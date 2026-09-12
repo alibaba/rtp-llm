@@ -586,6 +586,26 @@ class BackendRPCServerVisitor:
                 f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
             )
 
+        # think 预算若超过实际可生成的 token 数，C++ 侧「预算耗尽即强制写入 think
+        # 结束标记」的兜底永远不成立，模型会被 think 语法约束卡住直到撞上序列上限。
+        # 结束标记是逐 token 强制写入的，所以要为它留出长度：收敛到恰好等于可生成
+        # 空间会让强制收尾落在最后一步，标记写不完，think 块照旧闭合不了。
+        end_tag_len = len(input.generate_config.end_think_token_ids)
+        think_budget_cap = max(max_new_tokens - end_tag_len, 1)
+        if input.generate_config.max_thinking_tokens > think_budget_cap:
+            logging.warning(
+                "max_thinking_tokens %d exceeds generatable tokens %d minus the "
+                "%d-token think end tag (max_seq_len=%d, prompt_length=%d), "
+                "clamping to %d",
+                input.generate_config.max_thinking_tokens,
+                max_new_tokens,
+                end_tag_len,
+                self.max_seq_len,
+                input.prompt_length,
+                think_budget_cap,
+            )
+            input.generate_config.max_thinking_tokens = think_budget_cap
+
     @torch.inference_mode()
     async def enqueue(
         self, input: GenerateInput

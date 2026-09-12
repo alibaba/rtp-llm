@@ -1,9 +1,12 @@
+import os
 from typing import List
 from unittest import IsolatedAsyncioTestCase, TestCase, main
 from unittest.mock import MagicMock, Mock
 
 import torch
 
+from rtp_llm.config.py_config_modules import GenerateEnvConfig
+from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -18,7 +21,6 @@ from rtp_llm.openai.renderers.custom_renderer import (
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
 )
-from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
 from rtp_llm.utils.word_util import get_stop_word_slices
 
@@ -604,6 +606,442 @@ class TestStopWordTruncation(_RendererTestBase):
             is_streaming=True,
         )
         self.assertEqual(delta2.output_str, "")
+
+
+class EncodeExtraStopWordsTest(TestCase):
+    """Test encode_extra_stop_words, which resolves stop words against the live tokenizer."""
+
+    def setUp(self):
+        self.renderer = Mock(spec=CustomChatRenderer)
+        self.renderer.tokenizer = Mock()
+        self.renderer.encode_extra_stop_words = (
+            CustomChatRenderer.encode_extra_stop_words.__get__(self.renderer)
+        )
+
+    def test_ids_come_from_tokenizer_not_hardcoded(self):
+        # A 248K-vocab checkpoint maps the legacy 151K ids onto unrelated tokens,
+        # so the ids must be derived per tokenizer instead of being written down.
+        encoded = {"Observation:": [1, 2, 3], "<|endoftext|>": [248044]}
+        self.renderer.tokenizer.encode = Mock(
+            side_effect=lambda word, add_special_tokens: encoded[word]
+        )
+
+        result = self.renderer.encode_extra_stop_words(
+            ["Observation:", "<|endoftext|>"]
+        )
+
+        self.assertEqual(result, [[1, 2, 3], [248044]])
+        for call in self.renderer.tokenizer.encode.call_args_list:
+            self.assertFalse(call.kwargs["add_special_tokens"])
+
+    def test_skips_words_the_tokenizer_cannot_encode(self):
+        self.renderer.tokenizer.encode = Mock(return_value=[])
+
+        self.assertEqual(self.renderer.encode_extra_stop_words(["<|absent|>"]), [])
+
+    def test_falls_back_for_tokenizers_without_add_special_tokens(self):
+        # Legacy tokenizers expose encode(text) only. The repo already tolerates
+        # this for request stop words; extra stop words must not be stricter.
+        def encode(word, **kwargs):
+            if kwargs:
+                raise TypeError("encode() got an unexpected keyword argument")
+            return [9, 9]
+
+        self.renderer.tokenizer.encode = Mock(side_effect=encode)
+
+        self.assertEqual(self.renderer.encode_extra_stop_words(["x"]), [[9, 9]])
+
+    def test_returns_copy_not_tokenizer_buffer(self):
+        shared = [7, 8]
+        self.renderer.tokenizer.encode = Mock(return_value=shared)
+
+        result = self.renderer.encode_extra_stop_words(["x"])
+        result[0].append(9)
+
+        self.assertEqual(shared, [7, 8])
+
+
+class RealTokenizerStopWordTest(TestCase):
+    """用真实 tokenizer 验证停止词按字符串反查。
+
+    EncodeExtraStopWordsTest 只覆盖了拼接与降级分支，未验证真实词表上的解析结果。
+    回归背景：旧实现写死 151K 词表的 id（[37763, 367, 25] / [151643]），换词表后会
+    把无关 token 注册成停止序列；这里锁定解析结果必须可回解为原字符串。
+    """
+
+    TOKENIZER_RELATIVE_PATH = (
+        "rtp_llm/test/model_test/fake_test/testdata/qwen3_30b/tokenizer"
+    )
+
+    def setUp(self):
+        self.tokenizer = BaseTokenizer(
+            os.path.join(os.getcwd(), self.TOKENIZER_RELATIVE_PATH)
+        )
+        self.renderer = Mock(spec=CustomChatRenderer)
+        self.renderer.tokenizer = self.tokenizer
+        self.renderer.encode_extra_stop_words = (
+            CustomChatRenderer.encode_extra_stop_words.__get__(self.renderer)
+        )
+
+    def test_words_round_trip_through_the_live_tokenizer(self):
+        words = ["Observation:", "<|endoftext|>"]
+        result = self.renderer.encode_extra_stop_words(words)
+
+        self.assertEqual(len(result), len(words))
+        for ids, word in zip(result, words):
+            self.assertEqual(self.tokenizer.decode(ids), word)
+
+    def test_legacy_ids_are_reproduced_on_the_151k_vocab(self):
+        """反查结果必须与旧的硬编码 id 逐位相同，即 151K 词表上零行为变化。
+
+        这是唯一能钉住「换成了哪个字符串」的断言：round-trip 与「解析为该词表自己
+        的 id」对任何字符串都成立，改错词也照样通过。改动过程中确实一度把 151643
+        写成了 `<|fim_middle|>`（实际是 151660），只有这条断言能拦住。
+        """
+        self.assertEqual(
+            self.renderer.encode_extra_stop_words(["Observation:", "<|endoftext|>"]),
+            [[37763, 367, 25], [151643]],
+        )
+
+    def test_fim_middle_is_not_endoftext(self):
+        # 钉住那次改错的具体事实，避免再被"151643 是 <|fim_middle|>"的说法带偏。
+        self.assertEqual(self.tokenizer.convert_tokens_to_ids("<|fim_middle|>"), 151660)
+        self.assertEqual(self.tokenizer.convert_tokens_to_ids("<|endoftext|>"), 151643)
+
+    def test_special_token_resolves_to_the_tokenizer_own_id(self):
+        # <|endoftext|> 必须解析为该词表自己的特殊 token id（151K 词表上是
+        # 151643），而不能退化成对字面量的逐字切分。
+        (ids,) = self.renderer.encode_extra_stop_words(["<|endoftext|>"])
+        self.assertEqual(ids, [self.tokenizer.convert_tokens_to_ids("<|endoftext|>")])
+
+    def test_empty_word_is_skipped(self):
+        self.assertEqual(self.renderer.encode_extra_stop_words([""]), [])
+
+
+class RealRendererStopWordRegistrationTest(TestCase):
+    """真实构造 renderer，验证构造函数注册的额外停止 id。
+
+    上面的用例只覆盖 encode_extra_stop_words 这个 helper，而缺陷原址是
+    QwenReasoningToolRenderer._setup_stop_words / QwenRenderer 的构造函数。
+    helper 正确但构造函数传错字符串同样会注册错 token，所以这里从构造结果断言。
+    """
+
+    TOKENIZER_RELATIVE_PATH = (
+        "rtp_llm/test/model_test/fake_test/testdata/qwen3_30b/tokenizer"
+    )
+
+    def setUp(self):
+        from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
+            QwenReasoningToolRenderer,
+        )
+
+        self.tokenizer = BaseTokenizer(
+            os.path.join(os.getcwd(), self.TOKENIZER_RELATIVE_PATH)
+        )
+        self.renderer = QwenReasoningToolRenderer(
+            tokenizer=self.tokenizer,
+            renderer_params=RendererParams(
+                model_type="qwen_3",
+                max_seq_len=2048,
+                eos_token_id=151645,
+                stop_word_ids_list=[],
+            ),
+            generate_env_config=GenerateEnvConfig(),
+        )
+
+    def test_registers_endoftext_only(self):
+        # 对照 A 的形态：这条继承链只注册一组 id，且必须是 <|endoftext|>。
+        self.assertEqual(self.renderer.extra_stop_word_ids_list, [[151643]])
+
+    def test_registered_ids_decode_back_to_the_intended_word(self):
+        for ids in self.renderer.extra_stop_word_ids_list:
+            self.assertEqual(self.tokenizer.decode(ids), "<|endoftext|>")
+
+
+class CreateReasoningParserTest(TestCase):
+    """覆盖各 renderer 的 _create_reasoning_parser。
+
+    核心不变量：渲染后的 prompt 以 think 锚点结尾（anchored）时，即便请求侧
+    thinking_mode 为 DISABLED 也必须创建解析器，否则思考块会泄漏进可见回复。
+    """
+
+    THINK_START_TAG = "<think>\n"
+    TAGLESS_REPLY = "plain answer"
+
+    def _make_request(self, recorded_anchor=None, tools=None):
+        """recorded_anchor 模拟 endpoint 在渲染时记下的锚点状态。
+
+        None 表示没有走过 endpoint（例如 dash_sc / raw 链路），此时 renderer
+        必须自己回退到渲染探测。
+        """
+        request = Mock()
+        request.tools = tools
+        request.logprobs = None
+        request.prompt_has_think_anchor = Mock(return_value=recorded_anchor)
+        return request
+
+    def _make_renderer(
+        self,
+        renderer_cls,
+        anchored,
+        in_think_mode,
+        render_raises=False,
+        prompt_tail=None,
+    ):
+        renderer = Mock(spec=renderer_cls)
+        renderer.think_start_tag = self.THINK_START_TAG
+        renderer.in_think_mode = Mock(return_value=in_think_mode)
+        if render_raises:
+            renderer.render_chat = Mock(side_effect=RuntimeError("render failed"))
+        else:
+            if prompt_tail is None:
+                prompt = (
+                    f"user hello\n{self.THINK_START_TAG}" if anchored else "user hello"
+                )
+            else:
+                prompt = f"user hello\n{prompt_tail}"
+            rendered = Mock()
+            rendered.rendered_prompt = prompt
+            renderer.render_chat = Mock(return_value=rendered)
+        renderer._create_reasoning_parser = (
+            renderer_cls._create_reasoning_parser.__get__(renderer)
+        )
+        renderer._prompt_ends_with_think_anchor = (
+            renderer_cls._prompt_ends_with_think_anchor.__get__(renderer)
+        )
+        renderer._resolve_think_anchor = renderer_cls._resolve_think_anchor.__get__(
+            renderer
+        )
+        return renderer
+
+    def _assert_forces_reasoning(self, parser, expected):
+        """force_reasoning 的可观测效果：无标签文本是否被整体当成思考内容。"""
+        reasoning_text, normal_text = parser.parse_non_stream(self.TAGLESS_REPLY)
+        if expected:
+            self.assertEqual(reasoning_text, self.TAGLESS_REPLY)
+            self.assertEqual(normal_text, "")
+        else:
+            self.assertEqual(reasoning_text, "")
+            self.assertEqual(normal_text, self.TAGLESS_REPLY)
+
+    def _check(self, renderer_cls, expected_forced, render_raises=False):
+        # render_chat 抛异常时锚点无从探测，anchored 恒为 False。
+        if render_raises:
+            cases = [(False, True, expected_forced)]
+        else:
+            cases = [
+                (True, False, True),
+                (True, True, True),
+                (False, True, expected_forced),
+            ]
+        for anchored, in_think_mode, forced in cases:
+            with self.subTest(anchored=anchored, in_think_mode=in_think_mode):
+                renderer = self._make_renderer(
+                    renderer_cls,
+                    anchored=anchored,
+                    in_think_mode=in_think_mode,
+                    render_raises=render_raises,
+                )
+                parser = renderer._create_reasoning_parser(self._make_request())
+                self.assertIsNotNone(parser)
+                self._assert_forces_reasoning(parser, forced)
+
+    def _check_returns_none(self, renderer_cls, render_raises=False):
+        """既未锚定又未开启 thinking_mode 时不应创建解析器。"""
+        renderer = self._make_renderer(
+            renderer_cls,
+            anchored=False,
+            in_think_mode=False,
+            render_raises=render_raises,
+        )
+        self.assertIsNone(renderer._create_reasoning_parser(self._make_request()))
+
+    def _all_renderers(self):
+        from rtp_llm.openai.renderers.chatglm45_renderer import ChatGlm45Renderer
+        from rtp_llm.openai.renderers.deepseekv4_renderer import DeepseekV4Renderer
+        from rtp_llm.openai.renderers.deepseekv31_renderer import DeepseekV31Renderer
+        from rtp_llm.openai.renderers.deepseekv32_renderer import DeepseekV32Renderer
+        from rtp_llm.openai.renderers.kimik2_renderer import KimiK2Renderer
+        from rtp_llm.openai.renderers.qwen3_code_renderer import Qwen3CoderRenderer
+        from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
+            QwenReasoningToolRenderer,
+        )
+
+        # 第二项：在「已开启 thinking_mode 但未锚定」时是否仍强制解析。
+        return [
+            (Qwen3CoderRenderer, False),
+            (QwenReasoningToolRenderer, False),
+            (DeepseekV31Renderer, False),
+            (DeepseekV32Renderer, False),
+            (DeepseekV4Renderer, False),
+            (ChatGlm45Renderer, False),
+            (KimiK2Renderer, True),
+        ]
+
+    def test_anchored_creates_parser_even_when_thinking_disabled(self):
+        for renderer_cls, expected_forced in self._all_renderers():
+            with self.subTest(renderer=renderer_cls.__name__):
+                self._check(renderer_cls, expected_forced)
+                self._check_returns_none(renderer_cls)
+
+    def test_render_failure_falls_back_to_thinking_mode(self):
+        """render_chat 抛异常时应退化为仅按 thinking_mode 判断，而非整体失败。"""
+        for renderer_cls, expected_forced in self._all_renderers():
+            with self.subTest(renderer=renderer_cls.__name__):
+                self._check(renderer_cls, expected_forced, render_raises=True)
+                self._check_returns_none(renderer_cls, render_raises=True)
+
+    def test_bare_think_anchor_without_trailing_newline_is_detected(self):
+        """DeepSeek encoding 只追加裸 `<think>`，而默认 think_start_tag 是 `<think>\\n`。
+        严格比较会失配：ENABLED 路径 force_reasoning 由 True 翻成 False，思考内容
+        泄漏进可见回复（openai_response_test 的 deepseek_v31 用例即为此回归）。"""
+        for renderer_cls, _ in self._all_renderers():
+            for in_think_mode in (False, True):
+                with self.subTest(
+                    renderer=renderer_cls.__name__, in_think_mode=in_think_mode
+                ):
+                    renderer = self._make_renderer(
+                        renderer_cls,
+                        anchored=True,
+                        in_think_mode=in_think_mode,
+                        prompt_tail="<think>",
+                    )
+                    parser = renderer._create_reasoning_parser(self._make_request())
+                    self.assertIsNotNone(parser)
+                    self._assert_forces_reasoning(parser, True)
+
+    def test_tag_and_prompt_tail_may_differ_in_newline(self):
+        """配置锚点带换行、模板不带（DeepSeek），或反之（配置裸锚点、Qwen 模板带
+        换行），两个方向都必须判定为 anchored。"""
+        for tag, tail in (("<think>\n", "<think>"), ("<think>", "<think>\n")):
+            for renderer_cls, _ in self._all_renderers():
+                with self.subTest(renderer=renderer_cls.__name__, tag=tag, tail=tail):
+                    renderer = self._make_renderer(
+                        renderer_cls,
+                        anchored=True,
+                        in_think_mode=False,
+                        prompt_tail=tail,
+                    )
+                    renderer.think_start_tag = tag
+                    parser = renderer._create_reasoning_parser(self._make_request())
+                    self.assertIsNotNone(parser)
+                    self._assert_forces_reasoning(parser, True)
+
+    def test_closed_empty_think_block_is_not_an_anchor(self):
+        """模板关闭 think 时注入的是 `<think></think>` 空块（对照 B），不能判定为
+        anchored，否则 DISABLED 请求会平白多出一个解析器。"""
+        for renderer_cls, _ in self._all_renderers():
+            with self.subTest(renderer=renderer_cls.__name__):
+                renderer = self._make_renderer(
+                    renderer_cls,
+                    anchored=False,
+                    in_think_mode=False,
+                    prompt_tail="<think></think>",
+                )
+                self.assertIsNone(
+                    renderer._create_reasoning_parser(self._make_request())
+                )
+
+    def test_recorded_anchor_is_used_without_rendering_again(self):
+        """endpoint 渲染时已记下锚点状态，renderer 不得再渲染一次。
+
+        回归背景：早先的实现在每次 _create_reasoning_parser 里重渲染一遍 prompt，
+        给带 tools 的请求平白加了一次完整 jinja 渲染加编码。
+        """
+        for renderer_cls, expected_forced in self._all_renderers():
+            for recorded in (True, False):
+                with self.subTest(renderer=renderer_cls.__name__, recorded=recorded):
+                    renderer = self._make_renderer(
+                        renderer_cls,
+                        anchored=not recorded,  # 与记录值相反，证明用的是记录值
+                        in_think_mode=True,
+                    )
+                    parser = renderer._create_reasoning_parser(
+                        self._make_request(recorded_anchor=recorded)
+                    )
+                    renderer.render_chat.assert_not_called()
+                    self.assertIsNotNone(parser)
+                    self._assert_forces_reasoning(
+                        parser, True if recorded else expected_forced
+                    )
+
+    def test_recorded_anchor_builds_parser_when_thinking_disabled(self):
+        """案例一的一般形态：模板注入了锚点但请求侧 thinking_mode 为 DISABLED。
+
+        此时 in_think_mode 为假，只有锚点这一项能触发建解析器；建不出来思考块就
+        会整段泄漏进可见回复。
+        """
+        for renderer_cls, _ in self._all_renderers():
+            with self.subTest(renderer=renderer_cls.__name__):
+                renderer = self._make_renderer(
+                    renderer_cls, anchored=False, in_think_mode=False
+                )
+                parser = renderer._create_reasoning_parser(
+                    self._make_request(recorded_anchor=True)
+                )
+                renderer.render_chat.assert_not_called()
+                self.assertIsNotNone(parser)
+                self._assert_forces_reasoning(parser, True)
+
+
+class NeedsReasoningToolStatusTest(TestCase):
+    """状态列表门控：解析器只在门控放行时才会被创建。
+
+    案例一的失效链有两道门：门控与工厂方法。早先只修了工厂方法，门控仍然是
+    `tools or in_think_mode`，于是「模板有锚点 + DISABLED + 无 tools」的请求走
+    普通状态对象，解析器根本不会被创建，思考块照旧泄漏。
+    """
+
+    def _make_renderer(self, in_think_mode):
+        renderer = Mock(spec=CustomChatRenderer)
+        renderer.in_think_mode = Mock(return_value=in_think_mode)
+        renderer.needs_reasoning_tool_status = (
+            CustomChatRenderer.needs_reasoning_tool_status.__get__(renderer)
+        )
+        return renderer
+
+    def _make_request(self, recorded_anchor=None, tools=None):
+        request = Mock()
+        request.tools = tools
+        request.prompt_has_think_anchor = Mock(return_value=recorded_anchor)
+        return request
+
+    def test_anchor_alone_opens_the_gate(self):
+        renderer = self._make_renderer(in_think_mode=False)
+        self.assertTrue(
+            renderer.needs_reasoning_tool_status(
+                self._make_request(recorded_anchor=True)
+            )
+        )
+
+    def test_tools_or_think_mode_still_open_the_gate(self):
+        self.assertTrue(
+            self._make_renderer(in_think_mode=True).needs_reasoning_tool_status(
+                self._make_request()
+            )
+        )
+        self.assertTrue(
+            self._make_renderer(in_think_mode=False).needs_reasoning_tool_status(
+                self._make_request(tools=["a tool"])
+            )
+        )
+
+    def test_plain_request_keeps_the_gate_shut(self):
+        renderer = self._make_renderer(in_think_mode=False)
+        for recorded in (None, False):
+            with self.subTest(recorded=recorded):
+                self.assertFalse(
+                    renderer.needs_reasoning_tool_status(
+                        self._make_request(recorded_anchor=recorded)
+                    )
+                )
+
+    def test_unknown_anchor_does_not_open_the_gate(self):
+        """未探测过（None）不能当成有锚点：那会让门控在无 tools 无 think 的常见
+        路径上放行，等于把渲染成本加回来。"""
+        renderer = self._make_renderer(in_think_mode=False)
+        request = self._make_request(recorded_anchor=None)
+        self.assertFalse(renderer.needs_reasoning_tool_status(request))
 
 
 if __name__ == "__main__":
