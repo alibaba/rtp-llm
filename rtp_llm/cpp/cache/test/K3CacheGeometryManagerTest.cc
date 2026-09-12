@@ -122,6 +122,46 @@ TEST_F(K3CacheGeometryManagerTest, TargetFp8AndMtpBf16UseSeparatePhysicalPools) 
     }
 }
 
+TEST_F(K3CacheGeometryManagerTest, Eagle3SwaDraftUsesMlaPhysicalSpec) {
+    ParallelismConfig parallelism;
+    parallelism.tp_size = parallelism.ep_size = 1;
+
+    auto target = makeK3ModelConfig(128, false);
+    auto draft  = makeK3ModelConfig(128, true);
+    draft.num_layers = 1;
+    draft.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::SLIDING_WINDOW};
+    draft.attn_config.sliding_window = 2048;
+
+    KVCacheConfig kv;
+    kv.test_block_num = 2;
+    kv.seq_size_per_block = kv.kernel_seq_size_per_block = 128;
+
+    SpeculativeExecutionConfig sp;
+    sp.type = SP_TYPE_EAGLE3;
+    sp.model_type = "kimi_k3_mla_swa_eagle3";
+    sp.gen_num_per_cycle = 3;
+
+    auto config = CacheConfigCreator::createSpConfig(target,
+                                                     draft,
+                                                     parallelism,
+                                                     RuntimeConfig{},
+                                                     kv,
+                                                     sp,
+                                                     std::nullopt,
+                                                     true,
+                                                     true);
+    ASSERT_EQ(config.group_types,
+              (std::vector<CacheGroupType>{CacheGroupType::FULL,
+                                           CacheGroupType::LINEAR,
+                                           CacheGroupType::SWA}));
+    ASSERT_EQ(config.cache_specs.size(), 3);
+    EXPECT_EQ(config.cache_specs[2]->type, KVCacheSpecType::MultiHeadLatentAttention);
+
+    KVCacheManager manager(config, true, nullptr, kv, parallelism);
+    ASSERT_TRUE(manager.init());
+    EXPECT_NO_THROW(manager.getMainModelCacheLayerLayout());
+}
+
 TEST_F(K3CacheGeometryManagerTest, ExportRejectsInconsistentPhysicalSpecs) {
     ParallelismConfig parallelism;
     parallelism.tp_size                            = 8;

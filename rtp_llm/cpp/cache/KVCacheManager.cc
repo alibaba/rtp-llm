@@ -46,7 +46,8 @@ void validateK3CacheSpecs(const CacheConfig& config) {
             throw std::invalid_argument("Kimi K3 physical spec/group span mismatch");
         }
         const auto kind     = config.group_types[gid];
-        const bool matching = (kind == CacheGroupType::FULL && spec->type == KVCacheSpecType::MultiHeadLatentAttention
+        const bool mla_group = kind == CacheGroupType::FULL || kind == CacheGroupType::SWA;
+        const bool matching = (mla_group && spec->type == KVCacheSpecType::MultiHeadLatentAttention
                                && dynamic_cast<const MLAKVCacheSpec*>(spec))
                               || (kind == CacheGroupType::LINEAR && spec->type == KVCacheSpecType::LinearAttention
                                   && dynamic_cast<const LinearKVCacheSpec*>(spec));
