@@ -1,9 +1,9 @@
 py_test(
     name = "test_engine_adapter",
-    srcs = ["test_engine_adapter.py"],
+    srcs = ["test_engine_adapter.py", "fixture.py"],
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
-        "//rtp_llm:models",
+        "//rtp_llm:rtp_llm_lib",
     ],
 )
 

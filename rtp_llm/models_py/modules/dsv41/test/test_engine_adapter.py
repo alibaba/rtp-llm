@@ -1,12 +1,20 @@
 """Standard adapter metadata and physical-pool contracts, not engine acceptance."""
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+from fixture import flash_config
 from torch import nn
 
+from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.model_args import ModelArgs
+from rtp_llm.config.model_config import build_model_config
+from rtp_llm.models.deepseek_v41 import DeepSeekV41
 from rtp_llm.models_py.model_desc.deepseek_v41_model import (
     DeepSeekV41Model,
     _BatchedAttention,
@@ -25,6 +33,7 @@ from rtp_llm.models_py.modules.dsv41.cache_layout import (
 from rtp_llm.models_py.modules.dsv41.ced import ReplayConfig
 from rtp_llm.models_py.modules.dsv41.compressor import PairCarry
 from rtp_llm.models_py.modules.dsv41.inputs import V41ModelRows
+from rtp_llm.ops import DataType, KvCacheDataType
 from rtp_llm.ops.compute_ops import KVCache, KVCacheRegionName, PyModelOutputs
 
 
@@ -148,6 +157,50 @@ def request_fixture(starts=(0,), lengths=(2,), ready=(False,), ids=(101,), fake=
 
 
 class EngineAdapterContractTest(unittest.TestCase):
+    def test_standard_config_preserves_mixed_checkpoint_and_typed_cache(self):
+        raw = flash_config()
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "config.json").write_text(json.dumps(raw))
+            config = DeepSeekV41._create_config(folder)
+            model_args = ModelArgs()
+            model_args.ckpt_path = model_args.tokenizer_path = folder
+            model_args.model_type = "deepseek_v41"
+            model_args.act_type = "BF16"
+            cache = KVCacheConfig()
+            cache.seq_size_per_block = cache.kernel_seq_size_per_block = 128
+            build_model_config(
+                config, model_args, cache, SimpleNamespace(hack_layer_num=0)
+            )
+            self.assertEqual(config.data_type, DataType.TYPE_BF16)
+            self.assertEqual(config.attn_config.kv_cache_dtype, KvCacheDataType.BASE)
+            self.assertIsNone(config.quant_config)
+            self.assertFalse(config.quant_algo.isQuant())
+            self.assertEqual(
+                config.dsv41_config.quantization, raw["quantization_config"]
+            )
+            self.assertEqual(config.num_layers, 40)
+            self.assertTrue(config.enable_fp32_lm_head)
+
+    def test_v41_precision_rejects_generic_weight_or_cache_overrides(self):
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "config.json").write_text(json.dumps(flash_config()))
+            config = DeepSeekV41._create_config(folder)
+            cache = KVCacheConfig()
+            with self.assertRaisesRegex(ValueError, "BF16"):
+                config.init_precision_config(cache, "FP16")
+            config.quantization = "FP8"
+            with self.assertRaisesRegex(ValueError, "mixed quantization"):
+                config.init_precision_config(cache, "BF16")
+            config.quantization = ""
+            for name in ("int8_kv_cache", "fp8_kv_cache"):
+                with self.subTest(name=name):
+                    setattr(cache, name, True)
+                    with self.assertRaisesRegex(ValueError, "typed cache regions"):
+                        config.init_precision_config(cache, "BF16")
+                    setattr(cache, name, False)
+            config.init_precision_config(cache, None)
+            self.assertEqual(config.data_type, DataType.TYPE_BF16)
+
     def test_standard_base_and_pool_views_keep_allocator_storage(self):
         model, cache = framework_fixture()
         self.assertIsInstance(model, GptModelBase)

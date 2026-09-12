@@ -19,7 +19,9 @@ from rtp_llm.model_loader.model_weight_info import (
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.deepseek_v2 import DeepSeekV2
 from rtp_llm.models_py.modules.dsv41.math import dequantize_block32
+from rtp_llm.ops import KvCacheDataType
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
+from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 
 def _wo_a_bf16(tensors):
@@ -33,6 +35,23 @@ _CHECKPOINT_DTYPES = {
     "F8_E4M3": torch.float8_e4m3fn,
     "F8_E8M0": torch.float8_e8m0fnu,
 }
+
+
+class V41ModelConfig(ModelConfig):
+    def init_precision_config(self, kv_cache_config, act_type):
+        # V41 descriptors own mixed FP8/FP4 weights and typed byte cache regions.
+        # A generic quantization transform would reinterpret those stored bytes.
+        if self.quantization:
+            raise ValueError("V4.1 uses its checkpoint's mixed quantization")
+        if WEIGHT_TYPE.from_str(act_type or self.config_dtype) != WEIGHT_TYPE.BF16:
+            raise ValueError("V4.1 target activations must be BF16")
+        if kv_cache_config is not None and (
+            kv_cache_config.int8_kv_cache or kv_cache_config.fp8_kv_cache
+        ):
+            raise ValueError("V4.1 uses typed cache regions, not a global KV dtype")
+        self.data_type = WEIGHT_TYPE.BF16.to_str()
+        self.attn_config.kv_cache_dtype = KvCacheDataType.BASE
+        self.quant_config = None
 
 
 class V41AtomicWeight(AtomicWeight):
@@ -225,7 +244,7 @@ class DeepSeekV41(DeepSeekV2):
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         parsed = V41Config.from_path(ckpt_path)
         t = parsed.text
-        config = ModelConfig()
+        config = V41ModelConfig()
         config.dsv41_config = parsed
         revision = os.environ.get("DSV41_HF_REVISION", "")
         if revision and (
