@@ -85,6 +85,36 @@ cc_test(
 )
 
 cc_test(
+    name = "mla_kv_cache_spec_test",
+    srcs = ["MLAKVCacheSpecTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:kv_cache_specs",
+        "//rtp_llm/cpp/config:static_config",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    env = {},
+)
+
+cc_test(
+    name = "mla_kv_cache_block_pool_test",
+    srcs = ["MLAKVCacheBlockPoolTest.cc"],
+    copts = test_copts,
+    deps = [
+        ":cache_config_test_utils",
+        "//rtp_llm/cpp/cache:block_pool",
+        "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/cache:kv_cache_specs",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    env = {
+        "RTP_LLM_PIN_HOST_BLOCK_POOL": "0",
+    },
+)
+
+cc_test(
     name = "kv_cache_layout_view_test",
     srcs = ["KVCacheLayoutViewTest.cc"],
     copts = test_copts,

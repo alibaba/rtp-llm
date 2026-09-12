@@ -29,6 +29,7 @@ from rtp_llm.ops import (
     TaskType,
     VitSeparation,
 )
+from rtp_llm.utils.import_util import load_external_model_packages
 from rtp_llm.utils.util import check_with_info
 from rtp_llm.utils.warmup import configure_warmup
 
@@ -338,6 +339,7 @@ class ModelFactory:
         Returns:
             ModelConfig instance for the main model
         """
+        load_external_model_packages(model_args.external_model_packages)
         model_cls = ModelFactory.get_model_cls(model_args.model_type)
         model_config = model_cls._create_config(model_args.ckpt_path)
         build_model_config(
