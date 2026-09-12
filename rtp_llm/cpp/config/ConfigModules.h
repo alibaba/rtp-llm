@@ -37,7 +37,7 @@ struct PrefillCPConfig {
     bool kv_cache_sharded = false;
     // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
     int64_t prefill_cp_size = 0;
-    bool           is_enabled() const {
+    bool    is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;
     }
@@ -147,8 +147,8 @@ struct FMHAConfig {
     bool use_aiter_pa                        = true;
     bool use_asm_pa                          = true;
     // Default off: Triton PA on ROCm regressed vs ASM PA after the rocm_impl
-    // refactor; ASM/NonAsm now own the default decode path. Set to true to opt
-    // back into the Triton kernel.
+    // refactor. Set to true to select Triton for decode and no-prefix prefill;
+    // the latter is the ROCm generation-prefill graph-capable backend.
     bool        use_triton_pa  = false;
     int64_t     absorb_opt_len = 1024;
     std::string to_string() const;
@@ -206,11 +206,11 @@ struct KVCacheConfig {
     bool dsv4_fixed_pool_use_memory = false;
 
     // HBM cache event publishing. Only tp_rank=0 with pp_size=1 creates an active publisher for each DP replica.
-    std::string kv_cache_event_publisher_type        = "none";  // none | kvcm
-    std::string kv_cache_event_manager_endpoint      = "";      // KVCM Meta HTTP endpoint
-    std::string kv_cache_event_instance_group        = "";
-    std::string kv_cache_event_instance_id           = "";
-    std::string kv_cache_event_host_ip_port          = "";
+    std::string kv_cache_event_publisher_type   = "none";  // none | kvcm
+    std::string kv_cache_event_manager_endpoint = "";      // KVCM Meta HTTP endpoint
+    std::string kv_cache_event_instance_group   = "";
+    std::string kv_cache_event_instance_id      = "";
+    std::string kv_cache_event_host_ip_port     = "";
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
@@ -259,6 +259,17 @@ struct ProfilingDebugLoggingConfig {
 };
 
 struct HWKernelConfig {
+    static constexpr int kGenerationPrefillCudaGraphMaxCaptureTokens = 1 << 20;
+    // Every bucket retains a whole-model device graph and its graph-owned
+    // allocations. Keep malformed list/range/file input from turning startup
+    // into an unbounded capture loop; production presets use only seven.
+    static constexpr int kGenerationPrefillCudaGraphMaxCaptureBuckets = 64;
+    // The generation-prefill attention backend receives one additional
+    // positive-length padding-sentinel row. CUDA's graph-safe paged-attention
+    // plan is a single-CTA kernel with at most 1024 rows, so real requests must
+    // stay at or below 1023.
+    static constexpr int kGenerationPrefillCudaGraphMaxRequests = 1023;
+
     int         deep_gemm_num_sm             = -1;
     bool        arm_gemm_use_kai             = false;
     bool        enable_multi_block_mode      = true;
@@ -267,8 +278,12 @@ struct HWKernelConfig {
     bool        use_swizzleA                 = false;
     bool        enable_cuda_graph            = false;
     bool        enable_cuda_graph_debug_mode = false;
-    bool        enable_native_cuda_graph     = false;
-    int         num_native_cuda_graph        = 200;
+    // Generation-prefill graph is enabled only when the CUDA graph master
+    // switch is on and this capture bucket list is explicitly configured.
+    int              generation_prefill_cuda_graph_max_requests = 1;
+    std::vector<int> generation_prefill_capture_token_buckets;
+    bool             enable_native_cuda_graph = false;
+    int              num_native_cuda_graph    = 200;
     // Prefill CUDA Graph capture configuration
     // Can be set via: prefill_capture_file_path, prefill_capture_seq_lens, or prefill_capture_max_seq_len + step
     std::vector<int> prefill_capture_seq_lens;
@@ -419,7 +434,7 @@ struct FIFOSchedulerConfig {
     //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
-    std::string decode_prefill_ratio = "1";
+    std::string decode_prefill_ratio           = "1";
     bool        cp_force_single_prefill        = true;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;
@@ -437,7 +452,7 @@ struct GrammarConfig {
     // Positive number of grammar compiles that may run concurrently in this engine process.
     int compile_concurrency = 1;
     // Positive number of distinct compiles that may wait behind running work.
-    int compile_queue_size = 2;
+    int         compile_queue_size = 2;
     std::string tokenizer_info_json;
     // Total byte cap split between xgrammar's cache and the engine verdict LRU; <=0 = unlimited.
     int64_t     compiler_cache_bytes = 2L * 1024L * 1024L * 1024L;

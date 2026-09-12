@@ -761,6 +761,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register HWKernelConfig
     py::class_<HWKernelConfig>(m, "HWKernelConfig")
         .def(py::init<>())
+        .def_property_readonly_static(
+            "generation_prefill_cuda_graph_max_capture_tokens",
+            [](py::object) { return HWKernelConfig::kGenerationPrefillCudaGraphMaxCaptureTokens; })
+        .def_property_readonly_static(
+            "generation_prefill_cuda_graph_max_capture_buckets",
+            [](py::object) { return HWKernelConfig::kGenerationPrefillCudaGraphMaxCaptureBuckets; })
+        .def_property_readonly_static("generation_prefill_cuda_graph_max_requests_limit",
+                                      [](py::object) { return HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests; })
         .def_readwrite("deep_gemm_num_sm", &HWKernelConfig::deep_gemm_num_sm)
         .def_readwrite("arm_gemm_use_kai", &HWKernelConfig::arm_gemm_use_kai)
         .def_readwrite("enable_multi_block_mode", &HWKernelConfig::enable_multi_block_mode)
@@ -769,6 +777,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("use_swizzleA", &HWKernelConfig::use_swizzleA)
         .def_readwrite("enable_cuda_graph", &HWKernelConfig::enable_cuda_graph)
         .def_readwrite("enable_cuda_graph_debug_mode", &HWKernelConfig::enable_cuda_graph_debug_mode)
+        .def_readwrite("generation_prefill_cuda_graph_max_requests",
+                       &HWKernelConfig::generation_prefill_cuda_graph_max_requests)
+        .def_readwrite("generation_prefill_capture_token_buckets",
+                       &HWKernelConfig::generation_prefill_capture_token_buckets)
         .def_readwrite("enable_native_cuda_graph", &HWKernelConfig::enable_native_cuda_graph)
         .def_readwrite("num_native_cuda_graph", &HWKernelConfig::num_native_cuda_graph)
         .def_readwrite("prefill_capture_seq_lens", &HWKernelConfig::prefill_capture_seq_lens)
@@ -791,10 +803,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.prefill_capture_seq_lens,
                                       self.decode_capture_batch_sizes,
                                       self.disable_dpc_random,
-                                      self.rocm_disable_custom_ag);
+                                      self.rocm_disable_custom_ag,
+                                      self.generation_prefill_cuda_graph_max_requests,
+                                      self.generation_prefill_capture_token_buckets);
             },
             [](py::tuple t) {
-                if (t.size() != 14)
+                if (t.size() != 14 && t.size() != 16)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
@@ -812,6 +826,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.decode_capture_batch_sizes   = t[11].cast<std::vector<int>>();
                     c.disable_dpc_random           = t[12].cast<bool>();
                     c.rocm_disable_custom_ag       = t[13].cast<bool>();
+                    if (t.size() == 16) {
+                        c.generation_prefill_cuda_graph_max_requests = t[14].cast<int>();
+                        c.generation_prefill_capture_token_buckets   = t[15].cast<std::vector<int>>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());
                 }

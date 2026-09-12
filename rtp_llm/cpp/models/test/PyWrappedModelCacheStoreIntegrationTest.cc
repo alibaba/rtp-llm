@@ -26,6 +26,18 @@
 namespace py = pybind11;
 
 namespace rtp_llm::test {
+
+struct PyWrappedModelTestPeer {
+    static void replaceContextParallelProcessor(PyWrappedModel&                            model,
+                                                std::unique_ptr<IContextParallelProcessor> processor) {
+        model.context_parallel_processor_ = std::move(processor);
+    }
+
+    static bool generationPrefillCudaGraphReady(const PyWrappedModel& model) {
+        return model.generation_prefill_graph_runner_ != nullptr;
+    }
+};
+
 namespace {
 
 constexpr int    kLayerId        = 0;
@@ -536,11 +548,174 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
     {
         PyWrappedModel model(params, std::move(py_model));
         if (scenario.replace_cp_processor) {
-            model.context_parallel_processor_ = std::make_unique<TestContextParallelProcessor>(scenario.parallelism);
+            PyWrappedModelTestPeer::replaceContextParallelProcessor(
+                model, std::make_unique<TestContextParallelProcessor>(scenario.parallelism));
         }
         (void)model.forward(scenario.inputs);
     }
     return serializeResult(*cache_store, scenario.base_addresses);
+}
+
+py::dict runDirtyGenerationPrefillCaptureScenario(py::object py_model) {
+    static std::once_flag runtime_once;
+    std::call_once(runtime_once, []() {
+        initRuntime(/*device_id=*/0,
+                    /*trace_memory=*/false,
+                    /*enable_comm_overlap=*/false,
+                    MlaOpsType::AUTO);
+    });
+
+    bool                          saw_dirty_capture_error = false;
+    size_t                        available_before        = 0;
+    size_t                        available_after         = 0;
+    std::weak_ptr<KVCacheManager> manager_weak;
+    {
+        auto config  = makeCacheConfig({{"full", 4, 64}});
+        auto layout  = makeLayout(config);
+        auto manager = std::make_shared<KVCacheManager>(config,
+                                                        /*warmup=*/true,
+                                                        /*metrics_reporter=*/nullptr,
+                                                        KVCacheConfig{},
+                                                        ParallelismConfig{});
+        RTP_LLM_CHECK_WITH_INFO(manager->init(), "dirty prefill capture test cache manager init failed");
+        manager_weak     = manager;
+        available_before = manager->availableBlocksNum();
+
+        Weights weights;
+        weights.layers.resize(1);
+        GptModelDescription description;
+        description.data_type                    = DataType::TYPE_BF16;
+        description.norm_type                    = NormType::rmsnorm;
+        description.attention_conf.head_num      = 1;
+        description.attention_conf.kv_head_num   = 1;
+        description.attention_conf.size_per_head = 4;
+
+        HWKernelConfig hw_kernel_config;
+        hw_kernel_config.enable_cuda_graph                          = true;
+        hw_kernel_config.generation_prefill_cuda_graph_max_requests = 1;
+        hw_kernel_config.generation_prefill_capture_token_buckets   = {4};
+        hw_kernel_config.decode_capture_batch_sizes                 = {1};
+
+        GptModelInitParams params{weights,
+                                  description,
+                                  layout.layout,
+                                  /*model_id=*/0,
+                                  ParallelismConfig{},
+                                  hw_kernel_config,
+                                  ProfilingDebugLoggingConfig{},
+                                  RuntimeConfig{},
+                                  ConcurrencyConfig{},
+                                  SpeculativeExecutionConfig{},
+                                  DeviceResourceConfig{},
+                                  MlaOpsType::AUTO,
+                                  /*max_seq_len=*/4,
+                                  /*hidden_size=*/4,
+                                  config.seq_size_per_block,
+                                  config.kernel_seq_size_per_block,
+                                  manager,
+                                  /*mtp_cache_config_index=*/std::nullopt};
+        try {
+            PyWrappedModel model(params, py_model);
+        } catch (const DirtyCudaGraphCaptureError&) {
+            saw_dirty_capture_error = true;
+            available_after         = manager->availableBlocksNum();
+        }
+    }
+
+    py::dict result;
+    result["saw_dirty_capture_error"] = saw_dirty_capture_error;
+    result["available_before"]        = available_before;
+    result["available_after"]         = available_after;
+    // A dirty graph runner remains process-local by design, but it no longer
+    // owns an allocator request or the KVCacheManager itself.
+    result["manager_retained"] = !manager_weak.expired();
+    return result;
+}
+
+py::dict runGenerationPrefillCaptureScenario(py::object py_model, const std::string& expected_error_substring) {
+    static std::once_flag runtime_once;
+    std::call_once(runtime_once, []() {
+        initRuntime(/*device_id=*/0,
+                    /*trace_memory=*/false,
+                    /*enable_comm_overlap=*/false,
+                    MlaOpsType::AUTO);
+    });
+
+    auto config  = makeCacheConfig({{"full", 4, 64}});
+    auto layout  = makeLayout(config);
+    auto manager = std::make_shared<KVCacheManager>(config,
+                                                    /*warmup=*/true,
+                                                    /*metrics_reporter=*/nullptr,
+                                                    KVCacheConfig{},
+                                                    ParallelismConfig{});
+    RTP_LLM_CHECK_WITH_INFO(manager->init(), "clean prefill capture test cache manager init failed");
+    const size_t available_before = manager->availableBlocksNum();
+
+    Weights weights;
+    weights.layers.resize(1);
+    GptModelDescription description;
+    description.data_type                    = DataType::TYPE_BF16;
+    description.norm_type                    = NormType::rmsnorm;
+    description.attention_conf.head_num      = 1;
+    description.attention_conf.kv_head_num   = 1;
+    description.attention_conf.size_per_head = 4;
+
+    HWKernelConfig hw_kernel_config;
+    hw_kernel_config.enable_cuda_graph                          = true;
+    hw_kernel_config.generation_prefill_cuda_graph_max_requests = 1;
+    hw_kernel_config.generation_prefill_capture_token_buckets   = {4};
+    hw_kernel_config.decode_capture_batch_sizes                 = {1};
+
+    GptModelInitParams params{weights,
+                              description,
+                              layout.layout,
+                              /*model_id=*/0,
+                              ParallelismConfig{},
+                              hw_kernel_config,
+                              ProfilingDebugLoggingConfig{},
+                              RuntimeConfig{},
+                              ConcurrencyConfig{},
+                              SpeculativeExecutionConfig{},
+                              DeviceResourceConfig{},
+                              MlaOpsType::AUTO,
+                              /*max_seq_len=*/4,
+                              /*hidden_size=*/4,
+                              config.seq_size_per_block,
+                              config.kernel_seq_size_per_block,
+                              manager,
+                              /*mtp_cache_config_index=*/std::nullopt};
+
+    size_t      available_during  = 0;
+    bool        graph_enabled     = false;
+    bool        saw_capture_error = false;
+    std::string capture_error_message;
+    try {
+        PyWrappedModel model(params, std::move(py_model));
+        available_during = manager->availableBlocksNum();
+        graph_enabled    = PyWrappedModelTestPeer::generationPrefillCudaGraphReady(model);
+    } catch (const std::exception& e) {
+        // Failure scenarios name the exact injected stage they expect. Any
+        // other constructor exception must escape and fail the Python test
+        // instead of being reduced to a generic boolean and producing a false
+        // green cleanup result. The success scenario passes an empty string and
+        // therefore accepts no exception at all.
+        if (expected_error_substring.empty()
+            || std::string(e.what()).find(expected_error_substring) == std::string::npos) {
+            throw;
+        }
+        saw_capture_error     = true;
+        capture_error_message = e.what();
+        available_during      = manager->availableBlocksNum();
+    }
+
+    py::dict result;
+    result["graph_enabled"]         = graph_enabled;
+    result["saw_capture_error"]     = saw_capture_error;
+    result["capture_error_message"] = capture_error_message;
+    result["available_before"]      = available_before;
+    result["available_during"]      = available_during;
+    result["available_after"]       = manager->availableBlocksNum();
+    return result;
 }
 
 }  // namespace
@@ -552,4 +727,11 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
           &rtp_llm::test::runPyWrappedModelCacheStoreScenario,
           py::arg("py_model"),
           py::arg("scenario_name"));
+    m.def("run_dirty_generation_prefill_capture_scenario",
+          &rtp_llm::test::runDirtyGenerationPrefillCaptureScenario,
+          py::arg("py_model"));
+    m.def("run_generation_prefill_capture_scenario",
+          &rtp_llm::test::runGenerationPrefillCaptureScenario,
+          py::arg("py_model"),
+          py::arg("expected_error_substring") = "");
 }

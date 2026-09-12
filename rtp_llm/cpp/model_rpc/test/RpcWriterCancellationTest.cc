@@ -26,17 +26,22 @@ namespace nostd           = opentelemetry::nostd;
 
 class RejectingWriter: public grpc::internal::WriterInterface<GenerateOutputsPB> {
 public:
-    bool Write(const GenerateOutputsPB&, grpc::WriteOptions) override {
+    bool Write(const GenerateOutputsPB& response, grpc::WriteOptions) override {
         ++write_calls;
+        last_response.CopyFrom(response);
         return false;
     }
 
-    int write_calls = 0;
+    int               write_calls = 0;
+    GenerateOutputsPB last_response;
 };
 
 class SingleOutputStream: public GenerateStream {
 public:
-    SingleOutputStream(): GenerateStream(makeInput(), makeModelConfig(), RuntimeConfig{}, ResourceContext{}, nullptr) {}
+    explicit SingleOutputStream(GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status =
+                                    GenerationPrefillCudaGraphStatus::NOT_REQUESTED):
+        GenerateStream(makeInput(), makeModelConfig(), RuntimeConfig{}, ResourceContext{}, nullptr),
+        generation_prefill_cuda_graph_status_(generation_prefill_cuda_graph_status) {}
 
     ErrorResult<GenerateOutputs> nextOutput(int64_t /*wait_timeout_ms*/ = 0) override {
         GenerateOutputs outputs;
@@ -49,7 +54,13 @@ public:
 
     void updateOutput(const StreamUpdateInfo&) override {}
 
+    GenerationPrefillCudaGraphStatus generationPrefillCudaGraphStatus() const override {
+        return generation_prefill_cuda_graph_status_;
+    }
+
 private:
+    GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status_;
+
     static std::shared_ptr<GenerateInput> makeInput() {
         auto input             = std::make_shared<GenerateInput>();
         input->request_id      = 41;
@@ -207,10 +218,9 @@ TEST(RpcWriterCancellationTest, DecodeFirstReadCancellationReturnsCancelled) {
     //
     // Retry the scenario with a growing window and stop at the first attempt
     // that reaches the read path.
-    static constexpr const char* kReadFailureMarker = "read allocate request failed";
-    const std::chrono::milliseconds settle_windows[] = {std::chrono::milliseconds(500),
-                                                        std::chrono::milliseconds(1500),
-                                                        std::chrono::milliseconds(4000)};
+    static constexpr const char*    kReadFailureMarker = "read allocate request failed";
+    const std::chrono::milliseconds settle_windows[]   = {
+        std::chrono::milliseconds(500), std::chrono::milliseconds(1500), std::chrono::milliseconds(4000)};
     bool reached_read_path = false;
 
     for (const auto settle : settle_windows) {
@@ -226,7 +236,7 @@ TEST(RpcWriterCancellationTest, DecodeFirstReadCancellationReturnsCancelled) {
 
         auto channel =
             grpc::CreateChannel("127.0.0.1:" + std::to_string(listen_port), grpc::InsecureChannelCredentials());
-        auto stub = RpcService::NewStub(channel);
+        auto                stub = RpcService::NewStub(channel);
         grpc::ClientContext client_context;
         client_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
         auto stream = stub->RemoteGenerate(&client_context);
@@ -258,9 +268,8 @@ TEST(RpcWriterCancellationTest, DecodeFirstReadCancellationReturnsCancelled) {
         }
     }
 
-    EXPECT_TRUE(reached_read_path)
-        << "cancel never landed while the handler was blocked in Read, so the "
-           "read-failure path was not exercised in any attempt";
+    EXPECT_TRUE(reached_read_path) << "cancel never landed while the handler was blocked in Read, so the "
+                                      "read-failure path was not exercised in any attempt";
 }
 
 TEST(RpcWriterCancellationTest, RemoteWriteFailureCancelsGrpcStreamClosure) {
@@ -273,7 +282,7 @@ TEST(RpcWriterCancellationTest, RemoteWriteFailureCancelsGrpcStreamClosure) {
     kmonitor::MetricsReporterPtr metrics_reporter;
     auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
     PrefillGenerateContext       context(&resource, rpc_context, 0, nullptr, metrics_reporter, meta);
-    context.stream_        = std::make_shared<SingleOutputStream>();
+    context.stream_        = std::make_shared<SingleOutputStream>(GenerationPrefillCudaGraphStatus::REPLAYED);
     context.client_context = std::make_shared<grpc::ClientContext>();
     auto client_stream     = std::make_shared<SingleResponseClientStream>();
     context.client_stream  = client_stream;
@@ -282,6 +291,8 @@ TEST(RpcWriterCancellationTest, RemoteWriteFailureCancelsGrpcStreamClosure) {
 
     EXPECT_EQ(client_stream->read_calls, 1);
     EXPECT_EQ(writer.write_calls, 1);
+    ASSERT_EQ(writer.last_response.flatten_output().aux_info_size(), 1);
+    EXPECT_EQ(writer.last_response.flatten_output().aux_info(0).generation_prefill_cuda_graph_status(), "replayed");
     EXPECT_TRUE(context.cancelled());
     EXPECT_EQ(context.error_status.error_code(), grpc::StatusCode::CANCELLED);
     const auto close_status = context.closeGrpcStream();
@@ -459,8 +470,8 @@ TEST(RpcWriterCancellationTest, PrefillStageSettlementIsIdempotent) {
 }
 
 TEST(RpcWriterCancellationTest, ContextCleanupPropagatesSpecificTerminalError) {
-    auto                              stream = std::make_shared<SingleOutputStream>();
-    auto                              meta   = std::make_shared<RpcServerRuntimeMeta>();
+    auto                         stream = std::make_shared<SingleOutputStream>();
+    auto                         meta   = std::make_shared<RpcServerRuntimeMeta>();
     kmonitor::MetricsReporterPtr metrics_reporter;
     {
         GenerateContext context(49, 0, nullptr, metrics_reporter, meta);
@@ -483,7 +494,7 @@ TEST(RpcWriterCancellationTest, ContextCleanupPreservesExistingStreamError) {
         kmonitor::MetricsReporterPtr metrics_reporter;
         auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
         GenerateContext              context(50, 0, nullptr, metrics_reporter, meta);
-        context.stream_     = stream;
+        context.stream_    = stream;
         context.error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "later context error");
     }
 

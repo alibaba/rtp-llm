@@ -4,15 +4,15 @@ import json
 import os
 import pickle
 import sys
+import tempfile
+from pathlib import Path
 from unittest import TestCase, main
 from unittest.mock import patch
 
+from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_ENV_CASES
+from rtp_llm.ops import HWKernelConfig, RoleType, TaskType
 from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
-
-from rtp_llm.config.test.kv_cache_event_test_values import (
-    KV_CACHE_EVENT_ENV_CASES,
-)
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
@@ -204,6 +204,9 @@ class ServerArgsSetTest(TestCase):
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
         os.environ["THINK_MODE"] = "adaptive"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
+        os.environ["ENABLE_CUDA_GRAPH"] = "1"
+        os.environ["GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS"] = "4"
+        os.environ["GENERATION_PREFILL_CAPTURE_CONFIG"] = "64,128,256"
 
         sys.argv = ["prog"]
 
@@ -306,6 +309,15 @@ class ServerArgsSetTest(TestCase):
 
         # Verify disable_flashinfer_hybrid_prefill
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
+        self.assertEqual(
+            py_env_configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
+            [64, 128, 256],
+        )
+        self.assertTrue(py_env_configs.py_hw_kernel_config.enable_cuda_graph)
+        self.assertEqual(
+            py_env_configs.py_hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+            4,
+        )
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
@@ -420,6 +432,463 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(py_env_configs.fmha_config.enable_paged_flashinfer_trt_fmha_v2)
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_native)
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
+        self.assertEqual(
+            py_env_configs.py_hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+            1,
+        )
+        self.assertEqual(
+            py_env_configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
+            HWKernelConfig().generation_prefill_capture_token_buckets,
+        )
+
+    def test_generation_prefill_cuda_graph_cli_binding_and_validation(self):
+        from argparse import ArgumentTypeError
+
+        from rtp_llm.config.engine_config import EngineConfig
+        from rtp_llm.config.model_config import (
+            ModelConfig,
+            get_task_type_from_ckpt_path,
+        )
+        from rtp_llm.server.server_args import hw_kernel_group_args, server_args
+
+        def resolved_task_type(configs, checkpoint_path=""):
+            # Mirror build_model_config(): explicit task strings are normalized
+            # by ModelConfig, while an unset task may be inferred from the
+            # checkpoint layout or the legacy embedding switch.
+            resolved = get_task_type_from_ckpt_path(
+                configs.model_args.task_type,
+                checkpoint_path,
+                configs.embedding_config,
+            )
+            model_config = ModelConfig()
+            model_config.task_type = resolved
+            return model_config.task_type
+
+        def validate_resolved_config(configs, task_type=None, engine_config=None):
+            if engine_config is None:
+                engine_config = EngineConfig.create(configs)
+            hw_kernel_group_args.validate_hw_kernel_group_args(
+                engine_config.hw_kernel_config,
+                max_context_batch_size=(
+                    engine_config.runtime_config.fifo_scheduler_config.max_context_batch_size
+                ),
+                concurrency_limit=engine_config.concurrency_config.concurrency_limit,
+                role_type=engine_config.parallelism_config.role_type,
+                speculative_type=engine_config.sp_config.type,
+                task_type=(
+                    resolved_task_type(configs) if task_type is None else task_type
+                ),
+            )
+
+        configs = server_args.setup_args(
+            [
+                "--enable_cuda_graph",
+                "1",
+                "--generation_prefill_cuda_graph_max_requests",
+                "3",
+                "--max_context_batch_size",
+                "3",
+                "--generation_prefill_capture_config",
+                "7,19,31",
+            ]
+        )
+        self.assertTrue(configs.py_hw_kernel_config.enable_cuda_graph)
+        self.assertEqual(
+            configs.py_hw_kernel_config.generation_prefill_cuda_graph_max_requests, 3
+        )
+        self.assertEqual(
+            configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
+            [7, 19, 31],
+        )
+        validate_resolved_config(configs)
+
+        # The shipped defaults are internally usable: the default reachable
+        # context capacity is one, so enabling only the master switch and a
+        # capture bucket must not fail startup.
+        configs = server_args.setup_args(
+            [
+                "--enable_cuda_graph",
+                "1",
+                "--generation_prefill_capture_config",
+                "64",
+            ]
+        )
+        self.assertEqual(
+            configs.py_hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+            1,
+        )
+        validate_resolved_config(configs)
+
+        # These processes/wrappers do not own the optional normal-generation
+        # prefill runner. A deployment-wide retained config must not constrain
+        # their scheduler capacity.
+        non_owner_modes = {
+            "prefill_role": (["--role_type", "PREFILL"], TaskType.LANGUAGE_MODEL),
+            "decode_role": (["--role_type", "DECODE"], TaskType.LANGUAGE_MODEL),
+            "frontend_role": (["--role_type", "FRONTEND"], TaskType.LANGUAGE_MODEL),
+            "embedding_prefill": (["--embedding_model", "1"], TaskType.DENSE_EMBEDDING),
+        }
+        for mode, (mode_args, task_type) in non_owner_modes.items():
+            with self.subTest(mode=mode):
+                configs = server_args.setup_args(
+                    [
+                        "--enable_cuda_graph",
+                        "1",
+                        "--generation_prefill_cuda_graph_max_requests",
+                        "8",
+                        "--max_context_batch_size",
+                        "1",
+                        "--concurrency_limit",
+                        "1",
+                        "--generation_prefill_capture_config",
+                        "64",
+                        *mode_args,
+                    ]
+                )
+                self.assertEqual(
+                    configs.py_hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+                    8,
+                )
+                validate_resolved_config(configs, task_type=task_type)
+
+        # P/D roles ignore retained generation-prefill configuration with or
+        # without speculative execution, including its capacity constraints.
+        for role_type in ("PREFILL", "DECODE"):
+            for speculative_type in (None, "mtp", "dspark"):
+                with self.subTest(
+                    role_type=role_type, speculative_type=speculative_type
+                ):
+                    mode_args = ["--role_type", role_type]
+                    if speculative_type is not None:
+                        mode_args.extend(["--sp_type", speculative_type])
+                    configs = server_args.setup_args(
+                        [
+                            "--enable_cuda_graph",
+                            "1",
+                            "--generation_prefill_capture_config",
+                            "64",
+                            "--generation_prefill_cuda_graph_max_requests",
+                            "8",
+                            "--max_context_batch_size",
+                            "1",
+                            "--concurrency_limit",
+                            "1",
+                            *mode_args,
+                        ]
+                    )
+                    validate_resolved_config(configs)
+
+        # Parsing preserves both options so NormalEngine can reject the PDFUSION
+        # combination in C++. This is not a successful-service-startup test:
+        # the constructor rejection is covered by NormalEngineTest.
+        for speculative_type in ("mtp", "dspark"):
+            with self.subTest(deferred_cpp_conflict=speculative_type):
+                configs = server_args.setup_args(
+                    [
+                        "--enable_cuda_graph",
+                        "1",
+                        "--generation_prefill_capture_config",
+                        "64",
+                        "--sp_type",
+                        speculative_type,
+                    ]
+                )
+                engine_config = EngineConfig.create(configs)
+                self.assertTrue(engine_config.hw_kernel_config.enable_cuda_graph)
+                self.assertEqual(
+                    engine_config.hw_kernel_config.generation_prefill_capture_token_buckets,
+                    [64],
+                )
+                self.assertNotEqual(
+                    engine_config.sp_config.type,
+                    hw_kernel_group_args.SpeculativeType.NONE,
+                )
+                validate_resolved_config(configs, engine_config=engine_config)
+
+        # VIT_SEPARATION=ROLE implicitly replaces the parser-visible PDFUSION
+        # role. The final EngineConfig role is the ownership source of truth.
+        configs = server_args.setup_args(
+            [
+                "--enable_cuda_graph",
+                "1",
+                "--generation_prefill_cuda_graph_max_requests",
+                "8",
+                "--max_context_batch_size",
+                "1",
+                "--concurrency_limit",
+                "1",
+                "--generation_prefill_capture_config",
+                "64",
+                "--vit_separation",
+                "1",
+            ]
+        )
+        engine_config = EngineConfig.create(configs)
+        self.assertEqual(engine_config.parallelism_config.role_type, RoleType.VIT)
+        validate_resolved_config(
+            configs,
+            task_type=TaskType.LANGUAGE_MODEL,
+            engine_config=engine_config,
+        )
+
+        # Explicit non-language tasks and checkpoint-inferred sentence
+        # transformers both create embedding wrappers, not the secondary
+        # generation-prefill runner.
+        configs = server_args.setup_args(
+            [
+                "--enable_cuda_graph",
+                "1",
+                "--generation_prefill_cuda_graph_max_requests",
+                "8",
+                "--max_context_batch_size",
+                "1",
+                "--concurrency_limit",
+                "1",
+                "--generation_prefill_capture_config",
+                "64",
+                "--task_type",
+                "SEQ_CLASSIFICATION",
+            ]
+        )
+        explicit_task_type = resolved_task_type(configs)
+        self.assertEqual(explicit_task_type, TaskType.SEQ_CLASSIFICATION)
+        validate_resolved_config(configs, task_type=explicit_task_type)
+
+        configs = server_args.setup_args(
+            [
+                "--enable_cuda_graph",
+                "1",
+                "--generation_prefill_cuda_graph_max_requests",
+                "8",
+                "--max_context_batch_size",
+                "1",
+                "--concurrency_limit",
+                "1",
+                "--generation_prefill_capture_config",
+                "64",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as checkpoint_path:
+            Path(checkpoint_path, "modules.json").write_text(
+                '[{"type": "sentence_transformers.models.Transformer"}]',
+                encoding="utf-8",
+            )
+            inferred_task_type = resolved_task_type(configs, checkpoint_path)
+        self.assertEqual(inferred_task_type, TaskType.DENSE_EMBEDDING)
+        validate_resolved_config(configs, task_type=inferred_task_type)
+
+        self.assertEqual(
+            hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_CAPTURE_TOKENS,
+            HWKernelConfig.generation_prefill_cuda_graph_max_capture_tokens,
+        )
+        self.assertEqual(
+            hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_CAPTURE_BUCKETS,
+            HWKernelConfig.generation_prefill_cuda_graph_max_capture_buckets,
+        )
+        self.assertEqual(
+            hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT,
+            HWKernelConfig.generation_prefill_cuda_graph_max_requests_limit,
+        )
+        for invalid_max_requests in (
+            "0",
+            "-1",
+            str(
+                hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT
+                + 1
+            ),
+            str(hw_kernel_group_args.CPP_INT_MAX),
+            str(hw_kernel_group_args.CPP_INT_MAX + 1),
+        ):
+            with self.subTest(invalid_max_requests=invalid_max_requests):
+                with self.assertRaises(ArgumentTypeError):
+                    hw_kernel_group_args._generation_prefill_cuda_graph_max_requests(
+                        invalid_max_requests
+                    )
+        self.assertEqual(
+            hw_kernel_group_args._generation_prefill_cuda_graph_max_requests(
+                str(
+                    hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT
+                )
+            ),
+            hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT,
+        )
+        overflow_value = str(
+            hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT + 1
+        )
+        with self.assertRaises(SystemExit):
+            server_args.setup_args(
+                ["--generation_prefill_cuda_graph_max_requests", overflow_value]
+            )
+        with patch.dict(
+            os.environ,
+            {"GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS": overflow_value},
+            clear=True,
+        ):
+            with self.assertRaises(SystemExit):
+                server_args.setup_args([])
+
+        # A retained child configuration must not block rollback through the
+        # master switch, even when the active scheduler capacity is smaller.
+        configs = server_args.setup_args(
+            [
+                "--enable_cuda_graph",
+                "0",
+                "--generation_prefill_cuda_graph_max_requests",
+                "8",
+                "--max_context_batch_size",
+                "1",
+                "--concurrency_limit",
+                "1",
+                "--generation_prefill_capture_config",
+                "64,128",
+            ]
+        )
+        self.assertFalse(configs.py_hw_kernel_config.enable_cuda_graph)
+        self.assertEqual(
+            configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
+            [64, 128],
+        )
+        validate_resolved_config(configs)
+        with patch.dict(
+            os.environ,
+            {
+                "ENABLE_CUDA_GRAPH": "0",
+                "GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS": "8",
+                "GENERATION_PREFILL_CAPTURE_CONFIG": "64,128",
+                "MAX_CONTEXT_BATCH_SIZE": "1",
+                "CONCURRENCY_LIMIT": "1",
+            },
+            clear=True,
+        ):
+            configs = server_args.setup_args([])
+        self.assertFalse(configs.py_hw_kernel_config.enable_cuda_graph)
+        self.assertEqual(
+            configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
+            [64, 128],
+        )
+
+        max_requests_boundary = str(
+            hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT
+        )
+        configs = server_args.setup_args(
+            [
+                "--enable_cuda_graph",
+                "1",
+                "--generation_prefill_cuda_graph_max_requests",
+                max_requests_boundary,
+                "--max_context_batch_size",
+                max_requests_boundary,
+                "--concurrency_limit",
+                max_requests_boundary,
+                "--generation_prefill_capture_config",
+                "64",
+            ]
+        )
+        self.assertEqual(
+            configs.py_hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+            int(max_requests_boundary),
+        )
+        validate_resolved_config(configs)
+
+        for capacity_args in (
+            ["--max_context_batch_size", "2", "--concurrency_limit", "4"],
+            ["--max_context_batch_size", "4", "--concurrency_limit", "2"],
+        ):
+            with self.subTest(capacity_args=capacity_args):
+                configs = server_args.setup_args(
+                    [
+                        "--enable_cuda_graph",
+                        "1",
+                        "--generation_prefill_cuda_graph_max_requests",
+                        "3",
+                        "--generation_prefill_capture_config",
+                        "64",
+                        *capacity_args,
+                    ]
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "reachable context batch capacity"
+                ):
+                    validate_resolved_config(configs)
+
+        for empty_config in ("", "   \t"):
+            with self.subTest(empty_config=empty_config):
+                self.assertEqual(
+                    hw_kernel_group_args._parse_generation_prefill_capture_config(
+                        empty_config
+                    ),
+                    [],
+                )
+                configs = server_args.setup_args(
+                    ["--generation_prefill_capture_config", empty_config]
+                )
+                self.assertEqual(
+                    configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
+                    [],
+                )
+                with patch.dict(
+                    os.environ,
+                    {"GENERATION_PREFILL_CAPTURE_CONFIG": empty_config},
+                    clear=True,
+                ):
+                    configs = server_args.setup_args([])
+                self.assertEqual(
+                    configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
+                    [],
+                )
+        for invalid_config in (
+            "0,32",
+            "-1,32",
+            f"32,{hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_CAPTURE_TOKENS + 1}",
+        ):
+            with self.subTest(invalid_config=invalid_config):
+                with self.assertRaises(ArgumentTypeError):
+                    hw_kernel_group_args._parse_generation_prefill_capture_config(
+                        invalid_config
+                    )
+
+        self.assertEqual(
+            hw_kernel_group_args._parse_generation_prefill_capture_config("64:1"),
+            list(range(1, 65)),
+        )
+        with self.assertRaises(ArgumentTypeError):
+            hw_kernel_group_args._parse_generation_prefill_capture_config("65:1")
+
+        with self.assertRaises(ArgumentTypeError):
+            hw_kernel_group_args._parse_generation_prefill_capture_config(
+                ",".join(str(i) for i in range(1, 66))
+            )
+
+        for bucket_count, should_pass in ((64, True), (65, False)):
+            with tempfile.NamedTemporaryFile(mode="w", delete=False) as config_file:
+                config_file.write("\n".join(str(i) for i in range(1, bucket_count + 1)))
+                config_path = config_file.name
+            try:
+                if should_pass:
+                    self.assertEqual(
+                        hw_kernel_group_args._parse_generation_prefill_capture_config(
+                            config_path
+                        ),
+                        list(range(1, bucket_count + 1)),
+                    )
+                else:
+                    with self.assertRaises(ArgumentTypeError):
+                        hw_kernel_group_args._parse_generation_prefill_capture_config(
+                            config_path
+                        )
+            finally:
+                os.unlink(config_path)
+
+    def test_generation_prefill_invalid_bucket_preserves_exception_cause(self):
+        from argparse import ArgumentTypeError
+
+        from rtp_llm.server.server_args.hw_kernel_group_args import (
+            _parse_generation_prefill_capture_config,
+        )
+
+        with self.assertRaisesRegex(ArgumentTypeError, "invalid literal") as caught:
+            _parse_generation_prefill_capture_config("64,invalid")
+        self.assertIsInstance(caught.exception.__cause__, ValueError)
 
     def test_model_warm_up_env_and_global_master(self):
         os.environ["WARM_UP"] = "0"

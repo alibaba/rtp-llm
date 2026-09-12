@@ -113,7 +113,7 @@ def _device_or(device_tensor, host_tensor):
     base fields populated (possibly already CUDA-resident), so the device
     mirror may be missing.
     """
-    if device_tensor is not None and device_tensor.numel() >= 0:
+    if device_tensor is not None and device_tensor.numel() > 0:
         return device_tensor
     return host_tensor
 
@@ -162,6 +162,8 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
         self.prefill_cuda_graph_copy_params = None
+        self.input_lengths = None
+        self.cu_seq_lens = None
         # Pre-allocated buffers for CUDA graph copy path (avoid per-forward allocation)
         self._aligned_q_buf = None
         # reserve buffer for q cast
@@ -225,10 +227,74 @@ class PyFlashinferPrefillPagedAttnOp(object):
         # Store CUDA graph copy parameters
         # Define qo_indptr early for CUDA graph initialization
         if attn_inputs.prefill_cuda_graph_copy_params is not None:
-            # For CUDA graph mode, create a buffer that will be filled later
-            self.input_lengths = attn_inputs.input_lengths
-            self.cu_seq_lens = attn_inputs.cu_seqlens_device
-            qo_indptr = attn_inputs.cu_seqlens_device.clone()
+            initializing_cuda_graph_copy = self.prefill_cuda_graph_copy_params is None
+            # The copy kernels run inside the captured graph. Bind them to the
+            # graph-owned device metadata that CudaGraphRunner refreshes once
+            # per replay; no layer-local metadata copies are needed.
+            copy_input_lengths = _device_or(
+                attn_inputs.input_lengths_device, attn_inputs.input_lengths
+            )
+            copy_cu_seq_lens = attn_inputs.cu_seqlens_device
+            copy_batch_size = (
+                attn_inputs.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size
+            )
+            if (
+                copy_input_lengths is None
+                or not copy_input_lengths.is_cuda
+                or copy_input_lengths.dtype != torch.int32
+                or copy_input_lengths.dim() != 1
+                or copy_cu_seq_lens is None
+                or not copy_cu_seq_lens.is_cuda
+                or copy_cu_seq_lens.dtype != torch.int32
+                or copy_cu_seq_lens.dim() != 1
+                or copy_batch_size is None
+                or not copy_batch_size.is_cuda
+                or copy_batch_size.dtype != torch.int32
+                or copy_batch_size.dim() != 1
+                or copy_batch_size.numel() != 1
+            ):
+                raise ValueError(
+                    "CUDA Graph prefill copy metadata must provide rank-1 int32 "
+                    "device input_lengths/cu_seqlens and one int32 batch-size value"
+                )
+
+            if initializing_cuda_graph_copy:
+                self.input_lengths = copy_input_lengths
+                self.cu_seq_lens = copy_cu_seq_lens
+            elif (
+                self.input_lengths is None
+                or self.input_lengths.numel() < copy_input_lengths.numel()
+                or self.cu_seq_lens is None
+                or self.cu_seq_lens.numel() < copy_cu_seq_lens.numel()
+            ):
+                raise RuntimeError(
+                    "CUDA Graph prefill copy metadata shape changed after capture"
+                )
+
+            # Production replay passes the same fixed-address capture buffers,
+            # so these branches are no-ops. Retain conditional copies for
+            # direct operator tests/callers that provide fresh tensors.
+            if (
+                self.prefill_cuda_graph_copy_params is not None
+                and self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size.data_ptr()
+                != copy_batch_size.data_ptr()
+            ):
+                self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size.copy_(
+                    copy_batch_size, non_blocking=True
+                )
+            if self.input_lengths.data_ptr() != copy_input_lengths.data_ptr():
+                self.input_lengths[: copy_input_lengths.numel()].copy_(
+                    copy_input_lengths, non_blocking=True
+                )
+            if self.cu_seq_lens.data_ptr() != copy_cu_seq_lens.data_ptr():
+                self.cu_seq_lens[: copy_cu_seq_lens.numel()].copy_(
+                    copy_cu_seq_lens, non_blocking=True
+                )
+            qo_indptr = (
+                copy_cu_seq_lens.clone()
+                if initializing_cuda_graph_copy
+                else self.qo_indptr
+            )
         else:
             qo_indptr = attn_inputs.cu_seqlens_device[
                 : attn_inputs.input_lengths.size(0) + 1
@@ -268,15 +334,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
             assert attn_inputs.prefill_cuda_graph_copy_params is not None
             assert self.input_lengths is not None
             assert self.cu_seq_lens is not None
-            self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size[0] = (
-                attn_inputs.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size
-            )
-            self.input_lengths[: attn_inputs.input_lengths.size(0)] = (
-                attn_inputs.input_lengths
-            )
-            self.cu_seq_lens[: attn_inputs.cu_seqlens_device.size(0)] = (
-                attn_inputs.cu_seqlens_device
-            )
             qo_indptr = self.qo_indptr
 
         self.prefill_wrapper.plan(

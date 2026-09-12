@@ -7,6 +7,7 @@ import torch
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.ops import MultimodalInput
 
+GENERATION_PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED = "not_requested"
 
 
 class EmbeddingOutput:
@@ -123,6 +124,9 @@ class AuxInfo:
     multimodal_lengths: Dict[int, int] = field(default_factory=dict)
     speculative_draft_rounds: int = 0
     speculative_accepted_tokens_per_pos: List[int] = field(default_factory=list)
+    generation_prefill_cuda_graph_status: str = (
+        GENERATION_PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED
+    )
 
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""

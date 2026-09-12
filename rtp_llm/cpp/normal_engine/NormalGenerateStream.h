@@ -27,9 +27,10 @@ public:
                        perf_test),
         request_id_(query->request_id) {}
 
-    bool                         hasOutput() override;
-    ErrorResult<GenerateOutputs> nextOutput(int64_t wait_timeout_ms = 0) override;
-    void                         updateOutput(const StreamUpdateInfo& update_info) override;
+    bool                             hasOutput() override;
+    ErrorResult<GenerateOutputs>     nextOutput(int64_t wait_timeout_ms = 0) override;
+    void                             updateOutput(const StreamUpdateInfo& update_info) override;
+    GenerationPrefillCudaGraphStatus generationPrefillCudaGraphStatus() const override;
 
 private:
     GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);
@@ -38,8 +39,10 @@ private:
 
     static constexpr size_t kOutputCapacity = 1000;
 
-    int64_t                     request_id_{0};
-    bool                        finished_{false};
+    int64_t                          request_id_{0};
+    bool                             finished_{false};
+    GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status_{
+        GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     std::deque<GenerateOutputs> generate_outputs_;
 };
 }  // namespace rtp_llm

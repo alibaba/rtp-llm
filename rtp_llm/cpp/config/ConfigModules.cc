@@ -211,6 +211,8 @@ std::string HWKernelConfig::to_string() const {
         << "use_swizzleA: " << use_swizzleA << "\n"
         << "enable_cuda_graph: " << enable_cuda_graph << "\n"
         << "enable_cuda_graph_debug_mode: " << enable_cuda_graph_debug_mode << "\n"
+        << "generation_prefill_cuda_graph_max_requests: " << generation_prefill_cuda_graph_max_requests << "\n"
+        << "generation_prefill_capture_token_buckets size: " << generation_prefill_capture_token_buckets.size() << "\n"
         << "enable_native_cuda_graph: " << enable_native_cuda_graph << "\n"
         << "num_native_cuda_graph: " << num_native_cuda_graph << "\n"
         << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n"

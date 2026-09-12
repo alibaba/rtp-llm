@@ -77,10 +77,16 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common:common",
-        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-        "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
-    ] + torch_deps(),
+    ] + select({
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+        ],
+        "//conditions:default": [
+            "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+            "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+            "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
+        ],
+    }) + torch_deps(),
 )
 
 cc_binary(
@@ -89,13 +95,69 @@ cc_binary(
     linkshared = 1,
 )
 
+pywrapped_model_test_deps = [
+    "//rtp_llm:config",
+    "//rtp_llm:torch",
+]
+
 py_test(
     name = "pywrapped_model_cache_store_integration_test",
     srcs = ["pywrapped_model_cache_store_integration_test.py"],
     data = [":th_pywrapped_model_cache_store_integration_test"],
-    deps = ["//rtp_llm:torch"],
+    deps = pywrapped_model_test_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "A10"},
+)
+
+py_test(
+    name = "pywrapped_model_cache_store_integration_test_rocm",
+    main = "pywrapped_model_cache_store_integration_test.py",
+    srcs = ["pywrapped_model_cache_store_integration_test.py"],
+    data = [":th_pywrapped_model_cache_store_integration_test"],
+    deps = pywrapped_model_test_deps,
+    env = {"TEST_USING_DEVICE": "ROCM"},
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
+py_test(
+    name = "pywrapped_model_dirty_capture_test",
+    main = "pywrapped_model_cache_store_integration_test.py",
+    srcs = ["pywrapped_model_cache_store_integration_test.py"],
+    args = [
+        "PyWrappedModelCacheStoreIntegrationTest.test_dirty_generation_prefill_capture_does_not_retain_cache_manager",
+    ],
+    data = [":th_pywrapped_model_cache_store_integration_test"],
+    deps = pywrapped_model_test_deps + [
+        "//rtp_llm/models_py:modules",
+    ],
     env = {
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "RTP_LLM_RUN_PYWRAPPED_DIRTY_CAPTURE_TEST": "1",
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
+    name = "pywrapped_model_dirty_capture_test_rocm",
+    main = "pywrapped_model_cache_store_integration_test.py",
+    srcs = ["pywrapped_model_cache_store_integration_test.py"],
+    args = [
+        "PyWrappedModelCacheStoreIntegrationTest.test_dirty_generation_prefill_capture_does_not_retain_cache_manager",
+    ],
+    data = [":th_pywrapped_model_cache_store_integration_test"],
+    deps = pywrapped_model_test_deps + [
+        "//rtp_llm/models_py:modules",
+    ],
+    env = {
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "RTP_LLM_RUN_PYWRAPPED_DIRTY_CAPTURE_TEST": "1",
+        "TEST_USING_DEVICE": "ROCM",
+    },
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
 )

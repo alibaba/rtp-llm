@@ -23,16 +23,81 @@ public:
 };
 
 TEST_F(NormalEngineTest, testDecodeWarmupReserveTokensAreConvertedToBlocksAfterAddition) {
-    EXPECT_EQ(
-        NormalEngine::warmUpReservedBlockCount(/*seq_len=*/7, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 1u);
-    EXPECT_EQ(
-        NormalEngine::warmUpReservedBlockCount(/*seq_len=*/8, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 2u);
-    EXPECT_EQ(
-        NormalEngine::warmUpReservedBlockCount(/*seq_len=*/7, /*reserve_tokens=*/9, /*tokens_per_block=*/8), 2u);
-    EXPECT_EQ(
-        NormalEngine::warmUpReservedBlockCount(/*seq_len=*/9, /*reserve_tokens=*/8, /*tokens_per_block=*/8), 3u);
+    EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/7, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 1u);
+    EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/8, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 2u);
+    EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/7, /*reserve_tokens=*/9, /*tokens_per_block=*/8), 2u);
+    EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/9, /*reserve_tokens=*/8, /*tokens_per_block=*/8), 3u);
     EXPECT_ANY_THROW(
         NormalEngine::warmUpReservedBlockCount(/*seq_len=*/1, /*reserve_tokens=*/1, /*tokens_per_block=*/0));
+}
+
+TEST_F(NormalEngineTest, testRejectGenerationPrefillWithSpeculativeBeforeRunnerCreation) {
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.hw_kernel_config.enable_cuda_graph                        = true;
+    params.hw_kernel_config.generation_prefill_capture_token_buckets = {8, 16};
+    params.parallelism_config.role_type                              = RoleType::PDFUSION;
+    params.pd_sep_config.role_type                                   = RoleType::PDFUSION;
+
+    // Exercise the real constructor, not just the wrapper ownership predicate.
+    // Both the configured execution mode and a supplied propose model must
+    // reject the combination before warmup, KV allocation or runner creation.
+    for (const auto speculative_type : {SP_TYPE_MTP, SP_TYPE_DSPARK, SP_TYPE_NONE}) {
+        for (const bool has_propose_model : {false, true}) {
+            if (speculative_type == SP_TYPE_NONE && !has_propose_model) {
+                continue;
+            }
+            SCOPED_TRACE(::testing::Message() << "speculative_type=" << static_cast<int>(speculative_type)
+                                              << " has_propose_model=" << has_propose_model);
+            params.sp_config.type = speculative_type;
+            auto propose_params =
+                has_propose_model ? std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_MTP, 2) : nullptr;
+            try {
+                NormalEngine engine(params, std::move(propose_params));
+                FAIL() << "explicit generation-prefill/speculative combination must fail initialization";
+            } catch (const std::exception& error) {
+                EXPECT_NE(std::string(error.what())
+                              .find("GENERATION_PREFILL_CAPTURE_CONFIG does not support speculative execution"),
+                          std::string::npos)
+                    << error.what();
+            }
+        }
+    }
+}
+
+TEST_F(NormalEngineTest, testPdRolesIgnoreGenerationPrefillWithOrWithoutSpeculativeConfig) {
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.hw_kernel_config.enable_cuda_graph                        = true;
+    params.hw_kernel_config.generation_prefill_capture_token_buckets = {8, 16};
+    params.runtime_config.warm_up                                    = false;
+
+    // Keep the real NormalEngine constructor and its configuration checks.
+    // Only model execution is mocked; no draft model is needed to exercise the
+    // retained speculative configuration that previously failed at startup.
+    NormalExecutor::test_model_factory = [vocab = model_config.vocab_size](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(vocab);
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset_guard;
+
+    for (const auto role_type : {RoleType::PREFILL, RoleType::DECODE}) {
+        for (const auto speculative_type : {SP_TYPE_NONE, SP_TYPE_MTP, SP_TYPE_DSPARK}) {
+            SCOPED_TRACE(::testing::Message() << "role_type=" << static_cast<int>(role_type)
+                                              << " speculative_type=" << static_cast<int>(speculative_type));
+            params.parallelism_config.role_type = role_type;
+            params.pd_sep_config.role_type      = role_type;
+            params.sp_config.type               = speculative_type;
+            EXPECT_NO_THROW({ NormalEngine engine(params, nullptr); });
+        }
+    }
 }
 
 TEST_F(NormalEngineTest, testFp8KVCache) {

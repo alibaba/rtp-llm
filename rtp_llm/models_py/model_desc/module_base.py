@@ -75,7 +75,10 @@ class GptModelBase(nn.Module):
         return True
 
     def prepare_fmha_impl(
-        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: Optional[str] = None,
     ) -> AttentionImpl | dict[str, AttentionImpl]:
         attention_inputs = get_attention_inputs_value(inputs)
         if isinstance(attention_inputs, Mapping):
@@ -90,22 +93,24 @@ class GptModelBase(nn.Module):
             )
             return {
                 tag: AttnImplFactory.get_fmha_impl(
-                    self.config,
-                    self.parallelism_config,
-                    self.weight,
-                    group_inputs,
-                    self.fmha_config,
-                    is_cuda_graph,
+                    model_config=self.config,
+                    parallelism_config=self.parallelism_config,
+                    weight=self.weight,
+                    attn_inputs=group_inputs,
+                    fmha_config=self.fmha_config,
+                    is_cuda_graph=is_cuda_graph,
+                    cuda_graph_selection_mode=cuda_graph_selection_mode,
                 )
                 for tag, group_inputs in selected_group_inputs
             }
         return AttnImplFactory.get_fmha_impl(
-            self.config,
-            self.parallelism_config,
-            self.weight,
-            attention_inputs,
-            self.fmha_config,
-            is_cuda_graph,
+            model_config=self.config,
+            parallelism_config=self.parallelism_config,
+            weight=self.weight,
+            attn_inputs=attention_inputs,
+            fmha_config=self.fmha_config,
+            is_cuda_graph=is_cuda_graph,
+            cuda_graph_selection_mode=cuda_graph_selection_mode,
         )
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
