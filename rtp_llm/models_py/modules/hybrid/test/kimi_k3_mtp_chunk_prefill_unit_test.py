@@ -122,8 +122,10 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
     def test_chunk_round_recomputes_logical_and_physical_padding_counts(self):
         inputs = self._inputs(8, [5, 3], [0, 0])
         inputs.attention_inputs.logical_request_count = 1
+        inputs.attention_inputs.coordinated_request_count = 1
         inputs.attention_inputs.physical_request_count = 2
         inputs.attention_inputs.logical_token_count = 5
+        inputs.attention_inputs.coordinated_token_count = 5
         inputs.attention_inputs.physical_token_count = 8
         round_plan = KimiK3ChunkRound(
             (
@@ -140,8 +142,10 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
 
         attention = chunk.attention_inputs
         self.assertEqual(attention.logical_request_count, 1)
+        self.assertEqual(attention.coordinated_request_count, 1)
         self.assertEqual(attention.physical_request_count, 2)
         self.assertEqual(attention.logical_token_count, 5)
+        self.assertEqual(attention.coordinated_token_count, 5)
         self.assertEqual(attention.physical_token_count, 8)
         self.assertTrue(attention.is_s_padded)
 

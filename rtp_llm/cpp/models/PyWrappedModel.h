@@ -10,6 +10,7 @@
 #include <string>
 #include <atomic>
 #include <memory>
+#include <numeric>
 #include <utility>
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
@@ -142,7 +143,7 @@ private:
     torch_ext::PyEmbeddingInputs   buildPyEmbeddingInputs(const GptModelInputs& inputs);
     torch_ext::PyMultimodalInputs  buildPyMultimodalInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs buildBertEmbeddingInputs(const GptModelInputs& inputs);
-    void padSequenceParallelInputs(torch_ext::PyModelInputs& inputs);
+    void padTensorParallelInputs(torch_ext::PyModelInputs& inputs);
     void setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs, const GptModelInputs& inputs);
     GptModelOutputs callForwardPostLayers(torch::Tensor         hidden_states,
                                           const GptModelInputs& inputs,
@@ -365,7 +366,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
                               params.hw_kernel_config.decode_capture_batch_sizes.end());
         if (sequence_parallel_padding_enabled_) {
             const int tp = static_cast<int>(params.parallelism_config.tp_size);
-            max_graph_batch = ((max_graph_batch + tp - 1) / tp) * tp;
+            const int token_width =
+                params.sp_config.type != SP_TYPE_NONE
+                        && params.sp_config.gen_num_per_cycle > 0
+                        && !params.model_id && !is_prefill_cuda_graph_mode ?
+                    params.sp_config.gen_num_per_cycle + 1 :
+                    1;
+            const int request_alignment = tp / std::gcd(tp, token_width);
+            max_graph_batch =
+                ((max_graph_batch + request_alignment - 1) / request_alignment)
+                * request_alignment;
         }
         init_resources.max_decode_graph_batch_size = max_graph_batch;
     }

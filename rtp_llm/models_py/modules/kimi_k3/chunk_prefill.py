@@ -765,8 +765,10 @@ def build_chunk_attention_inputs(
     # final round may contain a real-request prefix followed by the dummy
     # request appended at the model boundary for TP divisibility.
     chunk.logical_request_count = len(logical_round.slices)
+    chunk.coordinated_request_count = len(logical_round.slices)
     chunk.physical_request_count = len(round_plan.slices)
     chunk.logical_token_count = int(logical_round.token_count)
+    chunk.coordinated_token_count = int(logical_round.token_count)
     chunk.physical_token_count = int(total_tokens)
     chunk.is_s_padded = (
         chunk.logical_request_count != chunk.physical_request_count

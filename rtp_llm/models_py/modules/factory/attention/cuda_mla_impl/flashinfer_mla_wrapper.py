@@ -3,6 +3,9 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+from rtp_llm.models_py.distributed.sequence_parallel import (
+    mask_physical_padding_slots_,
+)
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
@@ -191,23 +194,23 @@ class MlaFlashInferImplBase(MlaImplBase):
         # Sequence-parallel padding appends complete dummy requests at the
         # model boundary. Keep their MLA reads on reserved block 0, but make
         # cache writes explicit no-ops instead of racing on the same slots.
-        logical_tokens = int(getattr(attn_inputs, "logical_token_count", 0))
-        physical_tokens = int(getattr(attn_inputs, "physical_token_count", 0))
         slot_mapping = getattr(self.fmha_params, "slot_mapping", None)
-        if (
-            slot_mapping is not None
-            and logical_tokens > 0
-            and physical_tokens > logical_tokens
-        ):
-            if int(slot_mapping.numel()) != physical_tokens:
-                raise RuntimeError(
-                    "MLA slot mapping does not match the published physical token layout: "
-                    f"slots={slot_mapping.numel()} physical={physical_tokens}"
-                )
-            slot_mapping.narrow(
-                0, logical_tokens, physical_tokens - logical_tokens
-            ).fill_(-1)
+        if slot_mapping is not None:
+            self._mask_padding_slots(slot_mapping)
         self.fmha_impl.plan(self.fmha_params)
+
+    def _mask_padding_slots(self, slot_mapping: torch.Tensor) -> torch.Tensor:
+        """Turn every request-padding cache write into an explicit no-op."""
+
+        return mask_physical_padding_slots_(
+            slot_mapping,
+            logical_tokens=int(
+                getattr(self.attn_inputs, "logical_token_count", 0)
+            ),
+            physical_tokens=int(
+                getattr(self.attn_inputs, "physical_token_count", 0)
+            ),
+        )
 
     def _device_slot_mapping(self) -> Optional[torch.Tensor]:
         """Map direct-plan positions through the live HybridCache group."""
@@ -246,6 +249,7 @@ class MlaFlashInferImplBase(MlaImplBase):
                 batch_indices,
                 block_table,
             )
+            slot_mapping = self._mask_padding_slots(slot_mapping)
             slot_mapping.record_stream(torch.cuda.current_stream(slot_mapping.device))
             return slot_mapping
 
@@ -260,6 +264,7 @@ class MlaFlashInferImplBase(MlaImplBase):
         slot_mapping = block_numbers * self.seq_size_per_block + torch.remainder(
             positions_i64, self.seq_size_per_block
         )
+        slot_mapping = self._mask_padding_slots(slot_mapping)
         slot_mapping.record_stream(torch.cuda.current_stream(slot_mapping.device))
         return slot_mapping
 

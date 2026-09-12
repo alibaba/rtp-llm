@@ -248,9 +248,29 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
 
     optimizedCopyAsync(inputs.input_ids, py_model_inputs_.input_ids, token_num * sizeof(int));
     if (inputs.ktp_valid_row_mask.defined() && py_model_inputs_.ktp_valid_row_mask.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(inputs.ktp_valid_row_mask.numel() <= py_model_inputs_.ktp_valid_row_mask.numel(),
+                                "KTP valid-row mask exceeds graph capacity: input=%ld graph=%ld",
+                                inputs.ktp_valid_row_mask.numel(),
+                                py_model_inputs_.ktp_valid_row_mask.numel());
         optimizedCopyAsync(inputs.ktp_valid_row_mask,
                            py_model_inputs_.ktp_valid_row_mask,
                            inputs.ktp_valid_row_mask.numel() * inputs.ktp_valid_row_mask.element_size());
+#if USING_CUDA
+        const int64_t valid_rows = inputs.ktp_valid_row_mask.numel();
+        const int64_t graph_rows = py_model_inputs_.ktp_valid_row_mask.numel();
+        if (valid_rows < graph_rows) {
+            auto* tail = static_cast<char*>(py_model_inputs_.ktp_valid_row_mask.data_ptr())
+                         + valid_rows * py_model_inputs_.ktp_valid_row_mask.element_size();
+            const auto error = cudaMemsetAsync(tail,
+                                               0,
+                                               (graph_rows - valid_rows)
+                                                   * py_model_inputs_.ktp_valid_row_mask.element_size(),
+                                               cuda_graph::graphGetCurrentStream().stream());
+            RTP_LLM_CHECK_WITH_INFO(error == cudaSuccess,
+                                    "failed to clear CUDA graph KTP padding mask: %s",
+                                    cudaGetErrorString(error));
+        }
+#endif
     }
     py_model_inputs_.ktp_local_real_batch      = inputs.ktp_local_real_batch;
     py_model_inputs_.ktp_common_physical_batch = inputs.ktp_common_physical_batch;
@@ -313,9 +333,22 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
     auto& py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     auto  attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
-    py_model_inputs_.attention_inputs.logical_request_count = state.current_batch_size;
+    const bool has_coordinated_request_layout =
+        inputs.attention_inputs.coordinated_request_count > 0;
+    py_model_inputs_.attention_inputs.logical_request_count =
+        has_coordinated_request_layout ? inputs.attention_inputs.logical_request_count :
+                                         state.current_batch_size;
+    py_model_inputs_.attention_inputs.coordinated_request_count =
+        has_coordinated_request_layout ? inputs.attention_inputs.coordinated_request_count :
+                                         state.current_batch_size;
     py_model_inputs_.attention_inputs.logical_token_count =
-        is_prefill_cuda_graph_mode_ ? state.current_seq_len : state.seq_len_sum;
+        has_coordinated_request_layout ?
+            inputs.attention_inputs.logical_token_count :
+            (is_prefill_cuda_graph_mode_ ? state.current_seq_len : state.seq_len_sum);
+    py_model_inputs_.attention_inputs.coordinated_token_count =
+        has_coordinated_request_layout ?
+            inputs.attention_inputs.coordinated_token_count :
+            (is_prefill_cuda_graph_mode_ ? state.current_seq_len : state.seq_len_sum);
     if (is_prefill_cuda_graph_mode_) {
         py_model_inputs_.attention_inputs.physical_request_count = state.current_batch_size;
         py_model_inputs_.attention_inputs.physical_token_count = state.current_real_graph_seq_len;
@@ -883,8 +916,10 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // runner retains the replay's logical batch size separately and trims the
     // model output after replay.
     inputs.attention_inputs.logical_request_count  = max_bs;
+    inputs.attention_inputs.coordinated_request_count = max_bs;
     inputs.attention_inputs.physical_request_count = max_bs;
     inputs.attention_inputs.logical_token_count    = max_bs * num_tokens_per_bs;
+    inputs.attention_inputs.coordinated_token_count = max_bs * num_tokens_per_bs;
     inputs.attention_inputs.physical_token_count   = max_bs * num_tokens_per_bs;
 
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
@@ -1241,8 +1276,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
             0, 0, seq_len_or_tokens);
     }
     inputs.attention_inputs.logical_request_count  = batch_size;
+    inputs.attention_inputs.coordinated_request_count = batch_size;
     inputs.attention_inputs.physical_request_count = batch_size;
     inputs.attention_inputs.logical_token_count    = seq_len_or_tokens;
+    inputs.attention_inputs.coordinated_token_count = seq_len_or_tokens;
     inputs.attention_inputs.physical_token_count   = seq_len_or_tokens;
     // Draft prefill cudagraph mode (num_tokens_per_bs_ > 1 and
     // is_prefill_cuda_graph_mode_) must keep input_ids / input_hiddens at

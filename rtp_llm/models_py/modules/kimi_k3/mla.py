@@ -133,7 +133,7 @@ class KimiK3MLA(MlaAttention):
                 qkv, gate = all_gather_gemm(
                     hidden_states,
                     [self.fused_qkv_a_proj, self._fp8_gate],
-                    logical_m=sp_layout.physical_tokens,
+                    logical_m=sp_layout.tokens.physical_tokens,
                 )
             else:
                 quantized = self.fused_qkv_a_proj.quantize_input(hidden_states)
@@ -145,7 +145,7 @@ class KimiK3MLA(MlaAttention):
             packed = all_gather_gemm(
                 hidden_states,
                 [self._packed_qkv_gate_w],
-                logical_m=sp_layout.physical_tokens,
+                logical_m=sp_layout.tokens.physical_tokens,
             )[0]
             return torch.split(
                 packed,
@@ -213,7 +213,7 @@ class KimiK3MLA(MlaAttention):
         self._sp_layout_for_forward = sp_layout
         if self._sp_active_for_forward and (
             sp_layout is None
-            or int(hidden_states.shape[0]) != sp_layout.local_tokens
+            or int(hidden_states.shape[0]) != sp_layout.tokens.local_tokens
         ):
             raise ValueError(
                 "K3 MLA Sequence Parallel requires the matching physical token shard"

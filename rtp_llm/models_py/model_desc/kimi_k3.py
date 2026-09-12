@@ -34,8 +34,8 @@ from rtp_llm.models_py.distributed.collective_torch import (
 )
 from rtp_llm.models_py.distributed.sequence_parallel import (
     SequenceParallelLayout,
+    local_physical_token_view,
     sequence_parallel_layout_from_attention_inputs,
-    shard_physical_tokens,
 )
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
@@ -283,8 +283,8 @@ class KimiK3DecoderLayer(nn.Module):
         sequence_parallel = attn_meta.sequence_parallel
         sp_layout = attn_meta.sp_layout
         local_valid_tokens: Optional[int] = (
-            sp_layout.local_valid_tokens
-            if sp_layout.local_valid_tokens < sp_layout.local_tokens
+            sp_layout.tokens.local_valid_tokens
+            if sp_layout.tokens.local_valid_tokens < sp_layout.tokens.local_tokens
             else None
         )
         prefix_sum: Optional[torch.Tensor] = hidden_states
@@ -1275,10 +1275,15 @@ class KimiK3Model(GptModelBase):
                 )
         hidden_states = self._embed(input_ids, inputs.multimodal_inputs)
         if sp_active:
-            hidden_states = shard_physical_tokens(hidden_states, token_layout)
+            hidden_states = local_physical_token_view(hidden_states, token_layout)
         valid_token_mask = getattr(inputs, "ktp_valid_row_mask", None)
         if valid_token_mask is None or not valid_token_mask.numel():
             valid_token_mask = None
+        elif sp_active:
+            valid_token_mask = local_physical_token_view(
+                valid_token_mask,
+                token_layout,
+            )
         block_residual = (
             self._ensure_prefill_static_attn_res_bank(hidden_states)
             if token_layout.mode == "prefill" and sp_active
@@ -1433,13 +1438,13 @@ class KimiK3Model(GptModelBase):
                 # framework's global token layout just like final_hidden below.
                 self._all_gather_whole_chunk_mtp_hidden(
                     mtp_hidden_buffer,
-                    token_layout.logical_tokens,
+                    token_layout.tokens.logical_tokens,
                 )
             else:
                 if sp_active:
                     mtp_hidden_buffer = all_gather_trim(
                         mtp_hidden_buffer,
-                        token_layout.logical_tokens,
+                        token_layout.tokens.logical_tokens,
                         group=Group.TP,
                     )
                 self._write_mtp_hidden_buffer(
@@ -1461,12 +1466,12 @@ class KimiK3Model(GptModelBase):
             hidden_states = self.norm.final_norm(recurrent)
             if sp_active and getattr(self, "_whole_chunk_prefill_active", False):
                 self._all_gather_whole_chunk_mtp_hidden(
-                    recurrent, token_layout.logical_tokens
+                    recurrent, token_layout.tokens.logical_tokens
                 )
             else:
                 if sp_active:
                     recurrent = all_gather_trim(
-                        recurrent, token_layout.logical_tokens, group=Group.TP
+                        recurrent, token_layout.tokens.logical_tokens, group=Group.TP
                     )
                 self._write_mtp_hidden_buffer(
                     recurrent,
@@ -1480,7 +1485,7 @@ class KimiK3Model(GptModelBase):
         if sp_active:
             hidden_states = all_gather_trim(
                 hidden_states,
-                token_layout.logical_tokens,
+                token_layout.tokens.logical_tokens,
                 group=Group.TP,
             )
         fmha_params = getattr(fmha_impl, "fmha_params", None)
