@@ -1,5 +1,4 @@
 import json
-import logging
 from typing import Optional
 
 from jinja2 import Environment
@@ -65,16 +64,13 @@ class Qwen3CoderRenderer(ReasoningToolBaseRenderer):
     def _create_reasoning_parser(
         self, request: ChatCompletionRequest
     ) -> Optional[ReasoningParser]:
-        if not self.in_think_mode(request):
+        # 模板注入了 think 锚点就意味着模型会输出思考内容，此时即便请求侧
+        # thinking_mode 为 DISABLED 也必须建解析器，否则思考块会泄漏进可见回复。
+        anchored = self._resolve_think_anchor(request)
+        if not anchored and not self.in_think_mode(request):
             return None
 
-        try:
-            rendered_result = self.render_chat(request)
-            if rendered_result.rendered_prompt.endswith(self.think_start_tag):
-                return ReasoningParser(model_type="qwen3-thinking")
-        except Exception as e:
-            logging.error(f"Failed to render chat in _create_reasoning_parser: {e}")
-        return ReasoningParser(model_type="qwen3")
+        return ReasoningParser(model_type="qwen3-thinking" if anchored else "qwen3")
 
 
 register_renderer("qwen3_coder_moe", Qwen3CoderRenderer)

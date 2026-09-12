@@ -401,6 +401,28 @@ class CustomChatRenderer:
                 ids_list.append(self.tokenizer.encode(word, add_special_tokens=True))
         return ids_list
 
+    def encode_extra_stop_words(self, words: List[str]) -> List[List[int]]:
+        # 停止词必须按当前 tokenizer 反查：写死 id 会在词表不同的 ckpt 上把
+        # 无关 token 变成停止序列。tokenize_words 走 convert_tokens_to_ids，
+        # 对多 token 串会退化成 unk，故此处用 encode。
+        ids_list = []
+        for word in words:
+            try:
+                ids = self.tokenizer.encode(word, add_special_tokens=False)
+            except TypeError:
+                if not getattr(self, "_legacy_tokenizer_warned", False):
+                    self._legacy_tokenizer_warned = True
+                    logging.warning(
+                        "tokenizer %s does not accept add_special_tokens; stop "
+                        "words may pick up special tokens and never match in the "
+                        "engine",
+                        type(self.tokenizer).__name__,
+                    )
+                ids = self.tokenizer.encode(word)
+            if ids:
+                ids_list.append(list(ids))
+        return ids_list
+
     def get_all_extra_stop_word_ids_list(self) -> List[List[int]]:
         ids_list_from_words = self.tokenize_words(self.extra_stop_words)
         return self.extra_stop_word_ids_list + ids_list_from_words
@@ -1125,6 +1147,21 @@ class CustomChatRenderer:
     def should_process_think(self, request: ChatCompletionRequest):
         # 留出方法给子类重写, 避免重复的think处理
         return self.in_think_mode(request)
+
+    def needs_reasoning_tool_status(self, request: ChatCompletionRequest) -> bool:
+        """Whether the response path needs the tool/reasoning-aware status object.
+
+        The anchor term is what stops a template-injected think block from
+        leaking: with thinking_mode DISABLED and no tools the request config
+        alone says "nothing to parse", while the model is in fact going to
+        think. Only the flag recorded during rendering is consulted here --
+        resolving the anchor would render every request a second time.
+        """
+        return bool(
+            request.tools
+            or self.in_think_mode(request)
+            or request.prompt_has_think_anchor() is True
+        )
 
     async def render_response_stream(
         self,

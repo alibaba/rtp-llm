@@ -205,7 +205,11 @@ class QwenRenderer(CustomChatRenderer):
             misc_config,
             vit_config,
         )
-        self.add_extra_stop_word_ids([[37763, 367, 25], [151643]])  # Observation:
+        # 停止词按 tokenizer 反查：旧的硬编码 151643 只在 151K 词表上是
+        # <|endoftext|>，换到 248K 词表会解码成无关普通词，把垃圾序列注册成停止词。
+        self.add_extra_stop_word_ids(
+            self.encode_extra_stop_words(["Observation:", "<|endoftext|>"])
+        )
 
         self.qwen_reasoning_tool_renderer = QwenReasoningToolRenderer(
             tokenizer,
@@ -433,7 +437,7 @@ class QwenRenderer(CustomChatRenderer):
         stop_word_slice_list: List[str],
         is_streaming: bool,
     ) -> OutputDelta:
-        if status.request.tools or self.in_think_mode(status.request):
+        if self.needs_reasoning_tool_status(status.request):
             return await self.qwen_reasoning_tool_renderer._update_single_status(
                 status,
                 output,
@@ -513,7 +517,7 @@ class QwenRenderer(CustomChatRenderer):
     async def _create_status_list(
         self, n: int, request: ChatCompletionRequest
     ) -> List[StreamStatus]:
-        if request.tools or self.in_think_mode(request):
+        if self.needs_reasoning_tool_status(request):
             return await self.qwen_reasoning_tool_renderer._create_status_list(
                 n, request
             )
@@ -530,7 +534,7 @@ class QwenRenderer(CustomChatRenderer):
         is_streaming: bool,
         think_status: ThinkStatus,
     ):
-        if buffer_list[0].request.tools or self.in_think_mode(buffer_list[0].request):
+        if self.needs_reasoning_tool_status(buffer_list[0].request):
             return await self.qwen_reasoning_tool_renderer._flush_buffer(
                 buffer_list, stop_words_str, is_streaming, think_status
             )

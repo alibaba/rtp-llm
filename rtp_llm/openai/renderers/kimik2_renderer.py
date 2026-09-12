@@ -47,13 +47,17 @@ class KimiK2Renderer(ReasoningToolBaseRenderer):
     def _create_reasoning_parser(
         self, request: ChatCompletionRequest
     ) -> Optional[ReasoningParser]:
-        if self.in_think_mode(request):
-            return ReasoningParser(
-                model_type="kimi_k2",
-                stream_reasoning=True,
-                force_reasoning=True,
-            )
-        return None
+        # 模板注入了 think 锚点就意味着模型会输出思考内容，此时即便请求侧
+        # thinking_mode 为 DISABLED 也必须建解析器，否则思考块会泄漏进可见回复。
+        if not self._resolve_think_anchor(request) and not self.in_think_mode(request):
+            return None
+
+        # kimi_k2 的思考内容可能不带标签直接输出，保持原有的强制解析行为。
+        return ReasoningParser(
+            model_type="kimi_k2",
+            stream_reasoning=True,
+            force_reasoning=True,
+        )
 
     @override
     def _preprocess_messages(self, messages: list[dict]) -> list[dict]:

@@ -837,11 +837,18 @@ class GenerateConfig(BaseModel):
                     is_list_positive_integer(self.end_think_token_ids),
                     f"end_think_token_ids {self.end_think_token_ids} is wrong data type",
                 )
+
             if resolved_thinking_mode == ThinkingMode.ADAPTIVE:
                 check_with_info(
                     is_list_positive_integer(self.begin_think_token_ids),
                     f"begin_think_token_ids {self.begin_think_token_ids} is wrong data type",
                 )
+                if not self.begin_think_token_ids:
+                    raise FtRuntimeException(
+                        ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                        "begin_think_token_ids must be non-empty when thinking_mode is ADAPTIVE",
+                    )
+
             calculate_loss_list = [0, 1, 2]
             check_with_info(
                 self.calculate_loss in calculate_loss_list,
