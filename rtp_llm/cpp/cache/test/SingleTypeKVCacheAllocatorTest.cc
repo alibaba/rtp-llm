@@ -69,15 +69,15 @@ static rtp_llm::CacheConfig makeMtpCacheConfigByCreateSpConfig(uint32_t main_lay
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = mtp_module_num;
 
-    return rtp_llm::CacheConfigCreator::createSpConfig(score_model_config,
-                                                       propose_model_config,
-                                                       parallelism_config,
-                                                       runtime_config,
-                                                       kv_cache_config,
-                                                       sp_config,
-                                                       /*warm_up_result=*/std::nullopt,
-                                                       /*is_mtp=*/true,
-                                                       /*is_eagle=*/false);
+    return rtp_llm::test::finalizeCacheConfig(CacheConfigCreator::createConfig(score_model_config,
+                                                                               parallelism_config,
+                                                                               runtime_config,
+                                                                               kv_cache_config,
+                                                                               /*warm_up_result=*/std::nullopt,
+                                                                               sp_config,
+                                                                               &propose_model_config,
+                                                                               /*is_mtp=*/true,
+                                                                               /*is_eagle=*/false));
 }
 
 CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block = 8) {
@@ -608,11 +608,11 @@ TEST_F(KVCacheAllocatorSinglePathTest, SingleLayerMtpConfigSlicesDescriptorAndAt
 }
 
 TEST_F(KVCacheAllocatorSinglePathTest, SingleLayerMtpConfigSupportsDescriptorDrivenIndependentPools) {
-    auto config                                                      = makeTestModelConfig(/*num_layers=*/2);
-    config.hybrid_attention_config.enable_hybrid_attention           = true;
-    config.hybrid_attention_config.hybrid_attention_types            = {};
-    auto second_desc                                                 = config.kv_cache_spec_descs[1][0];
-    second_desc.tag                                                  = "layer1_state";
+    auto config                                            = makeTestModelConfig(/*num_layers=*/2);
+    config.hybrid_attention_config.enable_hybrid_attention = true;
+    config.hybrid_attention_config.hybrid_attention_types  = {};
+    auto second_desc                                       = config.kv_cache_spec_descs[1][0];
+    second_desc.tag                                        = "layer1_state";
     config.kv_cache_spec_descs[1].push_back(second_desc);
 
     const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
@@ -907,7 +907,7 @@ TEST_F(KVCacheAllocatorSinglePathTest, BlockBatchCopyCopiesCompleteSparseIndexer
 
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
-    auto config                = CacheConfigCreator::createBasicConfig(model_config, parallelism_config, false, 0);
+    auto config                = CacheConfigCreator::createWarmupConfig(model_config, parallelism_config, 0);
     config.finalizeBlockNums(/*global_block_num=*/4, RuntimeConfig{});
 
     ASSERT_TRUE(config.is_sparse);

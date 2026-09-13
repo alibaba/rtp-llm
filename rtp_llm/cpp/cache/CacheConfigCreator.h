@@ -27,36 +27,35 @@ uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlo
 
 class CacheConfigCreator {
 public:
-    static CacheConfig createBasicConfig(const ModelConfig&       model_config,
-                                         const ParallelismConfig& parallelism_config,
-                                         bool                     is_mtp,
-                                         int                      gen_num_per_cycle);
-    static CacheConfig createBasicConfig(const ModelConfig&       model_config,
-                                         const ParallelismConfig& parallelism_config,
-                                         const KVCacheConfig&     kv_cache_config,
-                                         bool                     is_mtp,
-                                         int                      gen_num_per_cycle);
+    static CacheConfig createWarmupConfig(const ModelConfig&       model_config,
+                                          const ParallelismConfig& parallelism_config,
+                                          int                      gen_num_per_cycle = 0);
+    static CacheConfig createWarmupConfig(const ModelConfig&       model_config,
+                                          const ParallelismConfig& parallelism_config,
+                                          const KVCacheConfig&     kv_cache_config,
+                                          int                      gen_num_per_cycle = 0);
+    // Returns layout and a candidate baseline; KVCacheManager confirms group capacity.
     static CacheConfig createConfig(const ModelConfig&                               model_config,
                                     const ParallelismConfig&                         parallelism_config,
                                     const RuntimeConfig&                             runtime_config,
                                     const KVCacheConfig&                             kv_cache_config,
-                                    const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
-                                    const std::optional<SpeculativeExecutionConfig>& sp_config      = std::nullopt);
-    static CacheConfig createSpConfig(const ModelConfig&                 score_model_config,
-                                      const ModelConfig&                 propose_model_config,
-                                      const ParallelismConfig&           parallelism_config,
-                                      const RuntimeConfig&               runtime_config,
-                                      const KVCacheConfig&               kv_cache_config,
-                                      const SpeculativeExecutionConfig&  sp_config,
-                                      const std::optional<WarmUpResult>& warm_up_result,
-                                      bool                               is_mtp,
-                                      bool                               is_eagle);
+                                    const std::optional<WarmUpResult>&               warm_up_result     = std::nullopt,
+                                    const std::optional<SpeculativeExecutionConfig>& sp_config          = std::nullopt,
+                                    const ModelConfig*                               draft_model_config = nullptr,
+                                    bool                                             is_mtp             = false,
+                                    bool                                             is_eagle           = false);
 
     // Unified desc->spec conversion. Callers provide the runtime build context;
     // descs remain read-only.
     static LayerKVCacheSpecs buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,
                                                       const SpecBuildContext&      ctx,
                                                       int64_t                      expected_layer_num);
+
+private:
+    static CacheConfig createBasicConfig(const ModelConfig&       model_config,
+                                         const ParallelismConfig& parallelism_config,
+                                         const KVCacheConfig&     kv_cache_config,
+                                         int                      gen_num_per_cycle);
 };
 
 }  // namespace rtp_llm

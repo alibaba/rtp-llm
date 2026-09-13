@@ -171,6 +171,7 @@ private:
     void initCacheEventPublisher();
     void stopCacheEventPublisher();
     void allocateAndSync();
+    uint32_t synchronizeBlockNum(uint32_t candidate_block_num);
     void reportMetricsLoop();
     void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     void notifyAllocationChange();

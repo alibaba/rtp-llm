@@ -6,6 +6,7 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -18,6 +19,12 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm::test {
+
+// Single-rank acceptance tests confirm the local candidate without collectives.
+inline CacheConfig finalizeCacheConfig(CacheConfig config) {
+    config.finalizeBlockNums(config.block_num, RuntimeConfig{});
+    return config;
+}
 
 inline constexpr uint32_t DSV4_FP8_KV_ENTRY_BYTES            = 584;
 inline constexpr uint32_t DSV4_FP8_INDEXER_ENTRY_BYTES       = 132;
@@ -75,7 +82,7 @@ inline std::shared_ptr<const CacheTopology> makeTestCacheTopology(int           
                             group_types.size(),
                             group_num);
 
-    std::vector<LayerBase>        layers;
+    std::vector<LayerBase> layers;
     layers.reserve(static_cast<size_t>(layer_num));
     for (int layer_id = 0; layer_id < layer_num; ++layer_id) {
         LayerBase layer;
@@ -434,8 +441,8 @@ inline KVCacheSpecPtr makeLinearSpec(const std::string& tag,
 inline CacheConfig
 makeSingleGroupCacheConfig(KVCacheSpecPtr spec, CacheGroupType group_type, int layer_num, int block_num) {
     CacheConfig config;
-    config.dtype              = spec->memoryLayoutDType();
-    config.layer_num          = static_cast<uint32_t>(layer_num);
+    config.dtype     = spec->memoryLayoutDType();
+    config.layer_num = static_cast<uint32_t>(layer_num);
 
     config.block_num          = static_cast<uint32_t>(block_num);
     config.seq_size_per_block = spec->seq_size_per_block;
@@ -479,8 +486,8 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
                                                   uint32_t          local_head_num_kv = 1,
                                                   uint32_t          size_per_head     = 1) {
     CacheConfig config;
-    config.dtype                         = dtype;
-    config.layer_num                     = static_cast<uint32_t>(layer_num);
+    config.dtype     = dtype;
+    config.layer_num = static_cast<uint32_t>(layer_num);
 
     config.block_num                     = static_cast<uint32_t>(block_num);
     config.seq_size_per_block            = tokens_per_block;

@@ -167,7 +167,7 @@ static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {
     ParallelismConfig pc;
     auto              mc = makeDSV4ManagerFlashModelConfig();
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
-    auto config      = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    auto config      = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
     config.block_num = block_num;
     setGroupBlockNumsForTest(config, std::vector<uint32_t>(static_cast<size_t>(config.groupNums()), block_num));
     return config;
@@ -238,7 +238,7 @@ static CacheConfig makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, ui
     ParallelismConfig pc;
     auto              mc = makeDSV4ManagerFlashModelConfig();
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
-    auto config      = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    auto config      = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
     config.block_num = full_block_num;
     std::vector<uint32_t> block_nums(static_cast<size_t>(config.groupNums()), full_block_num);
     for (int gid = 0; gid < config.groupNums(); ++gid) {
@@ -258,7 +258,8 @@ makeProductionDSV4Config(uint32_t full_block_num, uint32_t max_concurrency, uint
     setDsv4ExplicitPoolBlocks(mc, "hca_state", hca_state_pool_blocks);
     runtime_config.max_generate_batch_size                      = max_concurrency;
     runtime_config.fifo_scheduler_config.max_context_batch_size = max_concurrency;
-    return CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
+    return rtp_llm::test::finalizeCacheConfig(
+        CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config));
 }
 
 static BatchKVCacheResourcePtr makeDSV4BatchResource(const CacheConfig& config) {
@@ -318,8 +319,17 @@ static void assertDsv4RegionPatternEq(const std::shared_ptr<KVCacheManager>& man
 }
 
 TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
-    auto cache_config = makeSimpleMhaCacheConfig(
-        /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+    ModelConfig model;
+    model.num_layers                   = 1;
+    model.data_type                    = DataType::TYPE_FP16;
+    model.attn_config.head_num         = 1;
+    model.attn_config.kv_head_num      = 1;
+    model.attn_config.size_per_head    = 2;
+    model.attn_config.tokens_per_block = 2;
+    KVCacheSpecDesc desc;
+    desc.tag                  = "default";
+    model.kv_cache_spec_descs = {{desc}};
+    auto cache_config         = CacheConfigCreator::createWarmupConfig(model, ParallelismConfig{});
 
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
     ASSERT_TRUE(cache_manager->init());
@@ -328,6 +338,74 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
 
     EXPECT_EQ(cache_manager->totalBlocksNum(), 0);
     EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
+}
+
+TEST_F(KVCacheManagerTest, WarmupPreservesCompletedCapacity) {
+    const auto     config = makeSimpleMhaCacheConfig(1, 4, 2, DataType::TYPE_FP16);
+    KVCacheManager manager(config, /*warmup=*/true);
+    ASSERT_TRUE(manager.init());
+    EXPECT_EQ(manager.cacheConfig().block_num, 4u);
+    EXPECT_EQ(manager.cacheConfig().blockNumForGroup(0), 4u);
+    EXPECT_EQ(manager.totalBlocksNum(), 3u);
+}
+
+TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudget) {
+    ModelConfig target;
+    target.num_layers                   = 1;
+    target.max_seq_len                  = 64;
+    target.data_type                    = DataType::TYPE_FP16;
+    target.attn_config.head_num         = 1;
+    target.attn_config.kv_head_num      = 1;
+    target.attn_config.size_per_head    = 2;
+    target.attn_config.tokens_per_block = 4;
+    KVCacheSpecDesc desc;
+    desc.tag                        = "default";
+    target.kv_cache_spec_descs      = {{desc}};
+    auto draft                      = target;
+    draft.attn_config.size_per_head = 4;
+    KVCacheConfig options;
+    options.kv_cache_mem_mb = 1;
+    SpeculativeExecutionConfig sp;
+    sp.type              = SP_TYPE_MTP;
+    sp.gen_num_per_cycle = 2;
+    const auto candidate_config =
+        CacheConfigCreator::createConfig(target, {}, {}, options, std::nullopt, sp, &draft, true);
+    const auto candidate = candidate_config.block_num;
+    EXPECT_EQ(candidate_config.blockNumForGroup(0), 0u);
+    ASSERT_EQ(candidate_config.mtp_sub_configs.size(), 2u);
+    for (const auto& sub : candidate_config.mtp_sub_configs) {
+        EXPECT_EQ(sub->block_num, 0u);
+        EXPECT_EQ(sub->blockNumForGroup(0), 0u);
+    }
+    KVCacheManager manager(candidate_config, false, nullptr, options, {}, {}, sp);
+    ASSERT_TRUE(manager.init());
+    const auto& config = manager.cacheConfig();
+    EXPECT_EQ(config.block_num, candidate);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(manager.coordinator_manager_->group_block_pools_.size(), 1u);
+    const auto& pool = manager.coordinator_manager_->group_block_pools_[0];
+    ASSERT_EQ(pool->config_.memory_layouts.size(), 3u);
+    // FP16 K+V: 4 tokens/block * 2 bytes/element * (2 target + 2*4 draft elements/token).
+    constexpr size_t bytes_per_block = 4 * 2 * 2 * (2 + 2 * 4);
+    constexpr size_t budget_bytes    = 1024 * 1024;
+    EXPECT_EQ(config.block_num, budget_bytes / bytes_per_block);
+    EXPECT_EQ(pool->getTotalSizeBytes(), static_cast<size_t>(config.block_num) * bytes_per_block);
+    EXPECT_LE(pool->getTotalSizeBytes(), budget_bytes);
+    EXPECT_GT(pool->getTotalSizeBytes() + bytes_per_block, budget_bytes);
+    for (const auto& sub : config.mtp_sub_configs) {
+        EXPECT_EQ(sub->block_num, candidate);
+        EXPECT_EQ(sub->blockNumForGroup(0), candidate);
+    }
+    // Confirming the manager's copy must not mutate the caller's child views.
+    EXPECT_EQ(candidate_config.mtp_sub_configs[0]->blockNumForGroup(0), 0u);
+}
+
+TEST_F(KVCacheManagerTest, UnresolvedNormalConfigCannotBeUsedForWarmup) {
+    auto          model = makeDSV4ManagerFlashModelConfig();
+    KVCacheConfig options;
+    options.test_block_num = 3;
+    const auto config      = CacheConfigCreator::createConfig(model, {}, {}, options);
+    EXPECT_ANY_THROW(KVCacheManager(config, true));
 }
 
 TEST_F(KVCacheManagerTest, InitAcceptsSingleLinearGroupWithIndependentPool) {
@@ -372,8 +450,8 @@ TEST_F(KVCacheManagerTest, ProductionHybridConfigUsesHybridPoolWithDistinctPhysi
 
     KVCacheConfig kv_cache_config;
     kv_cache_config.test_block_num = 6;
-    auto cache_config =
-        CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
+    auto cache_config              = rtp_llm::test::finalizeCacheConfig(
+        CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config));
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
 
     ASSERT_TRUE(cache_manager->init());

@@ -142,15 +142,15 @@ static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig(SpeculativeType    sp
     sp_cfg.type              = sp_type;
     sp_cfg.gen_num_per_cycle = gen_num;
 
-    return CacheConfigCreator::createSpConfig(score_model_cfg,
-                                              propose_model_cfg,
-                                              parallelism_cfg,
-                                              runtime_cfg,
-                                              kv_cache_cfg,
-                                              sp_cfg,
-                                              /*warm_up_result=*/std::nullopt,
-                                              /*is_mtp=*/true,
-                                              /*is_eagle=*/sp_type == SP_TYPE_EAGLE);
+    return rtp_llm::test::finalizeCacheConfig(CacheConfigCreator::createConfig(score_model_cfg,
+                                                                               parallelism_cfg,
+                                                                               runtime_cfg,
+                                                                               kv_cache_cfg,
+                                                                               /*warm_up_result=*/std::nullopt,
+                                                                               sp_cfg,
+                                                                               &propose_model_cfg,
+                                                                               /*is_mtp=*/true,
+                                                                               /*is_eagle=*/sp_type == SP_TYPE_EAGLE));
 }
 
 static CompleteTokenIdsPtr makeCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block) {
@@ -254,8 +254,7 @@ TEST_F(KVCacheAllocatorHybridPathTest, CreateHybridConfigAllowsOnlyFullGroups) {
 
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
-    auto cache_config =
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+    auto cache_config       = CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0);
     ASSERT_EQ(cache_config.groupNums(), 1);
     EXPECT_EQ(cache_config.groupTypesSnapshot()[0], CacheGroupType::FULL);
     EXPECT_EQ(cache_config.groupTagsSnapshot()[0], "full");
@@ -268,7 +267,7 @@ TEST_F(KVCacheAllocatorHybridPathTest, CreateHybridConfigRejectsMultipleFullGrou
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
     try {
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+        CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0);
         FAIL() << "expected multiple full groups to be rejected";
     } catch (const std::runtime_error& e) {
         EXPECT_NE(std::string(e.what()).find("multiple FULL MHA/MLA cache groups"), std::string::npos);
@@ -282,8 +281,7 @@ TEST_F(KVCacheAllocatorHybridPathTest, CreateHybridConfigKeepsModelTokensPerBloc
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
 
-    auto cache_config =
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+    auto cache_config = CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0);
     EXPECT_EQ(cache_config.seq_size_per_block, 4);
     ASSERT_EQ(cache_config.groupNums(), 1);
     EXPECT_EQ(cache_config.specForGroup(0)->seq_size_per_block, 4);
@@ -343,7 +341,7 @@ TEST_F(KVCacheAllocatorHybridPathTest, CreateConfigSupportsOneLinearIndependentP
 
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
-    const auto config       = CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, false, 0);
+    const auto config       = CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, 0);
     ASSERT_EQ(config.groupNums(), 1);
     EXPECT_EQ(config.tagForGroup(0), "linear");
     EXPECT_EQ(config.typeForGroup(0), CacheGroupType::LINEAR);
@@ -363,7 +361,7 @@ TEST_F(KVCacheAllocatorHybridPathTest, CreateConfigRejectsLinearDescriptorWithou
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
     try {
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+        CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0);
         FAIL() << "expected a linear-only single config to be rejected";
     } catch (const std::runtime_error& e) {
         EXPECT_NE(std::string(e.what()).find("hybrid_attention_types size"), std::string::npos);
@@ -416,8 +414,7 @@ TEST_F(KVCacheAllocatorHybridPathTest, CreateHybridConfigUsesFirstSeenTagsWithFu
 
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
-    auto cache_config =
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+    auto cache_config       = CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0);
 
     std::vector<std::string>    expected_tags{"linear", "full"};
     std::vector<CacheGroupType> expected_types{CacheGroupType::LINEAR, CacheGroupType::FULL};
@@ -448,8 +445,7 @@ TEST_F(KVCacheAllocatorHybridPathTest, CreateHybridConfigKeepsExplicitPhysically
     cfg.kv_cache_spec_descs[1][0].dtype                = DataType::TYPE_FP32;
 
     ParallelismConfig parallelism_cfg;
-    auto              config =
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+    auto              config = CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0);
 
     ASSERT_EQ(config.groupNums(), 3);
     EXPECT_EQ(config.groupTagsSnapshot(), (std::vector<std::string>{"recurrent_state", "convolution_state", "full"}));
@@ -476,9 +472,8 @@ TEST_F(KVCacheAllocatorHybridPathTest, CreateHybridConfigRejectsDifferentLayouts
     cfg.kv_cache_spec_descs[1][0].dtype                = DataType::TYPE_BF16;
 
     ParallelismConfig parallelism_cfg;
-    EXPECT_THROW(
-        (void)CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0),
-        std::runtime_error);
+    EXPECT_THROW((void)CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0),
+                 std::runtime_error);
 }
 
 TEST_F(KVCacheAllocatorHybridPathTest, InitAndAddressLookupSmoke) {
@@ -621,15 +616,16 @@ TEST_F(KVCacheAllocatorHybridPathTest, CreateSpConfigPreservesQwenPackingAlignme
     sp_cfg.gen_num_per_cycle = 2;
 
     CacheConfig config;
-    ASSERT_NO_THROW(config = CacheConfigCreator::createSpConfig(score_model_cfg,
-                                                                propose_model_cfg,
-                                                                parallelism_cfg,
-                                                                runtime_cfg,
-                                                                kv_cache_cfg,
-                                                                sp_cfg,
-                                                                /*warm_up_result=*/std::nullopt,
-                                                                /*is_mtp=*/true,
-                                                                /*is_eagle=*/false));
+    ASSERT_NO_THROW(
+        config = rtp_llm::test::finalizeCacheConfig(CacheConfigCreator::createConfig(score_model_cfg,
+                                                                                     parallelism_cfg,
+                                                                                     runtime_cfg,
+                                                                                     kv_cache_cfg,
+                                                                                     /*warm_up_result=*/std::nullopt,
+                                                                                     sp_cfg,
+                                                                                     &propose_model_cfg,
+                                                                                     /*is_mtp=*/true,
+                                                                                     /*is_eagle=*/false)));
 
     EXPECT_EQ(config.groupTagsSnapshot(), std::vector<std::string>({"linear", "full"}));
     EXPECT_EQ(config.layerIdsForGroup(config.groupIdForTag("full")).size(), 4u);
@@ -687,7 +683,7 @@ TEST_F(KVCacheAllocatorHybridPathTest, MergeMtpAliasesCompatibleDefaultMlaGroup)
 
 TEST_F(KVCacheAllocatorHybridPathTest, MergeMtpRejectsAmbiguousDefaultFullGroupAlias) {
     CacheConfig main_config;
-    main_config.layer_num     = 2;
+    main_config.layer_num = 2;
 
     main_config.fromGroupedSpecs(
         {makeMhaSpec("full0", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("full1", 4, DataType::TYPE_FP16, 1, 1)},
@@ -792,7 +788,7 @@ TEST_F(KVCacheAllocatorHybridPathTest, MergeMtpRejectsIncompatibleDefaultFullGro
 
 TEST_F(KVCacheAllocatorHybridPathTest, MergeMtpPrefersExactDefaultGroupMatch) {
     CacheConfig main_config;
-    main_config.layer_num     = 2;
+    main_config.layer_num = 2;
 
     main_config.fromGroupedSpecs(
         {makeMhaSpec("default", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1)},
@@ -831,7 +827,7 @@ TEST_F(KVCacheAllocatorHybridPathTest, MergeMtpDoesNotAliasDefaultLinearProposeG
         main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1);
         FAIL() << "expected a default Linear propose group not to use the FULL alias";
     } catch (const std::runtime_error& e) {
-        EXPECT_NE(std::string(e.what()).find("missing group mapping for sub layer 0"), std::string::npos);
+        EXPECT_NE(std::string(e.what()).find("unmapped draft cache group tag=default"), std::string::npos);
     }
 }
 
@@ -861,7 +857,7 @@ TEST_F(KVCacheAllocatorHybridPathTest, MergeMtpDoesNotAliasMultiGroupProposeConf
         CacheGroupType::FULL);
 
     CacheConfig propose_config;
-    propose_config.layer_num     = 1;
+    propose_config.layer_num = 1;
 
     propose_config.fromGroupedSpecs(
         {makeMhaSpec("default", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1)},
@@ -873,13 +869,13 @@ TEST_F(KVCacheAllocatorHybridPathTest, MergeMtpDoesNotAliasMultiGroupProposeConf
         main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1);
         FAIL() << "expected a multi-group propose config not to use the default alias";
     } catch (const std::runtime_error& e) {
-        EXPECT_NE(std::string(e.what()).find("missing group mapping for sub layer 0"), std::string::npos);
+        EXPECT_NE(std::string(e.what()).find("unmapped draft cache group tag=default"), std::string::npos);
     }
 }
 
 TEST_F(KVCacheAllocatorHybridPathTest, MergeMtpAllowsUnequalIndependentGroupLayerCounts) {
     CacheConfig main_config;
-    main_config.layer_num     = 5;
+    main_config.layer_num = 5;
 
     main_config.fromGroupedSpecs(
         {makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1), makeLinearSpec("linear", 4, DataType::TYPE_FP16, 1, 1)},
@@ -900,7 +896,7 @@ TEST_F(KVCacheAllocatorHybridPathTest, MergeMtpRejectsPartialSourceAndDerivesOrd
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
 
     CacheConfig partial_source;
-    partial_source.layer_num     = 2;
+    partial_source.layer_num = 2;
 
     partial_source.fromGroupedSpecs(
         {makeMhaSpec("default", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1)},

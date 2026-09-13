@@ -319,13 +319,10 @@ def resolve_dsv4_tokens_per_block(
 ) -> Optional[int]:
     """Return the physical block size DSv4 should run with, or None to keep.
 
-    ``CacheConfigCreator`` takes
-    ``kv_cache_config.seq_size_per_block`` only when it differs from the
-    framework default of 64, otherwise it falls back to
-    ``attn_config.tokens_per_block``; and ``createBasicConfig`` (the warm-up
-    path) zeroes ``seq_size_per_block`` entirely, so ``attn_config`` is the only
-    channel that reaches both paths.  Promote the default to 256, but leave an
-    explicit ``--seq_size_per_block`` alone so the two paths stay in agreement.
+    ``CacheConfigCreator`` prefers resolved ``attn_config.tokens_per_block``
+    in both ``createConfig`` and ``createWarmupConfig``; raw cache options are
+    only a fallback for unresolved model geometry. Promote the default to 256,
+    but leave an explicit ``--seq_size_per_block`` alone so the two paths agree.
     """
     if tokens_per_block == framework_default:
         return DSV4_TOKENS_PER_BLOCK

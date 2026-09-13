@@ -46,8 +46,8 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
                                                  uint32_t       full_block_num   = 8,
                                                  CacheGroupType second_type      = CacheGroupType::FULL) {
     CacheConfig config;
-    config.dtype              = rtp_llm::DataType::TYPE_FP16;
-    config.layer_num          = 4;
+    config.dtype     = rtp_llm::DataType::TYPE_FP16;
+    config.layer_num = 4;
 
     config.block_num          = std::max(linear_block_num, full_block_num);
     config.seq_size_per_block = 4;
@@ -83,17 +83,17 @@ static CacheConfig makeTinySwaMultiPoolHybridConfig(uint32_t linear_block_num = 
 
 static ModelConfig makeTinyDSV4ModelConfig() {
     ModelConfig mc;
-    mc.num_layers                                                = 5;
-    mc.hidden_size                                               = 32;
-    mc.attn_config.head_num                                      = 4;
-    mc.attn_config.kv_head_num                                   = 1;
-    mc.attn_config.size_per_head                                 = 8;
-    mc.attn_config.rope_head_dim                                 = 4;
-    mc.attn_config.indexer_head_dim                              = 8;
-    mc.attn_config.indexer_head_num                              = 2;
-    mc.attn_config.indexer_topk                                  = 16;
-    mc.attn_config.tokens_per_block                              = 128;
-    mc.hybrid_attention_config.enable_hybrid_attention           = true;
+    mc.num_layers                                      = 5;
+    mc.hidden_size                                     = 32;
+    mc.attn_config.head_num                            = 4;
+    mc.attn_config.kv_head_num                         = 1;
+    mc.attn_config.size_per_head                       = 8;
+    mc.attn_config.rope_head_dim                       = 4;
+    mc.attn_config.indexer_head_dim                    = 8;
+    mc.attn_config.indexer_head_num                    = 2;
+    mc.attn_config.indexer_topk                        = 16;
+    mc.attn_config.tokens_per_block                    = 128;
+    mc.hybrid_attention_config.enable_hybrid_attention = true;
     setDsv4KvCacheSpecs(mc, {4, 128, 4, 128, 0});
     return mc;
 }
@@ -128,7 +128,7 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t                block_num   
     auto mc                                            = makeProModelConfig();
     mc.hybrid_attention_config.enable_hybrid_attention = true;
     ParallelismConfig pc;
-    auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    auto              config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
     if (explicit_block_num.has_value() || pin_explicit_groups) {
         auto groups                     = config.topology().groups();
         bool applied_explicit_block_num = false;
@@ -157,7 +157,7 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t                block_num   
 static CacheConfig makeTinyDSV4HybridPoolConfig(uint32_t block_num = 8, bool pin_explicit_groups = false) {
     auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
-    auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    auto              config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
     if (pin_explicit_groups) {
         auto groups = config.topology().groups();
         for (auto& group : groups) {
@@ -1242,7 +1242,7 @@ TEST_F(KVCacheAllocatorTest, TokenAggregatorsIgnoreSmallHCAStatePool) {
 TEST_F(KVCacheAllocatorTest, DSV4ConfigUsesGroupOwnedBlockSizes) {
     auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
-    auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    auto              config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
 
     ASSERT_EQ(config.groupNums(), 7);
 
@@ -1337,11 +1337,11 @@ TEST_F(KVCacheAllocatorTest, DSV4PinnedHcaStatePoolExcludesFixedReserve) {
 }
 
 TEST_F(KVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksScaleWithLinearStep) {
-    auto mc                                                      = makeProModelConfig();
-    mc.hybrid_attention_config.enable_hybrid_attention           = true;
+    auto mc                                            = makeProModelConfig();
+    mc.hybrid_attention_config.enable_hybrid_attention = true;
     ParallelismConfig pc;
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
-    auto config        = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    auto config        = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
     config.linear_step = 4;
 
     RuntimeConfig rt;

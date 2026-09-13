@@ -78,16 +78,16 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = mtp_module_num;
 
-    // NOTE: createSpConfig builds main global layer routing and local MTP sub-config routing.
-    auto cfg = rtp_llm::CacheConfigCreator::createSpConfig(score_model_config,
-                                                           propose_model_config,
-                                                           parallelism_config,
-                                                           runtime_config,
-                                                           kv_cache_config,
-                                                           sp_config,
-                                                           /*warm_up_result=*/std::nullopt,
-                                                           /*is_mtp=*/true,
-                                                           /*is_eagle=*/false);
+    // createConfig builds main global layer routing and local MTP sub-config routing.
+    auto cfg = rtp_llm::test::finalizeCacheConfig(CacheConfigCreator::createConfig(score_model_config,
+                                                                                   parallelism_config,
+                                                                                   runtime_config,
+                                                                                   kv_cache_config,
+                                                                                   /*warm_up_result=*/std::nullopt,
+                                                                                   sp_config,
+                                                                                   &propose_model_config,
+                                                                                   /*is_mtp=*/true,
+                                                                                   /*is_eagle=*/false));
     return cfg;
 }
 
@@ -106,7 +106,7 @@ TEST_F(BlockPoolTest, ConstructorAndInit) {
 }
 
 TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
-    // Use createSpConfig logic so that group layer ids are filled for main + sub-model layers.
+    // Use Creator so that group layer ids are filled for main + sub-model layers.
     // main(2 layers) + mtp1(1 layer) + mtp2(1 layer)
     auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
 
