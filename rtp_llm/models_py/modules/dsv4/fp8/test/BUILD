@@ -164,7 +164,7 @@ test_suite(
 
 py_test(
     name = "test_mega_csa_rtp_eager",
-    srcs = ["test_mega_csa_rtp_eager.py"],
+    srcs = ["test_mega_csa_rtp_eager.py", "mega_attention_test_utils.py"],
     deps = _DSV4_FP8_TEST_DEPS + [
         "//rtp_llm:deep_gemm",
     ],
@@ -175,7 +175,7 @@ py_test(
 
 py_test(
     name = "test_mega_hca_rtp_eager",
-    srcs = ["test_mega_hca_rtp_eager.py"],
+    srcs = ["test_mega_hca_rtp_eager.py", "mega_attention_test_utils.py"],
     deps = _DSV4_FP8_TEST_DEPS + [
         "//rtp_llm:deep_gemm",
     ],

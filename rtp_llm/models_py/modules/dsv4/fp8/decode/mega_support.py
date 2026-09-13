@@ -275,6 +275,14 @@ def _compiled_geometry_reason(
     except Exception as exc:
         return f"failed to query rtp-kernel DSV4 Mega ABI: {exc}"
 
+    for name, compiled in (("CSA", csa_geometry), ("HCA", hca_geometry)):
+        capacity = compiled.get("max_m") if isinstance(compiled, Mapping) else None
+        if not isinstance(capacity, int) or capacity < MAX_BATCH:
+            return (
+                f"rtp-kernel {name} max_m={capacity!r} is unsupported; "
+                f"requires at least {MAX_BATCH} tokens"
+            )
+
     reason = _mapping_mismatch(
         "CSA",
         csa_geometry,

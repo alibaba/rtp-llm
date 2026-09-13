@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import unittest
 from dataclasses import dataclass
+from unittest.mock import patch
 
 import torch
 
@@ -40,6 +41,10 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_hca_weights import (
     HCA_APE_ROWS,
     HCA_COMPRESS_RATIO,
     HCA_STATE_WIDTH,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test.mega_attention_test_utils import (
+    check_dynamic_graph_replays,
+    slots_from_block_table,
 )
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
 from rtp_llm.ops.compute_ops import CacheGroupType, KVCache, KVCacheRegionName
@@ -306,11 +311,8 @@ def _fill_random_context(pools: _Pools, device: torch.device, seed: int) -> None
         dtype=torch.int64,
         device=device,
     )
-    swa_slots = torch.arange(
-        _SWA_ENTRIES_PER_BLOCK,
-        _SWA_ENTRIES_PER_BLOCK + batch_size * _SWA_ENTRIES_PER_BLOCK,
-        dtype=torch.int64,
-        device=device,
+    swa_slots = slots_from_block_table(
+        pools.block_tables[SWA_KV], _SWA_ENTRIES_PER_BLOCK
     )
     compressed = torch.randn(
         compressed_count,
@@ -320,7 +322,7 @@ def _fill_random_context(pools: _Pools, device: torch.device, seed: int) -> None
         device=device,
     ).mul_(0.05)
     swa = torch.randn(
-        batch_size * _SWA_ENTRIES_PER_BLOCK,
+        swa_slots.numel(),
         HEAD_DIM,
         generator=generator,
         dtype=torch.bfloat16,
@@ -350,12 +352,15 @@ class MegaHCARTPEagerTest(unittest.TestCase):
             )
 
         cls.device = torch.device("cuda", torch.cuda.current_device())
-        os.environ["DSV4_HC_IMPL"] = "tilelang"
+        environment = {"DSV4_HC_IMPL": "tilelang"}
         test_tmpdir = os.environ.get("TEST_TMPDIR")
         if test_tmpdir:
-            os.environ["TILELANG_CACHE_DIR"] = os.path.join(
+            environment["TILELANG_CACHE_DIR"] = os.path.join(
                 test_tmpdir, "tilelang_cache"
             )
+        env_patch = patch.dict(os.environ, environment)
+        env_patch.start()
+        cls.addClassCleanup(env_patch.stop)
         weights = _make_layer_weights(cls.device)
         attention = AttentionFP8(
             layer_id=0,
@@ -391,6 +396,10 @@ class MegaHCARTPEagerTest(unittest.TestCase):
         cls.adapter = MegaHCAAdapter(cls.block, weights, cls.runtime)
         cls.mega_pools = _make_pools(cls.device, batch_size=1)
         cls.reference_pools = _make_pools(cls.device, batch_size=1)
+
+    def setUp(self) -> None:
+        self.mega_pools.reset()
+        self.reference_pools.reset()
 
     def _metadata(self, position: int, pools: _Pools, q_len: int = 1):
         batch_size = int(pools.block_tables[HCA_KV].shape[0])
@@ -509,8 +518,6 @@ class MegaHCARTPEagerTest(unittest.TestCase):
         self.assertLess(value_diff, 1.0e-4, msg=f"{label} HCA state")
 
     def test_matches_original_rtp_attention_sublayer(self) -> None:
-        self.mega_pools.reset()
-        self.reference_pools.reset()
         generator = torch.Generator(device=self.device).manual_seed(2026)
         mega_output = reference_output = None
         mega_metadata = reference_metadata = None
@@ -544,8 +551,6 @@ class MegaHCARTPEagerTest(unittest.TestCase):
         )
 
     def test_boundary_compression_writes_hca_kv(self) -> None:
-        self.mega_pools.reset()
-        self.reference_pools.reset()
         _fill_random_state(self.mega_pools, self.device, seed=1618)
         _fill_random_state(self.reference_pools, self.device, seed=1618)
         generator = torch.Generator(device=self.device).manual_seed(314)
@@ -578,8 +583,6 @@ class MegaHCARTPEagerTest(unittest.TestCase):
         )
 
     def test_matches_original_rtp_at_long_context(self) -> None:
-        self.mega_pools.reset()
-        self.reference_pools.reset()
         _fill_random_context(self.mega_pools, self.device, seed=31415)
         _fill_random_context(self.reference_pools, self.device, seed=31415)
         _fill_random_state(self.mega_pools, self.device, seed=27182)
@@ -644,50 +647,7 @@ class MegaHCARTPEagerTest(unittest.TestCase):
         )
 
     def test_cuda_graph_capture_and_replay(self) -> None:
-        self.mega_pools.reset()
-        generator = torch.Generator(device=self.device).manual_seed(47)
-        history = [
-            torch.randn(
-                (1, 1, HC, DIM),
-                generator=generator,
-                device=self.device,
-                dtype=torch.bfloat16,
-            ).mul_(0.05)
-            for _ in range(4)
-        ]
-
-        for position in range(4):
-            self._run_mega_step(position, history[position].clone(), self.mega_pools)
-
-        self.mega_pools.reset()
-        for position in range(3):
-            self._run_mega_step(position, history[position].clone(), self.mega_pools)
-
-        metadata = self._metadata(3, self.mega_pools)
-        metadata.is_cuda_graph = True
-        self.runtime.begin_decode(metadata)
-        torch.cuda.synchronize(self.device)
-
-        graph_input = history[3].clone()
-        graph_work = torch.empty_like(graph_input)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            graph_work.copy_(graph_input)
-            graph_output = self.adapter.forward_attention_sublayer(
-                self.block,
-                graph_work,
-                metadata,
-                kv_cache=self.mega_pools.kv_cache,
-            )
-
-        graph.replay()
-        torch.cuda.synchronize(self.device)
-        first = graph_output.clone()
-        graph.replay()
-        torch.cuda.synchronize(self.device)
-        second = graph_output.clone()
-        self.assertTrue(torch.isfinite(first).all().item())
-        torch.testing.assert_close(first, second, rtol=0.0, atol=0.0)
+        check_dynamic_graph_replays(self, _make_pools, _fill_random_context)
 
 
 if __name__ == "__main__":

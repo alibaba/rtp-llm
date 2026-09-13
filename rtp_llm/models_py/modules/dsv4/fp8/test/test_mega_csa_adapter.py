@@ -338,12 +338,28 @@ class MegaCSARoutingTest(unittest.TestCase):
         adapter = MagicMock(wraps=MegaCSAAdapter.__new__(MegaCSAAdapter))
         block = _block_stub(adapter)
         hidden = torch.zeros(MAX_BATCH + 1, 1, 1, 4)
-        metadata = SimpleNamespace(q_len_per_req=1)
+        metadata = SimpleNamespace(batch_size=MAX_BATCH + 1, q_len_per_req=1)
 
         block.forward_decode(hidden, metadata, torch.zeros(MAX_BATCH + 1, 1))
 
         adapter.forward_attention_sublayer.assert_not_called()
         block.attn.forward_decode.assert_called_once()
+
+    def test_kernel_capacity_boundary(self) -> None:
+        for batch_size, q_len in ((MAX_BATCH, 1), (MAX_BATCH // 4, 4)):
+            metadata = SimpleNamespace(batch_size=batch_size, q_len_per_req=q_len)
+            self.assertTrue(
+                MegaCSAAdapter.supports_decode_shape(
+                    torch.empty(batch_size, q_len, HC, DIM, device="meta"), metadata
+                )
+            )
+            metadata.batch_size += 1
+            self.assertFalse(
+                MegaCSAAdapter.supports_decode_shape(
+                    torch.empty(batch_size + 1, q_len, HC, DIM, device="meta"),
+                    metadata,
+                )
+            )
 
     def test_flat_token_count_above_limit_keeps_existing_attention_path(self) -> None:
         adapter = MagicMock(wraps=MegaCSAAdapter.__new__(MegaCSAAdapter))
