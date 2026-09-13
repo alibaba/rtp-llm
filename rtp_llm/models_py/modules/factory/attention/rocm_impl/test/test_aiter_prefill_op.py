@@ -1988,7 +1988,8 @@ class TestAiterGenerationPrefillCudaGraphNumerics(unittest.TestCase):
         )
         self.assertEqual(graph_impl.backend, "triton")
         self.assertTrue(graph_impl.supports_generation_prefill_cuda_graph())
-        self.assertIsNone(graph_impl.fmha_params)  # CK batch backend is not prepared.
+        # CK batch backend is not prepared.
+        self.assertIsNone(graph_impl.fmha_params)
         params = graph_impl.triton_fmha_params
         captured_tensors = {
             name: getattr(params, name)
