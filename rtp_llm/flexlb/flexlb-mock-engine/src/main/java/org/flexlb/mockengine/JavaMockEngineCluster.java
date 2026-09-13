@@ -6042,6 +6042,14 @@ public final class JavaMockEngineCluster {
         }
 
         Map<String, Object> getSnapshot() {
+            return getSnapshot(true);
+        }
+
+        Map<String, Object> getMetricsSnapshot() {
+            return getSnapshot(false);
+        }
+
+        private Map<String, Object> getSnapshot(boolean includeDetails) {
             Map<String, Object> snap = new LinkedHashMap<>();
             // Capacity model v2: one pool-derived caliber everywhere —
             // active = occupied + pressure (clamped), available = pool
@@ -6075,14 +6083,16 @@ public final class JavaMockEngineCluster {
             snap.put("decode_waiting_for_kv", decodeWaitingForKv.size());
             snap.put("fetch_attach_expirations", fetchAttachExpirations.get());
             snap.put("completed", completedCount.get());
-            snap.put("cache_keys", cache.snapshotKeys().size());
+            snap.put("cache_keys", cache.lruKeyBlocks());
             snap.put("cache_evictions", cache.evictions());
             // Full per-engine key list (flexlb_test_framework KV cases' per-engine key-set
             // exposure). Debug endpoint — the whole list is exposed by design
             // (default 6000-block caches included); sorted for determinism.
-            List<Long> cacheKeySet = new ArrayList<>(cache.snapshotKeys());
-            cacheKeySet.sort(Long::compareTo);
-            snap.put("cache_key_set", cacheKeySet);
+            if (includeDetails) {
+                List<Long> cacheKeySet = new ArrayList<>(cache.snapshotKeys());
+                cacheKeySet.sort(Long::compareTo);
+                snap.put("cache_key_set", cacheKeySet);
+            }
             snap.put("active_kv_tokens", effectiveActiveKv);
             snap.put("available_kv_tokens", availableKvTokens());
             // Pool observability (per-engine series, /metrics passthrough):
@@ -6114,13 +6124,15 @@ public final class JavaMockEngineCluster {
             rpcCounts.put("cancel", rpcCancel.get());
             snap.put("rpc_counts", rpcCounts);
             snap.put("cancelled_count", cancelledCount.get());
-            List<Long> cancelledRids;
-            synchronized (cancelledRidHistory) {
-                cancelledRids = new ArrayList<>(cancelledRidHistory);
+            if (includeDetails) {
+                List<Long> cancelledRids;
+                synchronized (cancelledRidHistory) {
+                    cancelledRids = new ArrayList<>(cancelledRidHistory);
+                }
+                cancelledRids.sort(Long::compareTo);
+                snap.put("cancelled_rids", cancelledRids);
+                snap.put("request_lifecycle", getRequestLifecycleSnapshot());
             }
-            cancelledRids.sort(Long::compareTo);
-            snap.put("cancelled_rids", cancelledRids);
-            snap.put("request_lifecycle", getRequestLifecycleSnapshot());
             snap.put("prefill_ms_avg", avg(recentPrefillTimes));
             snap.put("prefill_ms_p99", p99(recentPrefillTimes));
             synchronized (recentPrefillTimes) {

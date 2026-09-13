@@ -127,6 +127,13 @@ class MetricsValidationTest {
             for (JsonNode engineNode : snapshotArray) {
                 int port = engineNode.get("port").asInt();
                 String role = engineNode.get("role").asText();
+                var full = services.get(port).getSnapshot();
+                var lightweight = services.get(port).getMetricsSnapshot();
+                for (String detail : List.of("cache_key_set", "cancelled_rids", "request_lifecycle")) {
+                    assertTrue(full.containsKey(detail));
+                    assertFalse(lightweight.containsKey(detail));
+                }
+                lightweight.forEach((key, value) -> assertEquals(full.get(key), value, key));
                 long accepted = engineNode.get("accepted").asLong();
                 long completed = engineNode.get("completed").asLong();
                 long inflight = engineNode.get("inflight").asLong();

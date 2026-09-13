@@ -821,7 +821,7 @@ final class MockControlServer {
             // the snapshot so this scrape reads exactly its own token sums
             // (window = scrape interval; the G1 poller is 1s -> tokens/s).
             service.drainTpsWindows();
-            snaps.add(service.getSnapshot());
+            snaps.add(service.getMetricsSnapshot());
         }
 
         StringBuilder sb = new StringBuilder();
