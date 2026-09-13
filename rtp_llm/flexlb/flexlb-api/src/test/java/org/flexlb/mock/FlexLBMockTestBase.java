@@ -486,9 +486,8 @@ public abstract class FlexLBMockTestBase {
         request.setNumBeams(1);
         request.setModel("mock-model");
 
-        BalanceContext ctx = new BalanceContext();
+        BalanceContext ctx = new BalanceContext(config);
         ctx.setRequest(request);
-        ctx.setConfig(config);
         ctx.setGenerateInputPb(ByteString.copyFrom(generateInputBytes(requestId)));
         return ctx;
     }

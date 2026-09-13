@@ -71,10 +71,6 @@ public class EvictionManager {
         shutdown = true;
     }
 
-    boolean isShutdown() {
-        return shutdown;
-    }
-
     /**
      * Attempt one eviction-backed admission after ordinary placement has
      * reached exact capacity. A true result transfers the future to this

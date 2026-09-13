@@ -675,8 +675,7 @@ final class RouteTimelineProjector {
             }
         }
 
-        @Override
-        public double singletonBatchPlanningDurationMs(
+        private double singletonBatchPlanningDurationMs(
                 long seqLen, long hitCache) {
             Object snapshot = evaluator.snapshotIdentity();
             if (cachedBatchSnapshot == snapshot
@@ -732,8 +731,7 @@ final class RouteTimelineProjector {
             return features;
         }
 
-        @Override
-        public long committedGroupDurationMs(double predictedMs) {
+        private long committedGroupDurationMs(double predictedMs) {
             try {
                 return PrefillPredictionBoundary.committedDecisionGroupMs(predictedMs);
             } catch (InvalidPrefillPredictionException invalidPrediction) {

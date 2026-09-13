@@ -31,7 +31,6 @@ public class DefaultRouter {
     private final RandomStrategy vitSelector;
     private final ConfigService configService;
     private final List<RoleType> requiredRoles;
-    private final RoleType queueAdmissionRole;
 
     @Autowired
     public DefaultRouter(
@@ -51,11 +50,6 @@ public class DefaultRouter {
         this.requiredRoles = List.copyOf(
                 Objects.requireNonNull(
                         modelMetaConfig, "modelMetaConfig").requiredRoles());
-        this.queueAdmissionRole = requiredRoles.stream()
-                .filter(role -> role == RoleType.PREFILL
-                        || role == RoleType.PDFUSION)
-                .findFirst()
-                .orElse(RoleType.PREFILL);
     }
 
     public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context) {
@@ -72,11 +66,6 @@ public class DefaultRouter {
             return PlacementResult.success(RouteAdmission.prepare(context, routing.selections(),
                     buildSuccessResponse(routing.serverStatuses()), decodeAdmission));
         }
-    }
-
-    /** Capacity domain that gates publication into the selected Prefill queue. */
-    RoleType queueAdmissionRole() {
-        return queueAdmissionRole;
     }
 
     private Response validateRequest(BalanceContext context) {

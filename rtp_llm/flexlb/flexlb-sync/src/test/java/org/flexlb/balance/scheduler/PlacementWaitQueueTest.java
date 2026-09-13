@@ -44,7 +44,6 @@ class PlacementWaitQueueTest {
         queue.park(high, B, 0);
         queue.capacityChanged(B);
         queue.capacityChanged(A);
-        assertTrue(queue.hasEarlierReadyRequest(second));
         assertEquals(List.of(high, first), drain(10));
         queue.remove(high);
         assertEquals(List.of(second), drain(10));

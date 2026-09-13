@@ -41,6 +41,7 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.slf4j.LoggerFactory;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -58,6 +59,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
 import java.util.stream.LongStream;
 
@@ -378,8 +380,10 @@ class TransientCapacityQueueContractTest {
 
     @Test
     @Timeout(20)
-    void releasedSeatPreservesFifoAtTheSamePriority() throws Exception {
-        try (Fixture fixture = new Fixture(RoleType.PREFILL)) {
+    void globalWaitersPreserveFifoAtTheSamePriority() throws Exception {
+        // BATCH can accept a route behind a busy Prefill. Saturate Decode to keep
+        // both requests in the global wait queue before testing its retry order.
+        try (Fixture fixture = new Fixture(RoleType.DECODE)) {
             fixture.config.fixedWindowDecision().setMaxRequests(2);
             fixture.config.fixedWindowDecision().setMaxCollectionWaitMs(50L);
             fixture.submission.holdCompletions();
@@ -394,6 +398,7 @@ class TransientCapacityQueueContractTest {
                     .getQueuedRequestCount() >= 2, 2_000L);
             assertFalse(older.isDone());
             assertFalse(later.isDone());
+            awaitCapacityWaiters(fixture.runtime.scheduler(), 2);
             fixture.releaseCapacity();
 
             assertTrue(fixture.submission.awaitCommands(
@@ -406,9 +411,11 @@ class TransientCapacityQueueContractTest {
 
     @Test
     @Timeout(20)
-    void releasedSeatUsesPriorityOrderingBeforeArrivalOrder()
+    void globalWaitersUsePriorityOrderingBeforeArrivalOrder()
             throws Exception {
-        try (Fixture fixture = new Fixture(RoleType.PREFILL)) {
+        // BATCH can accept a route behind a busy Prefill. Saturate Decode to keep
+        // both requests in the global wait queue before testing its retry order.
+        try (Fixture fixture = new Fixture(RoleType.DECODE)) {
             fixture.config.fixedWindowDecision().setMaxRequests(2);
             fixture.config.fixedWindowDecision().setMaxCollectionWaitMs(50L);
             fixture.submission.holdCompletions();
@@ -417,6 +424,7 @@ class TransientCapacityQueueContractTest {
 
             awaitCondition(() -> fixture.runtime.scheduler()
                     .getQueuedRequestCount() >= 2, 2_000L);
+            awaitCapacityWaiters(fixture.runtime.scheduler(), 2);
             fixture.releaseCapacity();
 
             assertTrue(fixture.submission.awaitCommands(
@@ -435,6 +443,7 @@ class TransientCapacityQueueContractTest {
             fixture.runtime.scheduler().submit(fixture.context(271L, 50));
             fixture.runtime.scheduler().submit(fixture.context(272L, 50));
 
+            awaitCapacityWaiters(fixture.runtime.scheduler(), 2);
             fixture.releaseCapacity();
 
             assertTrue(fixture.submission.awaitCommands(
@@ -454,6 +463,7 @@ class TransientCapacityQueueContractTest {
             fixture.runtime.scheduler().submit(fixture.context(281L, 50));
             fixture.runtime.scheduler().submit(fixture.context(282L, 50));
 
+            awaitCapacityWaiters(fixture.runtime.scheduler(), 2);
             fixture.releaseCapacity();
             fixture.runtime.applyStatus(
                     fixture.decodeStatus,
@@ -529,6 +539,24 @@ class TransientCapacityQueueContractTest {
         }
     }
 
+    private static void awaitCapacityWaiters(RequestScheduler scheduler, int expected)
+            throws InterruptedException {
+        Object coordinator = ReflectionTestUtils.getField(scheduler, "globalQueue");
+        var lock = (ReentrantLock) ReflectionTestUtils.getField(coordinator, "lock");
+        Object waitQueue = ReflectionTestUtils.getField(coordinator, "waitingRequests");
+        var waiting = (Map<?, ?>) ReflectionTestUtils.getField(waitQueue, "waiting");
+        // Observe completed park registration under its owning lock. Placement
+        // counters are updated before park and cannot establish this barrier.
+        awaitCondition(() -> {
+            lock.lock();
+            try {
+                return waiting.size() == expected;
+            } finally {
+                lock.unlock();
+            }
+        }, 2_000L);
+    }
+
     private static void awaitCondition(
             java.util.function.BooleanSupplier condition,
             long timeoutMs) throws InterruptedException {
@@ -537,6 +565,7 @@ class TransientCapacityQueueContractTest {
         while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
             Thread.sleep(5L);
         }
+        assertTrue(condition.getAsBoolean(), "condition did not become true within " + timeoutMs + " ms");
     }
 
     @Test
@@ -1069,9 +1098,8 @@ class TransientCapacityQueueContractTest {
             request.setMaxNewTokens(8);
             request.setPriority(priority);
             request.setModel("transient-capacity-contract");
-            BalanceContext context = new BalanceContext();
+            BalanceContext context = new BalanceContext(config);
             context.setRequest(request);
-            context.setConfig(config);
             return context;
         }
 

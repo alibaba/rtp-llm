@@ -1525,9 +1525,8 @@ class PrefillEndpointTest {
         request.setSeqLen(500);
         request.setPriority(priority);
 
-        BalanceContext ctx = new BalanceContext();
+        BalanceContext ctx = new BalanceContext(config);
         ctx.setRequest(request);
-        ctx.setConfig(config);
         ctx.setSchedulingMetadata(SchedulingMetadata.explicit(priority, now + 60_000));
 
         return new ScheduledRequest(
@@ -1635,9 +1634,8 @@ class PrefillEndpointTest {
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
 
-        BalanceContext ctx = new BalanceContext();
+        BalanceContext ctx = new BalanceContext(requestConfig);
         ctx.setRequest(request);
-        ctx.setConfig(requestConfig);
 
         ServerStatus prefill = new ServerStatus();
         prefill.setRole(RoleType.PREFILL);

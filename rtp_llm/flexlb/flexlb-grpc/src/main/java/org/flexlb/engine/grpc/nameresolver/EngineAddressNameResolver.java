@@ -14,10 +14,11 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
 
 /**
  * @author saichen.sm
@@ -31,17 +32,16 @@ public class EngineAddressNameResolver implements CustomNameResolver {
     private final ServiceDiscovery serviceDiscovery;
     private Listener listener;
     private List<String/*ip:port*/> allIpPortList = new ArrayList<>();
-    private final List<String> serviceAddressList;
-    private final Map<String/*address*/, String/*protocol*/> addressProtocolMap = new ConcurrentHashMap<>();
+    private final Map<String/*address*/, String/*protocol*/> addressProtocols;
 
     public EngineAddressNameResolver(
             ServiceDiscovery serviceDiscovery,
             ModelMetaConfig modelConfig) {
         this.serviceDiscovery = serviceDiscovery;
-        this.serviceAddressList = initServiceAddressList(modelConfig.getServiceRoute());
-        log.info("EngineAddressNameResolver start subscribe clusters:{} ", serviceAddressList);
+        this.addressProtocols = addressProtocols(modelConfig.getServiceRoute());
+        log.info("EngineAddressNameResolver start subscribe clusters:{} ", addressProtocols.keySet());
         fetchAllDomainsHosts();
-        setupListeners(serviceDiscovery, serviceAddressList);
+        setupListeners();
     }
 
     @Scheduled(fixedDelay = 30000) // Execute every 30 seconds
@@ -49,25 +49,16 @@ public class EngineAddressNameResolver implements CustomNameResolver {
         fetchAllDomainsHosts();
     }
 
-    private void setupListeners(ServiceDiscovery serviceDiscovery, List<String> serviceAddressList) {
+    private void setupListeners() {
         // Create independent listener for each service address
-        for (String serviceAddress : serviceAddressList) {
-            if (serviceAddress == null) {
-                Logger.warn("Skipping null serviceAddress");
-                continue;
-            }
+        for (String serviceAddress : addressProtocols.keySet()) {
             ServiceHostListener addressListener = hosts -> updateDomainHosts(serviceAddress, hosts);
             serviceDiscovery.listen(serviceAddress, addressListener);
         }
     }
 
     private void fetchAllDomainsHosts() {
-        for (String serverAddress : serviceAddressList) {
-            if (serverAddress == null) {
-                Logger.warn("Skipping null serverAddress during fetch");
-                continue;
-            }
-
+        for (String serverAddress : addressProtocols.keySet()) {
             try {
                 List<WorkerHost> hosts = serviceDiscovery.getHosts(serverAddress);
                 updateDomainHosts(serverAddress, hosts);
@@ -77,15 +68,17 @@ public class EngineAddressNameResolver implements CustomNameResolver {
         }
     }
 
-    private List<String> initServiceAddressList(ServiceRoute serviceRoute) {
-        return serviceRoute.getAllEndpoints().stream()
-                .map(endpoint -> {
-                    if (endpoint.getAddress() != null && endpoint.getProtocol() != null) {
-                        addressProtocolMap.put(endpoint.getAddress(), endpoint.getProtocol());
-                    }
-                    return endpoint.getAddress();
-                })
-                .collect(Collectors.toList());
+    private static Map<String, String> addressProtocols(ServiceRoute serviceRoute) {
+        Map<String, String> protocols = new LinkedHashMap<>();
+        for (var endpoint : serviceRoute.getAllEndpoints()) {
+            if (endpoint.getAddress() != null) {
+                protocols.putIfAbsent(endpoint.getAddress(), null);
+                if (endpoint.getProtocol() != null) {
+                    protocols.put(endpoint.getAddress(), endpoint.getProtocol());
+                }
+            }
+        }
+        return Collections.unmodifiableMap(protocols);
     }
 
     @Override
@@ -108,7 +101,7 @@ public class EngineAddressNameResolver implements CustomNameResolver {
             // Downstream AbstractGrpcClient expects "ip:httpPort" and applies toGrpcPort(+1),
             // so correct the port back to httpPort semantics here (aligned with the GRPC branch
             // of WorkerAddressService.convertServiceDiscoveryHosts on the sync path).
-            String protocol = addressProtocolMap.get(address);
+            String protocol = addressProtocols.get(address);
             boolean isGrpcProtocol = BackendServiceProtocolEnum.GRPC.getName().equalsIgnoreCase(protocol);
             List<String/*ip:port*/> ipPortList = new ArrayList<>(hostList.size());
             for (WorkerHost host : hostList) {

@@ -32,7 +32,6 @@ final class OrderedRequestQueue {
     private final boolean priorityOrdering;
     private final Bucket fifo = new Bucket();
     private final Bucket[] priorityBuckets = new Bucket[PRIORITY_LEVELS];
-    private final BitSet nonEmptyPriorities = new BitSet(PRIORITY_LEVELS);
     private final BitSet pendingPriorities = new BitSet(PRIORITY_LEVELS);
     private int size;
     private long nextSequence;
@@ -51,7 +50,6 @@ final class OrderedRequestQueue {
                 priorityBuckets[entry.priority] = bucket;
             }
             bucket.add(entry);
-            nonEmptyPriorities.set(entry.priority);
         } else {
             fifo.add(entry);
         }
@@ -61,17 +59,6 @@ final class OrderedRequestQueue {
 
     int size() {
         return size;
-    }
-
-    GlobalQueueEntry peekHead() {
-        if (!priorityOrdering) {
-            return fifo.head;
-        }
-        int priority = nonEmptyPriorities.previousSetBit(
-                PRIORITY_LEVELS - 1);
-        Bucket bucket = priority < 0
-                ? null : priorityBuckets[priority];
-        return bucket == null ? null : bucket.head;
     }
 
     /** Continue an ordered scan, counting every examined entry against the budget. */
@@ -135,16 +122,6 @@ final class OrderedRequestQueue {
         }
     }
 
-    boolean hasEarlierRequestsToScan(GlobalQueueEntry entry) {
-        int priority = priorityOrdering
-                ? pendingPriorities.previousSetBit(PRIORITY_LEVELS - 1) : -1;
-        Bucket bucket = priorityOrdering
-                ? (priority < 0 ? null : priorityBuckets[priority]) : fifo;
-        GlobalQueueEntry next = bucket == null ? null : bucket.peekNextRequest();
-        return next != null
-                && (priorityOrdering ? PRIORITY_ORDER : SEQUENCE_ORDER).compare(next, entry) < 0;
-    }
-
     boolean remove(GlobalQueueEntry entry) {
         return markRemoved(entry);
     }
@@ -157,7 +134,6 @@ final class OrderedRequestQueue {
                     drainBucket(bucket, entries);
                 }
             }
-            nonEmptyPriorities.clear();
         } else {
             drainBucket(fifo, entries);
         }
@@ -195,9 +171,6 @@ final class OrderedRequestQueue {
         bucket.remove(entry);
         if (priorityOrdering && !bucket.hasPendingRequests()) {
             pendingPriorities.clear(entry.priority);
-        }
-        if (priorityOrdering && bucket.isEmpty()) {
-            nonEmptyPriorities.clear(entry.priority);
         }
     }
 

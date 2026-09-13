@@ -1,14 +1,12 @@
 package org.flexlb.service.monitor;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 
-@Slf4j
 @Configuration
 @EnableScheduling
 public class SyncSchedulerConfig {

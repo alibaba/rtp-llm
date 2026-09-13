@@ -379,10 +379,6 @@ public final class PrefillState {
             }
         }
 
-        private boolean isEmpty() {
-            return members.isEmpty();
-        }
-
         /** Simulate terminal metrics without mutating canonical batch work. */
         private BatchCompletion projectedCompletion(
                 Map<Long, TerminalObservation> terminals) {

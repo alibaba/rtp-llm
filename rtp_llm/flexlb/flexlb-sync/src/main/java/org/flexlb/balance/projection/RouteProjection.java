@@ -60,13 +60,6 @@ public final class RouteProjection {
 
         double batchPlanningDurationMs(List<GroupPlanner.Item> items);
 
-        default double singletonBatchPlanningDurationMs(
-                long seqLen, long hitCache) {
-            return batchPlanningDurationMs(List.of(new GroupPlanner.Item(
-                    0L, 0, 0L, 0L, Long.MAX_VALUE,
-                    seqLen, hitCache)));
-        }
-
         long batchDurationMs(List<GroupPlanner.Item> items);
 
         default long singletonBatchDurationMs(
@@ -76,7 +69,6 @@ public final class RouteProjection {
                     seqLen, hitCache)));
         }
 
-        long committedGroupDurationMs(double plannedDurationMs);
     }
 
     /** Invocation-local lazy service cursor for one exact planned group. */
@@ -129,12 +121,6 @@ public final class RouteProjection {
                         "routingCacheMatchTokens must be non-negative");
             }
         }
-
-        GroupPlanner.Item asItem() {
-            return new GroupPlanner.Item(
-                    requestId, priority, Long.MAX_VALUE, enqueuedAtMs,
-                    expiresAtMs, seqLen, hitCache);
-        }
     }
 
     /** Read-only projection result. Invocation-scoped views must not be retained. */
@@ -154,14 +140,6 @@ public final class RouteProjection {
         long cacheHitTokens();
 
         long routingCacheMatchTokens();
-
-        default long requiredProjectedTtftMs() {
-            if (projectedTtftMsValue() == Candidate.UNKNOWN) {
-                throw new IllegalStateException(
-                        "candidate projected TTFT is unknown");
-            }
-            return projectedTtftMsValue();
-        }
 
         default boolean engineWorkUnmodeled() {
             return state() == Candidate.State.UNMODELED_ENGINE_WORK;
@@ -304,25 +282,6 @@ public final class RouteProjection {
                 probe.hitCache(), probe.routingCacheMatchTokens(),
                 evaluator, deliveryProjection, planningAtMs);
         return immutable(view);
-    }
-
-    /** Allocation-free probe handoff for full-fleet selector hot paths. */
-    public static Candidate project(
-            Inputs inputs,
-            long requestId,
-            int priority,
-            long enqueuedAtMs,
-            long expiresAtMs,
-            long seqLen,
-            long hitCache,
-            long routingCacheMatchTokens,
-            PrefillTimePredictor.Evaluator evaluator,
-            DeliveryProjection deliveryProjection,
-            long planningAtMs) {
-        return immutable(projectView(
-                inputs, requestId, priority, enqueuedAtMs, expiresAtMs,
-                seqLen, hitCache, routingCacheMatchTokens,
-                evaluator, deliveryProjection, planningAtMs));
     }
 
     /**

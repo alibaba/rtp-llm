@@ -370,9 +370,8 @@ class WorkerEndpointTest {
         Request req = new Request();
         req.setRequestId(requestId);
         req.setSeqLen(seqLen);
-        BalanceContext ctx = new BalanceContext();
+        BalanceContext ctx = new BalanceContext(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         ctx.setRequest(req);
-        ctx.setConfig(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         return ctx;
     }
 

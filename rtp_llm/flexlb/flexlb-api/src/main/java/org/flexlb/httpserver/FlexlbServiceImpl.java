@@ -855,7 +855,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private BalanceContext buildContext(FlexlbScheduleProtocol.FlexlbScheduleRequestPB pb) {
-        BalanceContext ctx = new BalanceContext();
+        var config = configService.loadBalanceConfig();
+        BalanceContext ctx = new BalanceContext(config);
         ctx.setTraceContext(entryTraceContext());
         Span span = Span.fromContext(ctx.getTraceContext());
         FlexlbTrace.setRequestAttributes(span, pb.getRequestId());
@@ -879,7 +880,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
 
-        var config = configService.loadBalanceConfig();
         // QUEUE owns one absolute scheduling deadline, measured from FlexLB
         // admission through delivery acknowledgement. DIRECT never queues and
         // therefore has no scheduling timeout. RequestRegistry separately installs

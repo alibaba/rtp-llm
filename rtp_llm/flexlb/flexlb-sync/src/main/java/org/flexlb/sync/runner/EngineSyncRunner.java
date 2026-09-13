@@ -3,7 +3,6 @@ package org.flexlb.sync.runner;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -48,8 +47,6 @@ public class EngineSyncRunner implements Runnable {
 
     private final CacheAwareService cacheAwareService;
 
-    private final DynamicCacheIntervalService cacheIntervalService;
-
     private final long syncRequestTimeoutMs;
 
     private final LongAdder syncCount;
@@ -68,7 +65,6 @@ public class EngineSyncRunner implements Runnable {
                             EngineGrpcService engineGrpcService,
                             RoleType roleType,
                             CacheAwareService cacheAwareService,
-                            DynamicCacheIntervalService cacheIntervalService,
                             long syncRequestTimeoutMs,
                             LongAdder syncCount,
                             Long syncEngineStatusInterval,
@@ -85,8 +81,6 @@ public class EngineSyncRunner implements Runnable {
         this.roleType = roleType;
         this.cacheAwareService = Objects.requireNonNull(
                 cacheAwareService, "cacheAwareService");
-        this.cacheIntervalService = Objects.requireNonNull(
-                cacheIntervalService, "cacheIntervalService");
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
@@ -187,7 +181,7 @@ public class EngineSyncRunner implements Runnable {
                                 = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
                                 workerStatus, cachePollLease, workerDirectory,
                                 engineHealthReporter, engineGrpcService,
-                                cacheAwareService, cacheIntervalService,
+                                cacheAwareService,
                                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
                                 cacheFullSnapshotDebugMode, statusCheckExecutor);
                         statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
