@@ -479,11 +479,7 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
         from .flashmla_dense_prefill import MlaFlashMLAPrefillOp
 
         page_rr_enabled = bool(
-            parallelism_config is not None
-            and parallelism_config.kv_page_rr_enabled()
-            # SWA allocation keeps a replica on each rank, including Eagle3
-            # wrappers initialized with the target's global parallelism config.
-            and attn_configs.sliding_window <= 0
+            parallelism_config is not None and parallelism_config.kv_page_rr_enabled()
         )
         self.page_rr_cache_adapter = (
             MlaPageRRCacheAdapter(

@@ -234,8 +234,8 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block     = 128;
     kv_cache_config.dsv4_fixed_pool_blocks = block_num;
-    auto config                            = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
-    config.block_num                       = block_num;
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+    config.block_num         = block_num;
     return config;
 }
 
@@ -261,8 +261,9 @@ static BatchKVCacheResourcePtr makeBatchResource(int batch_size, const CacheConf
 }
 
 static size_t validBlockCount(const BlockIndicesType& blocks) {
-    return static_cast<size_t>(
-        std::count_if(blocks.begin(), blocks.end(), [](BlockIdxType block) { return !isNullBlockIdx(block); }));
+    return static_cast<size_t>(std::count_if(blocks.begin(), blocks.end(), [](BlockIdxType block) {
+        return !isNullBlockIdx(block);
+    }));
 }
 
 // Create HybridPoolKVCacheAllocator with SharedBlockCache injected (required before init()).
@@ -493,7 +494,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseDifferentCapacityScope
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseCPVirtualBlockSizeForFullGroups) {
-    auto config                     = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
+    auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
     config.group_seq_size_per_block = {100, 4};
     auto allocator                  = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
@@ -501,7 +502,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseCPVirtualBlockSizeForF
     EXPECT_EQ(allocator->maxAvailableTokensNum(), 7u * 4u);
     EXPECT_EQ(allocator->availableTokensNum(), 7u * 4u);
 
-    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
+    allocator->setCPSlotMapper(
+        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
 
     EXPECT_EQ(allocator->maxAvailableTokensNum(), 7u * 8u);
     EXPECT_EQ(allocator->availableTokensNum(), 7u * 8u);
@@ -810,43 +812,6 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksAreDistributedAcrossGroupsFo
     EXPECT_TRUE(result.success);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, ReserveCheckCountsOnlyPdLinearLoadDestination) {
-    auto config        = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/3, /*full_block_num=*/8);
-    config.linear_step = 1;
-    auto allocator     = makeAllocator(config, RoleType::DECODE);
-    ASSERT_TRUE(allocator->init());
-    allocator->setReserveBlockNum(2);
-    auto resource = makeBatchResource(1, config);
-    resource->setBatchCacheKeys(0, makeSequentialCacheKeys(5));
-    auto       tokens = makeCompleteTokenIds(1, 17, 4);
-    MallocInfo info{resource, tokens};
-    info.enable_device_cache       = false;
-    info.linear_prefix_load_tokens = 17;
-    // A dedicated FULL pool shortage must roll back the sparse LINEAR
-    // destination; retrying with the same load intent then fits the budget.
-    auto full_pool = allocator->groupBlockPools()[1];
-    auto held      = full_pool->malloc(3);
-    ASSERT_FALSE(allocator->malloc(info).success);
-    EXPECT_EQ(resource->blocksNum(0, 0), 0);
-    EXPECT_EQ(resource->blocksNum(0, 1), 0);
-    EXPECT_EQ(allocator->groupBlockPools()[0]->requestRefBlocksNum(), 0u);
-    EXPECT_EQ(full_pool->requestRefBlocksNum(), held.size());
-    full_pool->requestFree(held);
-    const auto result = allocator->malloc(info);
-    EXPECT_TRUE(result.success);
-    if (result.success) {
-        ASSERT_EQ(resource->blocks(0, 0).size(), 5u);
-        for (size_t slot = 0; slot < 4; ++slot) {
-            EXPECT_EQ(resource->blocks(0, 0)[slot], NULL_BLOCK_IDX);
-        }
-        EXPECT_NE(resource->blocks(0, 0)[4], NULL_BLOCK_IDX);
-        EXPECT_EQ(allocator->groupBlockPools()[0]->requestRefBlocksNum(), 1u);
-        EXPECT_EQ(allocator->groupBlockPools()[1]->requestRefBlocksNum(), 5u);
-        allocator->free(FreeInfo{resource, tokens});
-    }
-    EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
-}
-
 TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksRejectsWhenGroupCannotMeetItsShare) {
     // Force a group whose available_blocks < need + group_reserve_blocks.
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/4);
@@ -1128,10 +1093,10 @@ protected:
         ASSERT_TRUE(allocator->init());
     }
 
-    CacheConfig                         config;
-    int                                 full_gid;
-    int                                 linear_gid;
-    HybridPoolKVCacheAllocatorPtr       allocator;
+    CacheConfig config;
+    int full_gid;
+    int linear_gid;
+    HybridPoolKVCacheAllocatorPtr allocator;
     const std::shared_ptr<CPSlotMapper> mapper = std::make_shared<CPSlotMapper>(0, kShardCount, kPhysicalPageTokens);
 };
 
@@ -1180,7 +1145,7 @@ TEST_F(KimiK3PageRRAllocatorTest, KimiK3CompactLinearAllocatesOneSlotPerVirtualS
 }
 
 TEST_F(KimiK3PageRRAllocatorTest, KimiK3TerminalPartialLinearStateIsRequestPrivate) {
-    constexpr int kSeqLen = kCheckpointTokens + 1;
+    constexpr int kSeqLen             = kCheckpointTokens + 1;
 
     const auto counters_before = snapshotPoolCounters(allocator);
 
@@ -1224,7 +1189,7 @@ TEST_F(KimiK3PageRRAllocatorTest, KimiK3TerminalPartialLinearStateIsRequestPriva
 }
 
 TEST_F(KimiK3PageRRAllocatorTest, KimiK3JointReuseBacksOffAndUsesCompactLinearCoordinates) {
-    constexpr int kSeqLen = 2 * kCheckpointTokens + 1;
+    constexpr int kSeqLen             = 2 * kCheckpointTokens + 1;
 
     auto       keys       = makeSequentialCacheKeys(/*count=*/17);
     const auto first_full = seedNonResidentCacheItem(allocator, full_gid, keys[7]);
@@ -1313,9 +1278,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedRegionPoolsOnGpuWhenFixedPoolMem
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4HCAStateReuseEnabledAllocatesTailOnly) {
-    auto config        = makeDSV4HybridPoolConfig(/*block_num=*/200);
+    auto config       = makeDSV4HybridPoolConfig(/*block_num=*/200);
     config.linear_step = 4;
-    auto allocator     = makeAllocator(config);
+    auto allocator    = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
     constexpr int hca_state_gid = 5;
@@ -1357,8 +1322,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsIgnoreSmallHCAStatePool) 
     ASSERT_TRUE(allocator->init());
     ASSERT_GT(allocator->groupBlockPools().size(), static_cast<size_t>(hca_state_gid));
 
-    const auto hca_state_tokens =
-        allocator->groupBlockPools()[hca_state_gid]->totalBlocksNum() * config.group_seq_size_per_block[hca_state_gid];
+    const auto hca_state_tokens = allocator->groupBlockPools()[hca_state_gid]->totalBlocksNum()
+                                  * config.group_seq_size_per_block[hca_state_gid];
     EXPECT_LT(hca_state_tokens, allocator->totalTokensNum());
     EXPECT_EQ(allocator->availableTokensNum(), allocator->maxAvailableTokensNum());
     EXPECT_EQ(allocator->totalTokensNum(), allocator->maxAvailableTokensNum());
@@ -1370,7 +1335,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumul
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block     = 128;
     kv_cache_config.dsv4_fixed_pool_blocks = 200;
-    auto config                            = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
 
     ASSERT_EQ(config.groupNums(), 7);
     ASSERT_EQ(config.group_region_names.size(), 7u);
@@ -1401,7 +1366,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumul
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesFixedPoolBlocks) {
-    auto config                       = makeDSV4HybridPoolConfig(/*block_num=*/50);
+    auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
     config.fixed_pool_uses_pinned_cpu = true;
 
     RuntimeConfig rt;  // unused inside finalizeBlockNums today
@@ -1446,7 +1411,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesConfiguredFixedB
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4PinnedFixedPoolExcludesFixedReserve) {
-    auto config                       = makeDSV4HybridPoolConfig(/*block_num=*/50);
+    auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
     config.fixed_pool_uses_pinned_cpu = true;  // env>0 simulation
 
     RuntimeConfig rt;
@@ -1484,8 +1449,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedPoolBlocksFallbackFollowsLinearS
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block = 128;
-    auto config                        = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
-    config.linear_step                 = 4;
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+    config.linear_step       = 4;
 
     RuntimeConfig rt;
     config.finalizeBlockNums(/*global_block_num=*/128, rt);

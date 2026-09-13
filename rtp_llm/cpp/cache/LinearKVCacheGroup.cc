@@ -125,17 +125,25 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
     auto common_required = [&](int pos) { return shouldMaterializeBlock(pos, common_seq_len, 0, reuse_enabled); };
     auto final_required  = [&](int pos) { return shouldMaterializeBlock(pos, seq_len, reserve_step, reuse_enabled); };
 
-    // Reuse keeps only its final checkpoint. Earlier NULL slots describe
-    // skipped prefix computation and must not consume fresh state blocks.
-    const int first_new_slot = reuse_enabled ? std::max(reuse_blocks_len, 0) : 0;
-    for (int pos = first_new_slot; pos < common_slots; ++pos) {
+    for (int pos = 0; pos < common_slots; ++pos) {
         if (common_required(pos)) {
             info.common_blocks++;
         }
     }
-    for (int pos = first_new_slot; pos < total_slots; ++pos) {
+    for (int pos = 0; pos < total_slots; ++pos) {
         if (final_required(pos) && !(pos < common_slots && common_required(pos))) {
             info.extra_blocks++;
+        }
+    }
+
+    // Linear reuse materializes only one prefix block: the matched tail at
+    // reuse_blocks_len - 1. Do not count that block as newly allocated.
+    const int reused_tail_pos = (reuse_enabled && reuse_blocks_len > 0) ? reuse_blocks_len - 1 : -1;
+    if (reused_tail_pos >= 0) {
+        if (reused_tail_pos < common_slots && common_required(reused_tail_pos)) {
+            info.common_blocks--;
+        } else if (reused_tail_pos < total_slots && final_required(reused_tail_pos)) {
+            info.extra_blocks--;
         }
     }
 
@@ -170,19 +178,26 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
     const int new_blocks_len     = std::max(total_slots - current_blocks_len, 0);
 
     auto should_materialize = [&](int pos) {
-        // New computed/appended slots retain tail and tail-1 for boundary
-        // causal-conv reads at (seq_len - 2) / SBP. Existing historical NULLs
-        // are excluded below; a PD load supplies its terminal read state.
+        // Materialize tail and tail-1: causal_conv1d_update may read
+        // (seq_len - 2) / SBP when seq_len crosses a block boundary.
+        // Leaving tail-1 NULL can hit IMA on long prompts.
         const bool is_seq_tail = (seq_slots > 0) && (pos >= std::max(0, seq_slots - 2)) && (pos < seq_slots);
         const bool is_reserve  = (reserve_step > 0) && (pos >= seq_slots) && (pos < total_slots);
         const bool step_hit    = (((pos + 1) % step) == 0);
         return is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
     };
 
-    // Existing NULLs represent skipped computation, including PD prefixes.
-    // Allocating them cannot restore state. Monotonic growth only needs new
-    // slots: the preceding computed tail remains the causal-conv read state.
+    std::vector<size_t> positions_to_backfill;
+    const auto&         existing_blocks = block_ids.blocks();
+    const int           existing_scan   = std::min(current_blocks_len, total_slots);
+    for (int i = 0; i < existing_scan; ++i) {
+        if (should_materialize(i) && isNullBlockIdx(existing_blocks[static_cast<size_t>(i)])) {
+            positions_to_backfill.push_back(static_cast<size_t>(i));
+        }
+    }
+
     int need_alloc_blocks = 0;
+    need_alloc_blocks += static_cast<int>(positions_to_backfill.size());
     for (int i = current_blocks_len; i < total_slots; i++) {
         if (should_materialize(i)) {
             need_alloc_blocks++;
@@ -212,7 +227,11 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
         }
     }
 
-    size_t           allocated_idx = 0;
+    size_t allocated_idx = 0;
+    for (size_t pos : positions_to_backfill) {
+        block_ids.setAt(pos, allocated_blocks[allocated_idx++]);
+    }
+
     BlockIndicesType new_ids;
     new_ids.reserve(static_cast<size_t>(new_blocks_len));
     for (int i = current_blocks_len; i < total_slots; i++) {

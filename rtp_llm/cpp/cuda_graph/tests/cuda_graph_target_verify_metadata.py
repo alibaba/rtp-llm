@@ -7,10 +7,7 @@ from unittest import mock
 import torch
 
 try:
-    from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import (
-        CudaGraphRunner,
-        bind_model_cache_inputs,
-    )
+    from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
 except ModuleNotFoundError:
     runner_so = os.environ.get("CUDA_GRAPH_TEST_RUNNER_SO")
     if not runner_so:
@@ -23,10 +20,6 @@ except ModuleNotFoundError:
     runner_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner_module)
     CudaGraphRunner = runner_module.CudaGraphRunner
-    bind_model_cache_inputs = runner_module.bind_model_cache_inputs
-from rtp_llm.models_py.model_desc import module_base
-from rtp_llm.models_py.model_desc.kimi_k3_eagle3 import KimiK3Eagle3Model
-from rtp_llm.models_py.model_desc.kimi_k3_mtp import KimiK3MtpModel
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
     tokenspeed_mla_impl,
 )
@@ -143,7 +136,9 @@ class _SequenceHostProbeModel:
         metadata = SimpleNamespace()
 
         def prepare_cuda_graph(current_attention):
-            current_sequence_lengths_host = current_attention.sequence_lengths_host
+            current_sequence_lengths_host = (
+                current_attention.sequence_lengths_host
+            )
             self.replay_sequence_lengths.append(
                 (
                     current_sequence_lengths_host.tolist(),
@@ -164,149 +159,7 @@ class _SequenceHostProbeModel:
         return PyModelOutputs(inputs.input_hiddens + 1)
 
 
-def _draft_planner(attention, is_cuda_graph=False):
-    # Keep the production host planner and TokenSpeed GPU metadata conversion;
-    # omit model weights and the architecture-specific attention kernel.
-    planner = TokenSpeedMlaDecodeImpl.__new__(TokenSpeedMlaDecodeImpl)
-    planner.seq_size_per_block = 64
-    planner.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
-    planner.fmha_impl = tokenspeed_mla_impl._TokenSpeedDecodeMetadata(
-        64,
-        attention.input_lengths.numel(),
-        384,
-        is_cuda_graph,
-        torch.device("cuda"),
-    )
-    planner.prepare(attention)
-    return planner
-
-
-class _DraftPageTableProbeModel:
-    def initialize(self, _resources):
-        return True
-
-    def prepare_fmha_impl(self, inputs, is_cuda_graph):
-        return _draft_planner(inputs.attention_inputs, is_cuda_graph)
-
-    def forward(self, inputs, fmha_impl=None):
-        # The captured kernel consumes the real planner's first page ID.
-        return PyModelOutputs(
-            inputs.input_hiddens + fmha_impl.fmha_impl.block_tables[0, 0]
-        )
-
-
 class CudaGraphTargetVerifyMetadataTest(unittest.TestCase):
-    @classmethod
-    def _draft_inputs(cls, draft_first_page=50):
-        inputs = cls._build_decode_replay_inputs([70])
-        attention = inputs.attention_inputs
-        tables = [
-            torch.tensor([[10, 11, 12, 13, 14, 15]], dtype=torch.int32),
-            torch.tensor([[30, 31, 32, 33, 34, 35]], dtype=torch.int32),
-            torch.tensor([[draft_first_page, 51, 52, 53, 54, 55]], dtype=torch.int32),
-        ]
-        attention.kv_cache_kernel_block_id_host_by_group = [
-            t.pin_memory() for t in tables
-        ]
-        attention.kv_cache_kernel_block_id_device_by_group = [t.cuda() for t in tables]
-        attention.kv_cache_kernel_block_id_host = tables[0].pin_memory()
-        attention.kv_cache_kernel_block_id_device = (
-            attention.kv_cache_kernel_block_id_device_by_group[0]
-        )
-        attention.kv_cache_layer_to_group = torch.tensor(
-            [2], dtype=torch.int32
-        ).pin_memory()
-        attention.kv_cache_layer_to_group_host = attention.kv_cache_layer_to_group
-        inputs.attention_inputs = attention
-        return inputs
-
-    def test_draft_planner_selects_group_before_eager_construction(self):
-        for model_cls in (KimiK3MtpModel, KimiK3Eagle3Model):
-            for graph_capture in (False, True):
-                with self.subTest(
-                    model=model_cls.__name__, graph_capture=graph_capture
-                ):
-                    model = model_cls.__new__(model_cls)
-                    torch.nn.Module.__init__(model)
-                    model.config = model.parallelism_config = model.weight = (
-                        model.fmha_config
-                    ) = None
-                    model.cuda_graph_fmha_workspaces = {}
-                    inputs = self._draft_inputs()
-
-                    def metadata_only_factory(_c, _p, _w, attn, _f, graph):
-                        planner = _draft_planner(attn, graph)
-                        return SimpleNamespace(
-                            fmha_impl=planner.fmha_impl, fmha_params=planner.fmha_params
-                        )
-
-                    with mock.patch.object(
-                        module_base.AttnImplFactory,
-                        "get_fmha_impl",
-                        side_effect=metadata_only_factory,
-                    ):
-                        planner = model.prepare_fmha_impl(inputs, graph_capture)
-                    torch.cuda.synchronize()
-                    self.assertEqual(
-                        planner.fmha_impl.block_tables[0, :2].tolist(), [50, 51]
-                    )
-
-    def test_cpp_draft_binding_selects_host_and_device_before_planning(self):
-        inputs = self._draft_inputs()
-        attention = bind_model_cache_inputs(
-            _DraftPageTableProbeModel(), inputs.attention_inputs, 1
-        )
-        self.assertEqual(
-            attention.kv_cache_kernel_block_id_host[0, :2].tolist(), [50, 51]
-        )
-        self.assertEqual(
-            attention.kv_cache_kernel_block_id_device[0, :2].tolist(), [50, 51]
-        )
-
-    def test_cpp_target_binding_preserves_full_group_when_first_layer_is_linear(self):
-        inputs = self._draft_inputs()
-        inputs.attention_inputs.kv_cache_layer_to_group = torch.tensor(
-            [1, 0], dtype=torch.int32
-        )
-        inputs.attention_inputs.kv_cache_layer_to_group_host = (
-            inputs.attention_inputs.kv_cache_layer_to_group
-        )
-        attention = bind_model_cache_inputs(
-            _DraftPageTableProbeModel(), inputs.attention_inputs, 0
-        )
-        self.assertEqual(
-            attention.kv_cache_kernel_block_id_host[0, :2].tolist(), [10, 11]
-        )
-
-    def test_draft_graph_replay_uses_selected_live_host_table(self):
-        model = _DraftPageTableProbeModel()
-        runner = CudaGraphRunner()
-        runner.init_decode(
-            model,
-            hidden_size=16,
-            max_seq_len=384,
-            tokens_per_block=64,
-            kernel_tokens_per_block=64,
-            decode_capture_batch_sizes=[1],
-            max_context_batch_size=1,
-            kv_cache_layer_to_group=[2],
-            kv_cache_group_num=3,
-        )
-        # Reuse the same captured graph with two different draft allocations.
-        for first_page in (50, 72):
-            with self.subTest(first_page=first_page):
-                inputs = self._draft_inputs(first_page)
-                inputs.attention_inputs = bind_model_cache_inputs(
-                    model, inputs.attention_inputs, 1
-                )
-                self.assertTrue(runner.canRun(inputs))
-                output = runner.forward(inputs)
-                torch.cuda.synchronize()
-                torch.testing.assert_close(
-                    output.hidden_states,
-                    torch.full_like(output.hidden_states, first_page),
-                )
-
     @staticmethod
     def _build_replay_inputs(batch_size: int, q_len: int) -> PyModelInputs:
         inputs = PyModelInputs()
@@ -355,7 +208,9 @@ class CudaGraphTargetVerifyMetadataTest(unittest.TestCase):
         batch_size = len(sequence_lengths)
         inputs = PyModelInputs()
         attention = PyAttentionInputs()
-        inputs.input_ids = torch.arange(batch_size, dtype=torch.int32, device="cuda")
+        inputs.input_ids = torch.arange(
+            batch_size, dtype=torch.int32, device="cuda"
+        )
         inputs.input_hiddens = torch.zeros(
             (batch_size, 16), dtype=torch.float16, device="cuda"
         )
@@ -380,7 +235,9 @@ class CudaGraphTargetVerifyMetadataTest(unittest.TestCase):
         attention.kv_cache_kernel_block_id_device = block_table
         attention.kv_cache_kernel_block_id_host = block_table.cpu().pin_memory()
         attention.kv_cache_block_id_device = block_table
-        attention.kv_cache_block_id_host = attention.kv_cache_kernel_block_id_host
+        attention.kv_cache_block_id_host = (
+            attention.kv_cache_kernel_block_id_host
+        )
         attention.cu_seqlens = attention.decode_cu_seqlens_d
         attention.cu_kv_seqlens = attention.decode_cu_seqlens_d.clone()
         attention.padding_offset = torch.zeros(

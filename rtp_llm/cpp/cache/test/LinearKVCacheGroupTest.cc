@@ -31,32 +31,32 @@ TEST_F(LinearKVCacheGroupTest, PartitionEightSlicesEveryKdaHeadSegment) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());
 
-    auto spec               = makeLinearSpec(/*seq_size_per_block=*/4);
-    spec->local_num_k_heads = 8;
-    spec->local_num_v_heads = 8;
-    spec->local_head_num_kv = 8;
-    spec->head_k_dim        = 2;
-    spec->head_v_dim        = 2;
-    spec->conv_kernel_dim   = 3;
-    spec->ssm_state_dtype   = rtp_llm::DataType::TYPE_FP32;
-    spec->conv_state_dtype  = rtp_llm::DataType::TYPE_FP16;
+    auto spec                 = makeLinearSpec(/*seq_size_per_block=*/4);
+    spec->local_num_k_heads   = 8;
+    spec->local_num_v_heads   = 8;
+    spec->local_head_num_kv   = 8;
+    spec->head_k_dim          = 2;
+    spec->head_v_dim          = 2;
+    spec->conv_kernel_dim     = 3;
+    spec->ssm_state_dtype     = rtp_llm::DataType::TYPE_FP32;
+    spec->conv_state_dtype    = rtp_llm::DataType::TYPE_FP16;
 
-    LinearKVCacheGroup group(/*layer_ids=*/{0}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
     auto allocated = block_pool->malloc(1);
     ASSERT_EQ(allocated.size(), 1u);
 
-    auto whole = block_pool->convertIndexToBuffer(/*layer_id=*/0, allocated[0]);
+    auto whole = group.convertIndexToBuffer(/*layer_id=*/0, allocated[0]);
     ASSERT_EQ(whole.size(), 1u);
     auto* base = static_cast<char*>(whole[0].addr);
 
     constexpr int kPartitions = 8;
-    const size_t  ssm_bytes   = spec->k_block_size_bytes();
-    const size_t  q_bytes =
-        static_cast<size_t>(spec->local_num_k_heads) * spec->head_k_dim * getTypeSize(spec->conv_state_dtype);
+    const size_t ssm_bytes = spec->k_block_size_bytes();
+    const size_t q_bytes = static_cast<size_t>(spec->local_num_k_heads)
+                           * spec->head_k_dim * getTypeSize(spec->conv_state_dtype);
     const size_t k_bytes = q_bytes;
-    const size_t v_bytes =
-        static_cast<size_t>(spec->local_num_v_heads) * spec->head_v_dim * getTypeSize(spec->conv_state_dtype);
+    const size_t v_bytes = static_cast<size_t>(spec->local_num_v_heads)
+                           * spec->head_v_dim * getTypeSize(spec->conv_state_dtype);
     const size_t history_stride = q_bytes + k_bytes + v_bytes;
 
     for (int partition = 0; partition < kPartitions; ++partition) {
@@ -64,16 +64,19 @@ TEST_F(LinearKVCacheGroupTest, PartitionEightSlicesEveryKdaHeadSegment) {
             /*layer_id=*/0, allocated[0], kPartitions, partition);
         ASSERT_EQ(parts.size(), 7u);  // SSM + two histories * Q/K/V.
         EXPECT_EQ(parts[0].size_bytes, ssm_bytes / kPartitions);
-        EXPECT_EQ(static_cast<char*>(parts[0].addr) - base, partition * static_cast<int64_t>(ssm_bytes / kPartitions));
+        EXPECT_EQ(static_cast<char*>(parts[0].addr) - base,
+                  partition * static_cast<int64_t>(ssm_bytes / kPartitions));
         for (size_t history = 0; history < 2; ++history) {
-            const size_t segment      = 1 + history * 3;
+            const size_t segment = 1 + history * 3;
             const size_t history_base = ssm_bytes + history * history_stride;
             EXPECT_EQ(static_cast<char*>(parts[segment].addr) - base,
                       static_cast<int64_t>(history_base + partition * (q_bytes / kPartitions)));
             EXPECT_EQ(static_cast<char*>(parts[segment + 1].addr) - base,
-                      static_cast<int64_t>(history_base + q_bytes + partition * (k_bytes / kPartitions)));
+                      static_cast<int64_t>(history_base + q_bytes
+                                           + partition * (k_bytes / kPartitions)));
             EXPECT_EQ(static_cast<char*>(parts[segment + 2].addr) - base,
-                      static_cast<int64_t>(history_base + q_bytes + k_bytes + partition * (v_bytes / kPartitions)));
+                      static_cast<int64_t>(history_base + q_bytes + k_bytes
+                                           + partition * (v_bytes / kPartitions)));
         }
     }
     block_pool->requestFree(allocated);
@@ -108,24 +111,6 @@ TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseEnabledUsesSparseCountingAndRes
     const auto need =
         group.getNeedBlocks(/*common_seq_len=*/8, /*seq_len=*/12, /*reserve_step=*/2, /*reuse_blocks_len=*/0, true);
     EXPECT_EQ(need.common_blocks, 2);
-    EXPECT_EQ(need.extra_blocks, 2);
-}
-
-TEST_F(LinearKVCacheGroupTest, GetNeedBlocksExcludesUncomputedReusedPrefixSlots) {
-    auto block_pool = createBlockPool();
-    ASSERT_TRUE(block_pool->init());
-    auto               spec = makeLinearSpec(/*seq_size_per_block=*/8);
-    LinearKVCacheGroup group({}, spec, block_pool, /*group_id=*/0, /*linear_step=*/1);
-    ASSERT_TRUE(group.init());
-
-    const auto need = group.getNeedBlocks(/*common_seq_len=*/17,
-                                          /*seq_len=*/25,
-                                          /*reserve_step=*/2,
-                                          /*reuse_blocks_len=*/2,
-                                          true);
-    // The checkpoint at slot 1 is reused. Only suffix slots 2, 3 and
-    // speculative slot 4 need allocation; slot 0 cannot be recomputed.
-    EXPECT_EQ(need.common_blocks, 1);
     EXPECT_EQ(need.extra_blocks, 2);
 }
 
@@ -195,7 +180,7 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesReserveTailBlocksWhenReuseDisabled
     EXPECT_EQ(block_pool->freeBlocksNum(), 6u);
 }
 
-TEST_F(LinearKVCacheGroupTest, MallocPreservesHistoricalNullBeforeCurrentConvReadSlot) {
+TEST_F(LinearKVCacheGroupTest, MallocBackfillsExistingNullReadSlot) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
@@ -211,21 +196,15 @@ TEST_F(LinearKVCacheGroupTest, MallocPreservesHistoricalNullBeforeCurrentConvRea
     blocks.assign(BlockIndicesType{allocated[0], NULL_BLOCK_IDX, allocated[1]});
     const size_t free_before = block_pool->freeBlocksNum();
 
-    // Decode reads (sequence_length - 2) / 4: both lengths 12 and 13
-    // read slot 2, not historical slot 1. Allocating slot 1 cannot restore
-    // its uncomputed state and would make it look like a valid checkpoint.
+    // seq_len=12 => seq_slots=3. Position 1 is tail-1 and is the read slot
+    // for sequence_length=13, so it must be materialized even though no new
+    // slots are appended.
     ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/12, /*enable_reuse_cache=*/false));
 
     ASSERT_EQ(blocks.blocksNum(), 3u);
     EXPECT_EQ(blocks.blocks()[0], allocated[0]);
-    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[1]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[1]));
     EXPECT_EQ(blocks.blocks()[2], allocated[1]);
-    EXPECT_EQ(block_pool->freeBlocksNum(), free_before);
-
-    ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/13, /*enable_reuse_cache=*/true));
-    EXPECT_EQ(blocks.blocks()[(13 - 2) / 4], allocated[1]);
-    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[1]));
-    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[3]));
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before - 1);
 }
 

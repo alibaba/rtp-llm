@@ -255,8 +255,8 @@ TEST_F(StreamCacheResourceTest, testStreamCacheResourceReuseCacheMethod) {
 }
 
 TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdatesReuseLen) {
-    // Leave uncached input after the mocked six-token reused prefix.
-    prepareResourceWithInputTokens({1, 2, 3, 4, 5, 6, 7, 8}, /*reuse_cache=*/true);
+    // initKVBlock() ends with loadCacheSync() (same as GenerateStream::initKVBlock).
+    prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
 
     // Enable query-level reuse_cache and memory_cache so meta(enableMemoryCache) should be true.
@@ -313,7 +313,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
 TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {
     prepareHybridResource(/*reuse_cache=*/true, RoleType::DECODE);
     cache_manager_->config_.disable_decode_first_malloc_device_reuse = true;
-    auto& resource                                                   = stream_->streamCacheResource();
+    auto& resource = stream_->streamCacheResource();
 
     // Enable query-level reuse/device cache, but decode initKVBlock should still force device cache off.
     stream_->generate_input_->generate_config->reuse_cache         = true;
@@ -642,8 +642,7 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_Done_ReturnsTrue_ClearsContext
 }
 
 TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ThenLoadCacheDone_UpdatesReuseLength) {
-    // The mocked five cache blocks cover ten tokens, not the whole input.
-    prepareResourceWithInputTokens({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, /*reuse_cache=*/true);
+    prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
 
     stream_->generate_input_->generate_config->reuse_cache         = true;
@@ -688,18 +687,17 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ThenLoadCacheDone_UpdatesReus
 }
 
 TEST_F(StreamCacheResourceTest, testP2PSideChannelRestoresZeroFirstTokenAndMtpState) {
-    // Generic reuse metadata is applied before the sampled-token side channel.
-    prepareResourceWithInputTokens({1, 2, 3, 4, 5}, /*reuse_cache=*/true);
+    prepareResourceWithInputTokens({1, 2, 3}, /*reuse_cache=*/true);
     stream_->vocab_size_ = 16;
-    auto& resource       = stream_->streamCacheResource();
+    auto& resource = stream_->streamCacheResource();
 
     auto kv_resource = std::make_shared<KVCacheResource>();
     kv_resource->setDeviceReuseBlockNum(1);
     kv_resource->setMemoryReuseBlockNum(1);
 
-    auto server_call_result                                  = std::make_shared<PrefillLoadCaller::Result>();
-    server_call_result->side_channel_payload.has_data        = true;
-    server_call_result->side_channel_payload.first_token_id  = 0;
+    auto server_call_result                             = std::make_shared<PrefillLoadCaller::Result>();
+    server_call_result->side_channel_payload.has_data   = true;
+    server_call_result->side_channel_payload.first_token_id = 0;
     server_call_result->side_channel_payload.total_reuse_len = 2;
     server_call_result->side_channel_payload.local_reuse_len = 2;
     server_call_result->side_channel_payload.propose_tokens  = {0, 7};
@@ -708,19 +706,21 @@ TEST_F(StreamCacheResourceTest, testP2PSideChannelRestoresZeroFirstTokenAndMtpSt
     TensorPbConvert::torchToPb(&server_call_result->side_channel_payload.propose_hidden,
                                torch::tensor({{0.3f, 0.4f}}, torch::kFloat32));
 
-    auto p2p_ctx      = std::make_shared<P2PConnectorAsyncReadContext>(kv_resource,
-                                                                  std::shared_ptr<P2PBroadcastClient::Result>(),
-                                                                  server_call_result,
-                                                                  std::shared_ptr<DecodeSchedulerMetricsCollector>(),
-                                                                  /*transfer_not_done_hold_ms=*/0);
+    auto p2p_ctx = std::make_shared<P2PConnectorAsyncReadContext>(
+        kv_resource,
+        std::shared_ptr<P2PBroadcastClient::Result>(),
+        server_call_result,
+        std::shared_ptr<DecodeSchedulerMetricsCollector>(),
+        /*transfer_not_done_hold_ms=*/0);
     auto read_context = std::make_shared<FusedAsyncReadContext>(
         std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{}), kv_resource, nullptr);
-    read_context->setFusedReadContext(std::make_shared<FusedAsyncContext>(
-        std::vector<std::shared_ptr<AsyncContext>>{std::static_pointer_cast<AsyncContext>(p2p_ctx)}));
+    read_context->setFusedReadContext(
+        std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{
+            std::static_pointer_cast<AsyncContext>(p2p_ctx)}));
 
     resource.updateReuseLengthsFromContext(read_context);
 
-    EXPECT_EQ(stream_->completeTokenIdsVec(), std::vector<int>({1, 2, 3, 4, 5, 0}));
+    EXPECT_EQ(stream_->completeTokenIdsVec(), std::vector<int>({1, 2, 3, 0}));
     auto sp_output_buffer = stream_->getSPOutputBuffer();
     ASSERT_TRUE(sp_output_buffer != nullptr);
     EXPECT_EQ(sp_output_buffer->tokens.cpu()[0][0].item<int32_t>(), 0);
@@ -737,7 +737,7 @@ TEST_F(StreamCacheResourceTest, testP2PSideChannelRestoresZeroFirstTokenAndMtpSt
 TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseLength) {
     // Simulates PD separation: initKVBlock called twice on the same stream.
     // First call sets reuse length via asyncLoadCache+loadCacheDone; second call should NOT overwrite it with 0.
-    prepareResourceWithInputTokens({1, 2, 3, 4, 5, 6, 7, 8}, /*reuse_cache=*/true);
+    prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
 
     stream_->generate_input_->generate_config->reuse_cache         = true;
@@ -798,9 +798,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
 
 TEST_F(StreamCacheResourceTest, testWaitLoadCacheDone_ZeroReuseLen_DoesNotOverwriteExisting) {
     // Directly tests that waitLoadCacheDone with total_reuse_len == 0 preserves existing values.
-    // This test does not allocate KV blocks; its saved 100-token prefix must
-    // still leave at least one input token outside the reused prefix.
-    prepareResourceWithInputTokens(std::vector<int>(101, 1), /*reuse_cache=*/true);
+    prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
 
     // Pre-set reuse lengths on the stream (simulating a prior successful loadCacheSync)

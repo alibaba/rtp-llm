@@ -167,7 +167,7 @@ protected:
     // prefix and packs one fixed-width query per request. Publish matching
     // CPU mirrors for host-side CUDA Graph planners without synchronizing the
     // device length tensors.
-    static void populateTargetVerifyHostMetadata(GptModelInputs&      target,
+    static void populateTargetVerifyHostMetadata(GptModelInputs&     target,
                                                  const torch::Tensor& prefix_lengths_host,
                                                  size_t               batch_size,
                                                  int32_t              query_length);
@@ -205,16 +205,16 @@ private:
     // opened locally; these are not part of MtpExecutor's production API.
     GptModelInputs
          makePrefillRoundInput(const GptModelInputs& full_inputs, const PrefillChunkRound& round, size_t total_tokens);
-    void setPrefillChunkCacheStorePublishPlan(GptModelInputs&             chunk_input,
-                                              const PrefillChunkRound&    round,
-                                              size_t                      seq_size_per_block,
-                                              bool                        complete_blocks_only,
+    void setPrefillChunkCacheStorePublishPlan(GptModelInputs&          chunk_input,
+                                              const PrefillChunkRound& round,
+                                              size_t                  seq_size_per_block,
+                                              bool                    complete_blocks_only,
                                               const std::vector<int32_t>& publish_frontier);
     void advanceDraftCacheStorePublishFrontier(const GptModelInputs&    chunk_input,
                                                const PrefillChunkRound& round,
                                                std::vector<int32_t>&    publish_frontier);
-    void shiftRoundComboTokens(GptModelInputs&          chunk_input,
-                               const GptModelInputs&    full_inputs,
+    void shiftRoundComboTokens(GptModelInputs&         chunk_input,
+                               const GptModelInputs&   full_inputs,
                                const PrefillChunkRound& round);
     torch::Tensor buildDraftCacheGroupTypes(const CacheConfig&      global_cache_config,
                                             const CacheLayerLayout& draft_cache_layer_layout);
@@ -223,13 +223,13 @@ private:
     // Prefill callback. The model-side planner owns round scheduling;
     // the executor only materializes each planned round's target/draft inputs.
     struct ChunkPrefillContext {
-        GptModelInputs       full_inputs;
-        size_t               total_tokens = 0;
-        PrefillChunkRound    terminal_round;
-        std::vector<bool>    terminal_seen;
+        GptModelInputs    full_inputs;
+        size_t            total_tokens = 0;
+        PrefillChunkRound terminal_round;
+        std::vector<bool> terminal_seen;
         std::vector<int32_t> draft_publish_frontier;
-        int64_t*             model_forward_us = nullptr;
-        size_t               round_index      = 0;
+        int64_t*          model_forward_us = nullptr;
+        size_t            round_index      = 0;
     };
     void runChunkPrefillRound(ChunkPrefillContext& hook, const PrefillChunkRound& round, bool is_last);
 
@@ -237,7 +237,6 @@ private:
     std::unique_ptr<Sampler>                                                 sampler_;
     std::unique_ptr<MtpBatchStreamProcessor>                                 batch_stream_processor_;
     std::shared_ptr<KVCacheManager>                                          cache_manager_;
-    torch::Tensor                                                            linear_group_token_spans_;
     std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
     bool                                                                     enable_ffn_disaggregate_ = false;
     bool                                                                     enable_detail_log_       = false;
@@ -262,10 +261,10 @@ private:
     // Keeps async copy source tensors alive across release points.
     TensorHolder buffer_holder_;
 
-    bool warm_up_;
+    bool     warm_up_;
     void restoreKimiMtpMediaTokens(GptModelInputs& inputs) const;
 
-    bool     kimi_k3_mtp_            = false;
+    bool     kimi_k3_mtp_ = false;
     int64_t  kimi_k3_media_token_id_ = -1;
     RoleType role_type_;
 

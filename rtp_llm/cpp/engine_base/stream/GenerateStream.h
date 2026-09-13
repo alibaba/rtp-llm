@@ -529,7 +529,7 @@ public:
         // the event after the D2H copy; consumers synchronize it before CPU use.
         torch::Tensor                 next_seq_len_host;
         std::shared_ptr<torch::Event> next_seq_len_host_ready_event;
-        torch::Tensor                 propose_tokens_gpu;
+        torch::Tensor propose_tokens_gpu;
         // Main-thread mirrors used when DROP_BROAD_SYNC lets the next step run
         // before worker-side specUpdate has written sp_output_buffer fields.
         torch::Tensor last_hidden_states_gpu;
@@ -551,8 +551,8 @@ public:
     // apply kernel preserve allocator edits instead of blindly restoring IDs.
     struct MtpLinearBlockPatchState {
         uint64_t              epoch = 0;
-        torch::Tensor         positions_gpu;      // [1, group, 4]
-        torch::Tensor         source_slots_gpu;   // [1, group, 4]
+        torch::Tensor         positions_gpu;      // [1, 4]
+        torch::Tensor         source_slots_gpu;   // [1, 4]
         torch::Tensor         before_values_gpu;  // [1, group, 4]
         torch::Tensor         after_values_gpu;   // [1, group, 4]
         torch::Tensor         valid_gpu;          // [1, group]
@@ -862,7 +862,7 @@ protected:
     int                                mtp_token_index_       = 0;
     SpeculativeExecutorStreamOutputPtr sp_output_buffer_      = nullptr;
     // cudaEvent_t (type-erased) recorded after specUpdate runs
-    // updateLinearBlocks. MtpExecutor waits on it before issuing the next
+    // swapLinearBlocks. MtpExecutor waits on it before issuing the next
     // target verify. nullptr on streams without pending swaps.
     std::shared_ptr<void>       pending_swap_done_event_;
     std::shared_ptr<std::mutex> pending_swap_done_event_mutex_ = std::make_shared<std::mutex>();

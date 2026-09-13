@@ -20,12 +20,12 @@ class _Attention(nn.Module):
 
 class KimiK3MtpContractTest(unittest.TestCase):
     def test_weight_manifest_uses_config_source_layer_for_every_tp_rank(self):
-        from rtp_llm.config.kv_cache_config import KVCacheConfig
-        from rtp_llm.model_loader.weight_module import CompositeWeight
-        from rtp_llm.models.kimi_k3.fp8_weight import KimiK3LoadFp8Weight
         from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3Mtp
         from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3MtpWeight
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
         from rtp_llm.ops import HWKernelConfig, ParallelismConfig
+        from rtp_llm.model_loader.weight_module import CompositeWeight
+        from rtp_llm.models.kimi_k3.fp8_weight import KimiK3LoadFp8Weight
 
         def names(info):
             pending = list(info.weights)
@@ -43,48 +43,22 @@ class KimiK3MtpContractTest(unittest.TestCase):
 
         for source in (4, 47, 93):
             text = dict(
-                num_hidden_layers=source,
-                num_nextn_predict_layers=1,
-                hidden_size=64,
-                vocab_size=128,
-                max_position_embeddings=128,
-                intermediate_size=32,
-                num_attention_heads=8,
-                q_lora_rank=32,
-                kv_lora_rank=32,
-                qk_nope_head_dim=8,
-                qk_rope_head_dim=8,
-                v_head_dim=8,
-                num_experts=16,
-                num_experts_per_token=2,
-                moe_intermediate_size=32,
-                routed_expert_hidden_size=32,
-                num_shared_experts=1,
-                hidden_act="situ",
-                first_k_dense_replace=1,
-                moe_layer_freq=1,
-                activation_situ_beta=4.0,
-                activation_situ_linear_beta=25.0,
-                attn_res_block_size=4,
-                mla_use_nope=True,
-                mla_use_output_gate=True,
-                linear_attn_config=dict(
-                    num_heads=8,
-                    head_dim=8,
-                    full_attn_layers=[source + 1],
-                    kda_layers=[],
-                ),
+                num_hidden_layers=source, num_nextn_predict_layers=1,
+                hidden_size=64, vocab_size=128, max_position_embeddings=128,
+                intermediate_size=32, num_attention_heads=8,
+                q_lora_rank=32, kv_lora_rank=32, qk_nope_head_dim=8,
+                qk_rope_head_dim=8, v_head_dim=8, num_experts=16,
+                num_experts_per_token=2, moe_intermediate_size=32,
+                routed_expert_hidden_size=32, num_shared_experts=1,
+                hidden_act="situ", first_k_dense_replace=1, moe_layer_freq=1,
+                activation_situ_beta=4.0, activation_situ_linear_beta=25.0,
+                attn_res_block_size=4, mla_use_nope=True, mla_use_output_gate=True,
+                linear_attn_config=dict(num_heads=8, head_dim=8,
+                                        full_attn_layers=[source + 1], kda_layers=[]),
             )
-            config = KimiK3Mtp._from_config_json(
-                dict(model_type="kimi_k3", text_config=text)
-            )
+            config = KimiK3Mtp._from_config_json(dict(model_type="kimi_k3", text_config=text))
             expected = list(KimiK3MtpWeight.expected_checkpoint_tensor_names(config))
-            self.assertTrue(
-                all(
-                    name.startswith(f"language_model.model.layers.{source}.")
-                    for name in expected
-                )
-            )
+            self.assertTrue(all(name.startswith(f"language_model.model.layers.{source}.") for name in expected))
             self.assertEqual(config.num_layers, 1)
             self.assertEqual(config.moe_layer_index, [0])
             self.assertEqual(config.k3_runtime_config.mtp_source_layer, source)
@@ -97,35 +71,18 @@ class KimiK3MtpContractTest(unittest.TestCase):
                         parallel.tp_size = parallel.ep_size = tp
                         parallel.world_size = parallel.local_world_size = tp
                         parallel.tp_rank = parallel.ep_rank = rank
-                        manifest = KimiK3MtpWeight(
-                            config, parallel, HWKernelConfig(), KVCacheConfig()
-                        )._get_weight_info()
+                        manifest = KimiK3MtpWeight(config, parallel, HWKernelConfig(), KVCacheConfig())._get_weight_info()
                         checkpoint_names = names(manifest)
                         self.assertTrue(checkpoint_names)
-                        self.assertTrue(
-                            all(
-                                name.startswith(
-                                    f"language_model.model.layers.{source}."
-                                )
-                                for name in checkpoint_names
-                            )
-                        )
-                        self.assertFalse(
-                            any("{i}" in name for name in checkpoint_names)
-                        )
-                        self.assertTrue(
-                            any(
-                                name.endswith("shared_head.norm.weight")
-                                for name in checkpoint_names
-                            )
-                        )
+                        self.assertTrue(all(name.startswith(f"language_model.model.layers.{source}.") for name in checkpoint_names))
+                        self.assertFalse(any("{i}" in name for name in checkpoint_names))
+                        self.assertTrue(any(name.endswith("shared_head.norm.weight") for name in checkpoint_names))
 
     def test_weight_loader_rejects_injected_quantization(self):
-        from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
         from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
         from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3MtpWeight
+        from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
         from rtp_llm.ops import KvCacheDataType, QuantAlgo
-
         quant_algo = QuantAlgo()
         quant_algo.setQuantAlgo("fp8", 8, 128)
         for field, value in (
@@ -152,13 +109,8 @@ class KimiK3MtpContractTest(unittest.TestCase):
                     weight._get_weight_info()
 
     def test_dense_attention_dispatch_quantizes_only_fp8_compute(self):
-        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
-            flashmla_dense_prefill as dense,
-        )
-        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
-            mla_fp8_kernels,
-        )
-
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import flashmla_dense_prefill as dense
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import mla_fp8_kernels
         q, k, v = (torch.randn(2, 1, 4, dtype=torch.bfloat16) for _ in range(3))
         ptr = torch.tensor([0, 2], dtype=torch.int32)
         for enabled in (False, True):
@@ -166,29 +118,15 @@ class KimiK3MtpContractTest(unittest.TestCase):
             op.num_heads, op.v_head_dim, op.scale, op.q_scale = 1, 4, 0.5, 1.0
             op.fp8_compute = enabled
             op.flash_mla_cuda = MagicMock()
-            op.tokenspeed_prefill = MagicMock(
-                return_value=(torch.zeros_like(q), torch.zeros(2, 1))
-            )
-            with patch.object(
-                dense, "_workspace", return_value=torch.empty(0)
-            ), patch.object(
+            op.tokenspeed_prefill = MagicMock(return_value=(torch.zeros_like(q), torch.zeros(2, 1)))
+            with patch.object(dense, "_workspace", return_value=torch.empty(0)), patch.object(
                 mla_fp8_kernels, "quantize_fp8", side_effect=lambda x, *a, **kw: x
             ) as quantize:
-                op._run_dense_attention(
-                    q,
-                    k,
-                    v,
-                    qo_indptr=ptr,
-                    kv_indptr=ptr,
-                    max_q_len=2,
-                    max_kv_len=2,
-                    causal=True,
-                )
+                op._run_dense_attention(q, k, v, qo_indptr=ptr, kv_indptr=ptr,
+                                        max_q_len=2, max_kv_len=2, causal=True)
                 self.assertEqual(quantize.call_count, 3 if enabled else 0)
                 self.assertEqual(op.tokenspeed_prefill.call_count, int(enabled))
-                self.assertEqual(
-                    op.flash_mla_cuda.dense_prefill_fwd.call_count, int(not enabled)
-                )
+                self.assertEqual(op.flash_mla_cuda.dense_prefill_fwd.call_count, int(not enabled))
                 if not enabled:
                     args = op.flash_mla_cuda.dense_prefill_fwd.call_args.args
                     for actual, expected in zip(args[1:4], (q, k, v)):
@@ -231,9 +169,9 @@ class KimiK3MtpContractTest(unittest.TestCase):
         )
         propose_config = SimpleNamespace(model_type="kimi_k3_mtp")
         engine = MagicMock()
-        engine.parallelism_config = ParallelismConfig()
         engine.sp_config.type = SpeculativeType.MTP
         engine.sp_config.gen_num_per_cycle = 3
+        engine.parallelism_config = ParallelismConfig()
         with patch.object(ModelFactory, "get_model_cls", return_value=model_cls):
             result = ModelFactory.get_sp_model(
                 target_config, propose_config, engine, target
@@ -242,49 +180,6 @@ class KimiK3MtpContractTest(unittest.TestCase):
         self.assertEqual(result.gen_num_per_circle, 3)
         self.assertTrue(model_cls.from_config.call_args.kwargs["skip_python_model"])
         draft._create_python_model.assert_called_once()
-
-    def test_eagle_factory_keeps_replicated_cache_without_mutating_target(self):
-        from rtp_llm.model_factory import ModelFactory
-        from rtp_llm.ops import ParallelismConfig, SpeculativeType
-
-        for tp_size in (8, 16):
-            for rank in range(tp_size):
-                with self.subTest(tp_size=tp_size, rank=rank):
-                    parallel = ParallelismConfig()
-                    parallel.tp_size = parallel.ep_size = tp_size
-                    parallel.tp_rank = parallel.ep_rank = rank
-                    parallel.prefill_cp_config.kv_cache_sharded = True
-                    parallel.prefill_cp_config.prefill_cp_size = tp_size
-                    engine = MagicMock()
-                    engine.parallelism_config = parallel
-                    engine.sp_config.type = SpeculativeType.EAGLE3
-                    engine.sp_config.gen_num_per_cycle = 3
-                    target = SimpleNamespace(
-                        model_type="kimi_k3", max_seq_len=32, gen_num_per_cycle=3
-                    )
-                    draft = SimpleNamespace(model_type="kimi_k3_mla_swa_eagle3")
-                    loaded = []
-
-                    def load_model(**kwargs):
-                        loaded.append(kwargs["parallelism_config"])
-                        return SimpleNamespace()
-
-                    with patch.object(
-                        ModelFactory,
-                        "get_model_cls",
-                        return_value=SimpleNamespace(from_config=load_model),
-                    ):
-                        ModelFactory.get_sp_model(target, draft, engine)
-                    self.assertFalse(loaded[0].kv_page_rr_enabled())
-                    self.assertEqual(loaded[0].tp_size, tp_size)
-                    self.assertEqual(loaded[0].tp_rank, rank)
-                    self.assertTrue(parallel.kv_page_rr_enabled())
-                    self.assertEqual(
-                        parallel.prefill_cp_config.prefill_cp_size, tp_size
-                    )
-                    # Native MTP retains the target's FULL Page-RR placement.
-                    mtp = ModelFactory._propose_parallelism_config(parallel)
-                    self.assertTrue(mtp.kv_page_rr_enabled())
 
     def test_factory_rejects_wrong_mode_and_cp_before_loading(self):
         from rtp_llm.model_factory import ModelFactory

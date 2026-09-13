@@ -12,7 +12,9 @@ from rtp_llm.models_py.modules import Embedding, LinearFactory, RMSNorm
 from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLA
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.models_py.modules.kimi_k3.moe_se import KimiK3LatentMoESE
-from rtp_llm.models_py.modules.kimi_k3.utils import sequence_offsets
+from rtp_llm.models_py.modules.kimi_k3.utils import (
+    sequence_offsets,
+)
 from rtp_llm.ops.compute_ops import PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
@@ -183,11 +185,6 @@ class KimiK3MtpModel(GptModelBase):
         if rows > self._recurrent.size(0):
             raise ValueError("K3 MTP recurrent rows exceed buffer capacity")
         return self._recurrent[:rows]
-
-    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
-        # Planner metadata is materialized before forward, including capture.
-        select_block_map_for_layer(inputs.attention_inputs, 0)
-        return super().prepare_fmha_impl(inputs, is_cuda_graph)
 
     def forward(self, inputs, fmha_impl=None):
         previous_h = inputs.input_hiddens

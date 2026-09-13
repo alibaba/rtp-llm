@@ -134,27 +134,6 @@ TEST(KVCacheTransferPlannerTest, SwaWithoutVirtualBlockLayoutPreservesLegacyCoor
               (std::vector<Pair>{{7, 7}, {8, 8}}));
 }
 
-TEST(KVCacheTransferPlannerTest, EagleSwaChunkPublicationWaitsForTerminalAndKeepsBothTailPages) {
-    for (const int shards : {8, 16}) {
-        for (int rank = 0; rank < shards; ++rank) {
-            // Intermediate chunks must not advertise a moving SWA tail.
-            EXPECT_TRUE(buildIncrementalCacheStoreBlockPlan(
-                            16, 0, true, CacheGroupType::SWA, rank, shards, CacheStorePublishRange{0, 8, false})
-                            .empty());
-            // The final chunk starts at page 15. Page 14 still needs publishing
-            // from every replica because Decode loads both retained tail pages.
-            for (const bool use_hybrid : {false, true}) {
-                const auto terminal = buildIncrementalCacheStoreBlockPlan(
-                    16, 8, use_hybrid, CacheGroupType::SWA, rank, shards, CacheStorePublishRange{15, 16, true});
-                EXPECT_EQ(asPairs(terminal), (std::vector<Pair>{{14, 14}, {15, 15}}));
-                EXPECT_EQ(asPairs(buildIncrementalCacheStoreBlockPlan(
-                              1, 0, use_hybrid, CacheGroupType::SWA, rank, shards, CacheStorePublishRange{0, 1, true})),
-                          (std::vector<Pair>{{0, 0}}));
-            }
-        }
-    }
-}
-
 TEST(KVCacheTransferPlannerTest, IncrementalPageRRMergesToTheNonChunkedRegistrationSet) {
     constexpr size_t kTotalBlocks = 17;
     constexpr int    kCpSize      = 8;
@@ -215,12 +194,12 @@ TEST(KVCacheTransferPlannerTest, FullPageRRPreservesFirstFullBlockAndHalfOpenRan
     EXPECT_EQ(asPairs(incremental), (std::vector<Pair>{{8, 1}}));
 }
 
-TEST(KVCacheTransferPlannerTest, RejectsInvalidRangeAndIncompleteSwaTerminal) {
+TEST(KVCacheTransferPlannerTest, RejectsInvalidRangeAndUnsupportedGroup) {
     EXPECT_THROW(buildIncrementalCacheStoreBlockPlan(
                      4, 0, true, CacheGroupType::FULL, 0, 1, CacheStorePublishRange{3, 2, false}),
                  std::invalid_argument);
     EXPECT_THROW(
-        buildIncrementalCacheStoreBlockPlan(4, 0, true, CacheGroupType::SWA, 0, 1, CacheStorePublishRange{0, 2, true}),
+        buildIncrementalCacheStoreBlockPlan(4, 0, true, CacheGroupType::SWA, 0, 1, CacheStorePublishRange{0, 2, false}),
         std::invalid_argument);
 }
 
@@ -260,37 +239,6 @@ TEST(KVCacheTransferPlannerTest, K3ReplicaSourceWrapsDecodeDpRank) {
             EXPECT_EQ(plan.selected, peer == dp_rank % 8);
             EXPECT_EQ(plan.partition_count, 1);
             EXPECT_EQ(plan.partition_id, 0);
-        }
-    }
-}
-
-TEST(KVCacheTransferPlannerTest, EagleSwaReplicaPublishesBothTailKeysForEveryDecodeSource) {
-    // Only verifies placement/source agreement. The existing SWA retention
-    // policy (two tail pages) and the attention read window are separate.
-    for (const auto [prefill_tp, decode_dp] : {Pair{8, 8}, Pair{8, 16}, Pair{16, 16}}) {
-        for (int dp_rank = 0; dp_rank < decode_dp; ++dp_rank) {
-            int selected_sources = 0;
-            for (int peer = 0; peer < prefill_tp; ++peer) {
-                const auto source =
-                    planK3CacheLoadSource(K3CacheLoadSourcePolicy::SINGLE_REPLICA, 14, peer, prefill_tp, dp_rank);
-                if (!source.selected) {
-                    continue;
-                }
-                ++selected_sources;
-                EXPECT_EQ(peer, dp_rank % prefill_tp);
-                const auto next_source =
-                    planK3CacheLoadSource(K3CacheLoadSourcePolicy::SINGLE_REPLICA, 15, peer, prefill_tp, dp_rank);
-                EXPECT_TRUE(next_source.selected);
-                // Runtime must retain the physical SWA group type: FULL would
-                // publish separate owner keys with compact offsets instead.
-                const auto published = buildCacheStoreBlockPlan(16, 0, true, CacheGroupType::SWA, peer, prefill_tp);
-                EXPECT_EQ(asPairs(published), (std::vector<Pair>{{14, 14}, {15, 15}}));
-                EXPECT_EQ(blockPositionsForCacheTransfer(16, 0, true, CacheGroupType::SWA),
-                          (std::vector<size_t>{14, 15}));
-                EXPECT_EQ(source.partition_count, 1);
-                EXPECT_EQ(source.partition_id, 0);
-            }
-            EXPECT_EQ(selected_sources, 1);
         }
     }
 }

@@ -2,7 +2,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
-#include <numeric>
 #include <chrono>
 #include "autil/EnvUtil.h"
 #include "torch/all.h"
@@ -189,7 +188,8 @@ public:
         checkTensorField("lm_output_indexes", inputs.lm_output_indexes, expected_inputs.lm_output_indexes);
         checkTensorField("last_hidden_states", inputs.last_hidden_states, expected_inputs.last_hidden_states);
         if (expected_inputs.kv_cache_group_types.defined()) {
-            checkTensorField("kv_cache_group_types", inputs.kv_cache_group_types, expected_inputs.kv_cache_group_types);
+            checkTensorField(
+                "kv_cache_group_types", inputs.kv_cache_group_types, expected_inputs.kv_cache_group_types);
         }
         if (expected_inputs.kv_cache_group_types_host.defined()) {
             checkTensorField("kv_cache_group_types_host",
@@ -197,8 +197,9 @@ public:
                              expected_inputs.kv_cache_group_types_host);
         }
         if (expected_inputs.kv_cache_layer_to_group.defined()) {
-            checkTensorField(
-                "kv_cache_layer_to_group", inputs.kv_cache_layer_to_group, expected_inputs.kv_cache_layer_to_group);
+            checkTensorField("kv_cache_layer_to_group",
+                             inputs.kv_cache_layer_to_group,
+                             expected_inputs.kv_cache_layer_to_group);
         }
         if (expected_inputs.kv_cache_layer_to_group_host.defined()) {
             checkTensorField("kv_cache_layer_to_group_host",
@@ -477,12 +478,12 @@ public:
         // The combined cache layout appends the single MTP layer after the
         // target layer. Keep the test fixture consistent with the mapping
         // produced by CacheConfigCreator::createSpConfig.
-        const int global_mtp_layer_id = static_cast<int>(cache_config.layer_num);
-        cache_config.layer_all_num    = cache_config.layer_num + mtp_config.layer_num;
+        const int global_mtp_layer_id              = static_cast<int>(cache_config.layer_num);
+        cache_config.layer_all_num                 = cache_config.layer_num + mtp_config.layer_num;
         cache_config.global_layer_ids[0].push_back(global_mtp_layer_id);
         cache_config.layer_ids[0].push_back(global_mtp_layer_id);
-        mtp_config.global_layer_ids[0]       = {global_mtp_layer_id};
-        mtp_config.local_to_global_layer_ids = {global_mtp_layer_id};
+        mtp_config.global_layer_ids[0]             = {global_mtp_layer_id};
+        mtp_config.local_to_global_layer_ids       = {global_mtp_layer_id};
         cache_config.mtp_sub_configs.push_back(std::make_shared<CacheConfig>(mtp_config));
 
         EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
@@ -579,15 +580,15 @@ TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsPointMassProposal) {
 }
 
 TEST_F(MtpExecutorTest, testKimiMtpRestoresMediaTokensBeforeChunkLookahead) {
-    auto  components                 = createMtpExecutorComponents(MtpExecutorTestConfig{});
-    auto& executor                   = *components.executor;
-    executor.kimi_k3_mtp_            = true;
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto& executor = *components.executor;
+    executor.kimi_k3_mtp_ = true;
     executor.kimi_k3_media_token_id_ = 3;
     GptModelInputs inputs;
-    inputs.combo_tokens        = torch::tensor({-91, -92, 1, 2, -93, -94, -95, 0}, torch::kInt32);
-    inputs.mm_features_locs    = torch::tensor({-1, 4}, torch::kInt32);
+    inputs.combo_tokens = torch::tensor({-91, -92, 1, 2, -93, -94, -95, 0}, torch::kInt32);
+    inputs.mm_features_locs = torch::tensor({-1, 4}, torch::kInt32);
     inputs.multimodal_features = std::vector<torch::Tensor>{torch::zeros({3, 4}), torch::zeros({3, 4})};
-    auto target_tokens         = inputs.combo_tokens;
+    auto target_tokens = inputs.combo_tokens;
     executor.restoreKimiMtpMediaTokens(inputs);
     EXPECT_EQ(toVec<int32_t>(inputs.combo_tokens), (std::vector<int32_t>{3, 3, 1, 2, 3, 3, 3, 0}));
     EXPECT_EQ(toVec<int32_t>(target_tokens), (std::vector<int32_t>{-91, -92, 1, 2, -93, -94, -95, 0}));
@@ -596,7 +597,7 @@ TEST_F(MtpExecutorTest, testKimiMtpRestoresMediaTokensBeforeChunkLookahead) {
 }
 
 TEST_F(MtpExecutorTest, testMakePrefillRoundInputPacksMultiRequestRounds) {
-    auto           components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
     GptModelInputs inputs;
     inputs.combo_tokens              = torch::arange(0, 8, torch::kInt32).cuda();
     inputs.combo_tokens_host_for_log = inputs.combo_tokens.cpu().clone();
@@ -686,7 +687,7 @@ TEST_F(MtpExecutorTest, testMakePrefillRoundInputSlicesMultimodalRowsPerRequest)
 }
 
 TEST_F(MtpExecutorTest, testMakePrefillRoundInputSelectsPerRequestMetadataRows) {
-    auto           components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
     GptModelInputs inputs;
     inputs.combo_tokens                  = torch::arange(0, 12, torch::kInt32).cuda();
     inputs.input_lengths                 = torch::tensor({4, 4, 4}, torch::kInt32).cuda();
@@ -716,8 +717,8 @@ TEST_F(MtpExecutorTest, testMakePrefillRoundInputSelectsPerRequestMetadataRows) 
     EXPECT_EQ(toVec<int32_t>(first.kv_cache_block_id), (std::vector<int32_t>{0, 1, 2, 3, 4, 5}));
     EXPECT_EQ(toVec<int32_t>(first.kv_cache_block_id_host), (std::vector<int32_t>{0, 1, 2, 3, 4, 5}));
     EXPECT_EQ(toVec<int32_t>(first.kv_cache_kernel_block_id),
-              (std::vector<int32_t>{0,  1,  2,  3,  4,  5,  9,  10, 11, 12, 13, 14,
-                                    18, 19, 20, 21, 22, 23, 27, 28, 29, 30, 31, 32}));
+              (std::vector<int32_t>{0, 1, 2, 3, 4, 5, 9, 10, 11, 12, 13, 14, 18, 19, 20, 21, 22, 23,
+                                    27, 28, 29, 30, 31, 32}));
 
     auto middle = components.executor->makePrefillRoundInput(inputs, middle_round, /*total_tokens=*/12);
     EXPECT_EQ(toVec<int32_t>(middle.combo_tokens), (std::vector<int32_t>{8, 9}));
@@ -726,7 +727,7 @@ TEST_F(MtpExecutorTest, testMakePrefillRoundInputSelectsPerRequestMetadataRows) 
 }
 
 TEST_F(MtpExecutorTest, testShiftRoundComboTokensAppliesPerSliceLookahead) {
-    auto           components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
     GptModelInputs inputs;
     inputs.combo_tokens              = torch::arange(0, 8, torch::kInt32).cuda();
     inputs.combo_tokens_host_for_log = inputs.combo_tokens.cpu().clone();
@@ -751,7 +752,8 @@ TEST_F(MtpExecutorTest, testShiftRoundComboTokensAppliesPerSliceLookahead) {
 
     // The terminal round reaches the end of the packed batch, so its lookahead
     // shift would overrun and must be rejected (final rounds never shift).
-    EXPECT_THROW(components.executor->shiftRoundComboTokens(first, inputs, last_round), std::runtime_error);
+    EXPECT_THROW(
+        components.executor->shiftRoundComboTokens(first, inputs, last_round), std::runtime_error);
 }
 
 TEST_F(MtpExecutorTest, testShiftRoundComboTokensCarriesMultimodalLookahead) {
@@ -783,7 +785,7 @@ TEST_F(MtpExecutorTest, testShiftRoundComboTokensCarriesMultimodalLookahead) {
 }
 
 TEST_F(MtpExecutorTest, testBuildDraftCacheGroupTypesPreservesGlobalGroupNamespace) {
-    auto        components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
     CacheConfig global_cache_config;
     global_cache_config.group_types = {
         CacheGroupType::FULL,
@@ -817,8 +819,8 @@ TEST_F(MtpExecutorTest, testRunChunkPrefillRoundInterleavesTargetShiftAndDraft) 
                                             static_cast<int32_t>(CacheGroupType::FULL)},
                                            torch::kInt32)
                                  .pin_memory();
-    auto draft_layer_to_group                          = torch::tensor({2}, torch::kInt32).pin_memory();
-    components.executor->draft_kv_cache_group_types    = draft_group_types;
+    auto draft_layer_to_group = torch::tensor({2}, torch::kInt32).pin_memory();
+    components.executor->draft_kv_cache_group_types = draft_group_types;
     components.executor->draft_kv_cache_layer_to_group = draft_layer_to_group;
 
     GptModelInputs full_inputs;
@@ -839,23 +841,23 @@ TEST_F(MtpExecutorTest, testRunChunkPrefillRoundInterleavesTargetShiftAndDraft) 
     // Draft position p consumes target token p + 1, so each non-final draft
     // input is the round slice shifted by one token and re-pointed at the
     // draft cache groups.
-    auto first_draft                         = GptModelInputs{};
-    first_draft.combo_tokens                 = torch::tensor({1, 2, 3, 4}, torch::kInt32);
-    first_draft.input_lengths                = torch::tensor({4}, torch::kInt32);
-    first_draft.prefix_lengths               = torch::tensor({0}, torch::kInt32);
-    first_draft.is_prefill_chunk             = true;
-    first_draft.kv_cache_group_types         = draft_group_types;
-    first_draft.kv_cache_group_types_host    = draft_group_types;
+    auto first_draft                      = GptModelInputs{};
+    first_draft.combo_tokens              = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    first_draft.input_lengths             = torch::tensor({4}, torch::kInt32);
+    first_draft.prefix_lengths            = torch::tensor({0}, torch::kInt32);
+    first_draft.is_prefill_chunk          = true;
+    first_draft.kv_cache_group_types       = draft_group_types;
+    first_draft.kv_cache_group_types_host = draft_group_types;
     first_draft.kv_cache_layer_to_group      = draft_layer_to_group;
     first_draft.kv_cache_layer_to_group_host = draft_layer_to_group;
 
-    auto middle_draft                         = GptModelInputs{};
-    middle_draft.combo_tokens                 = torch::tensor({5, 6}, torch::kInt32);
-    middle_draft.input_lengths                = torch::tensor({2}, torch::kInt32);
-    middle_draft.prefix_lengths               = torch::tensor({4}, torch::kInt32);
-    middle_draft.is_prefill_chunk             = true;
-    middle_draft.kv_cache_group_types         = draft_group_types;
-    middle_draft.kv_cache_group_types_host    = draft_group_types;
+    auto middle_draft                      = GptModelInputs{};
+    middle_draft.combo_tokens              = torch::tensor({5, 6}, torch::kInt32);
+    middle_draft.input_lengths             = torch::tensor({2}, torch::kInt32);
+    middle_draft.prefix_lengths            = torch::tensor({4}, torch::kInt32);
+    middle_draft.is_prefill_chunk          = true;
+    middle_draft.kv_cache_group_types       = draft_group_types;
+    middle_draft.kv_cache_group_types_host = draft_group_types;
     middle_draft.kv_cache_layer_to_group      = draft_layer_to_group;
     middle_draft.kv_cache_layer_to_group_host = draft_layer_to_group;
 
@@ -880,11 +882,11 @@ TEST_F(MtpExecutorTest, testRunChunkPrefillRoundInterleavesTargetShiftAndDraft) 
                     std::move(components.fake_sampler));
 
     MtpExecutor::ChunkPrefillContext hook;
-    hook.full_inputs  = full_inputs;
-    hook.total_tokens = 8;
+    hook.full_inputs      = full_inputs;
+    hook.total_tokens     = 8;
     hook.terminal_seen.assign(1, false);
     int64_t model_forward_us = 0;
-    hook.model_forward_us    = &model_forward_us;
+    hook.model_forward_us = &model_forward_us;
 
     components.executor->runChunkPrefillRound(hook, first_round, /*is_last=*/false);
     components.executor->runChunkPrefillRound(hook, middle_round, /*is_last=*/false);
@@ -902,10 +904,10 @@ TEST_F(MtpExecutorTest, testRunChunkPrefillRoundInterleavesTargetShiftAndDraft) 
     // force_disable_sp_run skips every draft pass but still records the same
     // final round; no draft publication frontier is expected to advance.
     MtpExecutor::ChunkPrefillContext no_sp_hook;
-    auto                             no_sp_full_inputs = full_inputs;
-    no_sp_full_inputs.force_disable_sp_run             = true;
-    no_sp_hook.full_inputs                             = no_sp_full_inputs;
-    no_sp_hook.total_tokens                            = 8;
+    auto no_sp_full_inputs = full_inputs;
+    no_sp_full_inputs.force_disable_sp_run = true;
+    no_sp_hook.full_inputs      = no_sp_full_inputs;
+    no_sp_hook.total_tokens     = 8;
     no_sp_hook.terminal_seen.assign(1, false);
     no_sp_hook.model_forward_us = &model_forward_us;
     components.executor->runChunkPrefillRound(no_sp_hook, first_round, /*is_last=*/false);
@@ -931,11 +933,11 @@ TEST_F(MtpExecutorTest, testRunChunkPrefillRoundPropagatesDraftFailure) {
     full_inputs.sequence_lengths = torch::empty({0}, torch::kInt32);
 
     MtpExecutor::ChunkPrefillContext hook;
-    hook.full_inputs  = full_inputs;
-    hook.total_tokens = 4;
+    hook.full_inputs      = full_inputs;
+    hook.total_tokens     = 4;
     hook.terminal_seen.assign(1, false);
     int64_t model_forward_us = 0;
-    hook.model_forward_us    = &model_forward_us;
+    hook.model_forward_us = &model_forward_us;
 
     PrefillChunkRound first_round;
     first_round.slices = {{0, 0, 4, 4, 0, 4, false}};
@@ -943,7 +945,8 @@ TEST_F(MtpExecutorTest, testRunChunkPrefillRoundPropagatesDraftFailure) {
     // No draft inputs/outputs queued: the draft forward throws, and the hook
     // must propagate it so prefillStep's session guard aborts the Python
     // chunk session.
-    EXPECT_THROW(components.executor->runChunkPrefillRound(hook, first_round, /*is_last=*/false), std::runtime_error);
+    EXPECT_THROW(components.executor->runChunkPrefillRound(hook, first_round, /*is_last=*/false),
+                 std::runtime_error);
 }
 
 TEST_F(MtpExecutorTest, testRunChunkPrefillRoundCollectsHeterogeneousTerminalTokens) {
@@ -1012,7 +1015,8 @@ TEST_F(MtpExecutorTest, testPrefillChunkCacheStorePublishPlanDefersAndRewritesTe
               (std::vector<int32_t>{0}));
     EXPECT_EQ(toVec<int32_t>(terminal_prefix_input.cache_store_publish_plan->end_block_host),
               (std::vector<int32_t>{1}));
-    EXPECT_EQ(toVec<bool>(terminal_prefix_input.cache_store_publish_plan->terminal_host), (std::vector<bool>{false}));
+    EXPECT_EQ(toVec<bool>(terminal_prefix_input.cache_store_publish_plan->terminal_host),
+              (std::vector<bool>{false}));
     components.executor->advanceDraftCacheStorePublishFrontier(
         terminal_prefix_input, terminal_prefix_round, publish_frontier);
     EXPECT_EQ(publish_frontier, (std::vector<int32_t>{0, 1}));
@@ -1025,7 +1029,8 @@ TEST_F(MtpExecutorTest, testPrefillChunkCacheStorePublishPlanDefersAndRewritesTe
         {0, 0, 1, 1, 0, 1, true},
         {1, 4, 5, 1, 3, 4, true},
     };
-    auto terminal_input = components.executor->makePrefillRoundInput(full_inputs, terminal_round, /*total_tokens=*/5);
+    auto terminal_input =
+        components.executor->makePrefillRoundInput(full_inputs, terminal_round, /*total_tokens=*/5);
     components.executor->setPrefillChunkCacheStorePublishPlan(terminal_input,
                                                               terminal_round,
                                                               /*seq_size_per_block=*/2,
@@ -1034,10 +1039,14 @@ TEST_F(MtpExecutorTest, testPrefillChunkCacheStorePublishPlanDefersAndRewritesTe
     EXPECT_EQ(toVec<int32_t>(terminal_input.prefix_lengths), (std::vector<int32_t>{0, 3}));
     EXPECT_EQ(toVec<int32_t>(terminal_input.input_lengths), (std::vector<int32_t>{1, 1}));
     ASSERT_TRUE(terminal_input.cache_store_publish_plan.has_value());
-    EXPECT_EQ(toVec<int32_t>(terminal_input.cache_store_publish_plan->begin_block_host), (std::vector<int32_t>{0, 1}));
-    EXPECT_EQ(toVec<int32_t>(terminal_input.cache_store_publish_plan->end_block_host), (std::vector<int32_t>{1, 2}));
-    EXPECT_EQ(toVec<bool>(terminal_input.cache_store_publish_plan->terminal_host), (std::vector<bool>{true, true}));
-    components.executor->advanceDraftCacheStorePublishFrontier(terminal_input, terminal_round, publish_frontier);
+    EXPECT_EQ(toVec<int32_t>(terminal_input.cache_store_publish_plan->begin_block_host),
+              (std::vector<int32_t>{0, 1}));
+    EXPECT_EQ(toVec<int32_t>(terminal_input.cache_store_publish_plan->end_block_host),
+              (std::vector<int32_t>{1, 2}));
+    EXPECT_EQ(toVec<bool>(terminal_input.cache_store_publish_plan->terminal_host),
+              (std::vector<bool>{true, true}));
+    components.executor->advanceDraftCacheStorePublishFrontier(
+        terminal_input, terminal_round, publish_frontier);
     EXPECT_EQ(publish_frontier, (std::vector<int32_t>{1, 2}));
 
     // Regression for full-model PD smoke's first chunked stage. These requests
@@ -1052,12 +1061,12 @@ TEST_F(MtpExecutorTest, testPrefillChunkCacheStorePublishPlanDefersAndRewritesTe
         {3, 3, 4, 1, 28851, 28852, true},
     };
     GptModelInputs smoke_terminal_input;
-    smoke_terminal_input.input_lengths  = torch::tensor({1, 1, 1, 1}, torch::kInt32);
-    smoke_terminal_input.prefix_lengths = torch::tensor({9651, 16051, 22451, 28851}, torch::kInt32);
+    smoke_terminal_input.input_lengths   = torch::tensor({1, 1, 1, 1}, torch::kInt32);
+    smoke_terminal_input.prefix_lengths  = torch::tensor({9651, 16051, 22451, 28851}, torch::kInt32);
     std::vector<int32_t> smoke_publish_frontier(4, 0);
     components.executor->setPrefillChunkCacheStorePublishPlan(smoke_terminal_input,
-                                                              smoke_terminal_round,
-                                                              /*seq_size_per_block=*/4096,
+                                                               smoke_terminal_round,
+                                                               /*seq_size_per_block=*/4096,
                                                               /*complete_blocks_only=*/false,
                                                               smoke_publish_frontier);
     ASSERT_TRUE(smoke_terminal_input.cache_store_publish_plan.has_value());
@@ -1352,22 +1361,22 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     next_draft_output.all_hidden_states =
         torch::tensor({0.1f, 0.1f, 0.2f, 0.22f, 0.3f, 0.33f, 0.0f, 0.0f, 0.0f, 0.0f}).reshape({5, 2});
 
-    next_draft_input.combo_tokens                = torch::tensor({3, 2, 0, 0, 0}, torch::kInt32);
-    next_draft_input.input_lengths               = torch::tensor({5}, torch::kInt32);
-    next_draft_input.prefix_lengths              = torch::tensor({2}, torch::kInt32);
+    next_draft_input.combo_tokens      = torch::tensor({3, 2, 0, 0, 0}, torch::kInt32);
+    next_draft_input.input_lengths     = torch::tensor({5}, torch::kInt32);
+    next_draft_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
     next_draft_input.input_lengths_host_for_log  = torch::tensor({5}, torch::kInt32);
     next_draft_input.prefix_lengths_host_for_log = torch::tensor({2}, torch::kInt32);
-    next_draft_input.lm_output_indexes           = torch::tensor({2}, torch::kInt32);
+    next_draft_input.lm_output_indexes = torch::tensor({2}, torch::kInt32);
 
     // set fake model outputs
-    auto target_input                        = GptModelInputs{};
-    auto target_output                       = GptModelOutputs{};
-    target_input.combo_tokens                = torch::tensor({2, 3, 2, 1, 3}, torch::kInt32);
-    target_input.input_lengths               = torch::tensor({5}, torch::kInt32);
-    target_input.prefix_lengths              = torch::tensor({2}, torch::kInt32);
+    auto target_input              = GptModelInputs{};
+    auto target_output             = GptModelOutputs{};
+    target_input.combo_tokens      = torch::tensor({2, 3, 2, 1, 3}, torch::kInt32);
+    target_input.input_lengths     = torch::tensor({5}, torch::kInt32);
+    target_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
     target_input.input_lengths_host_for_log  = torch::tensor({5}, torch::kInt32);
     target_input.prefix_lengths_host_for_log = torch::tensor({2}, torch::kInt32);
-    target_input.lm_output_indexes           = torch::tensor({0, 1, 2, 3, 4}, torch::kInt32);
+    target_input.lm_output_indexes = torch::tensor({0, 1, 2, 3, 4}, torch::kInt32);
 
     auto target_prepare_input                    = GptModelInputs{};
     target_prepare_input.input_lengths           = torch::tensor({5}, torch::kInt32);
@@ -1457,7 +1466,8 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     auto status = components.executor->process({stream1});
     ASSERT_TRUE(status.ok());
     const auto* async_prepare_env       = std::getenv("RTP_LLM_MTP_ASYNC_PREPARE");
-    const bool  async_prepare_requested = async_prepare_env != nullptr && std::strcmp(async_prepare_env, "1") == 0;
+    const bool  async_prepare_requested =
+        async_prepare_env != nullptr && std::strcmp(async_prepare_env, "1") == 0;
     EXPECT_EQ(components.executor->useAsyncPrepare(), async_prepare_requested);
     if (async_prepare_requested) {
         EXPECT_FALSE(fake_target_model->hasPendingPrepareInputs());
@@ -1469,7 +1479,8 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
 
 TEST_F(MtpExecutorTest, testTargetVerifyHostMetadataMatchesPackedInput) {
     GptModelInputs target;
-    auto prefix_lengths_host = torch::tensor({126, 255}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+    auto prefix_lengths_host =
+        torch::tensor({126, 255}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
 
     MtpExecutor::populateTargetVerifyHostMetadata(target, prefix_lengths_host, 2, 4);
 
@@ -1497,7 +1508,8 @@ TEST_F(MtpExecutorTest, testTargetVerifyHostMetadataToleratesMissingMirror) {
 // A mirror shorter than the verify batch cannot be sliced safely either.
 TEST_F(MtpExecutorTest, testTargetVerifyHostMetadataRejectsShortMirror) {
     GptModelInputs target;
-    auto           prefix_lengths_host = torch::tensor({126}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+    auto           prefix_lengths_host =
+        torch::tensor({126}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
 
     MtpExecutor::populateTargetVerifyHostMetadata(target, prefix_lengths_host, 2, 4);
 
@@ -1936,8 +1948,8 @@ TEST_F(MtpExecutorTest, testLinearKvCacheBlockPatchKernel) {
     auto accept_len         = accept_len_cpu.to(torch::kCUDA);
     auto pending            = pending_cpu.to(torch::kCUDA);
     auto cuda_i32           = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    auto positions          = torch::empty({batch_size, group_num, patch_width}, cuda_i32);
-    auto source_slots       = torch::empty({batch_size, group_num, patch_width}, cuda_i32);
+    auto positions          = torch::empty({batch_size, patch_width}, cuda_i32);
+    auto source_slots       = torch::empty({batch_size, patch_width}, cuda_i32);
     auto before_values      = torch::empty({batch_size, group_num, patch_width}, cuda_i32);
     auto after_values       = torch::empty({batch_size, group_num, patch_width}, cuda_i32);
     auto patch_valid        = torch::empty({batch_size, group_num}, cuda_i32);
@@ -1953,7 +1965,7 @@ TEST_F(MtpExecutorTest, testLinearKvCacheBlockPatchKernel) {
                                           before_values,
                                           after_values,
                                           patch_valid,
-                                          torch::full({group_num}, page_size, cuda_i32),
+                                          page_size,
                                           at::cuda::getCurrentCUDAStream().stream());
     invokeMtpLinearKvCacheBlockPatchApply(block_ids,
                                           group_types,
@@ -1971,8 +1983,8 @@ TEST_F(MtpExecutorTest, testLinearKvCacheBlockPatchKernel) {
 
     // The overlapping pairs (1,0) then (2,1) form a 3-cycle. The patch must
     // store all three final values, not two independent destination values.
-    EXPECT_EQ(toVec<int32_t>(positions.cpu()[0][0]), (std::vector<int32_t>{1, 0, 2, -1}));
-    EXPECT_EQ(toVec<int32_t>(source_slots.cpu()[0][0]), (std::vector<int32_t>{2, 0, 1, -1}));
+    EXPECT_EQ(toVec<int32_t>(positions.cpu()[0]), (std::vector<int32_t>{1, 0, 2, -1}));
+    EXPECT_EQ(toVec<int32_t>(source_slots.cpu()[0]), (std::vector<int32_t>{2, 0, 1, -1}));
     EXPECT_EQ(toVec<int32_t>(before_values.cpu()[0][0]), (std::vector<int32_t>{1, 0, 2, -1}));
     EXPECT_EQ(toVec<int32_t>(after_values.cpu()[0][0]), (std::vector<int32_t>{2, 1, 0, -1}));
     EXPECT_EQ(patch_valid.cpu()[0][3].item<int32_t>(), 1);
@@ -2033,128 +2045,6 @@ TEST_F(MtpExecutorTest, testLinearKvCacheBlockPatchKernel) {
     EXPECT_TRUE(torch::equal(allocator_edited.cpu(), allocator_edited_expected));
 }
 
-TEST_F(MtpExecutorTest, testPageRRLinearBlockPatchUsesGroupSpans) {
-    constexpr int64_t group_num = 4, batch_size = 4, row_width = 8;
-    auto              cpu_ids = torch::arange(10, 10 + group_num * batch_size * row_width, torch::kInt32)
-                       .reshape({group_num, batch_size, row_width});
-    auto expected = cpu_ids.clone();
-    // LINEAR groups have V=1024 and V=2048; FULL/SWA stay unchanged.
-    const std::vector<std::vector<int64_t>> first_permutations{
-        {1, 0, 2, 3, 4, 5, 6, 7}, {1, 3, 2, 0, 4, 5, 6, 7}, {0, 2, 1, 3, 4, 5, 6, 7}, {0, 2, 4, 3, 1, 5, 6, 7}};
-    const std::vector<std::vector<int64_t>> second_permutations{
-        {1, 0, 2, 3, 4, 5, 6, 7}, {3, 1, 2, 0, 4, 5, 6, 7}, {1, 0, 2, 3, 4, 5, 6, 7}, {1, 3, 2, 0, 4, 5, 6, 7}};
-    for (int i = 0; i < batch_size; ++i) {
-        expected[0][i].copy_(cpu_ids[0][i].index_select(0, torch::tensor(first_permutations[i])));
-        expected[2][i].copy_(cpu_ids[2][i].index_select(0, torch::tensor(second_permutations[i])));
-    }
-    const auto cuda_i32     = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    auto       ids          = cpu_ids.to(torch::kCUDA);
-    auto       types        = torch::tensor({0, 1, 0, 2}, cuda_i32);
-    auto       counts       = torch::tensor({{4, 4, 5, 5}, {8, 8, 8, 8}, {4, 4, 4, 4}, {8, 8, 8, 8}}, cuda_i32);
-    auto       seq          = torch::tensor({385, 1023, 1025, 2047}, cuda_i32);
-    auto       accepted     = torch::tensor({2, 4, 2, 4}, cuda_i32);
-    auto       positions    = torch::empty({batch_size, group_num, 4}, cuda_i32);
-    auto       source_slots = torch::empty_like(positions);
-    auto       before       = torch::empty({batch_size, group_num, 4}, cuda_i32);
-    auto       after        = torch::empty_like(before);
-    auto       valid        = torch::empty({batch_size, group_num}, cuda_i32);
-    auto       pending      = torch::ones({batch_size}, cuda_i32);
-    auto       spans        = torch::tensor({1024, 128, 2048, 128}, cuda_i32);
-#if USING_CUDA
-    invokeMtpLinearKvCacheBlockPatchBuild(ids,
-                                          types,
-                                          counts,
-                                          seq,
-                                          accepted,
-                                          positions,
-                                          source_slots,
-                                          before,
-                                          after,
-                                          valid,
-                                          spans,
-                                          at::cuda::getCurrentCUDAStream().stream());
-    invokeMtpLinearKvCacheBlockPatchApply(ids,
-                                          types,
-                                          counts,
-                                          positions,
-                                          source_slots,
-                                          before,
-                                          after,
-                                          valid,
-                                          pending,
-                                          at::cuda::getCurrentCUDAStream().stream());
-#endif
-    EXPECT_TRUE(torch::equal(ids.cpu(), expected));
-    // Both LINEAR groups must commit; a bounds check must not discard the valid permutation.
-    EXPECT_EQ(toVec<int32_t>(valid.cpu().select(1, 0)), (std::vector<int32_t>{1, 1, 1, 1}));
-    EXPECT_EQ(toVec<int32_t>(valid.cpu().select(1, 2)), (std::vector<int32_t>{1, 1, 1, 1}));
-}
-
-TEST_F(MtpExecutorTest, testPageRRLinearSpecUpdateUsesGroupSpan) {
-    struct Case {
-        int              physical_page;
-        int              linear_span;
-        int              seq_len;
-        int              accepted;
-        BlockIndicesType expected;
-    };
-    const std::vector<Case> cases{
-        {128, 1024, 385, 2, {11, 10, 12, 13}},
-        {128, 1024, 1023, 4, {11, 13, 12, 10}},
-        {128, 1024, 1024, 2, {10, 11, 12, 13}},
-        {128, 1024, 1025, 2, {10, 12, 11, 13, 14}},
-        {128, 2048, 2047, 4, {11, 13, 12, 10}},
-        {256, 2048, 385, 2, {11, 10, 12, 13}},
-    };
-    for (const auto& c : cases) {
-        SCOPED_TRACE(::testing::Message() << "B=" << c.physical_page << " V=" << c.linear_span << " seq=" << c.seq_len
-                                          << " accepted=" << c.accepted);
-        auto cfg                      = test::makeSimpleHybridMhaCacheConfig(4, 64, c.physical_page, TYPE_INT8, 2);
-        cfg.kernel_seq_size_per_block = 128;
-        cfg.group_seq_size_per_block  = {static_cast<size_t>(c.linear_span), static_cast<size_t>(c.physical_page)};
-        cfg.cache_specs[0]->seq_size_per_block = c.linear_span;
-        cfg.linear_step                        = 1;
-        cfg.use_independent_block_pools        = true;
-        auto manager                           = std::make_shared<KVCacheManager>(cfg);
-        ASSERT_TRUE(manager->init());
-        ModelConfig model;
-        model.max_seq_len = 4096;
-        model.vocab_size  = 32;
-        model.num_layers  = 4;
-        ResourceContext resources;
-        resources.cache_manager = manager;
-        auto stream = createContextStream(model, RuntimeConfig{}, resources, std::vector<int>(c.seq_len, 1));
-        BatchKVCacheResource cache;
-        cache.resetBatchSize(1);
-        cache.initGroups(
-            cfg.groupNums(), model.num_layers, cfg.layer_to_group_id, cfg.kernelBlocksPerKvBlock(), cfg.group_types);
-        BlockIndicesType linear_ids(c.expected.size());
-        std::iota(linear_ids.begin(), linear_ids.end(), 10);
-        cache.setBatchBlocks(0, 0, linear_ids);
-        cache.setBatchBlocks(0, 1, {20, 21, 22, 23});
-        stream->setKVCache(cache);
-        stream->setNeedReleaseResource(false);
-        auto output    = std::make_shared<SpeculativeExecutorStreamOutput>();
-        output->tokens = torch::full({1, 2}, -1, torch::kInt32);
-        stream->setSPOutputBuffer(output);
-        const auto           before = stream->snapshotKVCacheBlocks();
-        StreamSpecUpdateInfo update{torch::full({1, c.accepted}, 2, torch::kInt32),
-                                    c.accepted,
-                                    3,
-                                    torch::Tensor(),
-                                    torch::Tensor(),
-                                    torch::Tensor(),
-                                    true,
-                                    false,
-                                    7};
-        stream->specUpdate(update);
-        const auto after = stream->snapshotKVCacheBlocks();
-        EXPECT_EQ(stream->seqLength(), c.seq_len + c.accepted);
-        EXPECT_EQ(after.kernel_blocks[0][0], c.expected);
-        EXPECT_EQ(after.kernel_blocks[0][1], before.kernel_blocks[0][1]);
-    }
-}
-
 TEST_F(MtpExecutorTest, testLinearKvCacheSnapshotEpochPreventsDoubleSwap) {
     auto cache_config = test::makeSimpleHybridMhaCacheConfig(
         /*layer_num=*/4, /*block_num=*/64, /*tokens_per_block=*/4, TYPE_INT8, /*group_layer_num=*/2);
@@ -2189,65 +2079,7 @@ TEST_F(MtpExecutorTest, testLinearKvCacheSnapshotEpochPreventsDoubleSwap) {
     GenerateStream::MtpAsyncDeviceState state;
     state.accept_len_gpu   = torch::tensor({3}, torch::kInt32).to(torch::kCUDA);
     state.prev_seq_len_gpu = torch::tensor({3}, torch::kInt32).to(torch::kCUDA);
-    const auto cuda_i32    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    auto       device_ids  = torch::tensor({10, 11, 12, 13, 20, 21, 22, 23}, cuda_i32).reshape({2, 1, 4});
-    auto       group_types = torch::tensor({0, 1}, cuda_i32);
-    auto       counts      = torch::full({2, 1}, 4, cuda_i32);
-    GenerateStream::MtpLinearBlockPatchState patch;
-    patch.positions_gpu     = torch::empty({1, 2, 4}, cuda_i32);
-    patch.source_slots_gpu  = torch::empty_like(patch.positions_gpu);
-    patch.before_values_gpu = torch::empty_like(patch.positions_gpu);
-    patch.after_values_gpu  = torch::empty_like(patch.positions_gpu);
-    patch.valid_gpu         = torch::empty({1, 2}, cuda_i32);
-#if USING_CUDA
-    invokeMtpLinearKvCacheBlockPatchBuild(device_ids,
-                                          group_types,
-                                          counts,
-                                          state.prev_seq_len_gpu,
-                                          state.accept_len_gpu,
-                                          patch.positions_gpu,
-                                          patch.source_slots_gpu,
-                                          patch.before_values_gpu,
-                                          patch.after_values_gpu,
-                                          patch.valid_gpu,
-                                          torch::full({2}, 4, cuda_i32),
-                                          at::cuda::getCurrentCUDAStream().stream());
-#endif
-    auto ready = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-    ready->record(cuda_graph::graphGetCurrentStream());
-    patch.ready_event = ready;
-    const auto epoch  = stream->setMtpAsyncDeviceState(std::move(state), true, std::move(patch));
-
-    // Mix a pending patch with a new request's dummy patch, exercising the
-    // per-group shape through snapshot validation and batch concatenation.
-    auto fresh_stream = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3});
-    fresh_stream->setKVCache(kv_cache);
-    fresh_stream->setNeedReleaseResource(false);
-    NormalModelInputGathererConfig gather_config;
-    gather_config.kv_cache_group_nums        = 2;
-    gather_config.kv_cache_group_types       = cache_config.group_types;
-    gather_config.kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
-    NormalModelInputGatherer gatherer(gather_config);
-    TensorHolder             holder;
-    auto gathered_status = gatherer.gatherMtpLinearKvCacheKernelBlockId(StreamGroups({stream, fresh_stream}), holder);
-    ASSERT_TRUE(gathered_status.ok());
-    auto gathered = std::move(gathered_status.value());
-    ASSERT_TRUE(gathered.device_patch_ready);
-    EXPECT_EQ(toVec<int32_t>(gathered.pending_patches), (std::vector<int32_t>{1, 0}));
-#if USING_CUDA
-    invokeMtpLinearKvCacheBlockPatchApply(gathered.block_ids,
-                                          gathered.group_types,
-                                          gathered.valid_block_counts,
-                                          gathered.patch_positions,
-                                          gathered.patch_source_slots,
-                                          gathered.patch_before_values,
-                                          gathered.patch_after_values,
-                                          gathered.patch_valid,
-                                          gathered.pending_patches,
-                                          at::cuda::getCurrentCUDAStream().stream());
-#endif
-    EXPECT_EQ(toVec<int32_t>(gathered.block_ids[0][0].narrow(0, 0, 4)), (std::vector<int32_t>{11, 12, 10, 13}));
-    EXPECT_EQ(toVec<int32_t>(gathered.block_ids[0][1].narrow(0, 0, 4)), (std::vector<int32_t>{10, 11, 12, 13}));
+    const auto epoch       = stream->setMtpAsyncDeviceState(std::move(state), true);
 
     auto before = stream->snapshotKVCacheBlocks();
     EXPECT_TRUE(before.needs_mtp_linear_patch);
@@ -2268,12 +2100,6 @@ TEST_F(MtpExecutorTest, testLinearKvCacheSnapshotEpochPreventsDoubleSwap) {
     EXPECT_FALSE(after.needs_mtp_linear_patch);
     EXPECT_EQ(after.kernel_blocks[0][0], (BlockIndicesType{11, 12, 10, 13}));
     EXPECT_EQ(after.kernel_blocks[0][1], before.kernel_blocks[0][1]);
-
-    auto committed_status = gatherer.gatherMtpLinearKvCacheKernelBlockId(StreamGroups({stream, fresh_stream}), holder);
-    ASSERT_TRUE(committed_status.ok());
-    auto committed = std::move(committed_status.value());
-    EXPECT_EQ(toVec<int32_t>(committed.pending_patches), (std::vector<int32_t>{0, 0}));
-    EXPECT_EQ(toVec<int32_t>(committed.block_ids[0][0].narrow(0, 0, 4)), (std::vector<int32_t>{11, 12, 10, 13}));
 }
 
 TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {

@@ -51,8 +51,8 @@ void invokeMtpDispatchStatePrepare(const torch::Tensor& accept_len,
 inline constexpr int64_t MTP_LINEAR_BLOCK_PATCH_WIDTH = 4;
 
 // Round N: capture the final values produced by specUpdate's two ordered
-// LINEAR swaps using group_token_spans[group]. before/after, positions and
-// source_slots use [batch, group, 4]. source_slots records the folded permutation so
+// LINEAR swaps. before/after use [batch, group, 4], and positions uses
+// [batch, 4]. source_slots explicitly records the folded permutation so
 // duplicate values such as NULL_BLOCK_IDX remain unambiguous.
 void invokeMtpLinearKvCacheBlockPatchBuild(const torch::Tensor& block_ids,
                                            const torch::Tensor& group_types,
@@ -64,7 +64,7 @@ void invokeMtpLinearKvCacheBlockPatchBuild(const torch::Tensor& block_ids,
                                            torch::Tensor&       before_values,
                                            torch::Tensor&       after_values,
                                            torch::Tensor&       patch_valid,
-                                           const torch::Tensor& group_token_spans,
+                                           int32_t              seq_size_per_block,
                                            cudaStream_t         stream);
 
 // Round N+1: repair a fresh host snapshot with the saved final values. The

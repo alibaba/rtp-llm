@@ -75,6 +75,7 @@ struct KVCache {
         LayerKVCache layer_cache;
         layer_cache.layer_id = idx;
 
+        // Determine whether this layer is a full-attention layer.
         if (idx < 0 || static_cast<size_t>(idx) >= layer_group_types.size())
             throw std::runtime_error("Invalid layer index: " + std::to_string(idx));
         const auto layer  = static_cast<size_t>(idx);
@@ -91,13 +92,9 @@ struct KVCache {
             scale = kv_scale_base_by_layer[idx];
         }
 
-        const auto group_type = layer_group_types[layer];
-        // FULL and SWA both expose dense attention kernel pages. Their
-        // storage/transfer policies remain distinct (Page-RR vs replica).
-        const bool uses_kernel_pages =
-            group_type == rtp_llm::CacheGroupType::FULL || group_type == rtp_llm::CacheGroupType::SWA;
+        const bool is_full = layer_group_types[static_cast<size_t>(idx)] == rtp_llm::CacheGroupType::FULL;
 
-        if (!uses_kernel_pages) {
+        if (!is_full) {
             // Linear/SSM attention layer: return the raw cache tensor unchanged.
             // Its block-table row advances by the group span, which can be a
             // virtual checkpoint wider than the physical FULL-cache page.
@@ -271,9 +268,9 @@ struct KVCache {
 
 struct PyModelInitResources {
     std::optional<KVCache> kv_cache;
-    bool                   is_speculative              = false;
-    bool                   is_decode_role              = false;
-    int64_t                max_context_batch_size      = 1;
+    bool                   is_speculative         = false;
+    bool                   is_decode_role         = false;
+    int64_t                max_context_batch_size = 1;
     int64_t                max_decode_graph_batch_size = 1;
     std::vector<int>       decode_capture_batch_sizes;
 };
@@ -352,8 +349,8 @@ struct PyAttentionInputs {
     // Model-scoped fixed-address backing storage used while constructing
     // TokenSpeed MLA implementations for CUDA graph capture/replay.
     torch::Tensor cuda_graph_fmha_workspace;
-    bool          is_mtp_draft_update{false};
-    bool          is_prefill_chunk{false};
+    bool is_mtp_draft_update{false};
+    bool is_prefill_chunk{false};
     // True for the synthetic stream used to keep DP/EP collectives aligned.
     // Python models must not read or write request KV state for this stream.
     bool          is_fake_stream{false};

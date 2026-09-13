@@ -67,10 +67,6 @@ struct MallocInfo {
     // Lets the state machine feed the publish-time value instead of racing with the async worker.
     int incr_seq_len_override = -1;
 
-    // Initial PD destination allocation: Prefill supplies only the terminal
-    // LINEAR state for this token prefix, not its historical checkpoints.
-    int linear_prefix_load_tokens = 0;
-
     int incrSeqLen() const;
 };
 

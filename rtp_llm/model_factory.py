@@ -107,9 +107,8 @@ class ModelFactory:
     @staticmethod
     def _propose_parallelism_config(
         parallelism_config: ParallelismConfig,
-        model_type: str = "",
     ) -> ParallelismConfig:
-        """Copy target TP topology, excluding KTP and Eagle3 cache sharding."""
+        """Copy target parallelism while keeping the draft model out of KTP."""
 
         result = ParallelismConfig()
         for name in (
@@ -136,11 +135,6 @@ class ModelFactory:
             setattr(result, name, getattr(parallelism_config, name))
         result.ktp_size = 1
         result.ktp_rank = 0
-        if model_type == "kimi_k3_mla_swa_eagle3":
-            # Eagle3's physical SWA cache is replicated on every TP rank.
-            # The pybind struct assignment above copies PrefillCPConfig, so
-            # disabling draft placement does not mutate the target's FULL RR.
-            result.prefill_cp_config.kv_cache_sharded = False
         return result
 
     @staticmethod
@@ -230,7 +224,7 @@ class ModelFactory:
             propose_model_config.gen_num_per_cycle = model_config.gen_num_per_cycle
 
             propose_parallelism_config = ModelFactory._propose_parallelism_config(
-                engine_config.parallelism_config, model_type
+                engine_config.parallelism_config
             )
             gpt_model = model_cls.from_config(
                 model_config=propose_model_config,

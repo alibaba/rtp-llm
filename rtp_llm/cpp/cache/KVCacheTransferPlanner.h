@@ -94,9 +94,8 @@ std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_l
 
 // Restrict the regular cache-store plan to one incremental publication.
 // FULL groups publish only the supplied half-open logical-block range;
-// LINEAR groups publish their existing final-state entry and SWA groups their
-// retained tail pages only on a terminal publication, including retained pages
-// before the supplied range. This preserves the non-chunked transfer policy.
+// LINEAR groups publish their existing final-state entry only on a terminal
+// publication. Other hybrid group policies are deliberately unsupported.
 std::vector<CacheStoreBlockPair> buildIncrementalCacheStoreBlockPlan(size_t                        total_logical_blocks,
                                                                      size_t                        reuse_block_size,
                                                                      bool                          use_hybrid,
