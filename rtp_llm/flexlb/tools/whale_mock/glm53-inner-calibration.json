@@ -1,0 +1,75 @@
+{
+  "source": {
+    "application": "spectrum_c602deb6_GLM-5_3-Inner-Model",
+    "deployment": "l20a_bk",
+    "master_commit": "96890a10736b53dbb2cbb9af8f0f15739ebb3c16",
+    "master_config_file": "glm53-inner-master.json",
+    "physical_topology": {
+      "prefill_rows": 42,
+      "prefill_partitions_per_row": 2,
+      "prefill_dp": 1,
+      "decode_rows": 10,
+      "decode_partitions_per_row": 4,
+      "decode_dp": 16
+    },
+    "capacity_evidence": "P available tokens/blocks=512, total blocks=9244; D worker_status total_kv_cache=1893248, block size=64. Equivalent single pool per logical engine.",
+    "performance_status": "Initial aggregate calibration, not a fitted batch-dependent GPU model. Decode engine metric series unavailable in the queried window. Revalidate after deployment.",
+    "frontend_window_epoch_s": [
+      1789306380,
+      1789306980
+    ],
+    "frontend_window_means": {
+      "ft_output_token_length": 497.57210009803265,
+      "py_rtp_frontend_speculative_avg_accept_length": 3.3168581375013897,
+      "py_rtp_frontend_tpot_ms": 27.99339255746516,
+      "py_rtp_frontend_request_rt_ms": 6933.231384441552,
+      "py_rtp_frontend_ttft_ms": 696.9989326707462
+    },
+    "decode_step_method": "(mean request RT - mean TTFT) / (mean output length - 1) * mean accepted tokens per round, same 20s windows. Ratio of aggregates; no batch slope inferred.",
+    "eos_caveat": "Geometric mean is a starting point, capped by each unchanged request output limit; does not reproduce the full observed output distribution."
+  },
+  "bundle_overrides": {
+    "prefill": 42,
+    "decode": 160,
+    "mock_heap": "32g",
+    "block_size": 64,
+    "prefill_block_size": 512,
+    "decode_block_size": 64,
+    "prefill_kv_pool_blocks": 9244,
+    "decode_kv_pool_blocks": 29582,
+    "decode_max_concurrency": 32
+  },
+  "performance": {
+    "block_size": 64,
+    "sleep_scale": 1,
+    "jitter_pct": 0,
+    "prefill": {
+      "scale": 1,
+      "max_waiting_batches": 256,
+      "direct_batch_size_max": 1,
+      "max_batch_requests": 1
+    },
+    "decode": {
+      "scale": 1,
+      "tokens_per_step": 3.3168581375013897,
+      "step_base_ms": 41.65497487861821,
+      "step_per_running_ms": 0,
+      "eos": {
+        "enabled": true,
+        "distribution": "geometric",
+        "mean_tokens": 500,
+        "seed": 20260913
+      }
+    }
+  },
+  "master_env": {
+    "MOCK_BUNDLE_LEGACY_MASTER": "1"
+  },
+  "frontend_env": {
+    "RTP_LLM_MOCK_SCHEDULE_ONLY": "1",
+    "RTP_LLM_MOCK_NON_BATCH": "1",
+    "SEQ_SIZE_PER_BLOCK": "512",
+    "PREFILL_CP_KV_CACHE_SHARDED": "1",
+    "PREFILL_CP_SIZE": "8"
+  }
+}

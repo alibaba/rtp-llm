@@ -193,3 +193,9 @@ frontend 额外设置 `RTP_LLM_MOCK_NON_BATCH=1`，用现有 GenerateStreamCall 
 读取至真实终态，错误正常透传；不调用 FetchResponse，不修改请求输出上限。
 BATCH 仍仅返回 schedule acknowledgement；NON_BATCH 终态返回 inference_completed=true，
 两种模式的应答时延不能混作相同的 frontend TTFT。指标的逻辑实例用 engine/engine_port/dp_rank 区分。
+
+Inner 部署使用 `glm53-inner-calibration.json` 的独立规模、容量和性能初值，
+`FLEXLB_CONFIG` 则完整读取 `glm53-inner-master.json`。不要使用上面的旧 WLCB
+schema 3 profile。Inner 的 D 步时只是同窗前端 RT/输出长度/MTP 接受长度推导的
+初值，未拟合 batch 斜率；EOS 500 也需通过新部署的完成样本重新验证。
+删除遗留 `MOCK_EOS_CONFIG_JSON`，避免覆盖新 profile 中的 EOS。

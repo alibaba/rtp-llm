@@ -21,7 +21,13 @@ def run(args, cwd):
 
 def build(output, internal):
     spec = json.loads((ROOT / "legacy-master.json").read_text())
-    sha = subprocess.check_output(["git", "rev-parse", spec["source_commit"]], cwd=REPO, text=True).strip()
+    # CI checks out a shallow tree. rev-parse of a literal SHA does not prove
+    # the object exists; fetch that exact revision before archiving it.
+    revision = spec["source_commit"] + "^{commit}"
+    if subprocess.run(["git", "cat-file", "-e", revision], cwd=REPO,
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        run(["git", "fetch", "--depth=1", "origin", spec["source_commit"]], REPO)
+    sha = subprocess.check_output(["git", "rev-parse", "--verify", revision], cwd=REPO, text=True).strip()
     if sha != spec["source_commit"]:
         raise ValueError("legacy master source must be pinned by full SHA")
     with tempfile.TemporaryDirectory(prefix="legacy-master-") as directory:
