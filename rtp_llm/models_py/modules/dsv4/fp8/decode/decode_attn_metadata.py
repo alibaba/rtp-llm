@@ -616,14 +616,25 @@ def _build_start_pos_from_attention_inputs(
         is_target_verify = bool(getattr(attention_inputs, "is_target_verify", False))
         is_prefill = bool(getattr(attention_inputs, "is_prefill", False))
         # Target verify and MTP draft-prefill CUDA graph are both multi-token
-        # decode-shaped batches.  CudaGraphRunner copies prefix_lengths for
-        # prefill graph replay but leaves sequence_lengths at capture-time
-        # sentinel values, so prefix_lengths is the only valid first-token
-        # position source for those q_len > 1 paths.
+        # decode-shaped batches. Use the stream-ordered device metadata when
+        # available; graph backends can leave the legacy host mirrors untouched.
+        # Verify and draft-prefill positions come from prefix lengths, while
+        # normal decode's device sequence lengths include the next token.
         if is_target_verify or (is_prefill and q_len > 1):
-            start_pos = attention_inputs.prefix_lengths
+            start_pos = getattr(attention_inputs, "prefix_lengths_device", None)
+            if not isinstance(start_pos, torch.Tensor) or start_pos.numel() == 0:
+                start_pos = attention_inputs.prefix_lengths
         else:
-            start_pos = attention_inputs.sequence_lengths
+            sequence_lengths_plus_1 = getattr(
+                attention_inputs, "sequence_lengths_plus_1_device", None
+            )
+            if (
+                isinstance(sequence_lengths_plus_1, torch.Tensor)
+                and sequence_lengths_plus_1.numel() > 0
+            ):
+                start_pos = sequence_lengths_plus_1 - 1
+            else:
+                start_pos = attention_inputs.sequence_lengths
 
     start_pos = start_pos.to(device=device, dtype=torch.int32)
     # Cuda-graph capture/warmup can hand us sentinel prefix lengths near

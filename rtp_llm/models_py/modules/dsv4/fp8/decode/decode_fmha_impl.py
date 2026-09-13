@@ -83,6 +83,9 @@ class DSv4DecodeFmhaImplFP8:
     from stable addresses.
     """
 
+    # Replay preparation consumes device lengths and device block tables only.
+    cuda_graph_requires_host_metadata = False
+
     def __init__(
         self,
         config: DSv4DecodeFmhaImplConfigFP8,

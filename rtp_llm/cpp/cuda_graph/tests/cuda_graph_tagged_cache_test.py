@@ -1,5 +1,6 @@
 import copy
 import unittest
+from types import SimpleNamespace
 
 import torch
 
@@ -47,6 +48,46 @@ class TaggedSequenceLengthModel:
             )
         ).to(inputs.input_hiddens.dtype)
         return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+class TaggedMetadataConsumerModel:
+    def __init__(self, host_metadata: bool):
+        self.host_metadata = host_metadata
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        signature = torch.zeros((), device="cuda", dtype=torch.int32)
+
+        def prepare(tagged):
+            full = tagged["full"]
+            if self.host_metadata:
+                positions = (
+                    full.prefix_lengths
+                    if full.is_target_verify
+                    else full.sequence_lengths
+                )
+                blocks = sum(v.kv_cache_kernel_block_id.sum() for v in tagged.values())
+            else:
+                positions = (
+                    full.prefix_lengths_device
+                    if full.is_target_verify
+                    else full.sequence_lengths_plus_1_device - 1
+                )
+                blocks = sum(v.kv_cache_kernel_block_id_device.sum() for v in tagged.values())
+            signature.copy_((positions.sum() + blocks).remainder(97))
+
+        impl = SimpleNamespace(
+            signature=signature,
+            prepare_cuda_graph=prepare,
+            support_cuda_graph=lambda: True,
+        )
+        # Missing capability keeps the legacy host-consumer contract.
+        if not self.host_metadata:
+            impl.cuda_graph_requires_host_metadata = False
+        prepare(inputs.attention_inputs)
+        return impl
+
+    def forward(self, inputs, fmha_impl=None):
+        return PyModelOutputs(inputs.input_hiddens + fmha_impl.signature)
 
 
 def _tag_attention_inputs(
@@ -230,6 +271,62 @@ def _build_target_verify_inputs(
 
 
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    def test_graph_metadata_consumers_and_device_only_prepare(self) -> None:
+        for host_metadata in (True, False):
+            for target_verify in (False, True):
+                runner = CudaGraphRunner()
+                query_len = 5 if target_verify else 1
+                runner.init_decode(
+                    TaggedMetadataConsumerModel(host_metadata),
+                    HIDDEN_SIZE,
+                    1048576,
+                    TOKENS_PER_BLOCK,
+                    TOKENS_PER_BLOCK,
+                    [4],
+                    GROUP_TAGS,
+                    target_verify,
+                    query_len,
+                )
+                for batch_size, prefix_len in ((4, 11), (1, 1000000), (2, 524288)):
+                    with self.subTest(host=host_metadata, verify=target_verify, batch=batch_size):
+                        if target_verify:
+                            inputs = _build_target_verify_inputs(
+                                GROUP_TAGS, {"full": 2, "aux": 1},
+                                batch_size=batch_size, query_len=query_len,
+                                prefix_len=prefix_len,
+                            )
+                        else:
+                            inputs = _build_decode_inputs(
+                                GROUP_TAGS, {"full": 2, "aux": 1}, batch_size
+                            )
+                        tagged = inputs.attention_inputs
+                        for value in tagged.values():
+                            value.input_lengths = value.input_lengths.cuda()
+                            value.cu_seqlens = value.cu_seqlens_device
+                            value.kv_cache_kernel_block_id = value.kv_cache_kernel_block_id_device
+                            if target_verify:
+                                value.prefix_lengths = value.prefix_lengths.cuda()
+                            else:
+                                value.sequence_lengths = torch.full(
+                                    (batch_size,), prefix_len, device="cuda", dtype=torch.int32
+                                )
+                                value.sequence_lengths_plus_1_device = value.sequence_lengths + 1
+                        inputs.attention_inputs = tagged
+                        expected = (
+                            batch_size * prefix_len
+                            + sum(int(v.kv_cache_kernel_block_id_device.sum()) for v in tagged.values())
+                        ) % 97
+                        self.assertTrue(runner.canRun(inputs))
+                        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
+                            output = runner.forward(inputs)
+                        torch.cuda.synchronize()
+                        torch.testing.assert_close(
+                            output.hidden_states, torch.full_like(output.hidden_states, expected)
+                        )
+                        events = [event.name for event in profile.events()]
+                        waits = [name for name in events if "wait_host_mirror_d2h" in name]
+                        self.assertEqual(bool(waits), host_metadata, events)
+
     def _assert_replay_signature(
         self, runner: CudaGraphRunner, inputs: PyModelInputs, expected: int
     ) -> None:

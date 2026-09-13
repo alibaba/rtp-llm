@@ -81,6 +81,7 @@ public:
 #endif
     at::cuda::CUDAGraph graph_;
     CaptureMemoryHold   mem_hold_;
+    bool                requires_host_metadata_ = true;
 };
 
 class CudaGraphStreamLife {

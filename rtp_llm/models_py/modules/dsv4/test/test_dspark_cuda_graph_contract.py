@@ -194,6 +194,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         self.assertIsNotNone(metadata)
         self.assertEqual(metadata.sched_meta_cache, {})
         self.assertTrue(metadata.support_cuda_graph())
+        self.assertFalse(metadata.cuda_graph_requires_host_metadata)
         metadata.prepare_cuda_graph(None)
 
     def test_commit_write_uses_request_ids_positions_and_committed_ends(self) -> None:

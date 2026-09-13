@@ -65,6 +65,20 @@ bool streamAsyncReplayPrepEnabled() {
     return enabled;
 }
 
+bool requiresHostMetadata(py::handle impl) {
+    if (py::isinstance<py::dict>(impl)) {
+        for (auto item : py::reinterpret_borrow<py::dict>(impl)) {
+            if (requiresHostMetadata(item.second)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    // Backends must explicitly opt out; legacy CPU planners read pinned mirrors.
+    return !impl || impl.is_none() || !py::hasattr(impl, "cuda_graph_requires_host_metadata")
+           || py::cast<bool>(impl.attr("cuda_graph_requires_host_metadata"));
+}
+
 void callPrepareCudaGraph(py::object attn_pyobj, PyModelInputs& inputs) {
     if (!attn_pyobj || attn_pyobj.is_none()) {
         return;
@@ -257,6 +271,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     auto&      py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     auto       attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
     const bool has_tagged_cache = !inputs.attention_inputs_by_tag.empty();
+    const bool requires_host_metadata = graph_instances_[graph_idx].requires_host_metadata_;
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
     // Worst case here is ~8 contiguous + (1 + group_count) strided copies,
@@ -334,6 +349,13 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(fused_fill)");
         CudaGraphPrepareFillParams fill_params;
+        if (!is_prefill_cuda_graph_mode_) {
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device,
+                                          state.current_batch_size,
+                                          selected_graph_batch_size,
+                                          1);
+        }
         if (!has_tagged_cache) {
             addCudaGraphPrepareFillRegion(fill_params,
                                           py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device,
@@ -379,6 +401,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
     }
 #else
+    if (!is_prefill_cuda_graph_mode_) {
+        py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device
+            .slice(0, state.current_batch_size, selected_graph_batch_size).fill_(1);
+    }
     if (!has_tagged_cache) {
         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.fill_(0);
     } else {
@@ -491,7 +517,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // NOTE: we do H2H after D2D copies to let GPU finish the D2D copies as soon as possible,
     // so that the GPU can start the kernel launch as soon as possible.
 
-    {
+    if (requires_host_metadata) {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(host_mirror_copy)");
 
         // H2H copies (common to both modes)
@@ -585,6 +611,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         if (has_tagged_cache) {
             for (const auto& [tag, src_inputs] : inputs.attention_inputs_by_tag) {
                 auto& dst_inputs = py_model_inputs_.attention_inputs_by_tag.at(tag);
+                dst_inputs.kv_cache_kernel_block_id.fill_(0);
                 stridedCopyHost(src_inputs.kv_cache_kernel_block_id, dst_inputs.kv_cache_kernel_block_id);
             }
         }
@@ -1189,6 +1216,8 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     // WarmUp twice (params already prepared in attn impl __init__/create_params when instance was created)
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
+    graph_instances_[key].requires_host_metadata_ =
+        is_prefill_cuda_graph_mode_ || requiresHostMetadata(attn_pyobj);
     try {
         py_forward_method_(inputs, attn_pyobj);
         py_forward_method_(inputs, attn_pyobj);

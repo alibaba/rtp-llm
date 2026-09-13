@@ -270,6 +270,32 @@ def _ref_state_slots(
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for fused decode meta")
 class TestDecodeMetadataStartPos(unittest.TestCase):
+    def test_current_device_positions_override_stale_host_mirrors(self):
+        for q_len, is_prefill, target_verify in ((1, False, False), (5, True, True), (5, True, False)):
+            with self.subTest(q_len=q_len, target_verify=target_verify):
+                meta = _alloc(q_len=q_len, max_seq_len=1048576)
+                positions = _i32([0, 524288, 1000000, 1048576 - q_len])
+                attn = SimpleNamespace(
+                    is_prefill=is_prefill,
+                    is_target_verify=target_verify,
+                    sequence_lengths=torch.full((4,), 7, dtype=torch.int32),
+                    prefix_lengths=torch.full((4,), 9, dtype=torch.int32),
+                    prefix_lengths_device=positions,
+                    sequence_lengths_plus_1_device=positions + 1,
+                )
+                pointers = _ptr_snapshot(meta)
+                for delta in (0, -1):
+                    expected = torch.clamp(positions + delta, min=0)
+                    attn.prefix_lengths_device = expected
+                    attn.sequence_lengths_plus_1_device = expected + 1
+                    update_decode_metadata_in_place_fp8(meta, attn, forbid_realloc=True)
+                    torch.testing.assert_close(meta.start_pos, expected)
+                    torch.testing.assert_close(
+                        meta.position_ids.view(4, q_len),
+                        expected[:, None] + torch.arange(q_len, device="cuda", dtype=torch.int32),
+                    )
+                    self.assertEqual(_ptr_snapshot(meta), pointers)
+
     def test_in_place_update_writes_cuda_fused_path_without_realloc(self):
         meta = _alloc(q_len=1)
         ptrs = _ptr_snapshot(meta)

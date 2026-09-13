@@ -219,6 +219,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             return None
         return SimpleNamespace(
             sched_meta_cache={},
+            cuda_graph_requires_host_metadata=False,
             prepare_cuda_graph=lambda _attention_inputs: None,
             support_cuda_graph=lambda: True,
         )
