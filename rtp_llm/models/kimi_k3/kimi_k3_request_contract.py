@@ -5,6 +5,32 @@ from typing import AbstractSet, Any, NoReturn, Protocol, Sequence
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 
 
+def kimi_k3_pending_prompt_token_ids(tokenizer: Any, thinking: bool) -> list[int]:
+    """Encode the trusted open generation channel excluded from public usage."""
+    channel = "think" if thinking else "response"
+    # Use the native tokenizer's default special-token policy for XTML tags,
+    # as in K3 prompt rendering; do not pass HF-only encoding kwargs.
+    token_ids = tokenizer.encode(f"<|open|>{channel}<|sep|>")
+    if (
+        not isinstance(token_ids, list)
+        or not token_ids
+        or not all(isinstance(token_id, int) for token_id in token_ids)
+    ):
+        raise TypeError("Kimi K3 tokenizer.encode must return a non-empty List[int]")
+    return token_ids
+
+
+def kimi_k3_pending_prompt_token_count(tokenizer: Any, input_ids: list[int]) -> int:
+    """Exclude only an exact pending-channel suffix of a pre-tokenized prompt."""
+    if tokenizer is None or not input_ids:
+        return 0
+    for thinking in (False, True):
+        pending_ids = kimi_k3_pending_prompt_token_ids(tokenizer, thinking)
+        if input_ids[-len(pending_ids) :] == pending_ids:
+            return len(pending_ids)
+    return 0
+
+
 class _GenerationConfig(Protocol):
     temperature: Any
     top_p: Any
@@ -22,6 +48,13 @@ def _reject(name: str, value: Any, expected: str) -> NoReturn:
     raise FtRuntimeException(
         ExceptionType.INVALID_PARAMS,
         f"Kimi K3 requires {name} {expected}, got {value!r}",
+    )
+
+
+def _reject_n(value: Any) -> NoReturn:
+    raise FtRuntimeException(
+        ExceptionType.INVALID_PARAMS,
+        f"Range of n should be [1, 1], got {value!r}",
     )
 
 
@@ -44,13 +77,19 @@ def _reject_tool_history(detail: str) -> NoReturn:
     )
 
 
-def validate_kimi_k3_tool_history(messages: Sequence[Any]) -> None:
+def validate_kimi_k3_tool_history(
+    messages: Sequence[Any], *, allow_partial: bool = False
+) -> None:
     """Validate complete OpenAI tool-call turns before K3 prompt rendering.
 
     Tool results for one parallel assistant call may arrive in any order, but
     every result must match exactly one pending call before the conversation can
     advance.  The validator intentionally accepts either pydantic message models
     or their JSON dictionaries so both OpenAI and DashSc entrypoints can share it.
+
+    DashSc media payloads may omit text-only turns. With ``allow_partial``, check
+    the fields of the supplied calls/results without requiring complete pairing
+    across turns. The OpenAI renderer always validates the complete history.
     """
 
     seen_call_ids: set[str] = set()
@@ -60,7 +99,7 @@ def validate_kimi_k3_tool_history(messages: Sequence[Any]) -> None:
         role_value = _field(message, "role")
         role = getattr(role_value, "value", role_value)
 
-        if pending_call_ids and role != "tool":
+        if not allow_partial and pending_call_ids and role != "tool":
             pending = ", ".join(sorted(pending_call_ids))
             _reject_tool_history(
                 f"messages[{message_index}] advances the conversation before "
@@ -121,14 +160,14 @@ def validate_kimi_k3_tool_history(messages: Sequence[Any]) -> None:
                 _reject_tool_history(
                     f"messages[{message_index}].tool_call_id must be a non-empty string"
                 )
-            if tool_call_id not in pending_call_ids:
+            if not allow_partial and tool_call_id not in pending_call_ids:
                 _reject_tool_history(
                     f"messages[{message_index}].tool_call_id {tool_call_id!r} "
                     "does not match a pending assistant tool call"
                 )
-            pending_call_ids.remove(tool_call_id)
+            pending_call_ids.discard(tool_call_id)
 
-    if pending_call_ids:
+    if not allow_partial and pending_call_ids:
         pending = ", ".join(sorted(pending_call_ids))
         _reject_tool_history(f"missing tool results for: {pending}")
 
@@ -174,9 +213,9 @@ def apply_kimi_k3_request_contract(
         setattr(config, name, 0.0)
 
     if config.num_return_sequences not in (0, 1):
-        _reject("n", config.num_return_sequences, "to be 1")
+        _reject_n(config.num_return_sequences)
     if "n" in specified_fields and config.num_return_sequences != 1:
-        _reject("n", config.num_return_sequences, "to be 1")
+        _reject_n(config.num_return_sequences)
 
     config.in_think_mode = bool(thinking)
     if not thinking:

@@ -1,30 +1,39 @@
+import copy
 import json
 import logging
 import re
 import uuid
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Any, AsyncGenerator, Dict, List, Mapping, Optional
 
 import torch
 from typing_extensions import override
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.kimi_k3_request_contract import (
+from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
     apply_kimi_k3_request_contract,
+    kimi_k3_pending_prompt_token_ids,
     validate_kimi_k3_tool_history,
 )
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
     KimiK3VisionProcessor,
+    load_kimi_k3_media_config,
     preflight_kimi_k3_images,
     preflight_kimi_k3_images_async,
 )
 from rtp_llm.multimodal.multimodal_util import MMUrlType
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
+    ChatCompletionResponseStreamChoice,
+    ChatCompletionTokenLogprob,
+    ChoiceLogprobs,
     DeltaMessage,
     FinisheReason,
     FunctionCall,
     ToolCall,
+    UsageInfo,
     get_tool_choice_function_name,
 )
 from rtp_llm.openai.renderer_factory_register import register_renderer
@@ -33,12 +42,13 @@ from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
     OutputDelta,
     RenderedInputs,
+    RendererRequestContext,
     StreamResponseObject,
     StreamStatus,
+    ThinkStatus,
 )
 from rtp_llm.ops import MultimodalInput
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
-
 
 _GRAMMAR_RESPONSE_FORMAT_TYPES = {
     "json_object",
@@ -48,10 +58,23 @@ _GRAMMAR_RESPONSE_FORMAT_TYPES = {
     "structural_tag",
 }
 
+_K3_THINKING_EFFORTS = ("low", "high", "max")
 
-def _thinking_enabled(
+
+def _normalize_reasoning_effort(effort: str) -> str:
+    normalized = effort.strip().lower()
+    if normalized not in _K3_THINKING_EFFORTS:
+        allowed = ", ".join(repr(value) for value in _K3_THINKING_EFFORTS)
+        raise FtRuntimeException(
+            ExceptionType.INVALID_PARAMS,
+            f"'reasoning_effort' must be one of: {allowed}",
+        )
+    return normalized
+
+
+def _resolve_thinking_enabled(
     request: ChatCompletionRequest,
-    template_kwargs: Optional[Dict[str, Any]] = None,
+    template_kwargs: Mapping[str, Any],
 ) -> bool:
     """Resolve K3 thinking controls in request-precedence order."""
 
@@ -60,13 +83,10 @@ def _thinking_enabled(
     if request.enable_thinking is not None:
         return request.enable_thinking
 
-    kwargs = template_kwargs
-    if kwargs is None:
-        kwargs = request.get_chat_template_kwargs() or {}
-    if "thinking" in kwargs:
-        return bool(kwargs["thinking"])
-    if "enable_thinking" in kwargs:
-        return bool(kwargs["enable_thinking"])
+    if "thinking" in template_kwargs:
+        return bool(template_kwargs["thinking"])
+    if "enable_thinking" in template_kwargs:
+        return bool(template_kwargs["enable_thinking"])
 
     if request.thinking_budget == 0:
         return False
@@ -77,11 +97,7 @@ def _thinking_enabled(
         return False
 
     if isinstance(request.reasoning_effort, str):
-        effort = request.reasoning_effort.lower()
-        if effort == "none":
-            return False
-        if effort in {"low", "high", "max"}:
-            return True
+        return True
 
     response_format = request.response_format
     if response_format is not None and response_format.type != "text":
@@ -89,22 +105,123 @@ def _thinking_enabled(
     return True
 
 
-def _uses_reasoning_channel(request: ChatCompletionRequest) -> bool:
-    return _thinking_enabled(request)
+@dataclass(frozen=True)
+class K3RequestOptions(RendererRequestContext):
+    """Canonical, immutable view of K3 request-level rendering controls."""
+
+    thinking: bool
+    thinking_effort: Optional[str]
+    template_kwargs: Mapping[str, Any]
+
+    @classmethod
+    def from_request(cls, request: ChatCompletionRequest) -> "K3RequestOptions":
+        normalized_reasoning_effort = (
+            _normalize_reasoning_effort(request.reasoning_effort)
+            if request.reasoning_effort is not None
+            else None
+        )
+        template_kwargs: Dict[str, Any] = {}
+        if request.chat_template_kwargs:
+            template_kwargs.update(request.chat_template_kwargs)
+        if (
+            request.extra_configs is not None
+            and request.extra_configs.chat_template_kwargs is not None
+        ):
+            template_kwargs.update(request.extra_configs.chat_template_kwargs)
+
+        thinking = _resolve_thinking_enabled(request, template_kwargs)
+        effort: Optional[str] = None
+        if thinking:
+            if request.thinking is not None and request.thinking.effort is not None:
+                effort = request.thinking.effort
+            elif normalized_reasoning_effort is not None:
+                effort = normalized_reasoning_effort
+
+        template_kwargs["thinking"] = thinking
+        template_kwargs.pop("enable_thinking", None)
+        if effort is None:
+            template_kwargs.pop("thinking_effort", None)
+        else:
+            template_kwargs["thinking_effort"] = effort
+        return cls(
+            thinking=thinking,
+            thinking_effort=effort,
+            template_kwargs=MappingProxyType(template_kwargs),
+        )
+
+
+K3ChannelLogprobs = Dict[str, List[ChatCompletionTokenLogprob]]
+
+
+@dataclass(frozen=True)
+class K3ParsedDelta:
+    delta: DeltaMessage
+    channel_logprobs: K3ChannelLogprobs
+
+
+@dataclass
+class _K3OutputDelta(OutputDelta):
+    channel_logprobs: K3ChannelLogprobs = field(default_factory=dict)
+
+    @classmethod
+    def from_parsed(
+        cls, source: OutputDelta, parsed: K3ParsedDelta
+    ) -> "_K3OutputDelta":
+        return cls(
+            output_str=parsed.delta,
+            logprobs=None,
+            input_length=source.input_length,
+            output_length=source.output_length,
+            reuse_length=source.reuse_length,
+            multimodal_lengths=source.multimodal_lengths,
+            extra_outputs=source.extra_outputs,
+            channel_logprobs=parsed.channel_logprobs,
+        )
+
+
+@dataclass
+class _K3StreamResponseObject(StreamResponseObject):
+    channel_logprobs: Dict[int, K3ChannelLogprobs] = field(default_factory=dict)
+
+
+class K3XtmlDecoder:
+    """Own all per-choice XTML state and decode one engine delta atomically."""
+
+    def __init__(self, thinking: bool):
+        self.xtml_pending = ""
+        self.in_reasoning = thinking
+        self.emitted_reasoning = False
+        self.response_closed = False
+        self.tools_pending = ""
+        self.in_tools = False
+        self.tool_calls_seen = 0
+        self.logprobs_channel: Optional[str] = (
+            "reasoning_content" if thinking else "content"
+        )
+        self.logprobs_marker_pending: List[ChatCompletionTokenLogprob] = []
+
+    def decode(
+        self,
+        text: str,
+        logprobs: Optional[List[ChatCompletionTokenLogprob]],
+        *,
+        flush: bool = False,
+    ) -> K3ParsedDelta:
+        # Preserve token routing before text routing: both inputs describe the
+        # same engine delta, but have independent partial-marker buffers.
+        channel_logprobs = KimiK3Renderer._decode_logprobs_by_channel(
+            self, logprobs, flush=flush
+        )
+        delta = KimiK3Renderer._decode_xtml_text(self, text, flush=flush)
+        return K3ParsedDelta(delta=delta, channel_logprobs=channel_logprobs)
 
 
 class _KimiK3StreamStatus(StreamStatus):
     """Per-choice state for parsing K3's generated XTML channels."""
 
-    def __init__(self, request: ChatCompletionRequest):
+    def __init__(self, request: ChatCompletionRequest, *, thinking: bool):
         super().__init__(request)
-        self.xtml_pending = ""
-        self.in_reasoning = _uses_reasoning_channel(request)
-        self.response_closed = False
-        # XTML tools channel state (emitted after <|close|>response<|sep|>)
-        self.tools_pending = ""
-        self.in_tools = False
-        self.tool_calls_seen = 0
+        self.xtml_decoder = K3XtmlDecoder(thinking)
 
 
 class KimiK3Renderer(CustomChatRenderer):
@@ -119,7 +236,11 @@ class KimiK3Renderer(CustomChatRenderer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._image_processor = KimiK3VisionProcessor()
+        self._image_processor = KimiK3VisionProcessor(
+            load_kimi_k3_media_config(
+                self.ckpt_path or self.model_config.checkpoint_path
+            )
+        )
         self.add_extra_stop_words(["<|end_of_msg|>"])
 
     _TOOLS_OPEN = "<|open|>tools<|sep|>"
@@ -140,38 +261,86 @@ class KimiK3Renderer(CustomChatRenderer):
         r"(?P<body>.*?)<\|close\|>argument<\|sep\|>",
         re.S,
     )
+    _XTML_CONTROL_TOKENS = {"<|open|>", "<|close|>"}
+    _XTML_CHANNELS = {
+        "think": "reasoning_content",
+        "response": "content",
+        "tools": "tool_calls",
+        "message": None,
+    }
 
     @staticmethod
     def _pending_prompt_token_count(tokenizer, thinking: bool) -> int:
         """Count the open generation channel excluded from tokenism usage."""
 
-        channel = "think" if thinking else "response"
-        channel_ids = tokenizer.encode(channel, add_special_tokens=False)
-        if not isinstance(channel_ids, list) or not all(
-            isinstance(token_id, int) for token_id in channel_ids
-        ):
-            raise TypeError(
-                "Kimi K3 tokenizer.encode must return List[int], got "
-                f"{type(channel_ids).__name__}"
-            )
-        # The opening XTML tag is <|open|>, ordinary channel text, <|sep|>.
-        return len(channel_ids) + 2
+        return len(kimi_k3_pending_prompt_token_ids(tokenizer, thinking))
 
     @staticmethod
     def _subtract_pending_prompt_tokens(
         response: StreamResponseObject, pending_tokens: int
     ) -> None:
-        usage = response.usage
-        if usage is None:
-            return
-        if usage.prompt_tokens < pending_tokens or usage.total_tokens < pending_tokens:
-            raise RuntimeError(
-                "Kimi K3 usage is shorter than its pending generation prompt: "
-                f"prompt={usage.prompt_tokens}, total={usage.total_tokens}, "
-                f"pending={pending_tokens}"
-            )
-        usage.prompt_tokens -= pending_tokens
-        usage.total_tokens -= pending_tokens
+        def adjust(usage: Optional[UsageInfo]) -> None:
+            if usage is None:
+                return
+            if (
+                usage.prompt_tokens < pending_tokens
+                or usage.total_tokens < pending_tokens
+            ):
+                raise RuntimeError(
+                    "Kimi K3 usage is shorter than its pending generation prompt: "
+                    f"prompt={usage.prompt_tokens}, total={usage.total_tokens}, "
+                    f"pending={pending_tokens}"
+                )
+            usage.prompt_tokens -= pending_tokens
+            usage.total_tokens -= pending_tokens
+            details = usage.prompt_tokens_details
+            if details is not None and details.cached_tokens is not None:
+                details.cached_tokens = min(
+                    details.cached_tokens, usage.prompt_tokens
+                )
+
+        adjust(response.usage)
+        for choice in response.choices:
+            adjust(choice.usage)
+
+    @staticmethod
+    def _has_logprobs(choice: ChatCompletionResponseStreamChoice) -> bool:
+        logprobs = choice.logprobs
+        return logprobs is not None and bool(logprobs.content or logprobs.refusal)
+
+    @staticmethod
+    def _stream_includes_usage(request: ChatCompletionRequest) -> bool:
+        return bool(
+            request.stream_options is not None
+            and request.stream_options.include_usage
+        )
+
+    @override
+    async def _generate_final(
+        self,
+        buffer_list: List[StreamStatus],
+        request: ChatCompletionRequest,
+        think_status_list: List[ThinkStatus],
+    ) -> StreamResponseObject:
+        response = await super()._generate_final(
+            buffer_list, request, think_status_list
+        )
+        if response.usage is None:
+            return response
+        for choice, buffer, think_status in zip(
+            response.choices, buffer_list, think_status_list
+        ):
+            assert buffer.output is not None
+            choice_usage = copy.deepcopy(response.usage)
+            output_tokens = buffer.output.aux_info.output_len
+            choice_usage.completion_tokens = output_tokens
+            choice_usage.total_tokens = choice_usage.prompt_tokens + output_tokens
+            if choice_usage.completion_tokens_details is not None:
+                choice_usage.completion_tokens_details.reasoning_tokens = (
+                    think_status.think_tokens
+                )
+            choice.usage = choice_usage
+        return response
 
     @override
     async def generate_choice(
@@ -184,8 +353,7 @@ class KimiK3Renderer(CustomChatRenderer):
         request: ChatCompletionRequest,
         headers: Optional[Dict[str, str]] = None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
-        request_dict = self._request_dict(request)
-        thinking = bool(self._template_kwargs(request, request_dict)["thinking"])
+        thinking = bool(generate_config.in_think_mode)
         pending_tokens = self._pending_prompt_token_count(self.tokenizer, thinking)
         async for response in super().generate_choice(
             request_id,
@@ -200,6 +368,226 @@ class KimiK3Renderer(CustomChatRenderer):
             yield response
 
     @staticmethod
+    def _split_exclusive_delta(delta: DeltaMessage) -> List[DeltaMessage]:
+        """Split channel fields so each serialized delta carries only one."""
+
+        if delta.role is not None:
+            return [
+                delta.model_copy(
+                    update={"reasoning_content": None, "tool_calls": None}
+                )
+            ]
+
+        channel_fields = ("reasoning_content", "content", "tool_calls")
+        present = [
+            name
+            for name in channel_fields
+            if getattr(delta, name) is not None
+            and (name != "tool_calls" or bool(delta.tool_calls))
+        ]
+        if len(present) <= 1:
+            return [delta]
+
+        result = []
+        for name in present:
+            updates = {field: None for field in channel_fields}
+            updates[name] = getattr(delta, name)
+            split_delta = delta.model_copy(update=updates)
+            result.append(split_delta)
+            if name == "reasoning_content" and delta.reasoning_content:
+                result.append(DeltaMessage(reasoning_content=""))
+        return result
+
+    @classmethod
+    def _split_exclusive_response(
+        cls, response: StreamResponseObject
+    ) -> List[StreamResponseObject]:
+        """Turn a batched response into ordered single-choice channel frames."""
+
+        result = []
+        response_channel_logprobs = (
+            response.channel_logprobs
+            if isinstance(response, _K3StreamResponseObject)
+            else {}
+        )
+        for choice in response.choices:
+            channel_logprobs = response_channel_logprobs.get(choice.index)
+            emitted_logprob_channels = set()
+            is_final = choice.finish_reason is not None
+            deltas = (
+                [DeltaMessage()]
+                if is_final
+                else cls._split_exclusive_delta(choice.delta)
+            )
+            for index, delta in enumerate(deltas):
+                is_last_delta = index == len(deltas) - 1
+                split_choice = choice.model_copy(
+                    update={
+                        "delta": delta,
+                        "finish_reason": choice.finish_reason if is_last_delta else None,
+                        "usage": choice.usage if is_last_delta else None,
+                    }
+                )
+                split_response = StreamResponseObject(
+                    choices=[split_choice],
+                    usage=None,
+                    aux_info=response.aux_info if is_last_delta else None,
+                    extra_outputs=response.extra_outputs if is_last_delta else None,
+                )
+
+                if channel_logprobs is not None:
+                    present_channel = next(
+                        (
+                            name
+                            for name in ("reasoning_content", "content", "tool_calls")
+                            if getattr(delta, name) is not None
+                            and (name != "tool_calls" or bool(delta.tool_calls))
+                        ),
+                        None,
+                    )
+                    logprobs = (
+                        channel_logprobs.get(present_channel)
+                        if present_channel not in emitted_logprob_channels
+                        else None
+                    )
+                    if present_channel is not None:
+                        emitted_logprob_channels.add(present_channel)
+                    split_choice.logprobs = (
+                        ChoiceLogprobs(content=logprobs)
+                        if logprobs
+                        else None
+                    )
+                elif not is_last_delta:
+                    split_choice.logprobs = None
+                elif delta.role is not None or not cls._has_logprobs(split_choice):
+                    split_choice.logprobs = None
+                result.append(split_response)
+        return result
+
+    @classmethod
+    def _transition_logprobs_channel(
+        cls, control: str, tag: str
+    ) -> Optional[str]:
+        channel = cls._XTML_CHANNELS[tag]
+        if control == "<|open|>":
+            return channel
+        if tag == "think":
+            # A think budget can inject only the close marker; response text
+            # may follow without an explicit response-open marker.
+            return "content"
+        return None
+
+    @classmethod
+    def _split_logprobs_by_channel(
+        cls,
+        status: _KimiK3StreamStatus,
+        logprobs: Optional[List[ChatCompletionTokenLogprob]],
+        *,
+        flush: bool = False,
+    ) -> K3ChannelLogprobs:
+        return cls._decode_logprobs_by_channel(
+            status.xtml_decoder, logprobs, flush=flush
+        )
+
+    @classmethod
+    def _decode_logprobs_by_channel(
+        cls,
+        decoder: K3XtmlDecoder,
+        logprobs: Optional[List[ChatCompletionTokenLogprob]],
+        *,
+        flush: bool = False,
+    ) -> K3ChannelLogprobs:
+        """Drop XTML envelopes and group visible token probabilities by channel."""
+
+        result: Dict[str, List[ChatCompletionTokenLogprob]] = {
+            "reasoning_content": [],
+            "content": [],
+            "tool_calls": [],
+        }
+
+        def route(item: ChatCompletionTokenLogprob) -> None:
+            channel = decoder.logprobs_channel
+            if channel in ("reasoning_content", "content"):
+                result[channel].append(item)
+
+        def consume(item: ChatCompletionTokenLogprob) -> None:
+            pending = decoder.logprobs_marker_pending
+            if not pending:
+                if item.token in cls._XTML_CONTROL_TOKENS:
+                    pending.append(item)
+                elif item.token != "<|end_of_msg|>":
+                    route(item)
+                return
+
+            pending.append(item)
+            tokens = [entry.token for entry in pending]
+            if len(tokens) == 2 and tokens[1] not in cls._XTML_CHANNELS:
+                buffered = list(pending)
+                pending.clear()
+                route(buffered[0])
+                consume(buffered[1])
+                return
+            if len(tokens) < 3:
+                return
+            if tokens[2] == "<|sep|>":
+                decoder.logprobs_channel = cls._transition_logprobs_channel(
+                    tokens[0], tokens[1]
+                )
+                pending.clear()
+                return
+
+            buffered = list(pending)
+            pending.clear()
+            route(buffered[0])
+            for buffered_item in buffered[1:]:
+                consume(buffered_item)
+
+        for item in logprobs or []:
+            consume(item)
+
+        if flush and decoder.logprobs_marker_pending:
+            buffered = list(decoder.logprobs_marker_pending)
+            decoder.logprobs_marker_pending.clear()
+            for item in buffered:
+                route(item)
+        return result
+
+    @classmethod
+    def _format_stream_frames(
+        cls, response: StreamResponseObject, include_usage: bool
+    ) -> List[StreamResponseObject]:
+        final_usage = (
+            copy.deepcopy(response.usage)
+            if include_usage
+            and any(choice.finish_reason is not None for choice in response.choices)
+            else None
+        )
+        result = cls._split_exclusive_response(response)
+        if final_usage is not None and include_usage:
+            result.append(StreamResponseObject(choices=[], usage=final_usage))
+        return result
+
+    @override
+    async def render_response_stream(
+        self,
+        output_generator,
+        request: ChatCompletionRequest,
+        generate_config: GenerateConfig,
+    ) -> AsyncGenerator[StreamResponseObject, None]:
+        """Serialize mixed XTML channels as consecutive OpenAI stream frames."""
+
+        async for response in super().render_response_stream(
+            output_generator, request, generate_config
+        ):
+            if not generate_config.is_streaming:
+                yield response
+                continue
+            for split_response in self._format_stream_frames(
+                response, self._stream_includes_usage(request)
+            ):
+                yield split_response
+
+    @staticmethod
     def _split_marker_prefix(text: str, marker: str) -> tuple[str, str]:
         """Keep the longest suffix that may be a split XTML marker."""
 
@@ -212,6 +600,12 @@ class KimiK3Renderer(CustomChatRenderer):
     @classmethod
     def _parse_xtml_delta(
         cls, status: _KimiK3StreamStatus, text: str, flush: bool = False
+    ) -> DeltaMessage:
+        return cls._decode_xtml_text(status.xtml_decoder, text, flush=flush)
+
+    @classmethod
+    def _decode_xtml_text(
+        cls, decoder: K3XtmlDecoder, text: str, flush: bool = False
     ) -> DeltaMessage:
         """Split K3 reasoning/content channels and remove their XTML envelope.
 
@@ -232,52 +626,68 @@ class KimiK3Renderer(CustomChatRenderer):
         buffered across streaming chunks.
         """
 
-        if status.response_closed:
-            tool_calls = cls._parse_tools_delta(status, text, flush)
-            return DeltaMessage(reasoning_content="", content="", tool_calls=tool_calls)
+        if decoder.response_closed:
+            tool_calls = cls._parse_tools_delta(decoder, text, flush)
+            return DeltaMessage(tool_calls=tool_calls)
 
         think_to_response = cls._THINK_TO_RESPONSE
         response_closure = cls._RESPONSE_CLOSE
-        combined = status.xtml_pending + text
-        status.xtml_pending = ""
+        combined = decoder.xtml_pending + text
+        decoder.xtml_pending = ""
         reasoning = ""
         content = ""
         tool_calls: Optional[List[ToolCall]] = None
+        saw_transition = False
 
-        if status.in_reasoning:
+        if decoder.in_reasoning:
             transition_at = combined.find(think_to_response)
             if transition_at < 0:
                 if flush:
                     reasoning = combined
                 else:
-                    reasoning, status.xtml_pending = cls._split_marker_prefix(
+                    reasoning, decoder.xtml_pending = cls._split_marker_prefix(
                         combined, think_to_response
                     )
-                return DeltaMessage(reasoning_content=reasoning, content="")
+                if reasoning:
+                    decoder.emitted_reasoning = True
+                return DeltaMessage(reasoning_content=reasoning or None)
             reasoning = combined[:transition_at]
             combined = combined[transition_at + len(think_to_response) :]
-            status.in_reasoning = False
+            decoder.in_reasoning = False
+            saw_transition = True
+            if reasoning:
+                decoder.emitted_reasoning = True
 
         closure_at = combined.find(response_closure)
         if closure_at >= 0:
             content = combined[:closure_at]
-            status.response_closed = True
+            decoder.response_closed = True
             remainder = combined[closure_at + len(response_closure) :]
-            tool_calls = cls._parse_tools_delta(status, remainder, flush)
+            tool_calls = cls._parse_tools_delta(decoder, remainder, flush)
         elif flush:
             content = combined
         else:
-            content, status.xtml_pending = cls._split_marker_prefix(
+            content, decoder.xtml_pending = cls._split_marker_prefix(
                 combined, response_closure
             )
 
+        if content:
+            content_value: Optional[str] = content
+        else:
+            content_value = None
         return DeltaMessage(
-            reasoning_content=reasoning, content=content, tool_calls=tool_calls
+            reasoning_content=(
+                reasoning
+                if reasoning
+                else "" if saw_transition and decoder.emitted_reasoning else None
+            ),
+            content=content_value,
+            tool_calls=tool_calls,
         )
 
     @classmethod
     def _parse_tools_delta(
-        cls, status: _KimiK3StreamStatus, text: str, flush: bool = False
+        cls, decoder: K3XtmlDecoder, text: str, flush: bool = False
     ) -> Optional[List[ToolCall]]:
         """Buffer the XTML tools channel and emit complete tool calls.
 
@@ -285,32 +695,32 @@ class KimiK3Renderer(CustomChatRenderer):
         the stream flushes) and parse the whole block at once.
         """
 
-        status.tools_pending += text
-        buf = status.tools_pending
+        decoder.tools_pending += text
+        buf = decoder.tools_pending
 
-        if not status.in_tools:
+        if not decoder.in_tools:
             open_at = buf.find(cls._TOOLS_OPEN)
             if open_at < 0:
                 if flush:
                     # Stream ended without a tools channel; drop leftovers
                     # (e.g. stray channel tokens must not surface as content).
-                    status.tools_pending = ""
+                    decoder.tools_pending = ""
                 return None
-            status.in_tools = True
+            decoder.in_tools = True
             buf = buf[open_at + len(cls._TOOLS_OPEN) :]
 
         close_at = buf.find(cls._TOOLS_CLOSE)
         if close_at < 0 and not flush:
-            status.tools_pending = buf
+            decoder.tools_pending = buf
             return None
         block = buf[:close_at] if close_at >= 0 else buf
-        status.tools_pending = (
+        decoder.tools_pending = (
             buf[close_at + len(cls._TOOLS_CLOSE) :] if close_at >= 0 else ""
         )
 
         calls = cls._parse_tools_block(block)
         if calls:
-            status.tool_calls_seen += len(calls)
+            decoder.tool_calls_seen += len(calls)
         return calls or None
 
     @staticmethod
@@ -360,10 +770,15 @@ class KimiK3Renderer(CustomChatRenderer):
         return calls
 
     @override
-    async def _create_status_list(
-        self, n: int, request: ChatCompletionRequest
+    async def _create_response_status_list(
+        self,
+        n: int,
+        request: ChatCompletionRequest,
+        enable_think_mode: bool,
     ) -> List[StreamStatus]:
-        return [_KimiK3StreamStatus(request) for _ in range(n)]
+        return [
+            _KimiK3StreamStatus(request, thinking=enable_think_mode) for _ in range(n)
+        ]
 
     @override
     async def _update_single_status(
@@ -386,23 +801,62 @@ class KimiK3Renderer(CustomChatRenderer):
         if isinstance(status, _KimiK3StreamStatus) and isinstance(
             delta.output_str, str
         ):
-            delta.output_str = self._parse_xtml_delta(
-                status,
+            flush = status.finish_reason is not None
+            parsed = status.xtml_decoder.decode(
                 delta.output_str,
-                flush=status.finish_reason is not None,
+                delta.logprobs,
+                flush=flush,
             )
             # The engine only knows stop/length; report tool_calls when the
             # tools channel produced at least one call.
             if (
                 status.finish_reason == FinisheReason.stop
-                and status.tool_calls_seen > 0
+                and status.xtml_decoder.tool_calls_seen > 0
             ):
                 status.finish_reason = FinisheReason.tool_calls
+            return _K3OutputDelta.from_parsed(delta, parsed)
         return delta
 
     @override
-    def in_think_mode(self, request: ChatCompletionRequest) -> bool:
-        return _uses_reasoning_channel(request)
+    async def _generate_stream_response(
+        self, items: List[OutputDelta], think_status_list: List[ThinkStatus]
+    ) -> StreamResponseObject:
+        response = await super()._generate_stream_response(items, think_status_list)
+        channel_logprobs = {}
+        for item, choice, think_status in zip(
+            items, response.choices, think_status_list
+        ):
+            if not isinstance(item, _K3OutputDelta):
+                continue
+            item_logprobs = item.channel_logprobs
+            if think_status.is_streaming:
+                channel_logprobs[choice.index] = item_logprobs
+                choice.logprobs = None
+            else:
+                content_logprobs = item_logprobs.get("content")
+                choice.logprobs = (
+                    ChoiceLogprobs(content=content_logprobs)
+                    if content_logprobs
+                    else None
+                )
+        return _K3StreamResponseObject(
+            choices=response.choices,
+            usage=response.usage,
+            aux_info=response.aux_info,
+            extra_outputs=response.extra_outputs,
+            channel_logprobs=channel_logprobs,
+        )
+
+    @override
+    def _response_thinking_enabled(
+        self,
+        request: ChatCompletionRequest,
+        generate_config: GenerateConfig,
+    ) -> bool:
+        del request
+        # apply_chat_completion_constraints resolves the request once and stores
+        # the canonical mode on GenerateConfig before generation starts.
+        return bool(generate_config.in_think_mode)
 
     @override
     def should_process_think(self, request: ChatCompletionRequest) -> bool:
@@ -565,9 +1019,10 @@ class KimiK3Renderer(CustomChatRenderer):
                 response_format = json.loads(response_format)
             except ValueError:
                 return True
-        return not isinstance(response_format, dict) or response_format.get(
-            "type"
-        ) in _GRAMMAR_RESPONSE_FORMAT_TYPES
+        return (
+            not isinstance(response_format, dict)
+            or response_format.get("type") in _GRAMMAR_RESPONSE_FORMAT_TYPES
+        )
 
     @classmethod
     def _grammar_constraint_fields(cls, config: GenerateConfig) -> List[str]:
@@ -604,29 +1059,9 @@ class KimiK3Renderer(CustomChatRenderer):
 
     @staticmethod
     def _template_kwargs(
-        request: ChatCompletionRequest, request_dict: Dict[str, Any]
+        options: K3RequestOptions, request_dict: Dict[str, Any]
     ) -> Dict[str, Any]:
-        kwargs: Dict[str, Any] = {}
-        if request.chat_template_kwargs:
-            kwargs.update(request.chat_template_kwargs)
-        if (
-            request.extra_configs is not None
-            and request.extra_configs.chat_template_kwargs is not None
-        ):
-            kwargs.update(request.extra_configs.chat_template_kwargs)
-
-        kwargs["thinking"] = _thinking_enabled(request, kwargs)
-        kwargs.pop("enable_thinking", None)
-
-        if request.thinking is not None and request.thinking.effort is not None:
-            kwargs["thinking_effort"] = request.thinking.effort
-        elif (
-            request.reasoning_effort is not None
-            and request.reasoning_effort.lower() != "none"
-        ):
-            kwargs["thinking_effort"] = request.reasoning_effort
-        else:
-            kwargs.pop("thinking_effort", None)
+        kwargs = dict(options.template_kwargs)
         if request_dict.get("tool_choice") is not None:
             kwargs["tool_choice"] = request_dict["tool_choice"]
         if request_dict.get("response_format") is not None:
@@ -672,7 +1107,7 @@ class KimiK3Renderer(CustomChatRenderer):
 
     def _render_preflighted(
         self,
-        request: ChatCompletionRequest,
+        options: K3RequestOptions,
         request_dict: Dict[str, Any],
         messages: List[Dict[str, Any]],
         mm_input: PromptWithMMInput,
@@ -684,7 +1119,7 @@ class KimiK3Renderer(CustomChatRenderer):
             for width, height in metadata
         ]
         tools = self._tools(request_dict)
-        template_kwargs = self._template_kwargs(request, request_dict)
+        template_kwargs = self._template_kwargs(options, request_dict)
 
         input_ids = self.tokenizer.apply_chat_template(
             messages,
@@ -704,18 +1139,18 @@ class KimiK3Renderer(CustomChatRenderer):
             input_urls=mm_input.urls,
             input_urls_type=mm_input.mm_types,
             input_tensors=tensors,
+            renderer_context=options,
         )
 
     @override
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         validate_kimi_k3_tool_history(request.messages)
+        options = K3RequestOptions.from_request(request)
         request_dict = self._request_dict(request)
         messages, mm_input = self._collect_and_rewrite(request_dict["messages"])
-        tensors, metadata = preflight_kimi_k3_images(
-            mm_input.urls, self.vit_config.download_headers
-        )
+        tensors, metadata = preflight_kimi_k3_images(mm_input.urls, self.vit_config)
         return self._render_preflighted(
-            request,
+            options,
             request_dict,
             messages,
             mm_input,
@@ -724,17 +1159,16 @@ class KimiK3Renderer(CustomChatRenderer):
         )
 
     @override
-    async def render_chat_async(
-        self, request: ChatCompletionRequest
-    ) -> RenderedInputs:
+    async def render_chat_async(self, request: ChatCompletionRequest) -> RenderedInputs:
         validate_kimi_k3_tool_history(request.messages)
+        options = K3RequestOptions.from_request(request)
         request_dict = self._request_dict(request)
         messages, mm_input = self._collect_and_rewrite(request_dict["messages"])
         tensors, metadata = await preflight_kimi_k3_images_async(
-            mm_input.urls, self.vit_config.download_headers
+            mm_input.urls, self.vit_config
         )
         return self._render_preflighted(
-            request,
+            options,
             request_dict,
             messages,
             mm_input,
@@ -746,7 +1180,31 @@ class KimiK3Renderer(CustomChatRenderer):
     def apply_chat_completion_constraints(
         self, request: ChatCompletionRequest, generate_config: GenerateConfig
     ) -> None:
-        thinking = _thinking_enabled(request)
+        options = K3RequestOptions.from_request(request)
+        self._apply_chat_completion_constraints_with_options(
+            request, generate_config, options
+        )
+
+    @override
+    def apply_rendered_chat_completion_constraints(
+        self,
+        request: ChatCompletionRequest,
+        generate_config: GenerateConfig,
+        rendered_inputs: RenderedInputs,
+    ) -> None:
+        options = rendered_inputs.renderer_context
+        if not isinstance(options, K3RequestOptions):
+            raise RuntimeError("Kimi K3 rendered inputs are missing request options")
+        self._apply_chat_completion_constraints_with_options(
+            request, generate_config, options
+        )
+
+    def _apply_chat_completion_constraints_with_options(
+        self,
+        request: ChatCompletionRequest,
+        generate_config: GenerateConfig,
+        options: K3RequestOptions,
+    ) -> None:
         specified_fields = {
             name
             for name in request.model_fields_set
@@ -765,7 +1223,7 @@ class KimiK3Renderer(CustomChatRenderer):
         apply_kimi_k3_request_contract(
             generate_config,
             specified_fields=specified_fields,
-            thinking=thinking,
+            thinking=options.thinking,
         )
 
         structural_tag = self._build_tool_call_structural_tag(request)
@@ -783,7 +1241,9 @@ class KimiK3Renderer(CustomChatRenderer):
                 structural_tag, ensure_ascii=False, separators=(",", ":")
             )
 
-        if generate_config.in_think_mode and self._grammar_constraint_fields(generate_config):
+        if generate_config.in_think_mode and self._grammar_constraint_fields(
+            generate_config
+        ):
             boundary_ids = self.tokenizer.encode(
                 self._THINK_TO_RESPONSE, add_special_tokens=False
             )

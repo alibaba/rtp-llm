@@ -21,6 +21,7 @@ from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
+    build_kimi_k3_multimodal_tokens,
     build_think_runtime,
 )
 from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
@@ -560,6 +561,9 @@ class DashScApp:
                         env_terminate_id if env_terminate_id > 0 else None
                     ),
                 )
+                kimi_k3_multimodal_tokens = build_kimi_k3_multimodal_tokens(
+                    base_tok, model_config
+                )
                 servicer = DashScInferenceServicer(
                     backend_visitor=backend_visitor,
                     ip=self.server_config.ip,
@@ -571,7 +575,8 @@ class DashScApp:
                     generate_env_config=self.py_env_configs.generate_env_config,
                     think_runtime=think_runtime,
                     model_type=model_config.model_type,
-                    mm_download_headers=self.py_env_configs.vit_config.download_headers,
+                    kimi_k3_multimodal_tokens=kimi_k3_multimodal_tokens,
+                    vit_config=self.py_env_configs.vit_config,
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
                 )

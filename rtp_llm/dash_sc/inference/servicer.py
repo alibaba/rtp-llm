@@ -27,10 +27,7 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.kimi_k3_request_contract import (
-    apply_kimi_k3_request_contract,
-    validate_kimi_k3_tool_history,
-)
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
@@ -66,6 +63,11 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
+from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
+    apply_kimi_k3_request_contract,
+    kimi_k3_pending_prompt_token_count,
+    validate_kimi_k3_tool_history,
+)
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
     KimiK3VisionProcessor,
     preflight_kimi_k3_images_async,
@@ -91,8 +93,14 @@ _EMPTY_THINK_BODY = "\n"
 _DEFAULT_TERMINATE_TOKEN_ID = 1
 _INT32_MAX = 2_147_483_647
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
-_KIMI_K3_IMAGE_PLACEHOLDER = "<|kimi_image_placeholder|>"
-_KIMI_K3_MEDIA_CONTENT = "<|media_content|>"
+
+
+@dataclass(frozen=True)
+class _KimiK3MultimodalTokens:
+    """Checkpoint-derived K3 multimodal tokens resolved once at startup."""
+
+    image_placeholder_ids: tuple[int, ...]
+    media_placeholder_token_id: int
 
 
 def _build_mm_inputs(
@@ -168,7 +176,8 @@ async def _prepare_multimodal_request(
     *,
     tokenizer: Any,
     is_kimi_k3: bool = False,
-    download_headers: str = "",
+    kimi_k3_multimodal_tokens: Optional[_KimiK3MultimodalTokens] = None,
+    vit_config: Optional[VitConfig] = None,
 ) -> tuple[list[int], list]:
     """Expand K3 chat-template placeholders and build backend multimodal inputs."""
     mm_parts = parse_multimodal_parts_from_request(request)
@@ -185,20 +194,16 @@ async def _prepare_multimodal_request(
         )
 
     urls = [part.url for part in mm_parts]
-    placeholder_ids = _encode_kimi_k3_prompt(tokenizer, _KIMI_K3_IMAGE_PLACEHOLDER)
-    media_content_ids = _encode_kimi_k3_prompt(tokenizer, _KIMI_K3_MEDIA_CONTENT)
-    if not placeholder_ids or not media_content_ids:
+    tokens = kimi_k3_multimodal_tokens
+    if tokens is None or not tokens.image_placeholder_ids:
         raise FtRuntimeException(
             ExceptionType.MM_WRONG_FORMAT_ERROR,
-            "Kimi K3 image markers could not be tokenized",
+            "Kimi K3 multimodal tokens are not configured",
         )
 
-    placeholder_offsets = _find_token_sequence_offsets(
-        input_ids_list, placeholder_ids
-    )
-    expanded_count = len(
-        _find_token_sequence_offsets(input_ids_list, media_content_ids)
-    )
+    placeholder_ids = list(tokens.image_placeholder_ids)
+    placeholder_offsets = _find_token_sequence_offsets(input_ids_list, placeholder_ids)
+    expanded_count = input_ids_list.count(tokens.media_placeholder_token_id)
     if placeholder_offsets:
         if expanded_count or len(placeholder_offsets) != len(urls):
             raise FtRuntimeException(
@@ -215,7 +220,7 @@ async def _prepare_multimodal_request(
 
     try:
         tensors, sizes = await preflight_kimi_k3_images_async(
-            urls, download_headers
+            urls, vit_config or VitConfig()
         )
     except ValueError as error:
         raise FtRuntimeException(
@@ -242,6 +247,56 @@ async def _prepare_multimodal_request(
         expanded_ids.extend(input_ids_list[cursor:])
 
     return expanded_ids, _build_mm_inputs(mm_parts, tensors)
+
+
+@dataclass(frozen=True)
+class _KimiK3PreEnqueue:
+    """K3-only values resolved before the shared DashSc enqueue path."""
+
+    input_ids: list[int]
+    mm_inputs: list
+    pending_prompt_tokens: int
+
+    def apply_sampling_contract(
+        self, generate_config: GenerateConfig, sampling: SamplingParams
+    ) -> None:
+        apply_kimi_k3_request_contract(
+            generate_config,
+            specified_fields=sampling.specified_fields,
+            thinking=bool(getattr(generate_config, "in_think_mode", False)),
+        )
+
+
+async def _prepare_kimi_k3_pre_enqueue(
+    request: Any,
+    input_ids: list[int],
+    mm_inputs: Optional[list],
+    *,
+    tokenizer: Any,
+    multimodal_tokens: Optional[_KimiK3MultimodalTokens],
+    vit_config: Optional[VitConfig],
+) -> _KimiK3PreEnqueue:
+    messages = parse_messages_from_request(request)
+    if messages is not None:
+        validate_kimi_k3_tool_history(messages, allow_partial=True)
+
+    if mm_inputs is None:
+        input_ids, mm_inputs = await _prepare_multimodal_request(
+            request,
+            input_ids,
+            tokenizer=tokenizer,
+            is_kimi_k3=True,
+            kimi_k3_multimodal_tokens=multimodal_tokens,
+            vit_config=vit_config,
+        )
+
+    return _KimiK3PreEnqueue(
+        input_ids=input_ids,
+        mm_inputs=mm_inputs,
+        pending_prompt_tokens=kimi_k3_pending_prompt_token_count(
+            _hf_tokenizer(tokenizer), input_ids
+        ),
+    )
 
 
 def _exception_metric_code(error_code: Any) -> str:
@@ -357,6 +412,37 @@ def _encode_kimi_k3_prompt(tokenizer: Any, text: str) -> list[int]:
     if hf_tok is None or not text:
         return []
     return list(hf_tok.encode(text))
+
+
+def build_kimi_k3_multimodal_tokens(
+    tokenizer: Any, model_config: Any
+) -> Optional[_KimiK3MultimodalTokens]:
+    """Build the immutable K3 multimodal token snapshot from checkpoint config."""
+    model_type = str(getattr(model_config, "model_type", "") or "")
+    if model_type.replace("-", "_").lower() != "kimi_k3":
+        return None
+
+    mm_params = getattr(model_config, "mm_related_params", None)
+    special_tokens = getattr(mm_params, "special_tokens", None) or {}
+    special_token_ids = getattr(mm_params, "special_token_ids", None) or {}
+    image_placeholder = special_tokens.get("image_placeholder")
+    media_placeholder_token_id = special_token_ids.get("image_token_index")
+    if image_placeholder is None and media_placeholder_token_id is None:
+        return None
+    if not isinstance(image_placeholder, str) or not image_placeholder:
+        raise ValueError("Kimi K3 image_placeholder is missing from model config")
+    if media_placeholder_token_id is None:
+        raise ValueError(
+            "Kimi K3 media_placeholder_token_id is missing from model config"
+        )
+
+    image_placeholder_ids = tuple(_encode_kimi_k3_prompt(tokenizer, image_placeholder))
+    if not image_placeholder_ids:
+        raise ValueError("Kimi K3 image_placeholder could not be tokenized")
+    return _KimiK3MultimodalTokens(
+        image_placeholder_ids=image_placeholder_ids,
+        media_placeholder_token_id=int(media_placeholder_token_id),
+    )
 
 
 def _is_deepseek_v4(model_type: Optional[str]) -> bool:
@@ -672,7 +758,8 @@ async def iter_real_model_stream_infer(
     access_agg: Any = None,
     mm_inputs: Optional[list] = None,
     is_kimi_k3: bool = False,
-    mm_download_headers: str = "",
+    kimi_k3_multimodal_tokens: Optional[_KimiK3MultimodalTokens] = None,
+    vit_config: Optional[VitConfig] = None,
     yield_access_stats: bool = False,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
@@ -717,18 +804,30 @@ async def iter_real_model_stream_infer(
     should_echo = bool(matched_echo_ids)
     echoed = False
     try:
+        kimi_k3_pre_enqueue: Optional[_KimiK3PreEnqueue] = None
         if is_kimi_k3:
-            messages = parse_messages_from_request(request)
-            if messages is not None:
-                validate_kimi_k3_tool_history(messages)
-        if mm_inputs is None:
+            kimi_k3_pre_enqueue = await _prepare_kimi_k3_pre_enqueue(
+                request,
+                input_ids_list,
+                mm_inputs,
+                tokenizer=tokenizer,
+                multimodal_tokens=kimi_k3_multimodal_tokens,
+                vit_config=vit_config,
+            )
+            input_ids_list = kimi_k3_pre_enqueue.input_ids
+            mm_inputs = kimi_k3_pre_enqueue.mm_inputs
+        elif mm_inputs is None:
             input_ids_list, mm_inputs = await _prepare_multimodal_request(
                 request,
                 input_ids_list,
                 tokenizer=tokenizer,
-                is_kimi_k3=is_kimi_k3,
-                download_headers=mm_download_headers,
+                vit_config=vit_config,
             )
+        pending_prompt_tokens = (
+            kimi_k3_pre_enqueue.pending_prompt_tokens
+            if kimi_k3_pre_enqueue is not None
+            else 0
+        )
         generate_config = sampling.to_generate_config(other=other)
         generate_config.trace_id = trace_str
         if generate_env_config is not None:
@@ -756,12 +855,8 @@ async def iter_real_model_stream_infer(
         ):
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
         _apply_request_overrides(generate_config, sampling, other, runtime)
-        if is_kimi_k3:
-            apply_kimi_k3_request_contract(
-                generate_config,
-                specified_fields=sampling.specified_fields,
-                thinking=bool(getattr(generate_config, "in_think_mode", False)),
-            )
+        if kimi_k3_pre_enqueue is not None:
+            kimi_k3_pre_enqueue.apply_sampling_contract(generate_config, sampling)
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list
             if existing:
@@ -899,6 +994,7 @@ async def iter_real_model_stream_infer(
                         go=go,
                         request_log_tag=tag,
                         request_input_ids=input_ids_list,
+                        pending_prompt_tokens=pending_prompt_tokens,
                         return_input_ids=other.return_input_ids,
                         is_streaming=is_streaming,
                         generate_config=generate_config,
@@ -932,6 +1028,7 @@ async def iter_real_model_stream_infer(
                         go=go,
                         request_log_tag=tag,
                         request_input_ids=input_ids_list,
+                        pending_prompt_tokens=pending_prompt_tokens,
                         return_input_ids=other.return_input_ids,
                         is_streaming=is_streaming,
                         generate_config=generate_config,
@@ -980,6 +1077,7 @@ async def iter_real_model_stream_infer(
                 go=go,
                 request_log_tag=tag,
                 request_input_ids=input_ids_list,
+                pending_prompt_tokens=pending_prompt_tokens,
                 return_input_ids=other.return_input_ids,
                 is_streaming=is_streaming,
                 generate_config=generate_config,
@@ -1335,7 +1433,8 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         generate_env_config: Any = None,
         think_runtime: Optional[_ThinkRuntime] = None,
         model_type: Optional[str] = None,
-        mm_download_headers: str = "",
+        kimi_k3_multimodal_tokens: Optional[_KimiK3MultimodalTokens] = None,
+        vit_config: Optional[VitConfig] = None,
         rank_id: Optional[int] = None,
         repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
     ):
@@ -1351,10 +1450,9 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         )
         self._tokenizer = tokenizer
         self._generate_env_config = generate_env_config
-        self._is_kimi_k3 = (
-            str(model_type or "").replace("-", "_").lower() == "kimi_k3"
-        )
-        self._mm_download_headers = mm_download_headers
+        self._is_kimi_k3 = str(model_type or "").replace("-", "_").lower() == "kimi_k3"
+        self._kimi_k3_multimodal_tokens = kimi_k3_multimodal_tokens
+        self._vit_config = vit_config or VitConfig()
         # Empty runtime is a safe default — phase-2 disabled, all dashllm limit
         # params null. Production callers (``DashScApp``) pre-build via
         # ``build_think_runtime`` so the per-request hot path is allocation-free.
@@ -1592,7 +1690,8 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         phase2_request_id_factory=self._next_rtp_llm_request_id,
                         access_agg=record,
                         is_kimi_k3=self._is_kimi_k3,
-                        mm_download_headers=self._mm_download_headers,
+                        kimi_k3_multimodal_tokens=self._kimi_k3_multimodal_tokens,
+                        vit_config=self._vit_config,
                         yield_access_stats=True,
                     ):
                         (

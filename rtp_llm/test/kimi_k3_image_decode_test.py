@@ -8,6 +8,7 @@ import torch
 from PIL import Image
 
 import rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_vit as kimi_k3_vit
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_vit import (
     KimiK3ImageEmbedding,
 )
@@ -35,7 +36,8 @@ class KimiK3ImageDecodeTest(TestCase):
             tensor=tensor,
             url="",
         )
-        vit_config = SimpleNamespace(download_headers='{"X-Test": "value"}')
+        vit_config = VitConfig()
+        vit_config.download_headers = '{"X-Test": "value"}'
         with patch.object(kimi_k3_vit.Image, "open", return_value=decoded):
             image = KimiK3ImageEmbedding.preprocess_input([mm_input], vit_config)
 

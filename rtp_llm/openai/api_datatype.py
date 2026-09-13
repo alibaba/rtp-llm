@@ -195,6 +195,10 @@ class ThinkingConfig(BaseModel):
     effort: Optional[Literal["low", "high", "max"]] = None
 
 
+class StreamOptions(BaseModel):
+    include_usage: bool = False
+
+
 class ChatCompletionRequest(BaseModel):
     model: Optional[str] = None
     messages: List[ChatMessage]
@@ -213,6 +217,7 @@ class ChatCompletionRequest(BaseModel):
     thinking_budget: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None
     user: Optional[str] = None
     seed: Optional[int] = None
     n: Optional[int] = None
@@ -468,6 +473,7 @@ class ChatCompletionResponseStreamChoice(BaseModel):
     delta: DeltaMessage
     finish_reason: Optional[FinisheReason] = None
     logprobs: Optional[ChoiceLogprobs] = None
+    usage: Optional[UsageInfo] = None
 
 
 class ChatCompletionStreamResponse(BaseModel):

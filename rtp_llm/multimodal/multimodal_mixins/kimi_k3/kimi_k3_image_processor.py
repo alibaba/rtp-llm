@@ -1,10 +1,13 @@
 """Kimi-K3 image processor."""
 
 import asyncio
+import copy
+import json
 import math
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
-from itertools import repeat
+from pathlib import Path
+from threading import Lock
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 import numpy as np
@@ -13,135 +16,120 @@ from PIL import Image
 from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
 from transformers.utils import TensorType
 
-_DEFAULT_MEDIA_PROC_CFG: Dict[str, Any] = {
-    "in_patch_limit": 65536,
-    "patch_size": 14,
-    "image_mean": [0.5, 0.5, 0.5],
-    "image_std": [0.5, 0.5, 0.5],
-    "merge_kernel_size": 2,
-    "fixed_output_tokens": None,
-    "patch_limit_on_one_side": 512,
-    "transparent_bg_config": {
-        "pattern": "chessboard",
-        "chessboard_square_size": 8,
-        "chessboard_square_on_top_left": True,
-        "chessboard_white_value": 255,
-        "chessboard_gray_value": 180,
-    },
-    "transparent_bg_fill_stage": "after_resize",
-}
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.py_config_modules import VitConfig
 
-_TRANSPARENT_BG_FILL_STAGES = ("before_resize", "after_resize")
+# All renderers in a service process share its startup worker configuration.
+_executor_lock = Lock()
+_executor: ThreadPoolExecutor | None = None
+_image_decode_lock = Lock()
 
-# Per-image compressed byte limit, in KB.  Lives here so the renderer preflight
-# and the vit url fallback, K3's two byte entry points, cannot disagree.
-K3_MAX_IMAGE_FILE_SIZE_KB = 32 * 1024
-K3_MAX_TOTAL_IMAGE_BYTES = 128 * 1024 * 1024
 
-_K3_MEDIA_PREFLIGHT_CONCURRENCY = 4
-_K3_MEDIA_EXECUTOR = ThreadPoolExecutor(
-    max_workers=_K3_MEDIA_PREFLIGHT_CONCURRENCY,
-    thread_name_prefix="kimi-k3-media",
-)
+def load_kimi_k3_media_config(checkpoint_path: str) -> Dict[str, Any]:
+    path = Path(checkpoint_path) / "preprocessor_config.json"
+    with path.open(encoding="utf-8") as reader:
+        return json.load(reader)["media_proc_cfg"]
 
-# Largest square the tower's one-side patch limit can describe, 4x the patch
-# budget it will actually use.  PIL's own 89 MP default is 256 MB decoded.
-K3_MAX_IMAGE_PIXELS = (
-    _DEFAULT_MEDIA_PROC_CFG["patch_limit_on_one_side"]
-    * _DEFAULT_MEDIA_PROC_CFG["patch_size"]
-) ** 2
+
+def _get_kimi_k3_media_executor(max_workers: int) -> ThreadPoolExecutor:
+    global _executor
+    with _executor_lock:
+        if _executor is None:
+            _executor = ThreadPoolExecutor(
+                max_workers=max_workers, thread_name_prefix="kimi-k3-media"
+            )
+        return _executor
+
+
+def shutdown_kimi_k3_media_executor() -> None:
+    """Drain and reset the K3 media pool."""
+    global _executor
+    with _executor_lock:
+        executor = _executor
+        _executor = None
+    if executor is not None:
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def _preflight_kimi_k3_image(
-    url: str, download_headers: str = ""
+    url: str, config: VitConfig
 ) -> tuple[torch.Tensor, tuple[int, int]]:
     from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
 
-    data = get_bytes_io_from_url(
-        url,
-        download_headers,
-        max_file_size_kb=K3_MAX_IMAGE_FILE_SIZE_KB,
-    )
+    try:
+        data = get_bytes_io_from_url(
+            url,
+            config.download_headers,
+            max_file_size_kb=config.mm_image_max_file_size_kb,
+        )
+    except FtRuntimeException as error:
+        if error.exception_type == ExceptionType.MM_WRONG_FORMAT_ERROR:
+            raise
+        raise FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR, str(error)
+        ) from error
     raw = data.getbuffer()
     try:
-        with Image.open(BytesIO(raw)) as image:
+        # Serialize full-resolution decoding to bound temporary pixel storage.
+        with _image_decode_lock, Image.open(BytesIO(raw)) as image:
             size = image.size
-            if size[0] * size[1] > K3_MAX_IMAGE_PIXELS:
-                raise ValueError(
-                    "Kimi K3 image pixel count exceeds the per-image limit: "
-                    f"{size[0]}x{size[1]} > {K3_MAX_IMAGE_PIXELS}"
-                )
             image.load()
     except (OSError, Image.DecompressionBombError) as error:
-        raise ValueError("Kimi K3 image could not be decoded") from error
+        raise FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR, "Image could not be decoded"
+        ) from error
     return torch.frombuffer(raw, dtype=torch.uint8), size
 
 
-def _append_kimi_k3_preflight_batch(
-    results: Sequence[tuple[torch.Tensor, tuple[int, int]]],
-    tensors: List[torch.Tensor],
-    sizes: List[tuple[int, int]],
-    total_bytes: int,
-) -> int:
-    for tensor, size in results:
-        total_bytes += tensor.numel()
-        if total_bytes > K3_MAX_TOTAL_IMAGE_BYTES:
-            raise ValueError(
-                "Kimi K3 image bytes exceed the per-request limit: "
-                f"{total_bytes} > {K3_MAX_TOTAL_IMAGE_BYTES}"
-            )
-        tensors.append(tensor)
-        sizes.append(size)
-    return total_bytes
-
-
 def preflight_kimi_k3_images(
-    urls: Sequence[str], download_headers: str = ""
-) -> tuple[List[torch.Tensor], List[tuple[int, int]]]:
-    """Download K3 images once, validate request limits, and report dimensions."""
-    tensors: List[torch.Tensor] = []
-    sizes: List[tuple[int, int]] = []
-    total_bytes = 0
-    for offset in range(0, len(urls), _K3_MEDIA_PREFLIGHT_CONCURRENCY):
-        batch = urls[offset : offset + _K3_MEDIA_PREFLIGHT_CONCURRENCY]
-        results = list(
-            _K3_MEDIA_EXECUTOR.map(
-                _preflight_kimi_k3_image,
-                batch,
-                repeat(download_headers),
-            )
-        )
-        total_bytes = _append_kimi_k3_preflight_batch(
-            results, tensors, sizes, total_bytes
-        )
-    return tensors, sizes
+    urls: Sequence[str], vit_config: VitConfig
+) -> tuple[list[torch.Tensor], list[tuple[int, int]]]:
+    """Load images once, enforcing the per-image byte limit before decoding."""
+    max_workers = vit_config.mm_preprocess_max_workers
+    if not urls:
+        return [], []
+    executor = _get_kimi_k3_media_executor(max_workers)
+    results: list[tuple[torch.Tensor, tuple[int, int]]] = []
+    futures = []
+    try:
+        for offset in range(0, len(urls), max_workers):
+            futures = [
+                executor.submit(_preflight_kimi_k3_image, url, vit_config)
+                for url in urls[offset : offset + max_workers]
+            ]
+            results.extend(future.result() for future in futures)
+    except BaseException:
+        for future in futures:
+            future.cancel()
+        raise
+    return [tensor for tensor, _ in results], [size for _, size in results]
 
 
 async def preflight_kimi_k3_images_async(
-    urls: Sequence[str], download_headers: str = ""
-) -> tuple[List[torch.Tensor], List[tuple[int, int]]]:
-    """Async counterpart that keeps image I/O off the event loop."""
+    urls: Sequence[str], vit_config: VitConfig
+) -> tuple[list[torch.Tensor], list[tuple[int, int]]]:
+    """Load images off the event loop with the same limits as sync preflight."""
+    max_workers = vit_config.mm_preprocess_max_workers
+    if not urls:
+        return [], []
+    executor = _get_kimi_k3_media_executor(max_workers)
     loop = asyncio.get_running_loop()
-    tensors: List[torch.Tensor] = []
-    sizes: List[tuple[int, int]] = []
-    total_bytes = 0
-    for offset in range(0, len(urls), _K3_MEDIA_PREFLIGHT_CONCURRENCY):
-        batch = urls[offset : offset + _K3_MEDIA_PREFLIGHT_CONCURRENCY]
-        results = await asyncio.gather(
-            *(
+    results: list[tuple[torch.Tensor, tuple[int, int]]] = []
+    futures = []
+    try:
+        for offset in range(0, len(urls), max_workers):
+            futures = [
                 loop.run_in_executor(
-                    _K3_MEDIA_EXECUTOR,
-                    _preflight_kimi_k3_image,
-                    url,
-                    download_headers,
+                    executor, _preflight_kimi_k3_image, url, vit_config
                 )
-                for url in batch
-            )
-        )
-        total_bytes = _append_kimi_k3_preflight_batch(
-            results, tensors, sizes, total_bytes
-        )
-    return tensors, sizes
+                for url in urls[offset : offset + max_workers]
+            ]
+            results.extend(await asyncio.gather(*futures))
+    except BaseException:
+        for future in futures:
+            future.cancel()
+        raise
+    return [tensor for tensor, _ in results], [size for _, size in results]
 
 
 def _navit_resize_image(
@@ -193,9 +181,7 @@ def _normalize(x: np.ndarray, mean: np.ndarray, std_inv: np.ndarray) -> np.ndarr
     return x
 
 
-def _navit_patchify(
-    pixel_values: np.ndarray, patch_size: int
-) -> Dict[str, np.ndarray]:
+def _navit_patchify(pixel_values: np.ndarray, patch_size: int) -> Dict[str, np.ndarray]:
     T, H, W, C = pixel_values.shape
     assert C == 3
     patches = pixel_values.reshape(
@@ -225,8 +211,10 @@ def _chessboard(
 
 
 def _fill_transparent_background(
-    image: Image.Image, config: Dict[str, Any]
+    image: Image.Image, config: Optional[Dict[str, Any]]
 ) -> Image.Image:
+    if config is None:
+        return image.convert("RGB")
     if image.mode == "RGB":
         return image
     if "A" not in image.getbands() and "transparency" not in image.info:
@@ -234,14 +222,18 @@ def _fill_transparent_background(
 
     rgba = np.asarray(image.convert("RGBA"))
     height, width = rgba.shape[:2]
-    background = _chessboard(
-        height,
-        width,
-        config["chessboard_square_size"],
-        config["chessboard_square_on_top_left"],
-        config["chessboard_white_value"],
-        config["chessboard_gray_value"],
-    )
+    if config["pattern"] == "chessboard":
+        background = _chessboard(
+            height,
+            width,
+            config["chessboard_square_size"],
+            config["chessboard_square_on_top_left"],
+            config["chessboard_white_value"],
+            config["chessboard_gray_value"],
+        )
+    else:
+        value = {"white": 255, "black": 0, "gray": 128}[config["pattern"]]
+        background = np.full((height, width, 3), value, dtype=np.uint8)
     alpha = rgba[:, :, 3:4].astype(np.float32) / 255.0
     result = alpha * rgba[:, :, :3] + (1.0 - alpha) * background
     return Image.fromarray(result.astype(np.uint8))
@@ -253,17 +245,26 @@ class KimiK3VisionProcessor(BaseImageProcessor):
     model_type = "kimi_k3"
     model_input_names = ["pixel_values", "grid_thws"]
 
-    def __init__(self, media_proc_cfg: Optional[Dict[str, Any]] = None, **kwargs):
+    def __init__(self, media_proc_cfg: Dict[str, Any], **kwargs):
         super().__init__(**kwargs)
-        cfg = dict(_DEFAULT_MEDIA_PROC_CFG)
-        if media_proc_cfg:
-            cfg.update(media_proc_cfg)
-        fill_stage = cfg["transparent_bg_fill_stage"]
-        if fill_stage not in _TRANSPARENT_BG_FILL_STAGES:
-            raise ValueError(
-                f"unsupported transparent_bg_fill_stage {fill_stage!r}, "
-                f"expected one of {_TRANSPARENT_BG_FILL_STAGES}"
+        cfg = copy.deepcopy(media_proc_cfg)
+        cfg.setdefault("transparent_bg_fill_stage", "before_resize")
+        if cfg["transparent_bg_fill_stage"] not in ("before_resize", "after_resize"):
+            raise ValueError("unsupported transparent_bg_fill_stage")
+        bg = cfg.get("transparent_bg_config")
+        if bg is not None:
+            # Optional defaults match the checkpoint's TransparentBgConfig dataclass.
+            bg = (
+                dict(
+                    pattern="black",
+                    chessboard_square_size=16,
+                    chessboard_square_on_top_left=True,
+                    chessboard_white_value=255,
+                    chessboard_gray_value=200,
+                )
+                | bg
             )
+        cfg["transparent_bg_config"] = bg
         self.media_proc_cfg = cfg
 
     @staticmethod

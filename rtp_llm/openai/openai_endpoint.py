@@ -295,7 +295,14 @@ class OpenaiEndpoint(object):
         renderer,
         request: ChatCompletionRequest,
         config: GenerateConfig,
+        rendered_inputs: Optional[RenderedInputs] = None,
     ) -> None:
+        apply_rendered_constraints = getattr(
+            renderer, "apply_rendered_chat_completion_constraints", None
+        )
+        if apply_rendered_constraints is not None and rendered_inputs is not None:
+            apply_rendered_constraints(request, config, rendered_inputs)
+            return
         apply_constraints = getattr(renderer, "apply_chat_completion_constraints", None)
         if apply_constraints is not None:
             apply_constraints(request, config)
@@ -570,7 +577,9 @@ class OpenaiEndpoint(object):
         )
         rendered_input = await self.render_chat_async(chat_request)
         generate_config = self._extract_generation_config(chat_request)
-        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
+        self._apply_renderer_chat_constraints(
+            renderer, chat_request, generate_config, rendered_input
+        )
 
         mm_inputs = rendered_input.multimodal_inputs
 
@@ -607,6 +616,8 @@ class OpenaiEndpoint(object):
         )
         rendered_input = await renderer.render_chat_async(chat_request)
         generate_config = self._extract_generation_config(chat_request)
-        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
+        self._apply_renderer_chat_constraints(
+            renderer, chat_request, generate_config, rendered_input
+        )
         debug_info = self._get_debug_info(renderer, rendered_input, generate_config)
         return debug_info

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import struct
+from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import patch
 
@@ -13,6 +14,9 @@ import torch
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
     _PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV,
+    DASH_ERROR_BAD_REQUEST,
+    DASH_ERROR_TOO_LONG,
+    DASH_ERROR_UNSUPPORTED,
     DashErrorSpec,
     DashScParameterError,
     LLMFinishReason,
@@ -1382,6 +1386,86 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         )
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 10)
 
+    def test_pending_prompt_usage_matches_wire_parameters_and_cache_details(self):
+        for input_len, pending in ((122, 3), (39, 3), (137, 3), (40, 4)):
+            for streaming in (False, True):
+                for cached in (0, 10, input_len - 1, input_len):
+                    with self.subTest(
+                        input_len=input_len,
+                        pending=pending,
+                        streaming=streaming,
+                        cached=cached,
+                    ):
+                        out = GenerateOutput(
+                            output_ids=torch.tensor([7], dtype=torch.int32),
+                            finished=True,
+                            aux_info=AuxInfo(
+                                input_len=input_len,
+                                reuse_len=cached,
+                                multimodal_lengths={MMUrlType.IMAGE: 5},
+                            ),
+                        )
+                        go = GenerateOutputs(generate_outputs=[out])
+                        # Reusing the same engine chunk must not double-subtract.
+                        for _ in range(2):
+                            infer = build_stream_response_from_generate_outputs(
+                                "req",
+                                "kimi-k3",
+                                go,
+                                "test",
+                                is_streaming=streaming,
+                                pending_prompt_tokens=pending,
+                            ).infer_response
+                            by_name = dict(
+                                zip(
+                                    (output.name for output in infer.outputs),
+                                    infer.raw_output_contents,
+                                )
+                            )
+                            for key, value in (
+                                ("prompt_token_num", input_len - pending),
+                                (
+                                    "prompt_cached_token_num",
+                                    min(cached, input_len - pending),
+                                ),
+                            ):
+                                self.assertEqual(
+                                    _unpack_int32_le(by_name[key]), [value]
+                                )
+                                self.assertEqual(
+                                    infer.parameters[key].int64_param, value
+                                )
+                            self.assertEqual(
+                                infer.parameters["image_tokens"].int64_param, 5
+                            )
+                        self.assertEqual(out.aux_info.input_len, input_len)
+                        self.assertEqual(out.aux_info.reuse_len, cached)
+
+    def test_pending_prompt_usage_without_aux_info(self):
+        out = SimpleNamespace(output_ids=torch.tensor([7]), finished=True)
+        infer = build_stream_response_from_generate_outputs(
+            "req",
+            "kimi-k3",
+            SimpleNamespace(generate_outputs=[out]),
+            "test",
+            request_input_ids=[99] * 39,
+            pending_prompt_tokens=3,
+        ).infer_response
+        self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 36)
+
+    def test_pending_prompt_usage_rejects_underflow(self):
+        out = GenerateOutput(
+            output_ids=torch.tensor([7]), finished=True, aux_info=AuxInfo(input_len=2)
+        )
+        with self.assertRaisesRegex(ValueError, "shorter"):
+            build_stream_response_from_generate_outputs(
+                "req",
+                "kimi-k3",
+                GenerateOutputs(generate_outputs=[out]),
+                "test",
+                pending_prompt_tokens=3,
+            )
+
     def test_logprobs_parameter_contains_compact_per_token_top_scores(self) -> None:
         all_probs = torch.tensor(
             [
@@ -1540,6 +1624,40 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         self.assertEqual(by_name["finished"], b"\x01")
         self.assertNotIn("generated_ids", by_name)
         self.assertNotIn("token_ids", by_name)
+
+    def test_parameter_errors_select_explicit_api_server_status(self) -> None:
+        for spec, code in (
+            (DASH_ERROR_BAD_REQUEST, 400),
+            (DASH_ERROR_TOO_LONG, 413),
+            (DASH_ERROR_UNSUPPORTED, 422),
+        ):
+            with self.subTest(code=code):
+                response = build_dash_error_response(
+                    "invalid-grammar",
+                    "kimi_k3",
+                    error_spec=spec,
+                    status_message="failed to compile grammar: enum array must not be empty",
+                )
+                infer = response.infer_response
+                outputs = dict(
+                    zip(
+                        (output.name for output in infer.outputs),
+                        infer.raw_output_contents,
+                    )
+                )
+                self.assertEqual(
+                    _unpack_int64_le(outputs["finish_reason"]),
+                    [LLMFinishReason.USE_PARAMETER_STATUS],
+                )
+                self.assertEqual(infer.parameters["error_no"].int64_param, 8)
+                self.assertEqual(infer.parameters["status_code"].int64_param, code)
+                legacy = json.loads(infer.parameters["error_msg"].string_param)
+                self.assertEqual(legacy["status_code"], code)
+                for field in ("status_name", "status_message"):
+                    self.assertEqual(
+                        infer.parameters[field].string_param, legacy[field]
+                    )
+                self.assertNotIn("generated_ids", outputs)
 
     def test_dash_error_status_code_is_json_number(self) -> None:
         for status_code in (400, 413, 422, 500, 503, 504):
