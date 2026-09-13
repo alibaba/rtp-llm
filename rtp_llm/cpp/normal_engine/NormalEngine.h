@@ -71,7 +71,6 @@ private:
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
     std::atomic<bool>                             stop_requested_{false};
-    torch::Tensor                                 stop_control_;
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     ParallelismConfig                             parallelism_config;

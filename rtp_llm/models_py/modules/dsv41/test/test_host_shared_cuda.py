@@ -224,6 +224,51 @@ class HostSharedCudaTest(TestCase):
                         torch.cuda.synchronize(device)
                         torch.testing.assert_close(out.view(torch.uint8), before)
 
+    def test_two_streams_keep_ids_masks_outputs_and_backing_independent(self):
+        device = self.devices[0]
+        shared = self.store.open_or_publish("e" * 40, self.slices)
+        with self.cuda_module.SharedEngramLookup(shared, device=device) as lookup:
+            streams = [torch.cuda.Stream(device=device) for _ in range(2)]
+            for stream in streams:
+                lookup.warmup(stream)
+            pointers = {
+                name: value.data_ptr() for name, value in lookup._buffers.items()
+            }
+            pending = []
+            for offset, (layer, stream) in enumerate(zip((1, 14), streams)):
+                ids = (
+                    torch.arange(6144, device=device, dtype=torch.int64)
+                    .reshape(256, 24)
+                    .add(offset * 113)
+                    .remainder(1024)
+                )
+                valid = (ids % (3 + offset)) != 0
+                ids = ids.masked_fill(~valid, -1)
+                out = torch.empty(
+                    (*ids.shape, 256), device=device, dtype=torch.bfloat16
+                )
+                expected = cpu_lookup_reference(shared, layer, ids, valid)
+                pending.append((layer, stream, ids, valid, out, expected))
+            for layer, stream, ids, valid, out, _ in pending:
+                stream.wait_stream(torch.cuda.current_stream(device))
+                with torch.cuda.stream(stream):
+                    lookup.lookup(layer, ids, valid_mask=valid, out=out)
+            for _, stream, _, _, _, _ in pending:
+                stream.synchronize()
+            for _, _, ids, valid, out, expected in pending:
+                torch.testing.assert_close(
+                    out.cpu(), expected, rtol=0, atol=0, equal_nan=True
+                )
+                self.assertTrue(torch.all(out[~valid] == 0).item())
+                self.assertTrue(torch.all(ids[~valid] == -1).item())
+            self.assertNotEqual(streams[0].cuda_stream, streams[1].cuda_stream)
+            self.assertEqual(
+                pointers,
+                {name: value.data_ptr() for name, value in lookup._buffers.items()},
+            )
+            self.assertFalse(self.store.remove_if_unused(shared.manifest["identity"]))
+        self.assertTrue(self.store.remove_if_unused(shared.manifest["identity"]))
+
     def test_disjoint_views_share_storage_without_aliasing(self):
         device = self.devices[0]
         shared = self.store.open_or_publish("d" * 40, self.slices)

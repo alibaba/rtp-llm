@@ -12,8 +12,6 @@ from pathlib import Path
 
 import torch
 from host_cuda_test_support import cpu_lookup_reference
-from transformers import AutoTokenizer
-
 from rtp_llm.config.dsv41_config import V41Config
 from rtp_llm.model_loader.host_shared_cuda import SharedEngramLookup
 from rtp_llm.models_py.modules.dsv41.engram import (
@@ -23,6 +21,7 @@ from rtp_llm.models_py.modules.dsv41.engram import (
 )
 from rtp_llm.models_py.modules.dsv41.math import engram_inject
 from rtp_llm.utils.database import CkptDatabase
+from transformers import AutoTokenizer
 
 
 class FullHostEngramBindingTest(unittest.TestCase):
@@ -157,6 +156,75 @@ class FullHostEngramBindingTest(unittest.TestCase):
         bad["engram.q_weight"] = bad["engram.q_weight"].float()
         with self.assertRaisesRegex(ValueError, "BF16"):
             Engram.from_weights(1, bad, self.lookup)
+
+    @torch.inference_mode()
+    def test_module_to_device_keeps_full_host_backing_and_local_bytes(self):
+        lookup = self.lookup
+        backing = {
+            name: (buffer.export.buf, buffer.export.len, buffer.data_ptr())
+            for name, buffer in lookup._buffers.items()
+        }
+        identity = lookup.shared.manifest["identity"]
+        for index, layer in enumerate((1, 14)):
+            module = Engram.from_weights(layer, self.loaded[layer], lookup)
+            module.to(device="cpu")
+            expected = {
+                name: tensor.detach().clone()
+                for name, tensor in module.state_dict().items()
+            }
+            self.assertEqual(
+                set(expected),
+                {
+                    "q_weight",
+                    "k_weight",
+                    "projection.weight",
+                    "projection.weight_scale",
+                },
+            )
+            self.assertTrue(
+                all(value.device.type == "cpu" for value in expected.values())
+            )
+            before_hbm = torch.cuda.memory_allocated(lookup.device)
+            module.to(device=torch.device("cuda", lookup.device))
+            self.assertIs(module.shared_lookup, lookup)
+            self.assertEqual(lookup.shared.manifest["identity"], identity)
+            self.assertEqual(
+                backing,
+                {
+                    name: (buffer.export.buf, buffer.export.len, buffer.data_ptr())
+                    for name, buffer in lookup._buffers.items()
+                },
+            )
+            for name, tensor in module.state_dict().items():
+                self.assertEqual(tensor.device, torch.device("cuda", lookup.device))
+                torch.testing.assert_close(
+                    tensor.detach().view(torch.uint8).cpu(),
+                    expected[name].view(torch.uint8),
+                    rtol=0,
+                    atol=0,
+                )
+            self.records.append(
+                {
+                    "test": self.id(),
+                    "layer": layer,
+                    "host_backing_bytes": lookup.total_bytes,
+                    "host_identity": identity,
+                    "local_state_keys": sorted(expected),
+                    "to_device_hbm_delta_bytes": (
+                        torch.cuda.memory_allocated(lookup.device) - before_hbm
+                    ),
+                    "shared_addresses_unchanged": True,
+                }
+            )
+            hashes, valid, hidden = self.rows(6, 73)
+            ids = hashes[:, index].contiguous()
+            self.equal(
+                module(hidden, ids, valid),
+                self.expected(module, hidden, ids, valid),
+                layer=layer,
+                device_roundtrip=True,
+            )
+            del module, expected
 
     @torch.inference_mode()
     def test_full_table_lookup_projection_and_image_mask_match_cpu_decoded_rows(self):
