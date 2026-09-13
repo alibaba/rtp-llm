@@ -107,7 +107,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     cum_log_probs_ = torch::zeros({(int64_t)init_batch_size}, torch::kFloat32);
 
     is_context_stream_ = std::make_shared<std::atomic<bool>>(true);
-    generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
+    generate_status_   = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
     sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
@@ -488,6 +488,14 @@ int GenerateStream::initialReuseLength() const {
 
 void GenerateStream::setReuseLength(int reuse_length) {
     reuse_length_ = reuse_length;
+}
+
+int GenerateStream::pdKvReadyLength() const {
+    return pd_kv_ready_length_;
+}
+
+void GenerateStream::setPdKvReadyLength(int length) {
+    pd_kv_ready_length_ = length;
 }
 
 void GenerateStream::setLocalReuseLength(int length) {

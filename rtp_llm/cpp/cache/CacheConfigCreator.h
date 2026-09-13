@@ -31,6 +31,11 @@ public:
                                          const ParallelismConfig& parallelism_config,
                                          bool                     is_mtp,
                                          int                      gen_num_per_cycle);
+    static CacheConfig createBasicConfig(const ModelConfig&       model_config,
+                                         const ParallelismConfig& parallelism_config,
+                                         const KVCacheConfig&     kv_cache_config,
+                                         bool                     is_mtp,
+                                         int                      gen_num_per_cycle);
     static CacheConfig createConfig(const ModelConfig&                               model_config,
                                     const ParallelismConfig&                         parallelism_config,
                                     const RuntimeConfig&                             runtime_config,
@@ -52,16 +57,6 @@ public:
     static LayerKVCacheSpecs buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,
                                                       const SpecBuildContext&      ctx,
                                                       int64_t                      expected_layer_num);
-
-private:
-    // Removed functions moved to MemoryEvaluationHelper:
-    // getDefaultRuntimeMemorySize
-    // getKVCacheMemorySize
-
-    // Removed functions moved to dedicated creators:
-    // createSingleConfig
-    // createHybridConfig
-    // splitIntoGroups (moved to HybridConfigCreator)
 };
 
 }  // namespace rtp_llm

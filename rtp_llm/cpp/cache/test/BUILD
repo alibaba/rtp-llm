@@ -61,25 +61,6 @@ cc_library(
 )
 
 cc_test(
-    name = "hybrid_pool_config_creator_test",
-    srcs = ["HybridPoolConfigCreatorTest.cc"],
-    copts = test_copts,
-    deps = [
-        ":cache_config_test_utils",
-        "//rtp_llm/cpp/cache:cache_core",
-        "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
-        "//rtp_llm/models_py/bindings/core:exec_ctx_state",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-    ],
-    env = {},
-    exec_properties = select({
-        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
-        "//conditions:default": {"gpu": "A10"},
-    }),
-)
-
-cc_test(
     name = "cache_topology_test",
     srcs = ["CacheTopologyTest.cc"],
     copts = test_copts,
@@ -310,6 +291,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps + [
+        "//rtp_llm/cpp/testing:device_test_utils",
         ":block_pool_test_helper",
         "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",

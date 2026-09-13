@@ -131,7 +131,7 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->block_num, 3u);
     EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->block_num, 3u);
 
-    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
+    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfigForGroup(cache_cfg, cache_cfg.groupIdForTag("full"));
     ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
     ASSERT_EQ(pool_cfg.memory_layouts[0].layer_num, 2u);
     ASSERT_EQ(pool_cfg.memory_layouts[1].layer_num, 1u);
@@ -230,7 +230,7 @@ TEST_F(BlockPoolTest, SharedPoolMTPLayoutsUseMainBlockNumAfterTpSync) {
     // MTP sub-config block_num may still contain the pre-sync local value.
     cache_cfg.block_num = 3;
 
-    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
+    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfigForGroup(cache_cfg, cache_cfg.groupIdForTag("full"));
     ASSERT_EQ(pool_cfg.block_num, 3u);
     ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
     EXPECT_EQ(pool_cfg.memory_layouts[0].block_num, 3u);

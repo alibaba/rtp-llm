@@ -146,9 +146,8 @@ protected:
         // Those methods assume allocator_->block_pool_ is non-null. In UT we use a mock allocator, so set a
         // minimal BlockPool here to avoid crashes/hangs in tests that exercise coordinator paths.
         {
-            const size_t block_stride_bytes =
-                cache_config_.block_size_bytes / static_cast<size_t>(std::max(1u, cache_config_.layer_all_num));
-            auto pool_config = BlockPoolConfigHelper::createConfig(
+            const size_t block_stride_bytes = cache_config_.layer_to_block_stride_bytes[0];
+            auto         pool_config        = BlockPoolConfigHelper::createConfig(
                 cache_config_.layer_all_num, cache_config_.block_num, block_stride_bytes, cache_config_.dtype);
             auto pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
             RTP_LLM_CHECK(pool->init());
@@ -363,9 +362,8 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
     auto allocator = std::make_shared<MockKVCacheAllocator>(cache_config);
     // KVCacheConnectorCoordinator::init logs free/available blocks via KVCacheAllocator. Ensure block_pool_ is valid.
     {
-        const size_t block_stride_bytes =
-            cache_config.block_size_bytes / static_cast<size_t>(std::max(1u, cache_config.layer_all_num));
-        auto pool_config = BlockPoolConfigHelper::createConfig(
+        const size_t block_stride_bytes = cache_config.layer_to_block_stride_bytes[0];
+        auto         pool_config        = BlockPoolConfigHelper::createConfig(
             cache_config.layer_all_num, cache_config.block_num, block_stride_bytes, cache_config.dtype);
         auto pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
         ASSERT_TRUE(pool->init());
@@ -446,11 +444,12 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenIncrKVCacheRefR
     // Without this, allocator_->freeBlocksNum() / availableBlocksNum() will dereference a null BlockPool and
     // the test process can crash/hang.
     {
-        auto pool_config = BlockPoolConfigHelper::createConfig(cache_config_.layer_all_num,
-                                                               /*block_num=*/1,
-                                                               /*block_stride_bytes=*/cache_config_.block_size_bytes,
-                                                               /*dtype=*/cache_config_.dtype);
-        auto pool        = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
+        auto pool_config =
+            BlockPoolConfigHelper::createConfig(cache_config_.layer_all_num,
+                                                /*block_num=*/1,
+                                                /*block_stride_bytes=*/cache_config_.layer_to_block_stride_bytes[0],
+                                                /*dtype=*/cache_config_.dtype);
+        auto pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
         ASSERT_TRUE(pool->init());
         allocator_->group_block_pools_ = {pool};
     }

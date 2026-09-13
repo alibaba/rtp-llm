@@ -603,7 +603,6 @@ TEST_F(KVCacheAllocatorSinglePathTest, SingleLayerMtpConfigSlicesDescriptorAndAt
 TEST_F(KVCacheAllocatorSinglePathTest, SingleLayerMtpConfigSupportsDescriptorDrivenIndependentPools) {
     auto config                                                      = makeTestModelConfig(/*num_layers=*/2);
     config.hybrid_attention_config.enable_hybrid_attention           = true;
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
     config.hybrid_attention_config.hybrid_attention_types            = {};
     auto second_desc                                                 = config.kv_cache_spec_descs[1][0];
     second_desc.tag                                                  = "layer1_state";
@@ -618,12 +617,35 @@ TEST_F(KVCacheAllocatorSinglePathTest, SingleLayerMtpConfigSupportsDescriptorDri
     EXPECT_TRUE(single_layer.hybrid_attention_config.hybrid_attention_types.empty());
 }
 
-TEST_F(KVCacheAllocatorSinglePathTest, SingleLayerMtpConfigRejectsLegacyHybridWithoutAttentionTypes) {
+TEST_F(KVCacheAllocatorSinglePathTest, SingleLayerMtpConfigRejectsLinearModelWithoutAttentionTypes) {
     auto config                                            = makeTestModelConfig(/*num_layers=*/2);
     config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types  = {};
+    config.linear_attention_config.linear_num_value_heads  = 2;
 
     EXPECT_THROW(makeSingleLayerMTPModelConfig(config, /*source_layer=*/0), std::runtime_error);
+}
+
+TEST_F(KVCacheAllocatorSinglePathTest, SingleLayerMtpConfigRejectsLinearDescriptorWithoutMetadataOrDimensions) {
+    auto config                                 = makeTestModelConfig(/*num_layers=*/2);
+    config.kv_cache_spec_descs[1][0].cache_type = KVCacheSpecType::LinearAttention;
+    EXPECT_THROW(makeSingleLayerMTPModelConfig(config, /*source_layer=*/0), std::runtime_error);
+}
+
+TEST_F(KVCacheAllocatorSinglePathTest, SingleLayerMtpConfigRejectsMissingSourceAttentionType) {
+    auto config                                           = makeTestModelConfig(/*num_layers=*/2);
+    config.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE};
+    EXPECT_THROW(makeSingleLayerMTPModelConfig(config, /*source_layer=*/1), std::runtime_error);
+}
+
+TEST_F(KVCacheAllocatorSinglePathTest, SingleLayerMtpFullDescriptorRetainsLinearModelMetadata) {
+    auto config                                           = makeTestModelConfig(/*num_layers=*/2);
+    config.linear_attention_config.linear_num_value_heads = 2;
+    config.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::LINEAR, HybridAttentionType::NONE};
+    const auto single_layer                               = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
+    EXPECT_EQ(single_layer.hybrid_attention_config.hybrid_attention_types,
+              std::vector<HybridAttentionType>({HybridAttentionType::NONE}));
+    EXPECT_EQ(single_layer.linear_attention_config.linear_num_value_heads, 2);
 }
 
 TEST_F(KVCacheAllocatorSinglePathTest, ActiveMtpCacheLayoutValidationOnlyChecksModule0) {

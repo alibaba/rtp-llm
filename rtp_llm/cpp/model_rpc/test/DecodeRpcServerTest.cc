@@ -206,34 +206,140 @@ TEST(DecodeRpcServerTest, OddTpWorkersWaitForEveryCompletionQueueResponse) {
     EXPECT_TRUE(DecodeRpcServer::completionQueueExpectedResponseCounts(0).empty());
 }
 
-TEST(DecodeRpcServerTest, CompletedHandoffPublishesOnlyReusablePromptBlocks) {
+TEST(DecodeRpcServerTest, MultiGroupHandoffPublishesOnlyReusablePromptBlocks) {
     auto stream = makeGenerateStream(/*seq_length=*/2560);
 
     EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
                                                     {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/10},
                                                     /*seq_size_per_block=*/256,
-                                                    /*use_independent_block_pools=*/true),
+                                                    /*group_num=*/2),
               2304);
+    EXPECT_EQ(stream->pdKvReadyLength(), 2304);
     EXPECT_EQ(stream->initialReuseLength(), 2304);
     EXPECT_EQ(stream->reuseLength(), 2304);
     EXPECT_EQ(stream->localReuseLength(), 2304);
+    EXPECT_EQ(stream->deviceReuseLength(), 2304);
 }
 
-TEST(DecodeRpcServerTest, FailedOrSharedPoolHandoffDoesNotPublishReuse) {
-    auto stream = makeGenerateStream(/*seq_length=*/513);
+TEST(DecodeRpcServerTest, SingleGroupHandoffPreservesRemoteReuseAccounting) {
+    auto stream = makeGenerateStream(/*seq_length=*/149);
+    stream->setInitialReuseLength(128);
+    stream->setReuseLength(128);
+    stream->setRemoteReuseLength(128);
 
-    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(
-                  stream,
-                  {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load failed"), /*loaded_cache_block_count=*/2},
-                  /*seq_size_per_block=*/256,
-                  /*use_independent_block_pools=*/true),
-              0);
     EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
-                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/2},
-                                                    /*seq_size_per_block=*/256,
-                                                    /*use_independent_block_pools=*/false),
-              0);
-    EXPECT_EQ(stream->initialReuseLength(), 0);
+                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/19},
+                                                    /*seq_size_per_block=*/8,
+                                                    /*group_num=*/1),
+              144);
+    EXPECT_EQ(stream->pdKvReadyLength(), 144);
+    EXPECT_EQ(stream->initialReuseLength(), 128);
+    EXPECT_EQ(stream->reuseLength(), 128);
+    EXPECT_EQ(stream->localReuseLength(), 0);
+    EXPECT_EQ(stream->deviceReuseLength(), 0);
+    EXPECT_EQ(stream->remoteReuseLength(), 128);
+}
+
+TEST(DecodeRpcServerTest, FailedHandoffDoesNotPublishReuse) {
+    for (size_t group_num : {1u, 2u}) {
+        auto stream = makeGenerateStream(/*seq_length=*/513);
+        stream->setInitialReuseLength(128);
+        stream->setReuseLength(128);
+        stream->setLocalReuseLength(64);
+        stream->setMemoryReuseLength(16);
+        stream->setRemoteReuseLength(64);
+        stream->setPdKvReadyLength(256);
+        EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(
+                      stream,
+                      {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load failed"), /*loaded_cache_block_count=*/2},
+                      /*seq_size_per_block=*/256,
+                      group_num),
+                  0);
+        EXPECT_EQ(stream->initialReuseLength(), 128);
+        EXPECT_EQ(stream->reuseLength(), 128);
+        EXPECT_EQ(stream->localReuseLength(), 64);
+        EXPECT_EQ(stream->memoryReuseLength(), 16);
+        EXPECT_EQ(stream->deviceReuseLength(), 48);
+        EXPECT_EQ(stream->remoteReuseLength(), 64);
+        EXPECT_EQ(stream->pdKvReadyLength(), 256);
+    }
+}
+
+TEST(DecodeRpcServerTest, SingleGroupHandoffReadinessDoesNotRegressOrChangeCacheAttribution) {
+    auto stream = makeGenerateStream(/*seq_length=*/149);
+    stream->setInitialReuseLength(128);
+    stream->setReuseLength(128);
+    stream->setMemoryReuseLength(8);
+    stream->setLocalReuseLength(16);
+    stream->setRemoteReuseLength(112);
+    stream->setPdKvReadyLength(144);
+
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
+                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/16},
+                                                    /*seq_size_per_block=*/8,
+                                                    /*group_num=*/1),
+              128);
+    EXPECT_EQ(stream->pdKvReadyLength(), 144);
+    EXPECT_EQ(stream->initialReuseLength(), 128);
+    EXPECT_EQ(stream->reuseLength(), 128);
+    EXPECT_EQ(stream->localReuseLength(), 16);
+    EXPECT_EQ(stream->memoryReuseLength(), 8);
+    EXPECT_EQ(stream->deviceReuseLength(), 8);
+    EXPECT_EQ(stream->remoteReuseLength(), 112);
+    stream->initSpeculativeHandoffPositions();
+    EXPECT_EQ(stream->reuseLength(), 148);
+    EXPECT_EQ(stream->pdKvReadyLength(), 144);
+    EXPECT_EQ(stream->initialReuseLength(), 128);
+}
+
+TEST(DecodeRpcServerTest, MultiGroupHandoffPreservesMonotonicReuseAndRemoteMemoryCounters) {
+    auto stream = makeGenerateStream(/*seq_length=*/149);
+    stream->setInitialReuseLength(128);
+    stream->setReuseLength(128);
+    stream->setLocalReuseLength(16);
+    stream->setMemoryReuseLength(8);
+    stream->setRemoteReuseLength(112);
+
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
+                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/19},
+                                                    /*seq_size_per_block=*/8,
+                                                    /*group_num=*/2),
+              144);
+    EXPECT_EQ(stream->initialReuseLength(), 144);
+    EXPECT_EQ(stream->reuseLength(), 144);
+    EXPECT_EQ(stream->localReuseLength(), 144);
+    EXPECT_EQ(stream->deviceReuseLength(), 136);
+    EXPECT_EQ(stream->memoryReuseLength(), 8);
+    EXPECT_EQ(stream->remoteReuseLength(), 112);
+    EXPECT_EQ(stream->pdKvReadyLength(), 144);
+
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
+                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/16},
+                                                    /*seq_size_per_block=*/8,
+                                                    /*group_num=*/2),
+              128);
+    EXPECT_EQ(stream->initialReuseLength(), 144);
+    EXPECT_EQ(stream->reuseLength(), 144);
+    EXPECT_EQ(stream->localReuseLength(), 144);
+    EXPECT_EQ(stream->deviceReuseLength(), 136);
+    EXPECT_EQ(stream->memoryReuseLength(), 8);
+    EXPECT_EQ(stream->remoteReuseLength(), 112);
+    EXPECT_EQ(stream->pdKvReadyLength(), 144);
+}
+
+TEST(DecodeRpcServerTest, EmptyHandoffDoesNotPublishReuse) {
+    for (size_t group_num : {1u, 2u}) {
+        auto stream = makeGenerateStream(/*seq_length=*/513);
+        EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
+                                                        {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/0},
+                                                        /*seq_size_per_block=*/256,
+                                                        group_num),
+                  0);
+        EXPECT_EQ(stream->initialReuseLength(), 0);
+        EXPECT_EQ(stream->reuseLength(), 0);
+        EXPECT_EQ(stream->localReuseLength(), 0);
+        EXPECT_EQ(stream->pdKvReadyLength(), 0);
+    }
 }
 
 TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
@@ -285,7 +391,7 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
 
 TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByLocalTagOrder) {
     auto                   topology = CacheTopology::create({makeRpcGroup("linear", {0}), makeRpcGroup("full", {1})},
-                                          {{0, {"linear"}}, {1, {"full"}}});
+                                                            {{0, {"linear"}}, {1, {"full"}}});
     BroadcastLoadRequestPB request;
     auto*                  full = request.add_tagged_group_block_ids();
     full->set_tag("full");

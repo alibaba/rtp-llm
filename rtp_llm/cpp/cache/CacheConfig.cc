@@ -299,20 +299,6 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
                     source_group.layer_ids[local_layer_id]);
             }
 
-            const size_t expected_existing_layers =
-                static_cast<size_t>(group_layer_num) + static_cast<size_t>(module_index) * mtp_layer_num;
-            RTP_LLM_CHECK_WITH_INFO(target_groups[target_gid].layer_ids.size() == expected_existing_layers,
-                                    "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s gid=%zu "
-                                    "physical group alignment mismatch: "
-                                    "existing_layers=%zu expected=%zu module=%d group_layer_num=%d module_layers=%u",
-                                    source_group.tag.c_str(),
-                                    tag.c_str(),
-                                    target_gid,
-                                    target_groups[target_gid].layer_ids.size(),
-                                    expected_existing_layers,
-                                    module_index,
-                                    group_layer_num,
-                                    mtp_layer_num);
         }
 
         GroupBase sub_group = source_group;
@@ -473,15 +459,8 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
         }
     }
 
-    if (!use_independent_block_pools || !group_block_layout_initialized || groupNums() == 0) {
+    if (groupNums() == 0) {
         explicitly_sized_pool_reserve_bytes = 0;
-        if (groupNums() > 0) {
-            auto groups = topology().groups();
-            for (auto& group : groups) {
-                group.block_num = global_block_num;
-            }
-            setTopology(std::move(groups), topology().layers());
-        }
         return;
     }
 

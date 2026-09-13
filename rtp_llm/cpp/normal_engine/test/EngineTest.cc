@@ -41,7 +41,11 @@ TEST_F(NormalEngineTest, testPrefillWarmUpUsesCachelessSingleInput) {
     auto params            = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
 
     const KVCacheSpecDesc default_desc{"default", KVCacheSpecType::MultiHeadAttention};
-    const KVCacheSpecDesc indexer_desc{"indexer_kv", KVCacheSpecType::MultiHeadAttention};
+    KVCacheSpecDesc indexer_desc{"indexer_kv", KVCacheSpecType::OpaqueKV};
+    indexer_desc.entry_dtype       = DataType::TYPE_UINT8;
+    indexer_desc.entry_elems       = 132;  // 128 indexer bytes and one FP32 scale per token.
+    indexer_desc.entry_count_mode  = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+    indexer_desc.compression_ratio = 1;
     params.model_config_.kv_cache_spec_descs.assign(static_cast<size_t>(params.model_config_.num_layers),
                                                     {default_desc, indexer_desc});
 
