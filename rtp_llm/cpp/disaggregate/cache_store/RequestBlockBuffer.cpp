@@ -35,6 +35,37 @@ std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> RequestBlockBuffer
     return blocks_;
 }
 
+void RequestBlockBuffer::forEachBlock(
+    const std::function<void(const std::string& key, const std::shared_ptr<BlockBuffer>& block)>& callback) const {
+    std::shared_lock<std::shared_mutex> lock(blocks_mutex_);
+    for (const auto& entry : blocks_) {
+        callback(entry.first, entry.second);
+    }
+}
+
+void RequestBlockBuffer::mergeBlocksFrom(RequestBlockBuffer& src) {
+    std::vector<std::shared_ptr<BlockBuffer>> merged_blocks;
+    {
+        std::scoped_lock lock(blocks_mutex_, src.blocks_mutex_);
+        const size_t     moved = src.blocks_.size();
+        blocks_.merge(src.blocks_);
+        blocks_size_ += src.blocks_size_;
+        src.blocks_size_ = 0;
+        if (moved > 0 && has_watch_funcs_.load(std::memory_order_acquire)) {
+            // Snapshot under the already-held blocks lock; watch funcs run
+            // after the locks are released so they may call back into this
+            // buffer (addBlock/getBlocks) without deadlocking.
+            merged_blocks.reserve(moved);
+            for (const auto& entry : blocks_) {
+                merged_blocks.push_back(entry.second);
+            }
+        }
+    }
+    if (!merged_blocks.empty()) {
+        triggerWatchFunc(true, merged_blocks);
+    }
+}
+
 std::shared_ptr<BlockBuffer> RequestBlockBuffer::getBlock(const std::string& id) const {
     std::shared_lock<std::shared_mutex> lock(blocks_mutex_);
 
@@ -65,7 +96,12 @@ void RequestBlockBuffer::addBlock(const std::shared_ptr<BlockBuffer>& block) {
         blocks_[block->key] = block;
         blocks_size_ += block->len;
     }
-    triggerWatchFunc(true, {block});
+    // Skip the per-block watch-func lock and the one-element argument vector
+    // when no watch func is registered: the PD load path adds one block per
+    // (layer, physical block) pair, which is O(layers * blocks) per request.
+    if (has_watch_funcs_.load(std::memory_order_acquire)) {
+        triggerWatchFunc(true, {block});
+    }
 }
 
 void RequestBlockBuffer::addBlock(
@@ -102,6 +138,10 @@ bool RequestBlockBuffer::setWatchFunc(RequestBlockBuffer::WatchFunc&& watch_func
         std::unique_lock<std::shared_mutex> lock(watch_func_mutex_);
         watch_funcs_.push_back(watch_func);
     }
+    // Publish the flag only after the func is visible in the vector so that
+    // addBlock either sees the flag (and triggers the new block itself) or the
+    // snapshot below (taken after the insert) includes the block.
+    has_watch_funcs_.store(true, std::memory_order_release);
 
     // current blocks trigger once
     // set callback then trigger will not miss new blocks

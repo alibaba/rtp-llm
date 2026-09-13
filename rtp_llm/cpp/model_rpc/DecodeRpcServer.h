@@ -100,6 +100,12 @@ private:
                                                             const std::vector<std::string>& peer_ips) const;
     static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
     static std::string     makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
+    // Cache-store key affixes for the hoisted long-context load path.
+    // cacheKeyPrefix(model_id) + token_id_str + cacheKeySuffix(layer_id, tag)
+    // must stay byte-identical to makeCacheKey(model_id, token_id_str, layer_id, tag);
+    // unit tests assert the equivalence so the two constructions cannot drift.
+    static std::string     cacheKeyPrefix(size_t model_id);
+    static std::string     cacheKeySuffix(size_t layer_id, const std::string& tag);
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);

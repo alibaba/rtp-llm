@@ -4,6 +4,7 @@
 #include <thread>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -696,6 +697,31 @@ TEST(DecodeRpcServerTest, EmptyTableOrMissingCacheKeysYieldNoLoad) {
                                                     kCompactSeqSizePerBlock,
                                                     kBaseSeqSizePerBlock)
                     .empty());
+}
+
+TEST(DecodeRpcServerTest, HoistedCacheKeyAffixesMatchMakeCacheKey) {
+    // The long-context load path builds cache keys as
+    // cacheKeyPrefix(model_id) + token_id_str + cacheKeySuffix(layer_id, tag)
+    // instead of calling makeCacheKey per (block, layer). The two constructions
+    // must stay byte-identical or the prefill cache store would miss every key.
+    for (size_t model_id : {0u, 1u, 5u, 42u}) {
+        for (size_t layer_id : {0u, 1u, 7u, 43u}) {
+            for (const std::string& tag :
+                 {std::string(""), std::string("default"), std::string("swa_kv"), std::string("hca_state")}) {
+                for (const std::string& token :
+                     {std::string("0"), std::string("7"), std::string("18446744073709551615")}) {
+                    const std::string expected = makeCacheKey(model_id, token, layer_id, tag);
+                    const std::string prefix   = DecodeRpcServer::cacheKeyPrefix(model_id);
+                    const std::string suffix   = DecodeRpcServer::cacheKeySuffix(layer_id, tag);
+                    std::string       actual;
+                    actual.reserve(prefix.size() + token.size() + suffix.size());
+                    actual.assign(prefix).append(token).append(suffix);
+                    ASSERT_EQ(expected, actual)
+                        << "model_id=" << model_id << " layer=" << layer_id << " tag=" << tag << " token=" << token;
+                }
+            }
+        }
+    }
 }
 
 }  // namespace rtp_llm

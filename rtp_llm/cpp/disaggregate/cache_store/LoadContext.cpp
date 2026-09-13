@@ -30,10 +30,10 @@ void SyncContext::call(const std::vector<std::shared_ptr<RequestBlockBuffer>>& r
     if (combine_load_) {  // for rdma only call rpc once
         auto new_buffer = std::make_shared<RequestBlockBuffer>(request_block_buffers[0]->getRequestId());
         for (auto& request_block_buffer : request_block_buffers) {
-            auto blocks = request_block_buffer->getBlocks();
-            for (auto& [_, block] : blocks) {
-                new_buffer->addBlock(block);
-            }
+            // Node-moving merge: the previous copy-then-re-insert path allocated
+            // and freed one hash node, one key string and one shared_ptr control
+            // block per block per layer, which dominated long-context load time.
+            new_buffer->mergeBlocksFrom(*request_block_buffer);
         }
         request_block_buffers_ = {new_buffer};
     } else {

@@ -140,6 +140,19 @@ std::string DecodeRpcServer::makeTaggedRequestKey(int64_t request_id, size_t lay
     return std::to_string(request_id) + "-" + std::to_string(layer_id) + "-tag-" + tag;
 }
 
+std::string DecodeRpcServer::cacheKeyPrefix(size_t model_id) {
+    return "model_id_" + std::to_string(model_id) + "_token_id_str_";
+}
+
+std::string DecodeRpcServer::cacheKeySuffix(size_t layer_id, const std::string& tag) {
+    std::string suffix = "_layer_id_" + std::to_string(layer_id);
+    if (!tag.empty() && tag != "default") {
+        suffix += "_tag_";
+        suffix += tag;
+    }
+    return suffix;
+}
+
 std::vector<DecodeRpcServer::MTPModuleLoadPlan>
 DecodeRpcServer::makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params) {
     if (propose_params == nullptr || propose_params->mtp_model_params_ == nullptr
@@ -1081,6 +1094,31 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                   cfg.seqSizePerBlockForGroup(gid),
                                   cfg.seq_size_per_block);
     };
+    // Long-context load hot path: the block loop below runs once per
+    // (layer, group, physical block) pair, so O(layers * blocks) per request.
+    // Hoist every peer- and block-independent value out of the loops:
+    // cache-key strings (one std::to_string per cache key instead of one per
+    // block per layer), the layer-independent per-group load plans (previously
+    // rebuilt per layer) and the per-(layer, tag) key affixes so the inner
+    // loop performs a single reused-buffer append per block.
+    std::vector<std::string> cache_key_strs;
+    cache_key_strs.reserve(load_context.cache_keys.size());
+    for (const auto& cache_key_value : load_context.cache_keys) {
+        cache_key_strs.emplace_back(std::to_string(cache_key_value));
+    }
+    const std::string main_key_prefix = cacheKeyPrefix(maga_init_params_.model_id);
+    std::vector<std::vector<CacheStoreBlockPair>> main_load_plans(
+        static_cast<size_t>(std::max<int>(cache_config.groupNums(), 0)));
+    std::vector<size_t> main_keys_per_block(main_load_plans.size(), 1);
+    for (size_t gid = 0; gid < main_load_plans.size(); ++gid) {
+        if (gid >= load_context.block_ids_by_group.size() || load_context.block_ids_by_group[gid] == nullptr) {
+            continue;
+        }
+        main_load_plans[gid] =
+            groupLoadPlan(cache_config, use_hybrid, gid, load_context.block_ids_by_group[gid]->blocks().size());
+        main_keys_per_block[gid] =
+            cacheKeysPerPhysicalBlock(cache_config.seqSizePerBlockForGroup(gid), cache_config.seq_size_per_block);
+    }
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
@@ -1106,13 +1144,15 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                 RTP_LLM_CHECK_WITH_INFO(
                     load_context.block_ids_by_group[gid] != nullptr, "null group_block: gid=%zu", gid);
                 const auto& block_ids = load_context.block_ids_by_group[gid]->blocks();
-                auto        block_num = block_ids.size();
-                size_t      model_id  = maga_init_params_.model_id;
 
-                CacheGroupType group_type                    = groupType(cache_config, use_hybrid, gid);
-                const auto     load_plan                     = groupLoadPlan(cache_config, use_hybrid, gid, block_num);
-                const auto     cache_keys_per_physical_block = cacheKeysPerPhysicalBlock(
-                    cache_config.seqSizePerBlockForGroup(gid), cache_config.seq_size_per_block);
+                CacheGroupType group_type = groupType(cache_config, use_hybrid, gid);
+                RTP_LLM_CHECK_WITH_INFO(gid < main_load_plans.size(),
+                                        "main group id out of range: gid=%zu hoisted=%zu",
+                                        gid,
+                                        main_load_plans.size());
+                const auto& load_plan                     = main_load_plans[gid];
+                const auto  cache_keys_per_physical_block = main_keys_per_block[gid];
+                const std::string layer_key_suffix = cacheKeySuffix(layer_id, tag);
 
                 if (!shouldLoadGroupFromPeer(cache_config, group_type, gid, i)) {
                     continue;
@@ -1129,8 +1169,12 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                     if (isNullBlockIdx(block_id)) {
                         continue;
                     }
-                    auto cache_key =
-                        makeCacheKey(model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, tag);
+                    std::string cache_key;
+                    cache_key.reserve(main_key_prefix.size() + cache_key_strs[cache_key_index].size()
+                                       + layer_key_suffix.size());
+                    cache_key.assign(main_key_prefix)
+                        .append(cache_key_strs[cache_key_index])
+                        .append(layer_key_suffix);
 
                     const bool             use_kv_key_prefix  = use_mla || use_opaque_kv_store || use_hybrid;
                     const bool             use_whole_kv_block = is_page_level_rr || use_kv_key_prefix;
@@ -1211,6 +1255,27 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                                 + " cache_cfg=" + std::to_string(mtp_cache_cfg.layer_num)
                                                 + " (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
 
+                    // Same hoisting as the main path: per-group plans and key
+                    // affixes are layer-independent within one MTP module.
+                    const bool mtp_use_hybrid_module = mtp_cache_cfg.groupNums() > 1;
+                    const std::string mtp_key_prefix = cacheKeyPrefix(module_plan.cache_model_id);
+                    std::vector<std::vector<CacheStoreBlockPair>> mtp_load_plans(
+                        static_cast<size_t>(std::max<int>(mtp_cache_cfg.groupNums(), 0)));
+                    std::vector<size_t> mtp_keys_per_block(mtp_load_plans.size(), 1);
+                    for (size_t gid = 0; gid < mtp_load_plans.size(); ++gid) {
+                        if (gid >= load_context.block_ids_by_group.size()
+                            || load_context.block_ids_by_group[gid] == nullptr) {
+                            continue;
+                        }
+                        mtp_load_plans[gid] = groupLoadPlan(
+                            mtp_cache_cfg,
+                            mtp_use_hybrid_module,
+                            gid,
+                            load_context.block_ids_by_group[gid]->blocks().size());
+                        mtp_keys_per_block[gid] = cacheKeysPerPhysicalBlock(
+                            mtp_cache_cfg.seqSizePerBlockForGroup(gid), mtp_cache_cfg.seq_size_per_block);
+                    }
+
                     for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
                         const bool mtp_use_hybrid          = mtp_cache_cfg.groupNums() > 1;
                         const bool mtp_use_opaque_kv_store = mtp_cache_cfg.use_opaque_kv_cache_store;
@@ -1245,13 +1310,15 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                             RTP_LLM_CHECK_WITH_INFO(
                                 load_context.block_ids_by_group[gid] != nullptr, "null mtp group_block: gid=%zu", gid);
                             const auto& block_ids = load_context.block_ids_by_group[gid]->blocks();
-                            auto        block_num = block_ids.size();
-                            size_t      model_id  = module_plan.cache_model_id;
 
                             CacheGroupType group_type = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
-                            const auto     load_plan  = groupLoadPlan(mtp_cache_cfg, mtp_use_hybrid, gid, block_num);
-                            const auto     cache_keys_per_physical_block = cacheKeysPerPhysicalBlock(
-                                mtp_cache_cfg.seqSizePerBlockForGroup(gid), mtp_cache_cfg.seq_size_per_block);
+                            RTP_LLM_CHECK_WITH_INFO(gid < mtp_load_plans.size(),
+                                                    "mtp group id out of range: gid=%zu hoisted=%zu",
+                                                    gid,
+                                                    mtp_load_plans.size());
+                            const auto& load_plan                    = mtp_load_plans[gid];
+                            const auto cache_keys_per_physical_block = mtp_keys_per_block[gid];
+                            const std::string mtp_layer_key_suffix = cacheKeySuffix(layer_id, tag);
 
                             if (!shouldLoadGroupFromPeer(mtp_cache_cfg, group_type, gid, i)) {
                                 continue;
@@ -1270,8 +1337,12 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                 if (isNullBlockIdx(block_id)) {
                                     continue;
                                 }
-                                auto cache_key = makeCacheKey(
-                                    model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, tag);
+                                std::string cache_key;
+                                cache_key.reserve(mtp_key_prefix.size() + cache_key_strs[cache_key_index].size()
+                                                   + mtp_layer_key_suffix.size());
+                                cache_key.assign(mtp_key_prefix)
+                                    .append(cache_key_strs[cache_key_index])
+                                    .append(mtp_layer_key_suffix);
                                 const bool mtp_use_mla = mtp_cache_cfg.use_mla;
                                 const bool mtp_use_kv_key_prefix =
                                     mtp_use_mla || mtp_use_opaque_kv_store || mtp_use_hybrid;

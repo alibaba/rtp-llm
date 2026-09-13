@@ -7,8 +7,6 @@
 namespace rtp_llm {
 
 CacheLoadRequest* Messager::makeLoadRequest(const std::shared_ptr<LoadRequest>& request) {
-    auto blocks = request->request_block_buffer->getBlocks();
-
     auto load_request = new CacheLoadRequest;
     load_request->set_timeout_ms(request->timeout_ms - 10);
     load_request->set_requestid(request->request_block_buffer->getRequestId());
@@ -17,11 +15,15 @@ CacheLoadRequest* Messager::makeLoadRequest(const std::shared_ptr<LoadRequest>& 
     load_request->set_partition_count(request->partition_count);
     load_request->set_partition_id(request->partition_id);
 
-    for (auto& [key, block] : blocks) {
-        auto block_msg = load_request->add_blocks();
-        block_msg->set_key(block->key);
-        block_msg->set_len(block->len);
-    }
+    // Iterating in place avoids getBlocks(), whose by-value map return copies
+    // every node (one allocation, one key string and one shared_ptr refcount
+    // bump per block) on the critical load path.
+    request->request_block_buffer->forEachBlock(
+        [&load_request](const std::string& key, const std::shared_ptr<BlockBuffer>& block) {
+            auto block_msg = load_request->add_blocks();
+            block_msg->set_key(block->key);
+            block_msg->set_len(block->len);
+        });
     return load_request;
 }
 
