@@ -28,7 +28,7 @@ def build(output, internal):
         work = Path(directory)
         archive = work / "source.tar"
         with archive.open("wb") as f:
-            subprocess.run(["git", "archive", sha, "rtp_llm/flexlb"], cwd=REPO, stdout=f, check=True)
+            subprocess.run(["git", "archive", sha, "rtp_llm/flexlb", "rtp_llm/cpp/model_rpc/proto"], cwd=REPO, stdout=f, check=True)
         run(["tar", "xf", str(archive), "-C", str(work)], REPO)
         project = work / "rtp_llm/flexlb"
         pom = project / "flexlb-api/pom.xml"
