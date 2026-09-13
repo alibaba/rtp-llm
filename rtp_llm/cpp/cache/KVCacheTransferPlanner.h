@@ -8,27 +8,6 @@
 
 namespace rtp_llm {
 
-enum class K3CacheLoadSourcePolicy {
-    PAGE_OWNER,
-    ALL_PEER_PARTITION,
-    SINGLE_REPLICA,
-};
-
-struct K3CacheLoadSourcePlan {
-    bool selected        = false;
-    int  partition_count = 1;
-    int  partition_id    = 0;
-};
-
-bool isK3PageRRToReplicatedDecode(int prefill_attention_tp,
-                                  int decode_attention_tp,
-                                  int source_shards,
-                                  int peer_count,
-                                  int configured_upstream_shards);
-
-K3CacheLoadSourcePlan planK3CacheLoadSource(
-    K3CacheLoadSourcePolicy policy, size_t block_position, int peer_index, int peer_count, int decode_dp_rank);
-
 std::vector<size_t>
 blockPositionsForCacheTransfer(size_t block_num, size_t first_full_block, bool use_hybrid, CacheGroupType group_type);
 
@@ -62,16 +41,15 @@ struct CacheStorePublishRange {
 // Background: ``cache_keys`` is always the FULL logical-block hash sequence
 // (length = total_logical_blocks). ``kv_cache_offset`` is per-group and
 // per-rank. Ordinary non-FULL groups keep the full block list. FULL groups
-// under Page-RR KV sharding hold only their 1/cp_size owned blocks,
-// **compactly**, in
+// under CP page-RR hold only their 1/cp_size owned blocks, **compactly**, in
 // appearance order: local index ``i`` ↔ logical position
 // ``cp_rank + i*cp_size``. Non-FULL groups with virtual-block cache layout
 // instead hold one local slot per D logical pages, shared by every rank's
 // distinct head shard.
 //
 // To register the right key with the right buffer the planner emits:
-//   * (pos, pos)                              — non-sharded / non-FULL groups
-//   * (cp_rank + i*cp_size, i) for owned i    — Page-RR-sharded FULL groups
+//   * (pos, pos)                              — non-CP / non-FULL groups
+//   * (cp_rank + i*cp_size, i) for owned i    — CP-sharded FULL groups
 //   * ((i+1)*cp_size-1, i)                    — virtual-block SWA groups
 //   * (total-1, ceil(total/cp_size)-1)         — virtual-block LINEAR terminal
 //

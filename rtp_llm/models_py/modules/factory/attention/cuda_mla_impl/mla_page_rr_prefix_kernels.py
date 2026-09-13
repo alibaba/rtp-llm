@@ -1,4 +1,4 @@
-"""Fused, backend-independent movement of raw MLA prefix pages."""
+"""Fused, backend-independent movement of unquantized MLA prefix pages."""
 
 from dataclasses import dataclass
 
@@ -121,7 +121,7 @@ def _pack_prefix_kernel(
         + token * CACHE_TOKEN_STRIDE
         + feature * CACHE_FEATURE_STRIDE,
         mask=live,
-        other=0.0,
+        other=0,
     )
     tl.store(
         Output + packed_page * PAGE_TOKENS * FEATURES + elements,
@@ -156,7 +156,7 @@ def _restore_prefix_kernel(
         (owner * LOCAL_PAGES + packed_page) * PAGE_TOKENS + position % PAGE_TOKENS
     ) * FEATURES + feature
     live = position < tl.load(Metadata + request)
-    values = tl.load(Gathered + source, mask=live, other=0.0)
+    values = tl.load(Gathered + source, mask=live, other=0)
     output_start = tl.load(Metadata + 2 * (REQUESTS + 1) + request) * FEATURES
     tl.store(Output + output_start + elements, values, mask=live)
 

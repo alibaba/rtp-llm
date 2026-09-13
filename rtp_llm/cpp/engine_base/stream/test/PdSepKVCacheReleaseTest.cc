@@ -26,7 +26,6 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 #include <atomic>
-#include <array>
 #include <chrono>
 #include <cstring>
 #include <memory>
@@ -224,8 +223,7 @@ struct K3TransferFixture {
               int64_t                  request_id,
               size_t                   model_id,
               size_t                   draft_model_id,
-              bool                     keep_skipped_blocks,
-              size_t                   draft_layer_num = 1) {
+              bool                     keep_skipped_blocks) {
         manager = std::make_shared<KVCacheManager>(config, true, nullptr, KVCacheConfig{}, parallelism);
         manager->config_.block_num = config.block_num;
         if (!manager->init()) {
@@ -262,7 +260,7 @@ struct K3TransferFixture {
         params.parallelism_config       = parallelism;
         auto draft                      = std::make_unique<EngineInitParams>();
         draft->model_id                 = draft_model_id;
-        draft->model_config_.num_layers = draft_layer_num;
+        draft->model_config_.num_layers = 1;
         auto mtp_params                 = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
         mtp_params->push_back(std::move(draft));
         propose_params = std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_EAGLE3, 3, std::move(mtp_params));
@@ -503,9 +501,7 @@ protected:
                                                   /*is_eagle=*/true);
     }
 
-    ModelConfig makeTinyK3ModelConfig(const std::vector<HybridAttentionType>& attention_types,
-                                      int                                      linear_head_num        = 8,
-                                      int                                      linear_conv_kernel_dim = 4) {
+    ModelConfig makeTinyK3ModelConfig(const std::vector<HybridAttentionType>& attention_types) {
         ModelConfig config;
         config.num_layers                                                = static_cast<int64_t>(attention_types.size());
         config.max_seq_len                                               = 4096;
@@ -523,22 +519,19 @@ protected:
         config.hybrid_attention_config.enable_hybrid_attention           = true;
         config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
         config.hybrid_attention_config.hybrid_attention_types            = attention_types;
-        config.linear_attention_config.linear_conv_kernel_dim            = linear_conv_kernel_dim;
+        config.linear_attention_config.linear_conv_kernel_dim            = 4;
         config.linear_attention_config.linear_key_head_dim               = 4;
         config.linear_attention_config.linear_value_head_dim             = 4;
-        config.linear_attention_config.linear_num_key_heads              = linear_head_num;
-        config.linear_attention_config.linear_num_value_heads            = linear_head_num;
+        config.linear_attention_config.linear_num_key_heads              = 8;
+        config.linear_attention_config.linear_num_value_heads            = 8;
         return config;
     }
 
     CacheConfig makeTinyK3PageRREagleConfig(const ParallelismConfig&                parallelism_config,
                                             const std::vector<HybridAttentionType>& draft_attention_types = {
-                                                HybridAttentionType::NONE},
-                                            int linear_head_num        = 8,
-                                            int linear_conv_kernel_dim = 4) {
-        auto score_config = makeTinyK3ModelConfig(
-            {HybridAttentionType::LINEAR, HybridAttentionType::NONE}, linear_head_num, linear_conv_kernel_dim);
-        auto draft_config = makeTinyK3ModelConfig(draft_attention_types, linear_head_num, linear_conv_kernel_dim);
+                                                HybridAttentionType::NONE}) {
+        auto score_config = makeTinyK3ModelConfig({HybridAttentionType::LINEAR, HybridAttentionType::NONE});
+        auto draft_config = makeTinyK3ModelConfig(draft_attention_types);
         if (std::find(draft_attention_types.begin(), draft_attention_types.end(), HybridAttentionType::SLIDING_WINDOW)
             != draft_attention_types.end()) {
             draft_config.attn_config.sliding_window = 256;
@@ -1305,280 +1298,6 @@ TEST_F(PdSepKVCacheReleaseTest, testEagleDraftLoadUsesIndependentPhysicalGroup) 
         actual_destination_addrs.insert(block->addr.get());
     }
     EXPECT_EQ(actual_destination_addrs, expected_destination_addrs);
-}
-
-TEST_F(PdSepKVCacheReleaseTest, testK3PageRRSourceFansIntoReplicatedDecodeOwner) {
-    constexpr int     kPageCount    = 18;
-    constexpr int64_t kRequestId    = 9030;
-    constexpr size_t  kModelId      = 96;
-    constexpr size_t  kDraftModelId = 97;
-
-    for (const int source_shards : {8, 16}) {
-        SCOPED_TRACE(::testing::Message() << "source_shards=" << source_shards);
-        const int decode_dp_rank = source_shards == 8 ? 11 : 15;
-
-        ParallelismConfig parallelism;
-        parallelism.tp_size                            = 1;
-        parallelism.ktp_size                           = 16;
-        parallelism.dp_size                            = 16;
-        parallelism.dp_rank                            = decode_dp_rank;
-        parallelism.role_type                          = RoleType::DECODE;
-        parallelism.prefill_cp_config.prefill_cp_size  = source_shards;
-        parallelism.prefill_cp_config.kv_cache_sharded = false;
-
-        std::vector<std::string> peer_addrs;
-        for (int peer = 0; peer < source_shards; ++peer) {
-            peer_addrs.push_back(testPeerIp(peer) + ":12345:12346");
-        }
-        CacheKeysType cache_keys;
-        for (int page = 0; page < kPageCount; ++page) {
-            cache_keys.push_back(43000 + page);
-        }
-
-        {
-            const auto config = makeTinyK3PageRREagleConfig(
-                parallelism,
-                {HybridAttentionType::LINEAR, HybridAttentionType::NONE},
-                /*linear_head_num=*/96,
-                /*linear_conv_kernel_dim=*/3);
-            ASSERT_EQ(config.layer_to_group_id, (std::vector<int>{1, 0, 3, 2}));
-            K3TransferFixture fixture;
-            ASSERT_TRUE(fixture.init(config,
-                                     parallelism,
-                                     kPageCount,
-                                     kRequestId,
-                                     kModelId,
-                                     kDraftModelId,
-                                     /*keep_skipped_blocks=*/true,
-                                     /*draft_layer_num=*/2));
-
-            auto groups = fixture.resource->groupBlocks();
-            ASSERT_EQ(groups.size(), 4u);
-            const int padding_block = static_cast<int>(config.block_num - 1);
-            for (const size_t full_gid : {size_t{0}, size_t{2}}) {
-                groups[full_gid] = std::make_shared<BlockIds>(*groups[full_gid]);
-                ASSERT_EQ(std::find(groups[full_gid]->blocks().begin(),
-                                    groups[full_gid]->blocks().end(),
-                                    padding_block),
-                          groups[full_gid]->blocks().end());
-                groups[full_gid]->add({padding_block});
-            }
-            fillK3BlockBytes(fixture.manager, padding_block, /*global_layer_id=*/1, 0xEE);
-            fillK3BlockBytes(fixture.manager, padding_block, /*global_layer_id=*/3, 0xEE);
-
-            fixture.cache_store->load_byte_pattern_ = [](const std::string&, const std::string&) {
-                return uint8_t{0x5A};
-            };
-            const std::string request_key = "k3-page-rr-to-decode-owner";
-            grpc::ServerContext server_context;
-            auto make_load_context = [&]() {
-                return DecodeRpcServer::LoadKVCacheContext(kRequestId,
-                                                           request_key,
-                                                           peer_addrs,
-                                                           cache_keys,
-                                                           groups,
-                                                           /*reuse_block_size=*/0,
-                                                           /*timeout_ms=*/5000,
-                                                           /*partition_count=*/1,
-                                                           /*partition_id=*/0,
-                                                           &server_context,
-                                                           source_shards,
-                                                           /*force_disable_sp_run=*/false);
-            };
-            auto       load_context = make_load_context();
-            const auto status       = fixture.server.loadCache(load_context);
-            ASSERT_TRUE(status.ok()) << status.ToString();
-            ASSERT_EQ(fixture.cache_store->load_buffer_calls_.size(), static_cast<size_t>(source_shards));
-
-            std::unordered_map<std::string, std::unordered_map<std::string, void*>> actual;
-            for (int peer = 0; peer < source_shards; ++peer) {
-                const auto& call = fixture.cache_store->load_buffer_calls_[static_cast<size_t>(peer)];
-                EXPECT_EQ(call.peer_ip, testPeerIp(peer));
-                for (const auto& request : call.requests) {
-                    for (const auto& [key, block] : request->getBlocks()) {
-                        EXPECT_TRUE(actual[call.peer_ip].emplace(key, block->addr.get()).second) << key;
-                    }
-                }
-            }
-
-            std::unordered_map<std::string, std::unordered_map<std::string, void*>> expected;
-            struct LayerExpectation {
-                int    physical_gid;
-                int    global_layer;
-                size_t model_id;
-                size_t wire_layer;
-            };
-            for (const auto layer : {LayerExpectation{0, 1, kModelId, 1},
-                                     LayerExpectation{2, 3, kDraftModelId, 1}}) {
-                const auto& blocks = groups[static_cast<size_t>(layer.physical_gid)]->blocks();
-                ASSERT_GE(blocks.size(), static_cast<size_t>(kPageCount + 1));
-                for (size_t page = 0; page < static_cast<size_t>(kPageCount); ++page) {
-                    const int peer = static_cast<int>(page % static_cast<size_t>(source_shards));
-                    const auto parts = fixture.manager->convertIndexToBuffer(
-                        blocks[page], layer.global_layer, /*partition_count=*/1, /*partition_id=*/0);
-                    ASSERT_EQ(parts.size(), 1u);
-                    const auto cache_key = makeCacheKey(layer.model_id,
-                                                        std::to_string(cache_keys[page]),
-                                                        layer.wire_layer,
-                                                        KVCacheRegionName::DEFAULT);
-                    expected[testPeerIp(peer)]["kv_" + cache_key] = parts[0].addr;
-                }
-            }
-
-            for (const auto layer : {LayerExpectation{1, 0, kModelId, 0},
-                                     LayerExpectation{3, 2, kDraftModelId, 0}}) {
-                const size_t terminal = static_cast<size_t>((kPageCount - 1) / source_shards);
-                const auto&  blocks   = groups[static_cast<size_t>(layer.physical_gid)]->blocks();
-                ASSERT_GT(blocks.size(), terminal);
-                const int block = blocks[terminal];
-                const auto whole = fixture.manager->convertIndexToBuffer(block, layer.global_layer);
-                ASSERT_EQ(whole.size(), 1u);
-                const auto* linear_spec =
-                    dynamic_cast<const LinearKVCacheSpec*>(config.cache_specs[layer.physical_gid].get());
-                ASSERT_NE(linear_spec, nullptr);
-                EXPECT_EQ(linear_spec->local_num_k_heads, 96u);
-                EXPECT_EQ(linear_spec->local_num_v_heads, 96u);
-                EXPECT_EQ(96 / source_shards, source_shards == 8 ? 12 : 6);
-                std::vector<std::pair<uintptr_t, uintptr_t>> spans;
-                for (int peer = 0; peer < source_shards; ++peer) {
-                    const auto parts = fixture.manager->convertIndexToBuffer(
-                        block, layer.global_layer, source_shards, peer);
-                    ASSERT_EQ(parts.size(), 7u);
-                    EXPECT_EQ(parts[0].size_bytes * static_cast<size_t>(source_shards),
-                              linear_spec->k_block_size_bytes());
-                    const auto cache_key = makeCacheKey(layer.model_id,
-                                                        std::to_string(cache_keys.back()),
-                                                        layer.wire_layer,
-                                                        KVCacheRegionName::DEFAULT);
-                    for (size_t segment = 0; segment < parts.size(); ++segment) {
-                        expected[testPeerIp(peer)][makeLinearCacheSegmentKey(segment, cache_key)] = parts[segment].addr;
-                        const auto begin = reinterpret_cast<uintptr_t>(parts[segment].addr);
-                        spans.emplace_back(begin, begin + parts[segment].size_bytes);
-                    }
-                }
-                std::sort(spans.begin(), spans.end());
-                uintptr_t cursor = reinterpret_cast<uintptr_t>(whole[0].addr);
-                for (const auto& span : spans) {
-                    EXPECT_EQ(span.first, cursor);
-                    cursor = span.second;
-                }
-                EXPECT_EQ(cursor,
-                          reinterpret_cast<uintptr_t>(whole[0].addr) + static_cast<uintptr_t>(whole[0].size_bytes));
-            }
-
-            EXPECT_EQ(actual, expected);
-            expectK3BlockBytes(fixture.manager, padding_block, /*global_layer_id=*/1, 0xEE);
-            expectK3BlockBytes(fixture.manager, padding_block, /*global_layer_id=*/3, 0xEE);
-
-            if (source_shards == 8) {
-                const auto saved_block = groups[0]->blocks()[5];
-                groups[0]->setAt(5, NULL_BLOCK_IDX);
-                fixture.cache_store->load_buffer_calls_.clear();
-                std::mutex                         callback_mutex;
-                std::vector<std::function<void()>> pending_callbacks;
-                std::promise<void>                 preceding_peer_dispatched;
-                auto                               dispatched = preceding_peer_dispatched.get_future();
-                bool                               signaled = false;
-                bool                               release_callbacks = false;
-                fixture.cache_store->defer_load_callback_ = [&](CacheStoreLoadDoneCallback callback,
-                                                                 bool                       ok,
-                                                                 const std::string&         peer) {
-                    auto complete = [callback = std::move(callback), ok]() {
-                        callback(ok, ok ? CacheStoreErrorCode::None : CacheStoreErrorCode::LoadErrorUnknown);
-                    };
-                    std::unique_lock<std::mutex> lock(callback_mutex);
-                    if (release_callbacks) {
-                        lock.unlock();
-                        complete();
-                    } else {
-                        pending_callbacks.push_back(std::move(complete));
-                        if (!signaled && peer == testPeerIp(4)) {
-                            signaled = true;
-                            preceding_peer_dispatched.set_value();
-                        }
-                    }
-                };
-                auto delayed_context = make_load_context();
-                auto load = std::async(std::launch::async, [&]() { return fixture.server.loadCache(delayed_context); });
-                EXPECT_EQ(dispatched.wait_for(std::chrono::seconds(2)), std::future_status::ready);
-                EXPECT_EQ(load.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout)
-                    << "loadCache returned before preceding transfer callbacks completed";
-                std::vector<std::function<void()>> completions;
-                {
-                    std::lock_guard<std::mutex> lock(callback_mutex);
-                    release_callbacks = true;
-                    completions.swap(pending_callbacks);
-                }
-                for (auto& complete : completions) {
-                    complete();
-                }
-                EXPECT_EQ(load.get().code(), ErrorCode::LOAD_KV_CACHE_FAILED);
-                fixture.cache_store->defer_load_callback_ = nullptr;
-                groups[0]->setAt(5, saved_block);
-            }
-        }
-
-        {
-            const auto config = makeTinyK3PageRREagleConfig(
-                parallelism,
-                {HybridAttentionType::SLIDING_WINDOW},
-                /*linear_head_num=*/96,
-                /*linear_conv_kernel_dim=*/3);
-            K3TransferFixture fixture;
-            ASSERT_TRUE(fixture.init(config,
-                                     parallelism,
-                                     /*page_count=*/4,
-                                     kRequestId + 1,
-                                     kModelId,
-                                     kDraftModelId,
-                                     /*keep_skipped_blocks=*/false));
-            fixture.cache_store->load_byte_pattern_ = [](const std::string&, const std::string&) {
-                return uint8_t{0x6B};
-            };
-            CacheKeysType eagle_cache_keys(cache_keys.begin(), cache_keys.begin() + 4);
-            const std::string eagle_request_key = "k3-page-rr-eagle-to-decode-owner";
-            grpc::ServerContext                 eagle_server_context;
-            DecodeRpcServer::LoadKVCacheContext eagle_context(kRequestId + 1,
-                                                               eagle_request_key,
-                                                               peer_addrs,
-                                                               eagle_cache_keys,
-                                                               fixture.resource->groupBlocks(),
-                                                               /*reuse_block_size=*/0,
-                                                               /*timeout_ms=*/5000,
-                                                               /*partition_count=*/1,
-                                                               /*partition_id=*/0,
-                                                               &eagle_server_context,
-                                                               source_shards,
-                                                               /*force_disable_sp_run=*/false);
-            const auto status = fixture.server.loadCache(eagle_context);
-            ASSERT_TRUE(status.ok()) << status.ToString();
-
-            std::unordered_set<std::string> eagle_peers;
-            std::unordered_set<std::string> eagle_keys;
-            for (const auto& call : fixture.cache_store->load_buffer_calls_) {
-                for (const auto& request : call.requests) {
-                    for (const auto& [key, block] : request->getBlocks()) {
-                        (void)block;
-                        if (key.find("_" + std::to_string(kDraftModelId) + "_") != std::string::npos) {
-                            eagle_peers.insert(call.peer_ip);
-                            eagle_keys.insert(key);
-                        }
-                    }
-                }
-            }
-            EXPECT_EQ(eagle_peers,
-                      std::unordered_set<std::string>({testPeerIp(decode_dp_rank % source_shards)}));
-            ASSERT_EQ(eagle_keys.size(), 2u);
-            for (size_t page : {size_t{2}, size_t{3}}) {
-                EXPECT_EQ(eagle_keys.count("kv_"
-                                           + makeCacheKey(kDraftModelId,
-                                                          std::to_string(eagle_cache_keys[page]),
-                                                          /*layer_id=*/0,
-                                                          KVCacheRegionName::DEFAULT)),
-                          1u);
-            }
-        }
-    }
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testK3PageRRToReplicatedLoadsSingleGroupMtpSwaTailFromRankAffinePeer) {

@@ -624,19 +624,13 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
             expected_width = (
                 self.attn_configs.kv_lora_rank + self.attn_configs.rope_head_dim
             )
-            expected_cache_dtype = (
-                torch.float8_e4m3fn
-                if self.attn_configs.mla_fp8_compute
-                else torch.bfloat16
-            )
             if (
-                raw_cache.dtype != expected_cache_dtype
+                raw_cache.dtype != torch.bfloat16
                 or not raw_cache.is_cuda
                 or raw_cache.shape[-1] != expected_width
             ):
                 raise RuntimeError(
-                    "MLA page-RR Prefill raw cache does not match the configured "
-                    f"precision; expected dtype={expected_cache_dtype} "
+                    "MLA page-RR Prefill requires BF16 raw cache "
                     f"[blocks,{adapter.page_tokens},{expected_width}], got "
                     f"shape={tuple(raw_cache.shape)} dtype={raw_cache.dtype} "
                     f"device={raw_cache.device}"
@@ -646,9 +640,6 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
                 block_table,
                 prefix_lens,
             )
-            if self.attn_configs.mla_fp8_compute:
-                canonical_prefix_kv = canonical_prefix_kv.to(torch.bfloat16)
-                canonical_prefix_kv.mul_(self.attn_configs.mla_fp8_kv_scale)
 
         return self.fmha_impl.forward(
             q,

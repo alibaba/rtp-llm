@@ -101,8 +101,6 @@ its request, token IDs and results are saved under prefill/long-prefix/.
 The Projection-KTP profile uses Prefill TP8/EP8 plus Decode DP8/KTP8/EP8.
 Both EAGLE3 and MTP use this Projection-KTP profile: target KTP8, draft KTP1,
 with Decode CUDA Graph enabled. MTP attention and cache remain native BF16.
-The two speculative modes require separate smoke launches and cannot be enabled
-together.
 
 Merge-gate accuracy validation must use SMOKE_SUITE=all. SMOKE_SUITE=flow is
 only a four-layer RDMA connectivity/multi-round preflight and does not satisfy
@@ -143,10 +141,7 @@ Important optional variables:
                                  and >64K single/batched chunk cases
   SMOKE_EXPECTED_LAYERS     checkpoint layer count; defaults to 93. Set to 4
                             only for the required four-layer RDMA flow smoke.
-  SMOKE_PAGE_RR             0 (default) keeps replicated Prefill cache;
-                            1 enables the two-host P8 -> DP8 Page-RR profile
   SMOKE_BLOCK_SIZE          physical cache page size; defaults to 4096
-                            (128 when SMOKE_PAGE_RR=1)
   SMOKE_KERNEL_BLOCK_SIZE   attention kernel page size; defaults to 128
   SMOKE_CHUNK_TOKENS        whole-model chunk budget; defaults to 65536
   SMOKE_DECODE_KV_CACHE_MEM_MB
@@ -194,17 +189,6 @@ EOF
 role="${1,,}"
 [[ "${role}" == "prefill" || "${role}" == "decode" ]] \
     || die "role must be decode or prefill"
-
-smoke_page_rr="${SMOKE_PAGE_RR:-0}"
-[[ "${smoke_page_rr}" == "0" || "${smoke_page_rr}" == "1" ]] \
-    || die "SMOKE_PAGE_RR must be 0 or 1"
-smoke_tp_size="${TP_SIZE:-${KIMI_K3_TP_SIZE:-8}}"
-smoke_ep_size="${EP_SIZE:-${KIMI_K3_EP_SIZE:-${smoke_tp_size}}}"
-[[ "${smoke_tp_size}" =~ ^[1-9][0-9]*$ && "${smoke_ep_size}" == "${smoke_tp_size}" ]] \
-    || die "this K3 MegaMoE smoke requires positive TP == EP"
-if [[ "${smoke_page_rr}" == "1" && "${smoke_tp_size}" != "8" ]]; then
-    die "this two-host SMOKE_PAGE_RR profile validates only Prefill TP8 -> Decode DP8"
-fi
 
 [[ "$(id -u)" != "0" ]] || die "run inside lhc_GPU as a normal user, not root"
 [[ -f /.dockerenv || -r /proc/1/cgroup ]] \
@@ -342,22 +326,15 @@ for timeout_value in "${startup_timeout}" "${request_timeout}" "${result_timeout
         || die "smoke timeouts must be positive integers"
 done
 
-if [[ "${smoke_page_rr}" == "1" ]]; then
-    smoke_block_size="${SMOKE_BLOCK_SIZE:-128}"
-    smoke_kernel_block_size="${SMOKE_KERNEL_BLOCK_SIZE:-128}"
-else
-    smoke_block_size="${SMOKE_BLOCK_SIZE:-4096}"
-    smoke_kernel_block_size="${SMOKE_KERNEL_BLOCK_SIZE:-128}"
-fi
+smoke_block_size="${SMOKE_BLOCK_SIZE:-4096}"
+smoke_kernel_block_size="${SMOKE_KERNEL_BLOCK_SIZE:-128}"
 smoke_chunk_tokens="${SMOKE_CHUNK_TOKENS:-65536}"
+smoke_tp_size="${TP_SIZE:-${KIMI_K3_TP_SIZE:-8}}"
+smoke_ep_size="${EP_SIZE:-${KIMI_K3_EP_SIZE:-${smoke_tp_size}}}"
+[[ "${smoke_tp_size}" =~ ^[1-9][0-9]*$ && "${smoke_ep_size}" == "${smoke_tp_size}" ]] \
+    || die "this K3 MegaMoE smoke requires positive TP == EP"
 smoke_decode_topology=dp8_ktp8_ep8
 smoke_decode_dp_size=8
-if [[ "${smoke_page_rr}" == "1" ]]; then
-    case "${smoke_block_size}:${smoke_kernel_block_size}" in
-        128:128 | 256:256) ;;
-        *) die "SMOKE_PAGE_RR requires physical/kernel pages 128/128 or 256/256" ;;
-    esac
-fi
 smoke_proposal_tokens="${GEN_NUM_PER_CIRCLE:-3}"
 [[ "${smoke_proposal_tokens}" =~ ^[1-9][0-9]*$ ]] \
     || die "GEN_NUM_PER_CIRCLE must be positive"
@@ -610,19 +587,11 @@ verify_decode_graph_log() {
     for marker in \
         K3_PROJECTION_KTP_LAYOUT \
         K3_PROJECTION_KTP_STEP \
-        K3_PROJECTION_KTP_GRAPH_REPLAY; do
+        K3_PROJECTION_KTP_GRAPH_REPLAY \
+        K3_PD_FAN_IN; do
         grep -Eh "${marker}" "${logs[@]}" | tail -20 >>"${evidence_file}" \
             || die "Decode log has no ${marker} evidence"
     done
-    if [[ "${smoke_page_rr}" == "1" ]]; then
-        grep -Eh \
-            "K3_PD_PAGE_RR_FAN_IN.*source_shards=${smoke_tp_size}.*kda_partitions=[1-9][0-9]*.*status=ok" \
-            "${logs[@]}" | tail -20 >>"${evidence_file}" \
-            || die "Decode log has no valid Page-RR fan-in evidence"
-    else
-        grep -Eh "K3_PD_FAN_IN" "${logs[@]}" | tail -20 >>"${evidence_file}" \
-            || die "Decode log has no K3_PD_FAN_IN evidence"
-    fi
     for bucket in 1 2 4 8; do
         grep -Eh "captured batch[ _]size ${bucket}([ :]|$)" "${logs[@]}" \
             | tail -1 >>"${evidence_file}" \
@@ -672,7 +641,6 @@ verify_role_environment() {
         "${smoke_sp_type}" \
         "${smoke_sp_model_type}" \
         "${smoke_tp_size}" \
-        "${smoke_page_rr}" \
         "${smoke_proposal_tokens}" \
         "${FT_CORE_DUMP_ON_EXCEPTION}" <<'PY'
 import os
@@ -696,7 +664,6 @@ import sys
     sp_type,
     sp_model_type,
     tp_size,
-    page_rr,
     proposal_tokens,
     core_dump_on_exception,
 ) = sys.argv[1:]
@@ -732,7 +699,6 @@ expected = {
     "GEN_NUM_PER_CIRCLE": proposal_tokens,
     "KIMI_K3_TP_SIZE": tp_size,
     "KIMI_K3_EP_SIZE": tp_size,
-    "SMOKE_PAGE_RR": page_rr,
 }
 absent = ["CUDA_LAUNCH_BLOCKING", "large_segment_size_mb"]
 if sp_type == "eagle3":
@@ -758,11 +724,6 @@ if role == "prefill":
         "ENABLE_MEMORY_CACHE": "1",
         "MEMORY_CACHE_SIZE_MB": "65536",
     })
-    if page_rr == "1":
-        expected["PREFILL_CP_KV_CACHE_SHARDED"] = "1"
-        absent.append("PREFILL_CP_SIZE")
-    else:
-        absent.extend(["PREFILL_CP_KV_CACHE_SHARDED", "PREFILL_CP_SIZE"])
     absent.extend(["DECODE_CAPTURE_CONFIG", "MOE_STRATEGY"])
 else:
     expected.update({
@@ -782,11 +743,6 @@ else:
         "RTP_LLM_DROP_BROAD_SYNC": "1",
         "RTP_LLM_STREAM_ASYNC": "1",
     })
-    if page_rr == "1":
-        expected["PREFILL_CP_SIZE"] = tp_size
-    else:
-        absent.append("PREFILL_CP_SIZE")
-    absent.append("PREFILL_CP_KV_CACHE_SHARDED")
     absent.extend([
         "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD",
         "KIMI_K3_PREFILL_CHUNK_TOKENS",
@@ -862,7 +818,6 @@ apply_validated_common_profile() {
     export EP_SIZE="${smoke_ep_size}"
     export KIMI_K3_TP_SIZE="${smoke_tp_size}"
     export KIMI_K3_EP_SIZE="${smoke_ep_size}"
-    export SMOKE_PAGE_RR="${smoke_page_rr}"
     if [[ "${smoke_sp_type}" == eagle3 ]]; then
         export KIMI_K3_EAGLE3_AUX_LAYER_IDS="${smoke_eagle3_aux_layer_ids}"
     else
@@ -893,12 +848,6 @@ apply_validated_prefill_profile() {
     export ENABLE_CUDA_GRAPH=0
     export ENABLE_MEMORY_CACHE=1
     export MEMORY_CACHE_SIZE_MB=65536
-    if [[ "${smoke_page_rr}" == "1" ]]; then
-        export PREFILL_CP_KV_CACHE_SHARDED=1
-        unset PREFILL_CP_SIZE
-    else
-        unset PREFILL_CP_KV_CACHE_SHARDED PREFILL_CP_SIZE
-    fi
     unset DECODE_CAPTURE_CONFIG MOE_STRATEGY
 }
 
@@ -922,12 +871,6 @@ apply_validated_decode_profile() {
     export RTP_LLM_DEVICE_INPUT=1
     export RTP_LLM_DROP_BROAD_SYNC=1
     export RTP_LLM_STREAM_ASYNC=1
-    unset PREFILL_CP_KV_CACHE_SHARDED
-    if [[ "${smoke_page_rr}" == "1" ]]; then
-        export PREFILL_CP_SIZE="${smoke_tp_size}"
-    else
-        unset PREFILL_CP_SIZE
-    fi
 }
 
 apply_validated_common_profile
@@ -942,11 +885,6 @@ echo "[${role}] checkpoint=${checkpoint_real} (${checkpoint_fs}:${checkpoint_sou
 echo "[${role}] sp_type=${smoke_sp_type} sp_model_type=${smoke_sp_model_type}"
 echo "[${role}] draft_checkpoint=${sp_checkpoint_real} (${sp_checkpoint_fs}:${sp_checkpoint_source})"
 echo "[${role}] decode_topology=${smoke_decode_topology} decode_dp=${smoke_decode_dp_size} draft_ktp=1"
-if [[ "${smoke_page_rr}" == "1" ]]; then
-    echo "[${role}] source_cache=page-rr/${smoke_tp_size}"
-else
-    echo "[${role}] source_cache=replicated"
-fi
 echo "[${role}] endpoints prefill=${PREFILL_ENDPOINT} decode=${DECODE_ENDPOINT}"
 
 setsid "${launcher}" "${role}" >"${service_log}" 2>&1 &

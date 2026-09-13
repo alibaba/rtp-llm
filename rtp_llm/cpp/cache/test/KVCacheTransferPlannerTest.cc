@@ -170,6 +170,7 @@ TEST(KVCacheTransferPlannerTest, IncrementalPageRRMergesToTheNonChunkedRegistrat
             CacheStorePublishRange{/*begin_block=*/0, /*end_block=*/16, /*terminal=*/false},
             /*virtual_block_cache_layout=*/true);
         EXPECT_TRUE(nonterminal_linear.empty()) << "rank=" << rank;
+
     }
 }
 
@@ -198,85 +199,9 @@ TEST(KVCacheTransferPlannerTest, RejectsInvalidRangeAndUnsupportedGroup) {
     EXPECT_THROW(buildIncrementalCacheStoreBlockPlan(
                      4, 0, true, CacheGroupType::FULL, 0, 1, CacheStorePublishRange{3, 2, false}),
                  std::invalid_argument);
-    EXPECT_THROW(
-        buildIncrementalCacheStoreBlockPlan(4, 0, true, CacheGroupType::SWA, 0, 1, CacheStorePublishRange{0, 2, false}),
-        std::invalid_argument);
-}
-
-TEST(KVCacheTransferPlannerTest, K3PageOwnerSelectsExactlyOnePeer) {
-    for (int peers : {8, 16}) {
-        for (size_t page = 0; page < static_cast<size_t>(peers * 2 + 3); ++page) {
-            int selected = 0;
-            for (int peer = 0; peer < peers; ++peer) {
-                const auto plan =
-                    planK3CacheLoadSource(K3CacheLoadSourcePolicy::PAGE_OWNER, page, peer, peers, /*decode_dp_rank=*/0);
-                selected += plan.selected;
-                EXPECT_EQ(plan.selected, peer == static_cast<int>(page % static_cast<size_t>(peers)));
-                EXPECT_EQ(plan.partition_count, 1);
-                EXPECT_EQ(plan.partition_id, 0);
-            }
-            EXPECT_EQ(selected, 1) << "peers=" << peers << " page=" << page;
-        }
-    }
-}
-
-TEST(KVCacheTransferPlannerTest, K3LinearFanInCoversEveryHeadPartition) {
-    for (int peers : {8, 16}) {
-        for (int peer = 0; peer < peers; ++peer) {
-            const auto plan = planK3CacheLoadSource(
-                K3CacheLoadSourcePolicy::ALL_PEER_PARTITION, 0, peer, peers, /*decode_dp_rank=*/0);
-            EXPECT_TRUE(plan.selected);
-            EXPECT_EQ(plan.partition_count, peers);
-            EXPECT_EQ(plan.partition_id, peer);
-        }
-    }
-}
-
-TEST(KVCacheTransferPlannerTest, K3ReplicaSourceWrapsDecodeDpRank) {
-    for (int dp_rank = 0; dp_rank < 16; ++dp_rank) {
-        for (int peer = 0; peer < 8; ++peer) {
-            const auto plan = planK3CacheLoadSource(K3CacheLoadSourcePolicy::SINGLE_REPLICA, 0, peer, 8, dp_rank);
-            EXPECT_EQ(plan.selected, peer == dp_rank % 8);
-            EXPECT_EQ(plan.partition_count, 1);
-            EXPECT_EQ(plan.partition_id, 0);
-        }
-    }
-}
-
-TEST(KVCacheTransferPlannerTest, K3SourcePolicyRejectsInvalidPeerCoordinates) {
-    EXPECT_THROW(planK3CacheLoadSource(K3CacheLoadSourcePolicy::PAGE_OWNER, 0, 0, 0, 0), std::invalid_argument);
-    EXPECT_THROW(planK3CacheLoadSource(K3CacheLoadSourcePolicy::PAGE_OWNER, 0, -1, 8, 0), std::invalid_argument);
-    EXPECT_THROW(planK3CacheLoadSource(K3CacheLoadSourcePolicy::PAGE_OWNER, 0, 8, 8, 0), std::invalid_argument);
-    EXPECT_THROW(planK3CacheLoadSource(K3CacheLoadSourcePolicy::SINGLE_REPLICA, 0, 0, 8, -1), std::invalid_argument);
-}
-
-TEST(KVCacheTransferPlannerTest, IdentifiesOnlyPageRRToReplicatedDecodeTopology) {
-    EXPECT_TRUE(isK3PageRRToReplicatedDecode(
-        /*prefill_attention_tp=*/8,
-        /*decode_attention_tp=*/1,
-        /*source_shards=*/8,
-        /*peer_count=*/8,
-        /*configured_upstream_shards=*/8));
-    EXPECT_TRUE(isK3PageRRToReplicatedDecode(
-        /*prefill_attention_tp=*/16,
-        /*decode_attention_tp=*/1,
-        /*source_shards=*/16,
-        /*peer_count=*/16,
-        /*configured_upstream_shards=*/16));
-
-    EXPECT_FALSE(isK3PageRRToReplicatedDecode(8, 1, 1, 1, 1));
-    EXPECT_FALSE(isK3PageRRToReplicatedDecode(8, 1, 4, 4, 4));
-    EXPECT_FALSE(isK3PageRRToReplicatedDecode(8, 1, 8, 7, 8));
-    EXPECT_FALSE(isK3PageRRToReplicatedDecode(8, 8, 8, 8, 8));
-}
-
-TEST(KVCacheTransferPlannerTest, DoesNotIdentifyTopologyThatDisagreesWithDecodeUpstreamShardConfiguration) {
-    EXPECT_FALSE(isK3PageRRToReplicatedDecode(
-        /*prefill_attention_tp=*/8,
-        /*decode_attention_tp=*/1,
-        /*source_shards=*/8,
-        /*peer_count=*/8,
-        /*configured_upstream_shards=*/16));
+    EXPECT_THROW(buildIncrementalCacheStoreBlockPlan(
+                     4, 0, true, CacheGroupType::SWA, 0, 1, CacheStorePublishRange{0, 2, false}),
+                 std::invalid_argument);
 }
 
 }  // namespace

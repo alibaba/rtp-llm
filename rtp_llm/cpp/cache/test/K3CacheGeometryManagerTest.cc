@@ -43,11 +43,10 @@ ModelConfig makeK3ModelConfig(int physical_page_tokens, bool draft) {
     return model;
 }
 
-void expectGeometry(const CacheLayerLayout& layout, int page_tokens, int local_shards, int upstream_shards) {
-    EXPECT_EQ(layout.local_shard_count, local_shards);
-    EXPECT_EQ(
-        layout.group_seq_size_per_block,
-        (std::vector<size_t>{static_cast<size_t>(page_tokens), static_cast<size_t>(page_tokens * upstream_shards)}));
+void expectGeometry(const CacheLayerLayout& layout, int page_tokens, int shards, bool decode) {
+    EXPECT_EQ(layout.local_shard_count, decode ? 1 : shards);
+    EXPECT_EQ(layout.group_seq_size_per_block,
+              (std::vector<size_t>{static_cast<size_t>(page_tokens), static_cast<size_t>(page_tokens * shards)}));
     EXPECT_EQ(layout.group_types, (std::vector<CacheGroupType>{CacheGroupType::FULL, CacheGroupType::LINEAR}));
 }
 
@@ -165,31 +164,20 @@ TEST_F(K3CacheGeometryManagerTest, ExportRejectsInconsistentPhysicalSpecs) {
 }
 
 TEST_F(K3CacheGeometryManagerTest, AllocatedMainAndMtpLayoutsRetainLocalAndUpstreamGeometry) {
-    struct Topology {
-        const char* name;
-        RoleType    role;
-        int         attention_tp;
-        int         local_shards;
-    };
-
     for (const int page_tokens : {128, 256}) {
-        for (const int upstream_shards : {2, 4, 8, 16}) {
-            for (const auto topology :
-                 {Topology{"prefill-page-rr", RoleType::PREFILL, upstream_shards, upstream_shards},
-                  Topology{"decode-equal-tp", RoleType::DECODE, upstream_shards, 1},
-                  Topology{"decode-dp-owner", RoleType::DECODE, 1, 1}}) {
-                SCOPED_TRACE(::testing::Message() << "B=" << page_tokens << " upstream=" << upstream_shards
-                                                  << " topology=" << topology.name);
+        for (const int shards : {2, 4, 8}) {
+            for (const bool decode : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << "B=" << page_tokens << " D=" << shards << " decode=" << decode);
                 ParallelismConfig parallelism;
-                parallelism.role_type                          = topology.role;
-                parallelism.tp_size                            = topology.attention_tp;
-                parallelism.tp_rank                            = topology.attention_tp - 1;
-                parallelism.prefill_cp_config.kv_cache_sharded = topology.role == RoleType::PREFILL;
-                parallelism.prefill_cp_config.prefill_cp_size  = upstream_shards;
+                parallelism.role_type                          = decode ? RoleType::DECODE : RoleType::PREFILL;
+                parallelism.tp_size                            = shards;
+                parallelism.tp_rank                            = shards - 1;
+                parallelism.prefill_cp_config.kv_cache_sharded = !decode;
+                parallelism.prefill_cp_config.prefill_cp_size  = shards;
                 KVCacheConfig kv_config;
                 kv_config.test_block_num            = 2;
                 kv_config.seq_size_per_block        = page_tokens;
-                kv_config.kernel_seq_size_per_block = topology.role == RoleType::DECODE ? 128 : page_tokens;
+                kv_config.kernel_seq_size_per_block = decode ? 128 : page_tokens;
                 kv_config.linear_step               = 1;
                 SpeculativeExecutionConfig speculative;
                 speculative.type              = SP_TYPE_MTP;
@@ -209,7 +197,7 @@ TEST_F(K3CacheGeometryManagerTest, AllocatedMainAndMtpLayoutsRetainLocalAndUpstr
                 KVCacheManager manager(config, true, nullptr, kv_config, parallelism);
                 ASSERT_TRUE(manager.init());
                 const auto main = manager.getMainModelCacheLayerLayout();
-                expectGeometry(main, page_tokens, topology.local_shards, upstream_shards);
+                expectGeometry(main, page_tokens, shards, decode);
                 EXPECT_EQ(main.layer_to_groups, (std::vector<int>{1, 0, 1, 0}));
                 ASSERT_EQ(main.layers_to_kv_buffer_ptrs.size(), 4);
                 const auto all = manager.allLayerCacheBase();
@@ -218,9 +206,8 @@ TEST_F(K3CacheGeometryManagerTest, AllocatedMainAndMtpLayoutsRetainLocalAndUpstr
                     const auto& buffer = all.layers_to_kv_buffer_ptrs[layer];
                     // Physical bytes: BF16 MLA latent+RoPE, or FP32 KDA
                     // state plus one BF16 convolution-history row.
-                    const size_t local_heads     = 96 / static_cast<size_t>(topology.attention_tp);
                     const size_t expected_stride = layer % 2 == 0 ?
-                                                       local_heads * (128 * 128 * sizeof(float) + 3 * 128 * 2) :
+                                                       (96 / shards) * (128 * 128 * sizeof(float) + 3 * 128 * 2) :
                                                        page_tokens * (512 + 64) * 2;
                     EXPECT_EQ(buffer.stride(0) * buffer.element_size(), expected_stride);
                 }
@@ -231,7 +218,7 @@ TEST_F(K3CacheGeometryManagerTest, AllocatedMainAndMtpLayoutsRetainLocalAndUpstr
                 }
                 for (int module = 0; module < 2; ++module) {
                     const auto mtp = manager.getMTPModuleCacheLayerLayout(module);
-                    expectGeometry(mtp, page_tokens, topology.local_shards, upstream_shards);
+                    expectGeometry(mtp, page_tokens, shards, decode);
                     EXPECT_EQ(mtp.layer_to_groups, (std::vector<int>{1, 0}));
                     ASSERT_EQ(mtp.layers_to_kv_buffer_ptrs.size(), 2);
                     for (int local_layer = 0; local_layer < 2; ++local_layer) {

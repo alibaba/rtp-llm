@@ -60,38 +60,14 @@ def validate_kimi_k3_page_rr_target(
 ) -> None:
     """Check layout constraints; the attention factory selects the actual backend."""
     tp_size = int(parallelism.tp_size)
-    ep_size = int(parallelism.ep_size)
     local_rr = bool(parallelism.kv_page_rr_enabled())
-    upstream_shards = (
-        int(parallelism.prefill_cp_config.prefill_cp_size)
-        if is_decode_role
-        else tp_size
-    )
-    supported_shards = (2, 4, 8, 16)
-
-    if is_decode_role:
-        equal_attention_tp = tp_size == upstream_shards and ep_size == tp_size
-        replicated_owner = tp_size == 1 and ep_size in supported_shards
-        if local_rr or not (equal_attention_tp or replicated_owner):
-            raise ValueError(
-                "Kimi K3 Decode role requires local PageRR disabled and either "
-                "equal attention TP or a TP1 replicated owner"
-            )
-    elif (
-        not local_rr or tp_size != ep_size or parallelism.prefill_cp_config.is_enabled()
-    ):
-        raise ValueError(
-            "Kimi K3 Prefill PageRR requires TP == EP and Query CP disabled"
-        )
-
     if (
-        upstream_shards not in supported_shards
-        or checkpoint_tokens != page_tokens * upstream_shards
+        tp_size != int(parallelism.ep_size)
+        or parallelism.prefill_cp_config.is_enabled()
     ):
-        raise ValueError(
-            "Kimi K3 PageRR role/checkpoint placement has an unsupported "
-            "page/shard count or checkpoint span"
-        )
+        raise ValueError("Kimi K3 PageRR requires TP == EP and Query CP disabled")
+    if local_rr == is_decode_role or checkpoint_tokens != page_tokens * tp_size:
+        raise ValueError("Kimi K3 PageRR role/checkpoint placement mismatch")
     if int(kv_cache.linear_step) != 1:
         raise ValueError("Kimi K3 compact LINEAR cache requires linear_step=1")
     pages = (
@@ -99,21 +75,17 @@ def validate_kimi_k3_page_rr_target(
         if is_decode_role
         else ((128, 128), (256, 256))
     )
-    if (page_tokens, int(kv_cache.kernel_seq_size_per_block)) not in pages:
+    if (
+        tp_size not in (2, 4, 8)
+        or (page_tokens, int(kv_cache.kernel_seq_size_per_block)) not in pages
+    ):
         raise ValueError("Unsupported Kimi K3 PageRR page/shard layout")
     attention = model_config.attn_config
-    mla_fp8_compute = bool(getattr(attention, "mla_fp8_compute", False))
-    bf16_cache = (
-        attention.kv_cache_dtype == KvCacheDataType.BASE and not mla_fp8_compute
-    )
-    fp8_cache = attention.kv_cache_dtype == KvCacheDataType.FP8 and mla_fp8_compute
-    if model_config.compute_dtype is not torch.bfloat16 or not (
-        bf16_cache or fp8_cache
+    if (
+        attention.kv_cache_dtype != KvCacheDataType.BASE
+        or model_config.compute_dtype is not torch.bfloat16
     ):
-        raise ValueError(
-            "Kimi K3 PageRR cache precision requires BF16 compute and matching "
-            "BASE/FP8 mla_fp8_compute"
-        )
+        raise ValueError("Kimi K3 PageRR requires BF16 compute and BASE cache")
     if (attention.kv_lora_rank, attention.rope_head_dim) != (512, 64):
         raise ValueError("Kimi K3 MLA cache requires 512+64 features")
     if not is_decode_role and (
@@ -124,7 +96,7 @@ def validate_kimi_k3_page_rr_target(
     if kda_head_dim != 128 or compute_capability not in ((10, 0), (10, 3)):
         raise ValueError("Kimi K3 cuLA requires head dimension 128 and SM100/SM103")
     budget = whole_model_query_budget_tokens
-    if budget > 0 and (budget < checkpoint_tokens or budget % upstream_shards):
+    if budget > 0 and (budget < checkpoint_tokens or budget % tp_size):
         raise ValueError("Kimi K3 query budget cannot advance an aligned checkpoint")
     if int(attention.mla_prefill_expanded_kv_budget_bytes) < 0:
         raise ValueError("Kimi K3 expanded-KV byte budget must be non-negative")
