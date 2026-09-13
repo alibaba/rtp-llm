@@ -316,6 +316,45 @@ class JitCacheTest(unittest.TestCase):
         with mock.patch.object(Path, "stat", flaky_stat):
             self.assertEqual(manager._snapshot_files(), {})
 
+    def test_snapshot_scan_continues_after_directory_vanishes(self):
+        manager = self.make_manager()
+        triton = component(manager.components, "triton")
+        gone = triton.local_dir / "temporary"
+        gone.mkdir(parents=True)
+        stable = triton.local_dir / "stable/kernel.cubin"
+        stable.parent.mkdir()
+        stable.write_bytes(b"complete")
+        real_scandir, removed = os.scandir, []
+
+        def disappearing_directory(path):
+            if Path(path) == gone:
+                gone.rmdir()
+                removed.append(gone)
+            return real_scandir(path)
+
+        with mock.patch.object(os, "scandir", disappearing_directory):
+            files = manager._snapshot_files()
+        self.assertEqual(removed, [gone])
+        self.assertEqual(
+            files, {stable.relative_to(manager.local_root).as_posix(): stable}
+        )
+
+    def test_snapshot_scan_does_not_hide_directory_io_errors(self):
+        manager = self.make_manager()
+        triton = component(manager.components, "triton")
+        denied = triton.local_dir / "denied"
+        denied.mkdir(parents=True)
+        real_scandir = os.scandir
+
+        def denied_directory(path):
+            if Path(path) == denied:
+                raise PermissionError("snapshot directory is inaccessible")
+            return real_scandir(path)
+
+        with mock.patch.object(os, "scandir", denied_directory):
+            with self.assertRaisesRegex(PermissionError, "inaccessible"):
+                manager._snapshot_files()
+
     def test_snapshot_lifecycle(self):
         remote = self.root / "remote"
         remote.mkdir()

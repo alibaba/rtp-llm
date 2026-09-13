@@ -334,6 +334,12 @@ class JitCacheManager:
 
     def _snapshot_files(self) -> dict[str, Path]:
         files = {}
+
+        def walk_error(error):
+            # Builders can rename a directory after scandir discovers it.
+            if not isinstance(error, FileNotFoundError):
+                raise error
+
         # All known components, not self.components: an archive is one complete
         # generation of the shared tree, which co-located processes with a
         # different managed set may also populate.
@@ -341,15 +347,17 @@ class JitCacheManager:
             root = self.local_root / component.name
             if component.name == "deep_gemm":
                 files.update(deepjit_snapshot_files(self.local_root))
-            for path in root.rglob("*"):
-                with suppress(OSError):  # file may vanish between walk and stat
-                    if path.is_symlink() or not path.is_file():
-                        continue
-                    rel = path.relative_to(root).as_posix()
-                    if component.name == "deep_gemm" and is_deepjit_path(rel):
-                        continue
-                    if component.should_sync(rel) and path.stat().st_size:
-                        files[path.relative_to(self.local_root).as_posix()] = path
+            for directory, _, filenames in os.walk(root, onerror=walk_error):
+                for filename in filenames:
+                    path = Path(directory) / filename
+                    with suppress(OSError):  # file may vanish between walk and stat
+                        if path.is_symlink() or not path.is_file():
+                            continue
+                        rel = path.relative_to(root).as_posix()
+                        if component.name == "deep_gemm" and is_deepjit_path(rel):
+                            continue
+                        if component.should_sync(rel) and path.stat().st_size:
+                            files[path.relative_to(self.local_root).as_posix()] = path
         return files
 
     def publish_pending_snapshot(self) -> None:
