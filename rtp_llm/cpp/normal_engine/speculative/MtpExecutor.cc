@@ -1023,7 +1023,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          MlaOpsType                                     mla_ops_type,
                          int32_t                                        kv_cache_group_num,
                          const std::vector<int32_t>&                    kv_cache_layer_to_group,
-                         bool                                           warm_up):
+                         bool                                           warm_up,
+                         std::function<void()>                          profile_step_start,
+                         std::function<void()>                          profile_step_finish):
     Executor(),
     cache_manager_(cache_manager),
     metrics_reporter_(params.metrics_reporter),
@@ -1032,6 +1034,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     wall_tps_reporter_(WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
         params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
     warm_up_(warm_up),
+    profile_step_start_(std::move(profile_step_start)),
+    profile_step_finish_(std::move(profile_step_finish)),
     role_type_(params.pd_sep_config.role_type),
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
     target_verify_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
@@ -1353,6 +1357,11 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     metrics_collector.not_skip = true;
+
+    if (!metrics_collector.profile_step_started && profile_step_start_) {
+        profile_step_start_();
+        metrics_collector.profile_step_started = true;
+    }
 
     // Preserve the original PD request metadata across the second TP sync.
     torch::Tensor pd_request_id;
@@ -2045,6 +2054,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
         ensureModelInputsOnCuda(model_input, "decode.after_tp_sync");
     }
+    if (!metrics_collector.profile_step_started && profile_step_start_) {
+        profile_step_start_();
+        metrics_collector.profile_step_started = true;
+    }
+
     if (model_input.force_disable_sp_run) {
         return decodeStepTargetOnly(streams, stream_groups, model_input, metrics_collector);
     }
@@ -2792,6 +2806,16 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
         schedule_time_us = process_start_time_us;
     }
     MtpMetricsCollector metrics_collector;
+    // Count only real, TP-synchronized work, once for a mixed Prefill/Decode step.
+    struct ProfileStepGuard {
+        MtpMetricsCollector& metrics;
+        const std::function<void()>& finish;
+        ~ProfileStepGuard() {
+            if (metrics.profile_step_started && finish) {
+                finish();
+            }
+        }
+    } profile_guard{metrics_collector, profile_step_finish_};
     auto                tps_active_guard =
         tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && !streams.empty());
     auto wall_tps_active_guard =

@@ -150,7 +150,10 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
                                         resource_context_.cache_manager,
                                         mla_ops_type_,
                                         kv_cache_group_num_,
-                                        kv_cache_layer_to_group_));
+                                        kv_cache_layer_to_group_,
+                                        false,
+                                        [this]() { step_profiler_.startStep(); },
+                                        [this]() { step_profiler_.finishStep(); }));
     } else {
         executor_.reset(new NormalExecutor(
             params,
@@ -575,9 +578,6 @@ absl::Status NormalEngine::step() {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
-    if (propose_params_) {
-        step_profiler_.tick();
-    }
     {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         const bool refresh_cache_status_snapshot =

@@ -1183,9 +1183,18 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
                     std::move(components.fake_speculative_sampler),
                     std::move(components.fake_sampler));
 
-    // Verify executor was created successfully
+    int profile_starts = 0;
+    int profile_finishes = 0;
+    components.executor->profile_step_start_ = [&]() { ++profile_starts; };
+    components.executor->profile_step_finish_ = [&]() { ++profile_finishes; };
+    ASSERT_TRUE(components.executor->process({}).ok());
+    EXPECT_EQ(profile_starts, 0);
+    EXPECT_EQ(profile_finishes, 0);
+
     auto status = components.executor->process({stream1});
     ASSERT_TRUE(status.ok());
+    EXPECT_EQ(profile_starts, 1);
+    EXPECT_EQ(profile_finishes, 1);
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.17, 0.18});
@@ -1430,9 +1439,18 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
                     std::move(components.fake_speculative_sampler),
                     std::move(components.fake_sampler));
 
-    // Verify executor was created successfully
+    int profile_starts = 0;
+    int profile_finishes = 0;
+    components.executor->profile_step_start_ = [&]() { ++profile_starts; };
+    components.executor->profile_step_finish_ = [&]() { ++profile_finishes; };
+    ASSERT_TRUE(components.executor->process({}).ok());
+    EXPECT_EQ(profile_starts, 0);
+    EXPECT_EQ(profile_finishes, 0);
+
     auto status = components.executor->process({stream1});
     ASSERT_TRUE(status.ok());
+    EXPECT_EQ(profile_starts, 1);
+    EXPECT_EQ(profile_finishes, 1);
     const auto* async_prepare_env       = std::getenv("RTP_LLM_MTP_ASYNC_PREPARE");
     const bool  async_prepare_requested =
         async_prepare_env != nullptr && std::strcmp(async_prepare_env, "1") == 0;

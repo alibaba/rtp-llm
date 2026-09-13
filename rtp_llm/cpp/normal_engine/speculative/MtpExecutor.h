@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <list>
 #include <memory>
 #include <vector>
@@ -28,6 +29,7 @@ struct MtpMetricsCollector {
     RtpLLMSpeculativeEngineMetricsCollector sp_engine_collector;
 
     bool not_skip = false;
+    bool profile_step_started = false;
 };
 
 class MtpExecutor: public Executor {
@@ -38,7 +40,9 @@ public:
                          MlaOpsType                                     mla_ops_type            = MlaOpsType::AUTO,
                          int32_t                                        kv_cache_group_num      = 1,
                          const std::vector<int32_t>&                    kv_cache_layer_to_group = {},
-                         bool                                           warm_up                 = false);
+                         bool                                           warm_up                 = false,
+                         std::function<void()>                          profile_step_start      = {},
+                         std::function<void()>                          profile_step_finish     = {});
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
@@ -262,6 +266,8 @@ private:
     TensorHolder buffer_holder_;
 
     bool     warm_up_;
+    std::function<void()> profile_step_start_;
+    std::function<void()> profile_step_finish_;
     void restoreKimiMtpMediaTokens(GptModelInputs& inputs) const;
 
     bool     kimi_k3_mtp_ = false;
