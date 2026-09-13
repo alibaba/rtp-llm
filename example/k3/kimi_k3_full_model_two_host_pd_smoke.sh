@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Recommended one-command startup from a controller with SSH access to both
-# hosts (the driver enters lhc_GPU, waits for Decode readiness, then launches
-# Prefill):
+# hosts (use --parallel-start to load both roles without a launch delay;
+# Prefill waits for both roles before sending requests):
 #
 # Merge-gate requirement: always use SMOKE_SUITE=all for the final 93-layer
 # accuracy/cache acceptance run. The flow suite is only a four-layer RDMA
@@ -62,7 +62,7 @@
 # process group.
 # The full-model profile enables the selected K3 draft mode on both roles. The
 # role-local draft checkpoint is mandatory; there is no non-MTP fallback.
-# The target model uses Projection-KTP while the selected draft remains KTP1.
+# Projection-KTP is opt-in; the default retains TP on both roles.
 # Both ordinary Decode and Target Verify participate in synchronized graph waves.
 
 set -Eeuo pipefail
@@ -98,9 +98,9 @@ The all suite also seeds a ~600k-token conversation, then appends a retrieval
 question. It checks the answer, PD metadata and a historical prefix larger than
 one expanded-KV budget. This correctness case runs by default without profiling;
 its request, token IDs and results are saved under prefill/long-prefix/.
-The Projection-KTP profile uses Prefill TP8/EP8 plus Decode DP8/KTP8/EP8.
-Both EAGLE3 and MTP use this Projection-KTP profile: target KTP8, draft KTP1,
-with Decode CUDA Graph enabled. MTP attention and cache remain native BF16.
+Set KIMI_K3_DECODE_TOPOLOGY=dp8_ktp8_ep8 to select Projection-KTP.
+The default legacy topology preserves the cache-CP validation path.
+MTP attention and cache remain native BF16.
 
 Merge-gate accuracy validation must use SMOKE_SUITE=all. SMOKE_SUITE=flow is
 only a four-layer RDMA connectivity/multi-round preflight and does not satisfy
@@ -112,7 +112,7 @@ Important optional variables:
   SMOKE_REQUEST_TIMEOUT_S   defaults to 900
   SMOKE_RESULT_TIMEOUT_S    defaults to 18000
   SMOKE_RESULT_ENDPOINT     defaults to decode-host:(decode-port + 100)
-  SMOKE_MAX_TOKENS          defaults to 128 for ordinary cache cases
+  SMOKE_MAX_TOKENS          defaults to 256 for ordinary cache cases
   SMOKE_IDENTITY_MAX_TOKENS defaults to 256 for the reasoning identity case
   SMOKE_SINGLE_EXACT_MAX_TOKENS
                             defaults to 128 for exact-cache seed/hit answers
@@ -144,19 +144,13 @@ Important optional variables:
   SMOKE_BLOCK_SIZE          physical cache page size; defaults to 4096
   SMOKE_KERNEL_BLOCK_SIZE   attention kernel page size; defaults to 128
   SMOKE_CHUNK_TOKENS        whole-model chunk budget; defaults to 65536
-  SMOKE_DECODE_KV_CACHE_MEM_MB
-                            Decode hybrid-cache budget; defaults to 20000 MiB.
-                            Projection-KTP replicates DP-local KDA/O-proj
-                            weights, so the older 42000 MiB budget can OOM
-                            before CUDA Graph capture on a 93-layer model.
-  SMOKE_DECODE_KDA_POOL_BLOCKS
-                            Decode DP-local full-head KDA block count;
-                            defaults to 32. Projection-KTP owns full-head KDA
-                            state per DP rank, so capacity is sized per request
-                            owner rather than divided by KTP size. Thirty-two
-                            blocks cover a >64K request at 4096 tokens/block,
-                            an eight-request graph wave, and retained-prefix /
-                            decode reserve margin.
+  KV_CACHE_MEM_MB            default -1; <=0 asks the framework to budget GPU KV
+  SMOKE_PREFILL_KV_CACHE_MEM_MB / SMOKE_DECODE_KV_CACHE_MEM_MB
+                            explicit per-role diagnostic overrides of KV_CACHE_MEM_MB
+  KIMI_K3_KDA_POOL_BLOCKS / SMOKE_DECODE_KDA_POOL_BLOCKS
+                            default 0 (automatic pool sizing)
+  SMOKE_MAX_INPUT_TOKENS / SMOKE_MAX_OUTPUT_TOKENS
+                            admission-budget inputs, default 1048576 / 8192
   SMOKE_DECODE_ROLE_ADDRS   optional comma-separated ordered
                             IP:HTTP_PORT:GRPC_PORT list. The DP8 default is
                             derived from DECODE_ENDPOINT using the rank stride.
@@ -333,19 +327,44 @@ smoke_tp_size="${TP_SIZE:-${KIMI_K3_TP_SIZE:-8}}"
 smoke_ep_size="${EP_SIZE:-${KIMI_K3_EP_SIZE:-${smoke_tp_size}}}"
 [[ "${smoke_tp_size}" =~ ^[1-9][0-9]*$ && "${smoke_ep_size}" == "${smoke_tp_size}" ]] \
     || die "this K3 MegaMoE smoke requires positive TP == EP"
-smoke_decode_topology=dp8_ktp8_ep8
-smoke_decode_dp_size=8
 smoke_proposal_tokens="${GEN_NUM_PER_CIRCLE:-3}"
 [[ "${smoke_proposal_tokens}" =~ ^[1-9][0-9]*$ ]] \
     || die "GEN_NUM_PER_CIRCLE must be positive"
 smoke_shared_expert_shard=$((smoke_tp_size % 2 == 0))
-smoke_decode_kv_cache_mem_mb="${SMOKE_DECODE_KV_CACHE_MEM_MB:-20000}"
-smoke_decode_kda_pool_blocks="${SMOKE_DECODE_KDA_POOL_BLOCKS:-32}"
-smoke_long_prefix_target_tokens="${SMOKE_LONG_PREFIX_TARGET_TOKENS:-100000}"
-smoke_long_prefix_tp_size="${SMOKE_LONG_PREFIX_TP_SIZE:-1}"
+smoke_suite="${SMOKE_SUITE:-all}"
+[[ "${TEST_BLOCK_NUM:-0}" == "0" ]] || die "formal smoke requires TEST_BLOCK_NUM=0"
+export TEST_BLOCK_NUM=0
+smoke_max_concurrency="${SMOKE_MAX_CONCURRENCY:-32}"
+[[ "${smoke_max_concurrency}" =~ ^[1-9][0-9]*$ ]] \
+    || die "SMOKE_MAX_CONCURRENCY must be positive"
+smoke_decode_capture_config="${DECODE_CAPTURE_CONFIG:-}"
+if [[ -z "${smoke_decode_capture_config}" ]]; then
+    case "${smoke_suite}" in
+        flow) smoke_decode_capture_config=1,2,3,4 ;;
+        *) smoke_decode_capture_config="$(python3 - "${smoke_max_concurrency}" <<'PY'
+import sys
+limit = int(sys.argv[1])
+buckets = list(range(1, min(limit, 8) + 1))
+bucket = 16
+while bucket < limit:
+    buckets.append(bucket)
+    bucket *= 2
+print(",".join(map(str, sorted(set(buckets + [limit])))))
+PY
+)" ;;
+    esac
+fi
+smoke_prefill_kv_cache_mem_mb="${SMOKE_PREFILL_KV_CACHE_MEM_MB:-${KV_CACHE_MEM_MB:--1}}"
+smoke_decode_kv_cache_mem_mb="${SMOKE_DECODE_KV_CACHE_MEM_MB:-${KV_CACHE_MEM_MB:--1}}"
+smoke_prefill_kda_pool_blocks="${KIMI_K3_KDA_POOL_BLOCKS:-0}"
+smoke_decode_kda_pool_blocks="${SMOKE_DECODE_KDA_POOL_BLOCKS:-${KIMI_K3_KDA_POOL_BLOCKS:-0}}"
+smoke_long_prefix_target_tokens="${SMOKE_LONG_PREFIX_TARGET_TOKENS:-600000}"
+smoke_long_prefix_tp_size="${SMOKE_LONG_PREFIX_TP_SIZE:-${smoke_tp_size}}"
+smoke_decode_topology="${KIMI_K3_DECODE_TOPOLOGY:-legacy}"
 smoke_linear_step="${SMOKE_LINEAR_STEP:-1}"
 smoke_chunkwise_rdma="${SMOKE_CHUNKWISE_RDMA:-1}"
 smoke_keep_cluster_on_success="${SMOKE_KEEP_CLUSTER_ON_SUCCESS:-0}"
+smoke_pytorch_cuda_alloc_conf="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 smoke_rdma_prewarm_attempts="${SMOKE_RDMA_PREWARM_ATTEMPTS:-3}"
 smoke_rdma_prewarm_timeout_s="${SMOKE_RDMA_PREWARM_TIMEOUT_S:-300}"
 smoke_rdma_prewarm_backoff_s="${SMOKE_RDMA_PREWARM_BACKOFF_S:-5}"
@@ -356,8 +375,6 @@ for size_value in \
     "${smoke_block_size}" \
     "${smoke_kernel_block_size}" \
     "${smoke_chunk_tokens}" \
-    "${smoke_decode_kv_cache_mem_mb}" \
-    "${smoke_decode_kda_pool_blocks}" \
     "${smoke_long_prefix_target_tokens}" \
     "${smoke_long_prefix_tp_size}" \
     "${smoke_linear_step}"; do
@@ -366,6 +383,41 @@ for size_value in \
 done
 [[ "${smoke_long_prefix_target_tokens}" -gt 65536 ]] \
     || die "SMOKE_LONG_PREFIX_TARGET_TOKENS must exceed 65536"
+for budget in "${smoke_prefill_kv_cache_mem_mb}" "${smoke_decode_kv_cache_mem_mb}"; do
+    [[ "${budget}" =~ ^-?[0-9]+$ ]] || die "GPU KV budget must be an integer (<=0 selects auto)"
+done
+for blocks in "${smoke_prefill_kda_pool_blocks}" "${smoke_decode_kda_pool_blocks}"; do
+    [[ "${blocks}" =~ ^[0-9]+$ ]] || die "KDA block override must be non-negative (0 selects auto)"
+done
+smoke_decode_attn_tp="${smoke_tp_size}"
+smoke_decode_dp_size=1
+case "${smoke_decode_topology}" in
+    dp8_ktp8_ep8) smoke_decode_attn_tp=1; smoke_decode_dp_size=8 ;;
+    dp16_ktp16_ep16) smoke_decode_attn_tp=1; smoke_decode_dp_size=16 ;;
+    tp8_ep8) smoke_decode_attn_tp=8 ;;
+esac
+resolved_capacity="$(python3 - "${smoke_max_concurrency}" "${smoke_proposal_tokens}" \
+    "${smoke_decode_attn_tp}" "${smoke_decode_capture_config}" \
+    "${SMOKE_MAX_INPUT_TOKENS:-1048576}" "${SMOKE_MAX_OUTPUT_TOKENS:-8192}" \
+    "${MAX_BATCH_TOKENS_SIZE:-}" <<'PYPROFILE'
+import sys
+limit, proposals, attn_tp = map(int, sys.argv[1:4])
+buckets = [int(value) for value in sys.argv[4].split(",")]
+max_input, max_output = map(int, sys.argv[5:7])
+if min(limit, proposals, attn_tp, max_input, max_output) <= 0:
+    raise SystemExit("smoke capacity inputs must be positive")
+if not buckets or min(buckets) <= 0 or buckets != sorted(set(buckets)):
+    raise SystemExit("decode capture buckets must be positive, unique and sorted")
+query_width = 2 * proposals + 1
+batch_tokens = int(sys.argv[7]) if sys.argv[7] else limit * (max_input + max_output + query_width) + 1
+moe_tokens = max(16, (max(limit, max(buckets)) * query_width + attn_tp - 1) // attn_tp)
+if not 0 < batch_tokens <= (1 << 63) - 1 or moe_tokens > (1 << 31) - 1:
+    raise SystemExit("smoke capacity exceeds native integer limits")
+print(batch_tokens, moe_tokens)
+PYPROFILE
+)" || die "invalid smoke capacity configuration"
+read -r smoke_max_batch_tokens smoke_decode_mega_tokens <<<"${resolved_capacity}"
+
 smoke_mega_tokens=$(( (smoke_chunk_tokens + smoke_tp_size - 1) / smoke_tp_size ))
 ((smoke_block_size % 64 == 0)) \
     || die "SMOKE_BLOCK_SIZE must be divisible by the cuLA checkpoint step 64"
@@ -416,14 +468,14 @@ notified=0
 
 stop_owned_process() {
     local pid="${1:-}"
-    [[ "${pid}" =~ ^[0-9]+$ ]] || return 0
-    if ! kill -0 "${pid}" 2>/dev/null; then
+    [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || return 0
+    if ! kill -0 -- "-${pid}" 2>/dev/null && ! kill -0 "${pid}" 2>/dev/null; then
         wait "${pid}" 2>/dev/null || true
         return 0
     fi
     kill -TERM -- "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
     for _ in {1..10}; do
-        if ! kill -0 "${pid}" 2>/dev/null; then
+        if ! kill -0 -- "-${pid}" 2>/dev/null && ! kill -0 "${pid}" 2>/dev/null; then
             wait "${pid}" 2>/dev/null || true
             return 0
         fi
@@ -450,7 +502,8 @@ notify_decode() {
 
 cleanup() {
     local rc=$?
-    trap - EXIT INT TERM
+    trap - EXIT
+    trap '' INT TERM
     if [[ "${role}" == "prefill" && "${notified}" == "0" ]]; then
         notify_decode FAIL "prefill-exit-${rc}" || true
     fi
@@ -573,8 +626,20 @@ pathlib.Path(output).write_text(
 PY
 }
 
-verify_decode_graph_log() {
-    [[ "${role}" == "decode" ]] || return 0
+collect_cache_evidence() {
+    local cp_size=1
+    local sharded="${PREFILL_CP_KV_CACHE_SHARDED}"
+    [[ "${role}" == "prefill" ]] || sharded="${DECODE_CP_KV_CACHE_SHARDED}"
+    [[ "${sharded}" == "1" ]] && cp_size="${smoke_tp_size}"
+    python3 "${repo_root}/example/k3/kimi_k3_cache_evidence.py" \
+        --engine-log "${role_dir}/runtime/work/${role}/logs/engine.log" \
+        --output-dir "${role_dir}/cache" --role "${role}" \
+        --tp-size "${smoke_tp_size}" --cp-size "${cp_size}" --phase "$1" \
+        || echo "[${role}] WARN: cache snapshot unavailable; inspect the preserved engine log" >&2
+}
+
+verify_projection_ktp_decode_log() {
+    [[ "${role}" == "decode" && "${smoke_decode_topology}" == "dp8_ktp8_ep8" ]] || return 0
     local engine_log="${role_dir}/runtime/work/${role}/logs/engine.log"
     local rank_log_dir="${role_dir}/runtime/logs/${role}"
     local evidence_file="${role_dir}/decode-graph-evidence.txt"
@@ -609,10 +674,14 @@ verify_fp8_log() {
     local logs=("${service_log}" "${engine_log}" "${rank_logs[@]}")
     local evidence_file="${role_dir}/fp8-runtime-evidence.log"
     : >"${evidence_file}"
-    grep -Eh "K3_FP8_EXECUTION" "${logs[@]}" | sed -n '1,20p' >>"${evidence_file}" \
-        || die "${role} logs have no K3 FP8 weight execution evidence"
-    grep -Eh "K3 MLA FP8: dense_e4m3_v1" "${logs[@]}" | sed -n '1,5p' >>"${evidence_file}" \
-        || die "${role} logs have no MLA FP8 runtime evidence"
+    if [[ "${KIMI_K3_ATTENTION_QUANTIZATION}" == "fp8_per_block" ]]; then
+        grep -Eh "K3_FP8_EXECUTION" "${logs[@]}" | sed -n '1,20p' >>"${evidence_file}" \
+            || die "${role} logs have no K3 FP8 weight execution evidence"
+    fi
+    if [[ "${KIMI_K3_MLA_FP8}" == "1" ]]; then
+        grep -Eh "K3 MLA FP8: dense_e4m3_v1" "${logs[@]}" | sed -n '1,5p' >>"${evidence_file}" \
+            || die "${role} logs have no MLA FP8 runtime evidence"
+    fi
     if [[ "${smoke_sp_type}" == mtp ]]; then
         grep -Eh 'K3 precision: model=kimi_k3_mtp compute=torch.bfloat16 attention_quantization=none mla_fp8_compute=False kv_cache_dtype=KvCacheDataType.BASE' "${logs[@]}" \
             | sed -n '1,8p' >>"${evidence_file}" \
@@ -642,7 +711,17 @@ verify_role_environment() {
         "${smoke_sp_model_type}" \
         "${smoke_tp_size}" \
         "${smoke_proposal_tokens}" \
-        "${FT_CORE_DUMP_ON_EXCEPTION}" <<'PY'
+        "${PREFILL_CP_KV_CACHE_SHARDED}" \
+        "${DECODE_CP_KV_CACHE_SHARDED}" \
+        "${smoke_max_concurrency}" \
+        "${smoke_decode_capture_config}" \
+        "${smoke_decode_topology}" \
+        "${FT_CORE_DUMP_ON_EXCEPTION}" \
+        "${smoke_prefill_kv_cache_mem_mb}" \
+        "${smoke_prefill_kda_pool_blocks}" \
+        "${smoke_max_batch_tokens}" \
+        "${smoke_decode_mega_tokens}" \
+        "${smoke_pytorch_cuda_alloc_conf}" <<'PY'
 import os
 import pathlib
 import sys
@@ -665,7 +744,17 @@ import sys
     sp_model_type,
     tp_size,
     proposal_tokens,
+    prefill_cp_kv_cache_sharded,
+    decode_cp_kv_cache_sharded,
+    max_concurrency,
+    decode_capture_config,
+    decode_topology,
     core_dump_on_exception,
+    prefill_kv_cache_mem_mb,
+    prefill_kda_pool_blocks,
+    max_batch_tokens,
+    decode_mega_tokens,
+    pytorch_cuda_alloc_conf,
 ) = sys.argv[1:]
 entries = pathlib.Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
 env = {}
@@ -678,17 +767,22 @@ expected = {
     "LOAD_METHOD": "fastsafetensors",
     "SEQ_SIZE_PER_BLOCK": block_size,
     "KERNEL_SEQ_SIZE_PER_BLOCK": kernel_block_size,
-    "CONCURRENCY_LIMIT": "32",
+    "CONCURRENCY_LIMIT": max_concurrency,
     "MAX_CONTEXT_BATCH_SIZE": "1",
+    "MAX_BATCH_TOKENS_SIZE": max_batch_tokens,
+    "TEST_BLOCK_NUM": "0",
     "LINEAR_STEP": linear_step,
+    "PREFILL_CP_KV_CACHE_SHARDED": prefill_cp_kv_cache_sharded,
+    "DECODE_CP_KV_CACHE_SHARDED": decode_cp_kv_cache_sharded,
     "CACHE_STORE_RDMA_MODE": "1",
     "CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS": "30000",
     "RDMA_CONNECT_RETRY_TIMES": "3",
+    "GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS": os.environ["GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS"],
     "KIMI_K3_CHUNKWISE_RDMA": chunkwise_rdma,
     "DSV4_MEGA_MOE_INPUT_PACKER": "fused",
     "DSV4_MEGA_MOE_INPUT_PACKER_IMPL": "optimized",
-    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
-    "ENABLE_CUDA_GRAPH_DEBUG_MODE": "0",
+    "PYTORCH_CUDA_ALLOC_CONF": pytorch_cuda_alloc_conf,
+    "ENABLE_CUDA_GRAPH_DEBUG_MODE": os.environ.get("ENABLE_CUDA_GRAPH_DEBUG_MODE", "0"),
     "FLASHINFER_CUDA_ARCH_LIST": "10.3a",
     "DEEPGEMM_JIT_COMPILER": "auto",
     "FT_CORE_DUMP_ON_EXCEPTION": core_dump_on_exception,
@@ -712,10 +806,9 @@ else:
 if role == "prefill":
     expected.update({
         "MAX_SEQ_LEN": "1258294",
-        "MAX_BATCH_TOKENS_SIZE": "1258291",
-        "KV_CACHE_MEM_MB": "42000",
+        "KV_CACHE_MEM_MB": prefill_kv_cache_mem_mb,
         "REUSE_CACHE": "1",
-        "KIMI_K3_KDA_POOL_BLOCKS": "0",
+        "KIMI_K3_KDA_POOL_BLOCKS": prefill_kda_pool_blocks,
         "RESERVER_RUNTIME_MEM_MB": "15000",
         "MEGA_MOE_MAX_TOKENS_PER_RANK": str((int(chunk_tokens) + int(tp_size) - 1) // int(tp_size)),
         "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD": str(int(int(tp_size) % 2 == 0)),
@@ -728,16 +821,14 @@ if role == "prefill":
 else:
     expected.update({
         "MAX_SEQ_LEN": "1468006",
-        "MAX_BATCH_TOKENS_SIZE": "1468006",
         "KV_CACHE_MEM_MB": decode_kv_cache_mem_mb,
         "REUSE_CACHE": "0",
         "KIMI_K3_KDA_POOL_BLOCKS": decode_kda_pool_blocks,
         "RESERVER_RUNTIME_MEM_MB": "8000",
-        "MEGA_MOE_MAX_TOKENS_PER_RANK": "16",
+        "MEGA_MOE_MAX_TOKENS_PER_RANK": decode_mega_tokens,
         "ENABLE_CUDA_GRAPH": "1",
-        "DECODE_CAPTURE_CONFIG": "1,2,4,8",
-        "KIMI_K3_DECODE_TOPOLOGY": "dp8_ktp8_ep8",
-        "RTP_MLA_DECODE_KERNEL": "tokenspeed_mla",
+        "DECODE_CAPTURE_CONFIG": decode_capture_config,
+        "KIMI_K3_DECODE_TOPOLOGY": decode_topology,
         "MOE_STRATEGY": "mega_moe_se",
         "RTP_LLM_DEVICE_INPUT": "1",
         "RTP_LLM_DROP_BROAD_SYNC": "1",
@@ -779,6 +870,8 @@ apply_validated_common_profile() {
     export CHECKPOINT_PATH="${checkpoint_real}"
     export TOKENIZER_PATH="${checkpoint_real}"
     export PREFILL_ENDPOINT DECODE_ENDPOINT
+    export PREFILL_CP_KV_CACHE_SHARDED="${PREFILL_CP_KV_CACHE_SHARDED:-0}"
+    export DECODE_CP_KV_CACHE_SHARDED="${DECODE_CP_KV_CACHE_SHARDED:-0}"
     export LOAD_METHOD=fastsafetensors
     export KIMI_K3_ATTENTION_QUANTIZATION="${KIMI_K3_ATTENTION_QUANTIZATION:-fp8_per_block}"
     export KIMI_K3_MLA_FP8="${KIMI_K3_MLA_FP8:-1}"
@@ -787,12 +880,13 @@ apply_validated_common_profile() {
     export KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES="${KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES:-4294967296}"
     export SEQ_SIZE_PER_BLOCK="${smoke_block_size}"
     export KERNEL_SEQ_SIZE_PER_BLOCK="${smoke_kernel_block_size}"
-    export CONCURRENCY_LIMIT=32
+    export CONCURRENCY_LIMIT="${smoke_max_concurrency}"
     export MAX_CONTEXT_BATCH_SIZE=1
     export LINEAR_STEP="${smoke_linear_step}"
     export CACHE_STORE_RDMA_MODE=1
     export CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS=30000
     export RDMA_CONNECT_RETRY_TIMES=3
+    export GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS="${GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS:-500}"
     if [[ -n "${smoke_accl_use_nics}" ]]; then
         export ACCL_USE_NICS="${smoke_accl_use_nics}"
     else
@@ -801,8 +895,8 @@ apply_validated_common_profile() {
     export KIMI_K3_CHUNKWISE_RDMA="${smoke_chunkwise_rdma}"
     export DSV4_MEGA_MOE_INPUT_PACKER=fused
     export DSV4_MEGA_MOE_INPUT_PACKER_IMPL=optimized
-    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-    export ENABLE_CUDA_GRAPH_DEBUG_MODE=0
+    export PYTORCH_CUDA_ALLOC_CONF="${smoke_pytorch_cuda_alloc_conf}"
+    export ENABLE_CUDA_GRAPH_DEBUG_MODE="${ENABLE_CUDA_GRAPH_DEBUG_MODE:-0}"
     export FLASHINFER_CUDA_ARCH_LIST=10.3a
     export DEEPGEMM_JIT_COMPILER=auto
     export FT_CORE_DUMP_ON_EXCEPTION="${FT_CORE_DUMP_ON_EXCEPTION:-1}"
@@ -837,10 +931,10 @@ apply_validated_common_profile() {
 
 apply_validated_prefill_profile() {
     export MAX_SEQ_LEN=1258294
-    export MAX_BATCH_TOKENS_SIZE=1258291
-    export KV_CACHE_MEM_MB=42000
+    export MAX_BATCH_TOKENS_SIZE="${smoke_max_batch_tokens}"
+    export KV_CACHE_MEM_MB="${smoke_prefill_kv_cache_mem_mb}"
     export REUSE_CACHE=1
-    export KIMI_K3_KDA_POOL_BLOCKS=0
+    export KIMI_K3_KDA_POOL_BLOCKS="${smoke_prefill_kda_pool_blocks}"
     export RESERVER_RUNTIME_MEM_MB=15000
     export MEGA_MOE_MAX_TOKENS_PER_RANK="${smoke_mega_tokens}"
     export KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD="${smoke_shared_expert_shard}"
@@ -853,20 +947,19 @@ apply_validated_prefill_profile() {
 
 apply_validated_decode_profile() {
     export MAX_SEQ_LEN=1468006
-    export MAX_BATCH_TOKENS_SIZE=1468006
+    export MAX_BATCH_TOKENS_SIZE="${smoke_max_batch_tokens}"
     export KV_CACHE_MEM_MB="${smoke_decode_kv_cache_mem_mb}"
     export REUSE_CACHE=0
     export KIMI_K3_KDA_POOL_BLOCKS="${smoke_decode_kda_pool_blocks}"
     export RESERVER_RUNTIME_MEM_MB=8000
-    export MEGA_MOE_MAX_TOKENS_PER_RANK=16
+    export MEGA_MOE_MAX_TOKENS_PER_RANK="${smoke_decode_mega_tokens}"
     unset KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD KIMI_K3_PREFILL_CHUNK_TOKENS
     unset ENABLE_MEMORY_CACHE MEMORY_CACHE_SIZE_MB
     export ENABLE_CUDA_GRAPH=1
-    # Exercise several arbitrary public graph buckets; the coordinator chooses
-    # one common key from the DP-local maximum batch.
-    export DECODE_CAPTURE_CONFIG=1,2,4,8
+    # The smoke issues four concurrent requests. Capture every possible
+    # coalesced Decode batch size instead of aborting above batch size one.
+    export DECODE_CAPTURE_CONFIG="${smoke_decode_capture_config}"
     export KIMI_K3_DECODE_TOPOLOGY="${smoke_decode_topology}"
-    export RTP_MLA_DECODE_KERNEL=tokenspeed_mla
     export MOE_STRATEGY=mega_moe_se
     export RTP_LLM_DEVICE_INPUT=1
     export RTP_LLM_DROP_BROAD_SYNC=1
@@ -887,6 +980,60 @@ echo "[${role}] draft_checkpoint=${sp_checkpoint_real} (${sp_checkpoint_fs}:${sp
 echo "[${role}] decode_topology=${smoke_decode_topology} decode_dp=${smoke_decode_dp_size} draft_ktp=1"
 echo "[${role}] endpoints prefill=${PREFILL_ENDPOINT} decode=${DECODE_ENDPOINT}"
 
+decode_role_addrs=()
+if [[ -n "${SMOKE_DECODE_ROLE_ADDRS:-}" ]]; then
+    IFS=',' read -r -a decode_role_addrs <<<"${SMOKE_DECODE_ROLE_ADDRS}"
+elif [[ "${smoke_decode_topology}" == "dp8_ktp8_ep8" ]]; then
+    for ((rank = 0; rank < 8; ++rank)); do
+        rank_http_port="$((decode_port + rank * 9))"
+        rank_grpc_port="$((rank_http_port + 1))"
+        decode_role_addrs+=(
+            "${decode_host}:${rank_http_port}:${rank_grpc_port}"
+        )
+    done
+else
+    decode_role_addrs+=("${decode_host}:${decode_port}:$((decode_port + 1))")
+fi
+if [[ "${smoke_decode_topology}" == "dp8_ktp8_ep8" ]]; then
+    [[ "${#decode_role_addrs[@]}" -eq 8 ]] \
+        || die "DP8 formal smoke requires exactly 8 ordered Decode role addresses"
+fi
+decode_role_addr_args=()
+for addr in "${decode_role_addrs[@]}"; do
+    [[ "${addr}" =~ ^[^:]+:[1-9][0-9]*:[1-9][0-9]*$ ]] \
+        || die "invalid Decode role address: ${addr}"
+    decode_role_addr_args+=(--decode-role-addr "${addr}")
+done
+
+case_args=(
+    --base-url "http://127.0.0.1:${prefill_port}"
+    --decode-health-url "http://${decode_host}:${decode_port}/health"
+    --decode-dp-size "${smoke_decode_dp_size}"
+    --output "${accuracy_file}"
+    --suite "${smoke_suite}"
+    --namespace "${SMOKE_REQUEST_NAMESPACE:-${SMOKE_RUN_ID}}"
+    --batch-size 4
+    --block-size "${smoke_block_size}"
+    --chunk-tokens "${smoke_chunk_tokens}"
+    --max-tokens "${SMOKE_MAX_TOKENS:-256}"
+    --identity-max-tokens "${SMOKE_IDENTITY_MAX_TOKENS:-256}"
+    --single-exact-max-tokens "${SMOKE_SINGLE_EXACT_MAX_TOKENS:-128}"
+    --mtp-chunk-max-tokens "${SMOKE_MTP_CHUNK_MAX_TOKENS:-128}"
+    --rdma-prewarm-attempts "${smoke_rdma_prewarm_attempts}"
+    --rdma-prewarm-backoff-s "${smoke_rdma_prewarm_backoff_s}"
+    --rdma-prewarm-settle-s "${smoke_rdma_prewarm_settle_s}"
+    --long-prefix-checkpoint "${CHECKPOINT_PATH}"
+    --long-prefix-tp-size "${smoke_tp_size}"
+    --long-prefix-kernel-page-size "${smoke_kernel_block_size}"
+    --expanded-kv-budget-bytes "${KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES}"
+    --timeout "${request_timeout}"
+)
+if [[ "${smoke_suite}" != "flow" ]]; then
+    case_args+=(--require-mtp)
+fi
+case_args+=("${decode_role_addr_args[@]}" --rdma-prewarm-timeout "${smoke_rdma_prewarm_timeout_s}")
+python3 "${case_runner}" "${case_args[@]}" --validate-only
+
 setsid "${launcher}" "${role}" >"${service_log}" 2>&1 &
 service_pid=$!
 printf '%s\n' "${service_pid}" >"${role_dir}/service.pid"
@@ -897,6 +1044,7 @@ wait_for_health 127.0.0.1 "${local_port}"
 verify_fastsafetensors_log
 verify_rdma_log
 verify_role_environment
+collect_cache_evidence startup
 
 if [[ "${role}" == "decode" ]]; then
     # One-shot result endpoint. It accepts only the matching run ID and writes
@@ -963,7 +1111,8 @@ PY
     # loading. Decode has processed the Prefill suite once PASS arrives.
     verify_fp8_log
     verify_rdma_selected_devices
-    verify_decode_graph_log
+    collect_cache_evidence final
+    verify_projection_ktp_decode_log
     echo "PASS: Decode stayed healthy and Prefill validated the PD response and semantic accuracy"
     keep_cluster_after_success
     exit 0
@@ -974,80 +1123,10 @@ fi
 # also checks local Prefill health before every sequential/concurrent stage.
 wait_for_health "${decode_host}" "${decode_port}"
 wait_for_result_listener
-max_tokens="${SMOKE_MAX_TOKENS:-256}"
-identity_max_tokens="${SMOKE_IDENTITY_MAX_TOKENS:-256}"
-single_exact_max_tokens="${SMOKE_SINGLE_EXACT_MAX_TOKENS:-128}"
-mtp_chunk_max_tokens="${SMOKE_MTP_CHUNK_MAX_TOKENS:-128}"
-for token_budget in \
-    "${max_tokens}" \
-    "${identity_max_tokens}" \
-    "${single_exact_max_tokens}" \
-    "${mtp_chunk_max_tokens}"; do
-    [[ "${token_budget}" =~ ^[1-9][0-9]*$ ]] \
-        || die "smoke output token budgets must be positive integers"
-done
-smoke_suite="${SMOKE_SUITE:-all}"
-case "${smoke_suite}" in
-    flow | all) ;;
-    *) die "SMOKE_SUITE must be flow or all" ;;
-esac
-mtp_case_args=()
-if [[ "${smoke_suite}" == "all" ]]; then
-    mtp_case_args+=(--require-mtp)
-fi
-
-decode_role_addrs=()
-if [[ -n "${SMOKE_DECODE_ROLE_ADDRS:-}" ]]; then
-    IFS=',' read -r -a decode_role_addrs <<<"${SMOKE_DECODE_ROLE_ADDRS}"
-else
-    for ((rank = 0; rank < smoke_decode_dp_size; ++rank)); do
-        rank_http_port="$((decode_port + rank * 9))"
-        rank_grpc_port="$((rank_http_port + 1))"
-        decode_role_addrs+=(
-            "${decode_host}:${rank_http_port}:${rank_grpc_port}"
-        )
-    done
-fi
-[[ "${#decode_role_addrs[@]}" -eq "${smoke_decode_dp_size}" ]] \
-    || die "formal smoke requires ${smoke_decode_dp_size} ordered Decode role addresses"
-decode_role_addr_args=()
-for addr in "${decode_role_addrs[@]}"; do
-    [[ "${addr}" =~ ^[^:]+:[1-9][0-9]*:[1-9][0-9]*$ ]] \
-        || die "invalid Decode role address: ${addr}"
-    decode_role_addr_args+=(--decode-role-addr "${addr}")
-done
-
-python3 -u "${case_runner}" \
-    --base-url "http://127.0.0.1:${prefill_port}" \
-    --decode-health-url "http://${decode_host}:${decode_port}/health" \
-    "${decode_role_addr_args[@]}" \
-    --decode-dp-size "${smoke_decode_dp_size}" \
-    --output "${accuracy_file}" \
-    --suite "${smoke_suite}" \
-    --namespace "${SMOKE_RUN_ID}" \
-    --batch-size 4 \
-    --block-size "${SEQ_SIZE_PER_BLOCK}" \
-    --chunk-tokens "${smoke_chunk_tokens}" \
-    --max-tokens "${max_tokens}" \
-    --identity-max-tokens "${identity_max_tokens}" \
-    --single-exact-max-tokens "${single_exact_max_tokens}" \
-    --mtp-chunk-max-tokens "${mtp_chunk_max_tokens}" \
-    "${mtp_case_args[@]}" \
-    --rdma-prewarm-attempts "${smoke_rdma_prewarm_attempts}" \
-    --rdma-prewarm-timeout "${smoke_rdma_prewarm_timeout_s}" \
-    --rdma-prewarm-backoff-s "${smoke_rdma_prewarm_backoff_s}" \
-    --rdma-prewarm-settle-s "${smoke_rdma_prewarm_settle_s}" \
-    --long-prefix-checkpoint "${CHECKPOINT_PATH}" \
-    --long-prefix-tp-size "${smoke_long_prefix_tp_size}" \
-    --long-prefix-target-tokens "${smoke_long_prefix_target_tokens}" \
-    --long-prefix-kernel-page-size "${KERNEL_SEQ_SIZE_PER_BLOCK}" \
-    --expanded-kv-budget-bytes "${KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES}" \
-    --timeout "${request_timeout}"
-
-# Runtime FP8 markers are produced only after the first model forward. Keep
-# the check as a completion gate, after the suite has exercised Prefill.
+python3 -u "${case_runner}" "${case_args[@]}"
 verify_fp8_log
 verify_rdma_selected_devices
+collect_cache_evidence final
 notify_decode PASS "smoke-suite-${smoke_suite}-validated"
 echo "PASS: Prefill validated suite=${smoke_suite}; artifacts=${role_dir}"
 keep_cluster_after_success

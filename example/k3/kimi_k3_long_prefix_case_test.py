@@ -16,6 +16,24 @@ from example.k3.kimi_k3_long_prefix_case import (
 
 
 class LongPrefixCaseTest(unittest.TestCase):
+    def test_independent_history_answers_reject_another_prefix(self):
+        expected = {key: f"{value}-003" if isinstance(value, str) else value
+                    for key, value in EXPECTED.items()}
+        with tempfile.TemporaryDirectory() as tmp:
+            case = LongPrefixCase(
+                "http://unused", pathlib.Path(tmp), "prefix-003",
+                timeout=1, budget=4 << 30, page_size=4096,
+                bytes_per_token=7680, target_tokens=65537, expected=expected,
+            )
+            with mock.patch.object(case, "tokenize", side_effect=lambda messages: list(range(len(messages[0]["content"])))):
+                seed, _, _ = case.make_seed()
+            for key in ("early", "middle", "late"):
+                self.assertIn(f"{key} = {expected[key]}.", seed[0]["content"])
+            check_answer(json.dumps(expected), case.expected)
+            with self.assertRaises(ValueError):
+                check_answer(json.dumps(EXPECTED), case.expected)
+        check_answer(json.dumps(EXPECTED))
+
     def test_default_budget_forces_two_historical_blocks(self):
         self.assertEqual(
             prefix_blocks(
@@ -51,6 +69,20 @@ class LongPrefixCaseTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 expanded_bytes_per_token(checkpoint, 3)
 
+    def test_multimodal_checkpoint_uses_nested_text_dimensions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = pathlib.Path(tmp)
+            (checkpoint / "config.json").write_text(json.dumps({
+                "text_config": {"num_attention_heads": 64, "v_head_dim": 64},
+            }))
+            self.assertEqual(expanded_bytes_per_token(checkpoint, 8), 4096)
+
+    def test_history_requests_keep_the_selected_semantic_output_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, sent = self.run_fake_service(tmp, max_tokens=4096)
+            self.assertTrue(result["passed"])
+            self.assertTrue(all(request["max_tokens"] == 4096 for request in sent))
+
     def test_answer_rejects_wrong_values_repetition_and_extra_keys(self):
         check_answer(json.dumps(EXPECTED))
         check_answer("```json\n" + json.dumps(EXPECTED) + "\n```")
@@ -71,6 +103,7 @@ class LongPrefixCaseTest(unittest.TestCase):
         fault=None,
         target_tokens=600000,
         bytes_per_token=7680,
+        max_tokens=256,
     ):
         case = LongPrefixCase(
             "http://prefill",
@@ -81,6 +114,7 @@ class LongPrefixCaseTest(unittest.TestCase):
             page_size=4096,
             bytes_per_token=bytes_per_token,
             target_tokens=target_tokens,
+            max_tokens=max_tokens,
         )
         seed = [{"role": "user", "content": "Original archive"}]
         ids = [1] * (target_tokens - 32)

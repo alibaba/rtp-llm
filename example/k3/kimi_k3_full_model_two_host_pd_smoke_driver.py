@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Launch both sides of the Kimi K3 full-model PD smoke concurrently over SSH."""
+"""Launch the native K3 PD smoke on two hosts."""
 
 from __future__ import annotations
 
 import argparse
+import base64
+import json
 import os
 import pathlib
 import re
+import runpy
 import shlex
 import signal
 import subprocess
@@ -22,6 +25,143 @@ ROLE_SCRIPT = "./example/k3/kimi_k3_full_model_two_host_pd_smoke.sh"
 def env_default(name: str, fallback: str | None = None) -> str | None:
     value = os.environ.get(name)
     return value if value not in (None, "") else fallback
+
+
+def split_endpoint(endpoint: str) -> tuple[str, int]:
+    host, separator, port = endpoint.rpartition(":")
+    return (host, int(port)) if separator else (endpoint, 0)
+
+
+def hold_port_block(repo_root: pathlib.Path, directory: pathlib.Path, ttl: int) -> int:
+    """Internal CPU-only lease process; execute the repository's original allocator."""
+    locks = []
+    status = "failed"
+    try:
+        port_manager = runpy.run_path(
+            str(repo_root / "rtp_llm/test/utils/port_util.py")
+        )["PortManager"]
+        # Preserve the generic smoke's base+100 layout, plus its result port at +100.
+        ports, locks = port_manager(ttl=ttl).get_consecutive_ports(201)
+        allocation = {
+            "service_port": ports[100],
+            "result_port": ports[200],
+            "first_port": ports[0],
+            "last_port": ports[-1],
+            "pid": os.getpid(),
+            "ttl": ttl,
+        }
+        temporary = directory / "allocation.tmp"
+        temporary.write_text(json.dumps(allocation), encoding="utf-8")
+        temporary.replace(directory / "allocation.json")
+        deadline = time.monotonic() + ttl
+        while not (directory / "release").exists():
+            if time.monotonic() >= deadline:
+                status = "expired"
+                return 1
+            time.sleep(0.5)
+        status = "released"
+        return 0
+    except Exception as exc:
+        (directory / "error").write_text(str(exc), encoding="utf-8")
+        return 1
+    finally:
+        for lock in reversed(locks):
+            lock.__exit__(None, None, None)
+        (directory / "status").write_text(status, encoding="utf-8")
+
+
+def allocate_remote_ports(
+    args: argparse.Namespace,
+    role: str,
+    leases: list[tuple[str, str]],
+) -> dict:
+    repo_root, runtime, container, _ = role_launch_parts(args, role)
+    parent = pathlib.PurePosixPath(args.remote_control_root) / args.run_id
+    directory = str(parent / f"{role}-ports")
+    result = run_container_short_ssh(
+        args,
+        role,
+        f"mkdir -p {shlex.quote(str(parent))} && mkdir {shlex.quote(directory)}",
+    )
+    if result.returncode:
+        raise RuntimeError(f"{role} port lease directory: {result.stderr.strip()}")
+    leases.append((role, directory))
+    ttl = args.overall_timeout + 2 * args.decode_ready_timeout_s + 120
+    helper = shlex.join(
+        (
+            "/opt/conda310/bin/python",
+            str(
+                pathlib.PurePosixPath(repo_root)
+                / "example/k3"
+                / pathlib.Path(__file__).name
+            ),
+            "--hold-ports",
+            repo_root,
+            directory,
+            str(ttl),
+        )
+    )
+    command = shlex.join(
+        (
+            runtime,
+            "exec",
+            "-d",
+            "-u",
+            args.container_user,
+            container,
+            "bash",
+            "-lc",
+            f"exec {helper} >{shlex.quote(directory + '/helper.log')} 2>&1",
+        )
+    )
+    result = run_short_ssh(args, role, command)
+    if result.returncode:
+        raise RuntimeError(f"{role} port holder launch: {result.stderr.strip()}")
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        result = run_container_short_ssh(
+            args,
+            role,
+            f"if test -f {shlex.quote(directory + '/error')}; then "
+            f"cat {shlex.quote(directory + '/error')} >&2; exit 2; "
+            f"elif test -f {shlex.quote(directory + '/status')}; then exit 2; "
+            f"elif test -f {shlex.quote(directory + '/allocation.json')}; then "
+            f"cat {shlex.quote(directory + '/allocation.json')}; else exit 3; fi",
+        )
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+        if result.returncode != 3:
+            raise RuntimeError(
+                f"{role} port allocation failed: {result.stderr.strip()}"
+            )
+        time.sleep(0.5)
+    raise TimeoutError(f"{role} port allocation timed out; inspect {directory}")
+
+
+def release_port_leases(
+    args: argparse.Namespace, leases: list[tuple[str, str]]
+) -> bool:
+    released = True
+    for role, directory in reversed(leases):
+        try:
+            result = run_container_short_ssh(
+                args,
+                role,
+                f"touch {shlex.quote(directory + '/release')}; "
+                f"for attempt in {{1..30}}; do "
+                f"test ! -f {shlex.quote(directory + '/status')} || exit 0; "
+                "sleep 0.2; done; exit 1",
+            )
+            if result.returncode:
+                released = False
+                print(
+                    f"port lease cleanup incomplete: {role} {directory}",
+                    file=sys.stderr,
+                )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            released = False
+            print(f"port lease cleanup failed: {role}: {exc}", file=sys.stderr)
+    return released
 
 
 def parse_args() -> argparse.Namespace:
@@ -78,7 +218,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--decode-container",
-        default=env_default("DECODE_SMOKE_CONTAINER"),
+        default=env_default("DECODE_SMOKE_CONTAINER", env_default("SMOKE_DECODE_CONTAINER")),
         help="Decode container name; defaults to --container",
     )
     parser.add_argument(
@@ -137,7 +277,7 @@ def parse_args() -> argparse.Namespace:
         "--parallel-start",
         action="store_true",
         default=env_default("SMOKE_PARALLEL_START", "0") == "1",
-        help="load both roles concurrently; role scripts still gate requests on health and RDMA readiness",
+        help="set the Prefill launch delay to zero; role scripts still gate requests on health and RDMA readiness",
     )
     parser.add_argument(
         "--prefill-start-delay-s",
@@ -157,6 +297,9 @@ def parse_args() -> argparse.Namespace:
             "health timeout"
         ),
     )
+    parser.add_argument("--defer-role", choices=("prefill", "decode"))
+    parser.add_argument("--start-file", type=pathlib.Path,
+                        help="controller-side file that releases the deferred role; no service is started for that role before it exists")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -180,23 +323,29 @@ def parse_args() -> argparse.Namespace:
         parser.error(
             "--run-id may contain only letters, digits, dot, underscore and dash"
         )
-    endpoint_pattern = r"[^:]+:[0-9]+"
+    endpoint_pattern = r"[^:]+(?::[0-9]+)?"
     for name in ("prefill_endpoint", "decode_endpoint"):
         if re.fullmatch(endpoint_pattern, getattr(args, name)) is None:
-            parser.error(f"--{name.replace('_', '-')} must have host:port form")
+            parser.error(f"--{name.replace('_', '-')} must be a host or host:port")
     if (
         args.result_endpoint
         and re.fullmatch(endpoint_pattern, args.result_endpoint) is None
     ):
-        parser.error("--result-endpoint must have host:port form")
+        parser.error("--result-endpoint must be a host or host:port")
     if args.overall_timeout <= 0:
         parser.error("--overall-timeout must be positive")
     if args.prefill_start_delay_s < 0:
         parser.error("--prefill-start-delay-s must be non-negative")
+    if args.parallel_start:
+        args.prefill_start_delay_s = 0
     if args.decode_ready_timeout_s <= 0:
         parser.error("--decode-ready-timeout-s must be positive")
     if not args.remote_control_root.startswith("/"):
         parser.error("--remote-control-root must be an absolute path")
+    if bool(args.defer_role) != bool(args.start_file):
+        parser.error("--defer-role and --start-file must be specified together")
+    if args.defer_role and (not args.remote_detached or not args.start_file.is_absolute()):
+        parser.error("deferred startup requires --remote-detached and an absolute --start-file")
     return args
 
 
@@ -216,9 +365,24 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_REQUEST_TIMEOUT_S",
         "SMOKE_RESULT_TIMEOUT_S",
         "SMOKE_MAX_TOKENS",
+        "SMOKE_REQUEST_NAMESPACE",
+        "SMOKE_MAX_CONCURRENCY",
+        "SMOKE_MAX_INPUT_TOKENS",
+        "SMOKE_MAX_OUTPUT_TOKENS",
+        "KV_CACHE_MEM_MB",
+        "SMOKE_PREFILL_KV_CACHE_MEM_MB",
+        "KIMI_K3_KDA_POOL_BLOCKS",
+        "TEST_BLOCK_NUM",
+        "MAX_BATCH_TOKENS_SIZE",
+        "GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS",
+        "DECODE_CAPTURE_CONFIG",
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE",
+        "kmonitorEnableLogFileSink",
+        "kmonitorNormalSamplePeriod",
         "SMOKE_IDENTITY_MAX_TOKENS",
         "SMOKE_SINGLE_EXACT_MAX_TOKENS",
         "SMOKE_MTP_CHUNK_MAX_TOKENS",
+        "KIMI_K3_DECODE_TOPOLOGY",
         "SMOKE_DECODE_KV_CACHE_MEM_MB",
         "SMOKE_DECODE_KDA_POOL_BLOCKS",
         "SMOKE_DECODE_ROLE_ADDRS",
@@ -237,12 +401,19 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "FT_CORE_DUMP_ON_EXCEPTION",
         "RTP_LLM_SKIP_BUILD",
         "KIMI_K3_ATTENTION_QUANTIZATION",
+        "FP8_KV_CACHE",
         "KIMI_K3_MLA_FP8",
         "KIMI_K3_MLA_FP8_Q_SCALE",
         "KIMI_K3_MLA_FP8_KV_SCALE",
         "KIMI_K3_MLA_FP8_DIAGNOSTICS",
         "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES",
         "RTP_LLM_MTP_ACCEPTANCE_DIAGNOSTICS",
+        # Pinned FlashMLA's sparse kernel raises the persisting-L2 limit inside
+        # CUDA graph capture once the KV pool passes FLASH_MLA_L2_PERSIST_MIN_SKV
+        # (49152 slots), which invalidates the capture and surfaces as CUTLASS
+        # error 11.  This is a dependency runtime condition rather than a model
+        # setting, so it has to be forwardable without being implied.
+        "FLASH_MLA_NO_L2_PERSIST",
         "LOAD_METHOD",
     )
     for name in names:
@@ -291,6 +462,8 @@ def role_launch_parts(
         "DECODE_ENDPOINT": args.decode_endpoint,
         "SMOKE_RUN_ID": args.run_id,
         "SMOKE_SUITE": args.suite,
+        "PREFILL_CP_KV_CACHE_SHARDED": env_default("PREFILL_CP_KV_CACHE_SHARDED", "0"),
+        "DECODE_CP_KV_CACHE_SHARDED": env_default("DECODE_CP_KV_CACHE_SHARDED", "0"),
         **forwarded_optional_environment(role),
     }
     if args.result_endpoint:
@@ -516,6 +689,10 @@ def build_detached_control_command(
     )
 
 
+def run_container_short_ssh(args, role, command):
+    return run_short_ssh(args, role, build_detached_control_command(args, role, command))
+
+
 def fetch_detached_log(
     args: argparse.Namespace, role: str, destination: pathlib.Path
 ) -> None:
@@ -559,44 +736,44 @@ def start_remote_roles(
     roles["prefill"].start()
 
 
+def launch_detached_role(args: argparse.Namespace, role: str) -> None:
+    command = build_short_ssh_command(args, role, build_detached_remote_command(args, role))
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, start_new_session=True)
+    try:
+        output, _ = process.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        output, _ = process.communicate()
+    if process.returncode != 0:
+        raise RuntimeError(f"{role} detached launch rc={process.returncode}: {output.strip()}")
+
+
+def launch_released_roles(args: argparse.Namespace, launched: set[str]) -> None:
+    for role in ("decode", "prefill"):
+        if role in launched:
+            continue
+        if role == getattr(args, "defer_role", None) and not args.start_file.is_file():
+            continue
+        # A failed SSH launch may already have created the remote process.
+        launched.add(role)
+        launch_detached_role(args, role)
+        if role == "decode" and args.prefill_start_delay_s:
+            time.sleep(args.prefill_start_delay_s)
+
+
 def run_detached(args: argparse.Namespace, run_dir: pathlib.Path) -> int:
     roles = ("decode", "prefill")
-    launch_errors = []
-    for role in roles:
-        command = build_short_ssh_command(
-            args, role, build_detached_remote_command(args, role)
-        )
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            start_new_session=True,
-        )
-        try:
-            output, _ = process.communicate(timeout=60)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            output, _ = process.communicate()
-        if process.returncode != 0:
-            launch_errors.append(
-                f"{role} detached launch rc={process.returncode}: {output.strip()}"
-            )
-            break
-        if role == "decode" and args.prefill_start_delay_s:
-            print(
-                f"Decode launch accepted; waiting {args.prefill_start_delay_s:g}s "
-                "before launching Prefill",
-                flush=True,
-            )
-            time.sleep(args.prefill_start_delay_s)
-    if launch_errors:
-        for role in roles:
+    launched = set()
+    try:
+        launch_released_roles(args, launched)
+    except (OSError, RuntimeError) as exc:
+        for role in launched:
             stop_detached_role(args, role)
-        print("FAIL: " + "; ".join(launch_errors), file=sys.stderr)
+        print(f"FAIL: {exc}", file=sys.stderr)
         return 1
 
-    print("detached Decode and Prefill role scripts accepted; polling status files")
+    print(f"detached roles launched={sorted(launched)}; deferred={getattr(args, 'defer_role', None)}; polling status files")
     started_at = time.monotonic()
     statuses: dict[str, int | None] = {role: None for role in roles}
     poll_failures: dict[str, int] = {role: 0 for role in roles}
@@ -607,7 +784,7 @@ def run_detached(args: argparse.Namespace, run_dir: pathlib.Path) -> int:
                     f"smoke exceeded controller timeout {args.overall_timeout}s"
                 )
             for role in roles:
-                if statuses[role] is not None:
+                if role not in launched or statuses[role] is not None:
                     continue
                 status_path = detached_control_paths(args, role)["status"]
                 try:
@@ -657,13 +834,14 @@ def run_detached(args: argparse.Namespace, run_dir: pathlib.Path) -> int:
             }
             if failed and any(status is None for status in statuses.values()):
                 raise RuntimeError(f"detached role failed early: {failed}")
+            launch_released_roles(args, launched)
             time.sleep(2)
     except (KeyboardInterrupt, TimeoutError, OSError, RuntimeError) as exc:
         print(f"controller abort: {exc}", file=sys.stderr)
-        for role in roles:
+        for role in launched:
             if statuses[role] is None:
                 stop_detached_role(args, role)
-        for role in roles:
+        for role in launched:
             fetch_detached_log(args, role, run_dir / f"{role}.log")
             show_tail(run_dir / f"{role}.log")
         return 1
@@ -689,8 +867,7 @@ def show_tail(path: pathlib.Path, line_count: int = 80) -> None:
         print(line, file=sys.stderr)
 
 
-def main() -> int:
-    args = parse_args()
+def run_smoke(args: argparse.Namespace, run_dir: pathlib.Path) -> int:
     if args.remote_detached:
         commands = {
             role: build_short_ssh_command(
@@ -707,8 +884,6 @@ def main() -> int:
             print(f"{role}: {shlex.join(commands[role])}")
         return 0
 
-    run_dir = args.artifact_root / args.run_id
-    run_dir.mkdir(parents=True, exist_ok=False)
     print(
         f"starting concurrent Decode and Prefill peers; prefill_start_delay_s="
         f"{args.prefill_start_delay_s:g}; run_id={args.run_id} "
@@ -764,6 +939,67 @@ def main() -> int:
         return 1
     print(f"PASS: both remote roles completed successfully; artifacts={run_dir}")
     return 0
+
+
+def raise_keyboard_interrupt(_signal, _frame):
+    raise KeyboardInterrupt
+
+
+def main() -> int:
+    if len(sys.argv) == 5 and sys.argv[1] == "--hold-ports":
+        return hold_port_block(
+            pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), int(sys.argv[4])
+        )
+    signal.signal(signal.SIGTERM, raise_keyboard_interrupt)
+    args = parse_args()
+    run_dir = args.artifact_root / args.run_id
+    if args.dry_run:
+        for role in ("prefill", "decode"):
+            if split_endpoint(getattr(args, f"{role}_endpoint"))[1] == 0:
+                print(
+                    f"{role}: PortManager allocation pending; dry-run reserves no ports"
+                )
+        return run_smoke(args, run_dir)
+    run_dir.mkdir(parents=True, exist_ok=False)
+    leases = []
+    verdict = 1
+    try:
+        allocations = {}
+        for role in ("prefill", "decode"):
+            host, port = split_endpoint(getattr(args, f"{role}_endpoint"))
+            if port:
+                continue
+            allocation = allocate_remote_ports(args, role, leases)
+            allocations[role] = allocation
+            setattr(args, f"{role}_endpoint", f"{host}:{allocation['service_port']}")
+            if role == "decode" and (
+                not args.result_endpoint or split_endpoint(args.result_endpoint)[1] == 0
+            ):
+                result_host = (
+                    split_endpoint(args.result_endpoint)[0]
+                    if args.result_endpoint
+                    else host
+                )
+                args.result_endpoint = f"{result_host}:{allocation['result_port']}"
+        (run_dir / "endpoints.json").write_text(
+            json.dumps(
+                {
+                    "prefill": args.prefill_endpoint,
+                    "decode": args.decode_endpoint,
+                    "result": args.result_endpoint,
+                    "allocations": allocations,
+                },
+                indent=2,
+            )
+        )
+        verdict = run_smoke(args, run_dir)
+    except (OSError, RuntimeError, ValueError, TimeoutError, KeyboardInterrupt) as exc:
+        verdict = 1
+        print(f"controller failed: {exc}", file=sys.stderr)
+    finally:
+        if not release_port_leases(args, leases):
+            verdict = 1
+    return verdict
 
 
 if __name__ == "__main__":

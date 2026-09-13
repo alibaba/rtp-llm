@@ -1,3 +1,5 @@
+exports_files(["testdata/qwen2_vl/1.jpg"])
+
 filegroup(
     name = "testdata",
     srcs = glob([

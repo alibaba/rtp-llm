@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import gzip
+import hashlib
 import json
+import os
 import pathlib
 import re
 import threading
@@ -30,7 +33,14 @@ class Case:
     require_chunk: bool = False
     require_mtp: bool = False
     require_multimodal: bool = False
+    # Connectivity/chunking preflights assert only that the request crossed the
+    # wire, so a response that stops at the token cap is not a failure for them.
+    # The flow case is the historical example: the predecessor task accepted
+    # output_len == max_tokens for it.  Cases whose answer text matters keep the
+    # strict check.
+    allow_length_stop: bool = False
     max_tokens: int | None = None
+
     timeout_s: int | None = None
     decode_owner_rank: int = 0
 
@@ -128,6 +138,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--long-prefix-kernel-page-size", type=int, default=128)
     parser.add_argument("--expanded-kv-budget-bytes", type=int, default=4294967296)
     parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
     if args.batch_size < 4:
         parser.error(
@@ -168,7 +179,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def numbered_answer_pattern(value: int) -> str:
-    return rf"(?<!\d){value}(?!\d)"
+    plain, grouped = re.escape(str(value)), re.escape(f"{value:,}")
+    alternatives = plain if plain == grouped else rf"(?:{plain}|{grouped})"
+    return rf"(?<![\d.,+\-]){alternatives}(?!\d|[.,]\d)"
 
 
 def make_cache_prompt(
@@ -252,6 +265,11 @@ class Runner:
         self.stages: list[dict[str, Any]] = []
         self.rdma_prewarm_attempts: list[dict[str, Any]] = []
         self.started_at = time.time()
+        self.reuse_alignment = args.block_size * (
+            args.long_prefix_tp_size
+            if os.environ.get("PREFILL_CP_KV_CACHE_SHARDED", "0") == "1"
+            else 1
+        )
 
     def save(self, passed: bool, error: str | None = None) -> None:
         payload = {
@@ -325,8 +343,6 @@ class Runner:
     def request(
         self, case: Case, barrier: threading.Barrier | None = None
     ) -> dict[str, Any]:
-        if barrier is not None:
-            barrier.wait(timeout=30)
         request_max_tokens = case.max_tokens or self.args.max_tokens
         payload = {
             "model": "kimi-k3",
@@ -350,44 +366,66 @@ class Runner:
             # by ChatCompletionRequest, which silently falls back to the
             # process-wide REMOTE_RPC_SERVER_IP and routes every request to the
             # first Decode rank.
-            payload["extra_configs"] = {
+            payload.setdefault("extra_configs", {}).update({
                 "role_addrs": [
                     self.decode_role_addrs[case.decode_owner_rank]
                 ]
-            }
+            })
+        encoded = json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":")
+        ).encode()
         request = urllib.request.Request(
             self.endpoint,
-            data=json.dumps(
-                payload, ensure_ascii=False, separators=(",", ":")
-            ).encode(),
+            data=encoded,
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        started = time.time()
-        request_timeout = case.timeout_s or self.args.timeout
+        directory = None
+        if self.args.output is not None:
+            directory = self.args.output.parent / "requests"
+            directory.mkdir(exist_ok=True, parents=True)
+            with gzip.open(directory / f"{case.name}-request.json.gz", "wb") as stream:
+                stream.write(encoded)
+        if barrier is not None:
+            barrier.wait(timeout=30)
+        started_epoch, started = time.time(), time.monotonic()
         try:
-            with self.opener.open(request, timeout=request_timeout) as response:
-                body = response.read()
+            with self.opener.open(request, timeout=case.timeout_s or self.args.timeout) as response:
                 status = response.status
+                body = response.read()
+                if directory is not None:
+                    with gzip.open(directory / f"{case.name}-response.json.gz", "wb") as stream:
+                        stream.write(body)
+                result = json.loads(body)
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise SmokeFailure(
-                f"{case.name}: HTTP {exc.code}: {detail[:1000]}"
-            ) from exc
+            body = exc.read()
+            if directory is not None:
+                with gzip.open(
+                    directory / f"{case.name}-response.json.gz", "wb"
+                ) as stream:
+                    stream.write(body)
+            try:
+                detail = json.loads(body)
+            except (ValueError, UnicodeDecodeError):
+                raise SmokeFailure(
+                    f"{case.name}: HTTP {exc.code}: {body[:1000]!r}"
+                ) from exc
+            raise SmokeFailure(f"{case.name}: HTTP {exc.code}: {detail!r}") from exc
         except Exception as exc:
             raise SmokeFailure(f"{case.name}: request failed: {exc}") from exc
+        elapsed = time.monotonic() - started
         if status != 200:
-            raise SmokeFailure(f"{case.name}: HTTP {status}")
-        try:
-            result = json.loads(body)
-        except json.JSONDecodeError as exc:
-            raise SmokeFailure(f"{case.name}: invalid JSON: {body[:1000]!r}") from exc
-        return self.validate(
-            case,
-            result,
-            time.time() - started,
-            request_max_tokens,
+            raise SmokeFailure(f"{case.name}: HTTP {status}: {result!r}")
+        if isinstance(result, dict) and "error_code" in result:
+            raise SmokeFailure(f"{case.name}: HTTP {status}: {result!r}")
+        record = self.validate(case, result, elapsed, request_max_tokens)
+        record.update(
+            request_sha256=hashlib.sha256(encoded).hexdigest(),
+            started_at_epoch_s=started_epoch,
+            finished_at_epoch_s=started_epoch + elapsed,
         )
+        return record
+
 
     def validate(
         self,
@@ -429,6 +467,13 @@ class Runner:
             and all(isinstance(ids, list) and ids for ids in output_ids)
         ):
             raise SmokeFailure(f"{case.name}: missing output token ids: {output_ids!r}")
+        if sum(map(len, output_ids)) != output_len:
+            raise SmokeFailure(f"{case.name}: output IDs disagree with output_len")
+        finish_reason = response["choices"][0].get("finish_reason")
+        if not case.allow_length_stop and (
+            finish_reason == "length" or output_len >= request_max_tokens
+        ):
+            raise SmokeFailure(f"{case.name}: response was truncated")
         if re.search(case.expected_regex, answer_text, flags=re.IGNORECASE) is None:
             raise SmokeFailure(
                 f"{case.name}: answer failed {case.expected_regex!r}: {answer_text!r}"
@@ -446,10 +491,10 @@ class Runner:
             raise SmokeFailure(
                 f"{case.name}: invalid reuse {effective_reuse} for input_len {input_len}"
             )
-        if effective_reuse and effective_reuse % self.args.block_size:
+        if effective_reuse and effective_reuse % self.reuse_alignment:
             raise SmokeFailure(
                 f"{case.name}: reuse {effective_reuse} is not aligned to "
-                f"block_size={self.args.block_size}"
+                f"joint checkpoint={self.reuse_alignment}"
             )
         if case.reuse == "miss" and effective_reuse != 0:
             raise SmokeFailure(
@@ -520,14 +565,36 @@ class Runner:
             "content": content,
             "reasoning_content": reasoning_content,
             "output_ids": output_ids,
+            "finish_reason": finish_reason,
+
             "decode_owner_rank": case.decode_owner_rank,
             "selected_decode_role_addr": selected_decode_role_addr,
             "observed_decode_role_addrs": observed_decode_role_addrs,
         }
 
-    def request_cases(
-        self, cases: list[Case], concurrent: bool
-    ) -> list[dict[str, Any]]:
+    def post_json(self, path, payload):
+        request = urllib.request.Request(
+            self.args.base_url.rstrip("/") + path,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with self.opener.open(request, timeout=self.args.timeout) as response:
+            return json.load(response)
+
+    def render_chat(self, prompt):
+        result = self.post_json("/v1/chat/render", {
+            "model": "kimi-k3", "messages": [{"role": "user", "content": prompt}],
+        })
+        ids = result.get("input_ids")
+        if not isinstance(ids, list) or not ids:
+            raise SmokeFailure("renderer returned no input token IDs")
+        return result
+
+    def render_input_ids(self, prompt):
+        return self.render_chat(prompt)["input_ids"]
+
+
+    def request_cases(self, cases: list[Case], concurrent: bool) -> list[dict[str, Any]]:
         if concurrent:
             barrier = threading.Barrier(len(cases))
             with ThreadPoolExecutor(max_workers=len(cases)) as pool:
@@ -597,7 +664,7 @@ class Runner:
             )
             print(
                 f"rdma_prewarm attempt={attempt} passed=true "
-                f"decode_owners={len(records)} elapsed_s={elapsed_s}"
+                f"requests={len(records)} decode_owners={len({case.decode_owner_rank for case in cases})} elapsed_s={elapsed_s}"
             )
             if self.args.rdma_prewarm_settle_s:
                 time.sleep(self.args.rdma_prewarm_settle_s)
@@ -613,6 +680,9 @@ class Runner:
                 "name": name,
                 "concurrent": concurrent,
                 "case_names": [case.name for case in cases],
+                "started_at_epoch_s": started,
+                "finished_at_epoch_s": time.time(),
+
                 "decode_owner_ranks": [case.decode_owner_rank for case in cases],
                 "elapsed_s": round(time.time() - started, 3),
             }
@@ -633,16 +703,45 @@ class Runner:
                     r".",
                     "miss",
                     require_chunk=True,
+                    # Connectivity/chunking preflight: the four-layer model is
+                    # free to run to the cap, and the predecessor task's passing
+                    # evidence records output_len == max_tokens here.
+                    allow_length_stop=True,
                 )
             ],
         )
 
-    def run_all(self) -> None:
-        self.prewarm_rdma_pool()
-        batch_owner_ranks = [
-            rank % max(1, len(self.decode_role_addrs))
-            for rank in [0, 0] + list(range(1, self.args.batch_size - 1))
-        ]
+    def make_reusable_prompt(self, builder, *args, repeats=900):
+        for _ in range(5):
+            prompt = builder(*args, repeats=repeats)
+            if self.reuse_alignment == self.args.block_size:
+                return prompt
+            count = len(self.render_input_ids(prompt))
+            if count >= self.reuse_alignment + 512:
+                return prompt
+            repeats *= 2
+        raise SmokeFailure("reuse seed did not reach one joint CP checkpoint")
+
+    def check_reuse_prefix(self, first, second):
+        if self.reuse_alignment == self.args.block_size:
+            return
+        first_ids, second_ids = self.render_input_ids(first), self.render_input_ids(
+            second
+        )
+        common = next(
+            (i for i, (a, b) in enumerate(zip(first_ids, second_ids)) if a != b),
+            min(len(first_ids), len(second_ids)),
+        )
+        if common < self.reuse_alignment:
+            raise SmokeFailure(
+                f"partial seed shares only {common} tokens; needs {self.reuse_alignment}"
+            )
+
+    def run_all(self, *, prewarm=True) -> None:
+        if prewarm:
+            self.prewarm_rdma_pool()
+        owner_count = max(1, len(self.decode_role_addrs))
+        batch_owner_ranks = [rank % owner_count for rank in [0, 0] + list(range(1, self.args.batch_size - 1))]
         self.run_stage(
             "identity_miss",
             [
@@ -658,7 +757,9 @@ class Runner:
                 )
             ],
         )
-        exact_prompt = make_cache_prompt(self.args.namespace, "single-exact", 37)
+        exact_prompt = self.make_reusable_prompt(
+            make_cache_prompt, self.args.namespace, "single-exact", 37
+        )
         single_exact_max_tokens = max(
             self.args.max_tokens,
             self.args.single_exact_max_tokens,
@@ -688,12 +789,13 @@ class Runner:
             ],
         )
 
-        partial_seed = make_partial_prompt(
-            self.args.namespace, "partial-common", "seed", 29
+        partial_seed = self.make_reusable_prompt(
+            make_partial_prompt, self.args.namespace, "partial-common", "seed", 29
         )
-        partial_query = make_partial_prompt(
-            self.args.namespace, "partial-common", "query", 31
+        partial_query = self.make_reusable_prompt(
+            make_partial_prompt, self.args.namespace, "partial-common", "query", 31
         )
+        self.check_reuse_prefix(partial_seed, partial_query)
         self.run_stage(
             "partial_prefix_seed",
             [
@@ -718,7 +820,8 @@ class Runner:
         )
 
         cold_prompts = [
-            make_cache_prompt(
+            self.make_reusable_prompt(
+                make_cache_prompt,
                 self.args.namespace,
                 f"batch-cold-{idx}",
                 40 + idx,
@@ -760,7 +863,8 @@ class Runner:
         mixed_prompts = []
         for idx in range(self.args.batch_size):
             if idx == partial_idx:
-                prompt = make_partial_prompt(
+                prompt = self.make_reusable_prompt(
+                    make_partial_prompt,
                     self.args.namespace,
                     "batch-mixed-partial-common",
                     "query",
@@ -768,20 +872,23 @@ class Runner:
                     repeats=350 + idx * 150,
                 )
             else:
-                prompt = make_cache_prompt(
+                prompt = self.make_reusable_prompt(
+                    make_cache_prompt,
                     self.args.namespace,
                     f"batch-mixed-{idx}",
                     50 + idx,
                     repeats=350 + idx * 150,
                 )
             mixed_prompts.append(prompt)
-        mixed_partial_seed = make_partial_prompt(
+        mixed_partial_seed = self.make_reusable_prompt(
+            make_partial_prompt,
             self.args.namespace,
             "batch-mixed-partial-common",
             "seed",
             67,
             repeats=350 + partial_idx * 150,
         )
+        self.check_reuse_prefix(mixed_partial_seed, mixed_prompts[partial_idx])
         self.run_stage(
             "mixed_seed_hits",
             [
@@ -971,7 +1078,7 @@ class Runner:
                     numbered_answer_pattern((70 + idx) ** 2),
                     "miss",
                     require_chunk=True,
-                    decode_owner_rank=idx % max(1, len(self.decode_role_addrs)),
+                    decode_owner_rank=idx % owner_count,
                 )
                 for idx, prompt in enumerate(chunk_prompts)
             ],
@@ -986,7 +1093,7 @@ class Runner:
                     numbered_answer_pattern((70 + idx) ** 2),
                     "hit",
                     require_chunk=True,
-                    decode_owner_rank=idx % max(1, len(self.decode_role_addrs)),
+                    decode_owner_rank=idx % owner_count,
                 )
                 for idx, prompt in enumerate(chunk_prompts)
             ],
@@ -1010,6 +1117,7 @@ class Runner:
                 self.args.long_prefix_checkpoint, self.args.long_prefix_tp_size
             ),
             target_tokens=self.args.long_prefix_target_tokens,
+            max_tokens=self.args.max_tokens,
         )
         try:
             result = case.run()
@@ -1026,6 +1134,10 @@ class Runner:
 
 def main() -> int:
     args = parse_args()
+    if args.suite == "all":
+        make_multimodal_chunk_prompt(args.namespace, "static-preflight", 1)
+    if args.validate_only:
+        return 0
     runner = Runner(args)
     try:
         suites: dict[str, Callable[[], None]] = {

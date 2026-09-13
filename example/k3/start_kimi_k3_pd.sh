@@ -67,6 +67,10 @@ Model and cache (normally change these together on both roles):
                                          <=0 selects automatic GPU KV budgeting
   SEQ_SIZE_PER_BLOCK                     defaults to 4096
   KERNEL_SEQ_SIZE_PER_BLOCK              defaults to 128
+  PREFILL_CP_KV_CACHE_SHARDED             defaults to 0; 1 shards Prefill FULL KV
+  DECODE_CP_KV_CACHE_SHARDED              defaults to 0; 1 shards Decode FULL KV
+                                         by original TP8; set both values on
+                                         both hosts, independently of rotate
   REUSE_CACHE                            defaults to 0
   LINEAR_STEP                            defaults to 1
   CONCURRENCY_LIMIT                      defaults to 2
@@ -269,6 +273,8 @@ kernel_seq_size_per_block="${KERNEL_SEQ_SIZE_PER_BLOCK:-128}"
 concurrency_limit="${CONCURRENCY_LIMIT:-2}"
 max_context_batch_size="${MAX_CONTEXT_BATCH_SIZE:-1}"
 reuse_cache="${REUSE_CACHE:-0}"
+prefill_cp_kv_cache_sharded="${PREFILL_CP_KV_CACHE_SHARDED:-0}"
+decode_cp_kv_cache_sharded="${DECODE_CP_KV_CACHE_SHARDED:-0}"
 linear_step="${LINEAR_STEP:-1}"
 kimi_k3_kda_pool_blocks="${KIMI_K3_KDA_POOL_BLOCKS:-0}"
 if [[ "${role}" == "PREFILL" ]]; then
@@ -320,6 +326,8 @@ fi
 
 for flag_name in \
     reuse_cache \
+    prefill_cp_kv_cache_sharded \
+    decode_cp_kv_cache_sharded \
     enable_cuda_graph \
     enable_cuda_graph_debug_mode; do
     flag_value="${!flag_name}"
@@ -568,6 +576,7 @@ if [[ -n "${max_batch_tokens_size}" ]]; then
     echo "  batch tokens:    ${max_batch_tokens_size}"
 fi
 echo "  reuse cache:     ${reuse_cache}"
+echo "  cache sharding:  Prefill=${prefill_cp_kv_cache_sharded} Decode=${decode_cp_kv_cache_sharded}"
 if [[ "${role}" == "PREFILL" ]]; then
     echo "  shared weights:  shard=${KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD}"
     echo "  Prefill chunks:  ${KIMI_K3_PREFILL_CHUNK_TOKENS}"
@@ -613,6 +622,8 @@ server_args=(
     --ssm_state_dtype fp32
     --warm_up 0
     --reuse_cache "${reuse_cache}"
+    --prefill_cp_kv_cache_sharded "${prefill_cp_kv_cache_sharded}"
+    --decode_cp_kv_cache_sharded "${decode_cp_kv_cache_sharded}"
     --enable_device_cache 1
     --concurrency_limit "${concurrency_limit}"
     --use_deepep_moe "${use_deepep_moe}"

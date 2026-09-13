@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import gzip
+import io
 import json
+import os
 import pathlib
 import tempfile
+import threading
 import unittest
+import urllib.error
 from unittest import mock
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from example.k3.kimi_k3_full_model_pd_cases import (
     Case,
@@ -51,10 +57,28 @@ def make_args() -> argparse.Namespace:
         long_prefix_target_tokens=600000,
         long_prefix_kernel_page_size=128,
         expanded_kv_budget_bytes=4294967296,
+        validate_only=False,
     )
 
 
 class KimiK3FullModelPdCasesTest(unittest.TestCase):
+
+
+    def test_multimodal_image_is_in_native_runfiles_and_checked_before_launch(self):
+        image = pathlib.Path(os.environ["TEST_SRCDIR"]) / os.environ["TEST_WORKSPACE"] / "rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg"
+        self.assertTrue(image.is_file())
+        self.assertEqual(image.read_bytes()[:2], b"\xff\xd8")
+        args = make_args()
+        args.validate_only = True
+        module = "example.k3.kimi_k3_full_model_pd_cases"
+        with mock.patch(module + ".parse_args", return_value=args), mock.patch(module + ".Runner") as runner:
+            self.assertEqual(main(), 0)
+            with mock.patch.object(pathlib.Path, "is_file", return_value=False):
+                with self.assertRaisesRegex(SmokeFailure, "multimodal smoke image is missing"):
+                    main()
+            runner.assert_not_called()
+
+
     def test_long_prefix_failure_marks_the_entire_suite_failed(self) -> None:
         args = make_args()
         with tempfile.TemporaryDirectory() as tmp:
@@ -297,6 +321,25 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
             [0, 1],
         )
 
+    def test_tp_all_suite_routes_every_request_to_its_single_owner(self) -> None:
+        args = make_args()
+        args.decode_role_addrs = args.decode_role_addrs[:1]
+        args.rdma_prewarm_attempts = 1
+        runner = Runner(args)
+        stages = {}
+        with (
+            mock.patch.object(runner, "health"),
+            mock.patch.object(runner, "request_cases", return_value=[]) as requests,
+            mock.patch.object(runner, "run_stage", side_effect=lambda name, cases, **kw: stages.update({name: cases})),
+            mock.patch.object(runner, "run_long_prefix_case"),
+        ):
+            runner.run_all()
+        self.assertNotIn("dp_uneven_local_batch", stages)
+        self.assertIn("multimodal_mtp_chunk_prefill_miss", stages)
+        self.assertEqual(len(stages["cuda_graph_bucket_8"]), 8)
+        cases = requests.call_args.args[0] + [case for stage in stages.values() for case in stage]
+        self.assertTrue(all(case.decode_owner_rank == 0 for case in cases))
+
     def test_mtp_chunk_case_requires_an_accepted_draft_token(self) -> None:
         runner = Runner(make_args())
         case = Case(
@@ -327,7 +370,7 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
                 "multimodal_lengths": {0: 576},
                 "role_addrs": [runner.decode_role_addrs[0]],
             },
-            "debug_info": {"output_ids": [[1, 2, 3]]},
+            "debug_info": {"output_ids": [list(range(12))]},
         }
 
         record = runner.validate(case, response, 1.0, 128)
@@ -369,7 +412,7 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
                 "multimodal_lengths": {},
                 "role_addrs": [runner.decode_role_addrs[0]],
             },
-            "debug_info": {"output_ids": [[1, 2, 3]], "input_urls": []},
+            "debug_info": {"output_ids": [list(range(12))], "input_urls": []},
         }
 
         with self.assertRaisesRegex(SmokeFailure, "no processed multimodal input URL"):
@@ -379,6 +422,90 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
         record = runner.validate(case, response, 1.0, 128)
         self.assertEqual(record["input_urls"], ["image.jpg"])
         self.assertTrue(record["require_multimodal"])
+
+    @staticmethod
+    def response(*, input_len=128, content="1369", output_len=3):
+        return {
+            "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+            "aux_info": {
+                "pd_sep": True,
+                "input_len": input_len,
+                "output_len": output_len,
+                "iter_count": 2,
+                "prefill_total_reuse_len": 0,
+            },
+            "debug_info": {"output_ids": [list(range(output_len))]},
+        }
+
+    def test_integer_oracle_preserves_value_and_rejects_numeric_substrings(self):
+        import re
+
+        pattern = numbered_answer_pattern(1144900)
+        for valid in ("1144900", "**1,144,900**", "Answer: 1,144,900."):
+            self.assertIsNotNone(re.search(pattern, valid))
+        for invalid in (
+            "1144901",
+            "-1144900",
+            "+1144900",
+            "1144900.5",
+            "0.1144900",
+            "11,44,900",
+        ):
+            self.assertIsNone(re.search(pattern, invalid))
+
+    def test_request_checks_output_ids_and_truncation(self):
+        runner = Runner(make_args())
+        case = Case(
+            "exact",
+            "prompt",
+            numbered_answer_pattern(1369),
+            "miss",
+        )
+        response = self.response(input_len=128)
+        response["debug_info"]["output_ids"] = [[1]]
+        with self.assertRaisesRegex(SmokeFailure, "IDs disagree"):
+            runner.validate(case, response, 1, 512)
+        response["debug_info"]["output_ids"] = [[1, 2, 3]]
+        response["choices"][0]["finish_reason"] = "length"
+        with self.assertRaisesRegex(SmokeFailure, "truncated"):
+            runner.validate(case, response, 1, 512)
+
+
+    def test_failed_http_response_is_preserved_before_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_args()
+            args.output = pathlib.Path(tmp) / "accuracy.json"
+            runner = Runner(args)
+            body = b"upstream returned malformed data"
+            error = urllib.error.HTTPError(
+                runner.endpoint, 500, "error", {}, io.BytesIO(body)
+            )
+            with mock.patch.object(runner.opener, "open", side_effect=error):
+                with self.assertRaises(SmokeFailure):
+                    runner.request(Case("http-error", "p", "1369", "miss"))
+            with gzip.open(
+                pathlib.Path(tmp) / "requests/http-error-response.json.gz", "rb"
+            ) as stream:
+                self.assertEqual(stream.read(), body)
+
+    def test_cp_reuse_builder_and_partial_prefix_are_token_validated(self):
+        args = make_args()
+        with mock.patch.dict("os.environ", {"PREFILL_CP_KV_CACHE_SHARDED": "1"}):
+            runner = Runner(args)
+        self.assertEqual(runner.reuse_alignment, 32768)
+
+        def build(_namespace, name, *, repeats):
+            return "x" * repeats + name
+
+        with mock.patch.object(
+            runner, "render_input_ids", side_effect=lambda text: list(text)
+        ):
+            first = runner.make_reusable_prompt(build, "n", "first", repeats=10000)
+            second = runner.make_reusable_prompt(build, "n", "second", repeats=10000)
+            self.assertGreaterEqual(len(first), 32768)
+            runner.check_reuse_prefix(first, second)
+            with self.assertRaisesRegex(SmokeFailure, "partial seed"):
+                runner.check_reuse_prefix("bad", second)
 
 
 if __name__ == "__main__":

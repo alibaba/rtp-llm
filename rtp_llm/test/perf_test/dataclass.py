@@ -17,6 +17,17 @@ class ResponseInfo:
     decode_time: float = 0.0
     decode_time_per_token: float = 0.0
     iter_count: int = 0
+    reuse_len: int = 0
+    local_reuse_len: int = 0
+    memory_reuse_len: int = 0
+    prefill_total_reuse_len: int = 0
+    prefill_local_reuse_len: int = 0
+    prefill_memory_reuse_len: int = 0
+    prefill_remote_reuse_len: int = 0
+    decode_total_reuse_len: int = 0
+    decode_local_reuse_len: int = 0
+    decode_memory_reuse_len: int = 0
+    decode_remote_reuse_len: int = 0
     """
     output example:
     {
@@ -54,6 +65,17 @@ class ResponseInfo:
         self.input_len = aux_info.get("input_len", 0)
         self.output_len = aux_info.get("output_len", 0)
         self.iter_count = aux_info.get("iter_count", 0)
+        self.reuse_len = aux_info.get("reuse_len", aux_info.get("total_reuse_len", 0))
+        self.local_reuse_len = aux_info.get("local_reuse_len", 0)
+        self.memory_reuse_len = aux_info.get("memory_reuse_len", 0)
+        self.prefill_total_reuse_len = aux_info.get("prefill_total_reuse_len", 0)
+        self.prefill_local_reuse_len = aux_info.get("prefill_local_reuse_len", 0)
+        self.prefill_memory_reuse_len = aux_info.get("prefill_memory_reuse_len", 0)
+        self.prefill_remote_reuse_len = aux_info.get("prefill_remote_reuse_len", 0)
+        self.decode_total_reuse_len = aux_info.get("decode_total_reuse_len", 0)
+        self.decode_local_reuse_len = aux_info.get("decode_local_reuse_len", 0)
+        self.decode_memory_reuse_len = aux_info.get("decode_memory_reuse_len", 0)
+        self.decode_remote_reuse_len = aux_info.get("decode_remote_reuse_len", 0)
         self.wait_time = aux_info.get("wait_time", 0.0)
         self.total_time = aux_info.get("cost_time", 0.0) - self.wait_time
         self.prefill_time = aux_info.get("first_token_cost_time", 0.0) - self.wait_time
@@ -81,6 +103,12 @@ class TestResultMetrics:
     max_decode_time: float = 0.0
     decode_time_var: float = 0.0
     avg_iter_count: float = 0.0
+    avg_reuse_len: float = 0.0
+    avg_local_reuse_len: float = 0.0
+    avg_memory_reuse_len: float = 0.0
+    avg_prefill_total_reuse_len: float = 0.0
+    avg_prefill_local_reuse_len: float = 0.0
+    avg_prefill_memory_reuse_len: float = 0.0
     speculative_accepted_tokens: int = 0
     speculative_proposed_tokens: int = 0
     speculative_acceptance_rate: float = 0.0
@@ -141,6 +169,18 @@ def analyze_results(responses: List[ResponseInfo]) -> TestResultMetrics:
         )
         metrics.avg_iter_count = (
             sum([r.iter_count for r in success_requests]) / success_count
+        )
+        metrics.avg_reuse_len = sum(r.reuse_len for r in success_requests) / success_count
+        metrics.avg_local_reuse_len = sum(r.local_reuse_len for r in success_requests) / success_count
+        metrics.avg_memory_reuse_len = sum(r.memory_reuse_len for r in success_requests) / success_count
+        metrics.avg_prefill_total_reuse_len = (
+            sum(r.prefill_total_reuse_len for r in success_requests) / success_count
+        )
+        metrics.avg_prefill_local_reuse_len = (
+            sum(r.prefill_local_reuse_len for r in success_requests) / success_count
+        )
+        metrics.avg_prefill_memory_reuse_len = (
+            sum(r.prefill_memory_reuse_len for r in success_requests) / success_count
         )
         gen_num_per_cycle = int(
             os.environ.get("PERF_SPEC_GEN_NUM_PER_CYCLE", "0")
@@ -245,6 +285,12 @@ def create_metrics_table(
                     "avg_prefill_time": metrics.avg_prefill_time,
                     "avg_decode_time": metrics.avg_decode_time,
                     "avg_iter_count": metrics.avg_iter_count,
+                    "avg_reuse_len": metrics.avg_reuse_len,
+                    "avg_local_reuse_len": metrics.avg_local_reuse_len,
+                    "avg_memory_reuse_len": metrics.avg_memory_reuse_len,
+                    "avg_prefill_total_reuse_len": metrics.avg_prefill_total_reuse_len,
+                    "avg_prefill_local_reuse_len": metrics.avg_prefill_local_reuse_len,
+                    "avg_prefill_memory_reuse_len": metrics.avg_prefill_memory_reuse_len,
                     "speculative_accepted_tokens": metrics.speculative_accepted_tokens,
                     "speculative_proposed_tokens": metrics.speculative_proposed_tokens,
                     "speculative_acceptance_rate": metrics.speculative_acceptance_rate,

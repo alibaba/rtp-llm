@@ -1,5 +1,6 @@
 import os
 import pathlib
+import shlex
 import socket
 import subprocess
 import tempfile
@@ -60,6 +61,8 @@ class StartKimiK3PdDryRunTest(unittest.TestCase):
             env = os.environ.copy()
             env.pop("THINK_START_TAG", None)
             env.pop("THINK_END_TAG", None)
+            env.pop("PREFILL_CP_KV_CACHE_SHARDED", None)
+            env.pop("DECODE_CP_KV_CACHE_SHARDED", None)
             env.update(
                 {
                     "CHECKPOINT_PATH": checkpoint,
@@ -100,6 +103,44 @@ class StartKimiK3PdDryRunTest(unittest.TestCase):
 
     def _dry_run(self, role: str, topology: str, **kwargs) -> str:
         return self._run(role, topology, **kwargs).stdout
+
+    def test_emits_both_cache_sharding_flags_without_changing_topology(self) -> None:
+        for prefill, decode in (("0", "0"), ("0", "1"), ("1", "0"), ("1", "1")):
+            for role in ("prefill", "decode"):
+                with self.subTest(prefill=prefill, decode=decode, role=role):
+                    output = self.run_dry_run(
+                        role,
+                        TP_SIZE="8",
+                        DP_SIZE="1",
+                        EP_SIZE="8",
+                        WORLD_SIZE="8",
+                        LOCAL_WORLD_SIZE="8",
+                        PREFILL_CP_KV_CACHE_SHARDED=prefill,
+                        DECODE_CP_KV_CACHE_SHARDED=decode,
+                    )
+                    command = shlex.split(
+                        next(
+                            line
+                            for line in output.splitlines()
+                            if line.startswith("command:")
+                        )
+                    )[1:]
+                    self.assertEqual(
+                        command[command.index("--prefill_cp_kv_cache_sharded") + 1],
+                        prefill,
+                    )
+                    self.assertEqual(
+                        command[command.index("--decode_cp_kv_cache_sharded") + 1],
+                        decode,
+                    )
+                    self.assertNotIn("--cp_rotate_method", command)
+                    for flag, expected in (
+                        ("--tp_size", "8"),
+                        ("--dp_size", "1"),
+                        ("--ep_size", "8"),
+                    ):
+                        self.assertEqual(command[command.index(flag) + 1], expected)
+                    self.assertIn("TP8/DP1/KTP1/EP8", output)
 
     def test_default_and_explicit_kv_budgets_reach_both_roles(self):
         for role, default in (("prefill", "43000"), ("decode", "46000")):
