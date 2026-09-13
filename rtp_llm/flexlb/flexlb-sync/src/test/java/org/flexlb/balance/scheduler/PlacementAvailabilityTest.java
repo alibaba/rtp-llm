@@ -26,7 +26,6 @@ class PlacementAvailabilityTest {
 
         assertEquals(List.of(new PlacementAvailability.Event(
                 exact,
-                availability.lastChangedSequence(exact),
                 PlacementAvailability.ChangeKind.CAPACITY)), changed);
         assertTrue(availability.lastChangedSequence(exact) > 0L);
         assertEquals(availability.lastChangedSequence(exact),
@@ -98,7 +97,7 @@ class PlacementAvailabilityTest {
         assertEquals(1L, availability.lastChangedSequence(olderExact));
         assertEquals(2L, availability.lastChangedSequence(newerExact));
         assertEquals(List.of(
-                new PlacementAvailability.Event(newerExact, 2L, PlacementAvailability.ChangeKind.TOPOLOGY),
-                new PlacementAvailability.Event(olderExact, 1L, PlacementAvailability.ChangeKind.CAPACITY)), events);
+                new PlacementAvailability.Event(newerExact, PlacementAvailability.ChangeKind.TOPOLOGY),
+                new PlacementAvailability.Event(olderExact, PlacementAvailability.ChangeKind.CAPACITY)), events);
     }
 }

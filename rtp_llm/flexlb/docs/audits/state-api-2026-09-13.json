@@ -1,0 +1,2994 @@
+{
+  "baseline": "9da436bfac; already includes the nonEmptyPriorities/peekHead removal requested before this review",
+  "source_revision": "c480e011359275b7c7050e9647feb20405de7667",
+  "scope": "All tracked flexlb source. Foreign untracked replacement classes were preserved and excluded from isolated builds.",
+  "coverage": {
+    "production_java_sources": 226,
+    "source_declarations": {
+      "CLASS": 309,
+      "METHOD": 3010,
+      "FIELD": 2730,
+      "RECORD": 121,
+      "ENUM": 76,
+      "INTERFACE": 28
+    },
+    "python_sources": 34
+  },
+  "method": [
+    "Enumerated every tracked production Java source declaration using the JDK AST, including nested classes, records and interfaces.",
+    "Cross-checked compiled main/test references including inheritance, interface dispatch, lambdas and method references. Manually followed deletion candidates into callers, framework callbacks and internal-source consumers.",
+    "Checked Python AST definitions against repository-wide references, retaining decorator registrations and protocol callbacks."
+  ],
+  "limits": [
+    "Reference inventories are evidence for candidate selection, not a proof that every live method is ideally designed or every interleaving is correct.",
+    "Field counts include enum values and record components; method counts include constructors.",
+    "Compiler-inlined constants, framework callbacks, serializers and external implementations cannot be judged by bytecode reference count alone.",
+    "Tests may inspect canonical state without justifying a separately maintained production index."
+  ],
+  "design_constraints": [
+    "Identify the authoritative owner, real readers, update points and synchronization rule for each mutable state.",
+    "Keep derived state only when index/cache value and coherent invalidation justify it.",
+    "Expose consumer operations in interfaces; keep implementation helpers private.",
+    "Test actual scans, wait registration and delivery order rather than test-only indexes or a quiet-time inference.",
+    "Verify framework lifecycle with an actual container and retain idempotent resource-transfer boundaries."
+  ],
+  "interfaces": [
+    {
+      "owner": "CacheAwareService",
+      "path": "flexlb-cache/src/main/java/org/flexlb/cache/service/CacheAwareService.java",
+      "line": 16,
+      "necessity": "Routing reads candidate cache matches; sync updates and retires engine cache. Keep the implementation boundary."
+    },
+    {
+      "owner": "DynamicCacheIntervalService",
+      "path": "flexlb-cache/src/main/java/org/flexlb/cache/service/DynamicCacheIntervalService.java",
+      "line": 12,
+      "necessity": "EngineLocalView reports diff statistics and the poller reads the shared interval. Removed the unused instance passed through three sync layers; the existing shared interval remains. Initialization still follows DefaultCacheAwareService -> KvCacheManager -> EngineLocalView -> DynamicCacheIntervalService; removing the unused injection chain does not remove the real dependency."
+    },
+    {
+      "owner": "ArithmeticFormula$Node",
+      "path": "flexlb-common/src/main/java/org/flexlb/balance/prediction/ArithmeticFormula.java",
+      "line": 93,
+      "necessity": "Expression-tree nodes share evaluation while constants, variables and operators have different implementations."
+    },
+    {
+      "owner": "ServiceDiscovery",
+      "path": "flexlb-common/src/main/java/org/flexlb/discovery/ServiceDiscovery.java",
+      "line": 12,
+      "necessity": "Production consumers query, subscribe and shut down local or internal discovery providers."
+    },
+    {
+      "owner": "ServiceHostListener",
+      "path": "flexlb-common/src/main/java/org/flexlb/discovery/ServiceHostListener.java",
+      "line": 13,
+      "necessity": "Discovery implementations invoke this callback when endpoints change."
+    },
+    {
+      "owner": "FlexMetricTags",
+      "path": "flexlb-common/src/main/java/org/flexlb/metric/FlexMetricTags.java",
+      "line": 14,
+      "necessity": "Immutable tags shared by Micrometer and the internal kmonitor adapter."
+    },
+    {
+      "owner": "FlexMonitor",
+      "path": "flexlb-common/src/main/java/org/flexlb/metric/FlexMonitor.java",
+      "line": 11,
+      "necessity": "Reporter boundary with multiple monitoring implementations. Optional prepare/close defaults are intentional capabilities."
+    },
+    {
+      "owner": "MasterStatusProvider",
+      "path": "flexlb-common/src/main/java/org/flexlb/metric/MasterStatusProvider.java",
+      "line": 9,
+      "necessity": "Actually consumed by internal_source/java/kmonitor KMonitorAdapter; retain both providers even though the opensource reactor has no direct call."
+    },
+    {
+      "owner": "Prioritized",
+      "path": "flexlb-common/src/main/java/org/flexlb/util/Prioritized.java",
+      "line": 20,
+      "necessity": "PriorityOrdering reads normalized priority and stable FIFO sequence across queue item types."
+    },
+    {
+      "owner": "CustomNameResolver",
+      "path": "flexlb-grpc/src/main/java/org/flexlb/engine/grpc/nameresolver/CustomNameResolver.java",
+      "line": 10,
+      "necessity": "Starts concrete gRPC address resolvers."
+    },
+    {
+      "owner": "CustomNameResolver$Listener",
+      "path": "flexlb-grpc/src/main/java/org/flexlb/engine/grpc/nameresolver/CustomNameResolver.java",
+      "line": 14,
+      "necessity": "Resolver callback updates channel addresses."
+    },
+    {
+      "owner": "MockControlServer$ServicePostAction",
+      "path": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockControlServer.java",
+      "line": 140,
+      "necessity": "Control endpoints share target selection, parsing, error handling and response formatting while supplying different mutations."
+    },
+    {
+      "owner": "CapacityBoundary$Availability",
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/delivery/CapacityBoundary.java",
+      "line": 70,
+      "necessity": "Nonblocking capacity query plus listener registration/removal; removal prevents retained waiters."
+    },
+    {
+      "owner": "DeliveryStrategy",
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/delivery/DeliveryStrategy.java",
+      "line": 16,
+      "necessity": "BATCH and NON_BATCH have different admission and transport behavior; common transactions avoid mode branches at every caller."
+    },
+    {
+      "owner": "DeliveryStrategy$Transaction",
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/delivery/DeliveryStrategy.java",
+      "line": 36,
+      "necessity": "Prepare, canonical commit, handoff and abort/close represent distinct ownership stages."
+    },
+    {
+      "owner": "PrefillActiveIndex",
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillActiveIndex.java",
+      "line": 18,
+      "necessity": "DIRECT owns no active queue; QUEUE owns an ordered index shared with the canonical ledger."
+    },
+    {
+      "owner": "EngineCancelChannel",
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/EngineCancelChannel.java",
+      "line": 20,
+      "necessity": "Real and mock cancel transport implementations; cancel acceptance is distinct from resource retirement."
+    },
+    {
+      "owner": "GroupPlanner$ItemAccess",
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/planner/GroupPlanner.java",
+      "line": 110,
+      "necessity": "One pure planner reads live and projected items without copying the algorithm."
+    },
+    {
+      "owner": "PrefillTimePredictor",
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/prediction/PrefillTimePredictor.java",
+      "line": 10,
+      "necessity": "Formula and learned prediction implementations share prediction and model-update behavior."
+    },
+    {
+      "owner": "PrefillTimePredictor$Evaluator",
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/prediction/PrefillTimePredictor.java",
+      "line": 15,
+      "necessity": "A planning operation uses one immutable model; snapshot identity allows prediction reuse without conflating endpoint state."
+    },
+    {
+      "owner": "RouteProjection$DeliveryProjection",
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/projection/RouteProjection.java",
+      "line": 23,
+      "necessity": "Pure projection behavior remains paired with the actual delivery mode."
+    },
+    {
+      "owner": "RouteProjection$GroupPlanning",
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/projection/RouteProjection.java",
+      "line": 44,
+      "necessity": "Lazily predicts only the candidate prefix needed by the probe."
+    },
+    {
+      "owner": "RouteProjection$Predictions",
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/projection/RouteProjection.java",
+      "line": 51,
+      "necessity": "Keep primitives consumed by delivery projections; moved two implementation-only operations to private methods."
+    },
+    {
+      "owner": "RouteProjection$GroupService",
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/projection/RouteProjection.java",
+      "line": 75,
+      "necessity": "Member completion time and complete preceding-group duration serve different projection questions."
+    },
+    {
+      "owner": "RouteProjection$CandidateView",
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/projection/RouteProjection.java",
+      "line": 127,
+      "necessity": "Reused invocation-local result avoids fleet-wide result allocation; removed the unused required-TTFT default query."
+    },
+    {
+      "owner": "BatchDeliveryStrategy$PreparedSubmission",
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BatchDeliveryStrategy.java",
+      "line": 754,
+      "necessity": "Dispatch permit is acquired before commit, transferred on submit, or released on close."
+    },
+    {
+      "owner": "PlacementAvailability$Listener",
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementAvailability.java",
+      "line": 36,
+      "necessity": "Capacity/topology events wake waiters. Removed unread event sequence; real version indexes remain."
+    },
+    {
+      "owner": "MasterElectService",
+      "path": "flexlb-sync/src/main/java/org/flexlb/consistency/MasterElectService.java",
+      "line": 4,
+      "necessity": "Routing only needs consistency-enabled and leader status. Removed unused lifecycle operations from this read-only interface; connected concrete destruction to Spring."
+    }
+  ],
+  "retained_state_reviews": [
+    {
+      "classes": [
+        "GlobalQueueCoordinator",
+        "OrderedRequestQueue",
+        "PlacementWaitQueue"
+      ],
+      "reason": "inFlight bounds planner ownership; completedPlans carries completion events; pendingPriorities drives real scans. Waiting and retrying are different scheduling stages. Removed the unused all-entry priority index."
+    },
+    {
+      "classes": [
+        "WorkerBatcher",
+        "RouteProjection",
+        "RouteTimelineProjector",
+        "WorkSnapshot",
+        "QueueSnapshot"
+      ],
+      "reason": "Queue, scheduling-input and ownership versions cover independent changes. Coherent snapshots and immutable derived arrays avoid rescanning each endpoint for every route. Retain versioned caching rather than deleting it as duplicate state."
+    },
+    {
+      "classes": [
+        "WorkerEndpoint",
+        "PrefillEndpoint",
+        "PrefillState",
+        "DecodeEndpoint",
+        "EndpointRegistry",
+        "WorkerDirectory"
+      ],
+      "reason": "Discovery observations, exact generation pins, Master reservations and engine-reported ownership are not interchangeable. Retirement and rediscovery must remain generation-fenced."
+    },
+    {
+      "classes": [
+        "RequestRegistry",
+        "RequestSlot",
+        "ExpirationTimer",
+        "RequestCompletionPublisher",
+        "RouteAdmission",
+        "BatchDeliveryStrategy",
+        "RouteDeliveryStrategy"
+      ],
+      "reason": "Registration, admission, delivery, terminal settlement and completion publication cross asynchronous ownership boundaries. Close and cancellation need idempotence and reentrancy handling. Removed dead dependencies and queries, not lifecycle distinctions."
+    },
+    {
+      "classes": [
+        "EngineLocalView",
+        "GlobalCacheIndex",
+        "KvCacheManager",
+        "RecentCacheKeyWindow",
+        "ShardedRecentCacheKeyWindow"
+      ],
+      "reason": "Engine-to-block and block-to-engine indexes answer different queries; windowing and sharding serve sampling and concurrency rather than redundant ownership."
+    },
+    {
+      "classes": [
+        "InternalRuntimeSettings",
+        "LearningPredictor",
+        "HttpNettyConfig"
+      ],
+      "reason": "Several constant field reads are compiler-inlined. Source and generated getters still use the values; zero GETFIELD references do not justify removal."
+    },
+    {
+      "classes": [
+        "FlexlbConfig",
+        "WorkerStatus",
+        "Request",
+        "Response",
+        "ServerStatus",
+        "WorkerHost",
+        "DiffResult",
+        "WorkerCacheUpdateResult",
+        "FlexLBException"
+      ],
+      "reason": "Configuration, protocol and error data retain Jackson/Lombok/external contracts. Removed unused handwritten factories without removing data properties."
+    },
+    {
+      "classes": [
+        "JavaMockEngineCluster",
+        "MockControlServer",
+        "JavaLoadClient",
+        "DynamicEngineManager",
+        "DiscoveryFileStore"
+      ],
+      "reason": "Live capacity gates, cumulative metrics and terminal history have different semantics. Keep actual control/observation counters; remove unconsumed queries."
+    }
+  ],
+  "files": [
+    {
+      "path": "flexlb-api/src/main/java/org/flexlb/Application.java",
+      "sha256": "76b86730ce6fbfcd6d5000380b227209db55fb8de6ee78cfc868e57575859e54",
+      "types": [
+        "Application"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-api/src/main/java/org/flexlb/config/CorsConfig.java",
+      "sha256": "96db3f91c88e86dec93ec6f9e436a95db91627e3798a4a2bce06882d12a6d1c0",
+      "types": [
+        "CorsConfig"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-api/src/main/java/org/flexlb/config/NettyServerConfig.java",
+      "sha256": "ffa664b7d9536084e459a4cda0af3afae9dae3afe594bfee54a3b84b8c373515",
+      "types": [
+        "NettyServerConfig"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-api/src/main/java/org/flexlb/httpserver/AppStateHookServer.java",
+      "sha256": "3dc1a3dc2c68785cd88d46cf6a741c427759c7a78cc24d99b2205726d72e1152",
+      "types": [
+        "AppStateHookServer"
+      ],
+      "fields": 4,
+      "methods_including_constructors": 8
+    },
+    {
+      "path": "flexlb-api/src/main/java/org/flexlb/httpserver/FlexlbGrpcForwarder.java",
+      "sha256": "cf572b60e7e11eedfbeb035f350da5bfa31b1d1eb9bab6fde859376074cab38d",
+      "types": [
+        "FlexlbGrpcForwarder",
+        "FlexlbGrpcForwarder$anonymous@90",
+        "FlexlbGrpcForwarder$anonymous@171",
+        "FlexlbGrpcForwarder$MasterForwardResult",
+        "FlexlbGrpcForwarder$CancelForwardResult",
+        "FlexlbGrpcForwarder$ForwardOperation",
+        "FlexlbGrpcForwarder$ForwardBlockReason",
+        "FlexlbGrpcForwarder$ForwardGuard"
+      ],
+      "fields": 27,
+      "methods_including_constructors": 34
+    },
+    {
+      "path": "flexlb-api/src/main/java/org/flexlb/httpserver/FlexlbGrpcServer.java",
+      "sha256": "7db5f7a9b2ccc5075ca6120247bb9509b0ed1f2861821743455f7398d5725cf3",
+      "types": [
+        "FlexlbGrpcServer",
+        "FlexlbGrpcServer$CountingAbortHandler"
+      ],
+      "fields": 16,
+      "methods_including_constructors": 6
+    },
+    {
+      "path": "flexlb-api/src/main/java/org/flexlb/httpserver/FlexlbServiceImpl.java",
+      "sha256": "38e6a1ba5f538eca01ac662b45ed993df7ebb10b3cb23ddb72044ff3b458c881",
+      "types": [
+        "FlexlbServiceImpl",
+        "FlexlbServiceImpl$ScheduleOrigin"
+      ],
+      "fields": 16,
+      "methods_including_constructors": 34
+    },
+    {
+      "path": "flexlb-api/src/main/java/org/flexlb/httpserver/HealthCheckServer.java",
+      "sha256": "cb289f3c08cb4e4b81969dd3427039ab1f025a1f01b5ce9295852cfac9a9e250",
+      "types": [
+        "HealthCheckServer"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 3
+    },
+    {
+      "path": "flexlb-api/src/main/java/org/flexlb/httpserver/HttpLoadBalanceServer.java",
+      "sha256": "f53617801672a4ed2eab2343a2ce30e607d62ef8e04151a080f4ba80ea5320ff",
+      "types": [
+        "HttpLoadBalanceServer"
+      ],
+      "fields": 10,
+      "methods_including_constructors": 14
+    },
+    {
+      "path": "flexlb-api/src/main/java/org/flexlb/httpserver/ServerScheduleLatencyRecorder.java",
+      "sha256": "9b21d40d7409eb909e9f09f65f05310567248121aa05f44aa10953edfbf189e5",
+      "types": [
+        "ServerScheduleLatencyRecorder",
+        "ServerScheduleLatencyRecorder$Window",
+        "ServerScheduleLatencyRecorder$WindowRate",
+        "ServerScheduleLatencyRecorder$LatencyHistogram",
+        "ServerScheduleLatencyRecorder$LatencySnapshot"
+      ],
+      "fields": 26,
+      "methods_including_constructors": 15
+    },
+    {
+      "path": "flexlb-api/src/main/java/org/flexlb/interceptor/GrpcQosHeaderInterceptor.java",
+      "sha256": "c40c8d62766f6bc205a5305adf8d273841db3c727d486ff7b88f7acd0509dcb2",
+      "types": [
+        "GrpcQosHeaderInterceptor"
+      ],
+      "fields": 2,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-api/src/main/java/org/flexlb/interceptor/GrpcServerTimingInterceptor.java",
+      "sha256": "941c6dfc16ee9326e6b700eb5c29f4d799eda5dda7a9868373a46b47d63532ba",
+      "types": [
+        "GrpcServerTimingInterceptor"
+      ],
+      "fields": 2,
+      "methods_including_constructors": 3
+    },
+    {
+      "path": "flexlb-cache/src/main/java/org/flexlb/cache/core/EngineLocalView.java",
+      "sha256": "36dad5007a0facc5e897e921dec84708c3e6b438a9a75f30a6b878ce0ce1bf98",
+      "types": [
+        "EngineLocalView"
+      ],
+      "fields": 4,
+      "methods_including_constructors": 8
+    },
+    {
+      "path": "flexlb-cache/src/main/java/org/flexlb/cache/core/GlobalCacheIndex.java",
+      "sha256": "b3324e05dc764f457c2cfb2435f68794fb38e9e068b75bce443ce18a92bb5f14",
+      "types": [
+        "GlobalCacheIndex"
+      ],
+      "fields": 5,
+      "methods_including_constructors": 10
+    },
+    {
+      "path": "flexlb-cache/src/main/java/org/flexlb/cache/core/KvCacheManager.java",
+      "sha256": "03145764e4b6b3cde15f08f3b21dac79a19fe807a6703ad39622a6d1b0be26b9",
+      "types": [
+        "KvCacheManager"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 6
+    },
+    {
+      "path": "flexlb-cache/src/main/java/org/flexlb/cache/core/RecentCacheKeyWindow.java",
+      "sha256": "47649ec2d2062effe57639b2cb994427250f04d3c87b90d9eadac38d2668f3a1",
+      "types": [
+        "RecentCacheKeyWindow",
+        "RecentCacheKeyWindow$Snapshot"
+      ],
+      "fields": 26,
+      "methods_including_constructors": 24
+    },
+    {
+      "path": "flexlb-cache/src/main/java/org/flexlb/cache/core/ShardedRecentCacheKeyWindow.java",
+      "sha256": "fcdd1133cb57c0710216fecd7fd9cc99b43898718344c1d7255613e0b4329e8a",
+      "types": [
+        "ShardedRecentCacheKeyWindow"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 3
+    },
+    {
+      "path": "flexlb-cache/src/main/java/org/flexlb/cache/domain/DiffResult.java",
+      "sha256": "6661e8ea3eeca18f0114c08d469fe8a76955ebcc34590cc35364ca8ff45448d1",
+      "types": [
+        "DiffResult"
+      ],
+      "fields": 5,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-cache/src/main/java/org/flexlb/cache/domain/WorkerCacheUpdateResult.java",
+      "sha256": "c886e904a5d2e2f9a4cb4ad5cbb8291dfe6f78d523fd5f4533668a5e681c6593",
+      "types": [
+        "WorkerCacheUpdateResult"
+      ],
+      "fields": 7,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-cache/src/main/java/org/flexlb/cache/monitor/CacheHitTheoryStats.java",
+      "sha256": "892faa23334330f10cdf80b3f7ee27878590984fec177b2092886a5e0961dfd4",
+      "types": [
+        "CacheHitTheoryStats",
+        "CacheHitTheoryStats$Snapshot"
+      ],
+      "fields": 8,
+      "methods_including_constructors": 13
+    },
+    {
+      "path": "flexlb-cache/src/main/java/org/flexlb/cache/monitor/CacheMetricsReporter.java",
+      "sha256": "b9d68b071a9318e2fcbb2165013b801158fcf1d5f8d2e1856325b217f6dc9fe7",
+      "types": [
+        "CacheMetricsReporter"
+      ],
+      "fields": 2,
+      "methods_including_constructors": 20
+    },
+    {
+      "path": "flexlb-cache/src/main/java/org/flexlb/cache/service/CacheAwareService.java",
+      "sha256": "da771ef49db247c0d7825c3ab1850359c3101c732b2ea0bf1797f4d3846e2ca5",
+      "types": [
+        "CacheAwareService"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 3
+    },
+    {
+      "path": "flexlb-cache/src/main/java/org/flexlb/cache/service/DynamicCacheIntervalService.java",
+      "sha256": "32f198dc3e352d2c6fdc99f274c631d4d8e22b5d48815fbe27f2e57cbb74877c",
+      "types": [
+        "DynamicCacheIntervalService"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-cache/src/main/java/org/flexlb/cache/service/impl/DefaultCacheAwareService.java",
+      "sha256": "5d33cfa529bce28196793c3d63eeacd6b82edb68ab3ee9cd4a4315d33600acd6",
+      "types": [
+        "DefaultCacheAwareService"
+      ],
+      "fields": 4,
+      "methods_including_constructors": 7
+    },
+    {
+      "path": "flexlb-cache/src/main/java/org/flexlb/cache/service/impl/DefaultDynamicCacheIntervalService.java",
+      "sha256": "0a3f5bccf754a8c553605427a5df2bfa1d4c6c85f6971e9035ce7eaf6cb2a5e9",
+      "types": [
+        "DefaultDynamicCacheIntervalService"
+      ],
+      "fields": 11,
+      "methods_including_constructors": 4
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/balance/prediction/ArithmeticFormula.java",
+      "sha256": "db97eb6abb10b9d528e45f38d0b434e585f0bfdb2d2b3c398c377d2c3e4f3954",
+      "types": [
+        "ArithmeticFormula",
+        "ArithmeticFormula$Node",
+        "ArithmeticFormula$EvalContext",
+        "ArithmeticFormula$ConstantNode",
+        "ArithmeticFormula$VariableNode",
+        "ArithmeticFormula$UnaryNode",
+        "ArithmeticFormula$BinaryNode",
+        "ArithmeticFormula$UnaryFuncNode",
+        "ArithmeticFormula$BinaryFuncNode",
+        "ArithmeticFormula$AggregateFuncNode",
+        "ArithmeticFormula$CachedAggregateNode",
+        "ArithmeticFormula$ParameterNode",
+        "ArithmeticFormula$Optimizer",
+        "ArithmeticFormula$Parser"
+      ],
+      "fields": 38,
+      "methods_including_constructors": 40
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/balance/prediction/DecodeCostFormula.java",
+      "sha256": "f03aa42a7392369a643089a8ec67f22044f13ad0f4cae42ca471fc09d123c114",
+      "types": [
+        "DecodeCostFormula"
+      ],
+      "fields": 4,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/balance/prediction/PrefillTimeFormula.java",
+      "sha256": "1266020adb4bb2e033cf58b9e4f1bf019c47f7a6fdff821826d94c22af5d4821",
+      "types": [
+        "PrefillTimeFormula"
+      ],
+      "fields": 14,
+      "methods_including_constructors": 4
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/ConfigService.java",
+      "sha256": "303de28f47e079b3905bc43b26ef0945e95bc8253bfa7d5fc6ec1d69eb2502af",
+      "types": [
+        "ConfigService"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 7
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/ConfigValidationException.java",
+      "sha256": "05b310d2216fc4ac2d99fbf23b4994a1f97afb191c29891010a298a500e21ecc",
+      "types": [
+        "ConfigValidationException"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/DecisionPolicyConfig.java",
+      "sha256": "0005e057a27a8dcf54ddf3a84fcc920aaf3642dfe791a1ab644248f93d05e963",
+      "types": [
+        "DecisionPolicyConfig",
+        "DecisionPolicyConfig$Type"
+      ],
+      "fields": 9,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/DispatcherConfig.java",
+      "sha256": "ad925f35c5778e80820bb4159bf0868752043af38a67f4d2b641c3b9142454e4",
+      "types": [
+        "DispatcherConfig",
+        "DispatcherConfig$Type"
+      ],
+      "fields": 5,
+      "methods_including_constructors": 4
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/FlexlbConfig.java",
+      "sha256": "0f49343a3926fd8f59f1b091e024d602719e71be6fbdba5cb83b12de94e9b3d1",
+      "types": [
+        "FlexlbConfig",
+        "FlexlbConfig$GrpcServerConfig"
+      ],
+      "fields": 13,
+      "methods_including_constructors": 10
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/FlexlbConfigValidator.java",
+      "sha256": "033c1574b6820cc819d1b4c22684757da7cedcecbdb3397447cf332125fbad6a",
+      "types": [
+        "FlexlbConfigValidator"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 18
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/InternalRuntimeSettings.java",
+      "sha256": "00d6313d78f8c54dbc1fd8cbf1c60fade4bcefabe08494ed74a52bd69f1d6cf2",
+      "types": [
+        "InternalRuntimeSettings"
+      ],
+      "fields": 21,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/MetricsCardinalityConfig.java",
+      "sha256": "97b3a45979431ef8833187a274c8a1b0d2775a7b53b672f4f2e0903be2392164",
+      "types": [
+        "MetricsCardinalityConfig"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/ModelMetaConfig.java",
+      "sha256": "9836f3e5d0ff748000a0fc631be9ac8e5c61e182339df2e86872f83ad30dc25c",
+      "types": [
+        "ModelMetaConfig"
+      ],
+      "fields": 4,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/MonitorClientConfig.java",
+      "sha256": "dae4180b7b438fcc973a24f5a19c8ce4c4e4c0de5dad9caae11729130beb31a1",
+      "types": [
+        "MonitorClientConfig"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/MonitorDisableConfig.java",
+      "sha256": "1c25c3d39e56cda178eaf04c27195675ff9f8af50c3f3473effe730ffc33a047",
+      "types": [
+        "MonitorDisableConfig"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/ObservabilityConfig.java",
+      "sha256": "9458277902b5eba7818635fee1fa1f43336bd220479ef126444e9680448afd15",
+      "types": [
+        "ObservabilityConfig",
+        "ObservabilityConfig$CacheHitConfig",
+        "ObservabilityConfig$RecentKeyWindowConfig",
+        "ObservabilityConfig$TheoryLogConfig"
+      ],
+      "fields": 9,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/OtelPropagationConfiguration.java",
+      "sha256": "62f6b7e578da3398b0b377c42b071999fb297ff7bedb17ffa0116b448d4c31e2",
+      "types": [
+        "OtelPropagationConfiguration"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/PreemptionConfig.java",
+      "sha256": "69adaf84abed71699d22f8544f736c15e70093d190905b689b12de52f6a530fd",
+      "types": [
+        "PreemptionConfig"
+      ],
+      "fields": 2,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/QueueOrderingConfig.java",
+      "sha256": "fbc603962ccb91d99dfd6b2e4ee10e7ba7c7ca5a40f7b8e7b1bf1a8777f3c34e",
+      "types": [
+        "QueueOrderingConfig",
+        "QueueOrderingConfig$Type"
+      ],
+      "fields": 5,
+      "methods_including_constructors": 3
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/RequestLifecycleConfig.java",
+      "sha256": "2d65ad074dd2babd1e492897cbd1adde0b6f25ad6562bdde1ced40a8ec67fec1",
+      "types": [
+        "RequestLifecycleConfig",
+        "RequestLifecycleConfig$RequestConfig",
+        "RequestLifecycleConfig$DecisionConfig"
+      ],
+      "fields": 4,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/RoutingConfig.java",
+      "sha256": "f3e50abede49e99dd5edbb558eda9d6772bd358abc94c07a2d9befa2de96964d",
+      "types": [
+        "RoutingConfig",
+        "RoutingConfig$RolesConfig",
+        "RoutingConfig$PrefillConfig",
+        "RoutingConfig$ExecutionTimeEstimatorConfig",
+        "RoutingConfig$EstimatorType",
+        "RoutingConfig$CacheAffinityConfig",
+        "RoutingConfig$DecodeConfig",
+        "RoutingConfig$DecodeCostEstimatorConfig",
+        "RoutingConfig$DecodeAvailabilityConfig"
+      ],
+      "fields": 19,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/SchedulerConfig.java",
+      "sha256": "d71270d3c3309bceb9bb4d4cb29dfc7952b234dba6643c3bcebfbf94d0e964d9",
+      "types": [
+        "SchedulerConfig",
+        "SchedulerConfig$Type"
+      ],
+      "fields": 7,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/ServiceDiscoveryConfiguration.java",
+      "sha256": "7bd505a57fe49145e5446c90e7b6f8899cd12c0f0340174e0850e2a0095c1eda",
+      "types": [
+        "ServiceDiscoveryConfiguration"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/TrafficPolicyConfig.java",
+      "sha256": "cf96eefe47cfdb42345464418ddc4f59e8d775534a3498af4322f564af147a97",
+      "types": [
+        "TrafficPolicyConfig",
+        "TrafficPolicyConfig$Rule",
+        "TrafficPolicyConfig$Match",
+        "TrafficPolicyConfig$InputTokens",
+        "TrafficPolicyConfig$Target"
+      ],
+      "fields": 11,
+      "methods_including_constructors": 11
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/VictimStage.java",
+      "sha256": "d062f47d2d24daef2ba407ba137e0dd6a6988278de45555570e064b834fa776c",
+      "types": [
+        "VictimStage"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/WhitelistMetricsFilterConfig.java",
+      "sha256": "16027e307eaf65cb883527f3d9c614dfc4060647634b1963102e87ad9ed252e2",
+      "types": [
+        "WhitelistMetricsFilterConfig",
+        "WhitelistMetricsFilterConfig$anonymous@142",
+        "WhitelistMetricsFilterConfig$PrefixAllowSet"
+      ],
+      "fields": 7,
+      "methods_including_constructors": 11
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/config/WorkerRegistryConfig.java",
+      "sha256": "16be9f0e226bf212685bb3ea95735497e35cd69a3f0bfe0e98fcb8dca4694a29",
+      "types": [
+        "WorkerRegistryConfig",
+        "WorkerRegistryConfig$HealthConfig",
+        "WorkerRegistryConfig$CacheStatusConfig"
+      ],
+      "fields": 10,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/constant/CommonConstants.java",
+      "sha256": "bb7ea334111c9426180449c66fc40333f2d6ed0f1f102b7e52673b37901fae7f",
+      "types": [
+        "CommonConstants"
+      ],
+      "fields": 5,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/constant/HttpHeaderNames.java",
+      "sha256": "6db47733b81b0069a128ca4deeee1345aea0ab0fcebb8e306676ffba063f0343",
+      "types": [
+        "HttpHeaderNames"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+      "sha256": "fec8bfec1968cd4f022cd5602364b98ed04f570a794c4f0f55762fc295fb0d0b",
+      "types": [
+        "MetricConstant"
+      ],
+      "fields": 112,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/constant/ZkMasterEvent.java",
+      "sha256": "71dbcf5159317f2870b57f499908e469b9f62aeb9de116b8d54b4a589b1acc07",
+      "types": [
+        "ZkMasterEvent"
+      ],
+      "fields": 11,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/BalanceContext.java",
+      "sha256": "a36a4e33c9e4996b671dc7cbb7872976fc5bfbcc24a6a0843b9754aeb076c896",
+      "types": [
+        "BalanceContext"
+      ],
+      "fields": 20,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/SchedulingMetadata.java",
+      "sha256": "265b0a7b070f36e57150ecec7cd2edaa300234656da292a1c9f9d2cabc55b397",
+      "types": [
+        "SchedulingMetadata",
+        "SchedulingMetadata$PrioritySource"
+      ],
+      "fields": 5,
+      "methods_including_constructors": 8
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/loadbalance/AdmissionRejectReason.java",
+      "sha256": "3ea0e5d95a234e1d028f72ee77c857f7586c96feda5fa441c0198a730b24c174",
+      "types": [
+        "AdmissionRejectReason"
+      ],
+      "fields": 4,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/loadbalance/DebugInfo.java",
+      "sha256": "f70a3132760c9c5e9befe24cf5bcdc0c1d49c05ab8cdb05bec49be1712192f3e",
+      "types": [
+        "DebugInfo"
+      ],
+      "fields": 7,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/loadbalance/LogLevelUpdateRequest.java",
+      "sha256": "2eb4c5a46ce2155dae9f87c8a0f177bed553d1c1852d095704cc406227718b16",
+      "types": [
+        "LogLevelUpdateRequest"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/loadbalance/QueueSnapshotResponse.java",
+      "sha256": "5df142343aef994effd504b8fee82272f58687a89e4c056b73f56621894d1919",
+      "types": [
+        "QueueSnapshotResponse"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/loadbalance/Request.java",
+      "sha256": "76a305748e5fed208398a823a0e0a2d46bd293c16d26d5f42d39659cc89de712",
+      "types": [
+        "Request"
+      ],
+      "fields": 13,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/loadbalance/Response.java",
+      "sha256": "d5a9fb5c3a6a39418e2b9692e12a45462444d43100ae72c2e631b7e67610496e",
+      "types": [
+        "Response",
+        "Response$WorkerRoleSummary"
+      ],
+      "fields": 13,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/loadbalance/ServerStatus.java",
+      "sha256": "47975e985dcd87cb4a324598e6ed920f038e0e054de8f216510035ae5f0e1db4",
+      "types": [
+        "ServerStatus"
+      ],
+      "fields": 12,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/loadbalance/StrategyErrorType.java",
+      "sha256": "610f17e95ea68b1856bf5d3b148c09cf60030cb0b5f885dd78fcdf748a52c77b",
+      "types": [
+        "StrategyErrorType"
+      ],
+      "fields": 25,
+      "methods_including_constructors": 4
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/master/CacheStatus.java",
+      "sha256": "edc5c4ffc8781bb92c6b7454cbd809575015a593d3fa810a6076497a66493d81",
+      "types": [
+        "CacheStatus"
+      ],
+      "fields": 7,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/master/TaskInfo.java",
+      "sha256": "60b5fa570a8d123156562f505981d644009906d353df9a9d657371497bdda4ae",
+      "types": [
+        "TaskInfo"
+      ],
+      "fields": 14,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerHost.java",
+      "sha256": "ac5f3706ce288320332de0cf5c5446a566a11b59c1e3a5bd8db30d9e339c9750",
+      "types": [
+        "WorkerHost"
+      ],
+      "fields": 6,
+      "methods_including_constructors": 6
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+      "sha256": "0437af79602d3b054d816526cc99e4787ee11d9b406bcd5171558f4f8b120aa2",
+      "types": [
+        "WorkerStatus",
+        "WorkerStatus$TopologySnapshot",
+        "WorkerStatus$TaskObservation",
+        "WorkerStatus$EngineObservation",
+        "WorkerStatus$AppliedStatusCursor",
+        "WorkerStatus$CommittedWorkerStatus",
+        "WorkerStatus$PollHealth",
+        "WorkerStatus$StatusObservation",
+        "WorkerStatus$PreparedStatus",
+        "WorkerStatus$PollKind",
+        "WorkerStatus$PollLease"
+      ],
+      "fields": 66,
+      "methods_including_constructors": 66
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatusResponse.java",
+      "sha256": "7672da7a0ffc0819cec419268830f289e8c909e2f4a47aa8f62bf8c1a812936f",
+      "types": [
+        "WorkerStatusResponse"
+      ],
+      "fields": 21,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/netty/HttpNettyChannelContext.java",
+      "sha256": "cde378fd3e4d03d01567752eb5359d187cd7fd7a01324ee128a62cf48c62754f",
+      "types": [
+        "HttpNettyChannelContext",
+        "HttpNettyChannelContext$ByteData"
+      ],
+      "fields": 13,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/pv/PvLogData.java",
+      "sha256": "b2531a658bf6032f9de70f02b90d3fba0d733c5c23da97217a63afac794acb2d",
+      "types": [
+        "PvLogData"
+      ],
+      "fields": 17,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/route/Endpoint.java",
+      "sha256": "98a4fda24582963f19013675e5586be9210291ed4940a8660196459a24369ae0",
+      "types": [
+        "Endpoint"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/route/GroupRoleEndPoint.java",
+      "sha256": "be8f4bdd6a082df4e2dc75fdb60041f38d93b3b1dc8ffa81fe5cc509dd7fafd6",
+      "types": [
+        "GroupRoleEndPoint"
+      ],
+      "fields": 5,
+      "methods_including_constructors": 3
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/route/RoleType.java",
+      "sha256": "27fd79d60b73de2c70d120ac8e7ed87f2eaeff9359cd25cad06e8add66cc0cfb",
+      "types": [
+        "RoleType"
+      ],
+      "fields": 8,
+      "methods_including_constructors": 4
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/dao/route/ServiceRoute.java",
+      "sha256": "92cd4a8442f2b255b96136daf48e32062f1eb8dd7607365057aa8813aece2d92",
+      "types": [
+        "ServiceRoute"
+      ],
+      "fields": 5,
+      "methods_including_constructors": 4
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/discovery/LocalServiceDiscovery.java",
+      "sha256": "b71c692e9e93b1d3dfc9943236dc6f56615895f50f20e5c700646123f55eb180",
+      "types": [
+        "LocalServiceDiscovery"
+      ],
+      "fields": 5,
+      "methods_including_constructors": 9
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/discovery/ServiceDiscovery.java",
+      "sha256": "3e05664d5f8eaeb1d0c94a34d7cae28b12cd9ad8275e276ca4329f764fc56999",
+      "types": [
+        "ServiceDiscovery"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 3
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/discovery/ServiceHostListener.java",
+      "sha256": "dbeaabde381b6a1a50eafa11d3b5887879fa31c733606b74bb3adf7f23a4f5c0",
+      "types": [
+        "ServiceHostListener"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/enums/BackendServiceProtocolEnum.java",
+      "sha256": "50911bbb0cbd5c245c8fe7869a8ac1eff8d5f2b48466d728c064190c25030e1e",
+      "types": [
+        "BackendServiceProtocolEnum"
+      ],
+      "fields": 6,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/enums/BalanceStatusEnum.java",
+      "sha256": "4be54c02df2a56f6c058367b7d969941b4cfc6881560d685b454be9b8c868034",
+      "types": [
+        "BalanceStatusEnum"
+      ],
+      "fields": 14,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/enums/DecodeTaskPhase.java",
+      "sha256": "65e3bbf2d594c4a5f0997d3b4b051a9bd145e4d73520474ca92af78b4be2b77c",
+      "types": [
+        "DecodeTaskPhase"
+      ],
+      "fields": 4,
+      "methods_including_constructors": 3
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/enums/FlexMetricType.java",
+      "sha256": "98b34be1af486110c6c6e7ec82aa43d3728e35503054154a8853055cc07acef1",
+      "types": [
+        "FlexMetricType"
+      ],
+      "fields": 6,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/enums/FlexPriorityType.java",
+      "sha256": "a13d407fc178e03909f5f1ed6d226390015c482d6c88b960aad4a7613e611084",
+      "types": [
+        "FlexPriorityType"
+      ],
+      "fields": 5,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/enums/LogLevel.java",
+      "sha256": "a4027c3f0c8366b7eb954a44f3f593944a952f6151fde4c25c2fb88602698bb3",
+      "types": [
+        "LogLevel"
+      ],
+      "fields": 5,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/enums/PriorityPreemptionProgress.java",
+      "sha256": "6c9da254c10abee496aa9eeae4dfd4442587d1272916a749bf946f2df8b75d3e",
+      "types": [
+        "PriorityPreemptionProgress"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/enums/StatusEnum.java",
+      "sha256": "2de24ee247f22e9a0608ef05a3fc6981e80e0842198518acfc460fac7574e44d",
+      "types": [
+        "StatusEnum"
+      ],
+      "fields": 12,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/enums/TaskPhase.java",
+      "sha256": "040c045dd548904dd98f1f8b7202f1e5e758e8d2697385d7b06ac301e446ddc2",
+      "types": [
+        "TaskPhase"
+      ],
+      "fields": 5,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/exception/EngineAbnormalDisconnectException.java",
+      "sha256": "8920d11948be9edae95e6e65df837feb8cdad97b57743f19117e641419450425",
+      "types": [
+        "EngineAbnormalDisconnectException"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 3
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/exception/EngineReadTimeoutException.java",
+      "sha256": "1b19ec77d5f2ac42da59ae2391010de4ffc070c8fe30a5b4df3ce6042e1075b1",
+      "types": [
+        "EngineReadTimeoutException"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 3
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/exception/FlexLBException.java",
+      "sha256": "ba4ad0c04fffefead20eb19814744c849fc645bb45543428f82de98973e437d6",
+      "types": [
+        "FlexLBException"
+      ],
+      "fields": 2,
+      "methods_including_constructors": 4
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/exception/JsonMapperException.java",
+      "sha256": "45e6315649d10c86639cb9b5070d46eafaccadd4606e8273ef33a06d6bc92e1a",
+      "types": [
+        "JsonMapperException"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 3
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/exception/NettyCatchException.java",
+      "sha256": "2dfb58607d3ad79fb8e70acf5a4d300ecd6e682bd55b8f64b612964260213653",
+      "types": [
+        "NettyCatchException"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 3
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/metric/FlexMetricTags.java",
+      "sha256": "c8b34bfd584f5e56874820fefbe61ece1d1a17971f6d6d68ac05ce2ecfefe146",
+      "types": [
+        "FlexMetricTags",
+        "FlexMetricTags$ImmutableFlexMetricTags"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 11
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/metric/FlexMonitor.java",
+      "sha256": "2ab36cf27437ebd2ac6731aebbf03ea72de3206f3d991dcdfe61f3ce8f8c3d09",
+      "types": [
+        "FlexMonitor"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 7
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/metric/FlexStatisticsType.java",
+      "sha256": "7c4c0b94235eefca85bb196d85d53e5d6cb3cb84df936c7c4788e0f826f382e1",
+      "types": [
+        "FlexStatisticsType"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/metric/MasterStatusProvider.java",
+      "sha256": "8b0554b0ac30da4d3330d6f84cfaa100eb6cdc98ca4936d66171649747bc5f42",
+      "types": [
+        "MasterStatusProvider"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/metric/MicrometerFlexMonitor.java",
+      "sha256": "b1be80b8e937260d605866db4a9f4e69fbd3a29ad7572295815bf1d5600c9023",
+      "types": [
+        "MicrometerFlexMonitor",
+        "MicrometerFlexMonitor$MetricKey",
+        "MicrometerFlexMonitor$GaugeEntry"
+      ],
+      "fields": 12,
+      "methods_including_constructors": 15
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/metric/NoOpFlexMonitor.java",
+      "sha256": "2d91296426df4f5ef0b77256133ea6da4cc003d9d7c0d2af4ee3eb66a6041ed0",
+      "types": [
+        "NoOpFlexMonitor"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 7
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/metric/NoOpMasterStatusProvider.java",
+      "sha256": "95d4ba02a0c60c713d55d46f196647df4d17de739bedaaeaa411c0f642285c1c",
+      "types": [
+        "NoOpMasterStatusProvider"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/transport/GeneralHttpNettyService.java",
+      "sha256": "3eecb878ff473a955650ca217b3c773c4c95804f9dd1497857266c885c1e2965",
+      "types": [
+        "GeneralHttpNettyService"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 9
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/transport/HttpNettyClientHandler.java",
+      "sha256": "3dfffd5c95a7a72d03773c4e0b4aa2fb5bfd7195df50c692245b38efccfaea6b",
+      "types": [
+        "HttpNettyClientHandler"
+      ],
+      "fields": 2,
+      "methods_including_constructors": 8
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/transport/HttpNettyConfig.java",
+      "sha256": "e17f6ac3261d848f4c899ca968c1ecf0b62dc4097fe8aa9e6585aabd43fd89fe",
+      "types": [
+        "HttpNettyConfig",
+        "HttpNettyConfig$anonymous@54",
+        "HttpNettyConfig$anonymous@89"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/util/CommonUtils.java",
+      "sha256": "861017d32d848514472d6ff05efa97cbd8463a17ac2b2215a700133f27263ef4",
+      "types": [
+        "CommonUtils"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/util/IdUtils.java",
+      "sha256": "901ea522d4c929ca9ce6982ffc56dee2e83748e57fc16a830890dcf918d71898",
+      "types": [
+        "IdUtils"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 4
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/util/JsonUtils.java",
+      "sha256": "ec81cf0b441793ce7c69b56f74eff948144c43e03311983ce839bd56ed81b1d2",
+      "types": [
+        "JsonUtils"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 6
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/util/Logger.java",
+      "sha256": "1d5d5522c8001b36a80919924f58bc1913c74ec4d72731d1a4fcd51b7f732617",
+      "types": [
+        "Logger"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 10
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/util/NettyUtils.java",
+      "sha256": "b07bd64e161a45dae3917046cd9cc2c067d5fe498e0f9c4c5038a67aae30285f",
+      "types": [
+        "NettyUtils"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 6
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/util/Prioritized.java",
+      "sha256": "3dbf1d62844ba427de1705bf6f49adee00deee7dfa4c04ad5adad2bb86c275d3",
+      "types": [
+        "Prioritized"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/util/PriorityNormalizer.java",
+      "sha256": "2bdb0b392133344f282781ba023e7c56ecde8f69b8b0bf1d01bb400d1f9fa04b",
+      "types": [
+        "PriorityNormalizer"
+      ],
+      "fields": 5,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-common/src/main/java/org/flexlb/util/PriorityOrdering.java",
+      "sha256": "53de05c4b4820d27cdd55eb27bfe657f188ec3a6203138d0aed64d81fb79e3c1",
+      "types": [
+        "PriorityOrdering"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 4
+    },
+    {
+      "path": "flexlb-grpc/src/main/java/org/flexlb/engine/grpc/AbstractGrpcClient.java",
+      "sha256": "369546d0931fae060808f6a535f4da08c14a07706650a1c83e8add7551bfa444",
+      "types": [
+        "AbstractGrpcClient",
+        "AbstractGrpcClient$GrpcFutureStubWrapper",
+        "AbstractGrpcClient$Invoker",
+        "AbstractGrpcClient$ServiceType"
+      ],
+      "fields": 17,
+      "methods_including_constructors": 21
+    },
+    {
+      "path": "flexlb-grpc/src/main/java/org/flexlb/engine/grpc/EngineGrpcClient.java",
+      "sha256": "dca073a7c73127c2c6d281f4628ecac71e53ec80f650864a395d162f8e9d66cf",
+      "types": [
+        "EngineGrpcClient",
+        "EngineGrpcClient$anonymous@121",
+        "EngineGrpcClient$anonymous@184"
+      ],
+      "fields": 8,
+      "methods_including_constructors": 18
+    },
+    {
+      "path": "flexlb-grpc/src/main/java/org/flexlb/engine/grpc/RoleTypeProtoConverter.java",
+      "sha256": "537f99fc79ad368afeafd2290b0730d6969c1b8076035cdaccdf82ba5e8ec92d",
+      "types": [
+        "RoleTypeProtoConverter"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 8
+    },
+    {
+      "path": "flexlb-grpc/src/main/java/org/flexlb/engine/grpc/config/ChannelConfiguration.java",
+      "sha256": "947226d1a6e1645a12b89f7b9ce5828c584932a1f0ff5f86fc4d50da4491cdce",
+      "types": [
+        "ChannelConfiguration"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-grpc/src/main/java/org/flexlb/engine/grpc/monitor/GrpcReporter.java",
+      "sha256": "a0a69c6606014950b95a48da842d3397ad36f06d7bdbca02f73819e9df7ac5cd",
+      "types": [
+        "GrpcReporter"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-grpc/src/main/java/org/flexlb/engine/grpc/nameresolver/CustomNameResolver.java",
+      "sha256": "ba7a1e0c673a04a4ca4303f3fbc75584b8c4a32a1d5d7971bdf7da6b77a33455",
+      "types": [
+        "CustomNameResolver",
+        "CustomNameResolver$Listener"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-grpc/src/main/java/org/flexlb/engine/grpc/nameresolver/EngineAddressNameResolver.java",
+      "sha256": "cf5ed7de18c5f0c7a678ed739c0ffb40323cd496380f2abf26f8d490bfc7f6db",
+      "types": [
+        "EngineAddressNameResolver"
+      ],
+      "fields": 6,
+      "methods_including_constructors": 8
+    },
+    {
+      "path": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/DiscoveryFileStore.java",
+      "sha256": "0f4e7f688c0a3f06e3dbee5b7579e2fbcab44a09abf546854740a0ae7dc82064",
+      "types": [
+        "DiscoveryFileStore"
+      ],
+      "fields": 7,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/DynamicEngineManager.java",
+      "sha256": "218c32115108214455c9c917998f11aed4d6a67daebc16bc040ba3856a99e6d6",
+      "types": [
+        "DynamicEngineManager",
+        "DynamicEngineManager$AddedEngine",
+        "DynamicEngineManager$RemovedEngine",
+        "DynamicEngineManager$EngineOperationException"
+      ],
+      "fields": 25,
+      "methods_including_constructors": 13
+    },
+    {
+      "path": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/FaultInjectionConfig.java",
+      "sha256": "3bb1427f6e8a4d8440a1e0d0e34947078a1311f403b2e1723a1e8578906493ed",
+      "types": [
+        "FaultInjectionConfig",
+        "FaultInjectionConfig$StatusFakeTask",
+        "FaultInjectionConfig$Builder"
+      ],
+      "fields": 60,
+      "methods_including_constructors": 63
+    },
+    {
+      "path": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaLoadClient.java",
+      "sha256": "04189572952c227183860a5b69984280834ddb66686cf7dfe107d16459a77009",
+      "types": [
+        "JavaLoadClient",
+        "JavaLoadClient$Config",
+        "JavaLoadClient$TraceRecord",
+        "JavaLoadClient$RequestResult"
+      ],
+      "fields": 103,
+      "methods_including_constructors": 62
+    },
+    {
+      "path": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+      "sha256": "8fd99e44c25d97307aa7cbe31911d386cc0f0d9347930501e0d02eadb301f14e",
+      "types": [
+        "JavaMockEngineCluster",
+        "JavaMockEngineCluster$FastRpcService",
+        "JavaMockEngineCluster$FastRpcService$DecodeStream",
+        "JavaMockEngineCluster$FastRpcService$BatchMember",
+        "JavaMockEngineCluster$FastRpcService$VersionedTask",
+        "JavaMockEngineCluster$FastRpcService$DecodePendingTask",
+        "JavaMockEngineCluster$FastRpcService$PrefillPendingBatch",
+        "JavaMockEngineCluster$CancelResult",
+        "JavaMockEngineCluster$CancelFaultKind",
+        "JavaMockEngineCluster$ClusterStats",
+        "JavaMockEngineCluster$ClusterStats$DecodeWindow",
+        "JavaMockEngineCluster$ClusterStats$PrefillWindow",
+        "JavaMockEngineCluster$EngineEventLog",
+        "JavaMockEngineCluster$Config"
+      ],
+      "fields": 197,
+      "methods_including_constructors": 167
+    },
+    {
+      "path": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MasterTargetRouter.java",
+      "sha256": "cb52087f1486bd5689750fb2ca8b8935c568269f37aeca3d194ee38723156db5",
+      "types": [
+        "MasterTargetRouter",
+        "MasterTargetRouter$ErrorKind",
+        "MasterTargetRouter$ScheduleOutcome",
+        "MasterTargetRouter$TargetPool"
+      ],
+      "fields": 16,
+      "methods_including_constructors": 10
+    },
+    {
+      "path": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockControlServer.java",
+      "sha256": "af2768f11ac1d3814408524772db0d56968575110484cdd52d6cfb8804ae8903",
+      "types": [
+        "MockControlServer",
+        "MockControlServer$ApiException",
+        "MockControlServer$ServicePostAction"
+      ],
+      "fields": 10,
+      "methods_including_constructors": 40
+    },
+    {
+      "path": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockEngineCancelChannel.java",
+      "sha256": "8fa69f5ba9da97828fbc558c7795ce9dd1186d571d49df265530293b964ed2e8",
+      "types": [
+        "MockEngineCancelChannel"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 3
+    },
+    {
+      "path": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockLruBlockCache.java",
+      "sha256": "c072a5fafe2dd61dc480cb93536e389c908bbaa19cf477a54611d8f6edd5eb94",
+      "types": [
+        "MockLruBlockCache",
+        "MockLruBlockCache$AllocationFailure",
+        "MockLruBlockCache$AllocationOutcome",
+        "MockLruBlockCache$BlockLease"
+      ],
+      "fields": 12,
+      "methods_including_constructors": 30
+    },
+    {
+      "path": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockPerformanceModel.java",
+      "sha256": "c746ee86d8fecae36c7d336b54ba6f57a3a040491394a976eabb02a3e02dc203",
+      "types": [
+        "MockPerformanceModel",
+        "MockPerformanceModel$RequestShape",
+        "MockPerformanceModel$DecodePoint"
+      ],
+      "fields": 39,
+      "methods_including_constructors": 25
+    },
+    {
+      "path": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/StabilityMonitor.java",
+      "sha256": "8791c95c7b87a0f4773019e830db19d1d1eab22e22ff3a2957217813375dbff3",
+      "types": [
+        "StabilityMonitor",
+        "StabilityMonitor$InflightData",
+        "StabilityMonitor$MockEngineData",
+        "StabilityMonitor$Config"
+      ],
+      "fields": 17,
+      "methods_including_constructors": 6
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/PlacementResult.java",
+      "sha256": "f856a9333fd592b7fddd68431fbfdb1f69047dcdaa3f49f631986858b6a14fe7",
+      "types": [
+        "PlacementResult",
+        "PlacementResult$Status"
+      ],
+      "fields": 8,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/composition/DeliveryBindingConfiguration.java",
+      "sha256": "23ff9ed4eea8543e5535a8ca2827e38ac11977f3244fdd8d34071c5d060370ef",
+      "types": [
+        "DeliveryBindingConfiguration"
+      ],
+      "fields": 14,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/delivery/CapacityBoundary.java",
+      "sha256": "20013921cd29ebd0b9fd9760d3d4a0ff1a8089b703027c27a1df06aa36ee5817",
+      "types": [
+        "CapacityBoundary",
+        "CapacityBoundary$Status",
+        "CapacityBoundary$Availability",
+        "CapacityBoundary$Attempt"
+      ],
+      "fields": 10,
+      "methods_including_constructors": 12
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/delivery/DeliveryMetrics.java",
+      "sha256": "51f531bf87030733ab9dbe0bcdffaa49bce147d872e0439e60773ea0776ef9ae",
+      "types": [
+        "DeliveryMetrics"
+      ],
+      "fields": 2,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/delivery/DeliveryResult.java",
+      "sha256": "8614f3615b26ae1cc5a1803e8175037758c0f560456e1b832a9fb00f71b87081",
+      "types": [
+        "DeliveryResult",
+        "DeliveryResult$Status"
+      ],
+      "fields": 6,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/delivery/DeliveryStrategy.java",
+      "sha256": "88ff2608e3bc02cbf4558600f24d9cbcd2e399b81979258bf9518d4d5e0bb1cb",
+      "types": [
+        "DeliveryStrategy",
+        "DeliveryStrategy$Transaction"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 10
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/endpoint/DecodeEndpoint.java",
+      "sha256": "3d20c3e21dfe8159dfd1d3bc12c38728d3b17433528ee66a586ac1f6ede05001",
+      "types": [
+        "DecodeEndpoint",
+        "DecodeEndpoint$DecodeRequestState",
+        "DecodeEndpoint$ReservationHandle",
+        "DecodeEndpoint$DispatchRejectionSettlement",
+        "DecodeEndpoint$AdmissionCapacity",
+        "DecodeEndpoint$CapacityUsage",
+        "DecodeEndpoint$CapacityRelease",
+        "DecodeEndpoint$CapacityDeficit",
+        "DecodeEndpoint$WorkerStatusFact",
+        "DecodeEndpoint$WorkerStatusFact$Kind",
+        "DecodeEndpoint$LayeredAdmissionView",
+        "DecodeEndpoint$DecodeRoutingView",
+        "DecodeEndpoint$DecodeRequestView",
+        "DecodeEndpoint$PreemptionBeginResult",
+        "DecodeEndpoint$EngineDispatchPermitAcquireStatus",
+        "DecodeEndpoint$EngineDispatchPermitTransferStatus",
+        "DecodeEndpoint$EngineDispatchPermitAcquisition",
+        "DecodeEndpoint$EngineDispatchPermit",
+        "DecodeEndpoint$EngineDispatchPermit$Resolution",
+        "DecodeEndpoint$ClaimOwner",
+        "DecodeEndpoint$PreemptionClaim",
+        "DecodeEndpoint$EndpointPreemptionAttempt"
+      ],
+      "fields": 130,
+      "methods_including_constructors": 177
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/endpoint/EndpointGenerationLifecycle.java",
+      "sha256": "dda74e15da05363cca804bf60acc4dc4708bec9ac68db4e8fa5df61c1dea3f1b",
+      "types": [
+        "EndpointGenerationLifecycle",
+        "EndpointGenerationLifecycle$RetirementPhase",
+        "EndpointGenerationLifecycle$HandoffPermit"
+      ],
+      "fields": 13,
+      "methods_including_constructors": 15
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/endpoint/EndpointRegistry.java",
+      "sha256": "65e22ad7c096a95c55aca601ae7affcfd4998cda81ddd1ab2f763c9f1871a221",
+      "types": [
+        "EndpointRegistry",
+        "EndpointRegistry$RegistryPhase",
+        "EndpointRegistry$EndpointPublication",
+        "EndpointRegistry$PrefillRoutingEntry",
+        "EndpointRegistry$DetachedGeneration",
+        "EndpointRegistry$anonymous@234"
+      ],
+      "fields": 24,
+      "methods_including_constructors": 52
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillActiveIndex.java",
+      "sha256": "28cdfed61f6cd8118b4f05c3ec02745f33d04493e1c2ca09f7aeb2f19dcb9261",
+      "types": [
+        "PrefillActiveIndex",
+        "PrefillActiveIndex$Disabled",
+        "PrefillActiveIndex$Ordered"
+      ],
+      "fields": 2,
+      "methods_including_constructors": 27
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillEndpoint.java",
+      "sha256": "2448997e6619372f15cbe516c38368af574c4bcb1af03640af8a64cac8c83990",
+      "types": [
+        "PrefillEndpoint",
+        "PrefillEndpoint$RouteCommitAdmission"
+      ],
+      "fields": 10,
+      "methods_including_constructors": 46
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillState.java",
+      "sha256": "2951b2942627cfdbcbf508a1bcf5f35eaad2f0058e36bf311579493f25022914",
+      "types": [
+        "PrefillState",
+        "PrefillState$CapacityStatus",
+        "PrefillState$ReservationResult",
+        "PrefillState$WorkerStatusFact",
+        "PrefillState$WorkerStatusFact$Kind",
+        "PrefillState$StatusReconciliation",
+        "PrefillState$BatchCompletion",
+        "PrefillState$Retirement",
+        "PrefillState$Stats",
+        "PrefillState$LeaseState",
+        "PrefillState$CommittedHandoff",
+        "PrefillState$Reservation",
+        "PrefillState$RouteReservation",
+        "PrefillState$BatchReservation",
+        "PrefillState$BatchWork",
+        "PrefillState$BatchReduction",
+        "PrefillState$QueueMembership",
+        "PrefillState$RequestEntry",
+        "PrefillState$Snapshot",
+        "PrefillState$WorkCapture",
+        "PrefillState$TerminalObservation",
+        "PrefillState$CapacityAvailability",
+        "PrefillState$HeartbeatReconciliation"
+      ],
+      "fields": 98,
+      "methods_including_constructors": 128
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/endpoint/WorkerEndpoint.java",
+      "sha256": "c75eef9b30f89115f96b4f56b4037d8a08cc2ae0f6b8f75b405318815ad1842b",
+      "types": [
+        "WorkerEndpoint",
+        "WorkerEndpoint$GenerationPin"
+      ],
+      "fields": 8,
+      "methods_including_constructors": 28
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/DecodeEndpointSnapshot.java",
+      "sha256": "fecbb5e5a656766e55b3926d1e7b03d497489d70ad5263005d7a0827f5d29ec9",
+      "types": [
+        "DecodeEndpointSnapshot"
+      ],
+      "fields": 7,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/DecodeEvictionProposal.java",
+      "sha256": "c62d317c339e97d0426dfafdd4fd409820c82836d82b71ef065c0cf510d2c22f",
+      "types": [
+        "DecodeEvictionProposal"
+      ],
+      "fields": 10,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/DecodePreemptionCoordinator.java",
+      "sha256": "cb473020a487890af14eb049818f2a0c4ba9e41c30db6c3e8f2dd89e3fd9475c",
+      "types": [
+        "DecodePreemptionCoordinator",
+        "DecodePreemptionCoordinator$PreemptionResult",
+        "DecodePreemptionCoordinator$PreemptionCommand",
+        "DecodePreemptionCoordinator$ClaimDisposition",
+        "DecodePreemptionCoordinator$ClaimedVictim",
+        "DecodePreemptionCoordinator$AttemptCapability"
+      ],
+      "fields": 36,
+      "methods_including_constructors": 34
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/EngineCancelChannel.java",
+      "sha256": "bda9802ab879c344d9437e07190d34c10bf7baeb2648817d46fda4284e50b358",
+      "types": [
+        "EngineCancelChannel",
+        "EngineCancelChannel$CancelAck"
+      ],
+      "fields": 5,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/EvictionManager.java",
+      "sha256": "4201242a079b3bf1e24e4d8e1095b5d2d29f6f86be939df86503f63202ad2036",
+      "types": [
+        "EvictionManager",
+        "EvictionManager$PlannedDecodeEviction"
+      ],
+      "fields": 10,
+      "methods_including_constructors": 18
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/EvictionPlanner.java",
+      "sha256": "33cdba2e165943d2316ef7c8427cd0035b987a9dcd56807b1edab70bec80498f",
+      "types": [
+        "EvictionPlanner",
+        "EvictionPlanner$VictimOwnership",
+        "EvictionPlanner$DecodeVictimSet"
+      ],
+      "fields": 9,
+      "methods_including_constructors": 15
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/GrpcEngineCancelChannel.java",
+      "sha256": "6edf8776178b1ad12217b97bb4530e24acaa6c4cb314a891ced1163f2e1af185",
+      "types": [
+        "GrpcEngineCancelChannel"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 4
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/PlanCost.java",
+      "sha256": "e6ad04407c7948c5287adbff1408b80923e69100406fce0d88e83dc80a58b6e7",
+      "types": [
+        "PlanCost"
+      ],
+      "fields": 4,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/PriorityCostFunction.java",
+      "sha256": "d51ddf273efda9debba3e03a51281f805d24dddec3e51ca22fd6387fb85bf323",
+      "types": [
+        "PriorityCostFunction"
+      ],
+      "fields": 12,
+      "methods_including_constructors": 8
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/PriorityHarmProfile.java",
+      "sha256": "f1035a0f79155bdd14d8320ecc711567804be47b0160e0e0808f491dfeb7fb44",
+      "types": [
+        "PriorityHarmProfile",
+        "PriorityHarmProfile$Builder"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 12
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/planner/GroupPlanner.java",
+      "sha256": "4b1e7504bf695ccefadf495a2843f7144abf33238b5911019908a5c142d94217",
+      "types": [
+        "GroupPlanner",
+        "GroupPlanner$anonymous@28",
+        "GroupPlanner$Item",
+        "GroupPlanner$Shape",
+        "GroupPlanner$ItemAccess",
+        "GroupPlanner$Constraints",
+        "GroupPlanner$Selection",
+        "GroupPlanner$Plan"
+      ],
+      "fields": 33,
+      "methods_including_constructors": 27
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/prediction/FormulaPredictor.java",
+      "sha256": "2146ee9156cea6ee35498b0da2698097558268bb3145e6cb42d7caa28ebfdd43",
+      "types": [
+        "FormulaPredictor"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 6
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/prediction/InvalidPrefillPredictionException.java",
+      "sha256": "2e010db56b588e82209fca026d47b0d8c4b6f89cd46b28bc45620e4c0add7fb4",
+      "types": [
+        "InvalidPrefillPredictionException"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/prediction/LearningPredictor.java",
+      "sha256": "eabb23e7ed69b1c81c64268875211f4b4bea2aa7870012ca1269f05f2974e227",
+      "types": [
+        "LearningPredictor",
+        "LearningPredictor$BatchUpdateItem",
+        "LearningPredictor$ModelEvaluator"
+      ],
+      "fields": 19,
+      "methods_including_constructors": 12
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/prediction/PrefillBatchFeatures.java",
+      "sha256": "395febd084f9a6de25277e835c561c04e7a6adacc8fc362d63253871667cfd03",
+      "types": [
+        "PrefillBatchFeatures",
+        "PrefillBatchFeatures$Item"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 4
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/prediction/PrefillPredictionBoundary.java",
+      "sha256": "200c2a1f8b07ea8181ecd1c87f5d8c1a63668a7cad9f6d06c783ce8c89a364cb",
+      "types": [
+        "PrefillPredictionBoundary"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 6
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/prediction/PrefillTimePredictor.java",
+      "sha256": "3ccb4f8c9041585c22c7ea79ef8d404fe970990ac4982b10446133133cbd98a3",
+      "types": [
+        "PrefillTimePredictor",
+        "PrefillTimePredictor$Evaluator",
+        "PrefillTimePredictor$LearningResult"
+      ],
+      "fields": 2,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/prediction/PrefillTimeVariableBindings.java",
+      "sha256": "268e0c8e36559c1c936744d57dbcde16e15815be03baa1f014b70d654b993c89",
+      "types": [
+        "PrefillTimeVariableBindings",
+        "PrefillTimeVariableBindings$BindingContext",
+        "PrefillTimeVariableBindings$EvaluationVariables"
+      ],
+      "fields": 8,
+      "methods_including_constructors": 7
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/preemption/CancelTarget.java",
+      "sha256": "06b2bbb2e4722fb95a99a1b1fbc86371ccc07cb654f666395cb36a3ba212d888",
+      "types": [
+        "CancelTarget"
+      ],
+      "fields": 2,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/preemption/PreemptionCancelPhase.java",
+      "sha256": "a6812db2f719ea3591a7904ff048434e8459060e0267978cfc5cb7ff59f1edd5",
+      "types": [
+        "PreemptionCancelPhase"
+      ],
+      "fields": 5,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/preemption/VictimTerminal.java",
+      "sha256": "76c784e0b2a20e12d121610e4e15453110636d275e86697050a9939eafee3118",
+      "types": [
+        "VictimTerminal"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/projection/QueueSnapshot.java",
+      "sha256": "3a8cec68393062956e084c9ca61a9c6fe815368e0d8c59ed990f2735613ba46a",
+      "types": [
+        "QueueSnapshot",
+        "QueueSnapshot$AdmissionBlock"
+      ],
+      "fields": 9,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/projection/RouteProjection.java",
+      "sha256": "44a29cc4cea99061b5384898414234de6338709367b76d2be034c47de36abfec",
+      "types": [
+        "RouteProjection",
+        "RouteProjection$DeliveryProjection",
+        "RouteProjection$GroupPlanning",
+        "RouteProjection$Predictions",
+        "RouteProjection$GroupService",
+        "RouteProjection$AfterProbeAdmission",
+        "RouteProjection$AdmissionBlockSemantics",
+        "RouteProjection$Probe",
+        "RouteProjection$CandidateView",
+        "RouteProjection$Candidate",
+        "RouteProjection$Candidate$InitialHeadDisposition",
+        "RouteProjection$Candidate$State",
+        "RouteProjection$Inputs",
+        "RouteProjection$Session"
+      ],
+      "fields": 35,
+      "methods_including_constructors": 44
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/projection/RouteTimelineProjector.java",
+      "sha256": "c377470be5f8ae17f88b41a062bec7e73cb7236b1ff0eb1ea871e180842e0343",
+      "types": [
+        "RouteTimelineProjector",
+        "RouteTimelineProjector$ExpirationPrune",
+        "RouteTimelineProjector$ProjectedQueue",
+        "RouteTimelineProjector$ProjectedQueue$anonymous@412",
+        "RouteTimelineProjector$ProjectedCandidate",
+        "RouteTimelineProjector$PredictionBoundary",
+        "RouteTimelineProjector$PredictionFailure"
+      ],
+      "fields": 37,
+      "methods_including_constructors": 51
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/projection/WorkSnapshot.java",
+      "sha256": "4d638a79270a1f7289fa798524913e97c53ff3dcdedc224943f69ee448068b1e",
+      "types": [
+        "WorkSnapshot",
+        "WorkSnapshot$Phase",
+        "WorkSnapshot$RequestWork",
+        "WorkSnapshot$BatchWork"
+      ],
+      "fields": 19,
+      "methods_including_constructors": 18
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AdmissionMutation.java",
+      "sha256": "9a3ad04df8cf12fe11bf8060a07f86a04a24776bcb87009e9b5556410eff136a",
+      "types": [
+        "AdmissionMutation"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 3
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BatchDeliveryStrategy.java",
+      "sha256": "0c5a371beb5de1e08e92f47f0fc28e5331ad11ca02a6489a49ecb1317d19530f",
+      "types": [
+        "BatchDeliveryStrategy",
+        "BatchDeliveryStrategy$BatchTransaction",
+        "BatchDeliveryStrategy$BatchTransaction$Phase",
+        "BatchDeliveryStrategy$PreparedSubmission",
+        "BatchDeliveryStrategy$ClaimedMember",
+        "BatchDeliveryStrategy$DispatchGate",
+        "BatchDeliveryStrategy$Event",
+        "BatchDeliveryStrategy$BatchProjection",
+        "BatchDeliveryStrategy$BatchProjection$BatchPlanning",
+        "BatchDeliveryStrategy$BatchProjection$BatchService"
+      ],
+      "fields": 41,
+      "methods_including_constructors": 62
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/CancelReason.java",
+      "sha256": "556ebf3d7a4b13f5a5b26ae70a9173b92a810cf673acaddbccb357b1e0d69f59",
+      "types": [
+        "CancelReason"
+      ],
+      "fields": 2,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DefaultBatchDispatcher.java",
+      "sha256": "07964c7be69b6cc6c3551f88e3d2ef24882415e883b6b470131ab2572b8bf8a2",
+      "types": [
+        "DefaultBatchDispatcher",
+        "DefaultBatchDispatcher$anonymous@86",
+        "DefaultBatchDispatcher$PermitReservation",
+        "DefaultBatchDispatcher$PermitReservation$PermitPhase",
+        "DefaultBatchDispatcher$DispatchTask",
+        "DefaultBatchDispatcher$BatchRoleAddressCache",
+        "DefaultBatchDispatcher$DispatchAttempt"
+      ],
+      "fields": 30,
+      "methods_including_constructors": 34
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DefaultRouter.java",
+      "sha256": "091991961b8a35378f7beec76fde55161a3b8d4501fae675b71fc59f13061843",
+      "types": [
+        "DefaultRouter",
+        "DefaultRouter$PinnedRouting"
+      ],
+      "fields": 8,
+      "methods_including_constructors": 21
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DeliveryClaimKind.java",
+      "sha256": "4eb335a4ea3d7d241ee004869e9ab18da5cb2d9e3945da7795881ef5c432a7f3",
+      "types": [
+        "DeliveryClaimKind"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/EndpointEventProjector.java",
+      "sha256": "8347bb81d7da849d1f7713515a6004f8b1fa35dfb5c0927618eeca043fb3ae3f",
+      "types": [
+        "EndpointEventProjector"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 14
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ExpirationTimer.java",
+      "sha256": "f125bc6190d0cc081312e76ee25f8592ab781e3b769eb71e594d06d23fc1ea63",
+      "types": [
+        "ExpirationTimer",
+        "ExpirationTimer$DeadlineState",
+        "ExpirationTimer$DetachedDeadlines",
+        "ExpirationTimer$CloseState",
+        "ExpirationTimer$DeadlineRegistration",
+        "ExpirationTimer$RequestDeadline",
+        "ExpirationTimer$InactivityDeadline",
+        "ExpirationTimer$DecisionDeadline"
+      ],
+      "fields": 23,
+      "methods_including_constructors": 38
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/GlobalQueueCoordinator.java",
+      "sha256": "8863b92e7037fe45d89ef3a762ec1ef63943d72f88ecd109979f333ba19ef0cf",
+      "types": [
+        "GlobalQueueCoordinator",
+        "GlobalQueueCoordinator$Outcome",
+        "GlobalQueueCoordinator$Plan"
+      ],
+      "fields": 30,
+      "methods_including_constructors": 43
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/GlobalQueueEntry.java",
+      "sha256": "8d2911bb85f14c7c6fe4412e3a4023ec20fbc35fc2b4c82dadbafb8a910d7191",
+      "types": [
+        "GlobalQueueEntry"
+      ],
+      "fields": 9,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/OrderedRequestQueue.java",
+      "sha256": "663c8612c0bd9bde047295d17c9f4464b7d9c4ed9cc1ff70f6ecb869a7e8cc27",
+      "types": [
+        "OrderedRequestQueue",
+        "OrderedRequestQueue$Bucket"
+      ],
+      "fields": 13,
+      "methods_including_constructors": 18
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementAvailability.java",
+      "sha256": "ef5f1ecbbc8ea9ef292b9b063678e919912be9c41a928e1b014e45a946674533",
+      "types": [
+        "PlacementAvailability",
+        "PlacementAvailability$ChangeKind",
+        "PlacementAvailability$Event",
+        "PlacementAvailability$Listener"
+      ],
+      "fields": 7,
+      "methods_including_constructors": 11
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementKey.java",
+      "sha256": "d72275c88ee231da34b84a769f967a91575d743f49b308dc52ee4d53b80b4df0",
+      "types": [
+        "PlacementKey"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 4
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementWaitQueue.java",
+      "sha256": "3ef578dbfaa9fda428ea755ce25c7dacf1d7f61c15bfe4e6477cfe8b2ea08e84",
+      "types": [
+        "PlacementWaitQueue",
+        "PlacementWaitQueue$Domain"
+      ],
+      "fields": 10,
+      "methods_including_constructors": 15
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PreemptionRegistration.java",
+      "sha256": "650a544d2dd867a89e9d05e01676a5eb5307503e27e38c57899bf55c981c3db4",
+      "types": [
+        "PreemptionRegistration"
+      ],
+      "fields": 9,
+      "methods_including_constructors": 18
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PrefillAdmissionResources.java",
+      "sha256": "58af6bcfd7eb79bae3c870a3cbe0c6eb019d78c07380864b4a367b71b62b596f",
+      "types": [
+        "PrefillAdmissionResources",
+        "PrefillAdmissionResources$MemberOwnership",
+        "PrefillAdmissionResources$Member",
+        "PrefillAdmissionResources$CommittedAdmissionOwner",
+        "PrefillAdmissionResources$DecodeAvailability"
+      ],
+      "fields": 14,
+      "methods_including_constructors": 28
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestCompletionPublisher.java",
+      "sha256": "72adb532deaf924c252c3a1a50e59a42b73d418116419a08c4f0c450171c6328",
+      "types": [
+        "RequestCompletionPublisher",
+        "RequestCompletionPublisher$PublisherPhase"
+      ],
+      "fields": 12,
+      "methods_including_constructors": 23
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestRegistry.java",
+      "sha256": "cb314543bf2c2f2fa64d2ef029b04307b05a240a25dc28ec5221808f7534c5b9",
+      "types": [
+        "RequestRegistry",
+        "RequestRegistry$DeliveryClaim"
+      ],
+      "fields": 16,
+      "methods_including_constructors": 120
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestScheduler.java",
+      "sha256": "bd2813d05e8112ff3fc77726148ec1dc5d1b8f33a0f87d1a0fd698c03ac6d6e2",
+      "types": [
+        "RequestScheduler"
+      ],
+      "fields": 5,
+      "methods_including_constructors": 10
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestSlot.java",
+      "sha256": "dc15bd30d84226ede06d0214a097a26101ad79fb4534549e9de4470e4da54904",
+      "types": [
+        "RequestSlot",
+        "RequestSlot$DecisionStage",
+        "RequestSlot$EngineObservation",
+        "RequestSlot$PendingPrefillRetirement",
+        "RequestSlot$SlotPhase",
+        "RequestSlot$EngineOwnership",
+        "RequestSlot$PublicationKind",
+        "RequestSlot$PendingReplay",
+        "RequestSlot$PreemptionReduction",
+        "RequestSlot$PreemptionReduction$Status",
+        "RequestSlot$AdmissionMutationCompletion",
+        "RequestSlot$DecisionExpiry",
+        "RequestSlot$DeliveryConfirmation",
+        "RequestSlot$TerminalResources",
+        "RequestSlot$PublicationPermit",
+        "WorkerTerminalSource",
+        "DecodeAcceptance",
+        "DeferredTerminal",
+        "DeferredTerminal$Kind",
+        "TerminalAction",
+        "TombstoneResult",
+        "RequestFuture"
+      ],
+      "fields": 123,
+      "methods_including_constructors": 150
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestState.java",
+      "sha256": "56d430a004bc6f01076540386fa3879d57d41620817631ba239a73952cfa8fe5",
+      "types": [
+        "RequestState",
+        "RequestState$Phase"
+      ],
+      "fields": 15,
+      "methods_including_constructors": 3
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RouteAdmission.java",
+      "sha256": "6c813fe9f95d0198e3b14c10f9c6d3fac0f245361391e05fb2510daeb1670991",
+      "types": [
+        "RouteAdmission",
+        "RouteAdmission$Ownership",
+        "RouteAdmission$RouteDelivery",
+        "RouteAdmission$PrefillReservationAttempt",
+        "RouteAdmission$Selection"
+      ],
+      "fields": 21,
+      "methods_including_constructors": 32
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RouteDeliveryStrategy.java",
+      "sha256": "664a1512bf0de67802b208eb1bd1627a8272fcde2e771febd5015b06f016a3e0",
+      "types": [
+        "RouteDeliveryStrategy",
+        "RouteDeliveryStrategy$ClaimedRoute",
+        "RouteDeliveryStrategy$RouteTransaction",
+        "RouteDeliveryStrategy$RouteProjectionPolicy",
+        "RouteDeliveryStrategy$RouteProjectionPolicy$RoutePlanning",
+        "RouteDeliveryStrategy$RouteProjectionPolicy$RouteService"
+      ],
+      "fields": 26,
+      "methods_including_constructors": 37
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ScheduledRequest.java",
+      "sha256": "74e73e3168133eba720021a395d6074afa716a6c15d52e8c30a9616d32cb29b5",
+      "types": [
+        "ScheduledRequest",
+        "ScheduledRequest$DecodeMode",
+        "ScheduledRequest$DecodeBinding"
+      ],
+      "fields": 27,
+      "methods_including_constructors": 32
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/SchedulerRuntime.java",
+      "sha256": "9cb5bb462b07b495ffe08d0b7a402e90e671adce9b03f85ed80a8824d594fd62",
+      "types": [
+        "SchedulerRuntime"
+      ],
+      "fields": 6,
+      "methods_including_constructors": 12
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/WorkerBatcher.java",
+      "sha256": "57f27667826c15d85be543cde77139faeba0aa8979bdb58052598970b1c2d8ba",
+      "types": [
+        "WorkerBatcher",
+        "WorkerBatcher$QueueSnapshot",
+        "WorkerBatcher$RuntimeState",
+        "WorkerBatcher$EnqueueAttempt",
+        "WorkerBatcher$BatcherCycleResult",
+        "WorkerBatcher$anonymous@162",
+        "WorkerBatcher$ActiveQueueSnapshot",
+        "WorkerBatcher$ProjectionVersion",
+        "WorkerBatcher$ProjectionCache",
+        "WorkerBatcher$ProjectionSource",
+        "WorkerBatcher$BatchCapacitySnapshot"
+      ],
+      "fields": 70,
+      "methods_including_constructors": 91
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/strategy/CostBasedPrefillStrategy.java",
+      "sha256": "df89e215ad4abf4cf87ed61841775d6924d3b8172137455a82d290384a4fb7d0",
+      "types": [
+        "CostBasedPrefillStrategy",
+        "CostBasedPrefillStrategy$EndpointDiscovery",
+        "CostBasedPrefillStrategy$EndpointDiscovery$anonymous@305",
+        "CostBasedPrefillStrategy$CacheTokenMatch"
+      ],
+      "fields": 10,
+      "methods_including_constructors": 22
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/strategy/DecodeSelector.java",
+      "sha256": "0631c3aef0da65cac492b27a298a487f689e5b40b165b269cd520c2e761ad7b1",
+      "types": [
+        "DecodeSelector",
+        "DecodeSelector$Availability"
+      ],
+      "fields": 6,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/strategy/EndpointRoundRobin.java",
+      "sha256": "9950ddc6e22c6182ed3b72353aeec073fd04f8659b60797cef18edaf6e0d3aa5",
+      "types": [
+        "EndpointRoundRobin",
+        "EndpointRoundRobin$Scope",
+        "EndpointRoundRobin$Cursor"
+      ],
+      "fields": 4,
+      "methods_including_constructors": 1
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/strategy/PrefillCandidateSet.java",
+      "sha256": "0226e137514f9220a1b5a97da4000c22e98dee51f2675a0c30fb833ba2c58297",
+      "types": [
+        "PrefillCandidateSet"
+      ],
+      "fields": 14,
+      "methods_including_constructors": 12
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/strategy/RandomStrategy.java",
+      "sha256": "6114faef0655c0ae04b7a3256610213296b30a6faa5462789cccb2081465cfe0",
+      "types": [
+        "RandomStrategy"
+      ],
+      "fields": 2,
+      "methods_including_constructors": 3
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/strategy/SelectedRole.java",
+      "sha256": "c1f31d96ddcb186cd47d6ad6598f9332861724f2f5e844ed5a0a736c44857fad",
+      "types": [
+        "SelectedRole"
+      ],
+      "fields": 4,
+      "methods_including_constructors": 14
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/consistency/LBStatusConsistencyService.java",
+      "sha256": "c38daac18d11efc7e5a2d9065ffe9c3e41c531b19607e8ceabc066d6522498f8",
+      "types": [
+        "LBStatusConsistencyService"
+      ],
+      "fields": 7,
+      "methods_including_constructors": 12
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/consistency/MasterElectService.java",
+      "sha256": "935adc5e585b17b42e54aec9c7e350a4799155ad44f3efe163601dd1ed9cbe07",
+      "types": [
+        "MasterElectService"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/consistency/ZkMasterStatusProvider.java",
+      "sha256": "a29da4a409375716d719bc076e1ddae2449e030d738634a952010b32196a2086",
+      "types": [
+        "ZkMasterStatusProvider"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/consistency/ZookeeperMasterElectService.java",
+      "sha256": "b8b0491e9e9f6ae5f7d113a1edfa47ed230005a99f6456c74419d1a168fea444",
+      "types": [
+        "ZookeeperMasterElectService"
+      ],
+      "fields": 17,
+      "methods_including_constructors": 26
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/domain/consistency/LBConsistencyConfig.java",
+      "sha256": "47292e073f88dd11443d63ffdcd2184dd2d1f5d8439c614bc4c9f6cc18958a18",
+      "types": [
+        "LBConsistencyConfig",
+        "LBConsistencyConfig$MasterElectType",
+        "LBConsistencyConfig$ZookeeperConfig"
+      ],
+      "fields": 6,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/domain/consistency/MasterChangeNotifyReq.java",
+      "sha256": "a36aaa5fee6991e3981d11507393d172cc7609009dba7be4c02ccbf6d6ba9962",
+      "types": [
+        "MasterChangeNotifyReq"
+      ],
+      "fields": 2,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/domain/consistency/MasterChangeNotifyResp.java",
+      "sha256": "3a96cbbbb64ae3221abe3f2a6609756d924156dc81ffd429e4892630c20b3db0",
+      "types": [
+        "MasterChangeNotifyResp"
+      ],
+      "fields": 2,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/domain/consistency/SyncLBStatusReq.java",
+      "sha256": "eeececef26cdd00037e788a4fc3b8fe9aaf8f804c91074f38e0671d14b299233",
+      "types": [
+        "SyncLBStatusReq"
+      ],
+      "fields": 1,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/domain/consistency/SyncLBStatusResp.java",
+      "sha256": "4ae3116b82a4698d284bb8ff0504caaaeb60ef24927b487e37c7b381118c63ea",
+      "types": [
+        "SyncLBStatusResp"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 0
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/service/RecentCacheKeyTraceReporter.java",
+      "sha256": "f49fda4ba5475f744759be0a921d5c650e26dd625e572e0c1f17a8820dfb9c3e",
+      "types": [
+        "RecentCacheKeyTraceReporter"
+      ],
+      "fields": 13,
+      "methods_including_constructors": 16
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/service/RouteService.java",
+      "sha256": "c921155c22289decd02f4fa6dce9753634d77afaddb165bd900b5ee8e115595c",
+      "types": [
+        "RouteService"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 7
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/service/address/WorkerAddressService.java",
+      "sha256": "d3c54cb1441ce96cf36889942e12a69044e3c8bec6f4f065d626cd7828424a13",
+      "types": [
+        "WorkerAddressService"
+      ],
+      "fields": 5,
+      "methods_including_constructors": 7
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/service/grace/ActiveRequestCounter.java",
+      "sha256": "588fc0f580573e65e7600c2d57e2969502961415b15aa0c0d8a217df7b6e19c9",
+      "types": [
+        "ActiveRequestCounter",
+        "ActiveRequestCounter$RequestToken"
+      ],
+      "fields": 4,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/service/grace/ApplicationLifecycle.java",
+      "sha256": "b41c12e088bf1905671898fb55ff249bb495d0aae04e8a2e87bdc55d45110dc6",
+      "types": [
+        "ApplicationLifecycle"
+      ],
+      "fields": 14,
+      "methods_including_constructors": 7
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/service/grace/GracefulLifecycleReporter.java",
+      "sha256": "ef36653f981ef5643545d59e52af3579b9972bc52695bc738376941c3ada9aa3",
+      "types": [
+        "GracefulLifecycleReporter"
+      ],
+      "fields": 3,
+      "methods_including_constructors": 9
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/service/grpc/EngineGrpcService.java",
+      "sha256": "feb09b7bfa2d439b7373d245f0f6d071ed112ac3888d1ac9146e078f15390bda",
+      "types": [
+        "EngineGrpcService"
+      ],
+      "fields": 2,
+      "methods_including_constructors": 3
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/service/grpc/EngineStatusConverter.java",
+      "sha256": "040eebe9d74e1df9160763e9718c5701b48603964f7812e35807139a10d2cae2",
+      "types": [
+        "EngineStatusConverter"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/service/monitor/BatchSchedulerReporter.java",
+      "sha256": "0a7f767cbc5ade3e4236ce1229dbc8c5adbe750be069dda97805093c7123461b",
+      "types": [
+        "BatchSchedulerReporter"
+      ],
+      "fields": 4,
+      "methods_including_constructors": 25
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/service/monitor/EngineHealthReporter.java",
+      "sha256": "e1b71657d583897ebf7e97eff87d61d7d33352723ffcb87f7b6ce6995ad671c3",
+      "types": [
+        "EngineHealthReporter"
+      ],
+      "fields": 6,
+      "methods_including_constructors": 24
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/service/monitor/RequestSchedulerReporter.java",
+      "sha256": "245e7bb56addadccd59212d4a0a607bd8924d034c8622743467a4e23b7378f02",
+      "types": [
+        "RequestSchedulerReporter"
+      ],
+      "fields": 2,
+      "methods_including_constructors": 23
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/service/monitor/SyncSchedulerConfig.java",
+      "sha256": "fd07d59429350d17deddc222b5affee8ae1153cc290d0df4146de97a56b19394",
+      "types": [
+        "SyncSchedulerConfig"
+      ],
+      "fields": 0,
+      "methods_including_constructors": 2
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/sync/runner/EngineSyncRunner.java",
+      "sha256": "79f4d4f1fb05d9d72960424ab1f415ca9a3bbd66d45450dc2ef536a4b7194284",
+      "types": [
+        "EngineSyncRunner"
+      ],
+      "fields": 14,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/sync/runner/GrpcCacheStatusCheckRunner.java",
+      "sha256": "141a282c348d5d033f86d1c3bd22b14f64b7ef46d586972e8b0e84584313c5e9",
+      "types": [
+        "GrpcCacheStatusCheckRunner"
+      ],
+      "fields": 21,
+      "methods_including_constructors": 11
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/sync/runner/GrpcWorkerStatusRunner.java",
+      "sha256": "0985753fad23d9e1f683474248ea679c12c3cb2dc5bfffa8dad0e5780e4e55db",
+      "types": [
+        "GrpcWorkerStatusRunner"
+      ],
+      "fields": 19,
+      "methods_including_constructors": 11
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/sync/schedule/ExpirationCleaner.java",
+      "sha256": "6559646c9fdafed6577e2ed9b23d4654c574298fe5e3224aee18896b2ab789e2",
+      "types": [
+        "ExpirationCleaner",
+        "ExpirationCleaner$PendingRetirement"
+      ],
+      "fields": 8,
+      "methods_including_constructors": 5
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/sync/status/WorkerDirectory.java",
+      "sha256": "193ab08ab09476531a1d24ff0bf8f8742bb5ae38246338c4772ea7857c4c3373",
+      "types": [
+        "WorkerDirectory"
+      ],
+      "fields": 2,
+      "methods_including_constructors": 20
+    },
+    {
+      "path": "flexlb-sync/src/main/java/org/flexlb/sync/synchronizer/MasterEngineSynchronizer.java",
+      "sha256": "ad3ddffc2da141d7652604ff177b641bf70991b41b4370066f4f13313d8a2aba",
+      "types": [
+        "MasterEngineSynchronizer"
+      ],
+      "fields": 16,
+      "methods_including_constructors": 6
+    }
+  ],
+  "compiled_reference_inventory": {
+    "classes": 1370,
+    "production_types": 226,
+    "fields": 2753,
+    "methods": 5072,
+    "baseline_fields": 2763,
+    "baseline_methods": 5105,
+    "field_delta": -10,
+    "method_delta": -33
+  },
+  "commits": [
+    "567a724886 refactor(flexlb): remove unused router admission role state",
+    "84a0670672 refactor(flexlb): remove unused expiration reporter dependency",
+    "03f2257734 refactor(flexlb): remove unused cache interval dependency chain",
+    "baca8bcb10 refactor(flexlb): drop unconsumed availability event sequence",
+    "e18cd64626 refactor(flexlb): remove obsolete internal queries and projection overload",
+    "1f6d5d7758 refactor(flexlb): remove unused mock engine queries",
+    "9163772218 refactor(flexlb): remove unused validators and logger declarations",
+    "e595d498ec refactor(flexlb): keep projection implementation details private",
+    "b9b10859a3 refactor(flexlb): share JSON serialization policy and remove unused helpers",
+    "574315e350 fix(flexlb): close enabled election when Spring context shuts down",
+    "09c2e10d5c test(flexlb): observe actual wait registration before checking retry order",
+    "c480e01135 refactor(flexlb): remove unused online evaluation helpers"
+  ],
+  "validation_summary": "../performance/repository-audit-2026-09-13/summary.json",
+  "member_evidence_archive": "state-api-2026-09-13-evidence.tar.gz",
+  "removed_compiled_members": [
+    {
+      "kind": "field",
+      "owner": "org/flexlb/balance/scheduler/DefaultRouter",
+      "name": "queueAdmissionRole",
+      "descriptor": "Lorg/flexlb/dao/route/RoleType;"
+    },
+    {
+      "kind": "field",
+      "owner": "org/flexlb/balance/scheduler/ExpirationTimer",
+      "name": "reporter",
+      "descriptor": "Lorg/flexlb/service/monitor/BatchSchedulerReporter;"
+    },
+    {
+      "kind": "field",
+      "owner": "org/flexlb/balance/scheduler/PlacementAvailability$Event",
+      "name": "sequence",
+      "descriptor": "J"
+    },
+    {
+      "kind": "field",
+      "owner": "org/flexlb/engine/grpc/config/ChannelConfiguration",
+      "name": "log",
+      "descriptor": "Lorg/slf4j/Logger;"
+    },
+    {
+      "kind": "field",
+      "owner": "org/flexlb/service/grace/GracefulLifecycleReporter",
+      "name": "log",
+      "descriptor": "Lorg/slf4j/Logger;"
+    },
+    {
+      "kind": "field",
+      "owner": "org/flexlb/service/monitor/SyncSchedulerConfig",
+      "name": "log",
+      "descriptor": "Lorg/slf4j/Logger;"
+    },
+    {
+      "kind": "field",
+      "owner": "org/flexlb/sync/runner/EngineSyncRunner",
+      "name": "cacheIntervalService",
+      "descriptor": "Lorg/flexlb/cache/service/DynamicCacheIntervalService;"
+    },
+    {
+      "kind": "field",
+      "owner": "org/flexlb/sync/runner/GrpcCacheStatusCheckRunner",
+      "name": "cacheIntervalService",
+      "descriptor": "Lorg/flexlb/cache/service/DynamicCacheIntervalService;"
+    },
+    {
+      "kind": "field",
+      "owner": "org/flexlb/sync/synchronizer/MasterEngineSynchronizer",
+      "name": "cacheIntervalService",
+      "descriptor": "Lorg/flexlb/cache/service/DynamicCacheIntervalService;"
+    },
+    {
+      "kind": "field",
+      "owner": "org/flexlb/util/JsonUtils",
+      "name": "MAPPER_WITH_INDENT",
+      "descriptor": "Lcom/fasterxml/jackson/databind/ObjectMapper;"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/endpoint/PrefillState$BatchReduction",
+      "name": "isEmpty",
+      "descriptor": "()Z"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/eviction/EvictionManager",
+      "name": "isShutdown",
+      "descriptor": "()Z"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/eviction/PriorityHarmProfile$Builder",
+      "name": "add",
+      "descriptor": "(IJ)Lorg/flexlb/balance/eviction/PriorityHarmProfile$Builder;"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/projection/RouteProjection",
+      "name": "project",
+      "descriptor": "(Lorg/flexlb/balance/projection/RouteProjection$Inputs;JIJJJJJLorg/flexlb/balance/prediction/PrefillTimePredictor$Evaluator;Lorg/flexlb/balance/projection/RouteProjection$DeliveryProjection;J)Lorg/flexlb/balance/projection/RouteProjection$Candidate;"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/projection/RouteProjection$CandidateView",
+      "name": "requiredProjectedTtftMs",
+      "descriptor": "()J"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/projection/RouteProjection$Predictions",
+      "name": "committedGroupDurationMs",
+      "descriptor": "(D)J"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/projection/RouteProjection$Predictions",
+      "name": "singletonBatchPlanningDurationMs",
+      "descriptor": "(JJ)D"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/projection/RouteProjection$Probe",
+      "name": "asItem",
+      "descriptor": "()Lorg/flexlb/balance/planner/GroupPlanner$Item;"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/scheduler/DefaultRouter",
+      "name": "queueAdmissionRole",
+      "descriptor": "()Lorg/flexlb/dao/route/RoleType;"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/scheduler/ExpirationTimer",
+      "name": "<init>",
+      "descriptor": "(Lorg/flexlb/balance/scheduler/RequestRegistry;Lorg/flexlb/config/ConfigService;Lorg/flexlb/service/monitor/BatchSchedulerReporter;)V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/scheduler/ExpirationTimer",
+      "name": "<init>",
+      "descriptor": "(Lorg/flexlb/balance/scheduler/RequestRegistry;Lorg/flexlb/config/ConfigService;Lorg/flexlb/service/monitor/BatchSchedulerReporter;Ljava/util/function/LongSupplier;)V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/scheduler/PlacementAvailability$Event",
+      "name": "<init>",
+      "descriptor": "(Lorg/flexlb/balance/scheduler/PlacementKey;JLorg/flexlb/balance/scheduler/PlacementAvailability$ChangeKind;)V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/scheduler/PlacementAvailability$Event",
+      "name": "sequence",
+      "descriptor": "()J"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/scheduler/RequestCompletionPublisher",
+      "name": "awaitTermination",
+      "descriptor": "(JLjava/util/concurrent/TimeUnit;)Z"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/scheduler/RequestScheduler",
+      "name": "ownsRequestGeneration",
+      "descriptor": "(J)Z"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/config/FlexlbConfigValidator",
+      "name": "nonNegative",
+      "descriptor": "(DLjava/lang/String;)V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/config/FlexlbConfigValidator",
+      "name": "positive",
+      "descriptor": "(DLjava/lang/String;)V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/consistency/MasterElectService",
+      "name": "destroy",
+      "descriptor": "()V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/consistency/MasterElectService",
+      "name": "offline",
+      "descriptor": "()V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/consistency/MasterElectService",
+      "name": "refreshMasterHost",
+      "descriptor": "(Z)V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/consistency/MasterElectService",
+      "name": "start",
+      "descriptor": "()V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/dao/loadbalance/ServerStatus",
+      "name": "code",
+      "descriptor": "(Lorg/flexlb/dao/loadbalance/StrategyErrorType;)Lorg/flexlb/dao/loadbalance/ServerStatus;"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/dao/master/WorkerHost",
+      "name": "of",
+      "descriptor": "(Ljava/lang/String;ILjava/lang/String;)Lorg/flexlb/dao/master/WorkerHost;"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/engine/grpc/config/ChannelConfiguration",
+      "name": "<clinit>",
+      "descriptor": "()V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/mockengine/DiscoveryFileStore",
+      "name": "getFile",
+      "descriptor": "()Ljava/nio/file/Path;"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/mockengine/DynamicEngineManager",
+      "name": "isFileDiscoveryEnabled",
+      "descriptor": "()Z"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/mockengine/JavaMockEngineCluster$FastRpcService",
+      "name": "getCrashEpoch",
+      "descriptor": "()J"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/mockengine/JavaMockEngineCluster$FastRpcService",
+      "name": "getKvAdmissionFails",
+      "descriptor": "()J"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/mockengine/JavaMockEngineCluster$FastRpcService",
+      "name": "getOccupiedKvTokens",
+      "descriptor": "()J"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/service/grace/GracefulLifecycleReporter",
+      "name": "<clinit>",
+      "descriptor": "()V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/service/monitor/SyncSchedulerConfig",
+      "name": "<clinit>",
+      "descriptor": "()V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/sync/runner/EngineSyncRunner",
+      "name": "<init>",
+      "descriptor": "(Ljava/lang/String;Lorg/flexlb/sync/status/WorkerDirectory;Lorg/flexlb/service/address/WorkerAddressService;Ljava/util/concurrent/ExecutorService;Lorg/flexlb/service/monitor/EngineHealthReporter;Lorg/flexlb/service/grpc/EngineGrpcService;Lorg/flexlb/dao/route/RoleType;Lorg/flexlb/cache/service/CacheAwareService;Lorg/flexlb/cache/service/DynamicCacheIntervalService;JLjava/util/concurrent/atomic/LongAdder;Ljava/lang/Long;ZJ)V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/sync/runner/GrpcCacheStatusCheckRunner",
+      "name": "<init>",
+      "descriptor": "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lorg/flexlb/dao/route/RoleType;Lorg/flexlb/dao/master/WorkerStatus;Lorg/flexlb/dao/master/WorkerStatus$PollLease;Lorg/flexlb/sync/status/WorkerDirectory;Lorg/flexlb/service/monitor/EngineHealthReporter;Lorg/flexlb/service/grpc/EngineGrpcService;Lorg/flexlb/cache/service/CacheAwareService;Lorg/flexlb/cache/service/DynamicCacheIntervalService;JLjava/util/concurrent/atomic/LongAdder;Ljava/lang/Long;ZLjava/util/concurrent/Executor;)V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/sync/synchronizer/MasterEngineSynchronizer",
+      "name": "<init>",
+      "descriptor": "(Lorg/flexlb/service/address/WorkerAddressService;Lorg/flexlb/service/monitor/EngineHealthReporter;Lorg/flexlb/sync/status/WorkerDirectory;Lorg/flexlb/service/grpc/EngineGrpcService;Lorg/flexlb/config/ModelMetaConfig;Lorg/flexlb/cache/service/CacheAwareService;Lorg/flexlb/cache/service/DynamicCacheIntervalService;Lorg/flexlb/config/ConfigService;)V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/transport/GeneralHttpNettyService",
+      "name": "request",
+      "descriptor": "(Ljava/lang/Object;Ljava/net/URI;Ljava/lang/String;Lio/netty/handler/codec/http/HttpHeaders;Ljava/lang/Class;)Lreactor/core/publisher/Mono;"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/util/JsonUtils",
+      "name": "toList",
+      "descriptor": "(Ljava/lang/String;Ljava/lang/Class;)Ljava/util/List;"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/util/JsonUtils",
+      "name": "toObject",
+      "descriptor": "(Lcom/fasterxml/jackson/databind/JsonNode;Ljava/lang/Class;)Ljava/lang/Object;"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/util/JsonUtils",
+      "name": "toObject",
+      "descriptor": "(Ljava/lang/Object;Ljava/lang/Class;)Ljava/lang/Object;"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/util/JsonUtils",
+      "name": "toObject",
+      "descriptor": "([BLcom/fasterxml/jackson/core/type/TypeReference;)Ljava/lang/Object;"
+    }
+  ],
+  "added_compiled_members": [
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/scheduler/ExpirationTimer",
+      "name": "<init>",
+      "descriptor": "(Lorg/flexlb/balance/scheduler/RequestRegistry;Lorg/flexlb/config/ConfigService;)V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/scheduler/ExpirationTimer",
+      "name": "<init>",
+      "descriptor": "(Lorg/flexlb/balance/scheduler/RequestRegistry;Lorg/flexlb/config/ConfigService;Ljava/util/function/LongSupplier;)V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/balance/scheduler/PlacementAvailability$Event",
+      "name": "<init>",
+      "descriptor": "(Lorg/flexlb/balance/scheduler/PlacementKey;Lorg/flexlb/balance/scheduler/PlacementAvailability$ChangeKind;)V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/sync/runner/EngineSyncRunner",
+      "name": "<init>",
+      "descriptor": "(Ljava/lang/String;Lorg/flexlb/sync/status/WorkerDirectory;Lorg/flexlb/service/address/WorkerAddressService;Ljava/util/concurrent/ExecutorService;Lorg/flexlb/service/monitor/EngineHealthReporter;Lorg/flexlb/service/grpc/EngineGrpcService;Lorg/flexlb/dao/route/RoleType;Lorg/flexlb/cache/service/CacheAwareService;JLjava/util/concurrent/atomic/LongAdder;Ljava/lang/Long;ZJ)V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/sync/runner/GrpcCacheStatusCheckRunner",
+      "name": "<init>",
+      "descriptor": "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lorg/flexlb/dao/route/RoleType;Lorg/flexlb/dao/master/WorkerStatus;Lorg/flexlb/dao/master/WorkerStatus$PollLease;Lorg/flexlb/sync/status/WorkerDirectory;Lorg/flexlb/service/monitor/EngineHealthReporter;Lorg/flexlb/service/grpc/EngineGrpcService;Lorg/flexlb/cache/service/CacheAwareService;JLjava/util/concurrent/atomic/LongAdder;Ljava/lang/Long;ZLjava/util/concurrent/Executor;)V"
+    },
+    {
+      "kind": "method",
+      "owner": "org/flexlb/sync/synchronizer/MasterEngineSynchronizer",
+      "name": "<init>",
+      "descriptor": "(Lorg/flexlb/service/address/WorkerAddressService;Lorg/flexlb/service/monitor/EngineHealthReporter;Lorg/flexlb/sync/status/WorkerDirectory;Lorg/flexlb/service/grpc/EngineGrpcService;Lorg/flexlb/config/ModelMetaConfig;Lorg/flexlb/cache/service/CacheAwareService;Lorg/flexlb/config/ConfigService;)V"
+    }
+  ]
+}

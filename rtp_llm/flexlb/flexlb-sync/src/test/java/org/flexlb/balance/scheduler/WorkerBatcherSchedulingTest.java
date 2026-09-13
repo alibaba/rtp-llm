@@ -28,13 +28,16 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 /** Concurrency contracts at the final, threaded Prefill scheduling boundary. */
@@ -72,11 +75,37 @@ class WorkerBatcherSchedulingTest {
         delivery.firstCapacity.release();
         await(delivery.secondAttempt);
         await(delivery.parkedCapacity.subscribed);
+        assertTrue(delivery.firstCapacity.listeners.isEmpty());
+        assertEquals(1, delivery.parkedCapacity.listeners.size());
 
         TimeUnit.MILLISECONDS.sleep(100L);
         assertEquals(2, delivery.attempts.get(),
                 "one capacity signal must trigger exactly one retry");
         assertSame(head, runtime.captureQueueSnapshot().items().getFirst());
+        assertNull(runtime.stopAndAwait());
+        assertTrue(delivery.parkedCapacity.listeners.isEmpty());
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void failedListenerRemovalStillReleasesQueueLock() throws Exception {
+        FlexlbConfig config = singleConfig();
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        EventDrivenBlock delivery = new EventDrivenBlock();
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        assertTrue(runtime.offer(item(
+                config, endpoint, 12L, 50, System.currentTimeMillis())));
+        await(delivery.firstCapacity.subscribed);
+        delivery.firstCapacity.removeFailure =
+                new IllegalStateException("listener removal failed");
+
+        // Release on this thread; removal runs on the scheduling thread.
+        delivery.firstCapacity.release();
+        await(delivery.firstCapacity.removed);
+        CompletableFuture.supplyAsync(runtime::captureQueueSnapshot)
+                .get(2, TimeUnit.SECONDS);
+        assertNull(runtime.stopAndAwait());
+        assertTrue(runtime.captureQueueSnapshot().items().isEmpty());
     }
 
     @Test
@@ -145,6 +174,49 @@ class WorkerBatcherSchedulingTest {
         assertEquals(1, delivery.attempts.get(),
                 "publishing backlog must not retry the capacity-blocked head");
         assertEquals(List.of(head, backlog), runtime.captureQueueSnapshot().items());
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void capacityBlockInvalidatesAnUnfinishedProjectionCapture() throws Exception {
+        FlexlbConfig config = singleConfig();
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        ProjectionCacheBlock delivery = new ProjectionCacheBlock();
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        ScheduledRequest head = spy(item(
+                config, endpoint, 12L, 50, System.currentTimeMillis()));
+        AtomicReference<Thread> capturingThread = new AtomicReference<>();
+        CountDownLatch materializingSnapshot = new CountDownLatch(1);
+        CountDownLatch finishSnapshot = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            if (Thread.currentThread() == capturingThread.get()) {
+                materializingSnapshot.countDown();
+                await(finishSnapshot);
+            }
+            return invocation.callRealMethod();
+        }).when(head).seqLen();
+
+        try {
+            assertTrue(runtime.offer(head));
+            await(delivery.firstPrepareEntered);
+            CompletableFuture<RouteProjection.Inputs> oldCapture =
+                    CompletableFuture.supplyAsync(() -> {
+                        capturingThread.set(Thread.currentThread());
+                        return runtime.captureRouteProjectionInputs();
+                    });
+            await(materializingSnapshot);
+            delivery.allowFirstPrepare.countDown();
+            await(delivery.firstCapacity.subscribed);
+            finishSnapshot.countDown();
+            assertNull(oldCapture.get(2, TimeUnit.SECONDS).queue().admissionBlock(),
+                    "the snapshot was taken before the block was published");
+            assertNotNull(runtime.captureRouteProjectionInputs().queue().admissionBlock(),
+                    "a late snapshot must not overwrite capacity-block invalidation");
+        } finally {
+            finishSnapshot.countDown();
+            delivery.allowFirstPrepare.countDown();
+            delivery.allowSecondPrepare.countDown();
+        }
     }
 
     @Test
@@ -229,9 +301,8 @@ class WorkerBatcherSchedulingTest {
         request.setRequestId(requestId);
         request.setPriority(priority);
         request.setSeqLen(10L);
-        BalanceContext context = new BalanceContext();
+        BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
-        context.setConfig(config);
         context.setSchedulingMetadata(
                 SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
         return new ScheduledRequest(
@@ -447,6 +518,8 @@ class WorkerBatcherSchedulingTest {
         private final CopyOnWriteArrayList<Runnable> listeners =
                 new CopyOnWriteArrayList<>();
         private final CountDownLatch subscribed = new CountDownLatch(1);
+        private final CountDownLatch removed = new CountDownLatch(1);
+        private volatile RuntimeException removeFailure;
 
         @Override
         public boolean isAvailable() {
@@ -462,6 +535,10 @@ class WorkerBatcherSchedulingTest {
         @Override
         public void removeListener(Runnable listener) {
             listeners.remove(listener);
+            removed.countDown();
+            if (removeFailure != null) {
+                throw removeFailure;
+            }
         }
 
         void release() {

@@ -35,6 +35,7 @@ import java.util.function.BiConsumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -108,6 +109,9 @@ class FlexlbServiceImplTest {
 
     @Test
     void testSchedule_localRouting() {
+        FlexlbConfig requestConfig = org.flexlb.mock.TestFlexlbConfigs.create();
+        when(configService.loadBalanceConfig()).thenReturn(requestConfig)
+                .thenThrow(new IllegalStateException("configuration must only be read once"));
         // Given: not master, no consistency needed
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
 
@@ -137,6 +141,10 @@ class FlexlbServiceImplTest {
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB resp = captor.getValue();
         assertTrue(resp.getSuccess());
         assertEquals(200, resp.getCode());
+        ArgumentCaptor<BalanceContext> contextCaptor = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService).route(contextCaptor.capture());
+        assertSame(requestConfig, contextCaptor.getValue().getConfig());
+        verify(configService).loadBalanceConfig();
         assertPvContains("\"scheduleOrigin\":\"LOCAL_STANDALONE\"");
         verify(serverLatencyRecorder).recordArrival(anyLong());
         verify(serverLatencyRecorder).recordCompletion(any(BalanceContext.class), anyLong());

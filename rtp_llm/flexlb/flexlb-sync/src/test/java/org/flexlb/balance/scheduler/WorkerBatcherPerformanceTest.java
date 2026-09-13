@@ -176,9 +176,8 @@ class WorkerBatcherPerformanceTest {
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
         request.setPriority(priority);
-        BalanceContext context = new BalanceContext();
+        BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
-        context.setConfig(config);
         context.setSchedulingMetadata(
                 SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
         return new ScheduledRequest(

@@ -106,15 +106,4 @@ public class WorkerHost {
         return new WorkerHost(ip, port);
     }
 
-    /**
-     * Create WorkerHost instance
-     *
-     * @param ip   Host IP address
-     * @param port Host port
-     * @param site Site information
-     * @return WorkerHost instance
-     */
-    public static WorkerHost of(String ip, int port, String site) {
-        return new WorkerHost(ip, port, site);
-    }
 }

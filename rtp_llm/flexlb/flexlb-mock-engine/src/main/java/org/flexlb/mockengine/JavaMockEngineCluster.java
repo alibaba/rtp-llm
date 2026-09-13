@@ -4740,7 +4740,6 @@ public final class JavaMockEngineCluster {
         void resetEnqueueCount() { this.enqueueCount.set(0); }
         void setStopped(boolean s) { this.stopped = s; }
         void setGrpcServer(Server server) { this.grpcServer = server; }
-        long getCrashEpoch() { return crashEpoch.get(); }
         boolean isStopped() { return stopped; }
         int getGrpcPort() { return grpcPort; }
         int getDownstreamOwnershipCount() { return downstreamDecodeOwners.size(); }
@@ -4762,18 +4761,12 @@ public final class JavaMockEngineCluster {
         /** Master-facing used tokens (occupied + pressure, clamped to total) —
          * the pool-derived caliber behind "active" everywhere. */
         long getActiveKvTokens() { return usedKvTokens(); }
-        /** Blocks currently pinned by in-flight leases (held + referenced). */
-        long getOccupiedKvTokens() { return occupiedKvTokens(); }
         /** Pool availability (free + pure-LRU) clamped to total, minus pressure. */
         long getAvailableKvTokens() { return availableKvTokens(); }
         /** Total pool blocks (ceil(totalKvTokens/spb) or explicit override). */
         int getCacheBlocks() { return cache.totalBlocks(); }
         /** spb — the pool's token<->block conversion factor (reported as block_size). */
         int getSeqSizePerBlock() { return seqSizePerBlock; }
-        /** Count of decode-side KV admission/growth failures — each a request
-         *  TERMINAL LACK_MEM (reservation rejects + admission failures + growth
-         *  failures; the un-pooled degradation era is retired). */
-        long getKvAdmissionFails() { return kvAdmissionFails.sum(); }
         boolean isLeakDetected() { return leakDetected.get(); }
         boolean isShuttingDown() { return shuttingDown; }
         int getActiveDecodeCount() { return activeDecodeRequests.get(); }
