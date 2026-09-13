@@ -16,6 +16,7 @@ import sys
 import types
 import unittest
 from typing import Any, Dict, Iterator, List, Optional
+from unittest import mock
 
 from rtp_llm.model_loader import weight_memory_saver as wms
 
@@ -373,7 +374,12 @@ class ExpandableCoexistenceTest(WeightMemorySaverTestBase):
         # Record enable/disable toggles instead of touching the real driver.
         self.toggles: List[bool] = []
         self._real_setter = wms._set_expandable_segments
-        wms._set_expandable_segments = lambda enabled: self.toggles.append(enabled)
+
+        def record_toggle(enabled: bool) -> None:
+            self.toggles.append(enabled)
+            wms._expandable_live = enabled
+
+        wms._set_expandable_segments = record_toggle
 
     def tearDown(self) -> None:
         wms._set_expandable_segments = self._real_setter
@@ -489,20 +495,18 @@ class InitSegmentSplitCapTest(WeightMemorySaverTestBase):
         self._inject_fake_tms()
         # Capture the composed config instead of calling the CUDA driver.
         self.applied: List[str] = []
-        self._real_apply = wms._apply_live_alloc_conf
-
-        def fake_apply(expandable: bool, split_cap: bool) -> None:
-            wms._capture_base_alloc_conf()
-            parts = [wms._expandable_base_conf] if wms._expandable_base_conf else []
-            parts.append(f"{wms._EXPANDABLE_KEY}:{'True' if expandable else 'False'}")
-            if split_cap:
-                parts.append(self._CAP)
-            self.applied.append(",".join(parts))
-
-        wms._apply_live_alloc_conf = fake_apply
+        # Exercise the actual composition and state transitions, not a test copy
+        # of the production config builder (which used to hide composition bugs).
+        fake_torch = types.SimpleNamespace(
+            _C=types.SimpleNamespace(
+                _accelerator_setAllocatorSettings=self.applied.append
+            )
+        )
+        self._torch_patch = mock.patch.dict(sys.modules, {"torch": fake_torch})
+        self._torch_patch.start()
 
     def tearDown(self) -> None:
-        wms._apply_live_alloc_conf = self._real_apply
+        self._torch_patch.stop()
         if self._saved_conf is None:
             os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
         else:
@@ -564,6 +568,87 @@ class InitSegmentSplitCapTest(WeightMemorySaverTestBase):
             self.applied[-1],
             "garbage_collection_threshold:0.9,expandable_segments:True",
         )
+
+    def test_large_segment_sizes_deferred_and_restored(self) -> None:
+        for size in (12, 16, 20, 64, 128, 256, 512, 1024, 2048, 4096):
+            with self.subTest(size=size):
+                wms._reset_for_testing()
+                self.applied.clear()
+                os.environ["PYTORCH_CUDA_ALLOC_CONF"] = (
+                    f"expandable_segments:True,large_segment_size_mb:{size},"
+                    "roundup_power2_divisions:[256:1,512:2,>:4]"
+                )
+                wms.prepare_expandable_coexistence()
+                wms.limit_init_segment_splitting()
+                self.assertTrue(wms._split_cap_live)
+                self.assertTrue(wms._expandable_requested)
+                for conf in self.applied:
+                    self.assertIn(f"large_segment_size_mb:{min(size, 20)},", conf)
+                    self.assertIn("expandable_segments:False", conf)
+                    self.assertIn("roundup_power2_divisions:[256:1,512:2,>:4]", conf)
+                self.assertIn(self._CAP, self.applied[-1])
+                wms.enable_runtime_expandable()
+                # BackendManager enables expandable before releasing the split
+                # cap; this intermediate config must also remain legal.
+                self.assertIn(
+                    f"large_segment_size_mb:{min(size, 20)},", self.applied[-1]
+                )
+                self.assertIn(self._CAP, self.applied[-1])
+                wms.release_init_segment_splitting()
+                runtime_conf = self.applied[-1]
+                self.assertIn(f"large_segment_size_mb:{size},", runtime_conf)
+                self.assertNotIn("max_split_size_mb", runtime_conf)
+                self.assertTrue(wms._expandable_live)
+                # Wake reload and nested weight regions must stay in the loading
+                # phase until the outer scope exits, even when an exception occurs.
+                with self.assertRaisesRegex(RuntimeError, "reload failed"):
+                    with wms.expandable_segments_disabled():
+                        loading_conf = self.applied[-1]
+                        self.assertIn(
+                            f"large_segment_size_mb:{min(size, 20)},", loading_conf
+                        )
+                        with wms.expandable_segments_disabled():
+                            self.assertFalse(wms._expandable_live)
+                        self.assertFalse(wms._expandable_live)
+                        self.assertEqual(self.applied[-1], loading_conf)
+                        raise RuntimeError("reload failed")
+                self.assertTrue(wms._expandable_live)
+                self.assertEqual(self.applied[-1], runtime_conf)
+
+    def test_user_split_cap_replaced_for_init_and_restored_for_runtime(self) -> None:
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = (
+            "max_split_size_mb:2048,expandable_segments:True,large_segment_size_mb:1024"
+        )
+        wms.prepare_expandable_coexistence()
+        wms.limit_init_segment_splitting()
+        self.assertEqual(self.applied[-1].count("max_split_size_mb:"), 1)
+        self.assertIn(self._CAP, self.applied[-1])
+        wms.enable_runtime_expandable()
+        wms.release_init_segment_splitting()
+        self.assertEqual(self.applied[-1].count("max_split_size_mb:"), 1)
+        self.assertIn("max_split_size_mb:2048", self.applied[-1])
+        self.assertIn("large_segment_size_mb:1024", self.applied[-1])
+
+    def test_large_segment_without_expandable_restored_after_init_cap(self) -> None:
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "large_segment_size_mb:512"
+        wms.limit_init_segment_splitting()
+        self.assertIn("large_segment_size_mb:20,", self.applied[-1])
+        self.assertIn(self._CAP, self.applied[-1])
+        wms.release_init_segment_splitting()
+        self.assertEqual(
+            self.applied[-1], "large_segment_size_mb:512,expandable_segments:False"
+        )
+
+    def test_large_segment_config_untouched_without_sleep(self) -> None:
+        os.environ[wms.ENV_SWITCH] = "0"
+        conf = "expandable_segments:True,large_segment_size_mb:1024"
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = conf
+        wms.prepare_expandable_coexistence()
+        wms.limit_init_segment_splitting()
+        wms.enable_runtime_expandable()
+        wms.release_init_segment_splitting()
+        self.assertEqual(self.applied, [])
+        self.assertEqual(os.environ["PYTORCH_CUDA_ALLOC_CONF"], conf)
 
 
 class CollectiveReleaseSwitchTest(WeightMemorySaverTestBase):

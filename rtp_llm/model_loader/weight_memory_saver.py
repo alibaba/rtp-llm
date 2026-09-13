@@ -126,6 +126,12 @@ _SPLIT_CAP_KEY: str = "max_split_size_mb"
 # enough to strand hundreds of MiB when a resident weight splits one.
 _INIT_SPLIT_CAP_MB: int = 256
 _split_cap_live: bool = False
+# A user-specified large segment size belongs to runtime allocations, not the
+# non-expandable weight-loading phase. Explicitly restore the native default
+# there: unlike max_split_size_mb, torch keeps large_segment_size_mb across
+# live-config writes that omit it. Never add this newer key unless requested.
+_LARGE_SEGMENT_KEY: str = "large_segment_size_mb"
+_INIT_LARGE_SEGMENT_MB: int = 20
 
 
 @contextmanager
@@ -359,12 +365,39 @@ def _capture_base_alloc_conf() -> None:
     )
 
 
+def _compose_live_alloc_conf(expandable: bool, split_cap: bool) -> str:
+    """Compose the allocation phase without overwriting the user's runtime config."""
+    _capture_base_alloc_conf()
+    loading = split_cap or (_expandable_requested and not expandable)
+    parts = []
+    for part in _expandable_base_conf.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        key, _, value = part.partition(":")
+        key = key.strip()
+        if split_cap and key == _SPLIT_CAP_KEY:
+            # Replace, rather than append a duplicate of, the user's runtime cap.
+            continue
+        if loading and key == _LARGE_SEGMENT_KEY:
+            # Keeping a 1 GiB segment size and raising the init split cap to match
+            # would defeat its purpose. Defer the large segments as well; retain
+            # a requested size below the native default instead of increasing it.
+            part = f"{key}:{min(int(value), _INIT_LARGE_SEGMENT_MB)}"
+        parts.append(part)
+    parts.append(f"{_EXPANDABLE_KEY}:{'True' if expandable else 'False'}")
+    if split_cap:
+        parts.append(f"{_SPLIT_CAP_KEY}:{_INIT_SPLIT_CAP_MB}")
+    return ",".join(parts)
+
+
 def _apply_live_alloc_conf(expandable: bool, split_cap: bool) -> None:
     """Push the composed caching-allocator config to the live allocator.
 
-    Both knobs we flip at runtime -- ``expandable_segments`` and the init-phase
-    ``max_split_size_mb`` cap -- share one setter that replaces the entire config,
-    so each call restates both plus the captured env base.
+    Restate expandable state, the init split cap and the captured user settings.
+    A requested large_segment_size_mb is deferred during loading: torch requires
+    max_split_size_mb >= large_segment_size_mb. It is restored for runtime,
+    including after a temporary non-expandable weight reload scope.
 
     Applies to future segments/allocations only; existing segments keep their
     nature. Prefers the current ``torch._C._accelerator_setAllocatorSettings`` and
@@ -372,12 +405,7 @@ def _apply_live_alloc_conf(expandable: bool, split_cap: bool) -> None:
     """
     import torch
 
-    _capture_base_alloc_conf()
-    parts = [_expandable_base_conf] if _expandable_base_conf else []
-    parts.append(f"{_EXPANDABLE_KEY}:{'True' if expandable else 'False'}")
-    if split_cap:
-        parts.append(f"{_SPLIT_CAP_KEY}:{_INIT_SPLIT_CAP_MB}")
-    full = ",".join(parts)
+    full = _compose_live_alloc_conf(expandable, split_cap)
     setter = getattr(torch._C, "_accelerator_setAllocatorSettings", None)
     if setter is not None:
         setter(full)
@@ -559,12 +587,13 @@ def limit_init_segment_splitting() -> None:
 
 
 def release_init_segment_splitting() -> None:
-    """Restore torch's default segment splitting once the engine is ready.
+    """Restore the user's runtime segment settings once the engine is ready.
 
     Pairs with :func:`limit_init_segment_splitting`; call after weights, KV arena
     and graph capture are done, alongside :func:`enable_runtime_expandable`. The
     cap applies to future allocations only, so the init-phase segments keep their
-    unsplit shape while runtime allocations go back to default behaviour.
+    unsplit shape while runtime allocations recover the requested segment size
+    and max_split_size_mb (or torch's default when no user cap was specified).
     """
     global _split_cap_live
     if not _split_cap_live:
@@ -582,7 +611,7 @@ def release_init_segment_splitting() -> None:
         return
     _split_cap_live = False
     logging.info(
-        "WeightMemorySaver: restored default max_split_size_mb for runtime "
+        "WeightMemorySaver: restored requested segment settings for runtime "
         "allocations (engine ready)"
     )
 
@@ -602,7 +631,7 @@ def expandable_segments_disabled() -> Iterator[None]:
     values are wrong -> garbage post-wake output). Forcing the whole wake weight
     path non-expandable matches the verified-correct expandable-off wake while
     leaving runtime forward buffers expandable for the fragmentation benefit."""
-    if not _expandable_active:
+    if not _expandable_active or not _expandable_live:
         yield
         return
     _set_expandable_segments(False)
