@@ -8,8 +8,6 @@ prefill communication, PD publication, Graph and DSpark remain separate work.
 from dataclasses import dataclass
 
 import torch
-from torch import nn
-
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.dsv41.attention import (
     AttentionOwnerCache,
@@ -32,9 +30,11 @@ from rtp_llm.models_py.modules.dsv41.compact_reader import (
 )
 from rtp_llm.models_py.modules.dsv41.compressor import PairCarry
 from rtp_llm.models_py.modules.dsv41.inputs import V41ModelRows
+from rtp_llm.models_py.modules.dsv41.linear import warmup_block32_linears
 from rtp_llm.models_py.modules.dsv41.moe import V41MoE
 from rtp_llm.models_py.modules.dsv41.transformer import V41ImageFeatures, V41TargetModel
 from rtp_llm.ops.compute_ops import KVCacheRegionName, PyModelOutputs
+from torch import nn
 
 _REGIONS = {
     CacheRegion.SWA: KVCacheRegionName.SWA_KV,
@@ -230,6 +230,7 @@ class DeepSeekV41Model(GptModelBase):
             tokenizer=tokenizer.get_real_tokenizer(),
             vision=vision,
         )
+        warmup_block32_linears(self.target, max_rows=max_tokens_per_rank)
 
     def initialize(self, init_resource):
         if init_resource.is_speculative:

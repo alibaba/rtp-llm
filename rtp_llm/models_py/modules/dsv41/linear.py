@@ -5,7 +5,9 @@ checkpoint's two-dimensional 32x32 weight scales remain exact FP32 values
 when supplied to DeepGEMM with its raw-scale recipe.
 """
 
+import logging
 import os
+from functools import partial
 
 import torch
 from torch import nn
@@ -127,3 +129,53 @@ class V41Block32Linear(nn.Module):
                 disable_ue8m0_cast=False,
             )
         return out
+
+
+@torch.inference_mode()
+def warmup_block32_linears(model: nn.Module, *, max_rows: int) -> None:
+    """Prepare each distinct V4.1 dense shape using its actual raw32 path."""
+    from rtp_llm.utils.warmup import model_warm_up_enabled
+
+    if not model_warm_up_enabled():
+        return
+    if type(max_rows) is not int or max_rows <= 0:
+        raise ValueError("V4.1 dense warmup requires a positive row budget")
+    if torch.cuda.is_current_stream_capturing():
+        raise RuntimeError("V4.1 dense warmup cannot run inside CUDA Graph capture")
+    from rtp_llm.models_py.modules.dsv4 import dsv4_kernel_jit_warmup as warmup
+
+    linears = {}
+    for module in model.modules():
+        if isinstance(module, V41Block32Linear):
+            key = (module.weight.device, module.out_features, module.in_features)
+            linears.setdefault(key, module)
+
+    def prepare():
+        for (device, n, k), linear in linears.items():
+            grid = warmup._generate_dense_gemm_warmup_m_grid(
+                max_m=max_rows,
+                n_value=n,
+                k_value=k,
+                kind="fp8",
+                num_sms=warmup._get_deep_gemm_num_sms(device),
+                uses_deepjit=True,
+            )
+            logging.info(
+                "[V41 Block32] startup dense n=%d k=%d max_rows=%d device=%s rows=%s",
+                n,
+                k,
+                max_rows,
+                device,
+                grid,
+            )
+            for rows in grid:
+                values = torch.ones((rows, k), dtype=torch.bfloat16, device=device)
+                warmup._run_deepgemm_warmup_launch_with_retry(
+                    "V41 Block32",
+                    f"n={n} k={k} rows={rows}",
+                    partial(linear, values),
+                    device=device,
+                )
+            torch.cuda.synchronize(device)
+
+    warmup._run_deepgemm_warmup_launches_serialized("V41 Block32", prepare)
