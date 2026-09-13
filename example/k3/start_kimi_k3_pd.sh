@@ -398,10 +398,6 @@ else
     [[ "${world_rank}" == "0" ]] \
         || die "${role} ${decode_topology} requires WORLD_RANK=0, got ${world_rank}"
 fi
-if [[ "${role}" == "DECODE" && "${ktp_size}" -gt 1 ]]; then
-    export RTP_MLA_DECODE_KERNEL="${RTP_MLA_DECODE_KERNEL:-tokenspeed_mla}"
-fi
-
 # ServerConfig allocates offsets 0..8 below each local rank's base and advances
 # the next rank by nine ports. Checking only START_PORT misses failures such as
 # an occupied cache_store_rdma_listen_port (rank * 9 + 4), after weights and
@@ -557,7 +553,6 @@ echo "  topology:        TP${tp_size}/DP${dp_size}/KTP${ktp_size}/EP${topology_e
 echo "  world rank:      ${world_rank} (local world ${local_world_size})"
 if [[ "${role}" == "DECODE" ]]; then
     echo "  decode topology: ${decode_topology}"
-    echo "  decode MLA:      ${RTP_MLA_DECODE_KERNEL:-default}"
 fi
 echo "  load method:     ${LOAD_METHOD}"
 echo "  DeepGEMM JIT:    ${deepgemm_jit_compiler}"
