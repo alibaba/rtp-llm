@@ -103,3 +103,19 @@ mock_heap: 32g
 `rtp_llm_context_wall_tps` / `_with_cache` 使用实际采样墙钟时间。
 `rtp_llm_generate_tps` 使用逐步生成 token 的增量，包括尚未结束的请求；
 `mock_generate_tokens_total` 仍专门统计已完成请求输出，供完成性验收使用。
+
+### Production timing calibration
+
+The bundle uses the DSv4 decode step fit `19.5 + 0.175 * running` ms with
+2.6 accepted tokens per step. It must not use the old fixed 20 ms / one-token
+smoke configuration for production traffic comparisons.
+
+Prefill execution follows `FLEXLB_CONFIG.router.roles.prefill.executionTimeEstimator`.
+An explicit constant expression such as `30` overrides the built-in DSv4 fit;
+production comparison deployments must supply the full calibrated expression.
+Changing this expression changes both routing estimates and mock execution time.
+
+`MOCK_EOS_CONFIG_JSON.mean_tokens` describes the geometric stopping model, not
+an observed mean: request limits, minimum length and ignore-EOS still apply.
+Calibrate it against completed output lengths, then size the cluster using the
+resulting lifetime. Do not tune reported TPS counters or truncate observations.

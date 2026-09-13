@@ -1,1 +1,14 @@
-{"block_size":1024,"sleep_scale":1,"jitter_pct":0,"prefill":{"scale":1},"decode":{"scale":1,"tokens_per_step":1,"step_ms_by_batch":[[1,20]]}}
+{
+  "block_size": 1024,
+  "sleep_scale": 1,
+  "jitter_pct": 0,
+  "prefill": {
+    "scale": 1
+  },
+  "decode": {
+    "scale": 1,
+    "tokens_per_step": 2.6,
+    "step_base_ms": 19.5,
+    "step_per_running_ms": 0.175
+  }
+}
