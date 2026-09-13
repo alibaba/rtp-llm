@@ -4,13 +4,13 @@
 #include <thread>
 #include <atomic>
 #include <algorithm>
-#include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 
 namespace rtp_llm {
 namespace test {
 
-class KVCacheGroupTest: public ::testing::Test {
+class SingleTypeCacheManagerTest: public ::testing::Test {
 protected:
     void SetUp() override {}
 

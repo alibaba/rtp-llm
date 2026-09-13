@@ -58,7 +58,7 @@ protected:
         mock_coord_ = std::make_shared<NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
                                                                                   cache_manager_->kv_cache_config_,
                                                                                   cache_manager_->runtime_config_,
-                                                                                  cache_manager_->allocator_,
+                                                                                  cache_manager_->coordinator_manager_,
                                                                                   nullptr);
         ON_CALL(*mock_coord_, hasActiveConnectors()).WillByDefault(Return(true));
         cache_manager_->coordinator_ = mock_coord_;

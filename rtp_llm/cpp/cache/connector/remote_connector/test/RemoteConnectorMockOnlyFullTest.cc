@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
@@ -117,8 +117,8 @@ private:
             EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
                 .WillOnce(Invoke(
                     [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
-            auto allocator = std::make_shared<KVCacheAllocator>(cache_config_);
-            ASSERT_TRUE(allocator->init());
+            auto coordinator_manager = std::make_shared<CoordinatorCacheManager>(cache_config_);
+            ASSERT_TRUE(coordinator_manager->init());
             remote_connectors_.push_back(std::make_shared<RemoteConnector>(cache_config_,
                                                                            kv_cache_config_,
                                                                            runtime_config_,
@@ -126,7 +126,7 @@ private:
                                                                            sp_config_,
                                                                            nullptr,
                                                                            0,
-                                                                           allocator));
+                                                                           coordinator_manager));
             ASSERT_TRUE(remote_connectors_[i]->init());
             servers_[i]->set_remote_connector(remote_connectors_[i]);
         }

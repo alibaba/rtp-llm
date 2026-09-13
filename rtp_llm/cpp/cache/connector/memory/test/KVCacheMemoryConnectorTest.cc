@@ -23,7 +23,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/memory/test/mock/TestRpcService.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
@@ -289,14 +289,14 @@ protected:
         createDevice();
 
         cache_config_ = createMockCacheConfig();
-        allocator_    = std::make_shared<KVCacheAllocator>(cache_config_, AllocationType::DEVICE);
-        ASSERT_TRUE(allocator_->init());
+        coordinator_manager_ = std::make_shared<CoordinatorCacheManager>(cache_config_, AllocationType::DEVICE);
+        ASSERT_TRUE(coordinator_manager_->init());
 
         const int server_num = 4;
         startRpcServer(server_num);
 
-        connector_ =
-            std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
+        connector_ = std::make_shared<KVCacheMemoryConnector>(
+            cache_config_, kv_cache_config_, coordinator_manager_, server_addrs_);
         ASSERT_TRUE(connector_->init());
     }
 
@@ -304,7 +304,7 @@ protected:
 
     CacheConfig                                 cache_config_;
     KVCacheConfig                               kv_cache_config_;
-    std::shared_ptr<KVCacheAllocator>           allocator_;
+    std::shared_ptr<CoordinatorCacheManager>    coordinator_manager_;
     std::shared_ptr<KVCacheMemoryConnector>     connector_;
     std::vector<std::unique_ptr<TestRpcServer>> servers_;
     std::vector<std::string>                    server_addrs_;
@@ -450,7 +450,8 @@ private:
             if (isNullBlockIdx(layer_block.block_id)) {
                 continue;
             }
-            const auto gpu_bufs = allocator_->convertIndexToBuffer(layer_block.layer_id, layer_block.block_id);
+            const auto gpu_bufs =
+                coordinator_manager_->convertIndexToBuffer(layer_block.layer_id, layer_block.block_id);
             ASSERT_GT(sumBlockInfosBytes(gpu_bufs), 0u);
             verifyBlockInfosContent(gpu_bufs, static_cast<char>('k' + layer_block.layer_id));
         }
@@ -482,7 +483,7 @@ private:
                 byte_off += layer_stride;
                 continue;
             }
-            const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), block_id);
+            const auto gpu_bufs = coordinator_manager_->convertIndexToBuffer(static_cast<int>(layer), block_id);
             const auto bytes    = sumBlockInfosBytes(gpu_bufs);
             ASSERT_GT(bytes, 0u);
             ASSERT_LE(bytes, layer_stride);
@@ -520,7 +521,7 @@ private:
             if (isNullBlockIdx(block_id)) {
                 continue;
             }
-            const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), block_id);
+            const auto gpu_bufs = coordinator_manager_->convertIndexToBuffer(static_cast<int>(layer), block_id);
             const auto bytes    = sumBlockInfosBytes(gpu_bufs);
             ASSERT_GT(bytes, 0u);
             ASSERT_LE(bytes, cache_config_.layerBlockStrideBytes(layer));
@@ -554,7 +555,7 @@ private:
                     byte_off += layer_stride;
                     continue;
                 }
-                const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), block_id);
+                const auto gpu_bufs = coordinator_manager_->convertIndexToBuffer(static_cast<int>(layer), block_id);
                 const auto bytes    = sumBlockInfosBytes(gpu_bufs);
                 ASSERT_GT(bytes, 0u);
                 ASSERT_LE(bytes, layer_stride);
@@ -757,7 +758,8 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_NoWorkerAddrs) {
     // 构造空的 worker 地址，BroadcastManager::init() 会失败；业务代码使用 RTP_LLM_CHECK，
     // 因此这里期望抛出 std::runtime_error。
     std::vector<std::string> empty_addrs;
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, empty_addrs);
+    auto                     conn =
+        std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, coordinator_manager_, empty_addrs);
     EXPECT_THROW(conn->init(), std::runtime_error);
 }
 
@@ -766,7 +768,7 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSizeMbZero) {
     kv_cfg.memory_cache_size_mb         = 0;
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, coordinator_manager_, server_addrs_);
     EXPECT_THROW(conn->init(), std::runtime_error);
     // Init fails early, nothing should be created.
     EXPECT_EQ(conn->block_cache_, nullptr);
@@ -779,7 +781,7 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSyncTimeoutMs
     kv_cfg.memory_cache_size_mb         = 64;
     kv_cfg.memory_cache_sync_timeout_ms = 0;
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, coordinator_manager_, server_addrs_);
     EXPECT_THROW(conn->init(), std::runtime_error);
     // Init fails early, nothing should be created.
     EXPECT_EQ(conn->block_cache_, nullptr);
@@ -795,7 +797,7 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenBlockSizeBytesZero) {
     kv_cfg.memory_cache_size_mb         = 64;
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, coordinator_manager_, server_addrs_);
     EXPECT_THROW(conn->init(), std::runtime_error);
 }
 
@@ -808,13 +810,14 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenPoolTooSmallForBlockSize
     kv_cfg.memory_cache_size_mb         = 1;     // 1MB
     kv_cfg.memory_cache_sync_timeout_ms = 1000;  // valid
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, coordinator_manager_, server_addrs_);
     EXPECT_THROW(conn->init(), std::runtime_error);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnTrue_WithWorkerAddrs) {
     // 使用有效的 worker 地址，init 应成功并正确设置 manager
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
+    auto conn =
+        std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, coordinator_manager_, server_addrs_);
     auto ok   = conn->init();
     EXPECT_TRUE(ok);
     ASSERT_NE(conn->block_cache_, nullptr);
@@ -834,7 +837,7 @@ TEST_F(KVCacheMemoryConnectorTest, initDiskBlockPool_UsesLocalRankPathAndPreallo
                                                          makeParallelismConfig(/*local_rank=*/1,
                                                                                /*local_world_size=*/2,
                                                                                /*world_rank=*/5),
-                                                         allocator_,
+                                                         coordinator_manager_,
                                                          server_addrs_,
                                                          nullptr);
     ASSERT_TRUE(conn->init());
@@ -854,20 +857,20 @@ TEST_F(KVCacheMemoryConnectorTest, initDiskBlockPool_RejectsInvalidDiskConfig) {
         auto kv_cfg                = makeDiskKvConfig({disk0.path()});
         kv_cfg.enable_memory_cache = false;
         auto conn                  = std::make_shared<KVCacheMemoryConnector>(
-            cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+            cache_config_, kv_cfg, makeParallelismConfig(), coordinator_manager_, server_addrs_, nullptr);
         EXPECT_THROW(conn->init(), std::runtime_error);
     }
     {
         auto kv_cfg                       = makeDiskKvConfig({disk0.path()});
         kv_cfg.enable_tiered_memory_cache = true;
         auto conn                         = std::make_shared<KVCacheMemoryConnector>(
-            cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+            cache_config_, kv_cfg, makeParallelismConfig(), coordinator_manager_, server_addrs_, nullptr);
         EXPECT_THROW(conn->init(), std::runtime_error);
     }
     {
         auto kv_cfg = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/0);
         auto conn   = std::make_shared<KVCacheMemoryConnector>(
-            cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+            cache_config_, kv_cfg, makeParallelismConfig(), coordinator_manager_, server_addrs_, nullptr);
         EXPECT_THROW(conn->init(), std::runtime_error);
     }
     {
@@ -877,7 +880,7 @@ TEST_F(KVCacheMemoryConnectorTest, initDiskBlockPool_RejectsInvalidDiskConfig) {
                                                              makeParallelismConfig(/*local_rank=*/0,
                                                                                    /*local_world_size=*/2,
                                                                                    /*world_rank=*/0),
-                                                             allocator_,
+                                                             coordinator_manager_,
                                                              server_addrs_,
                                                              nullptr);
         EXPECT_THROW(conn->init(), std::runtime_error);
@@ -889,7 +892,7 @@ TEST_F(KVCacheMemoryConnectorTest, initDiskBlockPool_RejectsInvalidDiskConfig) {
                                                              makeParallelismConfig(/*local_rank=*/1,
                                                                                    /*local_world_size=*/1,
                                                                                    /*world_rank=*/1),
-                                                             allocator_,
+                                                             coordinator_manager_,
                                                              server_addrs_,
                                                              nullptr);
         EXPECT_THROW(conn->init(), std::runtime_error);
@@ -902,7 +905,7 @@ TEST_F(KVCacheMemoryConnectorTest, allocateOneBacking_FallsBackToDiskWhenMemoryP
 
     auto kv_cfg = makeDiskKvConfig({disk0.path()});
     auto conn   = std::make_shared<KVCacheMemoryConnector>(
-        cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+        cache_config_, kv_cfg, makeParallelismConfig(), coordinator_manager_, server_addrs_, nullptr);
     ASSERT_TRUE(conn->init());
     ASSERT_NE(conn->block_pool_, nullptr);
     ASSERT_NE(conn->complete_disk_pool_, nullptr);
@@ -931,7 +934,7 @@ TEST_F(KVCacheMemoryConnectorTest, putToCache_DiskBackingTransfersRequestRefToCa
 
     auto kv_cfg = makeDiskKvConfig({disk0.path()});
     auto conn   = std::make_shared<KVCacheMemoryConnector>(
-        cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+        cache_config_, kv_cfg, makeParallelismConfig(), coordinator_manager_, server_addrs_, nullptr);
     ASSERT_TRUE(conn->init());
 
     const auto free_memory_blocks = conn->block_pool_->freeBlocksNum();
@@ -964,7 +967,7 @@ TEST_F(KVCacheMemoryConnectorTest, putToCache_DuplicateDiskItemRollsBackCacheRef
 
     auto kv_cfg = makeDiskKvConfig({disk0.path()});
     auto conn   = std::make_shared<KVCacheMemoryConnector>(
-        cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+        cache_config_, kv_cfg, makeParallelismConfig(), coordinator_manager_, server_addrs_, nullptr);
     ASSERT_TRUE(conn->init());
     ASSERT_GT(conn->complete_disk_pool_->totalSlots(), 1u);
 
@@ -1021,7 +1024,7 @@ TEST_F(KVCacheMemoryConnectorTest, validateCopyItemBacking_AcceptsUnsetDiskSlotF
     DiskTempDir disk0;
     auto        kv_cfg    = makeDiskKvConfig({disk0.path()});
     auto        disk_conn = std::make_shared<KVCacheMemoryConnector>(
-        cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+        cache_config_, kv_cfg, makeParallelismConfig(), coordinator_manager_, server_addrs_, nullptr);
     ASSERT_TRUE(disk_conn->init());
     EXPECT_TRUE(disk_conn->validateCopyItemBacking(disk_item));
 
@@ -1044,7 +1047,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero
     kv_cfg.memory_cache_size_mb         = 0;
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, coordinator_manager_, server_addrs_);
     EXPECT_THROW(conn->initBlockPool(), std::runtime_error);
 }
 
@@ -1056,7 +1059,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenBlockSizeBytesZero) {
     kv_cfg.memory_cache_size_mb         = 64;
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, coordinator_manager_, server_addrs_);
     EXPECT_THROW(conn->initBlockPool(), std::runtime_error);
 }
 
@@ -1070,7 +1073,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenCreateBlockPoolFails)
     kv_cfg.memory_cache_size_mb         = 1;     // 1MB
     kv_cfg.memory_cache_sync_timeout_ms = 1000;  // not used by initBlockPool but keep valid
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, coordinator_manager_, server_addrs_);
     EXPECT_THROW(conn->initBlockPool(), std::runtime_error);
 }
 
@@ -1079,7 +1082,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_ReturnTrue_AndRegistersPool) {
     kv_cfg.memory_cache_size_mb         = 64;
     kv_cfg.memory_cache_sync_timeout_ms = 1000;  // not used by initBlockPool but keep valid
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, coordinator_manager_, server_addrs_);
     EXPECT_NO_THROW(conn->initBlockPool());
     auto pool = conn->block_pool_;
     ASSERT_NE(pool, nullptr);
@@ -1092,7 +1095,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_PrefixPoolsDefaultKeepEqualKeyC
     kv_cfg.memory_cache_sync_timeout_ms    = 1000;
     kv_cfg.enable_prefix_tree_memory_cache = true;
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, coordinator_manager_, server_addrs_);
     ASSERT_NO_THROW(conn->initBlockPool());
     ASSERT_TRUE(conn->usePrefixTreeMemoryCache());
     ASSERT_NE(conn->compressed_pool_, nullptr);
@@ -1108,7 +1111,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_PrefixPoolRatioChangesStateCapa
     kv_cfg.enable_prefix_tree_memory_cache         = true;
     kv_cfg.prefix_tree_memory_state_swa_pool_ratio = 25;
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, coordinator_manager_, server_addrs_);
     ASSERT_NO_THROW(conn->initBlockPool());
     ASSERT_TRUE(conn->usePrefixTreeMemoryCache());
     ASSERT_NE(conn->compressed_pool_, nullptr);
@@ -1128,7 +1131,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_PrefixPoolRejectsRatioWithNoUsa
     kv_cfg.enable_prefix_tree_memory_cache         = true;
     kv_cfg.prefix_tree_memory_state_swa_pool_ratio = 99;
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, coordinator_manager_, server_addrs_);
     EXPECT_ANY_THROW(conn->initBlockPool());
 }
 
@@ -1139,7 +1142,7 @@ TEST_F(KVCacheMemoryConnectorTest, initDiskBlockPool_PrefixTreeCreatesTypedDiskP
     kv_cfg.enable_prefix_tree_memory_cache = true;
 
     auto conn = std::make_shared<KVCacheMemoryConnector>(
-        cfg, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+        cfg, kv_cfg, makeParallelismConfig(), coordinator_manager_, server_addrs_, nullptr);
     ASSERT_TRUE(conn->init());
     ASSERT_TRUE(conn->usePrefixTreeMemoryCache());
     ASSERT_NE(conn->diskPoolFor(CacheBlockKind::COMPRESSED_KV), nullptr);
@@ -1154,7 +1157,7 @@ TEST_F(KVCacheMemoryConnectorTest, allocateOnePrefixBacking_FallsBackToDiskWhenM
     kv_cfg.enable_prefix_tree_memory_cache = true;
 
     auto conn = std::make_shared<KVCacheMemoryConnector>(
-        cfg, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+        cfg, kv_cfg, makeParallelismConfig(), coordinator_manager_, server_addrs_, nullptr);
     ASSERT_TRUE(conn->init());
     ASSERT_TRUE(conn->usePrefixTreeMemoryCache());
 
@@ -1180,7 +1183,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyPlanTimeoutMs_UsesDiskTimeoutForDiskSourc
     kv_cfg.memory_cache_sync_timeout_ms      = 10;
     kv_cfg.memory_cache_disk_sync_timeout_ms = 1234;
 
-    auto conn       = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, coordinator_manager_, server_addrs_);
     auto plan       = std::make_shared<KVCacheMemoryConnector::CopyPlan>();
     plan->direction = KVCacheMemoryConnector::CopyDirection::D2H;
     KVCacheMemoryConnector::CopyInfoPerKey copy_info;
@@ -1201,7 +1204,7 @@ TEST_F(KVCacheMemoryConnectorTest, mergePrefixExistingSlots_SupportsMixedMemoryA
     kv_cfg.memory_cache_disk_buffered_io   = false;
 
     auto conn = std::make_shared<KVCacheMemoryConnector>(
-        cfg, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+        cfg, kv_cfg, makeParallelismConfig(), coordinator_manager_, server_addrs_, nullptr);
     ASSERT_TRUE(conn->init());
     auto slots = conn->layerTagSlots();
 
@@ -1333,7 +1336,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForRead_HandlesDiskPartial
     kv_cfg.enable_prefix_tree_memory_cache = true;
 
     auto conn = std::make_shared<KVCacheMemoryConnector>(
-        cfg, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+        cfg, kv_cfg, makeParallelismConfig(), coordinator_manager_, server_addrs_, nullptr);
     ASSERT_TRUE(conn->init());
     auto slots = conn->layerTagSlots();
 
@@ -1495,7 +1498,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForWrite_ProtectsPartialMe
     kv_cfg.enable_prefix_tree_memory_cache = true;
     kv_cfg.enable_memory_cache_disk        = false;
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, coordinator_manager_, server_addrs_);
     ASSERT_TRUE(conn->init());
     auto slots = conn->layerTagSlots();
     ASSERT_NE(conn->state_swa_pool_, nullptr);
@@ -1608,7 +1611,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForWrite_ProtectsDiskParti
     kv_cfg.enable_memory_cache_disk        = true;
 
     auto conn = std::make_shared<KVCacheMemoryConnector>(
-        cfg, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+        cfg, kv_cfg, makeParallelismConfig(), coordinator_manager_, server_addrs_, nullptr);
     ASSERT_TRUE(conn->init());
     auto slots = conn->layerTagSlots();
     ASSERT_NE(conn->state_swa_pool_, nullptr);
@@ -1726,7 +1729,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatchPrefixStopsWhenRequiredStateSwaMiss
     kv_cfg.enable_prefix_tree_memory_cache = true;
     kv_cfg.enable_memory_cache_disk        = false;
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, coordinator_manager_, server_addrs_);
     ASSERT_TRUE(conn->init());
     ASSERT_TRUE(conn->usePrefixTreeMemoryCache());
     auto slots = conn->layerTagSlots();
@@ -1803,7 +1806,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
-    auto conn          = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    auto conn          = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, coordinator_manager_, server_addrs_);
     conn->block_cache_ = std::make_shared<MemoryDiskBlockCache>();
     ASSERT_NO_THROW(conn->initBlockPool());
 
@@ -1846,7 +1849,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_SkipsHCAStateSlots) {
     kv_cfg.memory_cache_sync_timeout_ms    = 1000;
     kv_cfg.enable_prefix_tree_memory_cache = false;
 
-    auto conn          = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    auto conn          = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, coordinator_manager_, server_addrs_);
     conn->block_cache_ = std::make_shared<MemoryDiskBlockCache>();
     ASSERT_NO_THROW(conn->initBlockPool());
 
@@ -2797,7 +2800,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenThreadPoolFull) {
     auto                                   res = makeCacheResource(cache_keys, lbs_vec);
 
     // Pre-insert one key so cpu_matched_num < cache_keys.size() and it reaches the thread-pool-full check.
-    const auto   bufs  = allocator_->convertIndexToBuffer(layer0, /*block_id=*/1);
+    const auto   bufs  = coordinator_manager_->convertIndexToBuffer(layer0, /*block_id=*/1);
     const size_t total = sumBlockInfosBytes(bufs);
     ASSERT_GT(total, 0u);
     ASSERT_NE(ensureBlockPool(total), nullptr);
@@ -2829,7 +2832,7 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_WhenNoWorkers_NoOp
 TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_AllRanksSuccess) {
     const int    layer_id      = 0;
     const int    gpu_block_idx = 2;
-    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, gpu_block_idx);
+    const auto   gpu_bufs      = coordinator_manager_->convertIndexToBuffer(layer_id, gpu_block_idx);
     const size_t total         = sumBlockInfosBytes(gpu_bufs);
     ASSERT_GT(total, 0u);
 
@@ -2873,7 +2876,7 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_PartialRanksFail) 
 
     const int    layer_id      = 0;
     const int    gpu_block_idx = 2;
-    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, gpu_block_idx);
+    const auto   gpu_bufs      = coordinator_manager_->convertIndexToBuffer(layer_id, gpu_block_idx);
     const size_t total         = sumBlockInfosBytes(gpu_bufs);
     ASSERT_GT(total, 0u);
 
@@ -2930,7 +2933,7 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_RpcStatusError) {
 
     const int    layer_id      = 0;
     const int    gpu_block_idx = 2;
-    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, gpu_block_idx);
+    const auto   gpu_bufs      = coordinator_manager_->convertIndexToBuffer(layer_id, gpu_block_idx);
     const size_t total         = sumBlockInfosBytes(gpu_bufs);
     ASSERT_GT(total, 0u);
 
@@ -2993,7 +2996,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_CountMismatch) {
 TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidMemBlock) {
     const int    layer_id      = 0;
     const int    gpu_block_idx = 1;
-    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, gpu_block_idx);
+    const auto   gpu_bufs      = coordinator_manager_->convertIndexToBuffer(layer_id, gpu_block_idx);
     const size_t total         = sumBlockInfosBytes(gpu_bufs);
     ASSERT_GT(total, 0u);
 
@@ -3012,7 +3015,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidMemBlock) {
 TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidLayerId_BuildCopyPlanFailed) {
     const int    valid_layer   = 0;
     const int    gpu_block_idx = 1;
-    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(valid_layer, gpu_block_idx);
+    const auto   gpu_bufs      = coordinator_manager_->convertIndexToBuffer(valid_layer, gpu_block_idx);
     const size_t total         = sumBlockInfosBytes(gpu_bufs);
     ASSERT_GT(total, 0u);
 
@@ -3042,7 +3045,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidLayerId_BuildCop
 TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SingleLayer) {
     const int    layer_id      = 0;
     const int    gpu_block_idx = 2;
-    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, gpu_block_idx);
+    const auto   gpu_bufs      = coordinator_manager_->convertIndexToBuffer(layer_id, gpu_block_idx);
     const size_t total         = sumBlockInfosBytes(gpu_bufs);
     ASSERT_GT(total, 0u);
 
@@ -3132,9 +3135,10 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
         + 256;
     kv_cache_config_.memory_cache_size_mb = std::max(pool_mb, 512);
 
-    allocator_ = std::make_shared<KVCacheAllocator>(cache_config_, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator_->init());
-    connector_ = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
+    coordinator_manager_ = std::make_shared<CoordinatorCacheManager>(cache_config_, AllocationType::DEVICE);
+    ASSERT_TRUE(coordinator_manager_->init());
+    connector_ =
+        std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, coordinator_manager_, server_addrs_);
     ASSERT_TRUE(connector_->init());
 
     auto pool = ensureBlockPool(merged_one_key);
@@ -3168,7 +3172,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     for (int i = 0; i < kCopyBlockCount; ++i) {
         const char tag = static_cast<char>(0x21 + (i % 94));
         for (int l = 0; l < kLayerNum; ++l) {
-            const auto gpu_bufs = allocator_->convertIndexToBuffer(l, kGpuBlockBase + i);
+            const auto gpu_bufs = coordinator_manager_->convertIndexToBuffer(l, kGpuBlockBase + i);
             ASSERT_GE(gpu_bufs.size(), 2u);
             verifyBlockInfosContent(gpu_bufs, tag);
         }
@@ -3216,7 +3220,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_MultiLayer) {
 TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_D2H_SingleLayer) {
     const int    layer_id      = 0;
     const int    gpu_block_idx = 3;
-    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, gpu_block_idx);
+    const auto   gpu_bufs      = coordinator_manager_->convertIndexToBuffer(layer_id, gpu_block_idx);
     const size_t total         = sumBlockInfosBytes(gpu_bufs);
     ASSERT_GT(total, 0u);
 
@@ -3301,7 +3305,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
 
     // Fill GPU source with distinct byte patterns.
     for (const auto& lb : gpu_layer_blocks) {
-        const auto gpu_bufs = allocator_->convertIndexToBuffer(lb.layer_id, lb.block_id);
+        const auto gpu_bufs = coordinator_manager_->convertIndexToBuffer(lb.layer_id, lb.block_id);
         ASSERT_GT(sumBlockInfosBytes(gpu_bufs), 0u);
         setBlockInfosContent(gpu_bufs, static_cast<char>('k' + lb.layer_id));
     }
@@ -3349,7 +3353,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
             byte_off += layer_stride;
             continue;
         }
-        const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), block_id);
+        const auto gpu_bufs = coordinator_manager_->convertIndexToBuffer(static_cast<int>(layer), block_id);
         const auto bytes    = sumBlockInfosBytes(gpu_bufs);
         ASSERT_GT(bytes, 0u);
         ASSERT_LE(bytes, layer_stride);
@@ -3417,7 +3421,8 @@ protected:
     }
 
     std::shared_ptr<KVCacheMemoryConnector> createConnector(const CacheConfig& cfg) {
-        auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cache_config_, allocator_, server_addrs_);
+        auto conn =
+            std::make_shared<KVCacheMemoryConnector>(cfg, kv_cache_config_, coordinator_manager_, server_addrs_);
         EXPECT_TRUE(conn->init());
         return conn;
     }
@@ -3436,7 +3441,7 @@ protected:
 
     std::shared_ptr<KVCacheMemoryConnector> createConnectorWithKvConfig(const CacheConfig&   cfg,
                                                                         const KVCacheConfig& kv_cfg) {
-        auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+        auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, coordinator_manager_, server_addrs_);
         EXPECT_TRUE(conn->init());
         return conn;
     }
@@ -3496,7 +3501,7 @@ protected:
     }
 
     KVCacheConfig                               kv_cache_config_;
-    std::shared_ptr<KVCacheAllocator>           allocator_;
+    std::shared_ptr<CoordinatorCacheManager>    coordinator_manager_;
     std::vector<std::unique_ptr<TestRpcServer>> servers_;
     std::vector<std::string>                    server_addrs_;
 
@@ -3520,8 +3525,8 @@ private:
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_CreatesDualPools) {
     auto cfg   = createHybridCacheConfig();
-    allocator_ = std::make_shared<KVCacheAllocator>(cfg, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator_->init());
+    coordinator_manager_ = std::make_shared<CoordinatorCacheManager>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(coordinator_manager_->init());
     auto conn = createConnector(cfg);
 
     EXPECT_TRUE(conn->isDualPool());
@@ -3546,8 +3551,8 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_PureFullUsesSinglePool) {
                                            /*local_head_num_kv=*/8,
                                            /*size_per_head=*/128);
 
-    allocator_ = std::make_shared<KVCacheAllocator>(config, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator_->init());
+    coordinator_manager_ = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(coordinator_manager_->init());
     auto conn = createConnector(config);
 
     EXPECT_FALSE(conn->isDualPool());
@@ -3559,8 +3564,8 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_PureFullUsesSinglePool) {
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatch_AdvancesOnlyOnCompleteHit) {
     auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
-    allocator_ = std::make_shared<KVCacheAllocator>(cfg, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator_->init());
+    coordinator_manager_ = std::make_shared<CoordinatorCacheManager>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(coordinator_manager_->init());
     auto conn = createConnector(cfg);
     ASSERT_TRUE(conn->isDualPool());
 
@@ -3622,8 +3627,8 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatch_AdvancesOnlyOnCompleteHit)
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatch_StopsOnDoubleMiss) {
     auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
-    allocator_ = std::make_shared<KVCacheAllocator>(cfg, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator_->init());
+    coordinator_manager_ = std::make_shared<CoordinatorCacheManager>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(coordinator_manager_->init());
     auto conn = createConnector(cfg);
     ASSERT_TRUE(conn->isDualPool());
 
@@ -3662,8 +3667,8 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatch_StopsOnDoubleMiss) {
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, PoolSizing_JointCalculation) {
     auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
-    allocator_ = std::make_shared<KVCacheAllocator>(cfg, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator_->init());
+    coordinator_manager_ = std::make_shared<CoordinatorCacheManager>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(coordinator_manager_->init());
     auto conn = createConnector(cfg);
     ASSERT_TRUE(conn->isDualPool());
 
@@ -3679,8 +3684,8 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, PoolSizing_JointCalculation) {
 TEST_F(KVCacheMemoryConnectorDualPoolTest, InitDiskDualPools_MirrorsMemoryPoolRatioOnSameMount) {
     DiskTempDir disk0;
     auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
-    allocator_ = std::make_shared<KVCacheAllocator>(cfg, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator_->init());
+    coordinator_manager_ = std::make_shared<CoordinatorCacheManager>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(coordinator_manager_->init());
 
     auto kv_cfg = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/1);
     auto conn   = createConnectorWithKvConfig(cfg, kv_cfg);
@@ -3703,8 +3708,8 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, InitDiskDualPools_MirrorsMemoryPoolRa
 TEST_F(KVCacheMemoryConnectorDualPoolTest, AllocateOneBackingUsesMatchingDiskPoolWhenMemoryKindIsFull) {
     DiskTempDir disk0;
     auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
-    allocator_ = std::make_shared<KVCacheAllocator>(cfg, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator_->init());
+    coordinator_manager_ = std::make_shared<CoordinatorCacheManager>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(coordinator_manager_->init());
 
     auto kv_cfg = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/1);
     auto conn   = createConnectorWithKvConfig(cfg, kv_cfg);
@@ -3742,8 +3747,8 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, AllocateOneBackingUsesMatchingDiskPoo
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, BuildCopyPlanForWrite_SkipsIncompleteWhenIncompletePoolDisabled) {
     auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/1);
-    allocator_ = std::make_shared<KVCacheAllocator>(cfg, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator_->init());
+    coordinator_manager_ = std::make_shared<CoordinatorCacheManager>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(coordinator_manager_->init());
     auto conn = createConnector(cfg);
     ASSERT_TRUE(conn->isDualPool());
     ASSERT_NE(conn->complete_pool_, nullptr);
@@ -3769,8 +3774,8 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, BuildCopyPlanForWrite_SkipsIncomplete
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, CacheKeys_MergesBothCaches) {
     auto cfg   = createHybridCacheConfig(/*layer_num=*/2);
-    allocator_ = std::make_shared<KVCacheAllocator>(cfg, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator_->init());
+    coordinator_manager_ = std::make_shared<CoordinatorCacheManager>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(coordinator_manager_->init());
     auto conn = createConnector(cfg);
     ASSERT_TRUE(conn->isDualPool());
 
@@ -3812,8 +3817,8 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_IncompletePoolTracksCompletePool
     const int spb         = 8;
 
     auto cfg   = createHybridCacheConfig(layer_num, block_num, spb, linear_step);
-    allocator_ = std::make_shared<KVCacheAllocator>(cfg, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator_->init());
+    coordinator_manager_ = std::make_shared<CoordinatorCacheManager>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(coordinator_manager_->init());
     auto conn = createConnector(cfg);
     ASSERT_TRUE(conn->isDualPool());
 

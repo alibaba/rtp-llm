@@ -12,7 +12,7 @@
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
@@ -44,7 +44,7 @@ public:
     // 初始化和配置相关
     bool init();
     bool initialized() const {
-        return allocator_ != nullptr;
+        return coordinator_manager_ != nullptr;
     }
 
     const CacheConfig& cacheConfig() const;
@@ -167,7 +167,7 @@ private:
 
     // 成员变量
     CacheConfig         config_;
-    KVCacheAllocatorPtr allocator_;
+    CoordinatorCacheManagerPtr coordinator_manager_;
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const KVCacheConfig                kv_cache_config_;

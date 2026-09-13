@@ -90,7 +90,7 @@ cc_test_wrapper(
     deps = [
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache:cache_config",
-        "//rtp_llm/cpp/cache:kv_cache_allocator",
+        "//rtp_llm/cpp/cache:coordinator_cache_manager",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
         "@com_google_googletest//:gtest",

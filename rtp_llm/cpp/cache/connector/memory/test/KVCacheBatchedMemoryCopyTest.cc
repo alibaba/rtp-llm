@@ -14,7 +14,7 @@
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
@@ -334,12 +334,12 @@ void verifyBlockInfosContent(const std::vector<BlockInfo>& infos, char c) {
     }
 }
 
-class FakeTypedKVCacheAllocator: public KVCacheAllocator {
+class FakeTypedCoordinatorCacheManager: public CoordinatorCacheManager {
 public:
-    explicit FakeTypedKVCacheAllocator(const CacheConfig& config,
-                                       size_t             payload_gap_bytes = 0,
-                                       std::set<int>      host_groups       = {}):
-        KVCacheAllocator(config, AllocationType::DEVICE),
+    explicit FakeTypedCoordinatorCacheManager(const CacheConfig& config,
+                                              size_t             payload_gap_bytes = 0,
+                                              std::set<int>      host_groups       = {}):
+        CoordinatorCacheManager(config, AllocationType::DEVICE),
         host_groups_(std::move(host_groups)),
         payload_gap_bytes_(payload_gap_bytes) {
         const auto cuda_options    = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
@@ -503,7 +503,7 @@ TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout)
     // A typed multi-tag layout backed by plain MHA specs is typed but not staged-copy eligible.
     auto non_dsv4_config    = makeTinyTypedHybridPoolConfig();
     auto non_dsv4_connector = std::make_shared<KVCacheMemoryConnector>(
-        non_dsv4_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+        non_dsv4_config, kv_config, std::shared_ptr<CoordinatorCacheManager>(), server_addrs);
     const auto non_dsv4_slots = non_dsv4_connector->layerTagSlots();
     ASSERT_TRUE(non_dsv4_connector->hasTypedLayerTagSlots(non_dsv4_slots));
     EXPECT_FALSE(non_dsv4_connector->supportsTypedPrefixCacheLayout(non_dsv4_slots));
@@ -512,38 +512,38 @@ TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout)
     auto no_typed_regions_config                    = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
     no_typed_regions_config.use_typed_cache_regions = false;
     auto no_typed_regions_connector                 = std::make_shared<KVCacheMemoryConnector>(
-        no_typed_regions_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+        no_typed_regions_config, kv_config, std::shared_ptr<CoordinatorCacheManager>(), server_addrs);
     EXPECT_FALSE(
         no_typed_regions_connector->supportsTypedPrefixCacheLayout(no_typed_regions_connector->layerTagSlots()));
 
     auto no_opaque_store_config                      = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
     no_opaque_store_config.use_opaque_kv_cache_store = false;
     auto no_opaque_store_connector                   = std::make_shared<KVCacheMemoryConnector>(
-        no_opaque_store_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+        no_opaque_store_config, kv_config, std::shared_ptr<CoordinatorCacheManager>(), server_addrs);
     EXPECT_FALSE(no_opaque_store_connector->supportsTypedPrefixCacheLayout(no_opaque_store_connector->layerTagSlots()));
 
     // A kv-only opaque schema without any opaque-state group does not match the DSv4 typed layout.
     auto kv_only_config    = makeKvOnlyTypedOpaqueConfig();
     auto kv_only_connector = std::make_shared<KVCacheMemoryConnector>(
-        kv_only_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+        kv_only_config, kv_config, std::shared_ptr<CoordinatorCacheManager>(), server_addrs);
     EXPECT_FALSE(kv_only_connector->supportsTypedPrefixCacheLayout(kv_only_connector->layerTagSlots()));
 
     // The compact fixture used by the staged round-trip tests below is eligible.
     auto compact_config    = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
     auto compact_connector = std::make_shared<KVCacheMemoryConnector>(
-        compact_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+        compact_config, kv_config, std::shared_ptr<CoordinatorCacheManager>(), server_addrs);
     EXPECT_TRUE(compact_connector->supportsTypedPrefixCacheLayout(compact_connector->layerTagSlots()));
 
     // Real DSv4 Flash/Pro configs built by CacheConfigCreator are eligible.
     auto flash_config    = makeRealDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
     auto flash_connector = std::make_shared<KVCacheMemoryConnector>(
-        flash_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+        flash_config, kv_config, std::shared_ptr<CoordinatorCacheManager>(), server_addrs);
     EXPECT_EQ(flash_config.layer_num, 43u);
     EXPECT_TRUE(flash_connector->supportsTypedPrefixCacheLayout(flash_connector->layerTagSlots()));
 
     auto pro_config    = makeRealDsv4TypedMemoryCopyConfig(/*use_flash=*/false);
     auto pro_connector = std::make_shared<KVCacheMemoryConnector>(
-        pro_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+        pro_config, kv_config, std::shared_ptr<CoordinatorCacheManager>(), server_addrs);
     EXPECT_EQ(pro_config.layer_num, 61u);
     EXPECT_TRUE(pro_connector->supportsTypedPrefixCacheLayout(pro_connector->layerTagSlots()));
 }
@@ -563,10 +563,11 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<std::string>& host_tags) {
     for (const auto& tag : host_tags) {
         host_groups.insert(config.groupIdForTag(tag));
     }
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config, /*payload_gap_bytes=*/8, host_groups);
+    auto coordinator_manager =
+        std::make_shared<FakeTypedCoordinatorCacheManager>(config, /*payload_gap_bytes=*/8, host_groups);
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
-    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
+    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, coordinator_manager, server_addrs);
     ASSERT_TRUE(connector->init());
     auto memory_pool = connector->isDualPool() ? connector->complete_pool_ : connector->block_pool_;
     ASSERT_NE(memory_pool, nullptr);
@@ -620,7 +621,7 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<std::string>& host_tags) {
             const auto& slot = slots[i];
             const char  tag  = copyTag(block_idx * slots.size() + i);
             const auto  gpu_bufs =
-                allocator->convertIndexToBuffer(slot.layer_id, slot.group_id, gpu_block_sets[block_idx][i]);
+                coordinator_manager->convertIndexToBuffer(slot.layer_id, slot.group_id, gpu_block_sets[block_idx][i]);
             ASSERT_GT(sumBlockInfosBytes(gpu_bufs), 0u);
             ASSERT_LE(sumBlockInfosBytes(gpu_bufs), slot.stride_bytes);
             setBlockInfosContent(gpu_bufs, tag);
@@ -640,7 +641,7 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<std::string>& host_tags) {
         for (size_t i = 0; i < slots.size(); ++i) {
             const auto& slot = slots[i];
             const auto  gpu_bufs =
-                allocator->convertIndexToBuffer(slot.layer_id, slot.group_id, gpu_block_sets[block_idx][i]);
+                coordinator_manager->convertIndexToBuffer(slot.layer_id, slot.group_id, gpu_block_sets[block_idx][i]);
             verifyBlockBytesEq(
                 mem_buffer, byte_off, sumBlockInfosBytes(gpu_bufs), copyTag(block_idx * slots.size() + i));
             if (slot.stride_bytes > sumBlockInfosBytes(gpu_bufs)) {
@@ -663,7 +664,7 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<std::string>& host_tags) {
             const auto& slot = slots[i];
             const char  tag  = copyTag(1000 + block_idx * slots.size() + i);
             const auto  gpu_bufs =
-                allocator->convertIndexToBuffer(slot.layer_id, slot.group_id, gpu_block_sets[block_idx][i]);
+                coordinator_manager->convertIndexToBuffer(slot.layer_id, slot.group_id, gpu_block_sets[block_idx][i]);
             setBlockInfosContent(gpu_bufs, 0);
             setBlockBytes(mem_buffer, byte_off, sumBlockInfosBytes(gpu_bufs), tag);
             byte_off += slot.stride_bytes;
@@ -676,7 +677,7 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<std::string>& host_tags) {
         for (size_t i = 0; i < slots.size(); ++i) {
             const auto& slot = slots[i];
             const auto  gpu_bufs =
-                allocator->convertIndexToBuffer(slot.layer_id, slot.group_id, gpu_block_sets[block_idx][i]);
+                coordinator_manager->convertIndexToBuffer(slot.layer_id, slot.group_id, gpu_block_sets[block_idx][i]);
             verifyBlockInfosContent(gpu_bufs, copyTag(1000 + block_idx * slots.size() + i));
         }
     }
@@ -698,8 +699,8 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeKindRequiredUsesRuntimeNullSlots) {
     kv_config.memory_cache_sync_timeout_ms = 1000;
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
-    auto                     connector =
-        std::make_shared<KVCacheMemoryConnector>(config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    auto                     connector    = std::make_shared<KVCacheMemoryConnector>(
+        config, kv_config, std::shared_ptr<CoordinatorCacheManager>(), server_addrs);
     const auto slots = connector->layerTagSlots();
     ASSERT_TRUE(connector->supportsTypedPrefixCacheLayout(slots));
 
@@ -745,8 +746,8 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRunti
     kv_config.enable_legacy_memory_connector_fallback = false;
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
-    auto                     connector =
-        std::make_shared<KVCacheMemoryConnector>(config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    auto                     connector    = std::make_shared<KVCacheMemoryConnector>(
+        config, kv_config, std::shared_ptr<CoordinatorCacheManager>(), server_addrs);
     ASSERT_TRUE(connector->init());
     ASSERT_TRUE(connector->usePrefixTreeMemoryCache());
 
@@ -824,10 +825,10 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadRejectsCompressedOnlyWhenStateS
     kv_config.enable_prefix_tree_memory_cache         = true;
     kv_config.enable_legacy_memory_connector_fallback = false;
 
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    auto coordinator_manager = std::make_shared<FakeTypedCoordinatorCacheManager>(config);
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
-    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
+    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, coordinator_manager, server_addrs);
     ASSERT_TRUE(connector->init());
     ASSERT_TRUE(connector->usePrefixTreeMemoryCache());
 
@@ -883,10 +884,10 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadAllowsStateOnlyWhenCompressedNo
     kv_config.enable_prefix_tree_memory_cache         = true;
     kv_config.enable_legacy_memory_connector_fallback = false;
 
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    auto coordinator_manager = std::make_shared<FakeTypedCoordinatorCacheManager>(config);
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
-    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
+    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, coordinator_manager, server_addrs);
     ASSERT_TRUE(connector->init());
 
     const auto slots = connector->layerTagSlots();
@@ -946,10 +947,10 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeBlockZeroAndNullSlotsAreNotCopiedFo
     kv_config.enable_prefix_tree_memory_cache         = true;
     kv_config.enable_legacy_memory_connector_fallback = false;
 
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    auto coordinator_manager = std::make_shared<FakeTypedCoordinatorCacheManager>(config);
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
-    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
+    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, coordinator_manager, server_addrs);
     ASSERT_TRUE(connector->init());
 
     const auto          slots = connector->layerTagSlots();
@@ -1000,11 +1001,11 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeBlockZeroAndNullSlotsAreNotCopiedFo
 
     const auto& valid_slot      = slots[state_slots[0]];
     const auto  valid_gpu_block = static_cast<BlockIdxType>(7);
-    setBlockInfosContent(allocator->convertIndexToBuffer(valid_slot.layer_id, valid_slot.group_id, valid_gpu_block),
-                         'V');
-    setBlockInfosContent(allocator->convertIndexToBuffer(slots[state_slots[1]].layer_id,
-                                                         slots[state_slots[1]].group_id,
-                                                         /*block_id=*/0),
+    setBlockInfosContent(
+        coordinator_manager->convertIndexToBuffer(valid_slot.layer_id, valid_slot.group_id, valid_gpu_block), 'V');
+    setBlockInfosContent(coordinator_manager->convertIndexToBuffer(slots[state_slots[1]].layer_id,
+                                                                   slots[state_slots[1]].group_id,
+                                                                   /*block_id=*/0),
                          'Z');
     set_prefix_slot(mem_block, state_slots[0], 'M');
     set_prefix_slot(mem_block, state_slots[1], 'M');
@@ -1038,21 +1039,22 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeBlockZeroAndNullSlotsAreNotCopiedFo
     set_prefix_slot(mem_block, state_slots[0], 'A');
     set_prefix_slot(mem_block, state_slots[1], 'B');
     set_prefix_slot(mem_block, state_slots[2], 'C');
-    setBlockInfosContent(allocator->convertIndexToBuffer(valid_slot.layer_id, valid_slot.group_id, valid_gpu_block),
-                         'x');
-    setBlockInfosContent(allocator->convertIndexToBuffer(slots[state_slots[1]].layer_id,
-                                                         slots[state_slots[1]].group_id,
-                                                         /*block_id=*/0),
+    setBlockInfosContent(
+        coordinator_manager->convertIndexToBuffer(valid_slot.layer_id, valid_slot.group_id, valid_gpu_block), 'x');
+    setBlockInfosContent(coordinator_manager->convertIndexToBuffer(slots[state_slots[1]].layer_id,
+                                                                   slots[state_slots[1]].group_id,
+                                                                   /*block_id=*/0),
                          'z');
 
     request.set_copy_direction(MemoryOperationRequestPB::H2D);
     response.Clear();
     ASSERT_TRUE(connector->copyCache(request, response));
     EXPECT_TRUE(response.success());
-    verifyBlockInfosContent(allocator->convertIndexToBuffer(valid_slot.layer_id, valid_slot.group_id, valid_gpu_block),
-                            'A');
     verifyBlockInfosContent(
-        allocator->convertIndexToBuffer(slots[state_slots[1]].layer_id, slots[state_slots[1]].group_id, 0), 'z');
+        coordinator_manager->convertIndexToBuffer(valid_slot.layer_id, valid_slot.group_id, valid_gpu_block), 'A');
+    verifyBlockInfosContent(
+        coordinator_manager->convertIndexToBuffer(slots[state_slots[1]].layer_id, slots[state_slots[1]].group_id, 0),
+        'z');
 }
 
 TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeD2HMergeSourceKeepsOldSlotsAndOverlaysNewSlots) {
@@ -1067,10 +1069,10 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeD2HMergeSourceKeepsOldSlotsAndOverl
     kv_config.enable_prefix_tree_memory_cache         = true;
     kv_config.enable_legacy_memory_connector_fallback = false;
 
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    auto coordinator_manager = std::make_shared<FakeTypedCoordinatorCacheManager>(config);
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
-    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
+    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, coordinator_manager, server_addrs);
     ASSERT_TRUE(connector->init());
     ASSERT_TRUE(connector->usePrefixTreeMemoryCache());
 
@@ -1127,7 +1129,8 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeD2HMergeSourceKeepsOldSlotsAndOverl
 
     const auto& new_slot      = slots[state_slots[1]];
     const auto  new_gpu_block = static_cast<BlockIdxType>(7);
-    setBlockInfosContent(allocator->convertIndexToBuffer(new_slot.layer_id, new_slot.group_id, new_gpu_block), 'N');
+    setBlockInfosContent(coordinator_manager->convertIndexToBuffer(new_slot.layer_id, new_slot.group_id, new_gpu_block),
+                         'N');
 
     MemoryOperationRequestPB request;
     request.set_copy_direction(MemoryOperationRequestPB::D2H);
@@ -1160,10 +1163,10 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeCommitConflictMergesDisjointSlotMas
     kv_config.enable_prefix_tree_memory_cache         = true;
     kv_config.enable_legacy_memory_connector_fallback = false;
 
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    auto coordinator_manager = std::make_shared<FakeTypedCoordinatorCacheManager>(config);
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
-    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
+    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, coordinator_manager, server_addrs);
     ASSERT_TRUE(connector->init());
     ASSERT_TRUE(connector->usePrefixTreeMemoryCache());
 
@@ -1262,10 +1265,10 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeCommitConflictMergesOverlappingSlot
     kv_config.enable_prefix_tree_memory_cache         = true;
     kv_config.enable_legacy_memory_connector_fallback = false;
 
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    auto coordinator_manager = std::make_shared<FakeTypedCoordinatorCacheManager>(config);
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
-    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
+    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, coordinator_manager, server_addrs);
     ASSERT_TRUE(connector->init());
 
     const auto          slots = connector->layerTagSlots();
@@ -1365,10 +1368,10 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeCommitCoveredMaskReleasesRejectedBa
     kv_config.enable_prefix_tree_memory_cache         = true;
     kv_config.enable_legacy_memory_connector_fallback = false;
 
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    auto coordinator_manager = std::make_shared<FakeTypedCoordinatorCacheManager>(config);
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
-    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
+    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, coordinator_manager, server_addrs);
     ASSERT_TRUE(connector->init());
 
     const auto          slots = connector->layerTagSlots();
@@ -1432,8 +1435,8 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWriteAllocationFailureDoesNotDouble
     kv_config.enable_legacy_memory_connector_fallback = false;
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
-    auto                     connector =
-        std::make_shared<KVCacheMemoryConnector>(config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    auto                     connector    = std::make_shared<KVCacheMemoryConnector>(
+        config, kv_config, std::shared_ptr<CoordinatorCacheManager>(), server_addrs);
     ASSERT_TRUE(connector->init());
     ASSERT_TRUE(connector->usePrefixTreeMemoryCache());
     ASSERT_EQ(connector->compressed_pool_->totalBlocksNum(), 1u);
