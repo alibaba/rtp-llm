@@ -9,6 +9,7 @@
 #include <torch/extension.h>
 
 #include "rtp_llm/cpp/cache/BufferTypes.h"
+#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace rtp_llm {
@@ -17,10 +18,8 @@ namespace {
 class TestKVCacheSpec: public KVCacheSpec {
 public:
     TestKVCacheSpec(std::string tag, KVCacheSpecType type, size_t seq_size, size_t k_elems, size_t v_elems):
-        k_elems_(k_elems), v_elems_(v_elems) {
-        this->tag                = std::move(tag);
+        KVCacheSpec(std::move(tag), static_cast<uint32_t>(seq_size), 1, 1), k_elems_(k_elems), v_elems_(v_elems) {
         this->type               = type;
-        this->seq_size_per_block = static_cast<uint32_t>(seq_size);
     }
 
     size_t block_size() const override {
@@ -64,15 +63,14 @@ GroupBase makeGroup(const std::string& tag,
                     size_t             k_elems,
                     size_t             v_elems,
                     uint32_t           local_kv_heads = 1) {
+    auto spec = std::make_shared<TestKVCacheSpec>(tag, spec_type, physical_seq_size, k_elems, v_elems);
+    spec->kernel_seq_size_per_block = kernel_seq_size;
+    spec->local_kv_head_num         = local_kv_heads;
     GroupBase group;
-    group.tag                = tag;
-    group.spec               = std::make_shared<TestKVCacheSpec>(tag, spec_type, physical_seq_size, k_elems, v_elems);
-    group.policy.group_type  = group_type;
-    group.layer_ids          = {0};
-    group.block_num          = 4;
-    group.local_kv_head_num  = local_kv_heads;
-    group.seq_size_per_block = physical_seq_size;
-    group.kernel_seq_size_per_block = kernel_seq_size;
+    group.tag               = tag;
+    group.spec              = std::move(spec);
+    group.policy.group_type = group_type;
+    group.block_num         = 4;
     return group;
 }
 
@@ -157,6 +155,35 @@ TEST(KVCacheLayoutViewTest, FullOpaqueExpandsButLinearSwaAndStateStayPhysical) {
         EXPECT_EQ(layer.seq_size_per_block, 8) << tag;
         EXPECT_EQ(layer.kv_cache_base.sizes().vec(), physical.sizes().vec()) << tag;
         EXPECT_EQ(layer.kv_cache_base.data_ptr(), physical.data_ptr()) << tag;
+    }
+}
+
+TEST(KVCacheLayoutViewTest, CompressedSpecPreservesPaddingBetweenKernelPages) {
+    KVCacheSpecDesc desc;
+    desc.tag                          = "compressed";
+    desc.cache_type                   = KVCacheSpecType::OpaqueKV;
+    desc.entry_dtype                  = DataType::TYPE_UINT8;
+    desc.entry_elems                  = 3;
+    desc.entry_count_mode             = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+    desc.compression_ratio            = 4;
+    desc.block_stride_bytes_alignment = 8;
+    SpecBuildContext ctx;
+    ctx.seq_size_per_block      = 32;
+    ctx.kernel_tokens_per_block = 8;
+    GroupBase group;
+    group.tag                   = desc.tag;
+    group.spec                  = CompressedKVCacheSpec::build(desc, ctx);
+    group.policy.group_type     = CacheGroupType::FULL;
+    group.block_num             = 3;
+    ASSERT_EQ(group.kvBlockStrideBytes(), 32u);
+    auto               base = torch::arange(96, torch::TensorOptions().dtype(torch::kUInt8)).reshape({3, 32});
+    torch_ext::KVCache cache(makeLayout({group}, {desc.tag}, {{base, {}}}));
+    const auto         view = cache.getLayerCache(0).kv_cache_base;
+    ASSERT_EQ(view.sizes().vec(), (std::vector<int64_t>{12, 8}));
+    EXPECT_EQ(view.data_ptr(), base.data_ptr());
+    for (int page = 0; page < 12; ++page) {
+        EXPECT_EQ(view[page][0].item<int>(), page * 8);
+        EXPECT_EQ(view[page][7].item<int>(), page * 8 + 7);
     }
 }
 

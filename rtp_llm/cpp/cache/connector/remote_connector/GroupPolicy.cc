@@ -130,9 +130,7 @@ bool DefaultLayerGroupPolicy::init() {
                 }
                 const std::string prefix     = is_full_group ? "F" : GetOtherGroupPrefixName();
                 std::string       group_name = prefix + cache_tag;
-                const size_t      block_size_bytes =
-                    topology_group.layer_ids.size()
-                    * (topology_group.kv_block_stride_bytes + topology_group.kv_scale_stride_bytes);
+                const size_t      block_size_bytes = topology.blockSizeBytesForGroup(static_cast<size_t>(group_idx));
                 groups_[group_idx] = Group{is_full_group, group_name_bithash, group_name, cache_tag, block_size_bytes};
                 group_to_layer_ids_[group_idx] = {};
                 if (groups_.size() < 64) {

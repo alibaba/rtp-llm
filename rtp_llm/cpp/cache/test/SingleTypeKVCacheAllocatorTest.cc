@@ -473,11 +473,18 @@ TEST_F(KVCacheAllocatorSinglePathTest, InsertIntoCacheAsResident) {
 }
 
 TEST_F(KVCacheAllocatorSinglePathTest, PrefixReuseDisabledSkipsMatchAndInsert) {
-    auto config   = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/12, /*seq_size_per_block=*/4);
-    auto policies = config.groupPoliciesSnapshot();
-    ASSERT_EQ(policies.size(), 1u);
-    policies[0].enable_prefix_reuse = false;
-    config.setGroupPolicies(policies);
+    CacheConfig config;
+    config.dtype               = DataType::TYPE_FP16;
+    config.layer_num           = 4;
+    config.block_num           = 12;
+    config.seq_size_per_block  = 4;
+    auto policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    policy.enable_prefix_reuse = false;
+    config.fromGroupedSpecs({makeMhaSpec("default", 4, config.dtype, /*local_head_num_kv=*/8, /*size_per_head=*/128)},
+                            {{0, 1, 2, 3}},
+                            {CacheGroupType::FULL},
+                            {"default"},
+                            {policy});
 
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator_        = std::make_shared<KVCacheAllocator>(config);
@@ -904,13 +911,12 @@ TEST_F(KVCacheAllocatorSinglePathTest, BlockBatchCopyCopiesCompleteSparseIndexer
     config.finalizeBlockNums(/*global_block_num=*/4, RuntimeConfig{});
 
     ASSERT_TRUE(config.is_sparse);
-    ASSERT_GT(config.kv_scale_stride_bytes, 0u);
-    ASSERT_EQ(config.kv_scale_stride_bytes, config.kvScaleStrideBytesForGroup(0));
+    ASSERT_GT(config.kvScaleStrideBytesForGroup(0), 0u);
 
     allocator_ = std::make_shared<KVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
 
-    const auto stride   = config.kv_scale_stride_bytes;
+    const auto stride   = config.kvScaleStrideBytesForGroup(0);
     auto       snapshot = [&]() {
         std::vector<std::vector<uint8_t>> blocks(config.block_num, std::vector<uint8_t>(stride));
         for (uint32_t block = 0; block < config.block_num; ++block) {

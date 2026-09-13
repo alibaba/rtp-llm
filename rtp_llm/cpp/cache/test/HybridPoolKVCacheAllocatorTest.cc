@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
+#include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <unordered_set>
@@ -44,14 +46,12 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
                                                  uint32_t       full_block_num   = 8,
                                                  CacheGroupType second_type      = CacheGroupType::FULL) {
     CacheConfig config;
-    config.dtype                     = rtp_llm::DataType::TYPE_FP16;
-    config.layer_num                 = 4;
-    config.layer_all_num             = 4;
-    config.block_num                 = std::max(linear_block_num, full_block_num);
-    config.seq_size_per_block        = 4;
-    config.kernel_seq_size_per_block = 4;
-    config.linear_step               = 2;
-    config.group_layer_num           = 2;
+    config.dtype              = rtp_llm::DataType::TYPE_FP16;
+    config.layer_num          = 4;
+
+    config.block_num          = std::max(linear_block_num, full_block_num);
+    config.seq_size_per_block = 4;
+    config.linear_step        = 2;
 
     auto linear_spec = makeResolvedLinearSpec(config.dtype,
                                               1,
@@ -70,17 +70,10 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
                             {CacheGroupType::LINEAR, second_type},
                             {"linear", second_type == CacheGroupType::SWA ? "swa" : "full"});
 
-    // Same tokens per block for both groups.
-    config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
-    config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = 0;
-    config.kv_scale_size_bytes   = 0;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(config.kv_block_stride_bytes));
     const auto linear_stride = linear_spec->block_size_bytes();
     const auto full_stride   = full_spec->block_size_bytes();
-    config.setGroupBlockLayout({linear_block_num, full_block_num}, {linear_stride, full_stride}, {0, 0});
+    rtp_llm::test::setGroupBlockLayout(
+        config, {linear_block_num, full_block_num}, {linear_stride, full_stride}, {0, 0});
     return config;
 }
 
@@ -128,54 +121,67 @@ static ModelConfig makeProModelConfig() {
     return mc;
 }
 
-// Build a DSV4 7-pool CacheConfig with independent groups.
-static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
-    auto mc                                                      = makeProModelConfig();
-    mc.hybrid_attention_config.enable_hybrid_attention           = true;
+// Build a DSV4 7-pool CacheConfig.
+static CacheConfig makeDSV4HybridPoolConfig(uint32_t                block_num           = 200,
+                                            std::optional<uint32_t> explicit_block_num  = std::nullopt,
+                                            bool                    pin_explicit_groups = false) {
+    auto mc                                            = makeProModelConfig();
+    mc.hybrid_attention_config.enable_hybrid_attention = true;
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    if (explicit_block_num.has_value() || pin_explicit_groups) {
+        auto groups                     = config.topology().groups();
+        bool applied_explicit_block_num = false;
+        for (auto& group : groups) {
+            auto& policy = group.policy;
+            if (policy.evict_policy != CacheEvictPolicy::INDEPENDENT || policy.explicit_block_num == 0) {
+                continue;
+            }
+            if (explicit_block_num.has_value() && !applied_explicit_block_num) {
+                policy.explicit_block_num     = *explicit_block_num;
+                policy.charge_to_paged_budget = *explicit_block_num > 0;
+                applied_explicit_block_num    = true;
+            }
+            if (pin_explicit_groups && policy.explicit_block_num > 0) {
+                policy.memory_placement       = CacheMemoryPlacement::HOST_PINNED;
+                policy.charge_to_paged_budget = false;
+            }
+        }
+        EXPECT_TRUE(!explicit_block_num.has_value() || applied_explicit_block_num);
+        config.setTopology(std::move(groups), config.topology().layers());
+    }
     config.finalizeBlockNums(block_num, RuntimeConfig{});
     return config;
 }
 
-static CacheConfig makeTinyDSV4HybridPoolConfig(uint32_t block_num = 8) {
+static CacheConfig makeTinyDSV4HybridPoolConfig(uint32_t block_num = 8, bool pin_explicit_groups = false) {
     auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    if (pin_explicit_groups) {
+        auto groups = config.topology().groups();
+        for (auto& group : groups) {
+            auto& policy = group.policy;
+            if (policy.evict_policy == CacheEvictPolicy::INDEPENDENT && policy.explicit_block_num > 0) {
+                policy.memory_placement       = CacheMemoryPlacement::HOST_PINNED;
+                policy.charge_to_paged_budget = false;
+            }
+        }
+        config.setTopology(std::move(groups), config.topology().layers());
+    }
     config.finalizeBlockNums(block_num, RuntimeConfig{});
     return config;
 }
 
-static void setExplicitBlocksForGroup(CacheConfig& config, size_t group_id, uint32_t block_num) {
-    ASSERT_LT(group_id, static_cast<size_t>(config.groupNums()));
-    std::vector<CacheGroupPolicy> policies;
-    policies.reserve(static_cast<size_t>(config.groupNums()));
+static std::vector<size_t> explicitIndependentGroupIds(const CacheConfig& config) {
+    std::vector<size_t> group_ids;
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        policies.push_back(config.policyForGroup(gid));
-    }
-    policies[group_id].explicit_block_num     = block_num;
-    policies[group_id].charge_to_paged_budget = block_num > 0;
-    config.setGroupPolicies(policies);
-}
-
-// Move every explicitly-sized independent group (DSV4's fixed state pools) onto pinned host
-// memory. Residency and budget are independent knobs, so a host-resident pool must also drop
-// charge_to_paged_budget -- checkGroupResidencyBudget() enforces exactly that pairing.
-static std::vector<size_t> setPinnedHostPlacementForExplicitIndependentGroups(CacheConfig& config) {
-    std::vector<CacheGroupPolicy> policies;
-    std::vector<size_t>           pinned_gids;
-    policies.reserve(static_cast<size_t>(config.groupNums()));
-    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        auto policy = config.policyForGroup(gid);
+        const auto policy = config.policyForGroup(gid);
         if (policy.evict_policy == CacheEvictPolicy::INDEPENDENT && policy.explicit_block_num > 0) {
-            policy.memory_placement       = CacheMemoryPlacement::HOST_PINNED;
-            policy.charge_to_paged_budget = false;
-            pinned_gids.push_back(gid);
+            group_ids.push_back(gid);
         }
-        policies.push_back(policy);
     }
-    config.setGroupPolicies(policies);
-    return pinned_gids;
+    return group_ids;
 }
 
 static size_t firstExplicitIndependentGroup(const CacheConfig& config) {
@@ -228,7 +234,7 @@ static void setGroupBlockNums(CacheConfig& config, const std::vector<uint32_t>& 
         kv_strides.push_back(config.kvBlockStrideBytesForGroup(gid));
         scale_strides.push_back(config.kvScaleStrideBytesForGroup(gid));
     }
-    config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
+    rtp_llm::test::setGroupBlockLayout(config, block_nums, kv_strides, scale_strides);
 }
 
 static size_t validBlockCount(const BlockIndicesType& blocks) {
@@ -610,7 +616,7 @@ TEST_F(KVCacheAllocatorTest, AllLayerCacheBaseExposesPerLayerAndPerGroupTensors)
     EXPECT_EQ(layout.topology().layerGroupIdsSnapshot(), config.layerGroupIdsSnapshot());
     EXPECT_EQ(layout.topology().groupTypesSnapshot(), config.groupTypesSnapshot());
     EXPECT_EQ(layout.groups().size(), static_cast<size_t>(config.groupNums()));
-    for (size_t i = 0; i < static_cast<size_t>(config.layer_all_num); ++i) {
+    for (size_t i = 0; i < static_cast<size_t>(config.layer_all_num()); ++i) {
         const auto& layer = layout.topology().layer(static_cast<int>(i));
         ASSERT_FALSE(layer.group_tags.empty());
         for (const auto& tag : layer.group_tags) {
@@ -1162,8 +1168,8 @@ TEST_F(KVCacheAllocatorTest, DSV4FixedTagPoolsUseGpuBacking) {
 // memory_placement=HOST_PINNED must move only the opted-in pools off HBM; every other pool of
 // the same DSV4 config stays on the device.
 TEST_F(KVCacheAllocatorTest, DSV4FixedTagPoolsUsePinnedHostBackingWhenPlacementIsHostPinned) {
-    auto       config      = makeTinyDSV4HybridPoolConfig();
-    const auto pinned_gids = setPinnedHostPlacementForExplicitIndependentGroups(config);
+    auto       config      = makeTinyDSV4HybridPoolConfig(/*block_num=*/8, /*pin_explicit_groups=*/true);
+    const auto pinned_gids = explicitIndependentGroupIds(config);
     ASSERT_FALSE(pinned_gids.empty());
     ASSERT_LT(pinned_gids.size(), static_cast<size_t>(config.groupNums()));
 
@@ -1233,33 +1239,19 @@ TEST_F(KVCacheAllocatorTest, TokenAggregatorsIgnoreSmallHCAStatePool) {
     EXPECT_EQ(allocator->totalTokensNum(), allocator->maxAvailableTokensNum());
 }
 
-TEST_F(KVCacheAllocatorTest, DSV4ConfigUsesGroupOwnedBytesForPagedBlockSize) {
+TEST_F(KVCacheAllocatorTest, DSV4ConfigUsesGroupOwnedBlockSizes) {
     auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
 
     ASSERT_EQ(config.groupNums(), 7);
 
-    size_t expected_non_paged_bytes = 0;
-    size_t expected_paged_bytes     = 0;
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        const auto type = config.typeForGroup(gid);
         const auto expected_group_bytes =
             config.layerIdsForGroup(gid).size()
             * (config.kvBlockStrideBytesForGroup(gid) + config.kvScaleStrideBytesForGroup(gid));
         EXPECT_EQ(config.blockSizeBytesForGroup(gid), expected_group_bytes) << "gid=" << gid;
-        if (!config.usesExplicitIndependentBlocks(gid)
-            && (type == CacheGroupType::FULL || type == CacheGroupType::LINEAR)) {
-            expected_paged_bytes += expected_group_bytes;
-        } else {
-            expected_non_paged_bytes += expected_group_bytes;
-        }
     }
-
-    EXPECT_GT(expected_non_paged_bytes, 0u);
-    EXPECT_GT(expected_paged_bytes, 0u);
-
-    EXPECT_EQ(config.block_size_bytes, expected_paged_bytes);
 }
 
 TEST_F(KVCacheAllocatorTest, ReserveRatioExcludesExplicitIndependentPools) {
@@ -1288,9 +1280,7 @@ TEST_F(KVCacheAllocatorTest, ReserveRatioExcludesExplicitIndependentPools) {
 }
 
 TEST_F(KVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesHcaStatePoolBlocks) {
-    auto         config       = makeDSV4HybridPoolConfig(/*block_num=*/50);
-    const size_t explicit_gid = firstExplicitIndependentGroup(config);
-    setExplicitBlocksForGroup(config, explicit_gid, 50);
+    auto config = makeDSV4HybridPoolConfig(/*block_num=*/50, /*explicit_block_num=*/50);
 
     RuntimeConfig rt;  // unused inside finalizeBlockNums today
     config.finalizeBlockNums(/*global_block_num=*/200, rt);
@@ -1299,14 +1289,10 @@ TEST_F(KVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesHcaStatePoolBlocks) {
         const uint32_t expected = config.policyForGroup(gid).explicit_block_num > 0 ? 50u : 200u;
         EXPECT_EQ(config.blockNumForGroup(gid), expected) << "gid=" << gid;
     }
-
-    const size_t expected_reserve = 50u * config.blockSizeBytesForGroup(explicit_gid);
-    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, expected_reserve);
 }
 
 TEST_F(KVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesGlobalBlocksWhenHcaStateBlocksDisabled) {
-    auto config = makeDSV4HybridPoolConfig(/*block_num=*/123);
-    setExplicitBlocksForGroup(config, firstExplicitIndependentGroup(config), 0);
+    auto config = makeDSV4HybridPoolConfig(/*block_num=*/123, /*explicit_block_num=*/0);
 
     RuntimeConfig rt;
     config.finalizeBlockNums(/*global_block_num=*/123, rt);
@@ -1314,13 +1300,10 @@ TEST_F(KVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesGlobalBlocksWhenHcaStateBl
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         EXPECT_EQ(config.blockNumForGroup(gid), 123u);
     }
-    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, 0u);
 }
 
 TEST_F(KVCacheAllocatorTest, DSV4GpuHcaStatePoolIncludesFixedReserve) {
-    auto         config       = makeDSV4HybridPoolConfig(/*block_num=*/50);
-    const size_t explicit_gid = firstExplicitIndependentGroup(config);
-    setExplicitBlocksForGroup(config, explicit_gid, 50);
+    auto config = makeDSV4HybridPoolConfig(/*block_num=*/50, /*explicit_block_num=*/50);
 
     RuntimeConfig rt;
     config.finalizeBlockNums(/*global_block_num=*/200, rt);
@@ -1329,18 +1312,16 @@ TEST_F(KVCacheAllocatorTest, DSV4GpuHcaStatePoolIncludesFixedReserve) {
         const uint32_t expected = config.policyForGroup(gid).explicit_block_num > 0 ? 50u : 200u;
         EXPECT_EQ(config.blockNumForGroup(gid), expected) << "gid=" << gid;
     }
-    const size_t expected_reserve = 50u * config.blockSizeBytesForGroup(explicit_gid);
-    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, expected_reserve);
 }
 
 // Mirror image of DSV4GpuHcaStatePoolIncludesFixedReserve: a pinned-host pool keeps its explicit
 // block count but must NOT be deducted from the device paged budget, otherwise the KV cache
 // silently shrinks by bytes that never live in HBM.
 TEST_F(KVCacheAllocatorTest, DSV4PinnedHcaStatePoolExcludesFixedReserve) {
-    auto         config       = makeDSV4HybridPoolConfig(/*block_num=*/50);
+    auto config = makeDSV4HybridPoolConfig(
+        /*block_num=*/50, /*explicit_block_num=*/50, /*pin_explicit_groups=*/true);
     const size_t explicit_gid = firstExplicitIndependentGroup(config);
-    setExplicitBlocksForGroup(config, explicit_gid, 50);
-    const auto pinned_gids = setPinnedHostPlacementForExplicitIndependentGroups(config);
+    const auto   pinned_gids  = explicitIndependentGroupIds(config);
     ASSERT_EQ(pinned_gids.size(), 1u);
     ASSERT_EQ(pinned_gids.front(), explicit_gid);
 
@@ -1353,7 +1334,6 @@ TEST_F(KVCacheAllocatorTest, DSV4PinnedHcaStatePoolExcludesFixedReserve) {
         EXPECT_EQ(config.blockNumForGroup(gid), expected) << "gid=" << gid;
     }
     EXPECT_GT(config.blockSizeBytesForGroup(explicit_gid), 0u);
-    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, 0u);
 }
 
 TEST_F(KVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksScaleWithLinearStep) {
@@ -1371,7 +1351,6 @@ TEST_F(KVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksScaleWithLine
         const uint32_t expected = config.typeForGroup(gid) == CacheGroupType::SWA ? 32u : 128u;
         EXPECT_EQ(config.blockNumForGroup(gid), expected) << "gid=" << gid;
     }
-    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, 0u);
 }
 
 TEST_F(KVCacheAllocatorTest, FinalizeNonExplicitSwaBlocksUsesCeilDivision) {
@@ -1404,8 +1383,9 @@ TEST_F(KVCacheAllocatorTest, DSV4ConvertIndexToAddrByTagRoutesToCorrectPool) {
 
     // CSA layer (compress_ratio=4) -- pick the first one.
     int csa_layer = -1;
-    for (size_t l = 0; l < config.layer_all_num; ++l) {
-        if (config.layerTagToGroupIdSnapshot()[l].count("csa_kv") > 0) {
+    for (size_t l = 0; l < config.layer_all_num(); ++l) {
+        const auto& tags = config.topology().layer(static_cast<int>(l)).group_tags;
+        if (std::find(tags.begin(), tags.end(), "csa_kv") != tags.end()) {
             csa_layer = static_cast<int>(l);
             break;
         }
@@ -1437,8 +1417,9 @@ TEST_F(KVCacheAllocatorTest, DSV4ConvertIndexToBufferByTagAndPartition) {
     ASSERT_TRUE(allocator->init());
 
     int csa_layer = -1;
-    for (size_t l = 0; l < config.layer_all_num; ++l) {
-        if (config.layerTagToGroupIdSnapshot()[l].count("csa_kv") > 0) {
+    for (size_t l = 0; l < config.layer_all_num(); ++l) {
+        const auto& tags = config.topology().layer(static_cast<int>(l)).group_tags;
+        if (std::find(tags.begin(), tags.end(), "csa_kv") != tags.end()) {
             csa_layer = static_cast<int>(l);
             break;
         }
@@ -1461,7 +1442,7 @@ TEST_F(KVCacheAllocatorTest, DSV4AllLayerCacheBaseHasPerGroupTensors) {
     ASSERT_TRUE(allocator->init());
 
     auto layout = allocator->allLayerCacheBase();
-    for (size_t l = 0; l < static_cast<size_t>(config.layer_all_num); ++l) {
+    for (size_t l = 0; l < static_cast<size_t>(config.layer_all_num()); ++l) {
         EXPECT_TRUE(layout.group("swa_kv").hasLayer(l)) << "layer " << l << " missing SWA_KV tensor";
     }
     EXPECT_EQ(layout.groups().size(), 7u);

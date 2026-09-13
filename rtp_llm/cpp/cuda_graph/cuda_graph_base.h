@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace rtp_llm {
@@ -18,13 +19,14 @@ struct CudaGraphState {
 };
 
 struct GraphParams {
-    bool             enable_cuda_graph            = false;
-    bool             enable_cuda_graph_debug_mode = false;
-    bool             is_prefill_cuda_graph_mode   = false;
-    bool             is_target_verify             = false;
-    int              max_seq_len                  = 0;
-    int              tokens_per_block             = 0;  // physical kv block size
-    int              kernel_tokens_per_block      = 0;  // must be explicitly configured
+    bool             enable_cuda_graph              = false;
+    bool             enable_cuda_graph_debug_mode   = false;
+    bool             is_prefill_cuda_graph_mode     = false;
+    bool             is_target_verify               = false;
+    int              max_seq_len                    = 0;
+    int              tokens_per_block               = 0;  // tokens/base cache-key block
+    int              kernel_tokens_per_block        = 0;  // tokens/kernel page; cacheless fallback only
+    size_t           max_kernel_blocks_per_kv_block = 0;  // zero: derive from explicit page sizes without topology
     int              num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
     int              sp_steps               = 0;
     size_t           max_context_batch_size = 128;
@@ -45,6 +47,31 @@ struct GraphParams {
     // Width of one input_hiddens row. This is deliberately independent from
     // the model output hidden_size because auxiliary feature rows may be wider.
     std::size_t input_hidden_size = 0;
+
+    // Cache-backed graphs read per-group page geometry from the published specs.
+    // The scalar page fields remain available for cacheless callers.
+    std::shared_ptr<const CacheTopology> cache_topology;
+
+    void resolveCacheGeometry() {
+        RTP_LLM_CHECK_WITH_INFO(tokens_per_block > 0, "CUDA graph requires positive tokens/base cache-key block");
+        if (cache_topology) {
+            RTP_LLM_CHECK_WITH_INFO(!cache_topology->groups().empty(), "CUDA graph cache topology must not be empty");
+            kv_cache_group_tags            = cache_topology->groupTagsSnapshot();
+            max_kernel_blocks_per_kv_block = cache_topology->maxKernelBlocksPerKvBlock();
+            for (const auto& group : cache_topology->groups()) {
+                RTP_LLM_CHECK_WITH_INFO(group.seqSizePerBlock() >= static_cast<size_t>(tokens_per_block)
+                                            && group.seqSizePerBlock() % tokens_per_block == 0,
+                                        "CUDA graph tag=%s physical span must be a multiple of base key span",
+                                        group.tag.c_str());
+            }
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(kernel_tokens_per_block > 0 && tokens_per_block % kernel_tokens_per_block == 0,
+                                    "cacheless CUDA graph requires positive divisible physical/kernel spans");
+            if (max_kernel_blocks_per_kv_block == 0) {
+                max_kernel_blocks_per_kv_block = tokens_per_block / kernel_tokens_per_block;
+            }
+        }
+    }
 };
 
 class GraphBase {

@@ -93,7 +93,7 @@ static CacheConfig makeWriterTestCacheConfig(const std::string& tag, size_t kv_s
     CacheConfig config;
     config.dtype              = DataType::TYPE_BF16;
     config.layer_num          = 1;
-    config.layer_all_num      = 1;
+
     config.block_num          = block_num;
     config.seq_size_per_block = 1;
 
@@ -117,9 +117,7 @@ static CacheConfig makeWriterTestCacheConfig(const std::string& tag, size_t kv_s
     group.tag                   = tag;
     group.spec                  = spec;
     group.policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    group.layer_ids             = {0};
     group.block_num             = block_num;
-    group.kv_block_stride_bytes = kv_stride;
 
     config.setTopology({std::move(group)}, {{0, {tag}}});
     return config;

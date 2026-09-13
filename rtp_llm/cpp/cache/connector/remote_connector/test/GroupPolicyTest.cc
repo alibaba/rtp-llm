@@ -72,7 +72,7 @@ public:
             const auto  max_gid = *std::max_element(layer_group_ids.begin(), layer_group_ids.end());
             CacheConfig fake_config;
             fake_config.layer_num     = static_cast<uint32_t>(layer_group_ids.size());
-            fake_config.layer_all_num = fake_config.layer_num;
+
             std::vector<KVCacheSpecPtr>   specs;
             std::vector<std::vector<int>> layers_by_group(static_cast<size_t>(max_gid + 1));
             std::vector<CacheGroupType>   types(static_cast<size_t>(max_gid + 1), CacheGroupType::FULL);

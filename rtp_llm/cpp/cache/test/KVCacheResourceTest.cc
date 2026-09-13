@@ -14,18 +14,16 @@ namespace test {
 namespace {
 
 GroupBase makeResourceGroup(std::string tag, CacheGroupType type) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->tag                = tag;
-    spec->seq_size_per_block = 8;
+    auto spec                       = std::make_shared<MHAKVCacheSpec>();
+    spec->tag                       = tag;
+    spec->seq_size_per_block        = 8;
+    spec->kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
 
     GroupBase group;
-    group.tag                       = std::move(tag);
-    group.spec                      = std::move(spec);
-    group.policy                    = defaultCacheGroupPolicy(type);
-    group.layer_ids                 = {0};
-    group.block_num                 = 16;
-    group.seq_size_per_block        = 8;
-    group.kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
+    group.tag       = std::move(tag);
+    group.spec      = std::move(spec);
+    group.policy    = defaultCacheGroupPolicy(type);
+    group.block_num = 16;
     return group;
 }
 
@@ -213,15 +211,14 @@ TEST(KVCacheResourceTest, CacheKeysMaintainLinearDependencies) {
     EXPECT_EQ(resource.blockDependencies()[2].ordinal, 2u);
 }
 
-TEST(CacheConfigTest, KernelBlocksPerKvBlockSafeByDefault) {
-    CacheConfig config;
-    config.seq_size_per_block        = 1;
-    config.kernel_seq_size_per_block = 0;
-    ASSERT_EQ(config.kernelBlocksPerKvBlock(), 1u);
-
-    config.seq_size_per_block        = 8;
-    config.kernel_seq_size_per_block = 2;
-    ASSERT_EQ(config.kernelBlocksPerKvBlock(), 4u);
+TEST(CacheTopologyTest, GroupDerivesKernelBlocksFromSpec) {
+    auto spec                       = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, 8, "full");
+    spec->kernel_seq_size_per_block = 2;
+    GroupBase group;
+    group.tag       = "full";
+    group.spec      = std::move(spec);
+    group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    ASSERT_EQ(group.kernelBlocksPerKvBlock(), 4u);
 }
 
 TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {

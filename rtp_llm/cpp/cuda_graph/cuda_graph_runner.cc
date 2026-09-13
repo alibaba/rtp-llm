@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <c10/core/InferenceMode.h>
 #include "kmonitor/client/MetricsReporter.h"
@@ -248,8 +249,8 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
     RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareInputData");
     const size_t graph_idx =
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
-    auto& py_model_inputs = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
-    const int token_num   = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
+    auto&     py_model_inputs = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
+    const int token_num       = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
 
     RTP_LLM_CHECK_WITH_INFO(token_num <= py_model_inputs.input_ids.numel(),
                             "input_ids exceed selected CUDA graph capacity: %d > %ld",
@@ -640,8 +641,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
             auto& dst_inputs = dst_it->second;
-            if (dst_inputs.kv_cache_kernel_block_id.defined()
-                && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
+            if (dst_inputs.kv_cache_kernel_block_id.defined() && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
                 dst_inputs.kv_cache_kernel_block_id.zero_();
             }
             tryAddStridedD2DCopy(src_inputs.kv_cache_kernel_block_id_device,
@@ -705,8 +705,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             // whole captured range - not just the padding tail - would otherwise
             // keep the capture-time max_seq_len values.
             const bool has_live_sequence_lengths = inputs.attention_inputs.sequence_lengths.defined()
-                                                  && inputs.attention_inputs.sequence_lengths.numel() > 0;
-            const int  fill_start                = has_live_sequence_lengths ? state.current_batch_size : 0;
+                                                   && inputs.attention_inputs.sequence_lengths.numel() > 0;
+            const int fill_start = has_live_sequence_lengths ? state.current_batch_size : 0;
             if (fill_start < selected_graph_batch_size) {
                 py_model_inputs_.attention_inputs.sequence_lengths.slice(0, fill_start, selected_graph_batch_size)
                     .fill_(0);
@@ -726,10 +726,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                 const auto& input_lengths_host = live_input_lengths_on_cuda ?
                                                      py_model_inputs_.attention_inputs.input_lengths :
                                                      inputs.attention_inputs.input_lengths;
-                auto* input_lengths      = input_lengths_host.data_ptr<int32_t>();
-                auto* padding_offset     = py_model_inputs_.attention_inputs.padding_offset.data_ptr<int32_t>();
-                int   cumulative_padding = 0;
-                int   token_idx          = 0;
+                auto*       input_lengths      = input_lengths_host.data_ptr<int32_t>();
+                auto*       padding_offset     = py_model_inputs_.attention_inputs.padding_offset.data_ptr<int32_t>();
+                int         cumulative_padding = 0;
+                int         token_idx          = 0;
                 for (int batch_idx = 0; batch_idx < state.current_batch_size; ++batch_idx) {
                     const int input_length = input_lengths[batch_idx];
                     std::fill_n(padding_offset + token_idx, input_length, cumulative_padding);
@@ -889,8 +889,7 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
             RTP_LLM_CHECK_WITH_INFO(dst_it != py_model_inputs.attention_inputs_by_tag.end(),
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
-            add_block_table(src_inputs.kv_cache_kernel_block_id_device,
-                            dst_it->second.kv_cache_kernel_block_id_device);
+            add_block_table(src_inputs.kv_cache_kernel_block_id_device, dst_it->second.kv_cache_kernel_block_id_device);
         }
     }
     fusedCopy(d2d_copies);
@@ -1155,7 +1154,11 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         inputs.attention_inputs.combo_position_ids = inputs.combo_position_ids;
     }
 
-    const int64_t max_blocks = max_kv_blocks * seq_size_per_block_ / kernel_seq_size_per_block_;
+    RTP_LLM_CHECK_WITH_INFO(max_kv_blocks > 0
+                                && max_kernel_blocks_per_kv_block_
+                                       <= static_cast<size_t>(std::numeric_limits<int64_t>::max() / max_kv_blocks),
+                            "CUDA graph block table capacity overflow");
+    const int64_t max_blocks = max_kv_blocks * max_kernel_blocks_per_kv_block_;
     // kv_cache_kernel_block_id_device [batch_size, block_num]
     inputs.attention_inputs.kv_cache_kernel_block_id_device =
         torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
@@ -1325,7 +1328,7 @@ void CudaGraphRunner::initCapture() {
         initKernelInternalMemory();
 
         // get real output data type (params already prepared in attn impl __init__/create_params)
-        py::object attn_pyobj;
+        py::object     attn_pyobj;
         PyModelOutputs initial_outputs;
         try {
             attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);

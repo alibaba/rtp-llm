@@ -18,16 +18,23 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.position_id_len_factor     = model_config.attn_config.rope_config.index_factor;
     model_input_gatherer_config_.role_type                  = pd_sep_config.role_type;
     model_input_gatherer_config_.decode_entrance            = pd_sep_config.decode_entrance;
-    model_input_gatherer_config_.block_stride_bytes         = cache_config.kv_block_stride_bytes;
-    model_input_gatherer_config_.scale_stride_bytes         = cache_config.kv_scale_stride_bytes;
     model_input_gatherer_config_.seq_size_per_block         = cache_config.seq_size_per_block;
-    model_input_gatherer_config_.kernel_seq_size_per_block  = cache_config.kernel_seq_size_per_block;
-    model_input_gatherer_config_.kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
+    model_input_gatherer_config_.kernel_seq_size_per_block  = cache_config.seq_size_per_block;
+    model_input_gatherer_config_.kernel_blocks_per_kv_block = 1;
     model_input_gatherer_config_.kv_cache_group_nums        = cache_config.groupNums();
     model_input_gatherer_config_.use_opaque_kv_cache_store  = cache_config.use_opaque_kv_cache_store;
     if (model_input_gatherer_config_.kv_cache_group_nums > 0) {
-        model_input_gatherer_config_.kv_cache_group_types = cache_config.groupTypesSnapshot();
-        model_input_gatherer_config_.kv_cache_group_tags  = cache_config.groupTagsSnapshot();
+        // Scalar layout metadata is meaningful only for a single group.
+        // Multi-group consumers read their tagged specs and block tables.
+        model_input_gatherer_config_.kernel_seq_size_per_block = 0;
+        if (cache_config.groupNums() == 1) {
+            model_input_gatherer_config_.block_stride_bytes        = cache_config.kvBlockStrideBytesForGroup(0);
+            model_input_gatherer_config_.scale_stride_bytes        = cache_config.kvScaleStrideBytesForGroup(0);
+            model_input_gatherer_config_.kernel_seq_size_per_block = cache_config.kernelSeqSizePerBlockForGroup(0);
+        }
+        model_input_gatherer_config_.kernel_blocks_per_kv_block = cache_config.topology().maxKernelBlocksPerKvBlock();
+        model_input_gatherer_config_.kv_cache_group_types       = cache_config.groupTypesSnapshot();
+        model_input_gatherer_config_.kv_cache_group_tags        = cache_config.groupTagsSnapshot();
     }
     model_input_gatherer_config_.warm_up                 = warm_up;
     model_input_gatherer_config_.enable_detail_log       = profiling_debug_logging_config.enable_detail_log;
