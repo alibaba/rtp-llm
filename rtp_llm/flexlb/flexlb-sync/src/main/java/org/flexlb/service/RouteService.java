@@ -4,8 +4,6 @@ import com.google.protobuf.ByteString;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestState;
-import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -17,14 +15,11 @@ import java.util.concurrent.CompletableFuture;
 @Component
 public class RouteService {
 
-    private final ConfigService configService;
     private final RequestScheduler requestScheduler;
     private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
-    public RouteService(ConfigService configService,
-                        RequestScheduler requestScheduler,
+    public RouteService(RequestScheduler requestScheduler,
                         RecentCacheKeyTraceReporter recentCacheKeyTraceReporter) {
-        this.configService = configService;
         this.requestScheduler = requestScheduler;
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
     }
@@ -35,9 +30,6 @@ public class RouteService {
      * @return Routing result
      */
     public CompletableFuture<Response> route(BalanceContext balanceContext) {
-        FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
-        balanceContext.setConfig(flexlbConfig);
-
         CompletableFuture<Response> resultFuture = routeScheduled(balanceContext);
 
         // Observe the scheduler-owned future without replacing it with a

@@ -59,10 +59,6 @@ final class DiscoveryFileStore {
         this.decodeDomain = decodeDomain;
     }
 
-    Path getFile() {
-        return file;
-    }
-
     /**
      * Rebuild the discovery file from the current services map. Called from
      * the add/remove critical section, so the services map is stable while it

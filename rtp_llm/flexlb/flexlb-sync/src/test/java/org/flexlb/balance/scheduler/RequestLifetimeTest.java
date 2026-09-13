@@ -387,7 +387,7 @@ class RequestLifetimeTest {
             }
             return null;
         }).when(registry).expireInactiveRequest(eq(fixture.slot), anyLong());
-        try (var timer = new ExpirationTimer(registry, config, mock(BatchSchedulerReporter.class))) {
+        try (var timer = new ExpirationTimer(registry, config)) {
             synchronized (fixture.slot) {
                 fixture.slot.configureInactivityTimeout(20L);
                 fixture.slot.startRouteDecisionDelivery();
@@ -428,7 +428,7 @@ class RequestLifetimeTest {
             }
             return null;
         }).when(registry).expireInactiveRequest(eq(fixture.slot), anyLong());
-        try (var timer = new ExpirationTimer(registry, config, mock(BatchSchedulerReporter.class), now::get)) {
+        try (var timer = new ExpirationTimer(registry, config, now::get)) {
             synchronized (fixture.slot) {
                 fixture.slot.configureInactivityTimeout(100L);
                 fixture.slot.startRouteDecisionDelivery();

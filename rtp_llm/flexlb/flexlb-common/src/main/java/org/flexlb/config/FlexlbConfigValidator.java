@@ -296,18 +296,8 @@ final class FlexlbConfigValidator {
         require(value > 0, field, "must be greater than zero");
     }
 
-    private static void positive(double value, String field) {
-        require(Double.isFinite(value) && value > 0, field,
-                "must be finite and greater than zero");
-    }
-
     private static void nonNegative(long value, String field) {
         require(value >= 0, field, "must be non-negative");
-    }
-
-    private static void nonNegative(double value, String field) {
-        require(Double.isFinite(value) && value >= 0, field,
-                "must be finite and non-negative");
     }
 
     private static void range(long value, long minimum, long maximum, String field) {

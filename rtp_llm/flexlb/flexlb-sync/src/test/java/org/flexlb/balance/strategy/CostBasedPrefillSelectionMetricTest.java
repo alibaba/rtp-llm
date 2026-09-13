@@ -77,9 +77,8 @@ class CostBasedPrefillSelectionMetricTest {
         request.setSeqLen(1_000L);
         request.setPriority(50);
         request.setBlockCacheKeys(List.of());
-        context = new BalanceContext();
+        context = new BalanceContext(config);
         context.setRequest(request);
-        context.setConfig(config);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(
                 50, System.currentTimeMillis() + 60_000L));
     }
@@ -126,9 +125,8 @@ class CostBasedPrefillSelectionMetricTest {
         queuedRequest.setRequestId(9_001L);
         queuedRequest.setSeqLen(1_000L);
         queuedRequest.setPriority(10);
-        BalanceContext queuedContext = new BalanceContext();
+        BalanceContext queuedContext = new BalanceContext(config);
         queuedContext.setRequest(queuedRequest);
-        queuedContext.setConfig(config);
         queuedContext.setSchedulingMetadata(SchedulingMetadata.explicit(
                 10, System.currentTimeMillis() + 120_000L));
         ScheduledRequest queued = new ScheduledRequest(queuedContext, new CompletableFuture<>(),

@@ -86,9 +86,8 @@ class DecodeSelectorTest {
         Request request = new Request();
         request.setSeqLen(sequenceLength);
         request.setRequestId(requestId);
-        BalanceContext context = new BalanceContext();
+        BalanceContext context = new BalanceContext(configService.loadBalanceConfig());
         context.setRequest(request);
-        context.setConfig(configService.loadBalanceConfig());
         return context;
     }
 
@@ -641,9 +640,8 @@ class DecodeSelectorTest {
         Request request = new Request();
         request.setSeqLen(1);
         request.setRequestId(500L);
-        BalanceContext context = new BalanceContext();
+        BalanceContext context = new BalanceContext(configService.loadBalanceConfig());
         context.setRequest(request);
-        context.setConfig(configService.loadBalanceConfig());
 
         ServerStatus status = selectStatus(
                 strategy, context, RoleType.DECODE, null);

@@ -5,7 +5,6 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
@@ -156,8 +155,6 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         // A bare mock (null result -> debug-report path) mirrors upstream
         // EngineSyncRunnerTest's stub contract.
         CacheAwareService cacheAwareService = mock(CacheAwareService.class);
-        DynamicCacheIntervalService cacheIntervalService =
-                mock(DynamicCacheIntervalService.class);
         statusCheckExecutor = Executors.newFixedThreadPool(4, r -> {
             Thread thread = new Thread(r, "e2e-status-check");
             thread.setDaemon(true);
@@ -175,7 +172,6 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                 engineGrpcService,
                 RoleType.PREFILL,
                 cacheAwareService,
-                cacheIntervalService,
                 5_000L,
                 new LongAdder(),
                 1L,
@@ -185,7 +181,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         EngineSyncRunner decodeSyncRunner = new EngineSyncRunner(
                 MODEL_NAME, engineWorkerStatus, workerAddressService, statusCheckExecutor,
                 healthReporter, engineGrpcService, RoleType.DECODE, cacheAwareService,
-                cacheIntervalService, 5_000L, new LongAdder(), 1L, false, STATUS_STALE_AFTER_US);
+                5_000L, new LongAdder(), 1L, false, STATUS_STALE_AFTER_US);
 
         syncScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread thread = new Thread(r, "e2e-engine-sync");

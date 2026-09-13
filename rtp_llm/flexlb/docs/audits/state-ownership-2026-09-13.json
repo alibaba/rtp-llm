@@ -1,0 +1,115 @@
+{
+  "baseline": "f37ec66e92",
+  "source_revision": "9712d16687dfa460a93f765b9128a900f7e2bb57",
+  "scope": "Follow-up ownership review of tracked FlexLB sources, building on state-api-2026-09-13.json. Foreign untracked replacement classes preserved and excluded from isolated builds.",
+  "method": "Inspect canonical owner, updates, readers, synchronization, transfer/cleanup and index/cache cost. An inventory or a retained classification is not a proof of every possible concurrency interleaving.",
+  "changes": [
+    {
+      "commit": "93abcb707d",
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/WorkerBatcher.java",
+      "removed_field": "subscribedCapacityAvailability",
+      "ownership": "capacityBlockedHead owns the exact availability; one queue-lock setter changes the head, listener and projection invalidation. Unlock remains guaranteed if removal throws.",
+      "sha256": "1fa11081e75fbd658f80e9b131e7f094bcb8fb4f7dbcef6875beaf09d62af71c"
+    },
+    {
+      "commit": "a2a1e8db5b",
+      "path": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/GlobalQueueCoordinator.java",
+      "removed_field": "Plan.admission",
+      "ownership": "Plan.result owns the selected admission; transfer clears the result and close consumes ownership once. waitKey survives close for parking.",
+      "sha256": "08fc5f1c3691f24c20ade0bf9ad416be8c3835b99d4aa502a75ce0023627989a"
+    },
+    {
+      "commit": "3450dfac5c",
+      "path": "flexlb-grpc/src/main/java/org/flexlb/engine/grpc/nameresolver/EngineAddressNameResolver.java",
+      "removed_field": "serviceAddressList",
+      "ownership": "One immutable addressProtocols map owns the configured addresses and protocols. Fetch and subscription iterate its keys; a repeated address subscribes once.",
+      "sha256": "4c2b7285184efca24d9e00cdac7ebeeed5045415975a32eee9c4f99686a264d6"
+    },
+    {
+      "commit": "9712d16687",
+      "path": "flexlb-cache/src/main/java/org/flexlb/cache/core/GlobalCacheIndex.java",
+      "removed_field": "totalBlocks",
+      "ownership": "Use ConcurrentHashMap.mappingCount, removing a separately incremented/decremented/reset counter. Clear uses the same mutation lock as add/remove and totalMappings updates.",
+      "sha256": "f4969b4bc83e0143fa5bb07aa911b3f0f9013332f7eb4d2f69aafc03134894f7"
+    }
+  ],
+  "retained_state_review": [
+    {
+      "members": "WorkerBatcher.queueVersion / schedulingInputVersion",
+      "reason": "Queue membership changes and non-queue prediction/status/capacity changes have different invalidation conditions."
+    },
+    {
+      "members": "WorkerBatcher.activeIndex / PrefillState.activeIndex",
+      "reason": "References to the same index, not independent copies. PrefillState owns mutations; WorkerBatcher reads under the shared lock."
+    },
+    {
+      "members": "WorkerBatcher.runtimeState / stopped / terminationStarted / terminationFinished / terminationOwner",
+      "reason": "Thread lifecycle, admission gate and single-owner cleanup transaction are distinct. A stopped thread does not imply completed resource cleanup. Owner detects reentrant self-wait."
+    },
+    {
+      "members": "GlobalQueueCoordinator.inFlight / completedPlans / waiting",
+      "reason": "Running planners, completed but uncommitted plans, and resource-blocked entries serve different transitions. Removing an index would require scanning a different domain or changing scheduling."
+    },
+    {
+      "members": "GlobalQueueCoordinator.Plan.waitKey",
+      "reason": "Publication can block on a different resource than routing did; the key must survive admission cleanup until wait registration."
+    },
+    {
+      "members": "RequestSlot.state / slotPhase / engineOwnership / publicationWinner",
+      "reason": "Public progress, storage cleanup, engine ownership and the winning frontend result can advance independently while callbacks are unlocked."
+    },
+    {
+      "members": "RequestSlot.deadlines / decisionExpiresAtMs / decisionExpired",
+      "reason": "Timer handles provide cancellation; deadline values participate in scheduling; expired records a consumed event. These cannot be inferred from one another during callbacks."
+    },
+    {
+      "members": "EndpointGenerationLifecycle.phase / cleanupClaimed / drainContinuationArmed / cleanupThread",
+      "reason": "Retirement closes admission before handoffs drain, a continuation can be armed before cleanup starts, and execution-thread identity detects reentrant shutdown."
+    },
+    {
+      "members": "DecodeEndpoint KV and request counters",
+      "reason": "Hard versus expected demand, queued reservations, acquired dispatch permits and preemption-held resources cover different ownership stages. Aggregates avoid per-admission request-table scans; mutations use admissionLock."
+    },
+    {
+      "members": "PrefillState.requests / outstandingRequestCount / batchLeasesInUse / committedWorkCapture",
+      "reason": "Canonical request ownership, lock-free count, batch capacity and immutable versioned projections serve distinct consumers. Active, suspended, committed and engine-confirmed entries have different membership."
+    },
+    {
+      "members": "WorkerDirectory.statusesByRole / EndpointRegistry",
+      "reason": "Discovered status generations can exist before the first valid response publishes a routable endpoint. Discovery count is not admission capacity."
+    },
+    {
+      "members": "EngineAddressNameResolver.domainHostsMap / allIpPortList",
+      "reason": "Per-domain ownership is needed when one domain removes a shared host. Aggregate is the last published membership for edge-triggered notifications."
+    },
+    {
+      "members": "GlobalCacheIndex.totalMappings",
+      "reason": "Counts all block-engine edges, not map keys. Retained to avoid summing every set for each metrics report; clear now shares its writers lock."
+    },
+    {
+      "members": "EngineLocalView.engineViews / GlobalCacheIndex.blockToEnginesMap",
+      "reason": "Forward ownership supports per-engine diff and retirement; inverted lookup supports prefix routing. Removing either changes query/update complexity; no claim of a cross-index atomicity redesign."
+    },
+    {
+      "members": "RecentCacheKeyWindow ring/hash fields and counts",
+      "reason": "Ring records occurrence expiry; hash counts support hit queries and repeated keys. Cursor, length, unique count and occurrence count are not interchangeable. Stable final array capacities/masks are not independently mutable facts."
+    },
+    {
+      "members": "BalanceContext millisecond and nanosecond timestamps",
+      "reason": "Wall-clock timestamps are observable lifecycle facts; monotonic timestamps measure durations. Different request stages have separate measurement boundaries."
+    },
+    {
+      "members": "ServerScheduleLatencyRecorder.Window histograms / counts / sum / max",
+      "reason": "Distinct measurement boundaries plus bounded histogram buckets; sum and max preserve values beyond histogram range. Window replacement defines reset ownership."
+    },
+    {
+      "members": "FlexlbGrpcForwarder.channels / eventLoopGroup / shutdown",
+      "reason": "Channel membership, executor resources and the no-new-channel gate have distinct lifecycle responsibilities."
+    },
+    {
+      "members": "MockEngine runningTasks / requestStates / responseQueues",
+      "reason": "Running task membership does not include retained terminal/rejected outcomes or pending stream output. They cannot be collapsed by removing one map without redesigning lifecycle and diagnostics."
+    }
+  ],
+  "validation": "See ../performance/state-ownership-2026-09-13/summary.json"
+}

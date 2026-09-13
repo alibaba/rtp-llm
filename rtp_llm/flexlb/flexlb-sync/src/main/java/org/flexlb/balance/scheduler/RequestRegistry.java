@@ -87,8 +87,7 @@ public class RequestRegistry {
         this.requestReporter = Objects.requireNonNull(requestReporter);
         this.expirationTimer = new ExpirationTimer(
                 this,
-                Objects.requireNonNull(configService, "configService"),
-                reporter);
+                Objects.requireNonNull(configService, "configService"));
         this.completionPublisher = new RequestCompletionPublisher(
                 this, completionPublisherWorkers(configService));
     }

@@ -424,10 +424,6 @@ class SideData:
             vals.append(v)
         return vals
 
-    def approx_samples(self, family):
-        """quantile-approx expanded samples for the family (mock fallback)."""
-        return self.approx_modes.get(family) or []
-
     def gini_from_rows(self):
         """Per-engine request gini from per-request prefill/decode addrs."""
         out = {}
