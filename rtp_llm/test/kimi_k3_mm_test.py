@@ -20,7 +20,9 @@ from PIL import Image
 import rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor as kimi_k3_image_processor
 import rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_vit as kimi_k3_vit
 from rtp_llm.config.exceptions import FtRuntimeException
-from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitConfig
+from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
     KimiK3VisionProcessor,
     _navit_resize_image,
@@ -94,6 +96,136 @@ def _tiny_vision_config(**overrides):
     }
     values.update(overrides)
     return KimiK3VisionConfig(**values)
+
+
+class KimiK3WorkEstimateTest(TestCase):
+    def setUp(self):
+        self.embedding = object.__new__(KimiK3ImageEmbedding)
+        self.embedding.vision_config = _tiny_vision_config(text_hidden_size=8)
+        self.embedding.image_processor = KimiK3VisionProcessor(_media_proc_cfg())
+        weight = torch.empty((), dtype=torch.bfloat16)
+        self.embedding.vision_tower = SimpleNamespace(
+            patch_embed=SimpleNamespace(proj=SimpleNamespace(weight=weight))
+        )
+
+    def test_image_work_estimate_matches_processor_geometry(self):
+        image = Image.new("RGB", (225, 223))
+        estimate = self.embedding.estimate_work(image, MMUrlType.IMAGE)
+        processed = self.embedding.image_processor.preprocess({"image": image})
+
+        self.assertEqual(estimate.input_patches, processed.pixel_values.shape[0])
+        self.assertEqual(estimate.input_patches, 288)
+        self.assertEqual(estimate.output_tokens, 72)
+        self.assertEqual(estimate.max_attention_segment, 288)
+        self.assertEqual(estimate.attention_work, 288**2)
+
+        config = self.embedding.vision_config
+        expected_elements = (
+            288
+            * (
+                config.num_channels * config.patch_size**2
+                + 2 * config.vt_hidden_size
+                + 6 * config.qkv_hidden_size
+                + 2 * config.vt_intermediate_size
+            )
+            + 2 * 288 * config.mm_hidden_size
+            + 2 * 72 * config.text_hidden_size
+        )
+        self.assertEqual(
+            estimate.estimated_workspace_bytes,
+            2 * expected_elements,
+        )
+
+    def test_batch_budget_uses_existing_media_cap(self):
+        budget = self.embedding.get_batch_work_budget(32)
+        reference_patches = 65536
+
+        self.assertEqual(budget.input_patches, 32 * reference_patches)
+        self.assertEqual(budget.output_tokens, 32 * (reference_patches // 4))
+        self.assertEqual(budget.max_attention_segment, reference_patches)
+        self.assertEqual(budget.attention_work, 32 * reference_patches**2)
+        self.assertIsNone(self.embedding.get_batch_work_budget(1 << 30))
+
+    def test_rejects_unsupported_media_and_mismatched_geometry(self):
+        image = Image.new("RGB", (28, 28))
+        with self.assertRaisesRegex(ValueError, "only supports image"):
+            self.embedding.estimate_work(image, MMUrlType.VIDEO)
+
+        self.embedding.image_processor.media_proc_cfg["patch_size"] = 16
+        with self.assertRaisesRegex(ValueError, "patch sizes differ"):
+            self.embedding.estimate_work(image, MMUrlType.IMAGE)
+
+    def test_mm_process_engine_chunks_k3_multi_image_request(self):
+        torch.manual_seed(20260913)
+        vision_config = _tiny_vision_config(text_hidden_size=8)
+        embedding = KimiK3ImageEmbedding(
+            SimpleNamespace(
+                config={
+                    "vision_config": vars(vision_config),
+                    "media_proc_cfg": _media_proc_cfg(in_patch_limit=64),
+                }
+            )
+        )
+
+        image_payloads = [
+            _image_bytes(width=28, height=28, color=(index * 20, 2, 3))
+            for index in range(5)
+        ]
+        images = []
+        for payload in image_payloads:
+            with Image.open(BytesIO(payload)) as image:
+                images.append(image.copy())
+        expected = embedding.image_embedding(images)
+
+        model_config = ModelConfig()
+        model_config.mm_model_config.mm_position_ids_style = 0
+        model_config.mm_related_params.preprocess_batch_size = 1
+        vit_config = _vit_config(
+            use_gpu_batch=True,
+            use_local_preprocess=True,
+            disable_access_log=True,
+            mm_cache_item_num=0,
+            gpu_batch_wait_ms=0,
+            gpu_max_batch_size=8,
+            gpu_max_batch_images=2,
+        )
+        engine = MMProcessEngine(
+            embedding,
+            model_config,
+            vit_config,
+            ProfilingDebugLoggingConfig(),
+        )
+        preprocess_config = [-1, -1, -1, -1, -1, -1, -1, [], 30000]
+        try:
+            with patch.object(
+                embedding,
+                "estimate_work",
+                wraps=embedding.estimate_work,
+            ) as estimate_work, patch.object(
+                embedding,
+                "batched_embedding",
+                wraps=embedding.batched_embedding,
+            ) as batched_embedding:
+                result = engine.mm_embedding_cpp(
+                    [""] * len(image_payloads),
+                    [MMUrlType.IMAGE] * len(image_payloads),
+                    [
+                        torch.frombuffer(bytearray(payload), dtype=torch.uint8)
+                        for payload in image_payloads
+                    ],
+                    [list(preprocess_config) for _ in image_payloads],
+                )
+        finally:
+            engine.stop()
+
+        self.assertEqual(estimate_work.call_count, len(image_payloads))
+        self.assertEqual(
+            [len(call.args[0]) for call in batched_embedding.call_args_list],
+            [2, 2, 1],
+        )
+        self.assertEqual(len(result.embeddings), len(expected))
+        for actual, serial in zip(result.embeddings, expected):
+            torch.testing.assert_close(actual, serial)
 
 
 class KimiK3VisionProcessorTest(TestCase):
