@@ -1129,6 +1129,10 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     group_slots[0] = 3;
     shared_cache->put(12, group_slots, false);
 
+    // The mutation above bumped the live device-cache version past
+    // first.version, so the version gate does NOT fire for this request: the
+    // (still un-refreshed) snapshot is returned with its older key set, exactly
+    // as before the gate existed.
     auto unchanged = kv_cache_manager->getKVCacheInfo(first.version, /*need_cache_keys=*/true);
     EXPECT_EQ(unchanged.version, first.version);
     auto unchanged_keys = unchanged.cached_keys;
@@ -1149,11 +1153,71 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     std::sort(updated_keys.begin(), updated_keys.end());
     EXPECT_EQ(updated_keys, (std::vector<CacheKeyType>{10, 11, 12}));
 
+    // Current indexed version again: gated to an empty key set.
     auto current = kv_cache_manager->getKVCacheInfo(updated.version, /*need_cache_keys=*/true);
     EXPECT_EQ(current.version, updated.version);
-    auto current_keys = current.cached_keys;
-    std::sort(current_keys.begin(), current_keys.end());
-    EXPECT_EQ(current_keys, (std::vector<CacheKeyType>{10, 11, 12}));
+    EXPECT_TRUE(current.cached_keys.empty());
+    EXPECT_GT(current.total_kv_cache, 0);
+}
+
+TEST_F(KVCacheManagerTest, GetKVCacheInfo_VersionGateSkipsUnchangedKeySet) {
+    // The FlexLB cache-status poll sends the version it has already indexed
+    // (-1 while unindexed). When that version still equals the device-cache
+    // version, the key set is unchanged and must not be rebuilt/serialized:
+    // CacheStatusPB::ByteSizeLong over tens of thousands of keys dominated the
+    // prefill gRPC thread in long-context profiles. Scalars must stay fresh.
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 8, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache = false;
+    kv_cache_config.reuse_cache         = false;
+
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(kv_cache_manager->init());
+
+    auto shared_cache = kv_cache_manager->allocator_->sharedBlockCache();
+    ASSERT_NE(shared_cache, nullptr);
+
+    std::vector<BlockIdxType> group_slots(1);
+    group_slots[0] = 1;
+    shared_cache->put(10, group_slots, false);
+    group_slots[0] = 2;
+    shared_cache->put(11, group_slots, false);
+
+    // Unindexed caller (-1): full key set.
+    auto unindexed = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true);
+    ASSERT_GE(unindexed.version, 0);
+    auto unindexed_keys = unindexed.cached_keys;
+    std::sort(unindexed_keys.begin(), unindexed_keys.end());
+    EXPECT_EQ(unindexed_keys, (std::vector<CacheKeyType>{10, 11}));
+
+    // Indexed at the current version: gated, empty keys, scalars still filled.
+    auto gated = kv_cache_manager->getKVCacheInfo(unindexed.version, /*need_cache_keys=*/true);
+    EXPECT_EQ(gated.version, unindexed.version);
+    EXPECT_TRUE(gated.cached_keys.empty());
+    EXPECT_EQ(gated.block_size, unindexed.block_size);
+    EXPECT_EQ(gated.total_kv_cache, unindexed.total_kv_cache);
+    EXPECT_EQ(gated.available_kv_cache, unindexed.available_kv_cache);
+
+    // Stale indexed version: full key set again (no gate).
+    auto stale = kv_cache_manager->getKVCacheInfo(unindexed.version - 1, /*need_cache_keys=*/true);
+    auto stale_keys = stale.cached_keys;
+    std::sort(stale_keys.begin(), stale_keys.end());
+    EXPECT_EQ(stale_keys, (std::vector<CacheKeyType>{10, 11}));
+
+    // After a mutation the previously indexed version is stale: full set with
+    // the new key and a bumped version.
+    group_slots[0] = 3;
+    shared_cache->put(12, group_slots, false);
+    auto bumped = kv_cache_manager->getKVCacheInfo(unindexed.version, /*need_cache_keys=*/true);
+    EXPECT_GT(bumped.version, unindexed.version);
+    auto bumped_keys = bumped.cached_keys;
+    std::sort(bumped_keys.begin(), bumped_keys.end());
+    EXPECT_EQ(bumped_keys, (std::vector<CacheKeyType>{10, 11, 12}));
+
+    // need_cache_keys=false never hits the gate regardless of version.
+    auto scalars_only = kv_cache_manager->getKVCacheInfo(bumped.version, /*need_cache_keys=*/false);
+    EXPECT_TRUE(scalars_only.cached_keys.empty());
+    EXPECT_EQ(scalars_only.version, bumped.version);
 }
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesLogicalFullPoolTokenCapacity) {

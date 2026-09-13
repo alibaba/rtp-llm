@@ -346,6 +346,25 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         auto          request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
         std::vector<int64_t> publication_lease_keys;
         std::vector<int32_t> publication_lease_blocks;
+        // Long-context store hot path: the block loop below runs once per
+        // (logical block, cache key) pair, i.e. O(blocks) per (layer, tag)
+        // invocation and O(layers x blocks) per request. Hoist the per-key
+        // decimal strings and the layer/tag-invariant key affixes so the inner
+        // loop performs a single reused-buffer append per block instead of a
+        // full makeCacheKey construction (allocation + multi-part concat).
+        std::vector<std::string> cache_key_strs;
+        cache_key_strs.reserve(request_cache_key_count);
+        for (size_t key_index = 0; key_index < request_cache_key_count; ++key_index) {
+            cache_key_strs.emplace_back(
+                std::to_string(cache_keys[context_index][static_cast<int64_t>(key_index)]));
+        }
+        const std::string cache_key_prefix =
+            "model_id_" + std::to_string(cache_model_id) + "_token_id_str_";
+        std::string cache_key_suffix = "_layer_id_" + std::to_string(layer_kv.layer_id);
+        if (!layer_kv.tag.empty() && layer_kv.tag != "default") {
+            cache_key_suffix += "_tag_";
+            cache_key_suffix += layer_kv.tag;
+        }
         RTP_LLM_LOG_DEBUG("write cache store, request id is %ld, blocks num is %zu",
                           static_cast<long>(request_id),
                           total_logical_blocks);
@@ -359,11 +378,12 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                                     "invalid block key_index=%d (cache_keys_per_batch=%zu)",
                                     key_index,
                                     cache_keys_per_batch);
-            const std::string cache_key = makeCacheKey(
-                cache_model_id,
-                std::to_string(cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(key_index)]),
-                layer_kv.layer_id,
-                layer_kv.tag);
+            std::string cache_key;
+            cache_key.reserve(cache_key_prefix.size() + cache_key_strs[key_index].size()
+                              + cache_key_suffix.size());
+            cache_key.assign(cache_key_prefix)
+                .append(cache_key_strs[key_index])
+                .append(cache_key_suffix);
             const int32_t block_id = host_kv_cache_offset[input_index][static_cast<int64_t>(offset_index)];
             // Host block-offset tables use -1 as the null block sentinel.
             if (block_id == -1) {

@@ -540,6 +540,34 @@ size_t KVCacheManager::maxAvailableTokensNum() const {
 }
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
+    if (need_cache_keys) {
+        // Version gate for the cache-status poll (FlexLB GetCacheStatus). The
+        // caller sends the cache version it has ALREADY fully indexed (see
+        // GrpcCacheStatusCheckRunner::getCurrentCacheVersion: -1 when the local
+        // index is not initialized, otherwise the indexed version, which is
+        // only published after a successful full-key-set update). When that
+        // version still equals the device-cache version, the key set is exactly
+        // what the caller already holds, so rebuilding, serializing and
+        // transferring the full map (tens of thousands of keys after
+        // long-context traffic; CacheStatusPB::ByteSizeLong dominated the
+        // prefill gRPC thread in perf profiles) is pure waste. The client
+        // discards an unchanged-version response it has already indexed, so an
+        // empty key set is semantically identical to the full map here. The
+        // scalar capacity fields are still refreshed.
+        //
+        // Memory-connector keys are not covered by the device-cache version,
+        // but that is equally true today: the client skips a response whose
+        // version is unchanged and already indexed regardless of the key set,
+        // so memory-only changes were never propagated without a device-cache
+        // version bump either. The gate therefore changes no observable
+        // behavior for the caller.
+        if (latest_version >= 0 && allocator_ != nullptr) {
+            auto shared_cache = allocator_->sharedBlockCache();
+            if (shared_cache && shared_cache->version() == latest_version) {
+                return buildKVCacheInfo(latest_version, /*need_cache_keys=*/false);
+            }
+        }
+    }
     if (need_cache_keys && cacheStatusSnapshotEnabled()) {
         std::shared_ptr<const KVCacheInfo> snapshot;
         {
