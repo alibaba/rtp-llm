@@ -2,28 +2,29 @@
 
 #include <memory>
 
-#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 
 namespace rtp_llm {
 
-class FullKVCacheGroup: public KVCacheGroup {
+class FullCacheManager: public SingleTypeCacheManager {
 public:
-    FullKVCacheGroup(GroupBase                           cache_group,
+    FullCacheManager(GroupBase                           cache_group,
                      BlockPoolPtr                        block_pool,
                      int                                 group_id,
                      SharedBlockCache*                   shared_cache     = nullptr,
                      const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(std::move(cache_group), std::move(block_pool), group_id, shared_cache, metrics_reporter) {}
+        SingleTypeCacheManager(
+            std::move(cache_group), std::move(block_pool), group_id, shared_cache, metrics_reporter) {}
 
     // Transition-only overload.
-    FullKVCacheGroup(const LayerIdsType&                 layer_ids,
+    FullCacheManager(const LayerIdsType&                 layer_ids,
                      std::shared_ptr<KVCacheSpec>        kvcache_spec,
                      BlockPoolPtr                        block_pool,
                      int                                 group_id,
                      SharedBlockCache*                   shared_cache     = nullptr,
                      const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr,
                      CacheGroupPolicy                    policy = defaultCacheGroupPolicy(CacheGroupType::FULL)):
-        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy, shared_cache, metrics_reporter) {}
+        SingleTypeCacheManager(layer_ids, kvcache_spec, block_pool, group_id, policy, shared_cache, metrics_reporter) {}
 
     bool        malloc(BlockIds&            block_indices,
                        int                  seq_len,

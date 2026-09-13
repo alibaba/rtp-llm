@@ -38,6 +38,7 @@ public:
         max_seq_len_(graph_params.max_seq_len),
         seq_size_per_block_(graph_params.tokens_per_block),
         kernel_seq_size_per_block_(graph_params.kernel_tokens_per_block),
+        max_kernel_blocks_per_kv_block_(graph_params.max_kernel_blocks_per_kv_block),
         hidden_size_(graph_params.hidden_size),
         input_hidden_size_(graph_params.input_hidden_size),
         hc_mult_(static_cast<int>(graph_params.hc_mult)),
@@ -52,9 +53,10 @@ public:
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
         }
-        if (kernel_seq_size_per_block_ <= 0) {
-            throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
-        }
+        auto resolved_geometry = graph_params;
+        resolved_geometry.resolveCacheGeometry();
+        max_kernel_blocks_per_kv_block_ = resolved_geometry.max_kernel_blocks_per_kv_block;
+        kv_cache_group_tags_            = resolved_geometry.kv_cache_group_tags;
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr(forward_method_name);
@@ -162,6 +164,7 @@ private:
     int                     max_seq_len_{0};
     int                     seq_size_per_block_{0};
     int                     kernel_seq_size_per_block_{0};
+    size_t                  max_kernel_blocks_per_kv_block_{1};
     int                     hidden_size_{0};
     size_t                  input_hidden_size_{0};
     int                     hc_mult_{1};
@@ -182,10 +185,10 @@ private:
     at::TensorOptions                      options_cuda_float_;
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
-    std::vector<std::string>                       kv_cache_group_tags_;
-    int                                            position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
-    mutable std::atomic<uint64_t>                  combo_position_fallback_count_{0};
-    std::shared_ptr<kmonitor::MetricsReporter>     metrics_reporter_;
+    std::vector<std::string>                   kv_cache_group_tags_;
+    int                                        position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
+    mutable std::atomic<uint64_t>              combo_position_fallback_count_{0};
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter_;
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

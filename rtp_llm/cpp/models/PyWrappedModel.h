@@ -2,6 +2,7 @@
 #pragma once
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <optional>
 #include <string>
@@ -61,10 +62,10 @@ public:
     // py_instance is `py_model` indeedly.
     PyWrappedModel(const GptModelInitParams& params,
                    py::object                py_instance,
-                   bool                      is_prefill_cuda_graph_mode  = false,
-                   bool                      use_spec_decoding           = false,
-                   DSparkModelRole           dspark_model_role           = DSparkModelRole::NONE,
-                   bool                      allow_cuda_graph            = true,
+                   bool                      is_prefill_cuda_graph_mode   = false,
+                   bool                      use_spec_decoding            = false,
+                   DSparkModelRole           dspark_model_role            = DSparkModelRole::NONE,
+                   bool                      allow_cuda_graph             = true,
                    bool                      track_cache_store_completion = false);
     ~PyWrappedModel();
 
@@ -217,20 +218,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     torch_ext::PyModelInitResources init_resources;
 
     if (params.kv_cache_layer_layout.has_value()) {
-        // Block geometry travels on GptModelInitParams (filled from
-        // cache_manager->cacheConfig() in NormalExecutor/MtpExecutor) rather
-        // than the model-static attention_conf — for DSV4 the cache manager
-        // promotes seq_size_per_block to a 256-token physical block while
-        // attention_conf still reflects the 64-token --seq_size_per_block
-        // CLI flag, causing the fused compressor to index state block_table
-        // with the wrong stride and trap on unallocated ring slots.
-        RTP_LLM_CHECK_WITH_INFO(params.tokens_per_block > 0 && params.kernel_tokens_per_block > 0
-                                    && params.tokens_per_block % params.kernel_tokens_per_block == 0,
-                                "GptModelInitParams must carry valid tokens_per_block / kernel_tokens_per_block "
-                                "from CacheConfig before constructing PyWrappedModel KVCache; got tokens_per_block=%zu "
-                                "kernel_tokens_per_block=%zu",
-                                params.tokens_per_block,
-                                params.kernel_tokens_per_block);
+        // The layout carries the published per-group specs, including page geometry.
         init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value());
     }
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
@@ -295,7 +283,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
         if (params.kv_cache_layer_layout.has_value()) {
-            graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTagsSnapshot();
+            RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "cache-backed CUDA graph requires a cache manager");
+            const auto& cache_config             = params.mtp_cache_config_index.has_value() ?
+                                                       cache_manager_->getMTPModuleCacheConfig(*params.mtp_cache_config_index) :
+                                                       cache_manager_->cacheConfig();
+            graph_params.tokens_per_block        = cache_config.seq_size_per_block;
+            graph_params.kernel_tokens_per_block = 0;
+            graph_params.cache_topology          = params.kv_cache_layer_layout->topologyPtr();
         }
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);

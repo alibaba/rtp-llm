@@ -54,8 +54,8 @@ struct GptModelInitParams {
     MlaOpsType                                   mla_ops_type            = MlaOpsType::AUTO;
     int64_t                                      max_seq_len             = 0;
     int64_t                                      hidden_size             = 0;
-    size_t                                       tokens_per_block        = 0;
-    size_t                                       kernel_tokens_per_block = 0;
+    size_t                                       tokens_per_block        = 0;  // tokens/base cache-key block
+    size_t                                       kernel_tokens_per_block = 0;  // tokens/kernel page, cacheless fallback
     std::shared_ptr<KVCacheManager>              cache_manager;
     // nullopt selects the main-model cache config; otherwise selects this MTP module config.
     std::optional<int> mtp_cache_config_index;

@@ -227,6 +227,8 @@ public:
     int     prefixLength() const;
     int     reuseLength() const;
     int     initialReuseLength() const;
+    int     pdKvReadyLength() const;
+    void    setPdKvReadyLength(int length);
     size_t  maxTokenNum() const;
     void    setReuseLength(int reuse_length);
     void    setLocalReuseLength(int length);
@@ -825,6 +827,7 @@ protected:
     std::vector<int32_t>                  speculative_accepted_tokens_per_pos_;
     size_t                                last_output_pos_      = 0;
     int                                   initial_reuse_length_ = 0;
+    int                                   pd_kv_ready_length_   = 0;  // tokens in the completed P/D KV prefix
     int                                   reuse_length_         = 0;
     int                                   local_reuse_length_   = 0;
     int                                   device_reuse_length_  = 0;

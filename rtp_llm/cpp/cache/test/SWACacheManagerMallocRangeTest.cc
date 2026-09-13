@@ -6,7 +6,7 @@
 #include <string>
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
-#include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SWACacheManager.h"
 
 namespace rtp_llm {
 namespace test {
@@ -77,13 +77,13 @@ std::shared_ptr<MHAKVCacheSpec> makeMHASpec(int seq_size_per_block) {
 
 }  // namespace
 
-TEST(SWAKVCacheGroupMallocRangeTest, EmptyBlockIdsKeepTailBlocksForSeqLenUpTo1M) {
+TEST(SWACacheManagerMallocRangeTest, EmptyBlockIdsKeepTailBlocksForSeqLenUpTo1M) {
     constexpr int kSeqSizePerBlock = 256;
     constexpr int kMaxSeqLen       = 1000000;
 
     ScopedEnvVar    disable_pin_host_pool("RTP_LLM_PIN_HOST_BLOCK_POOL", "0");
     auto            block_pool = createHostBlockPool();
-    SWAKVCacheGroup group({}, makeMHASpec(kSeqSizePerBlock), block_pool, 0);
+    SWACacheManager group({}, makeMHASpec(kSeqSizePerBlock), block_pool, 0);
 
     auto check_seq_len = [&](int seq_len) {
         BlockIds block_ids;

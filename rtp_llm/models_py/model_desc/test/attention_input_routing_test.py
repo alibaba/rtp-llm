@@ -1,4 +1,5 @@
 import unittest
+from collections.abc import Iterator, Mapping
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -6,9 +7,8 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.model_desc.block_map import get_group_tags_for_layers
-from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import (
-    DeepSeekV4DSparkModel,
-)
+from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
+from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3_next import (
     Qwen3NextGatedDeltaNetDecode,
@@ -20,6 +20,7 @@ from rtp_llm.models_py.model_desc.qwen3_next import (
     _validate_aiter_flydsl_gdn_decode_eager_state,
     _write_cp_cache_store,
 )
+from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 
 class FakeKVCache:
@@ -28,6 +29,20 @@ class FakeKVCache:
 
     def get_layer_cache_groups(self, layer_idx: int):
         return [SimpleNamespace(tag=tag) for tag in self.layer_tags[layer_idx]]
+
+
+class DuplicateSparseTagMapping(Mapping[str, object]):
+    def __init__(self):
+        self.values = {"default": object(), "indexer_kv": object()}
+
+    def __getitem__(self, key: str) -> object:
+        return self.values[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(("default", "indexer_kv", "indexer_kv"))
+
+    def __len__(self) -> int:
+        return 3
 
 
 class RoutingModel(GptModelBase):
@@ -134,6 +149,119 @@ class AttentionInputRoutingTest(unittest.TestCase):
     def test_aiter_prefill_metadata_uses_only_existing_cpu_lengths(self):
         lengths = torch.tensor([3, 5], dtype=torch.int32)
         self.assertEqual(_cpu_sequence_lengths(lengths), (3, 5))
+
+    def test_sparse_mla_cacheless_single_input_prepares_one_shared_impl(self):
+        model = object.__new__(GenericMoeModel)
+        model.__dict__.update(
+            config=SimpleNamespace(
+                attn_config=SimpleNamespace(is_sparse=True, use_mla=True)
+            ),
+            kv_cache=None,
+            parallelism_config=object(),
+            weight=object(),
+            fmha_config=object(),
+        )
+        attention_inputs = PyAttentionInputs()
+        inputs = SimpleNamespace(attention_inputs=attention_inputs)
+        with patch(
+            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl"
+        ) as factory:
+            routes = model.prepare_fmha_impl(inputs)
+            factory.assert_called_once_with(
+                model.config,
+                model.parallelism_config,
+                model.weight,
+                attention_inputs,
+                model.fmha_config,
+                False,
+            )
+            self.assertIs(routes["default"], factory.return_value)
+            self.assertIs(routes["indexer_kv"], factory.return_value)
+
+            model.__dict__["kv_cache"] = FakeKVCache([["default", "indexer_kv"]])
+            factory.reset_mock()
+            with self.assertRaisesRegex(RuntimeError, "exactly.*tags"):
+                model.prepare_fmha_impl(inputs)
+            factory.assert_not_called()
+
+    def test_generic_sparse_mla_prepares_only_exact_semantic_groups(self):
+        model = object.__new__(GenericMoeModel)
+        model.__dict__["config"] = SimpleNamespace(
+            attn_config=SimpleNamespace(is_sparse=True, use_mla=True)
+        )
+
+        self.assertEqual(model._get_fmha_group_tags(), ["default", "indexer_kv"])
+
+    def test_generic_sparse_mla_cacheless_forward_passes_none(self):
+        model = object.__new__(GenericMoeModel)
+        hidden_states = torch.zeros((2, 4), dtype=torch.float32)
+        residual = torch.zeros_like(hidden_states)
+        decoder_layer = Mock(
+            return_value=SimpleNamespace(
+                hidden_states=hidden_states,
+                residual=residual,
+            )
+        )
+        model.__dict__.update(
+            config=SimpleNamespace(
+                attn_config=SimpleNamespace(is_sparse=True, use_mla=True)
+            ),
+            layer_num=1,
+            layers=[decoder_layer],
+            kv_cache=None,
+            embed_tokens=Mock(return_value=hidden_states),
+            norm=Mock(return_value=(hidden_states, None)),
+        )
+        fmha_impl = {"default": object(), "indexer_kv": object()}
+
+        model.forward(SimpleNamespace(input_ids=torch.tensor([1, 2])), fmha_impl)
+
+        self.assertIsNone(decoder_layer.call_args.kwargs["kv_cache"])
+
+    def test_generic_dense_mla_keeps_scalar_group_selection(self):
+        model = object.__new__(GenericMoeModel)
+        model.__dict__["config"] = SimpleNamespace(
+            attn_config=SimpleNamespace(is_sparse=False, use_mla=True)
+        )
+
+        self.assertIsNone(model._get_fmha_group_tags())
+
+    def test_generic_sparse_non_mla_keeps_scalar_group_selection(self):
+        model = object.__new__(GenericMoeModel)
+        model.__dict__["config"] = SimpleNamespace(
+            attn_config=SimpleNamespace(is_sparse=True, use_mla=False)
+        )
+
+        self.assertIsNone(model._get_fmha_group_tags())
+
+    def test_generic_sparse_mla_rejects_invalid_raw_tags_before_factory(self):
+        model = object.__new__(GenericMoeModel)
+        model.__dict__.update(
+            config=SimpleNamespace(
+                attn_config=SimpleNamespace(is_sparse=True, use_mla=True)
+            ),
+            parallelism_config=object(),
+            weight=object(),
+            fmha_config=object(),
+        )
+        invalid_mappings = (
+            {"default": object(), "indexer_kv": object(), "extra": object()},
+            {"default": object()},
+            {"default": object(), "wrong": object()},
+            DuplicateSparseTagMapping(),
+        )
+
+        with patch(
+            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl"
+        ) as factory:
+            for attention_inputs in invalid_mappings:
+                with self.subTest(tags=list(attention_inputs)):
+                    with self.assertRaisesRegex(RuntimeError, "exactly.*tags"):
+                        model.prepare_fmha_impl(
+                            SimpleNamespace(attention_inputs=attention_inputs)
+                        )
+
+        factory.assert_not_called()
 
     def test_qwen3_next_cuda_graph_uses_narrow_block_map_view(self):
         block_map = torch.arange(12, dtype=torch.int32).reshape(3, 4)

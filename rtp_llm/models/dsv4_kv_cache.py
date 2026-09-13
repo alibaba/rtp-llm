@@ -13,10 +13,9 @@ of independent pools selected by its ``compress_ratios`` entry:
   ==========  ====================================================
 
 C++ turns the resulting per-layer desc lists into the cache topology through
-``HybridPoolConfigCreator`` (``validateHybridPoolDescs`` ->
-``buildLayerSpecsFromDescs`` -> ``populateGroupsFromLayerSpecs`` ->
-``setupIndependentPoolSizes``), which is only reached when
-``hybrid_attention_config.enable_independent_kv_cache_pools`` is set.
+``CacheConfigCreator`` (descriptor validation, spec construction, and tagged
+group population). ``enable_independent_kv_cache_pools`` marks this as an
+explicit heterogeneous topology instead of a legacy single-group model.
 
 This module is the production twin of
 ``rtp_llm/cpp/cache/test/CacheConfigTestUtils.h`` (``makeDsv4Desc`` /
@@ -321,7 +320,7 @@ def resolve_dsv4_tokens_per_block(
 ) -> Optional[int]:
     """Return the physical block size DSv4 should run with, or None to keep.
 
-    ``HybridPoolConfigCreator::createHybridAttentionPoolConfig`` takes
+    ``CacheConfigCreator`` takes
     ``kv_cache_config.seq_size_per_block`` only when it differs from the
     framework default of 64, otherwise it falls back to
     ``attn_config.tokens_per_block``; and ``createBasicConfig`` (the warm-up

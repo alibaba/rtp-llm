@@ -11,7 +11,11 @@
 namespace rtp_llm {
 
 struct LinearKVCacheSpec: public KVCacheSpec {
-    LinearKVCacheSpec() {
+    LinearKVCacheSpec(std::string tag                       = {},
+                      uint32_t    seq_size_per_block        = 1,
+                      uint32_t    kernel_seq_size_per_block = 1,
+                      uint32_t    local_kv_head_num         = 1):
+        KVCacheSpec(std::move(tag), seq_size_per_block, kernel_seq_size_per_block, local_kv_head_num) {
         type = KVCacheSpecType::LinearAttention;
     }
 
@@ -43,15 +47,8 @@ struct LinearKVCacheSpec: public KVCacheSpec {
                                 linear.linear_key_head_dim,
                                 linear.linear_value_head_dim);
 
-        auto spec                  = std::make_shared<LinearKVCacheSpec>();
-        spec->tag                  = desc.tag;
-        spec->seq_size_per_block   = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
-        spec->memory_layout_dtype_ = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
-        RTP_LLM_CHECK_WITH_INFO(spec->memory_layout_dtype_ != DataType::TYPE_INVALID,
-                                "KVCacheSpecDesc tag=%s cache_type=%d requires valid dtype",
-                                desc.tag.c_str(),
-                                static_cast<int>(desc.cache_type));
-
+        const auto seq    = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
+        const auto kernel = SpecBuilder::kernelSeqSizePerBlock(desc, ctx, seq);
         const auto     attn_tp     = std::max<int64_t>(1, ctx.parallelism_config->get_attn_tp_size());
         const uint32_t tp          = static_cast<uint32_t>(attn_tp);
         const uint32_t key_heads   = static_cast<uint32_t>(linear.linear_num_key_heads);
@@ -83,6 +80,13 @@ struct LinearKVCacheSpec: public KVCacheSpec {
                                 desc.tag.c_str(),
                                 linear.linear_num_value_heads,
                                 tp);
+
+        auto spec                  = std::make_shared<LinearKVCacheSpec>(desc.tag, seq, kernel, local_v_heads);
+        spec->memory_layout_dtype_ = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
+        RTP_LLM_CHECK_WITH_INFO(spec->memory_layout_dtype_ != DataType::TYPE_INVALID,
+                                "KVCacheSpecDesc tag=%s cache_type=%d requires valid dtype",
+                                desc.tag.c_str(),
+                                static_cast<int>(desc.cache_type));
 
         spec->ssm_elems =
             static_cast<size_t>(local_v_heads) * linear.linear_key_head_dim * linear.linear_value_head_dim;

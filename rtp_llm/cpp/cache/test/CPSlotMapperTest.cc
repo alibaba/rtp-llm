@@ -150,14 +150,12 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     CacheConfig config;
     config.seq_size_per_block = 8;
     config.layer_num          = 1;
-    config.layer_all_num      = 1;
 
     auto full_spec = std::make_shared<MHAKVCacheSpec>();
     full_spec->tag = "full";
     GroupBase full_group;
     full_group.tag               = full_spec->tag;
     full_group.spec              = full_spec;
-    full_group.layer_ids         = {0};
     full_group.policy            = defaultCacheGroupPolicy(CacheGroupType::FULL);
     full_group.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
     full_group.policy.cp_slice   = CpBlockSliceMode::EQUAL_BYTES;
@@ -167,7 +165,6 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     GroupBase swa_group;
     swa_group.tag             = swa_spec->tag;
     swa_group.spec            = swa_spec;
-    swa_group.layer_ids       = {0};
     swa_group.policy          = defaultCacheGroupPolicy(CacheGroupType::SWA);
     swa_group.policy.cp_slice = CpBlockSliceMode::EQUAL_BYTES;
     config.setTopology({std::move(full_group), std::move(swa_group)}, {{0, {"full", "swa"}}});

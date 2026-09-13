@@ -58,7 +58,7 @@ class WeightsConvertLayerOverrideTest(unittest.TestCase):
         self.assertEqual(len(result.kv_cache_spec_descs), 2)
         self.assertEqual(
             [layer_descs[0].tag for layer_descs in result.kv_cache_spec_descs],
-            ["linear0", "full"],
+            ["linear", "full"],
         )
         self.assertEqual(
             [layer_descs[0].cache_type for layer_descs in result.kv_cache_spec_descs],

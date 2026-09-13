@@ -5,7 +5,7 @@
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
 #include "rtp_llm/cpp/cache/Types.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -92,7 +92,7 @@ bool DefaultLayerGroupPolicy::init() {
         RTP_LLM_LOG_ERROR("exist intersection between full and other [%s]", ss.str().c_str());
         return false;
     }
-    const auto  layer_layout       = allocator_->allLayerCacheBase();
+    const auto  layer_layout       = coordinator_manager_->allLayerCacheBase();
     const auto& topology           = layer_layout.topology();
     uint64_t    group_name_bithash = 1;
     const auto& layer_group_ids    = topology.layerGroupIdsSnapshot();
@@ -130,9 +130,7 @@ bool DefaultLayerGroupPolicy::init() {
                 }
                 const std::string prefix     = is_full_group ? "F" : GetOtherGroupPrefixName();
                 std::string       group_name = prefix + cache_tag;
-                const size_t      block_size_bytes =
-                    topology_group.layer_ids.size()
-                    * (topology_group.kv_block_stride_bytes + topology_group.kv_scale_stride_bytes);
+                const size_t      block_size_bytes = topology.blockSizeBytesForGroup(static_cast<size_t>(group_idx));
                 groups_[group_idx] = Group{is_full_group, group_name_bithash, group_name, cache_tag, block_size_bytes};
                 group_to_layer_ids_[group_idx] = {};
                 if (groups_.size() < 64) {
@@ -211,7 +209,7 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     gr
         iovs.reserve(layer_ids.size() * 2);
         for (size_t j = 0; j < layer_ids.size(); ++j) {
             // if support scale, block_infos: {kv_info, scale_info}
-            const auto& block_infos = allocator_->convertIndexToBufferByTag(layer_ids[j], tag, block_ids[i]);
+            const auto& block_infos = coordinator_manager_->convertIndexToBufferByTag(layer_ids[j], tag, block_ids[i]);
             if (block_infos.empty()) {
                 RTP_LLM_LOG_WARNING("convertIndexToBuffer returned empty for layer_id [%d] group_id [%d] block_id[%d]",
                                     layer_ids[j],

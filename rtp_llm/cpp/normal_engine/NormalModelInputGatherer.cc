@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <sstream>
 #include <string>
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -16,6 +17,13 @@
 namespace rtp_llm {
 
 namespace {
+
+size_t kernelBlockTableWidth(size_t physical_blocks, size_t bpk) {
+    RTP_LLM_CHECK_WITH_INFO(bpk > 0
+                                && physical_blocks <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) / bpk,
+                            "kernel block table capacity overflow or zero BPK");
+    return physical_blocks * bpk;
+}
 
 bool asyncDebugEnabled() {
     const char* env = std::getenv("RTP_LLM_ASYNC_DEBUG");
@@ -113,18 +121,28 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&             model_input,
                             "hybrid kv_cache_kernel_block_id must be 3-D");
     RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_block_id.dim() == 3, "hybrid kv_cache_block_id must be 3-D");
 
-    const size_t batch           = model_input.kv_cache_kernel_block_id.size(1);
-    int32_t*     kernel_dst_base = model_input.kv_cache_kernel_block_id.data_ptr<int32_t>();
-    int32_t*     store_dst_base  = model_input.kv_cache_block_id.data_ptr<int32_t>();
+    const size_t batch = model_input.kv_cache_kernel_block_id.size(1);
+    RTP_LLM_CHECK_WITH_INFO(kv_cache.groupNums() <= model_input.kv_cache_kernel_block_id.size(0) && model_batch_idx >= 0
+                                && static_cast<size_t>(model_batch_idx) < batch,
+                            "kernel block table group or batch exceeds destination");
+    int32_t* kernel_dst_base = model_input.kv_cache_kernel_block_id.data_ptr<int32_t>();
+    int32_t* store_dst_base  = model_input.kv_cache_block_id.data_ptr<int32_t>();
 
     for (int gid = 0; gid < kv_cache.groupNums(); ++gid) {
-        auto&    kernel_blocks = kv_cache.kernelBlocks(stream_batch_idx, gid);
-        int32_t* kernel_dst    = kernel_dst_base
+        auto& kernel_blocks = kv_cache.kernelBlocks(stream_batch_idx, gid);
+        RTP_LLM_CHECK_WITH_INFO(kernel_blocks.size()
+                                    <= static_cast<size_t>(model_input.kv_cache_kernel_block_id.size(2)),
+                                "kernel block ids exceed destination row for group=%d",
+                                gid);
+        int32_t* kernel_dst = kernel_dst_base
                               + (static_cast<size_t>(gid) * batch + static_cast<size_t>(model_batch_idx))
                                     * max_blocks_num * kernel_blocks_per_kv_block;
         std::memcpy(kernel_dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
 
-        auto&    physical_blocks = kv_cache.blocks(stream_batch_idx, gid);
+        auto& physical_blocks = kv_cache.blocks(stream_batch_idx, gid);
+        RTP_LLM_CHECK_WITH_INFO(physical_blocks.size() <= static_cast<size_t>(model_input.kv_cache_block_id.size(2)),
+                                "physical block ids exceed destination row for group=%d",
+                                gid);
         int32_t* store_dst =
             store_dst_base + (static_cast<size_t>(gid) * batch + static_cast<size_t>(model_batch_idx)) * max_blocks_num;
         std::memcpy(store_dst, physical_blocks.data(), physical_blocks.size() * sizeof(int32_t));
@@ -193,8 +211,7 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
                 sliceMultimodalExtraInput(mm_extra_input[i], mm_feature, token_offset, feature_len);
             if (!current_extra_input.is_cuda()) {
                 host_holder.hold_host(current_extra_input);
-                gathered_mm_extra_input.emplace_back(
-                    current_extra_input.to(torch::kCUDA, /*non_blocking=*/true));
+                gathered_mm_extra_input.emplace_back(current_extra_input.to(torch::kCUDA, /*non_blocking=*/true));
             } else {
                 gathered_mm_extra_input.emplace_back(std::move(current_extra_input));
             }
@@ -256,17 +273,16 @@ torch::Tensor buildLmOutputIndexesOnHost(const GptModelInputs& model_input, cons
     const auto total_batch_size         = static_cast<int64_t>(stream_groups.totalModelBatchSize());
     const auto total_decode_batch_size  = static_cast<int64_t>(stream_groups.totalDecodeBatchSize());
     const auto total_context_batch_size = total_batch_size - total_decode_batch_size;
-    auto       indexes =
-        torch::empty({total_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
-    auto* dst = indexes.data_ptr<int32_t>();
+    auto       indexes = torch::empty({total_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+    auto*      dst     = indexes.data_ptr<int32_t>();
     for (int64_t i = 0; i < total_decode_batch_size; ++i) {
         dst[i] = static_cast<int32_t>(i);
     }
     if (total_context_batch_size > 0) {
-        auto input_lengths = model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().contiguous() :
-                                                                  model_input.input_lengths.contiguous();
-        const auto* lengths = input_lengths.data_ptr<int32_t>();
-        int32_t     offset  = static_cast<int32_t>(total_decode_batch_size);
+        auto        input_lengths = model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().contiguous() :
+                                                                          model_input.input_lengths.contiguous();
+        const auto* lengths       = input_lengths.data_ptr<int32_t>();
+        int32_t     offset        = static_cast<int32_t>(total_decode_batch_size);
         for (int64_t i = 0; i < total_context_batch_size; ++i) {
             offset += lengths[total_decode_batch_size + i];
             dst[total_decode_batch_size + i] = offset - 1;
@@ -336,7 +352,7 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
         model_input.kv_cache_kernel_block_id =
             torch::zeros({(int64_t)config_.kv_cache_group_nums,
                           (int64_t)total_batch_size,
-                          (int64_t)(max_blocks_num * config_.kernel_blocks_per_kv_block)},
+                          (int64_t)kernelBlockTableWidth(max_blocks_num, config_.kernel_blocks_per_kv_block)},
                          pinned_i32);
         model_input.kv_cache_block_id = torch::zeros(
             {(int64_t)config_.kv_cache_group_nums, (int64_t)total_batch_size, (int64_t)max_blocks_num}, pinned_i32);
@@ -385,8 +401,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_decode_streams");
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::DECODE);
 
-    const char* device_input_env = std::getenv("RTP_LLM_DEVICE_INPUT");
-    bool use_normal_device_state = device_input_env != nullptr && std::string(device_input_env) == "1"
+    const char* device_input_env        = std::getenv("RTP_LLM_DEVICE_INPUT");
+    bool        use_normal_device_state = device_input_env != nullptr && std::string(device_input_env) == "1"
                                    && stream_groups.totalContextBatchSize() == 0
                                    && stream_groups.totalDecodeBatchSize() > 0 && !ctx.need_cal_position_id;
     if (use_normal_device_state) {
@@ -472,10 +488,10 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_context_streams");
     std::vector<torch::Tensor> gathered_mm_features;
     std::vector<torch::Tensor> gathered_mm_extra_input;
-    const auto context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
-    auto prefix_lengths_host =
+    const auto                 context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
+    auto                       prefix_lengths_host =
         torch::empty({context_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
-    auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
+    auto ctx                = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
     ctx.prefix_lengths_host = prefix_lengths_host.data_ptr<int32_t>();
 
     for (const auto& stream : stream_groups.contextStreams()) {
@@ -575,11 +591,12 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
         return torch::Tensor{};
     }
 
-    static const auto pinned_i32  = torch::TensorOptions(torch::kInt32).pinned_memory(true);
-    auto              host_tensor = torch::zeros({(int64_t)config_.kv_cache_group_nums,
-                                                  (int64_t)total_batch_size,
-                                                  (int64_t)(max_blocks_num * config_.kernel_blocks_per_kv_block)},
-                                    pinned_i32);
+    static const auto pinned_i32 = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+    auto              host_tensor =
+        torch::zeros({(int64_t)config_.kv_cache_group_nums,
+                      (int64_t)total_batch_size,
+                      (int64_t)kernelBlockTableWidth(max_blocks_num, config_.kernel_blocks_per_kv_block)},
+                     pinned_i32);
 
     const size_t per_batch_stride = max_blocks_num * config_.kernel_blocks_per_kv_block;
     int32_t*     dst_base         = host_tensor.data_ptr<int32_t>();
@@ -587,10 +604,16 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
     auto fill_one_stream = [&](const GenerateStreamPtr& stream, int& batch_idx) {
         auto& kv_cache           = *stream->kvCachePtr();
         auto  current_batch_size = stream->currentBatchSize();
+        RTP_LLM_CHECK_WITH_INFO(kv_cache.groupNums() <= host_tensor.size(0) && batch_idx >= 0
+                                    && static_cast<size_t>(batch_idx + current_batch_size) <= total_batch_size,
+                                "kernel block table group or batch exceeds destination");
         for (int i = 0; i < current_batch_size; ++i) {
             for (int gid = 0; gid < kv_cache.groupNums(); ++gid) {
                 const auto& kernel_blocks = kv_cache.kernelBlocks(i, gid);
-                int32_t*    dst =
+                RTP_LLM_CHECK_WITH_INFO(kernel_blocks.size() <= per_batch_stride,
+                                        "kernel block ids exceed destination row for group=%d",
+                                        gid);
+                int32_t* dst =
                     dst_base
                     + (static_cast<size_t>(gid) * total_batch_size + static_cast<size_t>(batch_idx)) * per_batch_stride;
                 std::memcpy(dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));

@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
@@ -168,7 +168,7 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                  const SpeculativeExecutionConfig&         sp_config,
                                  void*                                     register_buffer_addr,
                                  size_t                                    register_buffer_size,
-                                 std::shared_ptr<KVCacheAllocator>         allocator,
+                                 std::shared_ptr<CoordinatorCacheManager>  coordinator_manager,
                                  const kmonitor::MetricsReporterPtr        metrics_reporter,
                                  const std::map<std::string, std::string>& lora_info_map):
     metrics_reporter_(metrics_reporter) {
@@ -191,11 +191,11 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
         }
     }
     if (linear_group_ids.empty()) {
-        group_policy_ =
-            std::make_unique<remote_connector::FullLayerGroupPolicy>(allocator, full_group_ids, linear_group_ids);
+        group_policy_ = std::make_unique<remote_connector::FullLayerGroupPolicy>(
+            coordinator_manager, full_group_ids, linear_group_ids);
     } else {
         group_policy_ = std::make_unique<remote_connector::FullLinearLayerGroupPolicy>(
-            allocator, full_group_ids, linear_group_ids, std::max(1, cache_config.linear_step));
+            coordinator_manager, full_group_ids, linear_group_ids, std::max(1, cache_config.linear_step));
     }
 }
 

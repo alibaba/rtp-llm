@@ -23,18 +23,16 @@ namespace {
 
 std::shared_ptr<const CacheTopology> warmupCacheTopology() {
     static const auto topology = []() {
-        constexpr auto kWarmupCacheTag = "__warmup__";
-        auto           spec            = std::make_shared<MHAKVCacheSpec>();
-        spec->tag                      = kWarmupCacheTag;
+        constexpr auto kWarmupCacheTag  = "__warmup__";
+        auto           spec             = std::make_shared<MHAKVCacheSpec>();
+        spec->tag                       = kWarmupCacheTag;
+        spec->seq_size_per_block        = 1;
+        spec->kernel_seq_size_per_block = 1;
 
         GroupBase group;
-        group.tag                       = kWarmupCacheTag;
-        group.spec                      = std::move(spec);
-        group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        group.layer_ids                 = {0};
-        group.seq_size_per_block        = 1;
-        group.kernel_seq_size_per_block = 1;
-
+        group.tag       = kWarmupCacheTag;
+        group.spec      = std::move(spec);
+        group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
         return CacheTopology::create({std::move(group)}, {{0, {kWarmupCacheTag}}});
     }();
     return topology;

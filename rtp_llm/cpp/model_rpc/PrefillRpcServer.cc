@@ -621,8 +621,6 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     auto              prefill_local_reuse_len  = prefill_context.getStream()->localReuseLength();
     auto              prefill_remote_reuse_len = prefill_context.getStream()->remoteReuseLength();
     auto              prefill_memory_reuse_len = prefill_context.getStream()->memoryReuseLength();
-    const auto        cache_manager            = prefill_context.getStream()->resourceContext().cache_manager;
-    const bool use_independent_block_pools = cache_manager && cache_manager->cacheConfig().use_independent_block_pools;
     // Decode workers do not receive ViT features in PD mode, so preserve the
     // prefill-side media usage metadata when forwarding their responses.
     const auto multimodal_lengths =
@@ -653,8 +651,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
                                 prefill_total_reuse_len,
                                 prefill_local_reuse_len,
                                 prefill_remote_reuse_len,
-                                prefill_memory_reuse_len,
-                                use_independent_block_pools);
+                                prefill_memory_reuse_len);
         }
         if (!prefill_context.rpc_context.writer->Write(response)) {
             RTP_LLM_LOG_WARNING("request [%ld] write outputs pb failed", request_id);
@@ -674,8 +671,7 @@ void PrefillRpcServer::mergeCacheReuseInfo(AuxInfoPB& aux_info,
                                            int        prefill_total_reuse_len,
                                            int        prefill_local_reuse_len,
                                            int        prefill_remote_reuse_len,
-                                           int        prefill_memory_reuse_len,
-                                           bool       use_independent_block_pools) {
+                                           int        prefill_memory_reuse_len) {
     const int decode_total_reuse_len  = aux_info.total_reuse_len();
     const int decode_local_reuse_len  = aux_info.local_reuse_len();
     const int decode_remote_reuse_len = aux_info.remote_reuse_len();
@@ -691,17 +687,11 @@ void PrefillRpcServer::mergeCacheReuseInfo(AuxInfoPB& aux_info,
     aux_info.set_decode_remote_reuse_len(decode_remote_reuse_len);
     aux_info.set_decode_memory_reuse_len(decode_memory_reuse_len);
 
-    if (use_independent_block_pools && decode_total_reuse_len > prefill_total_reuse_len) {
-        aux_info.set_total_reuse_len(decode_total_reuse_len);
-        aux_info.set_local_reuse_len(decode_local_reuse_len);
-        aux_info.set_remote_reuse_len(decode_remote_reuse_len);
-        aux_info.set_memory_reuse_len(decode_memory_reuse_len);
-    } else {
-        aux_info.set_total_reuse_len(prefill_total_reuse_len);
-        aux_info.set_local_reuse_len(prefill_local_reuse_len);
-        aux_info.set_remote_reuse_len(prefill_remote_reuse_len);
-        aux_info.set_memory_reuse_len(prefill_memory_reuse_len);
-    }
+    // Top-level cache usage describes prefill computation saved, not decode KV availability.
+    aux_info.set_total_reuse_len(prefill_total_reuse_len);
+    aux_info.set_local_reuse_len(prefill_local_reuse_len);
+    aux_info.set_remote_reuse_len(prefill_remote_reuse_len);
+    aux_info.set_memory_reuse_len(prefill_memory_reuse_len);
 }
 
 void PrefillRpcServer::mergeMultimodalLengths(GenerateOutputsPB&        response,

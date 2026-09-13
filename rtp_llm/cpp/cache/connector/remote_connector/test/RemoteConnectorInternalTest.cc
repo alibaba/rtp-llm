@@ -1,4 +1,5 @@
 #include <gmock/gmock.h>
+#include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -7,7 +8,7 @@
 
 #include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "autil/EnvUtil.h"
@@ -74,13 +75,13 @@ KVCacheSpecPtr makeTestLinearSpec(const std::string& tag, uint32_t seq_size_per_
 
 }  // namespace
 
-class FakeKVCacheAllocator: public KVCacheAllocator {
+class FakeCoordinatorCacheManager: public CoordinatorCacheManager {
 public:
-    FakeKVCacheAllocator(const CacheConfig&          config,
-                         const std::vector<int32_t>& full_group_ids,
-                         const std::vector<int32_t>& other_group_ids,
-                         size_t                      per_group_layer_num):
-        KVCacheAllocator(config) {
+    FakeCoordinatorCacheManager(const CacheConfig&          config,
+                                const std::vector<int32_t>& full_group_ids,
+                                const std::vector<int32_t>& other_group_ids,
+                                size_t                      per_group_layer_num):
+        CoordinatorCacheManager(config) {
         (void)full_group_ids;
         (void)other_group_ids;
         (void)per_group_layer_num;
@@ -224,22 +225,22 @@ class RemoteConnectorInternalTest: public ::testing::Test {
 public:
     void SetUp() override {
         rtp_llm::initLogger();
-        auto mha_spec                  = makeTestMhaSpec("0", /*seq_size_per_block=*/8);
-        auto linear_spec_1             = makeTestLinearSpec("1", /*seq_size_per_block=*/8);
-        auto linear_spec_2             = makeTestLinearSpec("2", /*seq_size_per_block=*/8);
-        cache_config_.block_num        = 8;
-        cache_config_.layer_num        = layer_num_;
-        cache_config_.layer_all_num    = layer_num_;
-        byte_size_per_block_           = static_cast<size_t>(mha_spec->block_size_bytes()) * layer_num_;
-        cache_config_.block_size_bytes = byte_size_per_block_;
-        cache_config_.dtype            = rtp_llm::DataType::TYPE_FP16;
+        auto mha_spec               = makeTestMhaSpec("0", /*seq_size_per_block=*/8);
+        auto linear_spec_1          = makeTestLinearSpec("1", /*seq_size_per_block=*/8);
+        auto linear_spec_2          = makeTestLinearSpec("2", /*seq_size_per_block=*/8);
+        cache_config_.block_num     = 8;
+        cache_config_.layer_num     = layer_num_;
+
+        byte_size_per_block_        = static_cast<size_t>(mha_spec->block_size_bytes()) * layer_num_;
+        cache_config_.dtype         = rtp_llm::DataType::TYPE_FP16;
         std::vector<int> layers(layer_num_);
         std::iota(layers.begin(), layers.end(), 0);
         cache_config_.fromGroupedSpecs({mha_spec, linear_spec_1, linear_spec_2},
                                        {layers, layers, layers},
                                        {CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::LINEAR},
                                        {"0", "1", "2"});
-        cache_config_.setGroupBlockLayout(
+        rtp_llm::test::setGroupBlockLayout(
+            cache_config_,
             {8, 8, 8},
             {mha_spec->block_size_bytes(), mha_spec->block_size_bytes(), mha_spec->block_size_bytes()},
             {0, 0, 0});
@@ -251,10 +252,16 @@ private:
     std::shared_ptr<RemoteConnector> getFullLinearPolicyConnector() const {
         std::vector<int32_t> full_group_ids({0});
         std::vector<int32_t> linear_group_ids({1, 2});
-        auto                 allocator =
-            std::make_shared<FakeKVCacheAllocator>(cache_config_, full_group_ids, linear_group_ids, layer_num_);
-        return std::shared_ptr<RemoteConnector>(new RemoteConnector(
-            cache_config_, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, nullptr, 0, allocator));
+        auto                 coordinator_manager =
+            std::make_shared<FakeCoordinatorCacheManager>(cache_config_, full_group_ids, linear_group_ids, layer_num_);
+        return std::shared_ptr<RemoteConnector>(new RemoteConnector(cache_config_,
+                                                                    kv_cache_config_,
+                                                                    runtime_config_,
+                                                                    parallelism_config_,
+                                                                    sp_config_,
+                                                                    nullptr,
+                                                                    0,
+                                                                    coordinator_manager));
     }
 
     CacheConfig                cache_config_;
@@ -317,13 +324,13 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecInfoMapAndGroups) {
 TEST_F(RemoteConnectorInternalTest, PublishesTagLocalHeterogeneousGroupBlockSizes) {
     auto       heterogeneous_config = cache_config_;
     const auto per_layer_bytes      = byte_size_per_block_ / layer_num_;
-    heterogeneous_config.setGroupBlockLayout(
-        {8, 8, 8}, {per_layer_bytes, per_layer_bytes / 2, per_layer_bytes}, {0, 0, 0});
+    rtp_llm::test::setGroupBlockLayout(
+        heterogeneous_config, {8, 8, 8}, {per_layer_bytes, per_layer_bytes / 2, per_layer_bytes}, {0, 0, 0});
 
     std::vector<int32_t> full_group_ids({0});
     std::vector<int32_t> linear_group_ids({1, 2});
-    auto                 allocator =
-        std::make_shared<FakeKVCacheAllocator>(heterogeneous_config, full_group_ids, linear_group_ids, layer_num_);
+    auto                 coordinator_manager = std::make_shared<FakeCoordinatorCacheManager>(
+        heterogeneous_config, full_group_ids, linear_group_ids, layer_num_);
     auto connector = std::shared_ptr<RemoteConnector>(new RemoteConnector(heterogeneous_config,
                                                                           kv_cache_config_,
                                                                           runtime_config_,
@@ -331,7 +338,7 @@ TEST_F(RemoteConnectorInternalTest, PublishesTagLocalHeterogeneousGroupBlockSize
                                                                           sp_config_,
                                                                           nullptr,
                                                                           0,
-                                                                          allocator));
+                                                                          coordinator_manager));
     ASSERT_TRUE(connector->group_policy_->init());
     auto [spec_info_map, spec_groups] = connector->genLocationSpecInfoMapAndGroups(/*tp_size=*/1);
     EXPECT_EQ(spec_info_map->at("tp0_F0"), byte_size_per_block_);
@@ -345,12 +352,11 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecGroupsScalesLinearly) {
     constexpr size_t group_count        = linear_group_count + 1;
 
     CacheConfig config;
-    config.block_num        = 8;
-    config.layer_num        = group_count;
-    config.layer_all_num    = group_count;
-    config.dtype            = rtp_llm::DataType::TYPE_FP16;
-    auto full_spec          = makeTestMhaSpec("full", /*seq_size_per_block=*/8);
-    config.block_size_bytes = full_spec->block_size_bytes();
+    config.block_num     = 8;
+    config.layer_num     = group_count;
+
+    config.dtype         = rtp_llm::DataType::TYPE_FP16;
+    auto full_spec       = makeTestMhaSpec("full", /*seq_size_per_block=*/8);
 
     std::vector<KVCacheSpecPtr>   specs{full_spec};
     std::vector<std::vector<int>> layer_ids{{0}};
@@ -367,14 +373,15 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecGroupsScalesLinearly) {
         linear_group_ids.push_back(group_id);
     }
     config.fromGroupedSpecs(specs, layer_ids, group_types, group_tags);
-    config.setGroupBlockLayout(std::vector<uint32_t>(group_count, 8),
-                               std::vector<size_t>(group_count, full_spec->block_size_bytes()),
-                               std::vector<size_t>(group_count, 0));
+    rtp_llm::test::setGroupBlockLayout(config,
+                                       std::vector<uint32_t>(group_count, 8),
+                                       std::vector<size_t>(group_count, full_spec->block_size_bytes()),
+                                       std::vector<size_t>(group_count, 0));
 
-    auto allocator =
-        std::make_shared<FakeKVCacheAllocator>(config, full_group_ids, linear_group_ids, /*per_group_layer_num=*/1);
+    auto coordinator_manager = std::make_shared<FakeCoordinatorCacheManager>(
+        config, full_group_ids, linear_group_ids, /*per_group_layer_num=*/1);
     auto connector = std::shared_ptr<RemoteConnector>(new RemoteConnector(
-        config, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, nullptr, 0, allocator));
+        config, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, nullptr, 0, coordinator_manager));
     ASSERT_TRUE(connector->group_policy_->init());
 
     auto [spec_info_map, spec_groups] = connector->genLocationSpecInfoMapAndGroups(/*tp_size=*/1);
@@ -386,28 +393,28 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecGroupsScalesLinearly) {
 TEST(RemoteConnectorTagIdentityTest, GroupNamesDoNotDependOnNumericGroupOrder) {
     CacheConfig first_config;
     first_config.layer_num     = 1;
-    first_config.layer_all_num = 1;
+
     first_config.fromGroupedSpecs({makeTestMhaSpec("full", 8), makeTestLinearSpec("linear", 8)},
                                   {{0}, {0}},
                                   {CacheGroupType::FULL, CacheGroupType::LINEAR},
                                   {"full", "linear"});
-    auto first_allocator =
-        std::make_shared<FakeKVCacheAllocator>(first_config, std::vector<int32_t>{0}, std::vector<int32_t>{1}, 1);
+    auto first_coordinator_manager = std::make_shared<FakeCoordinatorCacheManager>(
+        first_config, std::vector<int32_t>{0}, std::vector<int32_t>{1}, 1);
     auto first_policy = std::make_shared<FullLinearLayerGroupPolicy>(
-        first_allocator, std::vector<int32_t>{0}, std::vector<int32_t>{1}, 1);
+        first_coordinator_manager, std::vector<int32_t>{0}, std::vector<int32_t>{1}, 1);
     ASSERT_TRUE(first_policy->init());
 
     CacheConfig reversed_config;
     reversed_config.layer_num     = 1;
-    reversed_config.layer_all_num = 1;
+
     reversed_config.fromGroupedSpecs({makeTestLinearSpec("linear", 8), makeTestMhaSpec("full", 8)},
                                      {{0}, {0}},
                                      {CacheGroupType::LINEAR, CacheGroupType::FULL},
                                      {"linear", "full"});
-    auto reversed_allocator =
-        std::make_shared<FakeKVCacheAllocator>(reversed_config, std::vector<int32_t>{1}, std::vector<int32_t>{0}, 1);
+    auto reversed_coordinator_manager = std::make_shared<FakeCoordinatorCacheManager>(
+        reversed_config, std::vector<int32_t>{1}, std::vector<int32_t>{0}, 1);
     auto reversed_policy = std::make_shared<FullLinearLayerGroupPolicy>(
-        reversed_allocator, std::vector<int32_t>{1}, std::vector<int32_t>{0}, 1);
+        reversed_coordinator_manager, std::vector<int32_t>{1}, std::vector<int32_t>{0}, 1);
     ASSERT_TRUE(reversed_policy->init());
 
     auto names_by_tag = [](const GroupPolicy& policy, const CacheTopology& topology) {
@@ -426,17 +433,17 @@ TEST(RemoteConnectorTagIdentityTest, GroupNamesDoNotDependOnNumericGroupOrder) {
 TEST(RemoteConnectorTagIdentityTest, FullOnlyPolicyRoutesSameLayerGroupsByTagWithoutHotPathLayoutLookup) {
     CacheConfig first_config;
     first_config.layer_num     = 1;
-    first_config.layer_all_num = 1;
+
     first_config.fromGroupedSpecs({makeTestMhaSpec("full_a", 8), makeTestMhaSpec("full_b", 8)},
                                   {{0}, {0}},
                                   {CacheGroupType::FULL, CacheGroupType::FULL},
                                   {"full_a", "full_b"});
-    auto first_allocator =
-        std::make_shared<FakeKVCacheAllocator>(first_config, std::vector<int32_t>{0, 1}, std::vector<int32_t>{}, 1);
-    auto first_policy =
-        std::make_shared<FullLayerGroupPolicy>(first_allocator, std::vector<int32_t>{0, 1}, std::vector<int32_t>{});
+    auto first_coordinator_manager = std::make_shared<FakeCoordinatorCacheManager>(
+        first_config, std::vector<int32_t>{0, 1}, std::vector<int32_t>{}, 1);
+    auto first_policy = std::make_shared<FullLayerGroupPolicy>(
+        first_coordinator_manager, std::vector<int32_t>{0, 1}, std::vector<int32_t>{});
     ASSERT_TRUE(first_policy->init());
-    ASSERT_EQ(first_allocator->allLayerCacheBaseCallCount(), 1u);
+    ASSERT_EQ(first_coordinator_manager->allLayerCacheBaseCallCount(), 1u);
     EXPECT_EQ(first_policy->groups().at(0).tag, "full_a");
     EXPECT_EQ(first_policy->groups().at(1).tag, "full_b");
     EXPECT_EQ(first_policy->reachableAggregateMasks(), (std::vector<uint64_t>{0b11}));
@@ -446,43 +453,45 @@ TEST(RemoteConnectorTagIdentityTest, FullOnlyPolicyRoutesSameLayerGroupsByTagWit
 
     kv_cache_manager::BlockBuffers first_buffers;
     ASSERT_TRUE(first_policy->genBlockBuffersByTag({"full_b", "full_a"}, {7, 9}, first_buffers));
-    EXPECT_EQ(first_allocator->taggedBufferRequests(),
+    EXPECT_EQ(first_coordinator_manager->taggedBufferRequests(),
               (std::vector<std::tuple<int, std::string, int>>{{0, "full_b", 7}, {0, "full_a", 9}}));
-    EXPECT_EQ(first_allocator->allLayerCacheBaseCallCount(), 1u);
+    EXPECT_EQ(first_coordinator_manager->allLayerCacheBaseCallCount(), 1u);
 
     CacheConfig reversed_config;
     reversed_config.layer_num     = 1;
-    reversed_config.layer_all_num = 1;
+
     reversed_config.fromGroupedSpecs({makeTestMhaSpec("full_b", 8), makeTestMhaSpec("full_a", 8)},
                                      {{0}, {0}},
                                      {CacheGroupType::FULL, CacheGroupType::FULL},
                                      {"full_b", "full_a"});
-    auto reversed_allocator =
-        std::make_shared<FakeKVCacheAllocator>(reversed_config, std::vector<int32_t>{0, 1}, std::vector<int32_t>{}, 1);
-    auto reversed_policy =
-        std::make_shared<FullLayerGroupPolicy>(reversed_allocator, std::vector<int32_t>{0, 1}, std::vector<int32_t>{});
+    auto reversed_coordinator_manager = std::make_shared<FakeCoordinatorCacheManager>(
+        reversed_config, std::vector<int32_t>{0, 1}, std::vector<int32_t>{}, 1);
+    auto reversed_policy = std::make_shared<FullLayerGroupPolicy>(
+        reversed_coordinator_manager, std::vector<int32_t>{0, 1}, std::vector<int32_t>{});
     ASSERT_TRUE(reversed_policy->init());
-    ASSERT_EQ(reversed_allocator->allLayerCacheBaseCallCount(), 1u);
+    ASSERT_EQ(reversed_coordinator_manager->allLayerCacheBaseCallCount(), 1u);
     EXPECT_EQ(reversed_policy->groups().at(0).tag, "full_b");
     EXPECT_EQ(reversed_policy->groups().at(1).tag, "full_a");
 
     kv_cache_manager::BlockBuffers reversed_buffers;
     ASSERT_TRUE(reversed_policy->genBlockBuffersByTag({"full_b", "full_a"}, {7, 9}, reversed_buffers));
-    EXPECT_EQ(reversed_allocator->taggedBufferRequests(),
+    EXPECT_EQ(reversed_coordinator_manager->taggedBufferRequests(),
               (std::vector<std::tuple<int, std::string, int>>{{0, "full_b", 7}, {0, "full_a", 9}}));
-    EXPECT_EQ(reversed_allocator->allLayerCacheBaseCallCount(), 1u);
+    EXPECT_EQ(reversed_coordinator_manager->allLayerCacheBaseCallCount(), 1u);
 }
 
 TEST(RemoteConnectorBlockBufferValidationTest, RejectsAllocatorBufferSizeThatDoesNotMatchTopology) {
     CacheConfig config;
     config.layer_num     = 1;
-    config.layer_all_num = 1;
+
     config.fromGroupedSpecs({makeTestMhaSpec("full", 8)}, {{0}}, {CacheGroupType::FULL}, {"full"});
 
-    auto allocator = std::make_shared<FakeKVCacheAllocator>(config, std::vector<int32_t>{0}, std::vector<int32_t>{}, 1);
-    auto policy    = std::make_shared<FullLayerGroupPolicy>(allocator, std::vector<int32_t>{0}, std::vector<int32_t>{});
+    auto coordinator_manager =
+        std::make_shared<FakeCoordinatorCacheManager>(config, std::vector<int32_t>{0}, std::vector<int32_t>{}, 1);
+    auto policy =
+        std::make_shared<FullLayerGroupPolicy>(coordinator_manager, std::vector<int32_t>{0}, std::vector<int32_t>{});
     ASSERT_TRUE(policy->init());
-    allocator->setTaggedBufferSizeOverride(config.kvBlockStrideBytesForGroup(0) + 1);
+    coordinator_manager->setTaggedBufferSizeOverride(config.kvBlockStrideBytesForGroup(0) + 1);
 
     kv_cache_manager::BlockBuffers buffers;
     EXPECT_FALSE(policy->genBlockBuffersByTag({"full"}, {7}, buffers));
@@ -495,11 +504,11 @@ TEST(RemoteConnectorTopologyInvariantTest, ConstructorRejectsMissingTopology) {
     RuntimeConfig              runtime_config;
     ParallelismConfig          parallelism_config;
     SpeculativeExecutionConfig sp_config;
-    auto                       allocator =
-        std::make_shared<FakeKVCacheAllocator>(cache_config, std::vector<int32_t>{}, std::vector<int32_t>{}, 0);
+    auto                       coordinator_manager =
+        std::make_shared<FakeCoordinatorCacheManager>(cache_config, std::vector<int32_t>{}, std::vector<int32_t>{}, 0);
 
     EXPECT_ANY_THROW((void)new RemoteConnector(
-        cache_config, kv_cache_config, runtime_config, parallelism_config, sp_config, nullptr, 0, allocator));
+        cache_config, kv_cache_config, runtime_config, parallelism_config, sp_config, nullptr, 0, coordinator_manager));
 }
 
 }  // namespace test

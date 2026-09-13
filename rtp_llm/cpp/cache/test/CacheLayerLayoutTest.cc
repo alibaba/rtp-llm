@@ -13,18 +13,16 @@
 namespace rtp_llm {
 namespace {
 
-GroupBase makeLayoutGroup(std::string tag, std::vector<int> layer_ids) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->tag                = tag;
-    spec->seq_size_per_block = 512;
+GroupBase makeLayoutGroup(std::string tag) {
+    auto spec                       = std::make_shared<MHAKVCacheSpec>();
+    spec->tag                       = tag;
+    spec->seq_size_per_block        = 512;
+    spec->kernel_seq_size_per_block = 128;
 
     GroupBase group;
-    group.tag                       = std::move(tag);
-    group.spec                      = std::move(spec);
-    group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    group.layer_ids                 = std::move(layer_ids);
-    group.seq_size_per_block        = 512;
-    group.kernel_seq_size_per_block = 128;
+    group.tag       = std::move(tag);
+    group.spec      = std::move(spec);
+    group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
     return group;
 }
 
@@ -37,8 +35,7 @@ CacheLayerLayout makeLayerLayout(size_t layer_count, const std::vector<int>& act
 }
 
 TEST(CacheLayerLayoutTest, SingleGroupCoversAllLayersAndTagMatchesSlotApi) {
-    auto topology =
-        CacheTopology::create({makeLayoutGroup("full", {0, 1, 2})}, {{0, {"full"}}, {1, {"full"}}, {2, {"full"}}});
+    auto topology = CacheTopology::create({makeLayoutGroup("full")}, {{0, {"full"}}, {1, {"full"}}, {2, {"full"}}});
     GroupedCacheLayerLayout::GroupLayouts groups;
     groups.emplace("full", makeLayerLayout(3, {0, 1, 2}, 7));
     GroupedCacheLayerLayout layout(topology, std::move(groups));
@@ -51,8 +48,8 @@ TEST(CacheLayerLayoutTest, SingleGroupCoversAllLayersAndTagMatchesSlotApi) {
 }
 
 TEST(CacheLayerLayoutTest, SupportsOneGroupPerLayerAndOneToManyTopology) {
-    auto topology = CacheTopology::create({makeLayoutGroup("a", {0, 2}), makeLayoutGroup("b", {1, 2})},
-                                          {{0, {"a"}}, {1, {"b"}}, {2, {"a", "b"}}});
+    auto topology =
+        CacheTopology::create({makeLayoutGroup("a"), makeLayoutGroup("b")}, {{0, {"a"}}, {1, {"b"}}, {2, {"a", "b"}}});
     GroupedCacheLayerLayout::GroupLayouts groups;
     groups.emplace("a", makeLayerLayout(3, {0, 2}, 1));
     groups.emplace("b", makeLayerLayout(3, {1, 2}, 2));
@@ -68,8 +65,8 @@ TEST(CacheLayerLayoutTest, SupportsOneGroupPerLayerAndOneToManyTopology) {
 }
 
 TEST(CacheLayerLayoutTest, EmptyPlaceholderIsSkippedAndProjectionRecountsActiveLayers) {
-    auto topology = CacheTopology::create({makeLayoutGroup("active", {0, 1}), makeLayoutGroup("mtp", {})},
-                                          {{0, {"active"}}, {1, {"active"}}});
+    auto topology =
+        CacheTopology::create({makeLayoutGroup("active"), makeLayoutGroup("mtp")}, {{0, {"active"}}, {1, {"active"}}});
     GroupedCacheLayerLayout::GroupLayouts groups;
     groups.emplace("active", makeLayerLayout(2, {0, 1}, 1));
     groups.emplace("mtp", makeLayerLayout(2, {}, 0));
@@ -87,7 +84,7 @@ TEST(CacheLayerLayoutTest, EmptyPlaceholderIsSkippedAndProjectionRecountsActiveL
 }
 
 TEST(CacheLayerLayoutTest, InvalidTagSlotAndLayerFailFast) {
-    auto topology = CacheTopology::create({makeLayoutGroup("full", {0})}, {{0, {"full"}}});
+    auto                                  topology = CacheTopology::create({makeLayoutGroup("full")}, {{0, {"full"}}});
     GroupedCacheLayerLayout::GroupLayouts groups;
     groups.emplace("full", makeLayerLayout(1, {0}, 1));
     GroupedCacheLayerLayout layout(topology, std::move(groups));

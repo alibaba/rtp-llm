@@ -1,8 +1,8 @@
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
+#include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
-#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
@@ -164,8 +164,8 @@ private:
             EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
                 .WillOnce(Invoke(
                     [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
-            auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(cache_config_);
-            ASSERT_TRUE(allocator->init());
+            auto coordinator_manager = std::make_shared<CoordinatorCacheManager>(cache_config_);
+            ASSERT_TRUE(coordinator_manager->init());
             remote_connectors_.push_back(std::make_shared<RemoteConnector>(cache_config_,
                                                                            kv_cache_config_,
                                                                            runtime_config_,
@@ -173,17 +173,15 @@ private:
                                                                            sp_config_,
                                                                            nullptr,
                                                                            0,
-                                                                           allocator));
+                                                                           coordinator_manager));
             ASSERT_TRUE(remote_connectors_[i]->init());
             servers_[i]->set_remote_connector(remote_connectors_[i]);
         }
     }
 
     void initHybridLayerCacheConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {
-        const size_t all_group_num    = full_group_ids_.size() + other_group_ids_.size();
-        cache_config_.layer_num       = all_group_num * layer_num;
-        cache_config_.layer_all_num   = all_group_num * layer_num;
-        cache_config_.group_layer_num = layer_num;
+        const size_t all_group_num  = full_group_ids_.size() + other_group_ids_.size();
+        cache_config_.layer_num     = all_group_num * layer_num;
 
         auto full_spec   = makeTestMhaSpec("full", static_cast<uint32_t>(seq_size_per_block));
         auto linear_spec = makeTestLinearSpec("linear", static_cast<uint32_t>(seq_size_per_block));
@@ -218,16 +216,16 @@ private:
         const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
         const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
         ASSERT_GE(full_kv_block_stride_bytes, linear_kv_block_stride_bytes);
-        cache_config_.kv_block_stride_bytes = full_kv_block_stride_bytes;
-        cache_config_.kv_block_size_bytes =
-            static_cast<size_t>(cache_config_.group_layer_num) * cache_config_.kv_block_stride_bytes;
-        cache_config_.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
-        cache_config_.kv_scale_size_bytes =
-            static_cast<size_t>(cache_config_.group_layer_num) * cache_config_.kv_scale_stride_bytes;
-        cache_config_.block_size_bytes      = cache_config_.kv_block_size_bytes + cache_config_.kv_scale_size_bytes;
-        const size_t per_layer_stride_bytes = cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
-        cache_config_.layer_to_block_stride_bytes.assign(static_cast<size_t>(cache_config_.layer_all_num),
-                                                         static_cast<int>(per_layer_stride_bytes));
+        std::vector<uint32_t> group_block_nums(all_group_num, static_cast<uint32_t>(block_num));
+        std::vector<size_t>   group_kv_strides;
+        std::vector<size_t>   group_scale_strides;
+        group_kv_strides.reserve(all_group_num);
+        group_scale_strides.reserve(all_group_num);
+        for (const auto& spec : specs) {
+            group_kv_strides.push_back(spec->block_size_bytes());
+            group_scale_strides.push_back(spec->scale_block_size_bytes());
+        }
+        rtp_llm::test::setGroupBlockLayout(cache_config_, group_block_nums, group_kv_strides, group_scale_strides);
     }
 };
 

@@ -261,9 +261,8 @@ std::vector<size_t> DecodeRpcServer::completionQueueExpectedResponseCounts(size_
 
 int DecodeRpcServer::markLoadedCacheReuse(const std::shared_ptr<GenerateStream>& stream,
                                           const LoadCacheResult&                 load_result,
-                                          int                                    seq_size_per_block,
-                                          bool                                   use_independent_block_pools) {
-    if (!stream || !use_independent_block_pools || !load_result.ok() || load_result.loaded_cache_block_count == 0
+                                          int                                    seq_size_per_block) {
+    if (!stream || !load_result.ok() || load_result.loaded_cache_block_count == 0
         || seq_size_per_block <= 0 || stream->inputLength() <= 1) {
         return 0;
     }
@@ -276,9 +275,8 @@ int DecodeRpcServer::markLoadedCacheReuse(const std::shared_ptr<GenerateStream>&
     }
 
     const int loaded_reuse_len = static_cast<int>(published_block_count) * seq_size_per_block;
-    stream->setInitialReuseLength(std::max(stream->initialReuseLength(), loaded_reuse_len));
-    stream->setReuseLength(std::max(stream->reuseLength(), loaded_reuse_len));
-    stream->setLocalReuseLength(std::max(stream->localReuseLength(), loaded_reuse_len));
+    // Completed transfer is KV readiness, not a device/memory/remote cache hit.
+    stream->setPdKvReadyLength(std::max(stream->pdKvReadyLength(), loaded_reuse_len));
     return loaded_reuse_len;
 }
 
@@ -417,12 +415,9 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     decode_context.time_info.updateLoadEndTime();
     const auto& error_info      = load_result.error_info;
     auto&       generate_stream = decode_context.getStream();
-    const bool  use_independent_block_pools =
-        generate_stream->resourceContext().cache_manager->cacheConfig().use_independent_block_pools;
-    const int loaded_reuse_len = markLoadedCacheReuse(
-        generate_stream, load_result, generate_stream->seqSizePerBlock(), use_independent_block_pools);
+    const int loaded_reuse_len = markLoadedCacheReuse(generate_stream, load_result, generate_stream->seqSizePerBlock());
     if (loaded_reuse_len > 0) {
-        RTP_LLM_LOG_DEBUG("request [%s] marked completed P/D handoff reuse_len=%d blocks=%zu",
+        RTP_LLM_LOG_DEBUG("request [%s] completed P/D handoff ready_tokens=%d blocks=%zu",
                           decode_context.request_key.c_str(),
                           loaded_reuse_len,
                           load_result.loaded_cache_block_count);
@@ -494,6 +489,8 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                       "message first status != RemoteStage::GENERATE");
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);
+    // Execution may skip transferred KV without reporting it as a cache hit.
+    generate_stream->setReuseLength(std::max(generate_stream->reuseLength(), generate_stream->pdKvReadyLength()));
     generate_stream->step();
 
     auto new_tokens = torch::zeros({(int64_t)generate_stream->nextBatchSize(), 1}, torch::kInt32);
@@ -971,23 +968,9 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
     RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
 
-    const bool   use_mla             = cache_config.use_mla;
-    const bool   use_hybrid          = cache_config.groupNums() > 1;
-    const bool   use_opaque_kv_store = cache_config.use_opaque_kv_cache_store;
-    const auto&  spec                = cache_config.specForGroup(0);
-    const size_t k_total_bytes       = spec->k_block_size_bytes();
-    const size_t v_total_bytes       = spec->v_block_size_bytes();
-
-    if (!use_mla && !use_opaque_kv_store && peer_cnt > 1) {
-        RTP_LLM_CHECK_WITH_INFO(k_total_bytes % static_cast<size_t>(peer_cnt) == 0,
-                                "k_block bytes[%zu] not divisible by peer_cnt[%d]",
-                                k_total_bytes,
-                                peer_cnt);
-        RTP_LLM_CHECK_WITH_INFO(v_total_bytes % static_cast<size_t>(peer_cnt) == 0,
-                                "v_block bytes[%zu] not divisible by peer_cnt[%d]",
-                                v_total_bytes,
-                                peer_cnt);
-    }
+    const bool use_mla             = cache_config.use_mla;
+    const bool use_hybrid          = cache_config.groupNums() > 1;
+    const bool use_opaque_kv_store = cache_config.use_opaque_kv_cache_store;
 
     auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
     auto start_load_time_us = currentTimeUs();
@@ -1565,7 +1548,7 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
             // scheduler releases its inflight entry without waiting for TTL eviction.
             auto& stream     = decode_context.getStream();
             auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                   ErrorCode::MALLOC_FAILED);
+                                                                                  ErrorCode::MALLOC_FAILED);
             reportEarlyFinishTask(decode_context,
                                   error_code,
                                   "decode allocate resource failed: " + decode_context.error_status.error_message());

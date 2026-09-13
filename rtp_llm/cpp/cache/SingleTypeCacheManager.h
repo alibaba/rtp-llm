@@ -23,13 +23,13 @@ struct NeedBlocksInfo {
     int extra_blocks  = 0;  // extra blocks per batch
 };
 
-class KVCacheGroup {
+class SingleTypeCacheManager {
 public:
-    KVCacheGroup(GroupBase                           cache_group,
-                 BlockPoolPtr                        block_pool,
-                 int                                 group_id,
-                 SharedBlockCache*                   shared_cache     = nullptr,
-                 const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
+    SingleTypeCacheManager(GroupBase                           cache_group,
+                           BlockPoolPtr                        block_pool,
+                           int                                 group_id,
+                           SharedBlockCache*                   shared_cache     = nullptr,
+                           const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
         cache_group_(std::move(cache_group)),
         block_pool_(std::move(block_pool)),
         shared_cache_(shared_cache),
@@ -37,22 +37,33 @@ public:
         group_id_(group_id) {}
 
     // Transition-only constructor for HybridPool and existing focused tests.
-    KVCacheGroup(const LayerIdsType&                 layer_ids,
-                 KVCacheSpecPtr                      kvcache_spec,
-                 BlockPoolPtr                        block_pool,
-                 int                                 group_id,
-                 CacheGroupPolicy                    policy           = CacheGroupPolicy{},
-                 SharedBlockCache*                   shared_cache     = nullptr,
-                 const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(makeLegacyCacheGroup(layer_ids, std::move(kvcache_spec), policy),
-                     std::move(block_pool),
-                     group_id,
-                     shared_cache,
-                     metrics_reporter) {}
+    SingleTypeCacheManager(const LayerIdsType&                 layer_ids,
+                           KVCacheSpecPtr                      kvcache_spec,
+                           BlockPoolPtr                        block_pool,
+                           int                                 group_id,
+                           CacheGroupPolicy                    policy           = CacheGroupPolicy{},
+                           SharedBlockCache*                   shared_cache     = nullptr,
+                           const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
+        SingleTypeCacheManager(makeLegacyCacheGroup(std::move(kvcache_spec), policy),
+                               std::move(block_pool),
+                               group_id,
+                               shared_cache,
+                               metrics_reporter) {
+        for (size_t i = 0; i < layer_ids.size(); ++i) {
+            global_layer_to_local_layer.emplace(layer_ids[i], static_cast<int>(i));
+        }
+    }
 
-    virtual ~KVCacheGroup() = default;
+    virtual ~SingleTypeCacheManager() = default;
 
     bool                init();
+    bool                init(const LayerIdsType& layer_ids) {
+        global_layer_to_local_layer.clear();
+        for (size_t i = 0; i < layer_ids.size(); ++i) {
+            global_layer_to_local_layer.emplace(layer_ids[i], static_cast<int>(i));
+        }
+        return init();
+    }
     virtual bool        malloc(BlockIds&            block_ids,
                                int                  seq_len,
                                bool                 enable_reuse_cache   = false,
@@ -112,17 +123,11 @@ public:
     virtual CacheMemoryPlacement memoryPlacement() const;
 
 protected:
-    static GroupBase
-    makeLegacyCacheGroup(const LayerIdsType& layer_ids, KVCacheSpecPtr spec, const CacheGroupPolicy& policy) {
+    static GroupBase makeLegacyCacheGroup(KVCacheSpecPtr spec, const CacheGroupPolicy& policy) {
         GroupBase group;
-        group.tag                       = spec == nullptr ? std::string{} : spec->tag;
-        group.spec                      = std::move(spec);
-        group.policy                    = policy;
-        group.layer_ids                 = layer_ids;
-        group.seq_size_per_block        = group.spec == nullptr ? 1 : group.spec->seq_size_per_block;
-        group.kernel_seq_size_per_block = group.seq_size_per_block;
-        group.kv_block_stride_bytes     = group.spec == nullptr ? 0 : group.spec->block_size_bytes();
-        group.kv_scale_stride_bytes     = group.spec == nullptr ? 0 : group.spec->scale_block_size_bytes();
+        group.tag                   = spec == nullptr ? std::string{} : spec->tag;
+        group.spec                  = std::move(spec);
+        group.policy                = policy;
         return group;
     }
 
@@ -137,6 +142,6 @@ protected:
     std::unordered_map<int, int>           global_layer_to_local_layer;
 };
 
-using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;
+using SingleTypeCacheManagerPtr = std::shared_ptr<SingleTypeCacheManager>;
 
 }  // namespace rtp_llm
