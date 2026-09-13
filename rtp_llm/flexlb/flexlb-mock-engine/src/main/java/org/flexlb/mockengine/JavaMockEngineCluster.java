@@ -3730,7 +3730,7 @@ public final class JavaMockEngineCluster {
                             + "rejected by D engine port=%d after its ALLOCATE retry window "
                             + "(need=%d blocks, avail=%d tokens, spb=%d)",
                     decode.getGrpcPort(), decode.decodeDemandBlocks(shape.inputLen()),
-                    decode.getAvailableKvTokens(), seqSizePerBlock)).build();
+                    decode.getAvailableKvTokens(), decode.seqSizePerBlock)).build();
         }
 
         private FastRpcService findDecodeEngine(EngineRpcService.GenerateInputPB input) {
@@ -3802,13 +3802,22 @@ public final class JavaMockEngineCluster {
             }
         }
 
+        private MockPerformanceModel.RequestShape shapeForDecode(
+                FastRpcService decode, MockPerformanceModel.RequestShape shape) {
+            if (!shape.nativeKeys() || seqSizePerBlock == decode.seqSizePerBlock) return shape;
+            // The local bundle transfers tokens, not the P allocator's block layout.
+            var local = decode.performance.shape(shape.input(), decode.cache);
+            return new MockPerformanceModel.RequestShape(shape.input(), shape.inputLen(),
+                    shape.outputLen(), local.blockKeys(), local.hitTokens(), local.hitBlocks(), true);
+        }
+
         private boolean allocateDecodeSession(FastRpcService decode, MockPrefillSession session) {
             MockPerformanceModel.RequestShape shape = session.shape;
             long batchId = session.batchId;
             long id = shape.input().getRequestId();
             // Retry without decodeQueueLock: existing completions must be able
             // to release KV while ALLOCATE waits for capacity.
-            if (decode.stopped || decode.shuttingDown || !decode.reserveDecodeLease(id, shape)) {
+            if (decode.stopped || decode.shuttingDown || !decode.reserveDecodeLease(id, shapeForDecode(decode, shape))) {
                 return false;
             }
             synchronized (decode.decodeQueueLock) {
@@ -3933,7 +3942,7 @@ public final class JavaMockEngineCluster {
             // false = Decode is shutting down. The caller emits a failure;
             // losing a prepared Decode cannot become a successful P-only result.
             registerDecodeOwnership(input.getRequestId(), decode);
-            boolean accepted = decode.scheduleDecodeCompletion(shape, batchId, queue);
+            boolean accepted = decode.scheduleDecodeCompletion(shapeForDecode(decode, shape), batchId, queue);
             if (!accepted) {
                 clearDecodeOwnership(input.getRequestId(), decode);
                 releaseReservedDecode(input.getRequestId());

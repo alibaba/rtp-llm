@@ -143,7 +143,7 @@ class WhaleModeConfigurationTest {
             reporter.set(p, (java.util.function.Consumer<java.util.Map<String, Number>>) eventMetrics::add);
             channel = io.grpc.ManagedChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build();
             var input = org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
-                    .setRequestId(42).addTokenIds(123)
+                    .setRequestId(42).addAllTokenIds(java.util.Collections.nCopies(513, 123))
                     .setGenerateConfig(org.flexlb.engine.grpc.EngineRpcService.GenerateConfigPB.newBuilder()
                             .setMaxNewTokens(eos ? 393216 : 8).setMinNewTokens(8)
                             .addRoleAddrs(org.flexlb.engine.grpc.EngineRpcService.RoleAddrPB.newBuilder()
@@ -162,6 +162,9 @@ class WhaleModeConfigurationTest {
                     && System.nanoTime() < deadline) Thread.sleep(10);
             assertEquals(1, d.getCompletedCount(), "D must complete without any Fetch RPC");
             assertEquals(0, d.getCancelledCount());
+            assertEquals(1, ((Number) p.getSnapshot().get("cache_keys")).intValue());
+            assertEquals(8, ((Number) d.getSnapshot().get("cache_keys")).intValue(),
+                    "D must cache its eight 64-token blocks, not one P 512-token key");
             assertEquals(1, eventMetrics.stream().filter(m -> m.containsKey("rtp_llm_first_token_latency_us")).count());
 
             assertEquals(0, d.getRunningCount());
