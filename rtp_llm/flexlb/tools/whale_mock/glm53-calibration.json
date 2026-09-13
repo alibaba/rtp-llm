@@ -12,7 +12,8 @@
     },
     "template_name": "GLM_TEST",
     "template_version_id": "6a8c106627b41a0bbb9ef0c9",
-    "routing_caveat": "Schema3 SINGLE/BATCH; cache affinity permits up to one request lifetime (60000ms) extra TTFT. This approximates the old near-unbounded token preference; it is not a unit conversion. WEIGHTED_CACHE and legacy queue knobs have no exact schema3 equivalent."
+    "routing_caveat": "Schema3 SINGLE/BATCH; cache affinity permits up to one request lifetime (60000ms) extra TTFT. This approximates the old near-unbounded token preference; it is not a unit conversion. WEIGHTED_CACHE and legacy queue knobs have no exact schema3 equivalent.",
+    "capacity_calibration": "available token / available block is 512 for P (8-way page sharding), 64 for D. One equivalent P pool represents the entire P engine; no per-rank pools."
   },
   "bundle_overrides": {
     "prefill": 55,
@@ -21,7 +22,9 @@
     "block_size": 64,
     "prefill_kv_pool_blocks": 31218,
     "decode_kv_pool_blocks": 46157,
-    "decode_max_concurrency": 64
+    "decode_max_concurrency": 64,
+    "prefill_block_size": 512,
+    "decode_block_size": 64
   },
   "performance": {
     "block_size": 64,
@@ -90,5 +93,10 @@
         }
       }
     }
+  },
+  "frontend_env": {
+    "SEQ_SIZE_PER_BLOCK": "512",
+    "PREFILL_CP_KV_CACHE_SHARDED": "0",
+    "PREFILL_CP_SIZE": "1"
   }
 }

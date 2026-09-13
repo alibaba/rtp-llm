@@ -46,6 +46,8 @@ class BundleConfigurationTest(unittest.TestCase):
             }
         )
         self.assertEqual(command[command.index("--block-size") + 1], "64")
+        self.assertEqual(command[command.index("--prefill-block-size") + 1], "512")
+        self.assertEqual(command[command.index("--decode-block-size") + 1], "64")
         self.assertEqual(command[command.index("--n-prefill") + 1], "55")
         self.assertEqual(command[command.index("--n-decode") + 1], "320")
         self.assertEqual(command[command.index("--decode-max-concurrency") + 1], "64")

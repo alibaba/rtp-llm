@@ -27,6 +27,8 @@ def run():
         "prefill",
         "decode",
         "block_size",
+        "prefill_block_size",
+        "decode_block_size",
         "prefill_kv_pool_blocks",
         "decode_kv_pool_blocks",
         "decode_max_concurrency",
@@ -157,6 +159,16 @@ def run():
                 str(runtime / "master-config.json"),
                 "--block-size",
                 str(cfg["block_size"]),
+                *(
+                    ["--prefill-block-size", str(cfg["prefill_block_size"])]
+                    if "prefill_block_size" in cfg
+                    else []
+                ),
+                *(
+                    ["--decode-block-size", str(cfg["decode_block_size"])]
+                    if "decode_block_size" in cfg
+                    else []
+                ),
                 "--prefill-kv-pool-blocks",
                 str(cfg["prefill_kv_pool_blocks"]),
                 "--decode-kv-pool-blocks",

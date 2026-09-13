@@ -27,7 +27,7 @@ D 样本仅覆盖 batch 3.09–7.70，超出范围是外推，不能据此宣称
 窗口均值不是按请求加权的分布，仍须用实际完成请求复核，不能将其解释为真实 EOS 模型。
 
 55P/320D 对应当时该部署的逻辑规模（55 个 P Pod × DP1，40 个 D Pod × DP8）。P/D 单池容量分别为 31218/46157 块，
-每块 64 token；依据同主机同窗口 `available_blocks / (1-used_ratio/100)` 的中位数估计。
+P 每块等效 512 token（8路分片），D 每块 64 token；依据同主机同窗口 `available_blocks / (1-used_ratio/100)` 的中位数估计。
 生产 `staticCacheBlockSize=500` 是旧路由缓存索引参数，不替代物理 KV 块大小。
 旧生产 `CACHE_AFFINITY_FIRST / WEIGHTED_CACHE` 与当前 schema v3 路由器不能直接视为等价；
 这份文件标定引擎执行和容量，不声明调度器策略完全相同。
@@ -109,7 +109,8 @@ decode: 1024
 mock_heap: 32g
 ```
 
-允许覆盖 P/D 数量、两 JVM 堆大小、block_size、prefill_kv_pool_blocks、
+允许覆盖 P/D 数量、两 JVM 堆大小、block_size、prefill_block_size、
+decode_block_size、prefill_kv_pool_blocks、
 decode_kv_pool_blocks 和 decode_max_concurrency；不设置时保留 bundle.yaml 默认值。
 上例仅扩逻辑引擎，不改变每引擎容量、执行上限、流量内容或 EOS 分布。
 需同时检查 Pod 内存、CPU、运行数、排队与完成率。1024 不是默认生产规模，
@@ -162,3 +163,11 @@ measured from arrival at the P engine (including its queue). It excludes master
 queueing/network and must not be presented as frontend TTFT. Failed/cancelled
 requests do not emit this latency. Schedule-only frontend acknowledgement remains
 a separate measurement; no frontend TTFT is fabricated.
+
+Per-role block sizes override the common performance block size only on the
+independent engine copy. GLM uses P=512 and D=64: production available-token /
+available-block ratios verify these effective sizes. P stays a single equivalent
+pool (31218 × 512 = 15983616 tokens), D is 46157 × 64 = 2954048 tokens.
+Apply `frontend_env` alongside the master profile: it hashes 512-token blocks
+without additionally striding for CP. The mock P already represents all P ranks.
+This changes cache routing metadata, not copied request tokens or traffic rate.

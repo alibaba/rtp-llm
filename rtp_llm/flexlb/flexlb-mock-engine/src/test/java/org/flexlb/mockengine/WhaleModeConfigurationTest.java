@@ -104,7 +104,9 @@ class WhaleModeConfigurationTest {
 
     private void assertBundleCompletion(boolean eos) throws Exception {
         var cfg = config("--whale", "true", "--whale-bundle", "true", "--auto-fetch", "true",
-                "--host", "10.1.2.3", "--n-prefill", "1", "--n-decode", "1");
+                "--host", "10.1.2.3", "--n-prefill", "1", "--n-decode", "1",
+                "--prefill-block-size", "512", "--decode-block-size", "64",
+                "--prefill-kv-pool-blocks", "32", "--decode-kv-pool-blocks", "32");
         Path perf = directory.resolve("bundle-perf.json");
         Path master = directory.resolve("bundle-master.json");
         Files.writeString(perf, "{\"block_size\":1024,\"sleep_scale\":1,\"jitter_pct\":0,"
@@ -132,6 +134,13 @@ class WhaleModeConfigurationTest {
                     scheduler, stats, "prefill", "prefill-0", port, 0);
             var d = JavaMockEngineCluster.startEngine(cfg, model, servers, boss, worker, services,
                     scheduler, stats, "decode", "decode-0", port + 1, 1);
+            assertEquals(32L * 512, p.getTotalKvTokens());
+            assertEquals(32L * 64, d.getTotalKvTokens());
+            assertEquals(1024, model.blockSize(), "role overrides must not mutate the shared model");
+            var eventMetrics = new java.util.concurrent.CopyOnWriteArrayList<java.util.Map<String, Number>>();
+            var reporter = p.getClass().getDeclaredField("eventMetricReporter");
+            reporter.setAccessible(true);
+            reporter.set(p, (java.util.function.Consumer<java.util.Map<String, Number>>) eventMetrics::add);
             channel = io.grpc.ManagedChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build();
             var input = org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
                     .setRequestId(42).addTokenIds(123)
@@ -153,6 +162,8 @@ class WhaleModeConfigurationTest {
                     && System.nanoTime() < deadline) Thread.sleep(10);
             assertEquals(1, d.getCompletedCount(), "D must complete without any Fetch RPC");
             assertEquals(0, d.getCancelledCount());
+            assertEquals(1, eventMetrics.stream().filter(m -> m.containsKey("rtp_llm_first_token_latency_us")).count());
+
             assertEquals(0, d.getRunningCount());
             assertEquals(8, d.whaleMetrics().get("mock_generate_tokens_total").longValue());
             long releaseDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);

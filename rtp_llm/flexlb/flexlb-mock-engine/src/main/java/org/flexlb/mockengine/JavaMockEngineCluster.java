@@ -314,6 +314,12 @@ public final class JavaMockEngineCluster {
                 ? config.prefillTotalKvTokens : config.decodeTotalKvTokens;
         int blocksOverride = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
                 ? config.prefillCacheBlocks : config.decodeCacheBlocks;
+        int roleBlockSize = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
+                ? config.prefillBlockSize : config.decodeBlockSize;
+        if (roleBlockSize > 0) {
+            performance = performance.forEngine();
+            performance.setBlockSize(roleBlockSize);
+        }
         int spb = performance.blockSize();
         int totalBlocks = blocksOverride > 0
                 ? blocksOverride
@@ -6486,7 +6492,15 @@ public final class JavaMockEngineCluster {
          */
         long prefillTotalKvTokens = DEFAULT_TOTAL_KV_TOKENS;
         long decodeTotalKvTokens = DEFAULT_DECODE_TOTAL_KV_TOKENS;
+        private static int positiveBlockSize(String value) {
+            int parsed = Integer.parseInt(value);
+            if (parsed <= 0) throw new IllegalArgumentException("role block size must be positive");
+            return parsed;
+        }
+
         int blockSize = 0;
+        int prefillBlockSize = 0;
+        int decodeBlockSize = 0;
         int decodeMaxConcurrency = DEFAULT_DECODE_MAX_CONCURRENCY;
         int statsIntervalMs = 5000;
         /**
@@ -6562,6 +6576,8 @@ public final class JavaMockEngineCluster {
                     case "--prefill-total-kv-tokens" -> config.prefillTotalKvTokens = Long.parseLong(value);
                     case "--decode-total-kv-tokens" -> config.decodeTotalKvTokens = Long.parseLong(value);
                     case "--block-size" -> config.blockSize = Integer.parseInt(value);
+                    case "--prefill-block-size" -> config.prefillBlockSize = positiveBlockSize(value);
+                    case "--decode-block-size" -> config.decodeBlockSize = positiveBlockSize(value);
                     case "--decode-max-concurrency" -> config.decodeMaxConcurrency = Integer.parseInt(value);
                     case "--stats-interval-ms" -> config.statsIntervalMs = Integer.parseInt(value);
                     case "--events-file" -> config.eventsFile = value;
