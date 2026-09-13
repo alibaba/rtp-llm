@@ -227,6 +227,16 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
 
 
 class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
+    def test_role_profile_pins_runtime_defaults_and_drops_stale_mla_selector(self):
+        role_script = pathlib.Path(driver.__file__).with_name(
+            "kimi_k3_full_model_two_host_pd_smoke.sh"
+        )
+        script = role_script.read_text(encoding="utf-8")
+
+        self.assertIn("export RESERVE_BLOCK_RATIO=5", script)
+        self.assertIn("export RTP_LLM_MTP_ASYNC_PREPARE=0", script)
+        self.assertNotIn("RTP_MLA_DECODE_KERNEL", script)
+
     def test_role_script_rejects_non_native_mtp_before_host_validation(self):
         role_script = pathlib.Path(driver.__file__).with_name(
             "kimi_k3_full_model_two_host_pd_smoke.sh"

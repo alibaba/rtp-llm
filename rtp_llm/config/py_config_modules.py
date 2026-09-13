@@ -309,14 +309,22 @@ class VitConfig:
         self.gpu_batch_wait_ms: int = 10
         self.gpu_max_batch_size: int = 8
         self.gpu_max_batch_images: int = 32
+        # Optional exact patch-count cap for models that provide
+        # MMWorkEstimate.input_patches. 0 preserves the historical model-derived
+        # work budget.
+        self.gpu_max_batch_patches: int = 0
+        # Minimum allocator-visible GPU headroom to preserve before launching a
+        # multimodal forward. 0 keeps the historical static-budget-only path.
+        self.gpu_memory_reserve_bytes: int = 0
 
     def embedding_scheduler_args(self) -> Dict[str, int]:
         """Resolved MMScheduler kwargs.
 
         use_gpu_batch on  -> cross-request GPU batching with the gpu_* limits;
-        gpu_max_batch_images caps each forward. Models that provide a work
-        budget may split a multi-work-item request across bounded forwards;
-        legacy models retain the original whole-request image cap.
+        gpu_max_batch_images and optional gpu_max_batch_patches cap each
+        forward. Models that provide a work budget may split a multi-work-item
+        request across bounded forwards; legacy models retain the original
+        whole-request image cap.
         use_gpu_batch off -> serial mode: one request per forward, no wait window,
         and no image cap (sys.maxsize) — matches the old inline path, which never
         bounded a single request's image count.
@@ -326,11 +334,17 @@ class VitConfig:
                 "batch_wait_ms": self.gpu_batch_wait_ms,
                 "max_batch_size": self.gpu_max_batch_size,
                 "max_batch_images": self.gpu_max_batch_images,
+                "max_batch_patches": self.gpu_max_batch_patches,
+                "gpu_memory_reserve_bytes": self.gpu_memory_reserve_bytes,
             }
         return {
             "batch_wait_ms": 0,
             "max_batch_size": 1,
             "max_batch_images": sys.maxsize,
+            "max_batch_patches": 0,
+            # The reserve is meaningful only for cost-aware GPU batching. Keep
+            # serial mode byte-for-byte compatible even if the env is present.
+            "gpu_memory_reserve_bytes": 0,
         }
 
     def to_string(self):
@@ -376,7 +390,9 @@ class VitConfig:
             f"use_gpu_batch: {self.use_gpu_batch}\n"
             f"gpu_batch_wait_ms: {self.gpu_batch_wait_ms}\n"
             f"gpu_max_batch_size: {self.gpu_max_batch_size}\n"
-            f"gpu_max_batch_images: {self.gpu_max_batch_images}"
+            f"gpu_max_batch_images: {self.gpu_max_batch_images}\n"
+            f"gpu_max_batch_patches: {self.gpu_max_batch_patches}\n"
+            f"gpu_memory_reserve_bytes: {self.gpu_memory_reserve_bytes}"
         )
 
 

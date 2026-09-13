@@ -1,18 +1,26 @@
+import os
 import threading
 import time
 import weakref
 from typing import Any, List, Optional
 from unittest import TestCase, main, mock
+from unittest.mock import patch
 
 import torch
 
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
-from rtp_llm.multimodal.mm_scheduler import MMScheduler, OutputCountMismatchError
+from rtp_llm.multimodal.mm_scheduler import (
+    MMScheduler,
+    OutputCountMismatchError,
+)
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import MMWorkEstimate
 from rtp_llm.multimodal.multimodal_util import (
     build_multimodal_output_pb,
     maybe_tensor_to_list,
 )
+from rtp_llm.server.server_args.server_args import EnvArgumentParser
+from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
@@ -29,6 +37,7 @@ class _FakeMMPart:
         oom_over: Optional[int] = None,
         short_over: Optional[int] = None,
         work_budget: Optional[MMWorkEstimate] = None,
+        device: str = "cpu",
     ):
         self.delay = delay
         # Raise a CUDA OOM when a single forward carries more than this many items.
@@ -36,6 +45,7 @@ class _FakeMMPart:
         # Return one fewer output when a forward carries more than this many items.
         self.short_over = short_over
         self.work_budget = work_budget
+        self.device = torch.device(device)
         self.calls: List[int] = []
         self.call_values: List[List[float]] = []
         self.call_started = threading.Event()
@@ -43,6 +53,10 @@ class _FakeMMPart:
 
     def get_batch_work_budget(self, max_batch_media: int) -> Optional[MMWorkEstimate]:
         return self.work_budget
+
+    @property
+    def _device(self) -> torch.device:
+        return self.device
 
     @staticmethod
     def _is_poison(data: Any) -> bool:
@@ -87,6 +101,7 @@ class _FakeWorkItem:
         mm_type: MMUrlType = MMUrlType.IMAGE,
         preprocess_result: Any = None,
         input_patches: Optional[int] = None,
+        estimated_workspace_bytes: Optional[int] = None,
     ):
         # mm_inputs is the raw media list; its length is what the scheduler
         # bounds batches by (sum(len(wi.mm_inputs)) across a request).
@@ -100,8 +115,11 @@ class _FakeWorkItem:
         self.need_check_cache = False
         self.cache_key = None
         self.work_estimate = (
-            MMWorkEstimate(input_patches=input_patches)
-            if input_patches is not None
+            MMWorkEstimate(
+                input_patches=input_patches or 0,
+                estimated_workspace_bytes=estimated_workspace_bytes or 0,
+            )
+            if input_patches is not None or estimated_workspace_bytes is not None
             else None
         )
 
@@ -293,6 +311,29 @@ class MMSchedulerTest(TestCase):
         self.assertTrue(all(e is None for e in errors), errors)
         self.assertEqual(fake.calls, [1, 1, 1, 1])
 
+    def test_explicit_patch_limit_splits_cross_request_batch(self):
+        """The operator patch cap overrides a larger model-derived budget."""
+        fake = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=100))
+        sched = MMScheduler(
+            fake,
+            batch_wait_ms=300,
+            max_batch_size=8,
+            max_batch_images=100,
+            max_batch_patches=10,
+        )
+        barrier = threading.Barrier(4)
+        try:
+            errors = _submit_concurrently(
+                sched,
+                [[_FakeWorkItem(input_patches=6)] for _ in range(4)],
+                barrier=barrier,
+            )
+        finally:
+            sched.close()
+
+        self.assertTrue(all(e is None for e in errors), errors)
+        self.assertEqual(fake.calls, [1, 1, 1, 1])
+
     def test_cost_aware_model_splits_large_request(self):
         """An opted-in model advances an oversized request in bounded chunks."""
         fake = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=10))
@@ -308,6 +349,42 @@ class MMSchedulerTest(TestCase):
 
         self.assertEqual(fake.calls, [1, 1])
         self.assertTrue(all(item.embedding_result is not None for item in items))
+
+    def test_explicit_patch_limit_splits_large_request(self):
+        """A request is chunked by patch count before the model budget binds."""
+        fake = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=100))
+        sched = MMScheduler(
+            fake,
+            batch_wait_ms=0,
+            max_batch_size=8,
+            max_batch_images=100,
+            max_batch_patches=10,
+        )
+        items = [
+            _FakeWorkItem(input_patches=6),
+            _FakeWorkItem(input_patches=4),
+            _FakeWorkItem(input_patches=6),
+        ]
+        try:
+            sched.submit_and_wait(items)
+        finally:
+            sched.close()
+
+        self.assertEqual(fake.calls, [2, 1])
+        self.assertTrue(all(item.embedding_result is not None for item in items))
+
+    def test_single_item_over_explicit_patch_limit_still_runs_alone(self):
+        """Keep the existing indivisible-work-item fallback behavior."""
+        fake = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=100))
+        sched = MMScheduler(fake, batch_wait_ms=0, max_batch_patches=10)
+        item = _FakeWorkItem(input_patches=11)
+        try:
+            sched.submit_and_wait([item])
+        finally:
+            sched.close()
+
+        self.assertEqual(fake.calls, [1])
+        self.assertIsNotNone(item.embedding_result)
 
     def test_split_request_yields_to_waiting_request(self):
         """A large request queues each next chunk at the tail for fairness."""
@@ -516,6 +593,217 @@ class MMSchedulerTest(TestCase):
         finally:
             sched.close()
 
+    @patch("rtp_llm.multimodal.mm_scheduler.torch.cuda.empty_cache")
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.memory_reserved",
+        return_value=0,
+    )
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.memory_allocated",
+        return_value=0,
+    )
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.mem_get_info",
+        return_value=(1000, 2000),
+    )
+    def test_memory_reserve_splits_batch_before_forward(
+        self, mem_get_info, memory_allocated, memory_reserved, empty_cache
+    ):
+        """Runtime headroom admission shrinks a cross-request batch proactively."""
+        fake = _FakeMMPart(
+            work_budget=MMWorkEstimate(estimated_workspace_bytes=10_000),
+            device="cuda:0",
+        )
+        sched = MMScheduler(
+            fake,
+            batch_wait_ms=300,
+            max_batch_size=8,
+            max_batch_images=100,
+            gpu_memory_reserve_bytes=100,
+        )
+        barrier = threading.Barrier(3)
+        try:
+            errors = _submit_concurrently(
+                sched,
+                [
+                    [_FakeWorkItem(estimated_workspace_bytes=400)]
+                    for _ in range(3)
+                ],
+                barrier=barrier,
+            )
+        finally:
+            sched.close()
+
+        self.assertTrue(all(error is None for error in errors), errors)
+        self.assertEqual(fake.calls, [2, 1])
+        empty_cache.assert_not_called()
+        self.assertGreaterEqual(mem_get_info.call_count, 3)
+
+    @patch("rtp_llm.multimodal.mm_scheduler.torch.cuda.empty_cache")
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.memory_reserved",
+        return_value=0,
+    )
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.memory_allocated",
+        return_value=0,
+    )
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.mem_get_info",
+        return_value=(700, 2000),
+    )
+    def test_memory_reserve_splits_items_within_request(
+        self, mem_get_info, memory_allocated, memory_reserved, empty_cache
+    ):
+        """Runtime headroom admission also bisects work items in one chunk."""
+        fake = _FakeMMPart(
+            work_budget=MMWorkEstimate(estimated_workspace_bytes=10_000),
+            device="cuda:0",
+        )
+        sched = MMScheduler(
+            fake,
+            batch_wait_ms=0,
+            max_batch_size=8,
+            max_batch_images=100,
+            gpu_memory_reserve_bytes=100,
+        )
+        items = [
+            _FakeWorkItem(estimated_workspace_bytes=300) for _ in range(4)
+        ]
+        try:
+            sched.submit_and_wait(items)
+        finally:
+            sched.close()
+
+        self.assertEqual(fake.calls, [2, 2])
+        self.assertTrue(all(item.embedding_result is not None for item in items))
+        empty_cache.assert_not_called()
+
+    @patch("rtp_llm.multimodal.mm_scheduler.torch.cuda.empty_cache")
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.memory_reserved",
+        return_value=0,
+    )
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.memory_allocated",
+        return_value=0,
+    )
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.mem_get_info",
+        return_value=(650, 2000),
+    )
+    def test_memory_reserve_rejects_indivisible_item_before_forward(
+        self, mem_get_info, memory_allocated, memory_reserved, empty_cache
+    ):
+        """An indivisible item that cannot preserve headroom fails pre-forward."""
+        fake = _FakeMMPart(
+            work_budget=MMWorkEstimate(estimated_workspace_bytes=10_000),
+            device="cuda:0",
+        )
+        sched = MMScheduler(
+            fake,
+            batch_wait_ms=0,
+            max_batch_size=8,
+            max_batch_images=100,
+            gpu_memory_reserve_bytes=100,
+        )
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                sched.submit_and_wait(
+                    [_FakeWorkItem(estimated_workspace_bytes=600)]
+                )
+        finally:
+            sched.close()
+
+        self.assertIsInstance(ctx.exception.__cause__, torch.cuda.OutOfMemoryError)
+        self.assertEqual(fake.calls, [])
+        empty_cache.assert_not_called()
+
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.memory_reserved",
+        return_value=500,
+    )
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.memory_allocated",
+        return_value=300,
+    )
+    @patch(
+        "rtp_llm.multimodal.mm_scheduler.torch.cuda.mem_get_info",
+        return_value=(600, 2000),
+    )
+    def test_memory_reserve_counts_allocator_reusable_bytes(
+        self, mem_get_info, memory_allocated, memory_reserved
+    ):
+        """Cached unused allocator blocks contribute to runtime allowance."""
+        fake = _FakeMMPart(
+            work_budget=MMWorkEstimate(estimated_workspace_bytes=10_000),
+            device="cuda:0",
+        )
+        sched = MMScheduler(
+            fake,
+            batch_wait_ms=0,
+            max_batch_size=8,
+            max_batch_images=100,
+            gpu_memory_reserve_bytes=100,
+        )
+        try:
+            sched.submit_and_wait(
+                [_FakeWorkItem(estimated_workspace_bytes=700)]
+            )
+        finally:
+            sched.close()
+
+        self.assertEqual(fake.calls, [1])
+
+    @patch("rtp_llm.multimodal.mm_scheduler.torch.cuda.mem_get_info")
+    def test_zero_memory_reserve_does_not_query_cuda(self, mem_get_info):
+        """The default preserves the old scheduler path without CUDA polling."""
+        fake = _FakeMMPart()
+        sched = MMScheduler(fake, batch_wait_ms=0)
+        try:
+            sched.submit_and_wait([_FakeWorkItem()])
+        finally:
+            sched.close()
+
+        self.assertEqual(fake.calls, [1])
+        mem_get_info.assert_not_called()
+
+    def test_gpu_scheduler_server_args_and_config(self):
+        """Public CLI/env-backed limits reach GPU-batch scheduler kwargs."""
+        config = VitConfig()
+        parser = EnvArgumentParser()
+        parser.set_root_config(config)
+        init_vit_group_args(parser, config)
+        with patch.dict(
+            os.environ,
+            {
+                "VIT_GPU_MAX_BATCH_PATCHES": "131072",
+                "VIT_GPU_MEMORY_RESERVE_BYTES": "1073741824",
+            },
+            clear=False,
+        ):
+            parser.parse_args(["--use_gpu_batch", "1"])
+
+        self.assertEqual(config.gpu_max_batch_patches, 131072)
+        self.assertEqual(config.gpu_memory_reserve_bytes, 1073741824)
+        self.assertEqual(
+            config.embedding_scheduler_args()["max_batch_patches"], 131072
+        )
+        self.assertEqual(
+            config.embedding_scheduler_args()["gpu_memory_reserve_bytes"],
+            1073741824,
+        )
+        self.assertIn(
+            "gpu_memory_reserve_bytes: 1073741824", config.to_string()
+        )
+        self.assertIn("gpu_max_batch_patches: 131072", config.to_string())
+
+        config.use_gpu_batch = False
+        self.assertEqual(config.embedding_scheduler_args()["max_batch_patches"], 0)
+        self.assertEqual(
+            config.embedding_scheduler_args()["gpu_memory_reserve_bytes"], 0
+        )
+
     def test_count_mismatch_fails_whole_batch(self):
         """A short combined return fails the whole batch; there is no retry."""
         fake = _FakeMMPart(short_over=1)  # any forward with >1 item returns short
@@ -567,6 +855,16 @@ class MMSchedulerTest(TestCase):
             MMScheduler(fake, max_batch_size=0)
         with self.assertRaisesRegex(ValueError, "max_batch_images must be > 0"):
             MMScheduler(fake, max_batch_images=0)
+        with self.assertRaisesRegex(ValueError, "max_batch_patches must be >= 0"):
+            MMScheduler(fake, max_batch_patches=-1)
+        with self.assertRaisesRegex(ValueError, "requires a cost-aware model"):
+            MMScheduler(fake, max_batch_patches=1)
+        with self.assertRaisesRegex(
+            ValueError, "gpu_memory_reserve_bytes must be >= 0"
+        ):
+            MMScheduler(fake, gpu_memory_reserve_bytes=-1)
+        with self.assertRaisesRegex(ValueError, "requires a cost-aware model"):
+            MMScheduler(fake, gpu_memory_reserve_bytes=1)
 
 
 class MMWorkEstimateTest(TestCase):

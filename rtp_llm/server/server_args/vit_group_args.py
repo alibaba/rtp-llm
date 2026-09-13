@@ -405,3 +405,21 @@ def init_vit_group_args(parser, vit_config):
         "多work-item请求拆成多个有界forward，其他模型仍会拒绝超过该值的请求"
         "（仅在 use_gpu_batch 时生效）",
     )
+    vit_group.add_argument(
+        "--gpu_max_batch_patches",
+        env_name="VIT_GPU_MAX_BATCH_PATCHES",
+        bind_to=(vit_config, "gpu_max_batch_patches"),
+        type=int,
+        default=0,
+        help="单次GPU forward允许的input patch总数；0表示关闭。仅支持提供"
+        "MMWorkEstimate.input_patches的模型，超过后在work item边界切分",
+    )
+    vit_group.add_argument(
+        "--gpu_memory_reserve_bytes",
+        env_name="VIT_GPU_MEMORY_RESERVE_BYTES",
+        bind_to=(vit_config, "gpu_memory_reserve_bytes"),
+        type=int,
+        default=0,
+        help="每次多模态GPU forward前保留的显存安全余量（字节）。0表示关闭；"
+        "开启后需要模型提供estimated_workspace_bytes，并在显存不足时主动二分batch/work item",
+    )
