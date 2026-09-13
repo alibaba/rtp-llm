@@ -139,6 +139,20 @@ cc_library(
     ] + torch_deps(),
 )
 
+cc_test(
+    name = "block_pool_config_helper_test",
+    srcs = ["BlockPoolConfigHelperTest.cc"],
+    copts = test_copts,
+    deps = [
+        ":cache_config_test_utils",
+        "//rtp_llm/cpp/cache:block_pool_config",
+        "//rtp_llm/cpp/config:static_config",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {},
+)
+
 cc_binary(
     name = "cache_config_creator_py_test",
     linkshared = 1,

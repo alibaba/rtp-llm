@@ -104,6 +104,18 @@ cc_library(
         "torch.libs/libopenblasp*.so",
     ]),
     linkopts = select({
+        "@//:using_ppu": [
+            # PPU workers expose their CUDA-compatible libraries from the SDK;
+            # /usr/local/cuda is only an optional compatibility symlink.
+            "-L/usr/local/PPU_SDK/lib",
+            "-L/usr/local/PPU_SDK/CUDA_SDK/lib64",
+            "-L/usr/local/PPU_SDK/CUDA_SDK/targets/x86_64-linux/lib",
+            "-L/usr/local/PPU_SDK/sailSHMEM/lib",
+            "-lcupti",
+            "-lcudart",
+            "-lnccl",
+            "-lcudnn",
+        ],
         "@//:cuda_pre_12_9": [
             "-L/usr/local/cuda/lib64",
             "-L/usr/local/cuda/extras/CUPTI/lib64",

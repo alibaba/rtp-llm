@@ -22,6 +22,22 @@ py_test (
     exec_properties = {'gpu':'H20', 'gpu_count':'1'},
 )
 
+py_test(
+    name = "deepgemm_masked_scale_layout_test",
+    srcs = ["deepgemm_masked_executor_test.py"],
+    main = "deepgemm_masked_executor_test.py",
+    args = [
+        "DeepGemmMaskedExecutorTest.test_fp8_rejects_wrong_non_e8m0_scale_dimension",
+    ],
+    deps = [
+        ":fused_moe_executor_test_util",
+        "//rtp_llm:testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20', 'gpu_count':'1'},
+)
+
 py_test (
     name = "deepgemm_masked_executor_sm100_test",
     srcs = ["deepgemm_masked_executor_test.py",

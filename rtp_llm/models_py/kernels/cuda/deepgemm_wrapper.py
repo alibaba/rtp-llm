@@ -1,12 +1,14 @@
 import functools
+import logging
 from contextlib import contextmanager
 from typing import Any, Callable, Generator, List, NoReturn, Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.utils.module_util import has_module, resolve_symbol
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "fp8_gemm_nt",
@@ -24,12 +26,15 @@ __all__ = [
     "transpose_packed_fp4",
     "tf32_hc_prenorm_gemm",
     "has_deep_gemm",
+    "is_deep_gemm_runtime_available",
     "is_deep_gemm_e8m0_used",
     "configure_deep_gemm_num_sms",
     "maybe_pack_ue8m0_scale",
 ]
 
 _deep_gemm_impl_new_map = {
+    "get_num_sms": "get_num_sms",
+    "set_num_sms": "set_num_sms",
     "fp8_gemm_nt": "fp8_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous": "m_grouped_fp8_gemm_nt_contiguous",
     "m_grouped_fp8_gemm_nt_masked": "m_grouped_fp8_gemm_nt_masked",
@@ -47,6 +52,8 @@ _deep_gemm_impl_new_map = {
 }
 
 _deep_gemm_impl_old_map = {
+    "get_num_sms": "get_num_sms",
+    "set_num_sms": "set_num_sms",
     "fp8_gemm_nt": "fp8_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous": "m_grouped_fp8_gemm_nt_contiguous",
     "m_grouped_fp8_gemm_nt_masked": "fp8_m_grouped_gemm_nt_masked",
@@ -64,6 +71,8 @@ _deep_gemm_impl_old_map = {
 }
 
 
+_get_num_sms_impl: Callable[..., Any] | None = None
+_set_num_sms_impl: Callable[..., Any] | None = None
 _fp8_gemm_nt_impl: Callable[..., Any] | None = None
 _m_grouped_fp8_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
 _m_grouped_fp8_gemm_nt_masked_impl: Callable[..., Any] | None = None
@@ -78,12 +87,68 @@ _per_token_cast_to_fp4_impl: Callable[..., Any] | None = None
 _cast_back_from_fp4_impl: Callable[..., Any] | None = None
 _transpose_packed_fp4_impl: Callable[..., Any] | None = None
 _tf32_hc_prenorm_gemm_impl: Callable[..., Any] | None = None
+_runtime_probe_error: Optional[str] = None
 
 
-@functools.cache
-def has_deep_gemm() -> bool:
-    """Whether the optional `deep_gemm` package is available."""
-    return has_module("deep_gemm")
+def has_deep_gemm(required_symbols: Tuple[str, ...] = ()) -> bool:
+    """Whether DeepGEMM exports every callable needed by one execution path.
+
+    Failed probes are deliberately not cached: optional backends can become
+    available after import-path initialization, and a transient failure must
+    not disable DeepGEMM for the lifetime of the process.
+    """
+    if not has_module("deep_gemm"):
+        return False
+    if not required_symbols:
+        return True
+    try:
+        _lazy_init_deep_gemm(list(required_symbols))
+    except (ImportError, OSError, RuntimeError, AttributeError) as error:
+        logger.warning(
+            "DeepGEMM backend is missing required symbols %s: %s",
+            required_symbols,
+            error,
+        )
+        return False
+    return all(
+        callable(globals().get(f"_{symbol}_impl")) for symbol in required_symbols
+    )
+
+
+def is_deep_gemm_runtime_available(
+    device: Optional[torch.device] = None,
+) -> bool:
+    """Whether FP8 DeepGEMM can execute on the target CUDA device."""
+    global _runtime_probe_error
+    if not has_deep_gemm():
+        return False
+    if getattr(torch.version, "hip", None) is not None or not torch.cuda.is_available():
+        return False
+
+    target = (
+        torch.device("cuda", torch.cuda.current_device())
+        if device is None
+        else torch.device(device)
+    )
+    if target.type != "cuda":
+        return False
+    device_index = torch.cuda.current_device() if target.index is None else target.index
+    try:
+        major, _ = torch.cuda.get_device_capability(device_index)
+    except (AssertionError, RuntimeError, ValueError):
+        return False
+    if major not in (9, 10, 12):
+        return False
+    if _fp8_gemm_nt_impl is None:
+        try:
+            _lazy_init_deep_gemm(["fp8_gemm_nt"])
+        except (ImportError, OSError, RuntimeError, AttributeError) as error:
+            reason = str(error)
+            if reason != _runtime_probe_error:
+                logger.warning("DeepGEMM FP8 GEMM is unavailable: %s", reason)
+                _runtime_probe_error = reason
+            return False
+    return _fp8_gemm_nt_impl is not None
 
 
 @functools.cache
@@ -94,21 +159,18 @@ def is_deep_gemm_e8m0_used() -> bool:
 @contextmanager
 def configure_deep_gemm_num_sms(num_sms: int) -> Generator[None, None, None]:
     """Configure the number of sms for deep gemm."""
-    if not has_deep_gemm():
-        raise RuntimeError(
-            "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."
-        )
-    import deep_gemm
+    get_num_sms = _ensure_impl("get_num_sms")
+    set_num_sms = _ensure_impl("set_num_sms")
 
     # get original num sms
-    original_num_sms = deep_gemm.get_num_sms()
+    original_num_sms = get_num_sms()
     # set num sms
-    deep_gemm.set_num_sms(num_sms)
+    set_num_sms(num_sms)
     try:
         yield
     finally:
         # restore original num sms
-        deep_gemm.set_num_sms(original_num_sms)
+        set_num_sms(original_num_sms)
 
 
 def _missing_deep_gemm() -> NoReturn:
@@ -120,6 +182,7 @@ def _missing_deep_gemm() -> NoReturn:
 
 def _lazy_init_deep_gemm(symbols: List[str]) -> None:
     """Import deep_gemm and resolve symbols on first use."""
+    global _get_num_sms_impl, _set_num_sms_impl
     global _fp8_gemm_nt_impl, _m_grouped_fp8_gemm_nt_contiguous_impl, _m_grouped_fp8_gemm_nt_masked_impl
     global _bf16_gemm_nt_impl, _m_grouped_bf16_gemm_nt_contiguous_impl, _m_grouped_bf16_gemm_nt_masked_impl
     global _fp8_fp4_gemm_nt_impl, _m_grouped_fp8_fp4_gemm_nt_contiguous_impl, _m_grouped_fp8_fp4_gemm_nt_masked_impl
@@ -131,10 +194,7 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
     # check if the symbols are valid
     if any(symbol not in _deep_gemm_impl_new_map for symbol in symbols):
         raise ValueError(f"Invalid symbols: {symbols}")
-    if all(
-        getattr(globals(), symbol_impl, None) is not None
-        for symbol_impl in symbol_impls
-    ):
+    if all(globals().get(symbol_impl) is not None for symbol_impl in symbol_impls):
         # already initialized
         return
     if not has_deep_gemm():
@@ -159,27 +219,16 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
             )
 
 
-def _lazy_init_deep_gemm_once():
-    _lazy_init_deep_gemm(
-        [
-            "fp8_gemm_nt",
-            "m_grouped_fp8_gemm_nt_contiguous",
-            "m_grouped_fp8_gemm_nt_masked",
-            "bf16_gemm_nt",
-            "m_grouped_bf16_gemm_nt_contiguous",
-            "m_grouped_bf16_gemm_nt_masked",
-            "fp8_fp4_gemm_nt",
-            "m_grouped_fp8_fp4_gemm_nt_contiguous",
-            "m_grouped_fp8_fp4_gemm_nt_masked",
-            "fp8_fp4_paged_mqa_logits",
-            "per_token_cast_to_fp4",
-            "cast_back_from_fp4",
-            "transpose_packed_fp4",
-        ]
-    )
-
-
-_lazy_init_deep_gemm_once()
+def _ensure_impl(symbol: str) -> Callable[..., Any]:
+    """Resolve one optional DeepGEMM symbol on first use."""
+    impl_name = f"_{symbol}_impl"
+    impl = globals().get(impl_name)
+    if impl is None:
+        _lazy_init_deep_gemm([symbol])
+        impl = globals().get(impl_name)
+    if impl is None:
+        _missing_deep_gemm()
+    return impl
 
 
 @triton.jit
@@ -430,10 +479,8 @@ def fp8_gemm_nt(
     Returns:
         None
     """
-    global _fp8_gemm_nt_impl
-    if _fp8_gemm_nt_impl is None:
-        return _missing_deep_gemm()
-    _fp8_gemm_nt_impl(
+    impl = _ensure_impl("fp8_gemm_nt")
+    impl(
         a,
         b,
         output,
@@ -467,10 +514,8 @@ def m_grouped_fp8_gemm_nt_contiguous(
             Defaults to None, which will be set to False if E8M0 scale is used, otherwise True.
     """
 
-    global _m_grouped_fp8_gemm_nt_contiguous_impl
-    if _m_grouped_fp8_gemm_nt_contiguous_impl is None:
-        return _missing_deep_gemm()
-    _m_grouped_fp8_gemm_nt_contiguous_impl(
+    impl = _ensure_impl("m_grouped_fp8_gemm_nt_contiguous")
+    impl(
         a,
         b,
         output,
@@ -530,9 +575,7 @@ def m_grouped_fp8_gemm_nt_masked(
         disable_ue8m0_cast (bool, optional): Whether to disable E8M0 type cast for E8M0 scale.
             Defaults to None, which will be set to False if E8M0 scale is used, otherwise True.
     """
-    global _m_grouped_fp8_gemm_nt_masked_impl
-    if _m_grouped_fp8_gemm_nt_masked_impl is None:
-        return _missing_deep_gemm()
+    impl = _ensure_impl("m_grouped_fp8_gemm_nt_masked")
 
     disable_ue8m0_cast = (
         disable_ue8m0_cast
@@ -543,7 +586,7 @@ def m_grouped_fp8_gemm_nt_masked(
     a = (a[0], maybe_pack_ue8m0_scale(a[0], a[1], disable_ue8m0_cast))
     b = (b[0], maybe_pack_ue8m0_scale(b[0], b[1], disable_ue8m0_cast))
 
-    _m_grouped_fp8_gemm_nt_masked_impl(
+    impl(
         a,
         b,
         output,
@@ -570,10 +613,8 @@ def bf16_gemm_nt(
         c (Optional[torch.Tensor], optional): Optional bias tensor. Defaults to None.
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
-    global _bf16_gemm_nt_impl
-    if _bf16_gemm_nt_impl is None:
-        return _missing_deep_gemm()
-    _bf16_gemm_nt_impl(a, b, output, c, compiled_dims)
+    impl = _ensure_impl("bf16_gemm_nt")
+    impl(a, b, output, c, compiled_dims)
 
 
 def m_grouped_bf16_gemm_nt_contiguous(
@@ -593,10 +634,8 @@ def m_grouped_bf16_gemm_nt_contiguous(
             The length of m_indices is the a.shape[0], and the corresponding value of valid tokens is group_idx.
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
-    global _m_grouped_bf16_gemm_nt_contiguous_impl
-    if _m_grouped_bf16_gemm_nt_contiguous_impl is None:
-        return _missing_deep_gemm()
-    _m_grouped_bf16_gemm_nt_contiguous_impl(
+    impl = _ensure_impl("m_grouped_bf16_gemm_nt_contiguous")
+    impl(
         a,
         b,
         output,
@@ -623,10 +662,8 @@ def m_grouped_bf16_gemm_nt_masked(
         expected_m (int): Expected number of valid tokens in each group.
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
-    global _m_grouped_bf16_gemm_nt_masked_impl
-    if _m_grouped_bf16_gemm_nt_masked_impl is None:
-        return _missing_deep_gemm()
-    _m_grouped_bf16_gemm_nt_masked_impl(
+    impl = _ensure_impl("m_grouped_bf16_gemm_nt_masked")
+    impl(
         a,
         b,
         output,
@@ -672,11 +709,9 @@ def fp8_fp4_gemm_nt(
     disable_ue8m0_cast: Optional[bool] = None,
 ) -> None:
     """Dense FP8-act × packed-FP4-weight GEMM with UE8M0 block scales."""
-    global _fp8_fp4_gemm_nt_impl
-    if _fp8_fp4_gemm_nt_impl is None:
-        return _missing_deep_gemm()
+    impl = _ensure_impl("fp8_fp4_gemm_nt")
     _require_sm100_packed_scale_for_fp8_fp4(a, b)
-    _fp8_fp4_gemm_nt_impl(
+    impl(
         a,
         b,
         output,
@@ -712,11 +747,9 @@ def m_grouped_fp8_fp4_gemm_nt_contiguous(
     the expert index owning token `i`. Tokens must already be permuted so
     each expert's rows are contiguous.
     """
-    global _m_grouped_fp8_fp4_gemm_nt_contiguous_impl
-    if _m_grouped_fp8_fp4_gemm_nt_contiguous_impl is None:
-        return _missing_deep_gemm()
+    impl = _ensure_impl("m_grouped_fp8_fp4_gemm_nt_contiguous")
     _require_sm100_packed_scale_for_fp8_fp4(a, b)
-    _m_grouped_fp8_fp4_gemm_nt_contiguous_impl(
+    impl(
         a,
         b,
         output,
@@ -749,11 +782,9 @@ def m_grouped_fp8_fp4_gemm_nt_masked(
 ) -> None:
     """Grouped FP8×FP4 GEMM with masked layout (data-dependent per-expert
     token counts; avoids a D2H sync, suitable for decode)."""
-    global _m_grouped_fp8_fp4_gemm_nt_masked_impl
-    if _m_grouped_fp8_fp4_gemm_nt_masked_impl is None:
-        return _missing_deep_gemm()
+    impl = _ensure_impl("m_grouped_fp8_fp4_gemm_nt_masked")
     _require_sm100_packed_scale_for_fp8_fp4(a, b)
-    _m_grouped_fp8_fp4_gemm_nt_masked_impl(
+    impl(
         a,
         b,
         output,
@@ -784,10 +815,8 @@ def fp8_fp4_paged_mqa_logits(
 ) -> torch.Tensor:
     """FP8-query × FP4-packed paged-KV MQA logits — same kernel V3.2 DSA
     uses for the lightning indexer score step."""
-    global _fp8_fp4_paged_mqa_logits_impl
-    if _fp8_fp4_paged_mqa_logits_impl is None:
-        return _missing_deep_gemm()
-    return _fp8_fp4_paged_mqa_logits_impl(
+    impl = _ensure_impl("fp8_fp4_paged_mqa_logits")
+    return impl(
         q,
         kv_cache,
         weights,
@@ -803,27 +832,18 @@ def fp8_fp4_paged_mqa_logits(
 def per_token_cast_to_fp4(*args: Any, **kwargs: Any) -> Any:
     """DeepGEMM helper: cast BF16 activations to packed-FP4 + UE8M0 scale.
     Thin passthrough — signature/kwargs owned by deep_gemm."""
-    global _per_token_cast_to_fp4_impl
-    if _per_token_cast_to_fp4_impl is None:
-        return _missing_deep_gemm()
-    return _per_token_cast_to_fp4_impl(*args, **kwargs)
+    return _ensure_impl("per_token_cast_to_fp4")(*args, **kwargs)
 
 
 def cast_back_from_fp4(*args: Any, **kwargs: Any) -> Any:
     """DeepGEMM helper: dequant packed-FP4 → BF16 (debug/inspection path)."""
-    global _cast_back_from_fp4_impl
-    if _cast_back_from_fp4_impl is None:
-        return _missing_deep_gemm()
-    return _cast_back_from_fp4_impl(*args, **kwargs)
+    return _ensure_impl("cast_back_from_fp4")(*args, **kwargs)
 
 
 def transpose_packed_fp4(*args: Any, **kwargs: Any) -> Any:
     """DeepGEMM helper: transpose a packed-FP4 weight in its int8 storage,
     preserving nibble ordering."""
-    global _transpose_packed_fp4_impl
-    if _transpose_packed_fp4_impl is None:
-        return _missing_deep_gemm()
-    return _transpose_packed_fp4_impl(*args, **kwargs)
+    return _ensure_impl("transpose_packed_fp4")(*args, **kwargs)
 
 
 def tf32_hc_prenorm_gemm(
@@ -838,9 +858,4 @@ def tf32_hc_prenorm_gemm(
     This symbol is optional in DeepGEMM, so it is not part of the eager
     wrapper initialization used by the unrelated GEMM paths.
     """
-    global _tf32_hc_prenorm_gemm_impl
-    if _tf32_hc_prenorm_gemm_impl is None:
-        _lazy_init_deep_gemm(["tf32_hc_prenorm_gemm"])
-    if _tf32_hc_prenorm_gemm_impl is None:
-        return _missing_deep_gemm()
-    return _tf32_hc_prenorm_gemm_impl(x, fn, out, sqrsum, num_split)
+    return _ensure_impl("tf32_hc_prenorm_gemm")(x, fn, out, sqrsum, num_split)

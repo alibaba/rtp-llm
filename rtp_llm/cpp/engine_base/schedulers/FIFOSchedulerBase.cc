@@ -273,6 +273,7 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOSchedulerBase::waitingTaskList() {
         task_info.prefix_length = stream->prefixLength();
         task_info.input_length  = stream->inputLength();
         task_info.batch_id      = stream->groupId();
+        task_info.priority      = stream->priority();
         waiting_task_list_.emplace_back(task_info);
     }
     return waiting_task_list_;
@@ -288,6 +289,7 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOSchedulerBase::runningTaskList() {
         task_info.prefix_length = stream->prefixLength();
         task_info.input_length  = stream->inputLength();
         task_info.batch_id      = stream->groupId();
+        task_info.priority      = stream->priority();
         running_task_list_.emplace_back(task_info);
     }
     return running_task_list_;

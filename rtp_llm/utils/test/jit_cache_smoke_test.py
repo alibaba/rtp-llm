@@ -343,7 +343,7 @@ class JitCacheSmokeTest(unittest.TestCase):
                     restored = Path(tmp) / "cache"
                     restored.mkdir()
                     try:
-                        store.extract_zstd_tar(snapshot, restored)
+                        store.extract_snapshot(snapshot, restored)
                         probe = restored / probe_name
                         if probe.is_file() and probe.read_bytes() == payload:
                             return _state(restored)

@@ -132,14 +132,13 @@ class QuantizedLinear(nn.Module):
         then run FP8 × packed-FP4 GEMM against the stored weight and scale.
         """
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
-            _fp8_fp4_gemm_nt_impl,
             fp8_fp4_gemm_nt,
         )
 
-        if _fp8_fp4_gemm_nt_impl is None or not x.is_cuda:
+        if not x.is_cuda:
             raise RuntimeError(
                 "FP4 QuantizedLinear requires deep_gemm fp8_fp4_gemm_nt "
-                f"on CUDA; got device={x.device}, impl={_fp8_fp4_gemm_nt_impl}"
+                f"on CUDA; got device={x.device}"
             )
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
             sgl_per_token_group_quant_fp8,

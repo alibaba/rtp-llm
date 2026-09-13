@@ -140,8 +140,10 @@ class BackendAvailabilityGuardTest(unittest.TestCase):
 
     @classmethod
     def _moe_config(cls):
+        quant_config = cls._quant_config()
         return SimpleNamespace(
-            model_config=SimpleNamespace(quant_config=cls._quant_config()),
+            model_config=SimpleNamespace(quant_config=quant_config),
+            quant_config=quant_config,
             ep_size=1,
             world_size=1,
             tp_size=1,
@@ -171,6 +173,13 @@ class BackendAvailabilityGuardTest(unittest.TestCase):
     def test_moe_reports_missing_w8a8_compute_backend(self):
         with self.assertRaisesRegex(ValueError, "registered MOE compute backend"):
             StrategyRegistry().get_strategy(self._moe_config())
+
+    def test_moe_uses_effective_quant_config_for_missing_backend_error(self):
+        config = self._moe_config()
+        config.quant_config = None
+
+        with self.assertRaisesRegex(ValueError, "No suitable MOE strategy"):
+            StrategyRegistry().get_strategy(config)
 
     def test_registered_moe_backend_is_not_blocked(self):
         registry = StrategyRegistry()

@@ -196,6 +196,32 @@ TEST(RpcWriterCancellationTest, LocalWriteFailureCancelsStreamAndReturnsCancelle
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
 }
 
+TEST(RpcWriterCancellationTest, DecodeAllocateWithoutPeersReturnsInvalidArgument) {
+    // Real streaming RPC into the production handler. No engine is installed:
+    // the invalid ALLOCATE must be rejected before resource allocation/loading.
+    DecodeFirstReadService service;
+    int listen_port = 0;
+    grpc::ServerBuilder builder;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &listen_port);
+    builder.RegisterService(&service);
+    auto server = builder.BuildAndStart();
+    ASSERT_NE(server, nullptr);
+    auto stub = RpcService::NewStub(grpc::CreateChannel(
+        "127.0.0.1:" + std::to_string(listen_port), grpc::InsecureChannelCredentials()));
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
+    auto stream = stub->RemoteGenerate(&context);
+    GenerateRequestPB request;
+    request.set_stage(RemoteStage::ALLOCATE);
+    request.set_request_id(42);
+    EXPECT_TRUE(stream->Write(request));
+    stream->WritesDone();
+    const auto status = stream->Finish();
+    server->Shutdown();
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(status.error_message().find("prefill peer address"), std::string::npos);
+}
+
 TEST(RpcWriterCancellationTest, DecodeFirstReadCancellationReturnsCancelled) {
     // The handler checks CHECK_REQUEST_CANCELLED before prepareGenerateContext,
     // so a cancel that lands too early short-circuits without ever attempting

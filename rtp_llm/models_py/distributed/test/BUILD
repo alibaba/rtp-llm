@@ -103,3 +103,11 @@ py_test(
     tags = ["open_skip"],
     exec_properties = {'gpu':'A10', 'gpu_count':'4'},
 )
+
+py_test(
+    name = "deepep_wrapper_import_test",
+    srcs = ["deepep_wrapper_import_test.py"],
+    deps = [
+        "//rtp_llm/models_py/distributed:deepep_wrapper",
+    ],
+)

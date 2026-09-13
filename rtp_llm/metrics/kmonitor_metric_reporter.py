@@ -12,15 +12,17 @@ def qos_priority_tag(qos_level: Any) -> str:
     ``priority`` tag value.
 
     Returns the raw 1-100 integer as a string, or ``"0"`` when the request
-    carries no (or an unparseable) priority — same convention as the FlexLB
-    ``auto_tpm.*`` metric family ("0" = legacy request without a budget).
+    carries no, invalid, or out-of-range priority — same convention as the
+    FlexLB ``auto_tpm.*`` metric family ("0" = legacy request without a
+    budget).
     """
     if qos_level is None:
         return "0"
     try:
-        return str(int(str(qos_level).strip()))
+        priority = int(str(qos_level).strip())
     except (TypeError, ValueError):
         return "0"
+    return str(priority) if 1 <= priority <= 100 else "0"
 
 
 class AccMetrics(Enum):
@@ -92,6 +94,7 @@ class GaugeMetrics(Enum):
     NUM_BEAMS_METRIC = "ft_num_beams"
 
     UPDATE_LANTENCY_METRIC = "py_rtp_update_framework_rt"
+    UPDATE_WEIGHTS_AVAILABLE_METRIC = "py_rtp_update_weights_available"
 
     # worker_status
     WORKER_STATUS_QPS_LANTENCY_METRIC = "py_rtp_worker_status_rt"

@@ -57,6 +57,7 @@ class DeepepNormalRouterHookTest(TestCase):
             tp_size=1,
             tp_rank=0,
             model_config=SimpleNamespace(quant_config=None),
+            quant_config=None,
         )
         router.quant_config = FusedMoEQuantConfig(
             quant_dtype=quant_dtype,
