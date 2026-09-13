@@ -109,8 +109,7 @@ class EvictionManagerTryAdmitTest {
         incoming.setRequestId(902L);
         incoming.setSeqLen(128L);
         incoming.setPriority(70);
-        var context = new BalanceContext();
-        context.setConfig(config);
+        var context = new BalanceContext(config);
         context.setRequest(incoming);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(70, System.currentTimeMillis() + 60_000L));
         var future = new CompletableFuture<Response>();

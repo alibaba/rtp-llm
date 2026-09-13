@@ -9,6 +9,7 @@ import org.flexlb.util.JsonUtils;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PreDestroy;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.LinkedHashMap;
@@ -58,7 +59,6 @@ public class LBStatusConsistencyService implements MasterElectService {
 
     }
 
-    @Override
     public void start() {
         if (!isNeedConsistency()) {
             log.warn("start: lbConsistencyConfig is closed.");
@@ -67,7 +67,6 @@ public class LBStatusConsistencyService implements MasterElectService {
         this.zookeeperMasterElectService.start();
     }
 
-    @Override
     public void offline() {
         if (!isNeedConsistency()) {
             log.warn("offline: lbConsistencyConfig is closed.");
@@ -76,7 +75,7 @@ public class LBStatusConsistencyService implements MasterElectService {
         this.zookeeperMasterElectService.offline();
     }
 
-    @Override
+    @PreDestroy
     public void destroy() {
         if (!isNeedConsistency()) {
             log.warn("destroy: lbConsistencyConfig is closed.");
@@ -98,7 +97,6 @@ public class LBStatusConsistencyService implements MasterElectService {
         return zookeeperMasterElectService.isMaster();
     }
 
-    @Override
     public void refreshMasterHost(boolean forceSync) {
         if (isNeedConsistency() && forceSync) {
             zookeeperMasterElectService.updateLatestMaster();

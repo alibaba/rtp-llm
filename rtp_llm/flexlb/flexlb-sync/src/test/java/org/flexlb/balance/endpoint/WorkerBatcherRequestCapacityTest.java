@@ -267,9 +267,8 @@ class WorkerBatcherRequestCapacityTest {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(100L);
-        BalanceContext context = new BalanceContext();
+        BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
-        context.setConfig(config);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
         return new ScheduledRequest(context, new CompletableFuture<Response>(), null, null, null,
                 endpoint, null, null, System.currentTimeMillis());

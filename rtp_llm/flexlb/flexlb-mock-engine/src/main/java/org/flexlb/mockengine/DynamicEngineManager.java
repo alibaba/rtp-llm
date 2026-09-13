@@ -145,10 +145,6 @@ final class DynamicEngineManager {
         this.nextEngineIndex = new AtomicInteger(services.size());
     }
 
-    boolean isFileDiscoveryEnabled() {
-        return discoveryFileStore != null;
-    }
-
     /**
      * Create and start a new engine of the given role.
      *

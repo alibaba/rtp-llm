@@ -560,11 +560,6 @@ def _decode_pressure_guardrail(ops, decode_names: list) -> tuple:
     return ok, ", ".join(evidence)
 
 
-def _single_prefill(ops):
-    names = _prefill_names(ops)
-    return names[0] if len(names) == 1 else None
-
-
 # ===========================================================================
 # Dispatch-order observation (design §3.3 arbitration chain)
 # ===========================================================================
@@ -576,16 +571,6 @@ def _prefill_lifecycle(ops, rid: int):
     engines."""
     for engine in ops.snapshot().get("engines", []):
         if engine.get("role") != "prefill":
-            continue
-        lc = engine.get("request_lifecycle", {}).get(str(rid))
-        if lc:
-            return lc
-    return None
-
-
-def _decode_lifecycle(ops, rid: int):
-    for engine in ops.snapshot().get("engines", []):
-        if engine.get("role") != "decode":
             continue
         lc = engine.get("request_lifecycle", {}).get(str(rid))
         if lc:
@@ -1879,21 +1864,6 @@ def _mono_to_epoch(monotonic_ts: float) -> float:
 def _outcome_map(outcomes: list) -> dict:
     """{(rid): (ok, code, detail)} from _drain results."""
     return {rid: (ok, code, detail) for (rid, ok, code, detail) in outcomes}
-
-
-def _code_of(fr) -> object:
-    """Unified typed terminal code of a fire: schedule-response code when
-    the RPC failed, stream raw code (grpc-status-details-bin) when the
-    direct stream broke, CODE_OK when completed."""
-    if fr.rpc_error or fr.resp is None:
-        return None
-    if not fr.ok:
-        return fr.code
-    if fr.terminal is None:
-        return None
-    if fr.terminal.completed:
-        return CODE_OK
-    return fr.terminal.raw_error_code
 
 
 @case(

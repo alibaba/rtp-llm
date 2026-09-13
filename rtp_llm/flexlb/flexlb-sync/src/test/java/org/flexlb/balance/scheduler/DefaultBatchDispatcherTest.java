@@ -923,8 +923,7 @@ class DefaultBatchDispatcherTest {
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
 
-        BalanceContext ctx = new BalanceContext();
-        ctx.setConfig(config);
+        BalanceContext ctx = new BalanceContext(config);
         ctx.setRequest(request);
 
         // Provide a valid GenerateInputPB bytes (minimum: requestId + empty config)

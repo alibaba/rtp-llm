@@ -169,9 +169,8 @@ class DecodeSelectionAdmissionContractTest {
             request.setSeqLen(100L);
             request.setMaxNewTokens(200);
             request.setPriority(70);
-            BalanceContext context = new BalanceContext();
+            BalanceContext context = new BalanceContext(config);
             context.setRequest(request);
-            context.setConfig(config);
             return DecodeBinding.capture(context);
         }
 

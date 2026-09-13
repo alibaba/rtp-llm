@@ -217,9 +217,8 @@ class TwinOverloadAdmissionTest {
         Request request = new Request();
         request.setRequestId(id);
         request.setSeqLen(128L);
-        BalanceContext context = new BalanceContext();
+        BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
-        context.setConfig(config);
         ServerStatus selected = new ServerStatus();
         selected.setRole(RoleType.PREFILL);
         selected.setServerIp("127.0.0.1");

@@ -1033,16 +1033,6 @@ class _ParkedSampler:
         best = max(self.samples, key=lambda s: s[1], default=None)
         return best[2] if best is not None else "no samples"
 
-    def parked_in_window(self, t_lo: float, t_hi: float) -> bool:
-        """True when any sample inside [t_lo, t_hi] observed parked >= 1.
-
-        Both bounds and the sample stamps are time.monotonic() instants
-        from the same clock, so callers can align the park evidence with
-        independently recorded event windows (e.g. the 8511 expiry
-        window of the deadline case)."""
-        return any(t_lo <= t <= t_hi and p >= 1 for t, p, _ in self.samples)
-
-
 def _await_tracked(fired: list, wait_s: float = 45.0) -> list:
     """Concurrently await every tracked stream.
 

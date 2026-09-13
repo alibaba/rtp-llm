@@ -96,7 +96,7 @@ class DefaultRouterTest {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
         DefaultRouter router = router();
 
-        PlacementResult<RouteAdmission, PlacementKey> result = router.select(new BalanceContext());
+        PlacementResult<RouteAdmission, PlacementKey> result = router.select(new BalanceContext(SchedulingTestConfig.newConfig()));
 
         assertEquals(PlacementResult.Status.REJECTED, result.status());
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
@@ -638,8 +638,7 @@ class DefaultRouterTest {
         request.setRequestId(requestId);
         request.setSeqLen(32L);
         request.setMaxNewTokens(16);
-        BalanceContext context = new BalanceContext();
-        context.setConfig(config);
+        BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(
                 50, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1)));

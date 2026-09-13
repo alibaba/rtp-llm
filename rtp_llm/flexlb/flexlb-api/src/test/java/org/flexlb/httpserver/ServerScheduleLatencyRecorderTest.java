@@ -17,7 +17,7 @@ class ServerScheduleLatencyRecorderTest {
     void recordsServerTotalStagesAndRates() {
         ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
         long end = System.nanoTime();
-        BalanceContext context = new BalanceContext();
+        BalanceContext context = new BalanceContext(org.flexlb.mock.TestFlexlbConfigs.create());
         context.setGrpcEntryNanos(end - TimeUnit.MILLISECONDS.toNanos(20));
         context.setServiceStartNanos(end - TimeUnit.MILLISECONDS.toNanos(18));
         context.setRouteSubmittedNanos(end - TimeUnit.MILLISECONDS.toNanos(15));
@@ -164,7 +164,7 @@ class ServerScheduleLatencyRecorderTest {
             long end,
             long batchWaitMs,
             SchedulingMetadata metadata) {
-        BalanceContext context = new BalanceContext();
+        BalanceContext context = new BalanceContext(org.flexlb.mock.TestFlexlbConfigs.create());
         context.setGrpcEntryNanos(end - TimeUnit.MILLISECONDS.toNanos(batchWaitMs + 10));
         context.setServiceStartNanos(end - TimeUnit.MILLISECONDS.toNanos(batchWaitMs + 8));
         context.setRouteSubmittedNanos(end - TimeUnit.MILLISECONDS.toNanos(batchWaitMs + 5));
