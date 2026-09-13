@@ -8,6 +8,30 @@
 默认 48P/192D，P=11042 块、D=27686 块，每块 1024 token，均为单池。
 性能文件不修改输入或输出长度；现有 `FLEXLB_CONFIG` 优先传给 master 与 mock，避免两份估算配置漂移。
 
+### GLM-5.3 标定配置（显式启用）
+
+`glm53-calibration.json` 保存 WLCB `l20d_wlcb_zhipu` 的近似标定，不能作为所有 GLM 硬件的通用公式。
+将 `bundle_overrides` 写入 `MOCK_BUNDLE_OVERRIDES_YAML`，`performance` 写入
+`MOCK_PERFORMANCE_CONFIG_JSON`，`prefill_estimator` 写入现有 `FLEXLB_CONFIG` 的
+`router.roles.prefill.executionTimeEstimator`。这些环境变量重启后生效。
+`MOCK_EOS_CONFIG_JSON` 仍可单独覆盖 EOS；未设置时保留 performance 中的 EOS 设置。
+物理 `block_size` 必须与性能配置一致，否则启动失败。未配置新变量时保留原行为。
+
+P 耗时（毫秒）为 `127.473174679 + 77.754525464 × batchSize +
+12.534367685 × sum(computeTokens/1024) + 0.601112784 × sum(hitCacheTokens/1024)`，下限 1ms。
+D 每步耗时为 `26.079977409 + 0.968553807 × running` 毫秒，每步每请求平均推进 2.741241181 token。
+系数来自 2026-09-13 的主机级 20 秒窗口，不是请求级性能回归：P 9908 个配对样本，
+D 7240 个；按时间前 80% 拟合、后 20% 验证，平均相对误差约 6.2% / 2.4%。
+D 样本仅覆盖 batch 3.09–7.70，超出范围是外推，不能据此宣称大 batch 已对齐。
+此显式 GLM 配置启用均值 1900 的几何 EOS 作为初始标定，来自生产输出长度窗口均值约 1927；
+窗口均值不是按请求加权的分布，仍须用实际完成请求复核，不能将其解释为真实 EOS 模型。
+
+55P/40D 对应当时该部署的逻辑规模。P/D 单池容量分别为 31218/46157 块，
+每块 64 token；依据同主机同窗口 `available_blocks / (1-used_ratio/100)` 的中位数估计。
+生产 `staticCacheBlockSize=500` 是旧路由缓存索引参数，不替代物理 KV 块大小。
+旧生产 `CACHE_AFFINITY_FIRST / WEIGHTED_CACHE` 与当前 schema v3 路由器不能直接视为等价；
+这份文件标定引擎执行和容量，不声明调度器策略完全相同。
+
 master 通过本地 discovery 文件发现各引擎，不依赖 P/D VIP。
 控制端口使用 Pod IP；引擎 RPC 使用独立 loopback IP 和端口，保证 master 的 engineIp 指标不互相覆盖。同 Pod P→D 仍使用现有 RPC 协议。
 框架自动接续，不等待客户端 Fetch；启动任何对端失败时 supervisor 会关闭另一 JVM。

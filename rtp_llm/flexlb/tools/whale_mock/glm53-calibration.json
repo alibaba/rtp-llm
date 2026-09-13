@@ -1,0 +1,45 @@
+{
+  "source": {
+    "application": "spectrum_33e6d810_GLM-5_3-Model",
+    "deployment": "l20d_wlcb_zhipu",
+    "template_version": 7,
+    "calibration": "20s host-window approximation; decode batch 3.09-7.70 only"
+  },
+  "bundle_overrides": {
+    "prefill": 55,
+    "decode": 40,
+    "mock_heap": "32g",
+    "block_size": 64,
+    "prefill_kv_pool_blocks": 31218,
+    "decode_kv_pool_blocks": 46157,
+    "decode_max_concurrency": 64
+  },
+  "prefill_estimator": {
+    "type": "FORMULA",
+    "expression": "max(1, 127.473174679 + 77.754525464 * batchSize + 12.534367685 * sum(computeTokens / 1024.) + 0.601112784 * sum(hitCacheTokens / 1024.))"
+  },
+  "performance": {
+    "block_size": 64,
+    "sleep_scale": 1,
+    "jitter_pct": 0,
+    "prefill": {
+      "scale": 1,
+      "max_waiting_batches": 128,
+      "direct_batch_size_max": 1,
+      "max_batch_requests": 1
+    },
+    "decode": {
+      "scale": 1,
+      "tokens_per_step": 2.741241181,
+      "step_base_ms": 26.079977409,
+      "step_per_running_ms": 0.968553807,
+      "eos": {
+        "enabled": true,
+        "distribution": "geometric",
+        "mean_tokens": 1900,
+        "seed": 20260912
+      }
+    }
+  },
+  "decode_max_engine_requests": 64
+}

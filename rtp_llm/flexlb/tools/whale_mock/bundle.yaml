@@ -3,6 +3,7 @@
 profile: single-batch
 prefill: 48
 decode: 192
+decode_max_concurrency: 128
 mock_port_offset: 50
 master_heap: 8g
 mock_heap: 16g

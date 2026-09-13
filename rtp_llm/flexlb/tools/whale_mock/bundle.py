@@ -23,10 +23,23 @@ def run():
     cfg_path = Path(os.environ.get("MOCK_BUNDLE_CONFIG_PATH", ROOT / "bundle.yaml"))
     cfg = yaml.safe_load(cfg_path.read_text())
     overrides = yaml.safe_load(os.environ.get("MOCK_BUNDLE_OVERRIDES_YAML", "{}"))
-    if not isinstance(overrides, dict) or set(overrides) - {"prefill", "decode", "mock_heap", "master_heap"}:
-        raise ValueError("bundle overrides support only prefill/decode and JVM heaps")
-    for role in ("prefill", "decode"):
-        if role in overrides and (type(overrides[role]) is not int or overrides[role] <= 0):
+    numeric_overrides = {
+        "prefill",
+        "decode",
+        "block_size",
+        "prefill_kv_pool_blocks",
+        "decode_kv_pool_blocks",
+        "decode_max_concurrency",
+    }
+    if not isinstance(overrides, dict) or set(overrides) - numeric_overrides - {
+        "mock_heap",
+        "master_heap",
+    }:
+        raise ValueError("unsupported bundle override")
+    for role in numeric_overrides:
+        if role in overrides and (
+            type(overrides[role]) is not int or overrides[role] <= 0
+        ):
             raise ValueError(f"{role} must be a positive integer")
     cfg.update(overrides)
     if os.environ.get("FETCH_OUTPUT_STREAM", "0") != "0":
@@ -45,13 +58,25 @@ def run():
         )
     )
     performance_path = (cfg_path.parent / cfg["performance"]).resolve()
+    performance_json = os.environ.get("MOCK_PERFORMANCE_CONFIG_JSON")
     eos_json = os.environ.get("MOCK_EOS_CONFIG_JSON")
+    if performance_json is not None or eos_json is not None:
+        performance = json.loads(
+            performance_json
+            if performance_json is not None
+            else performance_path.read_text()
+        )
+        if not isinstance(performance, dict):
+            raise ValueError("MOCK_PERFORMANCE_CONFIG_JSON must be a JSON object")
+        if performance.get("block_size", cfg["block_size"]) != cfg["block_size"]:
+            raise ValueError("performance block_size must match bundle block_size")
+        performance["block_size"] = cfg["block_size"]
     if eos_json is not None:
-        performance = json.loads(performance_path.read_text())
         eos = json.loads(eos_json)
         if not isinstance(eos, dict):
             raise ValueError("MOCK_EOS_CONFIG_JSON must be a JSON object")
         performance.setdefault("decode", {})["eos"] = eos
+    if performance_json is not None or eos_json is not None:
         performance_path = runtime / "performance.json"
         performance_path.write_text(json.dumps(performance))
     children, logs = [], []
@@ -98,15 +123,22 @@ def run():
                 "-Xmx" + cfg["mock_heap"],
                 "-jar",
                 str(jars / "mock.jar"),
-                "--whale", "true",
-                "--whale-bundle", "true",
-                "--kmonitor", str(cfg["kmonitor"]).lower(),
-                "--event-loop-threads", str(cfg["event_loop_threads"]),
-                "--completion-threads", str(cfg["completion_threads"]),
+                "--whale",
+                "true",
+                "--whale-bundle",
+                "true",
+                "--kmonitor",
+                str(cfg["kmonitor"]).lower(),
+                "--event-loop-threads",
+                str(cfg["event_loop_threads"]),
+                "--completion-threads",
+                str(cfg["completion_threads"]),
                 "--n-prefill",
                 str(cfg["prefill"]),
                 "--n-decode",
                 str(cfg["decode"]),
+                "--decode-max-concurrency",
+                str(cfg["decode_max_concurrency"]),
                 "--base-grpc-port",
                 str(mock_port),
                 "--host",
