@@ -49,6 +49,36 @@ class TaggedSequenceLengthModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
+class DecodeMetadataModel:
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        attention_inputs = inputs.attention_inputs["full"]
+        signature = torch.stack(
+            (
+                attention_inputs.cu_seqlens_device[-1],
+                attention_inputs.cu_kv_seqlens_device[-1],
+                attention_inputs.sequence_lengths_plus_1_device[-1],
+                attention_inputs.decode_cu_seqlens_device[-1],
+            )
+        ).to(inputs.input_hiddens.dtype)
+        return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+class TaggedHostBlockTableModel:
+    def __init__(self):
+        self.host_padding_value = torch.zeros(1, dtype=torch.bfloat16, device="cuda")
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        block_table = inputs.attention_inputs["full"].kv_cache_kernel_block_id
+        self.host_padding_value.fill_(block_table[-1, 0].item())
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        return PyModelOutputs(inputs.input_hiddens + self.host_padding_value)
+
+
 def _tag_attention_inputs(
     common: PyAttentionInputs, tags: list[str], values: dict[str, int]
 ) -> dict[str, PyAttentionInputs]:
@@ -220,6 +250,94 @@ def _build_target_verify_inputs(
 
 
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    def _assert_decode_replay_with_padding(
+        self, capture_batch_size: int, actual_batch_size: int
+    ) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            TaggedBlockTableModel(),
+            HIDDEN_SIZE,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [capture_batch_size],
+            GROUP_TAGS,
+        )
+
+        capture_inputs = _build_decode_inputs(
+            GROUP_TAGS,
+            {"full": 9, "aux": 7},
+            batch_size=capture_batch_size,
+        )
+        self.assertTrue(runner.canRun(capture_inputs))
+        runner.forward(capture_inputs)
+        torch.cuda.synchronize()
+
+        actual_inputs = _build_decode_inputs(
+            GROUP_TAGS,
+            {"full": 2, "aux": 3},
+            batch_size=actual_batch_size,
+        )
+        self.assertTrue(runner.canRun(actual_inputs))
+        output = runner.forward(actual_inputs)
+        torch.cuda.synchronize()
+        expected = torch.full_like(output.hidden_states, 2 + 16 * 3)
+        torch.testing.assert_close(output.hidden_states, expected)
+
+    def _assert_target_verify_replay_with_padding(
+        self, capture_batch_size: int, actual_batch_size: int
+    ) -> None:
+        query_len = 5
+        prefix_len = 11
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            TaggedSequenceLengthModel(),
+            HIDDEN_SIZE,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [capture_batch_size],
+            GROUP_TAGS,
+            True,
+            query_len,
+        )
+
+        capture_inputs = _build_target_verify_inputs(
+            GROUP_TAGS,
+            {"full": 9, "aux": 7},
+            batch_size=capture_batch_size,
+            query_len=query_len,
+            prefix_len=prefix_len,
+        )
+        self.assertTrue(runner.canRun(capture_inputs))
+        runner.forward(capture_inputs)
+        torch.cuda.synchronize()
+
+        actual_inputs = _build_target_verify_inputs(
+            GROUP_TAGS,
+            {"full": 2, "aux": 3},
+            batch_size=actual_batch_size,
+            query_len=query_len,
+            prefix_len=prefix_len,
+        )
+        self.assertTrue(runner.canRun(actual_inputs))
+        output = runner.forward(actual_inputs)
+        torch.cuda.synchronize()
+        expected = torch.tensor(
+            [
+                actual_batch_size * query_len,
+                actual_batch_size * (query_len + prefix_len),
+                actual_batch_size * query_len,
+                actual_batch_size * prefix_len,
+            ],
+            dtype=output.hidden_states.dtype,
+            device=output.hidden_states.device,
+        )
+        torch.testing.assert_close(
+            output.hidden_states,
+            expected.unsqueeze(0).expand_as(output.hidden_states),
+        )
+
     def _assert_replay_signature(
         self, runner: CudaGraphRunner, inputs: PyModelInputs, expected: int
     ) -> None:
@@ -437,6 +555,85 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     output.hidden_states,
                     expected_signature.unsqueeze(0).expand_as(output.hidden_states),
                 )
+
+    def test_decode_clears_rounded_batch_metadata(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            DecodeMetadataModel(),
+            HIDDEN_SIZE,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4],
+            GROUP_TAGS,
+        )
+
+        inputs = _build_decode_inputs(
+            GROUP_TAGS,
+            {"full": 2, "aux": 1},
+            batch_size=2,
+        )
+        self.assertTrue(runner.canRun(inputs))
+        self.assertEqual(runner.getCurrentRealGraphSize(), 4)
+
+        output = runner.forward(inputs)
+        torch.cuda.synchronize()
+        expected_signature = torch.tensor(
+            [0, 0, 1, 2],
+            dtype=output.hidden_states.dtype,
+            device=output.hidden_states.device,
+        )
+        torch.testing.assert_close(
+            output.hidden_states,
+            expected_signature.unsqueeze(0).expand_as(output.hidden_states),
+        )
+
+    def test_decode_graph_key_4_replays_actual_batch_3(self) -> None:
+        self._assert_decode_replay_with_padding(4, 3)
+
+    def test_decode_graph_key_8_replays_actual_batch_6(self) -> None:
+        self._assert_decode_replay_with_padding(8, 6)
+
+    def test_target_verify_graph_key_4_replays_actual_batch_3(self) -> None:
+        self._assert_target_verify_replay_with_padding(4, 3)
+
+    def test_target_verify_graph_key_8_replays_actual_batch_6(self) -> None:
+        self._assert_target_verify_replay_with_padding(8, 6)
+
+    def test_decode_clears_tagged_host_block_table_padding(self) -> None:
+        runner = CudaGraphRunner()
+        model = TaggedHostBlockTableModel()
+        runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4],
+            GROUP_TAGS,
+        )
+
+        full_batch = _build_decode_inputs(
+            GROUP_TAGS,
+            {"full": 9, "aux": 7},
+            batch_size=4,
+        )
+        self.assertTrue(runner.canRun(full_batch))
+        runner.forward(full_batch)
+        torch.cuda.synchronize()
+
+        short_batch = _build_decode_inputs(
+            GROUP_TAGS,
+            {"full": 2, "aux": 3},
+            batch_size=2,
+        )
+        self.assertTrue(runner.canRun(short_batch))
+        output = runner.forward(short_batch)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            output.hidden_states,
+            torch.zeros_like(output.hidden_states),
+        )
 
 
 if __name__ == "__main__":
