@@ -48,7 +48,7 @@ class WhaleLegacyConfigTest {
  @Test void productionDocumentParsesWithoutTranslation() throws Exception {
   var config = ConfigService.parse(Files.readString(Path.of("inner-master.json")));
   assertEquals(1, config.getSchemaVersion());
-  assertEquals(DispatcherConfig.Type.NON_BATCH, config.getDispatcher().getType());
+  assertEquals(NonBatchDispatcherConfig.class, config.getDispatcher().getClass());
  }
 }
 """)
