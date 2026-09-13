@@ -3455,6 +3455,13 @@ public final class JavaMockEngineCluster {
                     // request-BIRTH axis (same axis as e2e/full_e2e); exec_ms is
                     // the BATCH execution duration — prefill runs whole batches,
                     // so every member of one batch logs the same value.
+                    if (!alreadyCancelled && !asyncFail && shape.outputLen() > 0) {
+                        Long arrived = eventArrivalMs.get(requestId);
+                        if (arrived != null) {
+                            reportMetricEvent(Map.of("rtp_llm_first_token_latency_us",
+                                    Math.max(0L, doneTsMs - arrived) * 1000L));
+                        }
+                    }
                     writePrefillDoneEvent(shape, requestId, member.batchId(), doneTsMs,
                             executionMs, shapes.size(), alreadyCancelled);
                     if (!alreadyCancelled) {
@@ -5848,7 +5855,7 @@ public final class JavaMockEngineCluster {
 
         /** Stamp the engine-side arrival epoch-ms for engine_events.jsonl (first arrival wins). */
         private void recordEventArrival(long requestId) {
-            if (engineEventLog == null) {
+            if (engineEventLog == null && eventMetricReporter == null) {
                 return;
             }
             eventArrivalMs.putIfAbsent(requestId, System.currentTimeMillis());

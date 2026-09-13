@@ -11,7 +11,8 @@
       "decode_dp": 8
     },
     "template_name": "GLM_TEST",
-    "template_version_id": "6a8c106627b41a0bbb9ef0c9"
+    "template_version_id": "6a8c106627b41a0bbb9ef0c9",
+    "routing_caveat": "Schema3 SINGLE/BATCH; cache affinity permits up to one request lifetime (60000ms) extra TTFT. This approximates the old near-unbounded token preference; it is not a unit conversion. WEIGHTED_CACHE and legacy queue knobs have no exact schema3 equivalent."
   },
   "bundle_overrides": {
     "prefill": 55,
@@ -21,10 +22,6 @@
     "prefill_kv_pool_blocks": 31218,
     "decode_kv_pool_blocks": 46157,
     "decode_max_concurrency": 64
-  },
-  "prefill_estimator": {
-    "type": "FORMULA",
-    "expression": "max(1, 127.473174679 + 77.754525464 * batchSize + 12.534367685 * sum(computeTokens / 1024.) + 0.601112784 * sum(hitCacheTokens / 1024.))"
   },
   "performance": {
     "block_size": 64,
@@ -49,5 +46,49 @@
       }
     }
   },
-  "decode_max_engine_requests": 64
+  "master_config": {
+    "schemaVersion": 3,
+    "scheduler": {
+      "type": "QUEUE",
+      "ordering": {
+        "type": "FIFO"
+      },
+      "decision": {
+        "type": "SINGLE"
+      },
+      "queueTimeoutMs": 60000
+    },
+    "dispatcher": {
+      "type": "BATCH",
+      "maxInflightPerPrefillWorker": 2
+    },
+    "requestLifecycle": {
+      "request": {
+        "timeoutMs": 60000
+      },
+      "decision": {
+        "lifetime": 2.0
+      }
+    },
+    "router": {
+      "roles": {
+        "prefill": {
+          "executionTimeEstimator": {
+            "type": "FORMULA",
+            "expression": "max(1, 127.473174679 + 77.754525464 * batchSize + 12.534367685 * sum(computeTokens / 1024.) + 0.601112784 * sum(hitCacheTokens / 1024.))"
+          },
+          "cacheAffinity": {
+            "maxExtraTtftMs": 60000,
+            "minPrefixHitPercent": 5
+          }
+        },
+        "decode": {
+          "availability": {
+            "maxEngineRequests": 64,
+            "maxKvUsagePercent": 90
+          }
+        }
+      }
+    }
+  }
 }

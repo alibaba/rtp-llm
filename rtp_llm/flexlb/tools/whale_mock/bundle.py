@@ -60,17 +60,16 @@ def run():
     performance_path = (cfg_path.parent / cfg["performance"]).resolve()
     performance_json = os.environ.get("MOCK_PERFORMANCE_CONFIG_JSON")
     eos_json = os.environ.get("MOCK_EOS_CONFIG_JSON")
-    if performance_json is not None or eos_json is not None:
-        performance = json.loads(
-            performance_json
-            if performance_json is not None
-            else performance_path.read_text()
-        )
-        if not isinstance(performance, dict):
-            raise ValueError("MOCK_PERFORMANCE_CONFIG_JSON must be a JSON object")
-        if performance.get("block_size", cfg["block_size"]) != cfg["block_size"]:
-            raise ValueError("performance block_size must match bundle block_size")
-        performance["block_size"] = cfg["block_size"]
+    performance = json.loads(
+        performance_json
+        if performance_json is not None
+        else performance_path.read_text()
+    )
+    if not isinstance(performance, dict):
+        raise ValueError("MOCK_PERFORMANCE_CONFIG_JSON must be a JSON object")
+    if performance.get("block_size", cfg["block_size"]) != cfg["block_size"]:
+        raise ValueError("performance block_size must match bundle block_size")
+    performance["block_size"] = cfg["block_size"]
     if eos_json is not None:
         eos = json.loads(eos_json)
         if not isinstance(eos, dict):
@@ -137,8 +136,11 @@ def run():
                 str(cfg["prefill"]),
                 "--n-decode",
                 str(cfg["decode"]),
-                "--decode-max-concurrency",
-                str(cfg["decode_max_concurrency"]),
+                *(
+                    ["--decode-max-concurrency", str(cfg["decode_max_concurrency"])]
+                    if "decode_max_concurrency" in cfg
+                    else []
+                ),
                 "--base-grpc-port",
                 str(mock_port),
                 "--host",

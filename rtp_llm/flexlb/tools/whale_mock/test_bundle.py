@@ -63,6 +63,12 @@ class BundleConfigurationTest(unittest.TestCase):
                     {"MOCK_BUNDLE_OVERRIDES_YAML": json.dumps({"block_size": value})}
                 )
 
+    def test_block_override_alone_cannot_disagree_with_default_performance(self):
+        with self.assertRaisesRegex(ValueError, "block_size must match"):
+            self.launch_to_process_boundary(
+                {"MOCK_BUNDLE_OVERRIDES_YAML": '{"block_size":64}'}
+            )
+
     def test_mismatched_performance_block_size_cannot_launch(self):
         with self.assertRaisesRegex(ValueError, "block_size must match"):
             self.launch_to_process_boundary(

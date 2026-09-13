@@ -12,8 +12,8 @@
 
 `glm53-calibration.json` 保存 WLCB `l20d_wlcb_zhipu` 的近似标定，不能作为所有 GLM 硬件的通用公式。
 将 `bundle_overrides` 写入 `MOCK_BUNDLE_OVERRIDES_YAML`，`performance` 写入
-`MOCK_PERFORMANCE_CONFIG_JSON`，`prefill_estimator` 写入现有 `FLEXLB_CONFIG` 的
-`router.roles.prefill.executionTimeEstimator`。这些环境变量重启后生效。
+`MOCK_PERFORMANCE_CONFIG_JSON`，完整 `master_config` 写入 `FLEXLB_CONFIG`。
+这些环境变量重启后生效。
 `MOCK_EOS_CONFIG_JSON` 仍可单独覆盖 EOS；未设置时保留 performance 中的 EOS 设置。
 物理 `block_size` 必须与性能配置一致，否则启动失败。未配置新变量时保留原行为。
 
@@ -109,8 +109,9 @@ decode: 1024
 mock_heap: 32g
 ```
 
-只允许覆盖 P/D 数量与两 JVM 堆大小，不设置时保留 bundle.yaml 默认值。
-这是同 Pod 内的逻辑引擎扩容；每引擎容量、执行上限、流量内容与 EOS 分布不变。
+允许覆盖 P/D 数量、两 JVM 堆大小、block_size、prefill_kv_pool_blocks、
+decode_kv_pool_blocks 和 decode_max_concurrency；不设置时保留 bundle.yaml 默认值。
+上例仅扩逻辑引擎，不改变每引擎容量、执行上限、流量内容或 EOS 分布。
 需同时检查 Pod 内存、CPU、运行数、排队与完成率。1024 不是默认生产规模，
 只是针对当前复制流量的起始容量实验，不能通过降低 running 指标值伪造空闲。
 
@@ -143,3 +144,21 @@ Changing this expression changes both routing estimates and mock execution time.
 an observed mean: request limits, minimum length and ignore-EOS still apply.
 Calibrate it against completed output lengths, then size the cluster using the
 resulting lifetime. Do not tune reported TPS counters or truncate observations.
+
+### GLM profile application
+
+Use `glm53-calibration.json.master_config` as the complete `FLEXLB_CONFIG`,
+`bundle_overrides` as `MOCK_BUNDLE_OVERRIDES_YAML`, and `performance` as
+`MOCK_PERFORMANCE_CONFIG_JSON`. Remove a stale `MOCK_EOS_CONFIG_JSON` override.
+The profile explicitly selects SINGLE decisions, preserving BATCH transport for
+no-Fetch operation. The 60-second affinity allowance approximates the legacy
+near-unbounded cache preference within the request lifetime; it is not a conversion
+of the old token threshold. WEIGHTED_CACHE, the 100-ms legacy batch wait and
+legacy queue-size limits have no exact equivalent in this master schema.
+The profile therefore aligns workload and engine capacity, not the entire old router.
+
+P reports `rtp_llm_first_token_latency_us` at successful prefill completion,
+measured from arrival at the P engine (including its queue). It excludes master
+queueing/network and must not be presented as frontend TTFT. Failed/cancelled
+requests do not emit this latency. Schedule-only frontend acknowledgement remains
+a separate measurement; no frontend TTFT is fabricated.
