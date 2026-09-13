@@ -141,8 +141,8 @@ class MMScheduler:
     """A background thread turns submitted work items into embeddings.
 
     Within a wait window it merges concurrent submissions into a single GPU
-    forward, bounded by max_batch_size, max_batch_images, and an optional
-    model-derived work budget.
+    forward, bounded by max_batch_size, max_batch_images, an optional explicit
+    patch-count limit, and an optional model-derived work budget.
     Set max_batch_size=1 (with batch_wait_ms=0) for serial, one-request-per-
     forward behavior — no cross-request batching."""
 
@@ -152,6 +152,8 @@ class MMScheduler:
         batch_wait_ms: int = 10,
         max_batch_size: int = 8,
         max_batch_images: int = 32,
+        max_batch_patches: int = 0,
+        gpu_memory_reserve_bytes: int = 0,
     ):
         if batch_wait_ms < 0:
             raise ValueError(f"batch_wait_ms must be >= 0, got {batch_wait_ms}")
@@ -159,11 +161,22 @@ class MMScheduler:
             raise ValueError(f"max_batch_size must be > 0, got {max_batch_size}")
         if max_batch_images <= 0:
             raise ValueError(f"max_batch_images must be > 0, got {max_batch_images}")
+        if max_batch_patches < 0:
+            raise ValueError(
+                f"max_batch_patches must be >= 0, got {max_batch_patches}"
+            )
+        if gpu_memory_reserve_bytes < 0:
+            raise ValueError(
+                "gpu_memory_reserve_bytes must be >= 0, got "
+                f"{gpu_memory_reserve_bytes}"
+            )
 
         self._mm_part = mm_part
         self._batch_wait_ms = batch_wait_ms
         self._max_batch_size = max_batch_size
         self._max_batch_images = max_batch_images
+        self._max_batch_patches = max_batch_patches
+        self._gpu_memory_reserve_bytes = gpu_memory_reserve_bytes
         self._work_budget = mm_part.get_batch_work_budget(max_batch_images)
         if self._work_budget is not None and not isinstance(
             self._work_budget, MMWorkEstimate
@@ -174,6 +187,29 @@ class MMScheduler:
             )
         if self._work_budget is not None:
             logging.info("MMScheduler: model work budget=%s", self._work_budget)
+        if self._max_batch_patches > 0:
+            if self._work_budget is None:
+                raise ValueError(
+                    "max_batch_patches requires a cost-aware model that provides "
+                    "MMWorkEstimate.input_patches"
+                )
+            logging.info(
+                "MMScheduler: explicit batch patch limit=%d",
+                self._max_batch_patches,
+            )
+        if self._gpu_memory_reserve_bytes > 0:
+            if (
+                self._work_budget is None
+                or self._work_budget.estimated_workspace_bytes <= 0
+            ):
+                raise ValueError(
+                    "gpu_memory_reserve_bytes requires a cost-aware model with "
+                    "a positive estimated_workspace_bytes budget"
+                )
+            logging.info(
+                "MMScheduler: GPU memory reserve=%d bytes",
+                self._gpu_memory_reserve_bytes,
+            )
 
         self._waiting: queue.Queue[_EmbeddingChunk] = queue.Queue()
         # A chunk popped from _waiting that would have overflowed the current
@@ -243,8 +279,17 @@ class MMScheduler:
         self,
         current: Optional[MMWorkEstimate],
         candidate: Optional[MMWorkEstimate],
+        runtime_workspace_limit: Optional[int] = None,
     ) -> bool:
-        if self._work_budget is None or current is None or candidate is None:
+        if current is None or candidate is None:
+            return False
+        if (
+            self._max_batch_patches > 0
+            and current.input_patches + candidate.input_patches
+            > self._max_batch_patches
+        ):
+            return True
+        if self._work_budget is None:
             return False
         budget = self._work_budget
         additive_fields = (
@@ -261,6 +306,13 @@ class MMScheduler:
                 > limit
             ):
                 return True
+        if (
+            runtime_workspace_limit is not None
+            and current.estimated_workspace_bytes
+            + candidate.estimated_workspace_bytes
+            > runtime_workspace_limit
+        ):
+            return True
         return (
             budget.max_attention_segment > 0
             and max(
@@ -270,9 +322,55 @@ class MMScheduler:
             > budget.max_attention_segment
         )
 
+    def _runtime_workspace_allowance(self) -> Optional[int]:
+        if self._gpu_memory_reserve_bytes <= 0:
+            return None
+
+        device = torch.device(self._mm_part._device)
+        if device.type != "cuda":
+            return None
+
+        driver_free, _ = torch.cuda.mem_get_info(device)
+        allocated = torch.cuda.memory_allocated(device)
+        reserved = torch.cuda.memory_reserved(device)
+        allocator_reusable = max(0, reserved - allocated)
+        return max(
+            0,
+            driver_free
+            + allocator_reusable
+            - self._gpu_memory_reserve_bytes,
+        )
+
+    def _check_gpu_memory_headroom(self, items: List[MMWorkItem]) -> None:
+        if self._gpu_memory_reserve_bytes <= 0:
+            return
+
+        work_estimate = self._sum_work_estimates(items)
+        if work_estimate is None or work_estimate.estimated_workspace_bytes <= 0:
+            raise RuntimeError(
+                "GPU memory headroom admission requires every work item to have "
+                "a positive estimated_workspace_bytes"
+            )
+
+        runtime_available = self._runtime_workspace_allowance()
+        if runtime_available is None:
+            return
+        estimated_workspace = work_estimate.estimated_workspace_bytes
+        if estimated_workspace <= runtime_available:
+            return
+
+        raise torch.cuda.OutOfMemoryError(
+            "multimodal forward rejected before launch: estimated workspace "
+            f"{estimated_workspace} bytes exceeds runtime allowance "
+            f"{runtime_available} bytes "
+            f"(reserve={self._gpu_memory_reserve_bytes})"
+        )
+
     def _build_chunks(self, request: _EmbeddingRequest) -> None:
         if not request.work_items:
             raise ValueError("MMScheduler requires at least one work item")
+
+        runtime_workspace_limit = self._runtime_workspace_allowance()
 
         if len(request.work_items) == 1:
             work_item = request.work_items[0]
@@ -295,12 +393,20 @@ class MMScheduler:
                         "cost-aware multimodal work estimate must be "
                         f"MMWorkEstimate, got {type(work_estimate).__name__}"
                     )
-                if not work_estimate.fits_within(self._work_budget):
+                if (
+                    not work_estimate.fits_within(self._work_budget)
+                    or (
+                        self._max_batch_patches > 0
+                        and work_estimate.input_patches > self._max_batch_patches
+                    )
+                ):
                     logging.warning(
-                        "MMScheduler: one work item exceeds the model work "
-                        "budget; running it alone (estimate=%s, budget=%s)",
+                        "MMScheduler: one work item exceeds the scheduling work "
+                        "budget; running it alone (estimate=%s, budget=%s, "
+                        "max_batch_patches=%d)",
                         work_estimate,
                         self._work_budget,
+                        self._max_batch_patches,
                     )
             request.chunks = [
                 _EmbeddingChunk(
@@ -379,20 +485,43 @@ class MMScheduler:
                 bool(chunk_items)
                 and chunk_images + item_images > self._max_batch_images
             )
+            patch_overflow = (
+                bool(chunk_items)
+                and self._max_batch_patches > 0
+                and chunk_work.input_patches + item_work.input_patches
+                > self._max_batch_patches
+            )
             work_overflow = bool(chunk_items) and self._would_exceed_work_budget(
-                chunk_work, item_work
+                chunk_work,
+                item_work,
+                runtime_workspace_limit,
             )
             if image_overflow or work_overflow:
                 logging.info(
                     "MMScheduler: split request before work item "
                     "(reason=%s, chunk_images=%d, item_images=%d, "
-                    "chunk_work=%s, item_work=%s, budget=%s)",
-                    "media" if image_overflow else "work",
+                    "chunk_work=%s, item_work=%s, budget=%s, "
+                    "runtime_workspace_limit=%s)",
+                    "media"
+                    if image_overflow
+                    else (
+                        "patches"
+                        if patch_overflow
+                        else (
+                            "runtime workspace"
+                            if runtime_workspace_limit is not None
+                            and chunk_work.estimated_workspace_bytes
+                            + item_work.estimated_workspace_bytes
+                            > runtime_workspace_limit
+                            else "work"
+                        )
+                    ),
                     chunk_images,
                     item_images,
                     chunk_work,
                     item_work,
                     self._work_budget,
+                    runtime_workspace_limit,
                 )
                 finish_chunk()
 
@@ -400,15 +529,23 @@ class MMScheduler:
             chunk_images += item_images
             chunk_work = chunk_work + item_work
 
-            if len(chunk_items) == 1 and not item_work.fits_within(self._work_budget):
+            if len(chunk_items) == 1 and (
+                not item_work.fits_within(self._work_budget)
+                or (
+                    self._max_batch_patches > 0
+                    and item_work.input_patches > self._max_batch_patches
+                )
+            ):
                 # A model work item is not generically splittable (for example,
                 # one long video). Run it alone rather than reintroduce the old
                 # whole-request rejection; a true OOM still reaches the caller.
                 logging.warning(
-                    "MMScheduler: one work item exceeds the model work budget; "
-                    "running it alone (estimate=%s, budget=%s)",
+                    "MMScheduler: one work item exceeds the scheduling work budget; "
+                    "running it alone (estimate=%s, budget=%s, "
+                    "max_batch_patches=%d)",
                     item_work,
                     self._work_budget,
+                    self._max_batch_patches,
                 )
 
         finish_chunk()
@@ -564,6 +701,7 @@ class MMScheduler:
         batch = [first]
         n_images = first.n_images
         batch_work = first.work_estimate
+        runtime_workspace_limit = self._runtime_workspace_allowance()
 
         deadline = time.monotonic() + self._batch_wait_ms / 1000.0
 
@@ -581,7 +719,9 @@ class MMScheduler:
 
             image_overflow = n_images + chunk.n_images > self._max_batch_images
             work_overflow = self._would_exceed_work_budget(
-                batch_work, chunk.work_estimate
+                batch_work,
+                chunk.work_estimate,
+                runtime_workspace_limit,
             )
             if image_overflow or work_overflow:
                 self._pending = chunk
@@ -614,11 +754,15 @@ class MMScheduler:
             work_estimate = self._sum_work_estimates(items)
             t0 = time.time()
         oom_error = None
+        forward_started = False
         try:
+            self._check_gpu_memory_headroom(items)
+            forward_started = True
             _run_embedding(self._mm_part, items)
         except torch.cuda.OutOfMemoryError as error:
             logging.error(
-                "MMScheduler: batch OOM, failing %d chunk(s) without retry: %s",
+                "MMScheduler: batch OOM/headroom rejection, failing %d "
+                "chunk(s) without retry: %s",
                 len(batch),
                 error,
                 exc_info=True,
@@ -640,7 +784,8 @@ class MMScheduler:
         if oom_error is not None:
             # Leave the exception handler before releasing cached memory: its
             # active traceback can still own the failed forward's tensors.
-            torch.cuda.empty_cache()
+            if forward_started:
+                torch.cuda.empty_cache()
             self._fail_chunks(batch, oom_error)
             return
 

@@ -31,7 +31,7 @@ class KimiK3VitWeight(BaseVitWeights):
 
 class KimiK3Mixin(BaseMultiModalMixin):
     def _init_multimodal(self):
-        self.mm_part = KimiK3ImageEmbedding(self.mm_related_params)
+        self.mm_part = KimiK3ImageEmbedding(self.mm_related_params, self.vit_config)
         # vit_weights dict keys must match the on-disk ckpt prefix segment so
         # that BaseVitWeights builds names like `vision_tower.*` / `mm_projector.*`.
         self.mm_related_params.vit_weights = KimiK3VitWeight(

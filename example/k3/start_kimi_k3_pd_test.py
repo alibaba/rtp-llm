@@ -12,6 +12,12 @@ from typing import Optional
     "the production launcher requires Bash 4+ and runs in lhc_GPU Linux",
 )
 class StartKimiK3PdDryRunTest(unittest.TestCase):
+    def test_removed_mla_decode_selector_is_not_reintroduced(self) -> None:
+        launcher = pathlib.Path(__file__).with_name("start_kimi_k3_pd.sh")
+        self.assertNotIn(
+            "RTP_MLA_DECODE_KERNEL", launcher.read_text(encoding="utf-8")
+        )
+
     @staticmethod
     def _find_free_port_block(span: int = 72) -> int:
         # Do not derive the block from an ephemeral port: subprocess startup
