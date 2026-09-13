@@ -55,6 +55,8 @@ final class MockLruBlockCache {
     static final double DEFAULT_RESERVE_RATIO = 0.05;
 
     private final int totalBlocks;
+    // Updated under the cache monitor on 0 <-> 1 reference transitions.
+    private int referencedBlocks;
     private final double reserveRatio;
     /**
      * cache key → reference count. ref == 0: pure LRU block (evictable);
@@ -167,6 +169,7 @@ final class MockLruBlockCache {
         // Pin hits before selecting an eviction chain: a reused block must
         // never disappear between matching and reference acquisition.
         for (Long key : hitKeys) {
+            if (blocks.get(key) == 0) referencedBlocks++;
             blocks.put(key, blocks.get(key) + 1);
             refreshLeaf(key);
         }
@@ -275,6 +278,7 @@ final class MockLruBlockCache {
         // evictable pure-LRU set, so the LRU-tail eviction below can never
         // sacrifice a block this request is about to reuse.
         for (Long key : hitKeys) {
+            if (blocks.get(key) == 0) referencedBlocks++;
             blocks.put(key, blocks.get(key) + 1);
             refreshLeaf(key);
         }
@@ -341,6 +345,7 @@ final class MockLruBlockCache {
                 throw new IllegalStateException("computed keys exceed prefill allocation");
             }
             Integer references = blocks.get(key);
+            if (references == null || references == 0) referencedBlocks++;
             if (references == null) {
                 blocks.put(key, 1);
             } else {
@@ -422,6 +427,7 @@ final class MockLruBlockCache {
      */
     synchronized void clear() {
         blocks.clear();
+        referencedBlocks = 0;
         tree.clear();
         leaves.clear();
         accessSequence = 0;
@@ -477,13 +483,7 @@ final class MockLruBlockCache {
 
     /** Cache-key blocks referenced by in-flight requests. */
     synchronized int referencedKeyBlocks() {
-        int referenced = 0;
-        for (Integer ref : blocks.values()) {
-            if (ref != null && ref > 0) {
-                referenced++;
-            }
-        }
-        return referenced;
+        return referencedBlocks;
     }
 
     /** Indexed cache-key blocks (pure LRU + referenced). */
@@ -546,6 +546,7 @@ final class MockLruBlockCache {
     private void dereference(List<Long> hitKeys) {
         for (Long key : hitKeys) {
             Integer ref = blocks.get(key);
+            if (Integer.valueOf(1).equals(ref)) referencedBlocks--;
             int next = ref == null ? 0 : ref - 1;
             blocks.put(key, Math.max(0, next));
             refreshLeaf(key);
