@@ -1351,6 +1351,110 @@ TEST_F(KVCacheAllocatorHybridPathTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
+TEST_F(KVCacheAllocatorHybridPathTest, ReferencesReorderedResourceByIdentity) {
+    const auto config        = makeTinyHybridConfig();
+    auto       source_groups = config.topology().groups();
+    std::swap(source_groups[0], source_groups[1]);
+    auto        source_topology = CacheTopology::create(source_groups, config.topology().layers());
+    const auto& linear_tag      = config.tagForGroup(0);
+    const auto& full_tag        = config.tagForGroup(1);
+
+    for (bool is_connector : {false, true}) {
+        auto allocator = std::make_shared<KVCacheAllocator>(config, AllocationType::HOST);
+        ASSERT_TRUE(allocator->init());
+        const auto&     pools         = allocator->group_block_pools_;
+        const auto      free_before   = allocator->freeBlocksNum();
+        const auto      linear_blocks = pools[0]->malloc(2);
+        const auto      full_blocks   = pools[1]->malloc(3);
+        KVCacheResource source;
+        source.initGroups(source_topology);
+        source.setCacheKeys({100, 101, 102});
+        source.setDeviceReuseBlockNum(1);  // One cache-key block.
+        source.mutableBlockIds(linear_tag).assign({linear_blocks[0], NULL_BLOCK_IDX, linear_blocks[1]});
+        source.mutableBlockIds(full_tag).assign({full_blocks[0], full_blocks[2], NULL_BLOCK_IDX});
+
+        auto ref = allocator->incrKVCacheRef(source, {101, 999, 102}, is_connector);
+        ASSERT_NE(ref, nullptr);
+        EXPECT_EQ(ref->blocks(linear_tag), (BlockIndicesType{NULL_BLOCK_IDX, linear_blocks[1]}));
+        EXPECT_EQ(ref->blocks(full_tag), (BlockIndicesType{full_blocks[2], NULL_BLOCK_IDX}));
+        EXPECT_EQ(ref->reuseBlockNum(), 1);
+        EXPECT_EQ(ref->mutableBlockIds(full_tag).kernelBlocksPerKvBlock(), 2u);
+        EXPECT_EQ(ref->mutableBlockIds(linear_tag).kernelBlocksPerKvBlock(), 1u);
+
+        // Metadata lifetime is not a physical lease: release the original owner
+        // while the selected request/connector reference still holds two blocks.
+        source = KVCacheResource{};
+        pools[0]->requestFree(linear_blocks);
+        pools[1]->requestFree(full_blocks);
+        EXPECT_EQ(allocator->freeBlocksNum(), free_before - 2);
+        EXPECT_EQ(pools[0]->connectorRefBlocksNum(), is_connector ? 1u : 0u);
+        EXPECT_EQ(pools[1]->connectorRefBlocksNum(), is_connector ? 1u : 0u);
+        ref.reset();
+        EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+    }
+}
+
+TEST_F(KVCacheAllocatorHybridPathTest, DecrReferencesReorderedResourceByIdentity) {
+    const auto config    = makeTinyHybridConfig();
+    auto       allocator = std::make_shared<KVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+    const auto  free_before   = allocator->freeBlocksNum();
+    const auto& pools         = allocator->group_block_pools_;
+    const auto  linear_blocks = pools[0]->malloc(1);
+    const auto  full_blocks   = pools[1]->malloc(2);
+    auto        groups        = config.topology().groups();
+    std::swap(groups[0], groups[1]);
+    KVCacheResource resource;
+    resource.initGroups(CacheTopology::create(groups, config.topology().layers()));
+    resource.mutableBlockIds(config.tagForGroup(0)).assign(linear_blocks);
+    resource.mutableBlockIds(config.tagForGroup(1)).assign(full_blocks);
+    allocator->decrKVCacheRef(resource);
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+    EXPECT_EQ(pools[0]->requestRefBlocksNum(), 0u);
+    EXPECT_EQ(pools[1]->requestRefBlocksNum(), 0u);
+}
+
+TEST_F(KVCacheAllocatorHybridPathTest, ReferenceIdentityMismatchDoesNotChangeAnyPool) {
+    const auto config    = makeTinyHybridConfig();
+    auto       allocator = std::make_shared<KVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+    const auto& pools         = allocator->group_block_pools_;
+    const auto  linear_blocks = pools[0]->malloc(1);
+    const auto  full_blocks   = pools[1]->malloc(1);
+    auto        groups        = config.topology().groups();
+    const auto  old_tag       = groups[1].tag;
+    groups[1].tag             = "unexpected";
+    auto spec                 = groups[1].spec->clone();
+    spec->tag                 = groups[1].tag;
+    groups[1].spec            = std::move(spec);
+    auto layers               = config.topology().layers();
+    for (auto& layer : layers) {
+        for (auto& tag : layer.group_tags) {
+            if (tag == old_tag) {
+                tag = "unexpected";
+            }
+        }
+    }
+    KVCacheResource resource;
+    resource.initGroups(CacheTopology::create(groups, layers));
+    resource.setCacheKeys({100});
+    resource.mutableBlockIds(config.tagForGroup(0)).assign(linear_blocks);
+    resource.mutableBlockIds("unexpected").assign(full_blocks);
+    const auto free_before = allocator->freeBlocksNum();
+    EXPECT_EQ(allocator->incrKVCacheRef(resource, {999}), nullptr);
+    EXPECT_EQ(allocator->incrKVCacheRef(resource, {999}, true), nullptr);
+    EXPECT_ANY_THROW(allocator->incrKVCacheRef(resource, {100}));
+    EXPECT_ANY_THROW(allocator->incrKVCacheRef(resource, {100}, true));
+    EXPECT_ANY_THROW(allocator->decrKVCacheRef(resource));
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+    EXPECT_EQ(pools[0]->requestRefBlocksNum(), 1u);
+    EXPECT_EQ(pools[1]->requestRefBlocksNum(), 1u);
+    EXPECT_EQ(pools[0]->connectorRefBlocksNum(), 0u);
+    EXPECT_EQ(pools[1]->connectorRefBlocksNum(), 0u);
+    pools[0]->requestFree(linear_blocks);
+    pools[1]->requestFree(full_blocks);
+}
+
 TEST_F(KVCacheAllocatorHybridPathTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     auto config       = makeTinyHybridConfig();
     auto allocator    = std::make_shared<KVCacheAllocator>(config, AllocationType::DEVICE);

@@ -176,5 +176,66 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     EXPECT_EQ(mapper.layoutForGroup(config, 1).slice, CpBlockSliceMode::EQUAL_BYTES);
 }
 
+TEST_F(CPSlotMapperTest, ConnectorProjectionUsesTagsForDifferentGroupOrders) {
+    CacheConfig config;
+    config.seq_size_per_block            = 8;  // Tokens per cache-key block.
+    config.layer_num                     = 1;
+    auto full_spec                       = std::make_shared<MHAKVCacheSpec>();
+    full_spec->tag                       = "full";
+    full_spec->seq_size_per_block        = 8;  // Tokens per physical block.
+    full_spec->kernel_seq_size_per_block = 4;  // Tokens per kernel page.
+    GroupBase full;
+    full.tag               = "full";
+    full.spec              = full_spec;
+    full.policy            = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    full.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    auto swa_spec          = std::make_shared<MHAKVCacheSpec>();
+    swa_spec->tag          = "swa";
+    GroupBase swa;
+    swa.tag             = "swa";
+    swa.spec            = swa_spec;
+    swa.policy          = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa.policy.cp_slice = CpBlockSliceMode::EQUAL_BYTES;
+    config.setTopology({full, swa}, {{0, {"full", "swa"}}});
+
+    KVCacheResource source;
+    source.initGroups(CacheTopology::create({swa, full}, {{0, {"full", "swa"}}}));
+    source.setCacheKeys({100, 101, 102, 103});
+    source.setLastBlockAligned(true);
+    source.mutableBlockIds("full").assign({1, 2, 3, NULL_BLOCK_IDX});
+    source.mutableBlockIds("swa").assign({7, 8, 9, 10});
+    CPSlotMapper mapper(0, 2, 8);
+    auto         selected = mapper.projectConnectorResource(source, config, {101, 103});
+    EXPECT_EQ(selected.blocks("full"), (BlockIndicesType{2, NULL_BLOCK_IDX}));
+    EXPECT_EQ(selected.blocks("swa"), (BlockIndicesType{7, 8}));
+    EXPECT_EQ(selected.mutableBlockIds("full").kernelBlocksPerKvBlock(), 2u);
+    EXPECT_EQ(selected.mutableBlockIds("swa").kernelBlocksPerKvBlock(), 1u);
+    EXPECT_EQ(source.blocks("full"), (BlockIndicesType{1, 2, 3, NULL_BLOCK_IDX}));
+
+    // A partial key on rank 0 keeps the complete rank-1 key and adds the
+    // existing connector dummy tail; key counts are cache-key blocks.
+    source.setCacheKeys({100, 101, 102});
+    source.setLastBlockAligned(false);
+    source.mutableBlockIds("full").assign({1, 2, 3});
+    selected = mapper.projectConnectorResource(source, config, {101});
+    EXPECT_EQ(selected.cacheKeys(), (CacheKeysType{101, 102}));
+    EXPECT_FALSE(selected.lastBlockAligned());
+    EXPECT_EQ(selected.blocks("full"), (BlockIndicesType{2}));
+    EXPECT_EQ(selected.blocks("swa"), (BlockIndicesType{7}));
+
+    source.mutableBlockIds("full").assign({5});
+    selected = mapper.projectConnectorResource(source, config, {101});
+    EXPECT_EQ(selected.blocks("full"), (BlockIndicesType{5}));
+
+    auto unknown_spec = std::make_shared<MHAKVCacheSpec>(*swa_spec);
+    unknown_spec->tag = "unknown";
+    swa.tag           = "unknown";
+    swa.spec          = unknown_spec;
+    source.initGroups(CacheTopology::create({full, swa}, {{0, {"full", "unknown"}}}));
+    EXPECT_ANY_THROW(mapper.projectConnectorResource(source, config, {101}));
+    source.initGroups(CacheTopology::create({full}, {{0, {"full"}}}));
+    EXPECT_ANY_THROW(mapper.projectConnectorResource(source, config, {101}));
+}
+
 }  // namespace test
 }  // namespace rtp_llm

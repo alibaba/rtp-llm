@@ -25,37 +25,62 @@ public:
 
     class LoadKVCacheContext {
     public:
-        LoadKVCacheContext(int64_t                          request_id,
-                           const std::string&               request_key,
-                           const std::vector<std::string>&  peer_addrs,
-                           const std::vector<CacheKeyType>& cache_keys,
-                           const GroupBlockIds&             block_ids_by_group,
-                           int64_t                          reuse_block_size,
-                           int64_t                          timeout_ms,
-                           int                              partition_count,
-                           int                              partition_id,
-                           grpc::ServerContext*             server_context,
-                           int32_t                          prefill_cp_size = 1):
+        LoadKVCacheContext(int64_t                                 request_id,
+                           const std::string&                      request_key,
+                           const std::vector<std::string>&         peer_addrs,
+                           const std::vector<CacheKeyType>&        cache_keys,
+                           const GroupBlockIds&                    block_ids_by_group,
+                           std::unordered_map<std::string, size_t> tag_to_group_id,
+                           int64_t                                 reuse_block_size,
+                           int64_t                                 timeout_ms,
+                           int                                     partition_count,
+                           int                                     partition_id,
+                           grpc::ServerContext*                    server_context,
+                           int32_t                                 prefill_cp_size = 1):
             request_id(request_id),
             request_key(request_key),
             peer_addrs(peer_addrs),
             cache_keys(cache_keys),
             block_ids_by_group(block_ids_by_group),
+            tag_to_group_id(std::move(tag_to_group_id)),
             reuse_block_size(reuse_block_size),
             timeout_ms(timeout_ms),
             partition_count(partition_count),
             partition_id(partition_id),
             server_context(server_context),
-            prefill_cp_size(prefill_cp_size) {}
-        int64_t                          request_id;
-        const std::string&               request_key;
-        const std::vector<std::string>&  peer_addrs;
-        const std::vector<CacheKeyType>& cache_keys;
-        const GroupBlockIds&             block_ids_by_group;
-        int64_t                          reuse_block_size;
-        int64_t                          timeout_ms;
-        int                              partition_count;
-        int                              partition_id;
+            prefill_cp_size(prefill_cp_size) {
+            RTP_LLM_CHECK_WITH_INFO(this->tag_to_group_id.size() == block_ids_by_group.size(),
+                                    "RPC group identity count does not match block table");
+            std::vector<bool> seen(block_ids_by_group.size(), false);
+            for (const auto& [tag, group_id] : this->tag_to_group_id) {
+                RTP_LLM_CHECK_WITH_INFO(!tag.empty() && group_id < block_ids_by_group.size(),
+                                        "invalid RPC group identity tag=%s group_id=%zu",
+                                        tag.c_str(),
+                                        group_id);
+                RTP_LLM_CHECK_WITH_INFO(!seen[group_id] && block_ids_by_group[group_id] != nullptr,
+                                        "duplicate or null RPC group row for tag=%s",
+                                        tag.c_str());
+                seen[group_id] = true;
+            }
+        }
+        const BlockIds& blockIdsForGroup(std::string_view tag) const {
+            const auto value = std::string(tag);
+            const auto it    = tag_to_group_id.find(value);
+            RTP_LLM_CHECK_WITH_INFO(it != tag_to_group_id.end(), "missing RPC cache tag=%s", value.c_str());
+            const auto& holder = block_ids_by_group.at(it->second);
+            RTP_LLM_CHECK_WITH_INFO(holder != nullptr, "null RPC cache holder tag=%s", value.c_str());
+            return *holder;
+        }
+        int64_t                                       request_id;
+        const std::string&                            request_key;
+        const std::vector<std::string>&               peer_addrs;
+        const std::vector<CacheKeyType>&              cache_keys;
+        const GroupBlockIds&                          block_ids_by_group;
+        const std::unordered_map<std::string, size_t> tag_to_group_id;
+        int64_t                                       reuse_block_size;
+        int64_t                                       timeout_ms;
+        int                                           partition_count;
+        int                                           partition_id;
 
         grpc::ServerContext* server_context;
         int32_t              prefill_cp_size;
@@ -113,18 +138,18 @@ private:
                                                                bool                    use_hybrid,
                                                                size_t                  group_seq_size_per_block,
                                                                size_t                  base_seq_size_per_block);
-    static size_t cacheKeysPerPhysicalBlock(size_t group_seq_size_per_block, size_t base_seq_size_per_block);
-    static size_t keyBlocksPerLogicalBlock(const CacheGroupPolicy& policy,
-                                           size_t                  group_seq_size_per_block,
-                                           size_t                  base_seq_size_per_block);
-    static void   markCacheKeyRange(std::vector<size_t>& cache_key_counts,
-                                    size_t               endpoint_key_index,
-                                    size_t               block_offset_index,
-                                    size_t               cache_keys_per_physical_block);
-    static size_t completedHandoffPrefixBlocks(size_t                     already_reused_blocks,
-                                               const std::vector<size_t>& required_cache_key_counts,
-                                               const std::vector<size_t>& transferred_cache_key_counts);
-    static size_t minLoadedCacheBlockCount(const std::vector<size_t>& rank_loaded_cache_block_counts);
+    static size_t    cacheKeysPerPhysicalBlock(size_t group_seq_size_per_block, size_t base_seq_size_per_block);
+    static size_t    keyBlocksPerLogicalBlock(const CacheGroupPolicy& policy,
+                                              size_t                  group_seq_size_per_block,
+                                              size_t                  base_seq_size_per_block);
+    static void      markCacheKeyRange(std::vector<size_t>& cache_key_counts,
+                                       size_t               endpoint_key_index,
+                                       size_t               block_offset_index,
+                                       size_t               cache_keys_per_physical_block);
+    static size_t    completedHandoffPrefixBlocks(size_t                     already_reused_blocks,
+                                                  const std::vector<size_t>& required_cache_key_counts,
+                                                  const std::vector<size_t>& transferred_cache_key_counts);
+    static size_t    minLoadedCacheBlockCount(const std::vector<size_t>& rank_loaded_cache_block_counts);
     static ErrorInfo validateRemoteLoadTopology(size_t worker_size, size_t peer_size);
     static std::vector<size_t> completionQueueExpectedResponseCounts(size_t worker_size);
     static int                 markLoadedCacheReuse(const std::shared_ptr<GenerateStream>& stream,

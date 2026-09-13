@@ -236,6 +236,38 @@ const BlockIds& KVCacheResource::blockIdsForLayer(int layer_id, std::string_view
     return mutableBlockIdsForLayer(layer_id, tag);
 }
 
+std::shared_ptr<BlockIds> KVCacheResource::blockIdsPtrForLayer(int layer_id, std::string_view tag) const {
+    if (layer_id < 0 || static_cast<size_t>(layer_id) >= layer_group_tags_.size()
+        || static_cast<size_t>(layer_id) >= layer_group_block_ids.size()) {
+        return nullptr;
+    }
+    const auto value = std::string(tag);
+    const auto it    = tag_to_group_id_.find(value);
+    if (it == tag_to_group_id_.end() || it->second < 0) {
+        return nullptr;
+    }
+    const auto& tags = layer_group_tags_[static_cast<size_t>(layer_id)];
+    if (std::find(tags.begin(), tags.end(), value) == tags.end()) {
+        return nullptr;
+    }
+    const auto& row      = layer_group_block_ids[static_cast<size_t>(layer_id)];
+    const auto  group_id = static_cast<size_t>(it->second);
+    return group_id < row.size() ? row[group_id] : nullptr;
+}
+
+std::unordered_map<std::string, size_t> KVCacheResource::tagToGroupIdSnapshot() const {
+    std::unordered_map<std::string, size_t> snapshot;
+    snapshot.reserve(tag_to_group_id_.size());
+    for (const auto& [tag, group_id] : tag_to_group_id_) {
+        RTP_LLM_CHECK_WITH_INFO(group_id >= 0 && static_cast<size_t>(group_id) < group_block_ids.size(),
+                                "KVCacheResource invalid group_id=%d for tag=%s",
+                                group_id,
+                                tag.c_str());
+        snapshot.emplace(tag, static_cast<size_t>(group_id));
+    }
+    return snapshot;
+}
+
 int KVCacheResource::groupIdForTag(std::string_view tag) const {
     const auto value = std::string(tag);
     const auto it    = tag_to_group_id_.find(value);

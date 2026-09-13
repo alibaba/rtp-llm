@@ -913,7 +913,7 @@ bool RemoteConnector::Read(const std::string&                 trace_id,
     SdkMetricsHelper helper(trace_id, true, metrics_reporter_);
     helper.collector.remote_sdk_block_num = block_ids.size();
     kv_cache_manager::BlockBuffers block_buffers;
-    if (!group_policy_->genBlockBuffersByTag(group_tags, block_ids, block_buffers)) {
+    if (!group_policy_->genBlockBuffers(group_tags, block_ids, block_buffers)) {
         return false;
     }
     static bool kvcm_sdk_check = autil::EnvUtil::getEnv("KVCM_SDK_CHECK", false);
@@ -944,7 +944,7 @@ bool RemoteConnector::Write(const std::string&                 trace_id,
     SdkMetricsHelper helper(trace_id, false, metrics_reporter_);
     helper.collector.remote_sdk_block_num = block_ids.size();
     kv_cache_manager::BlockBuffers block_buffers;
-    if (!group_policy_->genBlockBuffersByTag(group_tags, block_ids, block_buffers)) {
+    if (!group_policy_->genBlockBuffers(group_tags, block_ids, block_buffers)) {
         return false;
     }
     static bool kvcm_sdk_check = autil::EnvUtil::getEnv("KVCM_SDK_CHECK", false);

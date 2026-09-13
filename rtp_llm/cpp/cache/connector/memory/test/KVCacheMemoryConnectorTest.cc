@@ -168,7 +168,7 @@ const std::vector<std::vector<std::string>>& dsv4TypedLayerTags() {
 
 CacheConfig createDsv4TypedConnectorConfig() {
     CacheConfig config;
-    config.layer_num                 = 2;
+    config.layer_num = 2;
 
     config.block_num                 = 16;
     config.seq_size_per_block        = 128;
@@ -232,15 +232,15 @@ CacheConfig createDsv4TypedConnectorConfig() {
 // Assign `stride_bytes` to a single group of an already-built topology, keeping every other
 // group untouched.  Replaces DEV's direct per-group stride vector writes.
 void setGroupKvStrideBytes(CacheConfig& config, const std::string& tag, size_t stride_bytes) {
-    auto       block_nums    = config.groupBlockNumsSnapshot();
+    auto                block_nums = config.groupBlockNumsSnapshot();
     std::vector<size_t> kv_strides;
     std::vector<size_t> scale_strides;
     for (const auto& group : config.topology().groups()) {
         kv_strides.push_back(group.kvBlockStrideBytes());
         scale_strides.push_back(group.kvScaleStrideBytes());
     }
-    const auto gid           = static_cast<size_t>(config.groupIdForTag(tag));
-    kv_strides.at(gid)       = stride_bytes;
+    const auto gid     = static_cast<size_t>(config.groupIdForTag(tag));
+    kv_strides.at(gid) = stride_bytes;
     rtp_llm::test::setGroupBlockLayout(config, block_nums, kv_strides, scale_strides);
 }
 
@@ -1791,11 +1791,11 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatchPrefixStopsWhenRequiredStateSwaMiss
     EXPECT_EQ(match_ctx->matchedBlockCount(), 1u);
 }
 
-TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots) {
+TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ProjectsReorderedResourceByLayerAndTag) {
     // One layer carrying two prefix-reusable tags with different byte strides: the copy plan must
     // emit one slot per (layer, tag), not one slot per layer.
-    auto cfg          = cache_config_;
-    cfg.layer_num     = 1;
+    auto cfg      = cache_config_;
+    cfg.layer_num = 1;
 
     cfg.fromGroupedSpecs({makeMhaSpec("csa_kv", cfg.seq_size_per_block, cfg.dtype, 1, 8),
                           makeMhaSpec("swa_kv", cfg.seq_size_per_block, cfg.dtype, 1, 16)},
@@ -1824,13 +1824,28 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
 
     auto resource         = std::make_shared<KVCacheResource>();
     resource->cacheKeys() = {101, 102, 103};
-    resource->initGroups(cfg.topologyPtr());
-    resource->mutableBlockIds(/*group_id=*/0).assign({11, 12, 13});
-    resource->mutableBlockIds(/*group_id=*/1).assign({21, NULL_BLOCK_IDX, 23});
+    auto resource_cfg     = cfg;
+    resource_cfg.fromGroupedSpecs({makeMhaSpec("swa_kv", cfg.seq_size_per_block, cfg.dtype, 1, 16),
+                                   makeMhaSpec("csa_kv", cfg.seq_size_per_block, cfg.dtype, 1, 8)},
+                                  {{0}, {0}},
+                                  {CacheGroupType::FULL, CacheGroupType::FULL},
+                                  {"swa_kv", "csa_kv"});
+    rtp_llm::test::setGroupBlockLayout(resource_cfg, {cfg.block_num, cfg.block_num}, {32, 16}, {0, 0});
+    resource->initGroups(resource_cfg.topologyPtr());
+    resource->mutableBlockIds("csa_kv").assign({11, 12, 13});
+    resource->mutableBlockIds("swa_kv").assign({21, NULL_BLOCK_IDX, 23});
+
+    auto layer_blocks = conn->resourceLayerRegionBlocks(*resource, slots);
+    ASSERT_TRUE(conn->checkLayerRegionBlocks(layer_blocks, slots, /*required_len=*/3));
+    ASSERT_EQ(layer_blocks.size(), 1u);
+    ASSERT_EQ(layer_blocks[0].size(), 2u);
+    EXPECT_EQ(layer_blocks[0][0], resource->blockIdsPtrForLayer(0, "csa_kv"));
+    EXPECT_EQ(layer_blocks[0][1], resource->blockIdsPtrForLayer(0, "swa_kv"));
+    EXPECT_NE(layer_blocks[0][0], resource->groupBlocks()[0]);
 
     bool no_need_write = true;
     auto plan          = conn->buildCopyPlanForWrite(
-        resource->cacheKeys(), resource->layerGroupBlocks(), slots, /*start_index=*/0, /*write_num=*/3, no_need_write);
+        resource->cacheKeys(), layer_blocks, slots, /*start_index=*/0, /*write_num=*/3, no_need_write);
 
     ASSERT_NE(plan, nullptr);
     EXPECT_FALSE(no_need_write);
@@ -1841,6 +1856,75 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
     EXPECT_EQ(plan->copy_infos[0].gpu_blocks, (std::vector<BlockIdxType>{11, 21}));
     EXPECT_EQ(plan->copy_infos[1].gpu_blocks, (std::vector<BlockIdxType>{12, NULL_BLOCK_IDX}));
     EXPECT_EQ(plan->copy_infos[2].gpu_blocks, (std::vector<BlockIdxType>{13, 23}));
+
+    std::weak_ptr<BlockIds> retained_holder = resource->blockIdsPtrForLayer(0, "csa_kv");
+    resource.reset();
+    EXPECT_FALSE(retained_holder.expired());
+    EXPECT_EQ(layer_blocks[0][0]->blocks(), (BlockIndicesType{11, 12, 13}));
+    layer_blocks.clear();
+    EXPECT_TRUE(retained_holder.expired());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, resourceLayerProjectionRejectsMissingOrMalformedIdentity) {
+    const auto cfg   = createDsv4TypedConnectorConfig();
+    auto       conn  = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cache_config_, allocator_, server_addrs_);
+    const auto slots = conn->layerTagSlots();
+    ASSERT_FALSE(slots.empty());
+
+    KVCacheResource resource;
+    EXPECT_TRUE(conn->resourceLayerRegionBlocks(resource, slots).empty());
+    resource.initGroups(cfg.topologyPtr());
+    ASSERT_FALSE(conn->resourceLayerRegionBlocks(resource, slots).empty());
+
+    auto invalid        = slots;
+    invalid.front().tag = "missing";
+    EXPECT_TRUE(conn->resourceLayerRegionBlocks(resource, invalid).empty());
+    invalid                  = slots;
+    invalid.front().group_id = -1;
+    EXPECT_TRUE(conn->resourceLayerRegionBlocks(resource, invalid).empty());
+    invalid.front().group_id = cfg.groupNums();
+    EXPECT_TRUE(conn->resourceLayerRegionBlocks(resource, invalid).empty());
+    invalid.front().group_id = (slots.front().group_id + 1) % cfg.groupNums();
+    EXPECT_TRUE(conn->resourceLayerRegionBlocks(resource, invalid).empty());
+    invalid                  = slots;
+    invalid.front().layer_id = -1;
+    EXPECT_TRUE(conn->resourceLayerRegionBlocks(resource, invalid).empty());
+    invalid.front().layer_id = static_cast<int>(cfg.layer_all_num());
+    EXPECT_TRUE(conn->resourceLayerRegionBlocks(resource, invalid).empty());
+
+    auto           missing_cfg   = cfg;
+    constexpr auto fixture_dtype = DataType::TYPE_FP16;
+    missing_cfg.fromGroupedSpecs({makeMhaSpec("different", cfg.seq_size_per_block, fixture_dtype, 1, 8)},
+                                 {{0, 1}},
+                                 {CacheGroupType::FULL},
+                                 {"different"});
+    resource.initGroups(missing_cfg.topologyPtr());
+    EXPECT_TRUE(conn->resourceLayerRegionBlocks(resource, slots).empty());
+
+    missing_cfg.fromGroupedSpecs({makeMhaSpec(slots.front().tag, cfg.seq_size_per_block, fixture_dtype, 1, 8),
+                                  makeMhaSpec("different", cfg.seq_size_per_block, fixture_dtype, 1, 8)},
+                                 {{1 - slots.front().layer_id}, {slots.front().layer_id}},
+                                 {CacheGroupType::FULL, CacheGroupType::FULL},
+                                 {slots.front().tag, "different"});
+    resource.initGroups(missing_cfg.topologyPtr());
+    EXPECT_TRUE(conn->resourceLayerRegionBlocks(resource, slots).empty());
+
+    missing_cfg.layer_num = 1;
+    missing_cfg.fromGroupedSpecs({makeMhaSpec(slots.back().tag, cfg.seq_size_per_block, fixture_dtype, 1, 8)},
+                                 {{0}},
+                                 {CacheGroupType::FULL},
+                                 {slots.back().tag});
+    resource.initGroups(missing_cfg.topologyPtr());
+    ASSERT_EQ(slots.back().layer_id, 1);
+    EXPECT_TRUE(conn->resourceLayerRegionBlocks(resource, {slots.back()}).empty());
+
+    resource.initGroups(cfg.topologyPtr());
+    // Deliberately corrupt the exposed metadata view to check the adapter's null-holder rejection.
+    auto& rows = const_cast<LayerAttnBlockIds&>(resource.layerGroupBlocks());
+    rows[slots.front().layer_id][slots.front().group_id].reset();
+    auto projected = conn->resourceLayerRegionBlocks(resource, slots);
+    EXPECT_TRUE(projected.empty());
+    EXPECT_FALSE(conn->checkLayerRegionBlocks(projected, slots, /*required_len=*/1));
 }
 
 TEST_F(KVCacheMemoryConnectorTest, typedLayoutProbeRejectsUnknownOrMismatchedGroupIdentity) {
@@ -1850,8 +1934,7 @@ TEST_F(KVCacheMemoryConnectorTest, typedLayoutProbeRejectsUnknownOrMismatchedGro
     ASSERT_FALSE(slots.empty());
     ASSERT_TRUE(conn->supportsTypedPrefixCacheLayout(slots));
 
-    // The resource matrix still uses local group indices. Identity validation rejects
-    // malformed slots; it does not enable independently reordered resource matrices.
+    // Slot indices belong to the connector, independently of Resource row order.
     auto unknown        = slots;
     unknown.front().tag = "missing";
     EXPECT_FALSE(conn->supportsTypedPrefixCacheLayout(unknown));
@@ -3148,7 +3231,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     ctx.attn_config        = &attn_config;
     auto mla_spec          = SpecBuilder::build(desc, ctx);
 
-    cache_config_.layer_num                 = static_cast<uint32_t>(kLayerNum);
+    cache_config_.layer_num = static_cast<uint32_t>(kLayerNum);
 
     cache_config_.block_num                 = static_cast<uint32_t>(kBlockNum);
     cache_config_.seq_size_per_block        = kSeqPerBlock;
@@ -3417,7 +3500,7 @@ protected:
         constexpr int kTestMemoryCacheSyncTimeout = 1000;
 
         CacheConfig config;
-        config.layer_num                              = layer_num;
+        config.layer_num = layer_num;
 
         config.block_num                              = block_num;
         config.seq_size_per_block                     = seq_size_per_block;

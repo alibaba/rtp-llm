@@ -224,14 +224,14 @@ class RemoteConnectorInternalTest: public ::testing::Test {
 public:
     void SetUp() override {
         rtp_llm::initLogger();
-        auto mha_spec               = makeTestMhaSpec("0", /*seq_size_per_block=*/8);
-        auto linear_spec_1          = makeTestLinearSpec("1", /*seq_size_per_block=*/8);
-        auto linear_spec_2          = makeTestLinearSpec("2", /*seq_size_per_block=*/8);
-        cache_config_.block_num     = 8;
-        cache_config_.layer_num     = layer_num_;
+        auto mha_spec           = makeTestMhaSpec("0", /*seq_size_per_block=*/8);
+        auto linear_spec_1      = makeTestLinearSpec("1", /*seq_size_per_block=*/8);
+        auto linear_spec_2      = makeTestLinearSpec("2", /*seq_size_per_block=*/8);
+        cache_config_.block_num = 8;
+        cache_config_.layer_num = layer_num_;
 
-        byte_size_per_block_        = static_cast<size_t>(mha_spec->block_size_bytes()) * layer_num_;
-        cache_config_.dtype         = rtp_llm::DataType::TYPE_FP16;
+        byte_size_per_block_ = static_cast<size_t>(mha_spec->block_size_bytes()) * layer_num_;
+        cache_config_.dtype  = rtp_llm::DataType::TYPE_FP16;
         std::vector<int> layers(layer_num_);
         std::iota(layers.begin(), layers.end(), 0);
         cache_config_.fromGroupedSpecs({mha_spec, linear_spec_1, linear_spec_2},
@@ -345,11 +345,11 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecGroupsScalesLinearly) {
     constexpr size_t group_count        = linear_group_count + 1;
 
     CacheConfig config;
-    config.block_num     = 8;
-    config.layer_num     = group_count;
+    config.block_num = 8;
+    config.layer_num = group_count;
 
-    config.dtype         = rtp_llm::DataType::TYPE_FP16;
-    auto full_spec       = makeTestMhaSpec("full", /*seq_size_per_block=*/8);
+    config.dtype   = rtp_llm::DataType::TYPE_FP16;
+    auto full_spec = makeTestMhaSpec("full", /*seq_size_per_block=*/8);
 
     std::vector<KVCacheSpecPtr>   specs{full_spec};
     std::vector<std::vector<int>> layer_ids{{0}};
@@ -385,7 +385,7 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecGroupsScalesLinearly) {
 
 TEST(RemoteConnectorTagIdentityTest, GroupNamesDoNotDependOnNumericGroupOrder) {
     CacheConfig first_config;
-    first_config.layer_num     = 1;
+    first_config.layer_num = 1;
 
     first_config.fromGroupedSpecs({makeTestMhaSpec("full", 8), makeTestLinearSpec("linear", 8)},
                                   {{0}, {0}},
@@ -398,7 +398,7 @@ TEST(RemoteConnectorTagIdentityTest, GroupNamesDoNotDependOnNumericGroupOrder) {
     ASSERT_TRUE(first_policy->init());
 
     CacheConfig reversed_config;
-    reversed_config.layer_num     = 1;
+    reversed_config.layer_num = 1;
 
     reversed_config.fromGroupedSpecs({makeTestLinearSpec("linear", 8), makeTestMhaSpec("full", 8)},
                                      {{0}, {0}},
@@ -425,7 +425,7 @@ TEST(RemoteConnectorTagIdentityTest, GroupNamesDoNotDependOnNumericGroupOrder) {
 
 TEST(RemoteConnectorTagIdentityTest, FullOnlyPolicyRoutesSameLayerGroupsByTagWithoutHotPathLayoutLookup) {
     CacheConfig first_config;
-    first_config.layer_num     = 1;
+    first_config.layer_num = 1;
 
     first_config.fromGroupedSpecs({makeTestMhaSpec("full_a", 8), makeTestMhaSpec("full_b", 8)},
                                   {{0}, {0}},
@@ -445,13 +445,17 @@ TEST(RemoteConnectorTagIdentityTest, FullOnlyPolicyRoutesSameLayerGroupsByTagWit
     EXPECT_EQ(first_policy->spec_info_map().at("tp0_Ffull_b").tag, "full_b");
 
     kv_cache_manager::BlockBuffers first_buffers;
-    ASSERT_TRUE(first_policy->genBlockBuffersByTag({"full_b", "full_a"}, {7, 9}, first_buffers));
+    EXPECT_ANY_THROW(first_policy->genBlockBuffers({"full_a"}, {7, 9}, first_buffers));
+    EXPECT_ANY_THROW(first_policy->genBlockBuffers({"full_a", "unknown"}, {7, 9}, first_buffers));
+    EXPECT_TRUE(first_buffers.empty());
+    EXPECT_TRUE(first_allocator->taggedBufferRequests().empty());
+    ASSERT_TRUE(first_policy->genBlockBuffers({"full_b", "full_a"}, {7, 9}, first_buffers));
     EXPECT_EQ(first_allocator->taggedBufferRequests(),
               (std::vector<std::tuple<int, std::string, int>>{{0, "full_b", 7}, {0, "full_a", 9}}));
     EXPECT_EQ(first_allocator->allLayerCacheBaseCallCount(), 1u);
 
     CacheConfig reversed_config;
-    reversed_config.layer_num     = 1;
+    reversed_config.layer_num = 1;
 
     reversed_config.fromGroupedSpecs({makeTestMhaSpec("full_b", 8), makeTestMhaSpec("full_a", 8)},
                                      {{0}, {0}},
@@ -467,15 +471,24 @@ TEST(RemoteConnectorTagIdentityTest, FullOnlyPolicyRoutesSameLayerGroupsByTagWit
     EXPECT_EQ(reversed_policy->groups().at(1).tag, "full_a");
 
     kv_cache_manager::BlockBuffers reversed_buffers;
-    ASSERT_TRUE(reversed_policy->genBlockBuffersByTag({"full_b", "full_a"}, {7, 9}, reversed_buffers));
+    ASSERT_TRUE(reversed_policy->genBlockBuffers({"full_b", "full_a"}, {7, 9}, reversed_buffers));
     EXPECT_EQ(reversed_allocator->taggedBufferRequests(),
               (std::vector<std::tuple<int, std::string, int>>{{0, "full_b", 7}, {0, "full_a", 9}}));
     EXPECT_EQ(reversed_allocator->allLayerCacheBaseCallCount(), 1u);
+    ASSERT_EQ(first_buffers.size(), 2u);
+    ASSERT_EQ(reversed_buffers.size(), first_buffers.size());
+    for (size_t i = 0; i < first_buffers.size(); ++i) {
+        ASSERT_EQ(first_buffers[i].iovs.size(), 1u);
+        ASSERT_EQ(reversed_buffers[i].iovs.size(), 1u);
+        EXPECT_EQ(first_buffers[i].iovs[0].size, reversed_buffers[i].iovs[0].size);
+        const std::string tag = i == 0 ? "full_b" : "full_a";
+        EXPECT_EQ(first_buffers[i].iovs[0].size, first_config.blockSizeBytesForGroup(tag));
+    }
 }
 
 TEST(RemoteConnectorBlockBufferValidationTest, RejectsAllocatorBufferSizeThatDoesNotMatchTopology) {
     CacheConfig config;
-    config.layer_num     = 1;
+    config.layer_num = 1;
 
     config.fromGroupedSpecs({makeTestMhaSpec("full", 8)}, {{0}}, {CacheGroupType::FULL}, {"full"});
 
@@ -485,7 +498,7 @@ TEST(RemoteConnectorBlockBufferValidationTest, RejectsAllocatorBufferSizeThatDoe
     allocator->setTaggedBufferSizeOverride(config.kvBlockStrideBytesForGroup(0) + 1);
 
     kv_cache_manager::BlockBuffers buffers;
-    EXPECT_FALSE(policy->genBlockBuffersByTag({"full"}, {7}, buffers));
+    EXPECT_FALSE(policy->genBlockBuffers({"full"}, {7}, buffers));
     EXPECT_TRUE(buffers.empty());
 }
 

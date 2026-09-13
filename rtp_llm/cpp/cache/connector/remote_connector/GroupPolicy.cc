@@ -35,21 +35,31 @@ bool GroupPolicy::addSpecInfo(const std::string& spec_name, int32_t group_id, in
     return true;
 }
 
-bool GroupPolicy::genBlockBuffersByTag(const std::vector<std::string>& tags,
-                                       const std::vector<int32_t>&     block_ids,
-                                       kv_cache_manager::BlockBuffers& block_buffers) const {
-    RTP_LLM_CHECK_WITH_INFO(tags.size() == block_ids.size(),
-                            "remote cache tag/block count mismatch: tags=%zu blocks=%zu",
-                            tags.size(),
-                            block_ids.size());
-    std::vector<int32_t> group_ids;
-    group_ids.reserve(tags.size());
-    for (const auto& tag : tags) {
-        const auto group_it = tag_to_group_id_.find(tag);
-        RTP_LLM_CHECK_WITH_INFO(group_it != tag_to_group_id_.end(), "remote cache policy missing tag=%s", tag.c_str());
-        group_ids.push_back(group_it->second);
+bool GroupPolicy::validateResourceGroups(const KVCacheResource& resource) const {
+    const auto& holders = resource.groupBlocks();
+    if (holders.size() != groups_.size()) {
+        RTP_LLM_LOG_WARNING(
+            "remote cache group count mismatch: expected=%zu actual=%zu", groups_.size(), holders.size());
+        return false;
     }
-    return genBlockBuffers(group_ids, block_ids, block_buffers);
+    const auto tag_to_group_id = resource.tagToGroupIdSnapshot();
+    if (tag_to_group_id.size() != groups_.size()) {
+        RTP_LLM_LOG_WARNING("remote cache resource identity count mismatch: expected=%zu actual=%zu",
+                            groups_.size(),
+                            tag_to_group_id.size());
+        return false;
+    }
+    std::vector<bool> seen_group_ids(holders.size(), false);
+    for (const auto& [group_id, group] : groups_) {
+        const auto it = tag_to_group_id.find(group.tag);
+        if (it == tag_to_group_id.end() || it->second >= holders.size() || !holders[it->second]
+            || seen_group_ids[it->second]) {
+            RTP_LLM_LOG_WARNING("remote cache resource missing or invalid group tag=%s", group.tag.c_str());
+            return false;
+        }
+        seen_group_ids[it->second] = true;
+    }
+    return true;
 }
 
 std::string GroupPolicy::debugString() const {
@@ -104,7 +114,7 @@ bool DefaultLayerGroupPolicy::init() {
         for (const auto& group_ref : topology.groupsForLayer(layer)) {
             const auto& topology_group = group_ref.get();
             const int   group_idx      = static_cast<int>(topology.groupIdForTag(topology_group.tag));
-            bool is_full_group = false;
+            bool        is_full_group  = false;
             if (full_group_ids_.find(group_idx) != full_group_ids_.end()) {
                 is_full_group = true;
             }
@@ -129,8 +139,8 @@ bool DefaultLayerGroupPolicy::init() {
                                       group_idx);
                     return false;
                 }
-                const std::string prefix     = is_full_group ? "F" : GetOtherGroupPrefixName();
-                std::string       group_name = prefix + cache_tag;
+                const std::string prefix           = is_full_group ? "F" : GetOtherGroupPrefixName();
+                std::string       group_name       = prefix + cache_tag;
                 const size_t      block_size_bytes = topology.blockSizeBytesForGroup(cache_tag);
                 groups_[group_idx] = Group{is_full_group, group_name_bithash, group_name, cache_tag, block_size_bytes};
                 group_to_layer_ids_[group_idx] = {};
@@ -160,8 +170,10 @@ bool DefaultLayerGroupPolicy::filterNeedLoadLocations(const kv_cache_manager::Lo
 
 bool DefaultLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                                  std::vector<std::string>& location_spec_group_names) const {
-    const auto& group_block_ids = resource->groupBlocks();
-    const auto& cache_keys      = resource->cacheKeys();
+    if (!resource || !validateResourceGroups(*resource)) {
+        return false;
+    }
+    const auto& cache_keys = resource->cacheKeys();
     RTP_LLM_CHECK(!cache_keys.empty());
     size_t valid_keys_size = cache_keys.size();
     if (!resource->lastBlockAligned()) {
@@ -171,7 +183,7 @@ bool DefaultLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheRe
     for (size_t key_idx = 0; key_idx < valid_keys_size; key_idx++) {
         uint64_t groups_name_bithash = 0;
         for (const auto& [group_idx, group] : groups_) {
-            const auto gpu_block_idx = group_block_ids.at(group_idx)->blocks().at(key_idx);
+            const auto gpu_block_idx = resource->blocks(group.tag).at(key_idx);
             if (!isNullBlockIdx(gpu_block_idx)) {
                 groups_name_bithash |= group.group_name_bithash;
             }
@@ -189,22 +201,26 @@ bool DefaultLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheRe
         }                                                                                                              \
     } while (0)
 
-bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     group_ids,
+bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<std::string>& group_tags,
                                               const std::vector<int32_t>&     block_ids,
                                               kv_cache_manager::BlockBuffers& block_buffers) const {
     static auto push_iov = [](std::vector<kv_cache_manager::Iov>& iovs, const BlockInfo& block_info) {
         iovs.push_back({kv_cache_manager::MemoryType::GPU, block_info.addr, block_info.size_bytes, false});
     };
-    RTP_LLM_CHECK_WITH_INFO(group_ids.size() == block_ids.size(),
+    RTP_LLM_CHECK_WITH_INFO(group_tags.size() == block_ids.size(),
                             "remote cache group/block count mismatch: groups=%zu blocks=%zu",
-                            group_ids.size(),
+                            group_tags.size(),
                             block_ids.size());
+    for (const auto& tag : group_tags) {
+        RTP_LLM_CHECK_WITH_INFO(
+            tag_to_group_id_.find(tag) != tag_to_group_id_.end(), "remote cache policy missing tag=%s", tag.c_str());
+    }
     block_buffers.reserve(block_ids.size());
     for (size_t i = 0; i < block_ids.size(); ++i) {
-        RTP_LLM_CHECK_WITH_INFO(group_ids[i] >= 0, "invalid remote cache group id=%d", group_ids[i]);
+        const auto& tag      = group_tags[i];
+        const auto  group_id = tag_to_group_id_.at(tag);
         block_buffers.push_back({});
-        const auto& layer_ids          = group_to_layer_ids_.at(group_ids[i]);
-        const auto& tag                = groups_.at(group_ids[i]).tag;
+        const auto& layer_ids          = group_to_layer_ids_.at(group_id);
         auto&       iovs               = block_buffers.back().iovs;
         size_t      actual_block_bytes = 0;
         iovs.reserve(layer_ids.size() * 2);
@@ -214,7 +230,7 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     gr
             if (block_infos.empty()) {
                 RTP_LLM_LOG_WARNING("convertIndexToBuffer returned empty for layer_id [%d] group_id [%d] block_id[%d]",
                                     layer_ids[j],
-                                    group_ids[i],
+                                    group_id,
                                     block_ids[i]);
             }
             for (size_t idx = 0; idx < block_infos.size(); ++idx) {
@@ -222,18 +238,18 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     gr
                     block_infos[idx],
                     "convertIndexToBuffer failed layer_id [%d] group_id [%d] block_id[%d], block_info.addr or block_info.size_bytes is invalid",
                     layer_ids[j],
-                    group_ids[i],
+                    group_id,
                     block_ids[i]);
                 actual_block_bytes += block_infos[idx].size_bytes;
                 push_iov(iovs, block_infos[idx]);
             }
         }
-        const size_t expected_block_bytes = groups_.at(group_ids[i]).block_size_bytes;
+        const size_t expected_block_bytes = groups_.at(group_id).block_size_bytes;
         if (actual_block_bytes != expected_block_bytes) {
             RTP_LLM_LOG_WARNING(
                 "remote cache block size mismatch tag [%s] group_id [%d] block_id [%d], expected [%zu] actual [%zu]",
                 tag.c_str(),
-                group_ids[i],
+                group_id,
                 block_ids[i],
                 expected_block_bytes,
                 actual_block_bytes);
@@ -273,7 +289,7 @@ bool FullLayerGroupPolicy::init() {
 bool FullLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                               std::vector<std::string>&               location_spec_group_names) const {
     if (groups_.size() == 1) {
-        return true;
+        return resource && validateResourceGroups(*resource);
     }
     return DefaultLayerGroupPolicy::getNeedWriteGroups(resource, location_spec_group_names);
 }
@@ -326,9 +342,7 @@ bool FullOtherGroupPolicy::init() {
 
 bool FullOtherGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                               std::vector<std::string>&               location_spec_group_names) const {
-    const auto& group_block_ids = resource->groupBlocks();
-    if (group_block_ids.size() != groups_.size()) {
-        RTP_LLM_LOG_WARNING("group size not equal, expect [%lu], real [%lu]", groups_.size(), group_block_ids.size());
+    if (!resource || !validateResourceGroups(*resource)) {
         return false;
     }
     const auto& cache_keys = resource->cacheKeys();
@@ -344,7 +358,7 @@ bool FullOtherGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResou
     for (size_t key_idx = valid_keys_size; key_idx-- > 0;) {
         uint64_t groups_name_bithash = 0;
         for (const auto& [group_idx, group] : groups_) {
-            const auto gpu_block_idx = group_block_ids.at(group_idx)->blocks().at(key_idx);
+            const auto gpu_block_idx = resource->blocks(group.tag).at(key_idx);
             if (!rtp_llm::isNullBlockIdx(gpu_block_idx)) {
                 groups_name_bithash |= group.group_name_bithash;
             }

@@ -69,12 +69,9 @@ public:
     virtual bool getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                     std::vector<std::string>&               location_spec_group_names) const = 0;
 
-    virtual bool genBlockBuffers(const std::vector<int32_t>&     group_ids,
+    virtual bool genBlockBuffers(const std::vector<std::string>& group_tags,
                                  const std::vector<int32_t>&     block_ids,
                                  kv_cache_manager::BlockBuffers& block_buffers) const = 0;
-    bool         genBlockBuffersByTag(const std::vector<std::string>& tags,
-                                      const std::vector<int32_t>&     block_ids,
-                                      kv_cache_manager::BlockBuffers& block_buffers) const;
 
     const GroupIdMap& groups() const {
         return groups_;
@@ -96,6 +93,8 @@ public:
     virtual std::string debugString() const;
 
 protected:
+    bool validateResourceGroups(const KVCacheResource& resource) const;
+
     std::shared_ptr<KVCacheAllocator> allocator_;
     std::set<int32_t>                 full_group_ids_;
     std::set<int32_t>                 other_group_ids_;
@@ -126,7 +125,7 @@ public:
     virtual bool getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                     std::vector<std::string>&               location_spec_group_names) const override;
 
-    bool genBlockBuffers(const std::vector<int32_t>&     group_ids,
+    bool genBlockBuffers(const std::vector<std::string>& group_tags,
                          const std::vector<int32_t>&     block_ids,
                          kv_cache_manager::BlockBuffers& block_buffers) const override;
 

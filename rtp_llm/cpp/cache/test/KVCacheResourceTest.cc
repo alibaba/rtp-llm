@@ -29,6 +29,46 @@ GroupBase makeResourceGroup(std::string tag, CacheGroupType type) {
 
 }  // namespace
 
+TEST(KVCacheResourceTest, IdentityQueriesRetainOriginalLayerHolders) {
+    KVCacheResource resource;
+    resource.initGroups(CacheTopology::create(
+        {makeResourceGroup("linear", CacheGroupType::LINEAR), makeResourceGroup("full", CacheGroupType::FULL)},
+        {{0, {"full"}}, {1, {"linear", "full"}}}));
+    resource.mutableBlockIds("full").assign({2, NULL_BLOCK_IDX, 5});
+    const auto snapshot = resource.tagToGroupIdSnapshot();
+    EXPECT_EQ(snapshot.at("linear"), 0u);
+    EXPECT_EQ(snapshot.at("full"), 1u);
+    auto holder = resource.blockIdsPtrForLayer(0, "full");
+    EXPECT_EQ(holder, resource.groupBlocks()[1]);
+    EXPECT_EQ(holder, resource.blockIdsPtrForLayer(1, "full"));
+    EXPECT_EQ(holder.get(), &resource.blockIdsForLayer(0, "full"));
+    EXPECT_EQ(holder->blocks(), (BlockIndicesType{2, NULL_BLOCK_IDX, 5}));
+    EXPECT_EQ(holder->kernelBlocks().size(), 12u);
+    EXPECT_EQ(resource.blockIdsPtrForLayer(0, "linear"), nullptr);
+    EXPECT_EQ(resource.blockIdsPtrForLayer(0, "missing"), nullptr);
+    EXPECT_EQ(resource.blockIdsPtrForLayer(-1, "full"), nullptr);
+    EXPECT_EQ(resource.blockIdsPtrForLayer(2, "full"), nullptr);
+    EXPECT_ANY_THROW(resource.blockIdsForLayer(0, "linear"));
+    resource = KVCacheResource();
+    EXPECT_EQ(snapshot.at("full"), 1u);
+    EXPECT_EQ(holder->blocks(), (BlockIndicesType{2, NULL_BLOCK_IDX, 5}));
+}
+
+TEST(KVCacheResourceTest, LayerHolderQueryReturnsNullForMissingRowsAndHolders) {
+    KVCacheResource resource;
+    resource.initGroups(
+        CacheTopology::create({makeResourceGroup("full", CacheGroupType::FULL)}, {{0, {"full"}}, {1, {"full"}}}));
+    // Deliberately corrupt metadata to exercise the optional-query boundary.
+    auto& rows = const_cast<LayerAttnBlockIds&>(resource.layerGroupBlocks());
+    rows[0][0].reset();
+    EXPECT_EQ(resource.blockIdsPtrForLayer(0, "full"), nullptr);
+    EXPECT_NE(resource.blockIdsPtrForLayer(1, "full"), nullptr);
+    rows[1].clear();
+    EXPECT_EQ(resource.blockIdsPtrForLayer(1, "full"), nullptr);
+    rows.clear();
+    EXPECT_EQ(resource.blockIdsPtrForLayer(0, "full"), nullptr);
+}
+
 TEST(BlockIdsTest, NonFull_MirrorsKernelBlocks) {
     BlockIds ids(/*kernel_blocks_per_kv_block=*/1);
 
@@ -242,9 +282,9 @@ TEST(CacheTopologyTest, GroupDerivesKernelBlocksFromSpec) {
     auto spec                       = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, 8, "full");
     spec->kernel_seq_size_per_block = 2;
     GroupBase group;
-    group.tag       = "full";
-    group.spec      = std::move(spec);
-    group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.tag    = "full";
+    group.spec   = std::move(spec);
+    group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
     ASSERT_EQ(group.kernelBlocksPerKvBlock(), 4u);
 }
 

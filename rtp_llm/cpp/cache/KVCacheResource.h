@@ -105,6 +105,9 @@ public:
 
     const BlockIds& blockIds(std::string_view tag) const;
     const BlockIds& blockIdsForLayer(int layer_id, std::string_view tag) const;
+    // Returns the original holder, or nullptr when the layer/tag row is unavailable.
+    std::shared_ptr<BlockIds>               blockIdsPtrForLayer(int layer_id, std::string_view tag) const;
+    std::unordered_map<std::string, size_t> tagToGroupIdSnapshot() const;
 
     const std::vector<std::string>& groupTagsForLayer(int layer_id) const;
     const std::string&              soleGroupTagForLayer(int layer_id) const;

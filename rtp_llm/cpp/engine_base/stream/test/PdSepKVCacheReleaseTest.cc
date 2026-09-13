@@ -882,6 +882,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
                                                      peer_addrs,
                                                      cache_keys,
                                                      decode_resource->groupBlocks(),
+                                                     decode_resource->cacheResource(0).tagToGroupIdSnapshot(),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -1037,6 +1038,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
                                                      peer_addrs,
                                                      cache_keys,
                                                      decode_resource->groupBlocks(),
+                                                     decode_resource->cacheResource(0).tagToGroupIdSnapshot(),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -1175,19 +1177,42 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     server.propose_maga_init_params_ = nullptr;
     server.resource_.cache_store     = cache_store;
 
-    std::vector<std::string>            peer_addrs = {"127.0.0.1:12345:12346"};
-    grpc::ServerContext                 server_context;
+    std::vector<std::string> peer_addrs = {"127.0.0.1:12345:12346"};
+    grpc::ServerContext      server_context;
+    // Keep the same physical holders while presenting a different source-local group order.
+    auto source_blocks   = decode_resource->groupBlocks();
+    auto tag_to_group_id = decode_resource->cacheResource(0).tagToGroupIdSnapshot();
+    ASSERT_GT(source_blocks.size(), 1u);
+    std::reverse(source_blocks.begin(), source_blocks.end());
+    for (auto& [tag, group_id] : tag_to_group_id) {
+        group_id = source_blocks.size() - 1 - group_id;
+    }
+    const std::string                   request_key = "dsv4-decoupled-cache-store-pd";
     DecodeRpcServer::LoadKVCacheContext load_context(request_id,
-                                                     "dsv4-decoupled-cache-store-pd",
+                                                     request_key,
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->groupBlocks(),
+                                                     source_blocks,
+                                                     std::move(tag_to_group_id),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
                                                      /*partition_id=*/0,
                                                      &server_context);
-    auto                                result = server.loadCache(load_context);
+    server.resource_.workers = {"decode-0"};
+    for (const auto& request : {server.constructRemoteLoadRequest(load_context, 0, peer_addrs),
+                                server.constructRemoteLoadRequestForMla(load_context, 0, peer_addrs)}) {
+        ASSERT_EQ(request.tagged_group_block_ids_size(), decode_resource->groupNums());
+        for (const auto& row : request.tagged_group_block_ids()) {
+            EXPECT_EQ((BlockIndicesType{row.block_ids().begin(), row.block_ids().end()}),
+                      decode_resource->blocks(0, row.tag()));
+        }
+        const auto decoded = DecodeRpcServer::decodeGroupBlockIds(request, cache_config.topology());
+        for (const auto& group : cache_config.topology().groups()) {
+            EXPECT_EQ(decoded[cache_config.groupIdForTag(group.tag)]->blocks(), decode_resource->blocks(0, group.tag));
+        }
+    }
+    auto result = server.loadCache(load_context);
     ASSERT_TRUE(result.ok()) << result.error_info.ToString();
     EXPECT_EQ(result.loaded_cache_block_count, 2u);
 
@@ -1331,6 +1356,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
                                                      peer_addrs,
                                                      cache_keys,
                                                      decode_resource->groupBlocks(),
+                                                     decode_resource->cacheResource(0).tagToGroupIdSnapshot(),
                                                      reuse_num,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,

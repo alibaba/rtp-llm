@@ -571,6 +571,9 @@ std::shared_ptr<KVCacheResource> KVCacheAllocator::incrKVCacheRef(const KVCacheR
         return nullptr;
     }
 
+    const auto& groups = config_.topology().groups();
+    RTP_LLM_CHECK_WITH_INFO(kvcache_resource.groupNums() == config_.groupNums(),
+                            "cache resource and manager group counts differ");
     std::unordered_map<CacheKeyType, size_t> key_to_pos;
     const auto&                              resource_keys = kvcache_resource.cacheKeys();
     for (size_t i = 0; i < resource_keys.size(); ++i) {
@@ -601,7 +604,7 @@ std::shared_ptr<KVCacheResource> KVCacheAllocator::incrKVCacheRef(const KVCacheR
         bool                      any_valid_block = false;
         std::vector<BlockIdxType> blocks_for_key(static_cast<size_t>(kvcache_resource.groupNums()), NULL_BLOCK_IDX);
         for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
-            const auto& src_blocks                   = kvcache_resource.blocks(gid);
+            const auto& src_blocks                   = kvcache_resource.blocks(groups[static_cast<size_t>(gid)].tag);
             const auto  block                        = pos < src_blocks.size() ? src_blocks[pos] : NULL_BLOCK_IDX;
             blocks_for_key[static_cast<size_t>(gid)] = block;
             any_valid_block                          = any_valid_block || (!isNullBlockIdx(block) && block > 0);
@@ -637,21 +640,28 @@ std::shared_ptr<KVCacheResource> KVCacheAllocator::incrKVCacheRef(const KVCacheR
         if (!valid.empty()) {
             referenceBlocksInGroup(gid, valid, is_connector);
         }
-        selected_resource->mutableBlockIds(gid).assign(std::move(selected_blocks[static_cast<size_t>(gid)]));
+        selected_resource->mutableBlockIds(groups[static_cast<size_t>(gid)].tag)
+            .assign(std::move(selected_blocks[static_cast<size_t>(gid)]));
     }
     return selected_resource;
 }
 
 void KVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector) {
-    for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
-        BlockIndicesType valid;
-        for (auto b : kvcache_resource.blocks(gid)) {
+    const auto& groups = config_.topology().groups();
+    RTP_LLM_CHECK_WITH_INFO(kvcache_resource.groupNums() == config_.groupNums(),
+                            "cache resource and manager group counts differ");
+    std::vector<BlockIndicesType> valid_blocks(groups.size());
+    for (size_t gid = 0; gid < groups.size(); ++gid) {
+        auto& valid = valid_blocks[gid];
+        for (auto b : kvcache_resource.blocks(groups[gid].tag)) {
             if (!isNullBlockIdx(b) && b > 0) {
                 valid.push_back(b);
             }
         }
-        if (!valid.empty()) {
-            freeBlocksInGroup(gid, valid, is_connector);
+    }
+    for (size_t gid = 0; gid < groups.size(); ++gid) {
+        if (!valid_blocks[gid].empty()) {
+            freeBlocksInGroup(static_cast<int>(gid), valid_blocks[gid], is_connector);
         }
     }
 }

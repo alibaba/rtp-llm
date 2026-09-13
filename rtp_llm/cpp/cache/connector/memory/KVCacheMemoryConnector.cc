@@ -635,7 +635,7 @@ bool KVCacheMemoryConnector::supportsTypedPrefixCacheLayout(const std::vector<La
     }
 
     for (const auto& slot : slots) {
-        const auto layer = static_cast<size_t>(slot.layer_id);
+        const auto  layer = static_cast<size_t>(slot.layer_id);
         const auto* group = findSlotGroup(cache_config_, slot.group_id, slot.tag);
         if (group == nullptr || layer >= layers.size() || groups[static_cast<size_t>(slot.group_id)].tag != slot.tag
             || std::find(layers[layer].group_tags.begin(), layers[layer].group_tags.end(), slot.tag)
@@ -2767,11 +2767,25 @@ bool KVCacheMemoryConnector::checkLayerBlocks(const LayerBlockIds& layer_block_i
 
 LayerAttnBlockIds KVCacheMemoryConnector::resourceLayerRegionBlocks(const KVCacheResource&           resource,
                                                                     const std::vector<LayerTagSlot>& slots) const {
-    if (!resource.layerGroupBlocks().empty()) {
-        return resource.layerGroupBlocks();
+    const auto&       topology = cache_config_.topology();
+    const auto&       groups   = topology.groups();
+    const auto&       layers   = topology.layers();
+    LayerAttnBlockIds view(layers.size(), GroupBlockIds(groups.size()));
+    for (const auto& slot : slots) {
+        const auto layer = static_cast<size_t>(slot.layer_id);
+        const auto group = static_cast<size_t>(slot.group_id);
+        if (layer >= layers.size() || group >= groups.size() || groups[group].tag != slot.tag
+            || std::find(layers[layer].group_tags.begin(), layers[layer].group_tags.end(), slot.tag)
+                   == layers[layer].group_tags.end()) {
+            return {};
+        }
+        auto holder = resource.blockIdsPtrForLayer(slot.layer_id, slot.tag);
+        if (holder == nullptr) {
+            return {};
+        }
+        view[layer][group] = std::move(holder);
     }
-
-    return {};
+    return view;
 }
 
 bool KVCacheMemoryConnector::checkLayerRegionBlocks(const LayerAttnBlockIds&         layer_attn_block_ids,

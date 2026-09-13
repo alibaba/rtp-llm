@@ -13,17 +13,19 @@ namespace rtp_llm {
 
 namespace {
 
-DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&               request_key,
-                                                    const std::vector<std::string>&  peer_addrs,
-                                                    const std::vector<CacheKeyType>& cache_keys,
-                                                    const GroupBlockIds&             block_ids_by_group,
-                                                    int32_t                          prefill_cp_size,
-                                                    int64_t                          reuse_block_size = 0) {
+DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&                      request_key,
+                                                    const std::vector<std::string>&         peer_addrs,
+                                                    const std::vector<CacheKeyType>&        cache_keys,
+                                                    const GroupBlockIds&                    block_ids_by_group,
+                                                    std::unordered_map<std::string, size_t> tag_to_group_id,
+                                                    int32_t                                 prefill_cp_size,
+                                                    int64_t                                 reuse_block_size = 0) {
     return {/*request_id=*/42,
             request_key,
             peer_addrs,
             cache_keys,
             block_ids_by_group,
+            std::move(tag_to_group_id),
             reuse_block_size,
             /*timeout_ms=*/1000,
             /*partition_count=*/1,
@@ -349,7 +351,7 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     const std::vector<CacheKeyType> cache_keys  = {101, 102};
     const GroupBlockIds             block_ids_by_group;
     const auto                      load_context =
-        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2, /*reuse=*/3);
+        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, {}, /*cp_size=*/2, /*reuse=*/3);
 
     const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
 
@@ -374,7 +376,7 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     const std::vector<CacheKeyType> cache_keys  = {101};
     const GroupBlockIds             block_ids_by_group;
     const auto                      load_context =
-        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2, /*reuse=*/3);
+        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, {}, /*cp_size=*/2, /*reuse=*/3);
 
     const auto request = server.constructRemoteLoadRequestForMla(load_context, /*index=*/1, peer_addrs);
 
@@ -385,6 +387,26 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     ASSERT_EQ(request.peer_addrs_size(), 2);
     EXPECT_EQ(request.peer_addrs(0), "prefill-0");
     EXPECT_EQ(request.peer_addrs(1), "prefill-1");
+}
+
+TEST(DecodeRpcServerTest, LoadContextUsesSourceGroupIdentity) {
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peers{"prefill"};
+    const std::vector<CacheKeyType> keys{101};
+    GroupBlockIds                   blocks{std::make_shared<BlockIds>(), std::make_shared<BlockIds>()};
+    blocks[0]->assign({20, NULL_BLOCK_IDX});
+    blocks[1]->assign({10});
+    const auto context = makeLoadContext(request_key, peers, keys, blocks, {{"linear", 0}, {"full", 1}}, 1);
+    EXPECT_EQ(&context.blockIdsForGroup("full"), blocks[1].get());
+    EXPECT_EQ(context.blockIdsForGroup("linear").blocks(), (BlockIndicesType{20, NULL_BLOCK_IDX}));
+    EXPECT_ANY_THROW(context.blockIdsForGroup("missing"));
+    EXPECT_ANY_THROW(makeLoadContext(request_key, peers, keys, blocks, {{"full", 1}}, 1));
+    EXPECT_ANY_THROW(makeLoadContext(request_key, peers, keys, blocks, {{"linear", 0}, {"full", 0}}, 1));
+    EXPECT_ANY_THROW(makeLoadContext(request_key, peers, keys, blocks, {{"linear", 0}, {"full", 2}}, 1));
+    EXPECT_ANY_THROW(makeLoadContext(request_key, peers, keys, blocks, {{"", 0}, {"full", 1}}, 1));
+    blocks[1].reset();
+    EXPECT_ANY_THROW(context.blockIdsForGroup("full"));
+    EXPECT_ANY_THROW(makeLoadContext(request_key, peers, keys, blocks, {{"linear", 0}, {"full", 1}}, 1));
 }
 
 TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByLocalTagOrder) {
