@@ -1,4 +1,15 @@
 py_test(
+    name = "deepseek_v41_pipeline_test",
+    srcs = [
+        "deepseek_v41_pipeline_test.py",
+        "deepseek_v41_processor_test.py",
+        "deepseek_v41_vision_test.py",
+    ],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["requires-dsv41-weights"],
+)
+
+py_test(
     name = "deepseek_v41_processor_test",
     srcs = ["deepseek_v41_processor_test.py"],
     deps = ["//rtp_llm:testlib"],

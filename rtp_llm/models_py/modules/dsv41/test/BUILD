@@ -140,6 +140,13 @@ py_test(
 )
 
 py_test(
+    name = "test_flashmla_multikey",
+    srcs = ["test_flashmla_multikey.py", "test_flashmla.py", "official_flashmla.py", "test_compact_reader.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"DSV41_FLASHMLA": "1"},
+)
+
+py_test(
     name = "test_flashmla",
     srcs = ["test_flashmla.py", "official_flashmla.py", "test_compact_reader.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
