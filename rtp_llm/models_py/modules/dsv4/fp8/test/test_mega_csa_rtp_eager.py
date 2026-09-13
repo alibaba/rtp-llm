@@ -43,13 +43,14 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_adapter import MegaCSAAd
 from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_runtime import MegaCSARuntime
 from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_weights import (
     DIM,
+    FLASH_GEOMETRY,
     HC,
     HEAD_DIM,
     INDEX_HEAD_DIM,
     INDEX_HEADS,
-    MAIN_HEADS,
-    Q_LORA_RANK,
+    PRO_GEOMETRY,
     ROPE_DIM,
+    CSAGeometry,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.mega_attention_test_utils import (
     check_dynamic_graph_replays,
@@ -70,8 +71,6 @@ _KV_ENTRY_BYTES = 584
 _INDEXER_ENTRY_BYTES = 132
 _KV_BLOCK_ALIGNMENT_BYTES = 576
 _REGION_COUNT = 8
-_INDEX_TOPK = 1024
-_O_GROUPS = 16
 _O_LORA_RANK = 1024
 
 
@@ -100,31 +99,35 @@ def _ue8m0_scale(
     return exponents.to(torch.uint8).view(torch.float8_e8m0fnu)
 
 
-def _make_layer_weights(device: torch.device) -> dict[str, torch.Tensor]:
+def _make_layer_weights(
+    device: torch.device, g: CSAGeometry
+) -> dict[str, torch.Tensor]:
     torch.manual_seed(20260815)
     weights = {
-        W.v4_attn_wq_a_w: _random_fp8((Q_LORA_RANK, DIM), device),
-        W.v4_attn_wq_a_s: _ue8m0_scale((Q_LORA_RANK // 128, DIM // 128), device, 0),
-        W.v4_attn_wkv_w: _random_fp8((HEAD_DIM, DIM), device),
-        W.v4_attn_wkv_s: _ue8m0_scale((HEAD_DIM // 128, DIM // 128), device, 1),
+        W.v4_attn_wq_a_w: _random_fp8((g.q_lora_rank, g.dim), device),
+        W.v4_attn_wq_a_s: _ue8m0_scale((g.q_lora_rank // 128, g.dim // 128), device, 0),
+        W.v4_attn_wkv_w: _random_fp8((HEAD_DIM, g.dim), device),
+        W.v4_attn_wkv_s: _ue8m0_scale((HEAD_DIM // 128, g.dim // 128), device, 1),
         W.v4_attn_wq_b_w: _random_fp8(
-            (MAIN_HEADS * HEAD_DIM, Q_LORA_RANK), device, scale=0.03
+            (g.main_heads * HEAD_DIM, g.q_lora_rank), device, scale=0.03
         ),
         W.v4_attn_wq_b_s: _ue8m0_scale(
-            (MAIN_HEADS * HEAD_DIM // 128, Q_LORA_RANK // 128), device, 2
+            (g.main_heads * HEAD_DIM // 128, g.q_lora_rank // 128), device, 2
         ),
         W.v4_indexer_wq_b_w: _random_fp8(
-            (INDEX_HEADS * INDEX_HEAD_DIM, Q_LORA_RANK), device, scale=0.03
+            (INDEX_HEADS * INDEX_HEAD_DIM, g.q_lora_rank), device, scale=0.03
         ),
         W.v4_indexer_wq_b_s: _ue8m0_scale(
-            (INDEX_HEADS * INDEX_HEAD_DIM // 128, Q_LORA_RANK // 128), device, 3
+            (INDEX_HEADS * INDEX_HEAD_DIM // 128, g.q_lora_rank // 128), device, 3
         ),
-        W.v4_compressor_wkv: _random_bf16((2 * HEAD_DIM, DIM), device),
-        W.v4_compressor_wgate: _random_bf16((2 * HEAD_DIM, DIM), device),
-        W.v4_indexer_compressor_wkv: _random_bf16((2 * INDEX_HEAD_DIM, DIM), device),
-        W.v4_indexer_compressor_wgate: _random_bf16((2 * INDEX_HEAD_DIM, DIM), device),
-        W.v4_indexer_weights_proj_w: _random_bf16((INDEX_HEADS, DIM), device),
-        W.v4_attn_q_norm: torch.rand(Q_LORA_RANK, device=device).add_(0.5).bfloat16(),
+        W.v4_compressor_wkv: _random_bf16((2 * HEAD_DIM, g.dim), device),
+        W.v4_compressor_wgate: _random_bf16((2 * HEAD_DIM, g.dim), device),
+        W.v4_indexer_compressor_wkv: _random_bf16((2 * INDEX_HEAD_DIM, g.dim), device),
+        W.v4_indexer_compressor_wgate: _random_bf16(
+            (2 * INDEX_HEAD_DIM, g.dim), device
+        ),
+        W.v4_indexer_weights_proj_w: _random_bf16((INDEX_HEADS, g.dim), device),
+        W.v4_attn_q_norm: torch.rand(g.q_lora_rank, device=device).add_(0.5).bfloat16(),
         W.v4_attn_kv_norm: torch.rand(HEAD_DIM, device=device).add_(0.5).bfloat16(),
         W.v4_indexer_compressor_norm: torch.rand(INDEX_HEAD_DIM, device=device)
         .add_(0.5)
@@ -134,27 +137,27 @@ def _make_layer_weights(device: torch.device) -> dict[str, torch.Tensor]:
         W.v4_indexer_compressor_ape: torch.randn(
             4, 2 * INDEX_HEAD_DIM, device=device
         ).mul_(0.02),
-        W.v4_hc_attn_fn: torch.randn(24, HC * DIM, device=device).mul_(0.01),
+        W.v4_hc_attn_fn: torch.randn(24, HC * g.dim, device=device).mul_(0.01),
         W.v4_hc_attn_base: torch.randn(24, device=device).mul_(0.1),
         W.v4_hc_attn_scale: torch.rand(3, device=device).add_(0.5),
-        W.v4_attn_norm: torch.rand(DIM, device=device).add_(0.5).bfloat16(),
-        W.v4_attn_sink: torch.randn(MAIN_HEADS, device=device),
+        W.v4_attn_norm: torch.rand(g.dim, device=device).add_(0.5).bfloat16(),
+        W.v4_attn_sink: torch.randn(g.main_heads, device=device),
     }
 
-    o_group_input = MAIN_HEADS * HEAD_DIM // _O_GROUPS
+    o_group_input = g.main_heads * HEAD_DIM // g.o_groups
     weights.update(
         {
             W.v4_attn_wo_a_w: _random_fp8(
-                (_O_GROUPS * _O_LORA_RANK, o_group_input), device, scale=0.01
+                (g.o_groups * _O_LORA_RANK, o_group_input), device, scale=0.01
             ),
             W.v4_attn_wo_a_s: _ue8m0_scale(
-                (_O_GROUPS * _O_LORA_RANK // 128, o_group_input // 128), device, 4
+                (g.o_groups * _O_LORA_RANK // 128, o_group_input // 128), device, 4
             ),
             W.v4_attn_wo_b_w: _random_fp8(
-                (DIM, _O_GROUPS * _O_LORA_RANK), device, scale=0.01
+                (g.dim, g.o_groups * _O_LORA_RANK), device, scale=0.01
             ),
             W.v4_attn_wo_b_s: _ue8m0_scale(
-                (DIM // 128, _O_GROUPS * _O_LORA_RANK // 128), device, 5
+                (g.dim // 128, g.o_groups * _O_LORA_RANK // 128), device, 5
             ),
         }
     )
@@ -172,7 +175,7 @@ class _AttentionBlock(torch.nn.Module):
             layer_weights[W.v4_hc_attn_fn],
             layer_weights[W.v4_hc_attn_base],
             layer_weights[W.v4_hc_attn_scale],
-            dim=DIM,
+            dim=attention.dim,
             hc_mult=HC,
             hc_sinkhorn_iters=20,
             norm_eps=1.0e-6,
@@ -395,16 +398,22 @@ class MegaCSARTPEagerTest(unittest.TestCase):
         env_patch = patch.dict(os.environ, environment)
         env_patch.start()
         cls.addClassCleanup(env_patch.stop)
-        weights = _make_layer_weights(cls.device)
+        cls.block, cls.runtime, cls.adapter = cls._make_layer(cls.device, PRO_GEOMETRY)
+        cls.mega_pools = _make_pools(cls.device, batch_size=1)
+        cls.reference_pools = _make_pools(cls.device, batch_size=1)
+
+    @staticmethod
+    def _make_layer(device: torch.device, g: CSAGeometry):
+        weights = _make_layer_weights(device, g)
         attention = AttentionFP8(
             layer_id=0,
-            dim=DIM,
-            n_heads=MAIN_HEADS,
-            q_lora_rank=Q_LORA_RANK,
+            dim=g.dim,
+            n_heads=g.main_heads,
+            q_lora_rank=g.q_lora_rank,
             head_dim=HEAD_DIM,
             rope_head_dim=ROPE_DIM,
             o_lora_rank=_O_LORA_RANK,
-            o_groups=_O_GROUPS,
+            o_groups=g.o_groups,
             window_size=128,
             compress_ratio=4,
             compress_rope_theta=160000.0,
@@ -417,18 +426,16 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             max_seq_len=_MODEL_MAX_SEQ_LEN,
             index_n_heads=INDEX_HEADS,
             index_head_dim=INDEX_HEAD_DIM,
-            index_topk=_INDEX_TOPK,
+            index_topk=g.index_topk,
             norm_eps=1.0e-6,
             layer_weights=weights,
             tp_size=1,
             tp_rank=0,
         )
-        attention.init_rope_cache(cls.device)
-        cls.block = _AttentionBlock(attention, weights)
-        cls.runtime = MegaCSARuntime()
-        cls.adapter = MegaCSAAdapter(cls.block, weights, cls.runtime)
-        cls.mega_pools = _make_pools(cls.device, batch_size=1)
-        cls.reference_pools = _make_pools(cls.device, batch_size=1)
+        attention.init_rope_cache(device)
+        block = _AttentionBlock(attention, weights)
+        runtime = MegaCSARuntime()
+        return block, runtime, MegaCSAAdapter(block, weights, runtime)
 
     def setUp(self) -> None:
         self.mega_pools.reset()
@@ -445,7 +452,7 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             head_dim=HEAD_DIM,
             max_seq_len=pools.max_seq_len,
             compress_ratios=[4],
-            index_topk=_INDEX_TOPK,
+            index_topk=self.block.attn.indexer.index_topk,
             device=self.device,
             paged_block_tables=pools.block_tables,
             paged_pool_entries_per_block=pools.entries_per_block,
@@ -753,6 +760,16 @@ class MegaCSARTPEagerTest(unittest.TestCase):
         self.assertGreaterEqual(overlap, int(0.97 * valid_topk))
 
     def test_mtp_matches_original_rtp_across_compression_boundary(self) -> None:
+        self._check_mtp_compression_boundary(position=61)
+
+    def test_flash_mtp_matches_original_rtp_across_compression_boundary(self) -> None:
+        self.block, self.runtime, self.adapter = self._make_layer(
+            self.device, FLASH_GEOMETRY
+        )
+        # 1024 compressed entries exercise Flash's TopK-512 selection.
+        self._check_mtp_compression_boundary(position=4093)
+
+    def _check_mtp_compression_boundary(self, position: int) -> None:
         batch_size, q_len = 2, 3
         mega_pools = _make_pools(self.device, batch_size=batch_size)
         reference_pools = _make_pools(self.device, batch_size=batch_size)
@@ -760,22 +777,25 @@ class MegaCSARTPEagerTest(unittest.TestCase):
         _fill_random_context(reference_pools, self.device, seed=1618)
         generator = torch.Generator(device=self.device).manual_seed(2718)
         hidden = torch.randn(
-            (batch_size, q_len, HC, DIM),
+            (batch_size, q_len, HC, self.block.attn.dim),
             generator=generator,
             device=self.device,
             dtype=torch.bfloat16,
         ).mul_(0.05)
 
-        # Positions 61, 62, 63 include one ratio-4 compression boundary.
+        # The last query token crosses a ratio-4 compression boundary.
         reference_output, reference_metadata = self._run_reference_step(
-            61, hidden.clone(), reference_pools
+            position, hidden.clone(), reference_pools
         )
-        mega_output, mega_metadata = self._run_mega_step(61, hidden.clone(), mega_pools)
+        mega_output, mega_metadata = self._run_mega_step(
+            position, hidden.clone(), mega_pools
+        )
 
         output_diff = calc_diff(mega_output.float(), reference_output.float())
         print(
             "Mega/reference CSA MTP attention sublayer "
-            f"B={batch_size}, S={q_len}: calc_diff={output_diff:.6e}"
+            f"dim={self.block.attn.dim}, B={batch_size}, S={q_len}: "
+            f"calc_diff={output_diff:.6e}"
         )
         self.assertLess(output_diff, 1.0e-3)
         self._assert_written_pools_match(
