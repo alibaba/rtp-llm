@@ -1007,8 +1007,25 @@ class CustomChatRenderer:
     ) -> List[StreamStatus]:
         return [StreamStatus(request) for _ in range(n)]
 
+    async def _create_response_status_list(
+        self,
+        n: int,
+        request: ChatCompletionRequest,
+        enable_think_mode: bool,
+    ) -> List[StreamStatus]:
+        del enable_think_mode
+        return await self._create_status_list(n, request)
+
     def in_think_mode(self, request: ChatCompletionRequest):
         return self.think_mode
+
+    def _response_thinking_enabled(
+        self,
+        request: ChatCompletionRequest,
+        generate_config: GenerateConfig,
+    ) -> bool:
+        del generate_config
+        return bool(self.in_think_mode(request))
 
     def should_process_think(self, request: ChatCompletionRequest):
         # 留出方法给子类重写, 避免重复的think处理
@@ -1031,12 +1048,16 @@ class CustomChatRenderer:
             else generate_config.num_beams
         )
         nums_output = last_num_beams if last_num_beams != 1 else nums_output
-        status_list = await self._create_status_list(nums_output, request)
+        enable_think_mode = self._response_thinking_enabled(request, generate_config)
+        status_list = await self._create_response_status_list(
+            nums_output, request, enable_think_mode
+        )
+        process_think = bool(self.should_process_think(request))
         index = 0
         think_status_list = [
             ThinkStatus(
-                enable_think_mode=bool(self.in_think_mode(request)),
-                in_think_mode=bool(self.should_process_think(request)),
+                enable_think_mode=enable_think_mode,
+                in_think_mode=process_think,
                 think_buffer="",
                 think_tokens=0,
                 is_streaming=generate_config.is_streaming,

@@ -11,6 +11,9 @@ from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3Eagle3Weight, KimiK3MtpWeight, KimiK3Weight
+from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
+    load_kimi_k3_media_config,
+)
 from rtp_llm.ops import HybridAttentionType, KvCacheDataType, QuantAlgo
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
@@ -175,16 +178,28 @@ class KimiK3(BaseModel):
                 "Kimi K3 config has vision_config but no media_placeholder_token_id; "
                 "guessing it would silently mis-place every image placeholder"
             )
+        image_placeholder = top_config.get("image_placeholder")
+        if not isinstance(image_placeholder, str) or not image_placeholder:
+            raise ValueError(
+                "Kimi K3 config has vision_config but no image_placeholder; "
+                "guessing it would silently miss every image placeholder"
+            )
         media_token_id = int(top_config["media_placeholder_token_id"])
 
         config.mm_model_config.is_multimodal = True
         config.mm_model_config.mm_sep_tokens = [[media_token_id]]
-        config.mm_related_params.config = {"vision_config": vision_config}
+        config.mm_related_params.config = {
+            "vision_config": vision_config,
+            "media_proc_cfg": load_kimi_k3_media_config(config.ckpt_path),
+        }
         config.mm_related_params.special_token_ids.update(
             {"image_token_index": media_token_id}
         )
         config.mm_related_params.special_tokens.update(
-            {"default_mm_token": "<|media_pad|>"}
+            {
+                "default_mm_token": "<|media_pad|>",
+                "image_placeholder": image_placeholder,
+            }
         )
         config.mm_related_params.support_batch = True
 
