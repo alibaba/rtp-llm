@@ -235,6 +235,16 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
 
 
 class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
+    def test_role_profile_pins_runtime_defaults_and_drops_stale_mla_selector(self):
+        role_script = pathlib.Path(driver.__file__).with_name(
+            "kimi_k3_full_model_two_host_pd_smoke.sh"
+        )
+        script = role_script.read_text(encoding="utf-8")
+
+        self.assertIn("export RESERVE_BLOCK_RATIO=5", script)
+        self.assertIn("export RTP_LLM_MTP_ASYNC_PREPARE=0", script)
+        self.assertNotIn("RTP_MLA_DECODE_KERNEL", script)
+
     def test_role_script_rejects_non_native_mtp_before_host_validation(self):
         role_script = pathlib.Path(driver.__file__).with_name(
             "kimi_k3_full_model_two_host_pd_smoke.sh"
@@ -359,6 +369,7 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             "DECODE_CP_KV_CACHE_SHARDED": "0",
             "PREFILL_CP_SIZE": "16", "CP_ROTATE_METHOD": "ALLTOALL",
             "NCCL_GRAPH_REGISTER": "1",
+            "MM_CACHE_GPU_MAX_BYTES": "21474836480",
         }
         for role, tp, dp, source_tp in (
             ("prefill", 8, 1, 8), ("prefill", 4, 1, 4),
@@ -386,9 +397,11 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
                     if role == "prefill":
                         self.assertEqual(env["PREFILL_CP_KV_CACHE_SHARDED"], "1")
                         self.assertEqual(env["REUSE_CACHE"], "1")
+                        self.assertEqual(env["MM_CACHE_GPU_MAX_BYTES"], "1073741824")
                         self.assertNotIn("PREFILL_CP_SIZE", env)
                         self.assertNotIn("DECODE_CP_KV_CACHE_SHARDED", env)
                     else:
+                        self.assertNotIn("MM_CACHE_GPU_MAX_BYTES", env)
                         self.assertEqual(env["KIMI_K3_DECODE_TOPOLOGY"], "legacy")
                         self.assertEqual(env["DECODE_CP_KV_CACHE_SHARDED"], "1")
                         self.assertEqual(env["PREFILL_CP_SIZE"], str(source_tp))

@@ -753,6 +753,8 @@ expected = {
     "CACHE_STORE_RDMA_MODE": "1",
     "CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS": "30000",
     "RDMA_CONNECT_RETRY_TIMES": "3",
+    "RESERVE_BLOCK_RATIO": "5",
+    "RTP_LLM_MTP_ASYNC_PREPARE": "0",
     "KIMI_K3_CHUNKWISE_RDMA": chunkwise_rdma,
     "DSV4_MEGA_MOE_INPUT_PACKER": "fused",
     "DSV4_MEGA_MOE_INPUT_PACKER_IMPL": "optimized",
@@ -794,6 +796,7 @@ if role == "prefill":
         "ENABLE_CUDA_GRAPH": "0",
         "ENABLE_MEMORY_CACHE": "1",
         "MEMORY_CACHE_SIZE_MB": "65536",
+        "MM_CACHE_GPU_MAX_BYTES": "1073741824",
     })
     expected["PREFILL_CP_KV_CACHE_SHARDED"] = "1"
     absent.extend(["PREFILL_CP_SIZE", "DECODE_CP_KV_CACHE_SHARDED"])
@@ -814,7 +817,6 @@ else:
         "KIMI_K3_DECODE_TOPOLOGY": decode_topology,
         "DECODE_CP_KV_CACHE_SHARDED": "1",
         "DECODE_CP_Q_REPLICATED": decode_q_replicated,
-        "RTP_MLA_DECODE_KERNEL": "tokenspeed_mla",
         "MOE_STRATEGY": "mega_moe_se",
         "RTP_LLM_DEVICE_INPUT": "1",
         "RTP_LLM_DROP_BROAD_SYNC": "1",
@@ -827,6 +829,7 @@ else:
         "KIMI_K3_PREFILL_CHUNK_TOKENS",
         "ENABLE_MEMORY_CACHE",
         "MEMORY_CACHE_SIZE_MB",
+        "MM_CACHE_GPU_MAX_BYTES",
     ])
 
 for key in ("FP8_GEMM", "FP8_KV_CACHE", "FP8_MLA",
@@ -880,6 +883,8 @@ apply_validated_common_profile() {
     export CACHE_STORE_RDMA_MODE=1
     export CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS=30000
     export RDMA_CONNECT_RETRY_TIMES=3
+    export RESERVE_BLOCK_RATIO=5
+    export RTP_LLM_MTP_ASYNC_PREPARE=0
     if [[ -n "${smoke_accl_use_nics}" ]]; then
         export ACCL_USE_NICS="${smoke_accl_use_nics}"
     else
@@ -945,6 +950,9 @@ apply_validated_prefill_profile() {
     unset NCCL_GRAPH_REGISTER
     export ENABLE_MEMORY_CACHE=1
     export MEMORY_CACHE_SIZE_MB=65536
+    # The ViT process reserves this entire GPU pool at startup; 1 GiB leaves
+    # headroom for the full-model multimodal chunk-prefill smoke.
+    export MM_CACHE_GPU_MAX_BYTES=1073741824
     export PREFILL_CP_KV_CACHE_SHARDED=1
     unset PREFILL_CP_SIZE
     unset DECODE_CAPTURE_CONFIG MOE_STRATEGY
@@ -965,14 +973,13 @@ apply_validated_decode_profile() {
     export RESERVER_RUNTIME_MEM_MB=8000
     export MEGA_MOE_MAX_TOKENS_PER_RANK=16
     unset KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD KIMI_K3_PREFILL_CHUNK_TOKENS
-    unset ENABLE_MEMORY_CACHE MEMORY_CACHE_SIZE_MB
+    unset ENABLE_MEMORY_CACHE MEMORY_CACHE_SIZE_MB MM_CACHE_GPU_MAX_BYTES
     export ENABLE_CUDA_GRAPH=1
     # Exercise the DCP group with several public Graph buckets.
     export DECODE_CAPTURE_CONFIG=1,2,4,8
     export KIMI_K3_DECODE_TOPOLOGY="${smoke_decode_topology}"
     export DECODE_CP_KV_CACHE_SHARDED=1
     export DECODE_CP_Q_REPLICATED="${smoke_decode_q_replicated}"
-    export RTP_MLA_DECODE_KERNEL=tokenspeed_mla
     export MOE_STRATEGY=mega_moe_se
     export RTP_LLM_DEVICE_INPUT=1
     export RTP_LLM_DROP_BROAD_SYNC=1

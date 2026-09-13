@@ -32,11 +32,11 @@ MMRdmaEncoderOp::MMRdmaEncoderOp(const py::object& vit_config) {
     max_slot_bytes_ = cfg.mm_rdma_max_slot_bytes;
 }
 
-std::vector<py::bytes> MMRdmaEncoderOp::exportEmbedding(torch::Tensor                embedding,
-                                                        std::optional<torch::Tensor> pos_id,
-                                                        std::vector<torch::Tensor>   extra_inputs) {
+std::vector<py::bytes> MMRdmaEncoderOp::exportEmbedding(const std::vector<torch::Tensor>&   embeddings,
+                                                        const std::optional<torch::Tensor>& pos_id,
+                                                        const std::vector<torch::Tensor>&   extra_inputs) {
     std::vector<py::bytes> out;
-    if (transport_ == nullptr) {
+    if (transport_ == nullptr || embeddings.empty()) {
         return out;  // empty => caller falls back to inline bytes
     }
 
@@ -44,17 +44,22 @@ std::vector<py::bytes> MMRdmaEncoderOp::exportEmbedding(torch::Tensor           
         max_slot_bytes_ > 0 ? static_cast<uint64_t>(max_slot_bytes_) : std::numeric_limits<uint64_t>::max();
 
     // Build the ordered (tensor, role) list. Pack order must stay in lockstep with the manifest
-    // the LLM slices by: embedding first, then the optional pos_id, then each extra_input in its
-    // original (per-image) order. The embedding may exceed one slot, so row-split it (along dim 0)
-    // into pieces that each fit; the LLM concatenates the EMBEDDING pieces back in order. pos_id
-    // and each extra_input are per-image and expected to fit in one slot.
+    // the LLM slices by: embedding chunks first, then the optional pos_id, then each extra_input
+    // in original (per-image) order. Oversized embedding chunks are row-split to fit a slot; the
+    // LLM concatenates EMBEDDING pieces in descriptor order. The request-level pos_id and each
+    // per-image extra_input are expected to fit in one slot.
     std::vector<torch::Tensor>        tensors;
     std::vector<MMRdmaTensorPB::Role> roles;
 
-    if (slotFootprint(embedding) <= max_slot) {
-        tensors.push_back(embedding);
-        roles.push_back(MMRdmaTensorPB::EMBEDDING);
-    } else {
+    for (const auto& embedding : embeddings) {
+        if (embedding.numel() == 0) {
+            continue;
+        }
+        if (slotFootprint(embedding) <= max_slot) {
+            tensors.push_back(embedding);
+            roles.push_back(MMRdmaTensorPB::EMBEDDING);
+            continue;
+        }
         const int64_t rows = embedding.dim() >= 1 ? embedding.size(0) : 0;
         if (rows <= 0) {
             RTP_LLM_LOG_WARNING("mm rdma chunk: embedding not row-splittable (dim=%ld), fall back to bytes",
@@ -78,6 +83,9 @@ std::vector<py::bytes> MMRdmaEncoderOp::exportEmbedding(torch::Tensor           
             tensors.push_back(embedding.narrow(0, start, len));
             roles.push_back(MMRdmaTensorPB::EMBEDDING);
         }
+    }
+    if (tensors.empty()) {
+        return {};
     }
     if (pos_id.has_value()) {
         if (slotFootprint(*pos_id) > max_slot) {

@@ -3,7 +3,7 @@
 import math
 import threading
 from io import BytesIO
-from typing import Any, List
+from typing import Any, List, Optional
 
 import torch
 import torch.nn as nn
@@ -18,6 +18,7 @@ from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_moonvit import (
 )
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     ImageEmbeddingInterface,
+    MMWorkEstimate,
 )
 from rtp_llm.multimodal.multimodal_util import MMUrlType, get_bytes_io_from_url
 
@@ -151,7 +152,7 @@ def mm_projector_forward(
 class KimiK3ImageEmbedding(ImageEmbeddingInterface):
     """K3 MoonViT and projector exposed through RTP-LLM's image interface."""
 
-    def __init__(self, mm_related_params) -> None:
+    def __init__(self, mm_related_params, vit_config=None) -> None:
         config = mm_related_params.config or {}
         self.vision_config = KimiK3VisionConfig(
             **(config.get("vision_config", {}) or {})
@@ -159,6 +160,11 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
         self.vision_tower = MoonViT3dPretrainedModel(self.vision_config)
         self.mm_projector = KimiK3PatchMergerMLPV2(self.vision_config)
         self.image_processor = KimiK3VisionProcessor(config["media_proc_cfg"])
+        self._rdma_max_slot_bytes = (
+            int(vit_config.mm_rdma_max_slot_bytes)
+            if vit_config is not None and vit_config.mm_transport_mode == "auto"
+            else None
+        )
 
     @property
     def _device(self):
@@ -167,6 +173,134 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
     @property
     def _data_type(self):
         return self.vision_tower.patch_embed.proj.weight.dtype
+
+    def _work_geometry(self, image: Image.Image) -> tuple[int, int]:
+        if not isinstance(image, Image.Image):
+            raise TypeError(
+                f"Kimi-K3 work estimation expects PIL.Image, got {type(image)}"
+            )
+
+        processor_config = self.image_processor.media_proc_cfg
+        patch_size = int(processor_config["patch_size"])
+        merge_size = int(processor_config["merge_kernel_size"])
+
+        resize = self.image_processor.resize_config_for_size(*image.size)
+        padded_height = int(resize["new_height"]) + int(resize["pad_height"])
+        padded_width = int(resize["new_width"]) + int(resize["pad_width"])
+        if padded_height <= 0 or padded_width <= 0:
+            raise ValueError(
+                "Kimi-K3 resize produced a non-positive padded size: "
+                f"{(padded_height, padded_width)}"
+            )
+        if padded_height % patch_size or padded_width % patch_size:
+            raise ValueError(
+                "Kimi-K3 resized image is not patch-aligned: "
+                f"{(padded_height, padded_width)} vs patch size {patch_size}"
+            )
+
+        grid_h = padded_height // patch_size
+        grid_w = padded_width // patch_size
+        if grid_h % merge_size or grid_w % merge_size:
+            raise ValueError(
+                f"Kimi-K3 patch grid {(grid_h, grid_w)} is not merge-aligned "
+                f"to {merge_size}"
+            )
+        return grid_h * grid_w, (grid_h // merge_size) * (grid_w // merge_size)
+
+    def _estimated_rdma_slot_bytes(self, output_tokens: int, dtype_bytes: int) -> int:
+        max_slot = self._rdma_max_slot_bytes
+        if max_slot is None or output_tokens == 0:
+            return 0
+
+        row_bytes = self.vision_config.text_hidden_size * dtype_bytes
+        aligned_row_bytes = (row_bytes + 255) // 256 * 256
+        if max_slot > 0 and aligned_row_bytes > max_slot:
+            return 0
+
+        rows_per_chunk = output_tokens if max_slot <= 0 else max_slot // row_bytes
+        full_chunks, remaining_rows = divmod(output_tokens, rows_per_chunk)
+
+        def bucket_bytes(rows: int) -> int:
+            payload = rows * row_bytes
+            return max(64 * 1024, 1 << (payload - 1).bit_length())
+
+        slot_bytes = full_chunks * bucket_bytes(rows_per_chunk)
+        if remaining_rows:
+            slot_bytes += bucket_bytes(remaining_rows)
+
+        # Work estimates add per image, while the encoder may pack several images
+        # into one slot. That combined slot can round up beyond the sum of their
+        # individual buckets, so retain a subadditive upper bound as well.
+        aligned_payload = full_chunks * (
+            (rows_per_chunk * row_bytes + 255) // 256 * 256
+        )
+        if remaining_rows:
+            aligned_payload += (remaining_rows * row_bytes + 255) // 256 * 256
+        return max(slot_bytes, 2 * aligned_payload)
+
+    def _estimated_workspace_bytes(self, input_patches: int, output_tokens: int) -> int:
+        config = self.vision_config
+        dtype_bytes = torch.empty((), dtype=self._data_type).element_size()
+        qkv_hidden_size = config.qkv_hidden_size or config.vt_hidden_size
+
+        vision_elements = input_patches * (
+            config.num_channels * config.patch_size**2
+            + 2 * config.vt_hidden_size
+            + 6 * qkv_hidden_size
+            + 2 * config.vt_intermediate_size
+        )
+        projector_intermediate_elements = (
+            2 * input_patches * config.mm_hidden_size
+            + output_tokens * config.text_hidden_size
+        )
+        embedding_bytes = output_tokens * config.text_hidden_size * dtype_bytes
+        return (
+            dtype_bytes * (vision_elements + projector_intermediate_elements)
+            + embedding_bytes
+            + self._estimated_rdma_slot_bytes(output_tokens, dtype_bytes)
+        )
+
+    def estimate_work(
+        self, data: Any, mm_type: Optional[MMUrlType] = None
+    ) -> MMWorkEstimate:
+        if mm_type not in (None, MMUrlType.DEFAULT, MMUrlType.IMAGE):
+            raise ValueError("Kimi-K3 only supports image multimodal inputs")
+
+        input_patches, output_tokens = self._work_geometry(data)
+        return MMWorkEstimate(
+            input_patches=input_patches,
+            output_tokens=output_tokens,
+            estimated_workspace_bytes=self._estimated_workspace_bytes(
+                input_patches, output_tokens
+            ),
+            max_attention_segment=input_patches,
+            attention_work=input_patches**2,
+        )
+
+    def get_batch_work_budget(self, max_batch_media: int) -> Optional[MMWorkEstimate]:
+        if max_batch_media >= 1 << 30:
+            return None
+
+        processor_config = self.image_processor.media_proc_cfg
+        reference_patches = int(processor_config["in_patch_limit"])
+        if reference_patches <= 0:
+            raise ValueError(
+                "Kimi-K3 in_patch_limit must be positive, got " f"{reference_patches}"
+            )
+
+        merge_size = int(processor_config["merge_kernel_size"])
+        merge_area = merge_size * merge_size
+        reference_output_tokens = max(1, reference_patches // merge_area)
+        reference = MMWorkEstimate(
+            input_patches=reference_patches,
+            output_tokens=reference_output_tokens,
+            estimated_workspace_bytes=self._estimated_workspace_bytes(
+                reference_patches, reference_output_tokens
+            ),
+            max_attention_segment=reference_patches,
+            attention_work=reference_patches**2,
+        )
+        return reference.scaled(max_batch_media)
 
     @staticmethod
     def preprocess_input(mm_inputs, vit_config, **kwargs):

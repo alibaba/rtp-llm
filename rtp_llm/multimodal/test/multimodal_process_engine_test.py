@@ -764,6 +764,7 @@ class MMEmbeddingAsyncCacheTest(TestCase):
         ]
         self.assertEqual(token_values, [2, 0])
 
+
 class AsyncSubmitGetEmbeddingTest(TestCase):
     def test_cache_free_hash_wait_does_not_block_next_compute(self):
         """A slow result consumer must not occupy the sole compute worker."""
@@ -900,7 +901,13 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         computations = []
 
         def compute(
-            mm_inputs, cache_key, entry, request_id=0, user_id="", service_name=""
+            mm_inputs,
+            cache_key,
+            entry,
+            request_id=0,
+            user_id="",
+            service_name="",
+            model_name="",
         ):
             computations.append(cache_key)
             started.set()
@@ -938,7 +945,13 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         inp = self._make_input("fake://no-cache")
 
         def compute(
-            mm_inputs, cache_key, entry, request_id=0, user_id="", service_name=""
+            mm_inputs,
+            cache_key,
+            entry,
+            request_id=0,
+            user_id="",
+            service_name="",
+            model_name="",
         ):
             entry.complete((torch.ones(2, 4), None))
 
@@ -1038,7 +1051,13 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         completed_count = 0
 
         def blocked_compute(
-            mm_inputs, cache_key, entry, request_id=0, user_id="", service_name=""
+            mm_inputs,
+            cache_key,
+            entry,
+            request_id=0,
+            user_id="",
+            service_name="",
+            model_name="",
         ):
             nonlocal active, max_active, completed_count
             with lock:
@@ -1082,7 +1101,13 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         completed_count = 0
 
         def blocked_compute(
-            mm_inputs, cache_key, entry, request_id=0, user_id="", service_name=""
+            mm_inputs,
+            cache_key,
+            entry,
+            request_id=0,
+            user_id="",
+            service_name="",
+            model_name="",
         ):
             nonlocal completed_count
             started.set()
@@ -1131,7 +1156,13 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         started_urls = []
 
         def blocked_compute(
-            mm_inputs, cache_key, entry, request_id=0, user_id="", service_name=""
+            mm_inputs,
+            cache_key,
+            entry,
+            request_id=0,
+            user_id="",
+            service_name="",
+            model_name="",
         ):
             started_urls.append(mm_inputs[0].url)
             first_started.set()
@@ -1170,7 +1201,13 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         started_urls = []
 
         def blocked_compute(
-            mm_inputs, cache_key, entry, request_id=0, user_id="", service_name=""
+            mm_inputs,
+            cache_key,
+            entry,
+            request_id=0,
+            user_id="",
+            service_name="",
+            model_name="",
         ):
             started_urls.append(mm_inputs[0].url)
             first_started.set()
@@ -1229,7 +1266,13 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         error = None
 
         def blocked_compute(
-            mm_inputs, cache_key, entry, request_id=0, user_id="", service_name=""
+            mm_inputs,
+            cache_key,
+            entry,
+            request_id=0,
+            user_id="",
+            service_name="",
+            model_name="",
         ):
             nonlocal started_count
             with lock:
