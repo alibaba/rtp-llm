@@ -2,12 +2,20 @@
   "source": {
     "application": "spectrum_33e6d810_GLM-5_3-Model",
     "deployment": "l20d_wlcb_zhipu",
-    "template_version": 7,
-    "calibration": "20s host-window approximation; decode batch 3.09-7.70 only"
+    "template_version": 47,
+    "calibration": "20s host-window approximation; decode batch 3.09-7.70 only",
+    "physical_topology": {
+      "prefill_pods": 55,
+      "prefill_dp": 1,
+      "decode_pods": 40,
+      "decode_dp": 8
+    },
+    "template_name": "GLM_TEST",
+    "template_version_id": "6a8c106627b41a0bbb9ef0c9"
   },
   "bundle_overrides": {
     "prefill": 55,
-    "decode": 40,
+    "decode": 320,
     "mock_heap": "32g",
     "block_size": 64,
     "prefill_kv_pool_blocks": 31218,
