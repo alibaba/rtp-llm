@@ -171,9 +171,11 @@ async def _prepare_kimi_k3_multimodal_request(
     *,
     tokenizer: Any,
     vit_config: Optional[VitConfig] = None,
+    mm_parts: Optional[list] = None,
 ) -> tuple[list[int], list]:
     """Expand K3 chat-template placeholders and build backend multimodal inputs."""
-    mm_parts = parse_multimodal_parts_from_request(request)
+    if mm_parts is None:
+        mm_parts = parse_multimodal_parts_from_request(request)
     if not mm_parts:
         return input_ids_list, []
 
@@ -740,7 +742,44 @@ async def iter_real_model_stream_infer(
         _apply_request_overrides(generate_config, sampling, other, runtime)
 
         prompt_token_offset = 0
+        wire_n_inputs = tuple(
+            f"{inp.name}:{inp.datatype}:raw_bytes="
+            f"{len(request.raw_input_contents[index])}"
+            if index < len(request.raw_input_contents)
+            else f"{inp.name}:{inp.datatype}:raw_bytes=missing"
+            for index, inp in enumerate(request.inputs)
+            if inp.name in ("n", "num_return_sequences")
+        )
+        wire_n_parameters = tuple(
+            name
+            for name in ("n", "num_return_sequences")
+            if name in request.parameters
+        )
+        has_wire_n = bool(wire_n_inputs or wire_n_parameters)
+        trace_n_contract_result = has_wire_n or "n" in sampling.specified_fields
+        if is_kimi_k3 or has_wire_n:
+            wire_input_names = tuple(inp.name for inp in request.inputs)
+            wire_parameter_names = tuple(sorted(request.parameters))
+            logging.info(
+                "[DashScGrpc] [%s] Kimi K3 n trace: stage=pre_contract "
+                "wire_input_names=%s wire_parameter_names=%s wire_n_inputs=%s "
+                "wire_n_parameters=%s parsed_n=%s n_explicit=%s config_n=%s "
+                "thinking=%s gate=%s action=%s",
+                tag,
+                wire_input_names,
+                wire_parameter_names,
+                wire_n_inputs or ("none",),
+                wire_n_parameters or ("none",),
+                sampling.num_return_sequences,
+                "n" in sampling.specified_fields,
+                generate_config.num_return_sequences,
+                bool(getattr(generate_config, "in_think_mode", False)),
+                is_kimi_k3,
+                "apply" if is_kimi_k3 else "skip",
+            )
         if is_kimi_k3:
+            parsed_mm_parts = parse_multimodal_parts_from_request(request)
+            input_token_count_before_mm = len(input_ids_list)
             messages = parse_messages_from_request(request)
             if messages is not None:
                 validate_kimi_k3_tool_history(messages, allow_partial=True)
@@ -751,13 +790,54 @@ async def iter_real_model_stream_infer(
                         input_ids_list,
                         tokenizer=tokenizer,
                         vit_config=vit_config,
+                        mm_parts=parsed_mm_parts,
                     )
                 )
-            apply_kimi_k3_request_contract(
-                generate_config,
-                specified_fields=sampling.specified_fields,
-                thinking=bool(getattr(generate_config, "in_think_mode", False)),
+            logging.info(
+                "[DashScGrpc] [%s] Kimi K3 multimodal usage trace: "
+                "stage=request_prepared wire_payload_parameters=%s "
+                "parsed_mm_count=%s parsed_mm_types=%s backend_mm_count=%s "
+                "input_tokens_before_mm=%s input_tokens_after_mm=%s",
+                tag,
+                tuple(
+                    name
+                    for name in ("payload", "__messages__")
+                    if name in request.parameters
+                )
+                or ("none",),
+                len(parsed_mm_parts),
+                tuple(
+                    getattr(part.mm_type, "name", str(part.mm_type))
+                    for part in parsed_mm_parts
+                )
+                or ("none",),
+                len(mm_inputs or []),
+                input_token_count_before_mm,
+                len(input_ids_list),
             )
+            try:
+                apply_kimi_k3_request_contract(
+                    generate_config,
+                    specified_fields=sampling.specified_fields,
+                    thinking=bool(getattr(generate_config, "in_think_mode", False)),
+                )
+            except FtRuntimeException as e:
+                if trace_n_contract_result:
+                    logging.warning(
+                        "[DashScGrpc] [%s] Kimi K3 n trace: "
+                        "stage=contract_result result=reject config_n=%s error=%s",
+                        tag,
+                        generate_config.num_return_sequences,
+                        e,
+                    )
+                raise
+            if trace_n_contract_result:
+                logging.info(
+                    "[DashScGrpc] [%s] Kimi K3 n trace: "
+                    "stage=contract_result result=accept config_n=%s",
+                    tag,
+                    generate_config.num_return_sequences,
+                )
             prompt_token_offset = kimi_k3_pending_prompt_token_count(
                 _hf_tokenizer(tokenizer), input_ids_list
             )
@@ -917,6 +997,7 @@ async def iter_real_model_stream_infer(
                         token_ids=generated_ids,
                         top_logprobs=sampling.top_logprobs,
                         prompt_token_offset=prompt_token_offset,
+                        trace_multimodal_usage=is_kimi_k3,
                     )
                     if should_echo and not echoed:
                         if prepend_to_generated_ids_tensor(
@@ -955,6 +1036,7 @@ async def iter_real_model_stream_infer(
                         top_logprobs=sampling.top_logprobs,
                         emit_logprobs=False,
                         prompt_token_offset=prompt_token_offset,
+                        trace_multimodal_usage=is_kimi_k3,
                     )
                     eos_finished = not will_do_phase2
                     eos_finish_reason = (
@@ -999,6 +1081,7 @@ async def iter_real_model_stream_infer(
                 _request_shape=request_shape,
                 top_logprobs=sampling.top_logprobs,
                 prompt_token_offset=prompt_token_offset,
+                trace_multimodal_usage=is_kimi_k3,
             )
             if should_echo and not echoed and generated_ids:
                 if prepend_to_generated_ids_tensor(
@@ -1174,6 +1257,7 @@ async def iter_real_model_stream_infer(
                     finish_reason_override=finish_reason_override,
                     _request_shape=request_shape,
                     top_logprobs=sampling.top_logprobs,
+                    trace_multimodal_usage=is_kimi_k3,
                 )
                 stats = (
                     len(resp_ids),

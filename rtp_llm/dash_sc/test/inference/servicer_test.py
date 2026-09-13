@@ -2352,11 +2352,12 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             model_type="kimi_k3",
         )
 
-        await _drain(
-            servicer.ModelStreamInfer(
-                _areq_iter([self._valid_infer_request()]), MagicMock()
+        with self.assertLogs(level="INFO") as captured:
+            await _drain(
+                servicer.ModelStreamInfer(
+                    _areq_iter([self._valid_infer_request()]), MagicMock()
+                )
             )
-        )
 
         self.assertEqual(visitor.enqueue_called, 1)
         config = visitor.last_generate_input.generate_config
@@ -2365,6 +2366,14 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config.num_return_sequences, 0)
         self.assertFalse(config.in_think_mode)
         self.assertEqual(config.max_thinking_tokens, 0)
+        log_text = "\n".join(captured.output)
+        self.assertIn("stage=pre_contract", log_text)
+        self.assertIn("wire_n_inputs=('none',)", log_text)
+        self.assertIn("parsed_n=0 n_explicit=False", log_text)
+        self.assertIn("gate=True action=apply", log_text)
+        self.assertIn("stage=request_prepared", log_text)
+        self.assertIn("parsed_mm_count=0", log_text)
+        self.assertIn("backend_mm_count=0", log_text)
 
     async def test_kimi_k3_rejects_n_two_before_enqueue(self) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
@@ -2375,13 +2384,70 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         req = self._valid_infer_request()
         _add_input_tensor(req, "n", "INT32", [1], struct.pack("<i", 2))
 
-        responses = await _drain(
-            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
-        )
+        with self.assertLogs(level="INFO") as captured:
+            responses = await _drain(
+                servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+            )
 
         self.assertEqual(visitor.enqueue_called, 0)
         self.assertEqual(len(responses), 1)
         _assert_parameter_error_response(self, responses[0], "n")
+        log_text = "\n".join(captured.output)
+        self.assertIn("wire_n_inputs=('n:INT32:raw_bytes=4',)", log_text)
+        self.assertIn("parsed_n=2 n_explicit=True", log_text)
+        self.assertIn("stage=contract_result result=reject config_n=2", log_text)
+
+    async def test_kimi_k3_rejects_n_parameter_before_enqueue(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            model_type="kimi_k3",
+        )
+        req = self._valid_infer_request()
+        req.parameters["n"].int64_param = 2
+
+        with self.assertLogs(level="INFO") as captured:
+            responses = await _drain(
+                servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+            )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_parameter_error_response(self, responses[0], "n")
+        log_text = "\n".join(captured.output)
+        self.assertIn("wire_n_parameters=('n',)", log_text)
+        self.assertIn("parsed_n=2 n_explicit=True", log_text)
+        self.assertIn("stage=contract_result result=reject config_n=2", log_text)
+
+    async def test_non_kimi_k3_logs_n_contract_skip(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            model_type="qwen3",
+        )
+        req = self._valid_infer_request()
+        _add_input_tensor(req, "n", "INT32", [1], struct.pack("<i", 2))
+
+        with self.assertLogs(level="INFO") as captured:
+            responses = await _drain(
+                servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+            )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(_gen_ids(responses[0]), [9])
+        log_text = "\n".join(captured.output)
+        self.assertIn("parsed_n=2 n_explicit=True", log_text)
+        self.assertIn("gate=False action=skip", log_text)
+        self.assertNotIn("stage=contract_result", log_text)
+
     async def test_kimi_k3_rejects_invalid_tool_history_before_enqueue(self) -> None:
         invalid_functions = (
             ({"arguments": "{}"}, "function.name"),

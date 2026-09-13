@@ -1596,6 +1596,46 @@ def _append_aux_info_metrics_outputs(
     )
 
 
+def _log_multimodal_usage_trace(
+    infer: predict_v2_pb2.ModelInferResponse,
+    out_py: Any,
+    request_log_tag: str,
+    prompt_token_offset: int,
+) -> None:
+    """Trace engine and gRPC usage fields without logging request content."""
+    ax = getattr(out_py, "aux_info", None)
+    multimodal_lengths = getattr(ax, "multimodal_lengths", {}) if ax else {}
+    engine_mm_tokens = tuple(
+        sorted(
+            (
+                getattr(mm_type, "name", str(mm_type)),
+                int(token_count),
+            )
+            for mm_type, token_count in multimodal_lengths.items()
+        )
+    )
+    wire_mm_parameters = tuple(
+        (name, infer.parameters[name].int64_param)
+        for name in ("image_tokens", "video_tokens", "audio_tokens")
+        if name in infer.parameters
+    )
+    logging.info(
+        "[DashScGrpc] [%s] Kimi K3 multimodal usage trace: "
+        "stage=response_serialized aux_present=%s engine_input_tokens=%s "
+        "engine_cached_tokens=%s engine_mm_tokens=%s prompt_token_offset=%s "
+        "wire_prompt_tokens=%s wire_cached_tokens=%s wire_mm_parameters=%s",
+        request_log_tag,
+        ax is not None,
+        int(ax.input_len) if ax is not None else None,
+        int(ax.reuse_len) if ax is not None else None,
+        engine_mm_tokens or ("none",),
+        prompt_token_offset,
+        infer.parameters["prompt_token_num"].int64_param,
+        infer.parameters["prompt_cached_token_num"].int64_param,
+        wire_mm_parameters or ("none",),
+    )
+
+
 def build_stream_response_from_generate_outputs(
     dash_sc_request_id: str,
     model_name: str,
@@ -1616,6 +1656,7 @@ def build_stream_response_from_generate_outputs(
     top_logprobs: int = 0,
     emit_logprobs: bool = True,
     prompt_token_offset: int = 0,
+    trace_multimodal_usage: bool = False,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
 
@@ -1679,6 +1720,13 @@ def build_stream_response_from_generate_outputs(
         max_token_id=max_token_id,
         generate_think_token_num=generate_think_token_num,
     )
+    if trace_multimodal_usage and finished:
+        _log_multimodal_usage_trace(
+            infer,
+            out_py,
+            request_log_tag,
+            prompt_token_offset,
+        )
 
     logging.debug("[DashScGrpc] [%s] generated_ids: %s", request_log_tag, generated_ids)
     logging.debug(

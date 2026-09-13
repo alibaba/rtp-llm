@@ -1462,6 +1462,34 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
                         self.assertEqual(out.aux_info.input_len, input_len)
                         self.assertEqual(out.aux_info.reuse_len, cached)
 
+    def test_multimodal_usage_trace_distinguishes_engine_and_wire_fields(self):
+        out = GenerateOutput(
+            output_ids=torch.tensor([7], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(
+                input_len=2528,
+                reuse_len=64,
+                multimodal_lengths={MMUrlType.IMAGE: 594},
+            ),
+        )
+
+        with self.assertLogs(level="INFO") as captured:
+            build_stream_response_from_generate_outputs(
+                "req",
+                "kimi-k3",
+                GenerateOutputs(generate_outputs=[out]),
+                "usage-test",
+                prompt_token_offset=3,
+                trace_multimodal_usage=True,
+            )
+
+        log_text = "\n".join(captured.output)
+        self.assertIn("stage=response_serialized aux_present=True", log_text)
+        self.assertIn("engine_input_tokens=2528 engine_cached_tokens=64", log_text)
+        self.assertIn("engine_mm_tokens=(('IMAGE', 594),)", log_text)
+        self.assertIn("wire_prompt_tokens=2525 wire_cached_tokens=64", log_text)
+        self.assertIn("wire_mm_parameters=(('image_tokens', 594),)", log_text)
+
     def test_prompt_token_offset_without_aux_info(self):
         out = SimpleNamespace(output_ids=torch.tensor([7]), finished=True)
         infer = build_stream_response_from_generate_outputs(
