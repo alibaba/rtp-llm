@@ -813,6 +813,72 @@ TEST_F(KVCacheMemoryConnectorTest, initDiskBlockPool_RejectsInvalidDiskConfig) {
     }
 }
 
+TEST_F(KVCacheMemoryConnectorTest, SleepReturnsDiskSlotsAcrossRepeatedCycles) {
+    DiskTempDir disk;
+    auto        kv_cfg = makeDiskKvConfig({disk.path()});
+    auto        conn   = std::make_shared<KVCacheMemoryConnector>(
+        cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+    auto pool = conn->complete_disk_pool_;
+    ASSERT_NE(pool, nullptr);
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        auto slot = pool->malloc();
+        ASSERT_TRUE(slot.has_value());
+        MemoryDiskBlockCache::CacheItem item;
+        item.cache_key    = 123;
+        item.backing_type = CacheBackingType::DISK;
+        item.disk_slot    = *slot;
+        item.block_size   = pool->blockSizeBytes();
+        item.is_resident  = true;  // Sleep discards resident entries too.
+        ASSERT_TRUE(conn->block_cache_->putCommitted(item).first);
+        pool->blockCacheReference(*slot);
+        pool->requestFree(*slot);
+        EXPECT_EQ(pool->freeSlots(), pool->totalSlots() - 1);
+        ASSERT_TRUE(conn->releaseMemoryCacheBacking());
+        EXPECT_TRUE(conn->cacheKeys().empty());
+        EXPECT_EQ(pool->freeSlots(), pool->totalSlots());
+        ASSERT_TRUE(conn->restoreMemoryCacheBacking());
+        EXPECT_EQ(pool->freeSlots(), pool->totalSlots());
+    }
+}
+
+TEST_F(KVCacheMemoryConnectorTest, SleepReturnsPrefixDiskSlotsAcrossRepeatedCycles) {
+    DiskTempDir disk;
+    auto        cfg                        = createDsv4TypedConnectorConfig();
+    auto        kv_cfg                     = makeDiskKvConfig({disk.path()});
+    kv_cfg.memory_cache_size_mb            = 1;
+    kv_cfg.enable_prefix_tree_memory_cache = true;
+    auto conn                              = std::make_shared<KVCacheMemoryConnector>(
+        cfg, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+            auto pool = conn->diskPoolFor(kind);
+            ASSERT_NE(pool, nullptr);
+            auto slot = pool->malloc();
+            ASSERT_TRUE(slot.has_value());
+            PrefixTreeMemoryBlockCache::CacheItem item;
+            item.cache_key    = 123;
+            item.kind         = kind;
+            item.backing_type = CacheBackingType::DISK;
+            item.disk_slot    = *slot;
+            item.block_size   = pool->blockSizeBytes();
+            item.is_resident  = true;
+            ASSERT_TRUE(conn->prefix_block_cache_->putCommitted(123, BlockDependency{}, item).first);
+            pool->blockCacheReference(*slot);
+            pool->requestFree(*slot);
+            EXPECT_EQ(pool->freeSlots(), pool->totalSlots() - 1);
+        }
+        ASSERT_TRUE(conn->releaseMemoryCacheBacking());
+        EXPECT_TRUE(conn->cacheKeys().empty());
+        for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+            auto pool = conn->diskPoolFor(kind);
+            EXPECT_EQ(pool->freeSlots(), pool->totalSlots());
+        }
+        ASSERT_TRUE(conn->restoreMemoryCacheBacking());
+    }
+}
+
 TEST_F(KVCacheMemoryConnectorTest, allocateOneBacking_FallsBackToDiskWhenMemoryPoolFull) {
     DiskTempDir disk0;
     ASSERT_FALSE(disk0.path().empty());

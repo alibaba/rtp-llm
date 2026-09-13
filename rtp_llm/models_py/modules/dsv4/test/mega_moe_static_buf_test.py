@@ -14,6 +14,7 @@ covered by the SM100_ARM smoke suite.
 import os
 import sys
 import unittest
+from unittest import mock
 
 import torch
 
@@ -154,6 +155,57 @@ class TestMegaBufferGraphBakedGate(unittest.TestCase):
         # Returns early before dereferencing the opaque _mega_buf / cache.
         self.assertEqual(self.mega_buf.release_mega_symm_buffers(), 0.0)
         self.assertIsNotNone(self.strat._mega_buf)
+
+    def test_failed_destroy_keeps_buffer_and_owner_for_diagnosis(self):
+        self.mega_buf.set_mega_buffers_graph_baked(False)
+        failed = mock.Mock(buffer=torch.empty(8))
+        failed.destroy.side_effect = RuntimeError("injected destroy failure")
+        self.strat._mega_buf = failed
+        with mock.patch.dict(
+            self.mega_buf._MEGA_BUF_CACHE, {"failed": failed}, clear=True
+        ):
+            with self.assertRaisesRegex(RuntimeError, "injected destroy failure"):
+                self.mega_buf.release_mega_symm_buffers()
+            self.assertIs(self.mega_buf._MEGA_BUF_CACHE["failed"], failed)
+            self.assertIs(self.strat._mega_buf, failed)
+            self.assertIs(self.strat._mega_y, self._buf)
+            failed.destroy.side_effect = None
+            self.assertGreater(self.mega_buf.release_mega_symm_buffers(), 0)
+            self.assertEqual(self.mega_buf._MEGA_BUF_CACHE, {})
+            self.assertIsNone(self.strat._mega_buf)
+            self.assertIsNone(self.strat._mega_y)
+
+    def test_partial_destroy_removes_only_successful_buffer(self):
+        self.mega_buf.set_mega_buffers_graph_baked(False)
+        good = mock.Mock(buffer=torch.empty(8))
+        failed = mock.Mock(buffer=torch.empty(8))
+        failed.destroy.side_effect = RuntimeError("injected failure")
+        self.strat._mega_buf = good
+        with mock.patch.dict(
+            self.mega_buf._MEGA_BUF_CACHE, {"good": good, "failed": failed}, clear=True
+        ):
+            with self.assertRaises(RuntimeError):
+                self.mega_buf.release_mega_symm_buffers()
+            self.assertEqual(list(self.mega_buf._MEGA_BUF_CACHE), ["failed"])
+            self.assertIsNone(self.strat._mega_buf)
+            good.destroy.assert_called_once_with()
+
+
+class TestMegaFusedSleepCompatibility(unittest.TestCase):
+    def test_level_two_rejected_before_weight_allocation(self):
+        from rtp_llm.model_loader import weight_memory_saver as wms
+        from rtp_llm.models_py.modules.dsv4.moe.strategies.mega_fused import (
+            MegaMoEFusedStrategy,
+        )
+
+        strategy = MegaMoEFusedStrategy.__new__(MegaMoEFusedStrategy)
+        with mock.patch.object(wms, "is_enabled", return_value=True), mock.patch.object(
+            wms, "sleep_mode_level", return_value=2
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "does not support sleep mode level 2"
+            ):
+                strategy.setup_weights({})
 
 
 if __name__ == "__main__":

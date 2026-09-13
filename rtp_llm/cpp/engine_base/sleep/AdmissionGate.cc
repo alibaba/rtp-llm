@@ -45,8 +45,8 @@ AdmissionCheckResult makeCheckResult(const std::string& instance_id, SleepState 
     result.admitted       = false;
     result.error_code     = static_cast<int64_t>(ErrorCode::ENGINE_UNAVAILABLE);
     result.error_code_str = ErrorCodeToString(ErrorCode::ENGINE_UNAVAILABLE);
-    result.message        = "engine unavailable: instance [" + instance_id + "] is " + result.state
-                     + " (sleep_epoch=" + std::to_string(result.sleep_epoch) + "), request can be retried elsewhere";
+    result.message = "engine unavailable: " + result.state + " (sleep_epoch=" + std::to_string(result.sleep_epoch)
+                     + "), request can be retried elsewhere";
     return result;
 }
 

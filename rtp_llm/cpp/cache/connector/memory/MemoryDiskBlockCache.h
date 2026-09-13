@@ -71,7 +71,9 @@ public:
     // Sleep/wake_up: drop every cache entry in place (keeps the object address stable so
     // shared_ptr holders never race a pointer swap). Used when the underlying host KV buffer
     // is released/reallocated and the cache-key -> block index index becomes invalid.
-    void clear();
+    // Returns removed entries so the owner can release both memory and disk refs.
+    // Requires all transfers to be drained.
+    std::vector<CacheItem> clear();
 
 private:
     struct EvictKey {

@@ -304,27 +304,26 @@ void LocalRpcServer::installSleepHooks() {
         // driver -- this is what actually frees physical GPU for other processes during
         // sleep, and it logs a [SleepMem] segment breakdown attributing any residual.
         // The C++ trim below remains the no-python-model fallback. GIL-guarded,
-        // best-effort: a throw here must NOT fail the sleep (regions already released above).
+        // Optional trimming is best-effort in Python; destructive buffer failures
+        // propagate here and must leave the instance unavailable.
         if (!weight_manager_.is_none()) {
             try {
                 py::gil_scoped_acquire acquire;
                 weight_manager_.attr("release_runtime_gpu_caches")("sleep");
             } catch (const py::error_already_set& e) {
-                RTP_LLM_LOG_WARNING("releaseRestorableGpuMemory: python release_runtime_gpu_caches "
-                                    "failed (ignored): %s",
-                                    e.what());
+                RTP_LLM_LOG_ERROR("releaseRestorableGpuMemory: python release_runtime_gpu_caches "
+                                  "failed: %s",
+                                  e.what());
+                ok = false;
             }
         }
-        // Hand back the NCCL communicator's GPU memory (enabled by default;
-        // disable with --sleep_release_collective_memory=0); see
+        // Hand back NCCL memory when --sleep_release_collective_memory=1; see
         // rtp_llm/utils/nccl_memory.py for the rules this call obeys.
         //
-        // Its own step, not part of release_runtime_gpu_caches above, for two local reasons.
+        // Keep this separate from runtime-cache trimming.
         // Ordering: it must run after the engine is fully quiesced (suspend begins with a
         // cudaDeviceSynchronize()) and before the best-effort allocator trim, whose per-role duration
-        // would otherwise add rank skew ahead of a collective. Failure semantics: unlike the
-        // best-effort reclaim above, a failure here leaves memory the wake path will dereference,
-        // so it must fail the sleep.
+        // would otherwise add rank skew ahead of a collective. Failures must fail sleep.
         if (!weight_manager_.is_none()) {
             try {
                 py::gil_scoped_acquire acquire;

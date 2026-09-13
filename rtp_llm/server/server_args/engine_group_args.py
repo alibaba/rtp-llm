@@ -2,6 +2,16 @@ from rtp_llm.server.server_args.util import str2bool
 
 
 def init_engine_group_args(parser, runtime_config):
+    # These fields are a required Python/C++ contract, not optional old bindings.
+    # The general argument binder only logs assignment failures.
+    for name in ("enable_sleep_mode", "sleep_mode_level"):
+        try:
+            getattr(runtime_config, name)
+        except AttributeError as e:
+            raise RuntimeError(
+                f"RuntimeConfig binding is missing {name}; rebuild the matching C++ bindings"
+            ) from e
+
     ##############################################################################################################
     # Engine Configuration
     # Fields merged from EngineConfig to RuntimeConfig (warm_up, warm_up_with_loss).
@@ -35,11 +45,7 @@ def init_engine_group_args(parser, runtime_config):
         "--enable_sleep_mode",
         "--enable-sleep-mode",
         env_name="ENABLE_SLEEP_MODE",
-        bind_to=(
-            (runtime_config, "enable_sleep_mode")
-            if hasattr(runtime_config, "enable_sleep_mode")
-            else None
-        ),
+        bind_to=(runtime_config, "enable_sleep_mode"),
         type=str2bool,
         default=False,
         help="是否开启 sleep/wake_up 生命周期管理接口，默认关闭",
@@ -48,11 +54,7 @@ def init_engine_group_args(parser, runtime_config):
         "--sleep_mode_level",
         "--sleep-mode-level",
         env_name="SLEEP_MODE_LEVEL",
-        bind_to=(
-            (runtime_config, "sleep_mode_level")
-            if hasattr(runtime_config, "sleep_mode_level")
-            else None
-        ),
+        bind_to=(runtime_config, "sleep_mode_level"),
         type=int,
         choices=[1, 2],
         default=1,

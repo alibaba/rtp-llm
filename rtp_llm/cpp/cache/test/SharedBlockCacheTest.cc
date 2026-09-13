@@ -51,6 +51,28 @@ TEST(SharedBlockCacheTest, PrefixTreeEvictsCollectedChainInParentFirstOrderWithD
     EXPECT_TRUE(cache.empty());
 }
 
+TEST(SharedBlockCacheTest, SleepResetDropsResidentEntriesAndAllTreeAliases) {
+    SharedBlockCache cache;
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        putOne(cache, 2, 102, childDep(1, 1));
+        putOne(cache, 1, 101, rootDep(), SharedBlockCache::kGpuLogicalNamespace, true);
+        putOne(cache, 1, 101, rootDep(), SharedBlockCache::kGpuCpCanonicalNamespace, true);
+        putOne(cache, 3, 103, childDep(99, 1));
+        const auto version = cache.version();
+        cache.resetMetadata();
+        EXPECT_TRUE(cache.empty());
+        EXPECT_TRUE(cache.allCacheKeys().empty());
+        EXPECT_FALSE(cache.match(1).found);
+        EXPECT_EQ(cache.matchGroup(2, 0), NULL_BLOCK_IDX);
+        EXPECT_GT(cache.version(), version);
+        // New non-resident entries must not inherit the old resident/parent state.
+        putOne(cache, 1, 201, rootDep());
+        auto evicted = cache.selectAndEvict(1);
+        EXPECT_EQ(evicted.evicted_keys, (CacheKeysType{1}));
+        EXPECT_TRUE(cache.empty());
+    }
+}
+
 TEST(SharedBlockCacheTest, PrefixTreeStopsAtBranchPoint) {
     SharedBlockCache cache;
     putOne(cache, 1, 101, rootDep(0));

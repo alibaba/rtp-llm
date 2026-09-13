@@ -159,19 +159,14 @@ def release_mega_symm_buffers() -> float:
             freed_bytes += buf.buffer.numel() * buf.buffer.element_size()
         except Exception:
             pass
-    # 1) Drop per-layer strong refs first, else the buffers stay alive below.
-    for strat in list(_MEGA_STRATEGY_REGISTRY):
-        try:
-            strat._mega_buf = None
-        except Exception:
-            pass
-    # 2) Destroy the cached buffers (nulls each SymmBuffer's handle/tensor refs).
-    for buf in list(_MEGA_BUF_CACHE.values()):
-        try:
-            buf.destroy()
-        except Exception:
-            pass
-    _MEGA_BUF_CACHE.clear()
+    # Destroy first. On failure retain that buffer and its owning references,
+    # and fail the lifecycle transition instead of reporting a successful sleep.
+    for key, buf in list(_MEGA_BUF_CACHE.items()):
+        buf.destroy()
+        for strat in list(_MEGA_STRATEGY_REGISTRY):
+            if strat._mega_buf is buf:
+                strat._mega_buf = None
+        del _MEGA_BUF_CACHE[key]
     release_mega_output_buffers()
     gc.collect()
     return freed_bytes / (1024**3)

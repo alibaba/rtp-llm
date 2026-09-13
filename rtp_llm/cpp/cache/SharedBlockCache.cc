@@ -8,6 +8,17 @@
 
 namespace rtp_llm {
 
+void SharedBlockCache::resetMetadata() {
+    std::lock_guard<std::mutex> lock(mu_);
+    lru_cache_.clear();
+    tree_nodes_.clear();
+    aliases_by_cache_key_.clear();
+    pending_children_by_parent_.clear();
+    leaf_lru_.clear();
+    tree_access_seq_ = 0;
+    ++version_;
+}
+
 void SharedBlockCache::init(int group_num, const std::vector<BlockPoolPtr>& group_pools) {
     std::lock_guard<std::mutex> lock(mu_);
     RTP_LLM_CHECK_WITH_INFO(static_cast<int>(group_pools.size()) == group_num,

@@ -719,6 +719,9 @@ bool KVCacheManager::restoreKVCacheMemoryBackingAndResetMetadata() {
 
     // Physical pages are re-mapped at the same VA but the content is garbage (discard mode):
     // wipe all KV metadata so the pool is indistinguishable from a freshly initialized one.
+    if (auto shared_cache = allocator_->sharedBlockCache()) {
+        shared_cache->resetMetadata();
+    }
     const auto block_pools = allocator_->getBlockPools();
     for (const auto& block_pool : block_pools) {
         block_pool->resetMetadata();
@@ -726,6 +729,7 @@ bool KVCacheManager::restoreKVCacheMemoryBackingAndResetMetadata() {
             block_cache->clear();
         }
     }
+    refreshKVCacheInfoSnapshot();
     RTP_LLM_LOG_INFO("restoreKVCacheMemoryBackingAndResetMetadata done: reset %zu block pools", block_pools.size());
     return true;
 }

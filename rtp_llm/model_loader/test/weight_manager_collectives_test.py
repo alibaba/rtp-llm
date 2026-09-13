@@ -17,6 +17,7 @@ The policy layer itself is covered by rtp_llm/utils/test/nccl_memory_test.py.
 """
 
 import unittest
+from types import SimpleNamespace
 from typing import Any, List, Optional, Tuple
 from unittest import mock
 
@@ -46,6 +47,22 @@ def _manager(device: Any = _DEVICE) -> WeightManager:
 
 
 class WeightManagerCollectivesTest(unittest.TestCase):
+    def test_reload_coverage_excludes_draft_global_aliases(self) -> None:
+        manager = _manager()
+        embedding, head, owned = object(), object(), object()
+        manager._weights = SimpleNamespace(
+            weights=[{"layer": owned}],
+            global_weights={"embedding": embedding, "head": head, "norm": owned},
+        )
+        manager._non_owned_global_weights = {"embedding", "head"}
+        self.assertEqual(manager._live_weight_keys(), {(0, "layer"), (None, "norm")})
+        self.assertIs(manager._weights.global_weights["embedding"], embedding)
+        manager._non_owned_global_weights = set()
+        self.assertEqual(
+            manager._live_weight_keys(),
+            {(0, "layer"), (None, "norm"), (None, "embedding"), (None, "head")},
+        )
+
     def setUp(self) -> None:
         self.suspend_calls: List[Tuple[Any, Optional[str]]] = []
         self.resume_calls: List[Tuple[Any, Optional[str]]] = []

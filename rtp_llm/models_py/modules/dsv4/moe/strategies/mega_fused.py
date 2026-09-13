@@ -75,6 +75,18 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
         converted to the INT32 MN-major layout and then to the fused SE UTCCP
         4x32 layout the kernel consumes.
         """
+        from rtp_llm.model_loader.weight_memory_saver import (
+            is_enabled,
+            sleep_mode_level,
+        )
+
+        if is_enabled() and sleep_mode_level() == 2:
+            raise ValueError(
+                "DSV4_USE_MEGA_MOE_FUSED=1 does not support sleep mode level 2: "
+                "fused routed/shared weights cannot yet be restored in place. "
+                "Disable DSV4_USE_MEGA_MOE_FUSED or use sleep mode level 1."
+            )
+
         import deep_gemm
 
         from rtp_llm.utils.model_weight import W

@@ -691,10 +691,14 @@ bool KVCacheMemoryConnector::releaseMemoryCacheBacking() {
     // Clear in place (keeping the cache object's address stable) so lock-free readers that
     // hold the shared_ptr never race a pointer swap; both caches are internally locked.
     if (block_cache_) {
-        block_cache_->clear();
+        for (const auto& item : block_cache_->clear()) {
+            releaseCacheBacking(item);
+        }
     }
     if (prefix_block_cache_) {
-        prefix_block_cache_->clear();
+        for (const auto& item : prefix_block_cache_->clear()) {
+            releasePrefixCacheBacking(item);
+        }
     }
     for (const auto& pool : pools) {
         pool->releaseHostBuffer();
@@ -716,14 +720,8 @@ bool KVCacheMemoryConnector::restoreMemoryCacheBacking() {
     for (const auto& pool : pools) {
         pool->reallocateHostBuffer();
     }
-    // Start from an empty cache: the previous host KV contents were discarded.
-    // Clear in place rather than swapping the pointer so lock-free readers stay safe.
-    if (block_cache_) {
-        block_cache_->clear();
-    }
-    if (prefix_block_cache_) {
-        prefix_block_cache_->clear();
-    }
+    // Release already emptied both indexes and returned their backing refs.
+    // No cache writes are admitted between release and restore.
     const double allocation_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - allocation_start).count();
     RTP_LLM_LOG_INFO("wake up memory cache allocation took %.3fs", allocation_seconds);

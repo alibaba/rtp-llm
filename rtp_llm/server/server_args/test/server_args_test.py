@@ -2,6 +2,7 @@ import importlib
 import os
 import pickle
 import sys
+from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import patch
 
@@ -11,6 +12,17 @@ class ServerArgsPyEnvConfigsTest(TestCase):
 
 
 class ServerArgsSetTest(TestCase):
+    def test_missing_sleep_binding_fails_at_startup(self):
+        from rtp_llm.server.server_args.engine_group_args import init_engine_group_args
+
+        for missing in ("enable_sleep_mode", "sleep_mode_level"):
+            fields = {"enable_sleep_mode": False, "sleep_mode_level": 1}
+            del fields[missing]
+            with self.subTest(missing=missing), self.assertRaisesRegex(
+                RuntimeError, f"binding is missing {missing}"
+            ):
+                init_engine_group_args(None, SimpleNamespace(**fields))
+
     def setUp(self):
         self._environ_backup = os.environ.copy()
         self._argv_backup = sys.argv.copy()

@@ -120,6 +120,37 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeWakeUnblocksIdleSchedule) {
     EXPECT_TRUE(result.value().empty());
 }
 
+TEST_F(FIFOSchedulerTest, ForcePollUnblocksIdleScheduleAndKeepsPolling) {
+    auto cache_manager =
+        std::make_shared<KVCacheManager>(makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16));
+    ASSERT_TRUE(cache_manager->init());
+    RuntimeConfig runtime_config;
+    ModelConfig   model_config;
+    FIFOScheduler scheduler(
+        runtime_config, model_config, PDSepConfig{}, ParallelismConfig{}, ModelSpecificConfig{}, cache_manager);
+    auto first = std::async(std::launch::async, [&]() { return scheduler.schedule(); });
+    EXPECT_EQ(first.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    scheduler.setForcePoll(true);
+    const auto first_status = first.wait_for(std::chrono::seconds(1));
+    EXPECT_EQ(first_status, std::future_status::ready);
+    if (first_status != std::future_status::ready) {
+        scheduler.stop();  // Bound a failing test instead of hanging future destruction.
+    }
+    EXPECT_TRUE(first.get().ok());
+    auto       next        = std::async(std::launch::async, [&]() { return scheduler.schedule(); });
+    const auto next_status = next.wait_for(std::chrono::seconds(1));
+    EXPECT_EQ(next_status, std::future_status::ready);
+    if (next_status != std::future_status::ready) {
+        scheduler.stop();
+    }
+    EXPECT_TRUE(next.get().ok());
+    scheduler.setForcePoll(false);
+    auto idle = std::async(std::launch::async, [&]() { return scheduler.schedule(); });
+    EXPECT_EQ(idle.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    scheduler.stop();
+    idle.get();
+}
+
 TEST_F(FIFOSchedulerTest, testBatchDecodeForcePollAndStopUnblockSchedule) {
     RuntimeConfig runtime_config;
     runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 8;

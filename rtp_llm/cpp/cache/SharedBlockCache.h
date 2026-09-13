@@ -101,6 +101,9 @@ public:
     std::vector<CacheKeyType> allCacheKeys() const;
 
     int64_t version() const;
+    // Caller must quiesce users and reset all group-pool metadata together.
+    // Discard even resident entries: their physical KV contents are gone.
+    void    resetMetadata();
     void    setPrefixTreeEnabled(bool enabled);
     bool    prefixTreeEnabled() const;
     void    setStateBlockIndependentEviction(bool enabled, const std::vector<int>& state_group_ids);

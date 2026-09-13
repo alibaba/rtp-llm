@@ -10,9 +10,7 @@ import torch
 from rtp_llm.config.sleep_mode_compatibility import reject_dynamic_weight_update
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.model_loader.weight_memory_saver import (
-    expandable_segments_disabled,
-)
+from rtp_llm.model_loader.weight_memory_saver import expandable_segments_disabled
 from rtp_llm.model_loader.weight_memory_saver import is_enabled as sleep_mode_enabled
 from rtp_llm.model_loader.weight_memory_saver import (
     sleep_mode_level,
@@ -338,7 +336,7 @@ class WeightManager:
     # ------------------------------------------------------------------
 
     def _live_weight_keys(self) -> set[tuple[int | None, str]]:
-        """Every (layer_id, name) tracked in the live ModelWeights.
+        """Every owned (layer_id, name) tracked in the live ModelWeights.
 
         layer_id is None for global weights. Used by
         :meth:`reload_weights_from_loader` to assert full coverage.
@@ -348,7 +346,10 @@ class WeightManager:
             for name in layer_dict:
                 keys.add((layer_id, name))
         for name in self._weights.global_weights:
-            keys.add((None, name))
+            # Draft embedding/head aliases are restored by the main manager,
+            # before chained reload. The draft loader intentionally omits them.
+            if name not in self._non_owned_global_weights:
+                keys.add((None, name))
         return keys
 
     @timed_sleep_method("sleep", "release_runtime_gpu_caches")
@@ -360,7 +361,7 @@ class WeightManager:
         long-lived Python-held device caches, then empties the torch caching
         allocator so segments they co-tenanted are returned to the driver, and logs
         a ``[SleepMem]`` segment breakdown attributing any physical residual.
-        Best-effort; never raises into the hook.
+        Optional trimming is best-effort; destructive buffer failures propagate.
         """
         from rtp_llm.utils.sleep_gpu_reclaim import release_and_trim
 
@@ -394,10 +395,9 @@ class WeightManager:
     def suspend_collectives_for_sleep(self, reason: str = "sleep") -> None:
         """Sleep-hook entry: release NCCL communicator GPU memory.
 
-        A separate seam from :meth:`release_runtime_gpu_caches` rather than a step
-        inside it, because the two have opposite failure semantics: that one is
-        best-effort, whereas a failure here leaves memory the wake path will
-        dereference, so it must propagate and put the instance in ERROR.
+        Kept separate from :meth:`release_runtime_gpu_caches` so every rank still
+        attempts NCCL suspension after a runtime-cache failure. Destructive
+        release failures in either step propagate and put the instance in ERROR.
 
         No-op unless sleep mode and ``--sleep_release_collective_memory`` are on,
         and no-op on a runtime NCCL without the suspend API. The C++ lifecycle
@@ -559,9 +559,7 @@ class WeightManager:
         attentions: list = []
         fp8_linears: list = []
         try:
-            from rtp_llm.models_py.modules.dsv4.fp8.attention import (
-                iter_attentions,
-            )
+            from rtp_llm.models_py.modules.dsv4.fp8.attention import iter_attentions
             from rtp_llm.models_py.modules.dsv4.fp8.compressor import iter_compressors
             from rtp_llm.models_py.modules.dsv4.moe.mega_buf import iter_mega_strategies
             from rtp_llm.models_py.modules.dsv4.moe.mega_se_buf import (

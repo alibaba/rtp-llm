@@ -35,6 +35,11 @@ public:
     void                                         wake() override;
     void                                         setForcePoll(bool enable) override {
         force_poll_.store(enable, std::memory_order_relaxed);
+        if (enable) {
+            // Also release an existing indefinite wait. wake() updates the
+            // predicate under lock_, so the notification cannot be lost.
+            wake();
+        }
     }
     bool empty() override;
 

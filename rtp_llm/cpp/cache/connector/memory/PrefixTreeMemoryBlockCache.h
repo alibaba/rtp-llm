@@ -92,7 +92,9 @@ public:
     size_t                    size() const;
     // Drop all cached entries in place (keeps the object address stable for shared_ptr
     // holders). Used on sleep/wake when the backing pinned host buffers are discarded.
-    void clear();
+    // Returns removed entries so the owner can release both memory and disk refs.
+    // Requires all transfers to be drained.
+    std::vector<CacheItem> clear();
 
 private:
     struct RetiredItem {

@@ -148,11 +148,13 @@ TEST_F(AdmissionGateTest, ErrorBodyFieldsComplete) {
     EXPECT_GE(detail.sleep_epoch, 1);
     EXPECT_EQ(detail.state, "SLEEPING");
     EXPECT_FALSE(detail.message.empty());
+    EXPECT_EQ(detail.message.find("test_instance_0"), std::string::npos);
 
     // grpc::Status error_details round-trips through ErrorDetailsPB.
     const auto status = gate_.check();
     EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
     EXPECT_EQ(status.error_message(), detail.message);
+    EXPECT_EQ(status.error_message().find("test_instance_0"), std::string::npos);
     ErrorDetailsPB details;
     ASSERT_TRUE(details.ParseFromString(status.error_details()));
     EXPECT_EQ(details.error_code(), kEngineUnavailable);

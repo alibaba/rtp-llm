@@ -4,6 +4,32 @@ from unittest import mock
 
 
 class TestCudaGraphSleepReclaim(unittest.TestCase):
+    def test_destructive_release_failure_reaches_sleep_hook(self):
+        from rtp_llm.utils import sleep_gpu_reclaim as reclaim
+
+        with mock.patch.dict(
+            os.environ, {"RTP_LLM_SLEEP_FREE_RUNTIME_CACHES": "1"}, clear=True
+        ), mock.patch.object(
+            reclaim,
+            "_clear_module_device_caches",
+            side_effect=reclaim.RuntimeCacheReleaseError(
+                "Mega symmetric-memory release failed"
+            ),
+        ), mock.patch.object(
+            reclaim.torch.cuda, "device"
+        ), mock.patch.object(
+            reclaim.torch.cuda, "mem_get_info", return_value=(100, 200)
+        ), mock.patch.object(
+            reclaim, "_snapshot_summary", return_value=""
+        ), mock.patch.object(
+            reclaim.torch.cuda, "empty_cache"
+        ) as trim:
+            with self.assertRaisesRegex(
+                reclaim.RuntimeCacheReleaseError, "Mega symmetric-memory"
+            ):
+                reclaim.release_and_trim("cuda:0")
+            trim.assert_not_called()
+
     def test_init_memory_probe_is_opt_in(self):
         from rtp_llm.utils import gpu_mem_probe
 

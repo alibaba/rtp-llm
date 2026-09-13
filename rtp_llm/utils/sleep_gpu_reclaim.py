@@ -73,6 +73,10 @@ def _optional_release_allowed(graph_baked: bool) -> bool:
     return not graph_baked and release_enabled
 
 
+class RuntimeCacheReleaseError(RuntimeError):
+    """A partially destroyed runtime resource cannot safely resume serving."""
+
+
 def _clear_module_device_caches() -> list[str]:
     """Drop long-lived Python-held device tensor caches so their segments free.
 
@@ -180,12 +184,16 @@ def _clear_module_device_caches() -> list[str]:
                     "output (destroy+recreate; re-rendezvous on next forward)"
                 )
             except Exception as e:
-                notes.append(f"mega buffers release failed: {e}")
+                raise RuntimeCacheReleaseError(
+                    "Mega symmetric-memory release failed"
+                ) from e
         else:
             notes.append(
                 f"mega buffers kept ~{output_gib:.3f} GiB output + ~{symm_gib:.3f} GiB "
                 "symm (RTP_LLM_SLEEP_FREE_RUNTIME_CACHES not set)"
             )
+    except RuntimeCacheReleaseError:
+        raise
     except Exception as e:  # module may be absent on non-dsv4 models
         notes.append(f"mega_buf cache skip: {e}")
     try:
@@ -443,7 +451,8 @@ def release_and_trim(device: object, reason: str = "sleep") -> None:
     """Free known Python-held device caches, then return free segments to the driver.
 
     Logs physical driver-free before/after and a segment breakdown so the residual
-    can be attributed. Never raises.
+    can be attributed. Destructive runtime-resource failures propagate; optional
+    allocator trimming and diagnostics remain best-effort.
     """
     try:
         with torch.cuda.device(device):
@@ -494,7 +503,9 @@ def release_and_trim(device: object, reason: str = "sleep") -> None:
                 ";".join(notes) if notes else "no_caches_cleared",
                 after_snapshot,
             )
-    except Exception as e:  # noqa: BLE001 - never fail the sleep hook
+    except RuntimeCacheReleaseError:
+        raise
+    except Exception as e:  # noqa: BLE001 - best-effort allocator diagnostics
         logging.warning(
             "[SleepMem] op=%s phase=reclaim status=error detail=%s",
             "wake" if reason.startswith("wake") else "sleep",
