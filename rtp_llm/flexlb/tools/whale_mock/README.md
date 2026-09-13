@@ -33,6 +33,11 @@ P 每块等效 512 token（8路分片），D 每块 64 token；依据同主机�
 这份文件标定引擎执行和容量，不声明调度器策略完全相同。
 
 master 通过本地 discovery 文件发现各引擎，不依赖 P/D VIP。
+寄生部署的 frontend 平台健康检查应使用原生 `/frontend_health`（端口沿用 frontend HTTP 端口），
+而不是依赖 P/D VIP 的 `/health`；独立 P/D Pod 模式仍保留原检查。
+`/frontend_health` 只证明 frontend 自身可用，验收必须同时检查 master `/health`、
+mock 控制端口 `/health` 的 `healthy` 和 `engines`，以及实际 decode 完成计数。
+这项部署配置不能代替下游推理成功率，也不改动生产部署的健康检查。
 控制端口使用 Pod IP；引擎 RPC 使用独立 loopback IP 和端口，保证 master 的 engineIp 指标不互相覆盖。同 Pod P→D 仍使用现有 RPC 协议。
 框架自动接续，不等待客户端 Fetch；启动任何对端失败时 supervisor 会关闭另一 JVM。
 
