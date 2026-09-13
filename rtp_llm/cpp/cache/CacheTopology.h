@@ -1,10 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <algorithm>
 #include <functional>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -21,14 +20,15 @@ struct GroupBase {
     std::string                        tag;
     std::shared_ptr<const KVCacheSpec> spec;
     CacheGroupPolicy                   policy;
-    std::vector<int>                   layer_ids;
 
-    uint32_t block_num                 = 0;
-    uint32_t local_kv_head_num         = 1;
-    size_t   seq_size_per_block        = 0;
-    size_t   kernel_seq_size_per_block = 0;
-    size_t   kv_block_stride_bytes     = 0;
-    size_t   kv_scale_stride_bytes     = 0;
+    uint32_t block_num             = 0;
+
+    size_t seqSizePerBlock() const;
+    size_t kernelSeqSizePerBlock() const;
+    size_t kernelBlocksPerKvBlock() const;
+    size_t   kvBlockStrideBytes() const;
+    size_t   kvScaleStrideBytes() const;
+    uint32_t localKvHeadNum() const;
 };
 
 // Order is deterministic but carries no business meaning.
@@ -62,33 +62,32 @@ public:
     bool   hasSingleGlobalGroup() const;
     bool   hasOneGroupPerLayer() const;
 
-    // Lazily materialized compatibility projections. The same immutable
-    // object is returned for the lifetime of this topology.
-    const std::vector<std::string>&                groupTagsSnapshot() const;
-    const std::vector<CacheGroupType>&             groupTypesSnapshot() const;
-    const std::vector<KVCacheSpecType>&            groupSpecTypesSnapshot() const;
-    const std::vector<std::vector<int>>&           layerGroupIdsSnapshot() const;
-    const std::vector<std::map<std::string, int>>& layerTagToGroupIdSnapshot() const;
+    size_t totalGroupBlockSizeBytes() const;
+    size_t           blockSizeBytesForGroup(size_t group_id) const;
+    std::vector<int> layerIdsForGroup(size_t group_id) const;
+    std::vector<int> groupIdsForLayer(int layer_id) const;
+
+    size_t maxKernelBlocksPerKvBlock() const {
+        size_t result = 1;
+        for (const auto& group : groups_) {
+            result = std::max(result, group.kernelBlocksPerKvBlock());
+        }
+        return result;
+    }
+
+    // Compatibility projections are values, never a second configuration source.
+    std::vector<std::string>      groupTagsSnapshot() const;
+    std::vector<CacheGroupType>   groupTypesSnapshot() const;
+    std::vector<std::vector<int>> layerGroupIdsSnapshot() const;
 
 private:
-    struct SnapshotCache {
-        std::vector<std::string>                group_tags;
-        std::vector<CacheGroupType>             group_types;
-        std::vector<KVCacheSpecType>            group_spec_types;
-        std::vector<std::vector<int>>           layer_group_ids;
-        std::vector<std::map<std::string, int>> layer_tag_to_group_id;
-    };
-
     CacheTopology(std::vector<GroupBase> groups, std::vector<LayerBase> layers);
     void validateAndBuildIndex();
-    void buildSnapshots() const;
 
     std::vector<GroupBase>                  groups_;
     std::vector<LayerBase>                  layers_;
-    std::unordered_map<std::string, size_t> tag_to_group_id_;
 
-    mutable std::once_flag                       snapshot_once_;
-    mutable std::shared_ptr<const SnapshotCache> snapshots_;
+    std::unordered_map<std::string, size_t> tag_to_group_id_;
 };
 
 }  // namespace rtp_llm

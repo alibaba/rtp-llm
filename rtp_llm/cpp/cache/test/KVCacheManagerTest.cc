@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -103,7 +104,7 @@ static void assertScaleEq(const std::shared_ptr<rtp_llm::KVCacheManager>& cache_
     ASSERT_NE(addr_info.kv_scale_addr, nullptr);
     ASSERT_EQ(expected_k.size(), expected_v.size());
 
-    const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kv_scale_stride_bytes;
+    const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kvScaleStrideBytesForGroup(0);
     ASSERT_GT(kv_scale_stride_bytes, 0u);
     const size_t kv_scale_block_bytes = kv_scale_stride_bytes / 2;
     void*        v_scale_addr = static_cast<void*>(static_cast<char*>(addr_info.kv_scale_addr) + kv_scale_block_bytes);
@@ -159,7 +160,7 @@ static void setGroupBlockNumsForTest(CacheConfig& config, const std::vector<uint
         kv_strides.push_back(config.kvBlockStrideBytesForGroup(gid));
         scale_strides.push_back(config.kvScaleStrideBytesForGroup(gid));
     }
-    config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
+    rtp_llm::test::setGroupBlockLayout(config, block_nums, kv_strides, scale_strides);
 }
 
 static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {
@@ -435,9 +436,10 @@ TEST_F(KVCacheManagerTest, WriteKVBlockUsesTargetLayerSpec) {
     auto small_spec = makeResolvedMhaSpec(DataType::TYPE_INT8, 1, 4, 2, "small");
     config.fromGroupedSpecs(
         {large_spec, small_spec}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"large", "small"});
-    config.setGroupBlockLayout({4, 4},
-                               {large_spec->block_size_bytes(), small_spec->block_size_bytes()},
-                               {large_spec->scale_block_size_bytes(), small_spec->scale_block_size_bytes()});
+    rtp_llm::test::setGroupBlockLayout(config,
+                                       {4, 4},
+                                       {large_spec->block_size_bytes(), small_spec->block_size_bytes()},
+                                       {large_spec->scale_block_size_bytes(), small_spec->scale_block_size_bytes()});
     auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
@@ -457,9 +459,10 @@ TEST_F(KVCacheManagerTest, WriteKVBlockRejectsMultiGroupLayer) {
     auto second = makeResolvedMhaSpec(DataType::TYPE_INT8, 1, 4, 2, "second");
     config.fromGroupedSpecs(
         {first, second}, {{0}, {0}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"first", "second"});
-    config.setGroupBlockLayout({4, 4},
-                               {first->block_size_bytes(), second->block_size_bytes()},
-                               {first->scale_block_size_bytes(), second->scale_block_size_bytes()});
+    rtp_llm::test::setGroupBlockLayout(config,
+                                       {4, 4},
+                                       {first->block_size_bytes(), second->block_size_bytes()},
+                                       {first->scale_block_size_bytes(), second->scale_block_size_bytes()});
     auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
     ASSERT_TRUE(manager->init());
     auto k = torch::zeros({static_cast<int64_t>(first->k_block_size_bytes())}, torch::kInt8);
@@ -539,7 +542,7 @@ TEST_F(KVCacheManagerTest, BlockCopyAlsoCopiesScaleWhenQuantized) {
         auto host_k_t = torch::tensor(src_k, torch::kFloat32);
         auto host_v_t = torch::tensor(src_v, torch::kFloat32);
 
-        const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kv_scale_stride_bytes;
+        const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kvScaleStrideBytesForGroup(0);
         ASSERT_GT(kv_scale_stride_bytes, 0u);
         const size_t kv_scale_block_bytes = kv_scale_stride_bytes / 2;
         void*        v_scale_addr = static_cast<void*>(static_cast<char*>(addr.kv_scale_addr) + kv_scale_block_bytes);

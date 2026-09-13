@@ -76,8 +76,8 @@ struct GptModelInputs {
     // Physical KV-manager block strides. These are independent of any kernel-block view exposed to attention ops.
     size_t kv_block_stride_bytes;
     size_t kv_scale_stride_bytes;
-    size_t seq_size_per_block;
-    size_t kernel_seq_size_per_block = 0;  // 0 means same as seq_size_per_block
+    size_t seq_size_per_block;             // tokens/base cache-key block
+    size_t kernel_seq_size_per_block = 0;  // tokens/kernel page for single group; 0 for multi-group topology
     bool   pd_separation             = false;
     bool   decode_entrance           = false;
     bool   use_opaque_kv_cache_store = false;

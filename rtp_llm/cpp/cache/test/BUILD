@@ -51,9 +51,11 @@ cc_library(
     name = "cache_config_test_utils",
     hdrs = [
         "CacheConfigTestUtils.h",
+        "TestLayoutSpec.h",
     ],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/config:model_config",
     ],
@@ -90,6 +92,7 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/models_py/bindings:op_defs",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

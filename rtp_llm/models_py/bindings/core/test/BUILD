@@ -6,6 +6,7 @@ test_copts = [
 ] + copts()
 
 exec_ops_test_deps = [
+    "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     "//rtp_llm/cpp/cache:cache_config",
     "//rtp_llm/models_py/bindings:op_defs",
     "//rtp_llm/models_py/bindings/core:cache_store_async_writer",

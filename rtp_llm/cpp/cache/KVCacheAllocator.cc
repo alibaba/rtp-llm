@@ -1159,8 +1159,10 @@ bool KVCacheAllocator::doInit() {
             full_group_ids_.push_back(gid);
         }
 
-        RTP_LLM_CHECK_WITH_INFO(
-            group->init(), "Failed to initialize KVCacheGroup %s(gid %d)", pool_config.pool_name.c_str(), gid);
+        RTP_LLM_CHECK_WITH_INFO(group->init(config_.layerIdsForGroup(gid)),
+                                "Failed to initialize KVCacheGroup %s(gid %d)",
+                                pool_config.pool_name.c_str(),
+                                gid);
         group_block_pools_.push_back(group_pool);
         kv_cache_groups_.push_back(group);
     }
@@ -1174,7 +1176,7 @@ bool KVCacheAllocator::doInit() {
 }
 
 int KVCacheAllocator::defaultGroupIdForLayer(int layer_id) const {
-    if (layer_id < 0 || static_cast<size_t>(layer_id) >= config_.layer_all_num) {
+    if (layer_id < 0 || static_cast<size_t>(layer_id) >= config_.layer_all_num()) {
         RTP_LLM_FAIL("invalid layer_id=%d", layer_id);
     }
     const auto& group = config_.topology().soleGroupForLayer(layer_id);
@@ -1191,10 +1193,10 @@ int KVCacheAllocator::validateGroupIdForLayer(int layer_id, int group_id) const 
                             "invalid group id %d for layer %d",
                             group_id,
                             layer_id);
-    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < config_.layer_all_num,
+    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < config_.layer_all_num(),
                             "invalid layer id %d for layer_all_num=%u",
                             layer_id,
-                            config_.layer_all_num);
+                            config_.layer_all_num());
     const auto& group_ids = config_.groupIdsForLayer(layer_id);
     RTP_LLM_CHECK_WITH_INFO(std::find(group_ids.begin(), group_ids.end(), group_id) != group_ids.end(),
                             "layer %d does not own cache group %d",
@@ -1339,7 +1341,7 @@ void KVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>&
         const auto   copy_type = BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(gid)]->where(),
                                                               group_block_pools_[static_cast<size_t>(gid)]->where());
         const auto&  group     = config_.topology().groupById(static_cast<size_t>(gid));
-        const size_t buffers_per_layer = group.kv_scale_stride_bytes > 0 ? 2 : 1;
+        const size_t buffers_per_layer = group.kvScaleStrideBytes() > 0 ? 2 : 1;
         copy_nums[copy_type] += config_.layerIdsForGroup(static_cast<size_t>(gid)).size() * buffers_per_layer;
     }
 
@@ -1353,8 +1355,8 @@ void KVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>&
         RTP_LLM_CHECK_WITH_INFO(
             static_cast<size_t>(gid) < group_block_pools_.size(), "missing block pool for group %d", gid);
         const auto&  group               = config_.topology().groupById(static_cast<size_t>(gid));
-        const size_t kv_block_size_bytes = group.kv_block_stride_bytes;
-        const size_t scale_block_bytes   = group.kv_scale_stride_bytes;
+        const size_t kv_block_size_bytes = group.kvBlockStrideBytes();
+        const size_t scale_block_bytes   = group.kvScaleStrideBytes();
         const auto   copy_type = BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(gid)]->where(),
                                                               group_block_pools_[static_cast<size_t>(gid)]->where());
 

@@ -1,6 +1,7 @@
 // Copyright (c) RTP-LLM
 
 #include <cstring>
+#include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include <map>
 #include <memory>
 #include <set>
@@ -82,15 +83,14 @@ TEST(KVCacheMemoryProtocolTest, TaglessBlocksAreAlwaysRejected) {
 
 CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     CacheConfig config;
-    config.dtype                       = rtp_llm::DataType::TYPE_UINT8;
-    config.layer_num                   = use_flash ? 43 : 61;
-    config.layer_all_num               = config.layer_num;
-    config.block_num                   = 512;
-    config.seq_size_per_block          = 256;
-    config.kernel_seq_size_per_block   = 256;
-    config.use_typed_cache_regions     = true;
-    config.use_opaque_kv_cache_store   = true;
-    config.is_sparse                   = true;
+    config.dtype                     = rtp_llm::DataType::TYPE_UINT8;
+    config.layer_num                 = use_flash ? 43 : 61;
+
+    config.block_num                 = 512;
+    config.seq_size_per_block        = 256;
+    config.use_typed_cache_regions   = true;
+    config.use_opaque_kv_cache_store = true;
+    config.is_sparse                 = true;
 
     constexpr size_t               kDsv4PoolNum = 7;
     const std::vector<std::string> group_tags   = {
@@ -120,7 +120,6 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     const std::vector<size_t>     group_kv_scale_stride_bytes(kDsv4PoolNum, 0);
     const std::vector<uint32_t>   group_block_nums(kDsv4PoolNum, config.block_num);
     std::vector<std::vector<int>> layers_by_group(kDsv4PoolNum);
-    config.layer_to_block_stride_bytes = std::vector<int>(config.layer_all_num, 0);
 
     auto make_spec = [&](size_t gid) -> KVCacheSpecPtr {
         return makeResolvedOpaqueSpec(group_types[gid] != CacheGroupType::FULL,
@@ -135,7 +134,7 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
         layers_by_group[static_cast<size_t>(gid)].push_back(static_cast<int>(layer));
     };
 
-    for (size_t layer = 0; layer < config.layer_all_num; ++layer) {
+    for (size_t layer = 0; layer < config.layer_all_num(); ++layer) {
         const bool is_csa = layer >= 2 && layer % 2 == 0;
         const bool is_hca = use_flash ? (layer >= 2 && layer % 2 == 1) : (!is_csa);
         if (is_csa) {
@@ -157,7 +156,8 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     }
     config.fromGroupedSpecs(specs, layers_by_group, group_types, group_tags);
     config.setGroupPolicies(group_policies);
-    config.setGroupBlockLayout(group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes);
+    rtp_llm::test::setGroupBlockLayout(
+        config, group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes);
     return config;
 }
 
@@ -172,7 +172,7 @@ void setGroupStridesForConfig(CacheConfig&               config,
     if (block_nums.empty()) {
         block_nums.assign(static_cast<size_t>(config.groupNums()), config.block_num);
     }
-    config.setGroupBlockLayout(block_nums, kv_block_stride_bytes, kv_scale_stride_bytes);
+    rtp_llm::test::setGroupBlockLayout(config, block_nums, kv_block_stride_bytes, kv_scale_stride_bytes);
 }
 
 ModelConfig makeDsv4ProModelConfig() {
@@ -233,32 +233,30 @@ CacheConfig makeRealDsv4TypedMemoryCopyConfig(bool use_flash) {
 
 CacheConfig makeTinyTypedHybridPoolConfig() {
     CacheConfig config;
-    config.dtype                       = rtp_llm::DataType::TYPE_FP16;
-    config.layer_num                   = 2;
-    config.layer_all_num               = 2;
-    config.block_num                   = 16;
-    config.seq_size_per_block          = 4;
-    config.kernel_seq_size_per_block   = 4;
+    config.dtype              = rtp_llm::DataType::TYPE_FP16;
+    config.layer_num          = 2;
+
+    config.block_num          = 16;
+    config.seq_size_per_block = 4;
 
     config.fromGroupedSpecs({makeMhaSpec("csa_kv", config.seq_size_per_block, config.dtype, 1, 4),
                              makeMhaSpec("swa_kv", config.seq_size_per_block, config.dtype, 1, 8)},
                             /*layers_by_group=*/{{0, 1}, {0, 1}},
                             {CacheGroupType::FULL, CacheGroupType::FULL},
                             {"csa_kv", "swa_kv"});
-    config.setGroupBlockLayout({config.block_num, config.block_num}, {16, 32}, {0, 0});
+    rtp_llm::test::setGroupBlockLayout(config, {config.block_num, config.block_num}, {16, 32}, {0, 0});
     return config;
 }
 
 CacheConfig makeKvOnlyTypedOpaqueConfig() {
     CacheConfig config;
-    config.dtype                       = rtp_llm::DataType::TYPE_UINT8;
-    config.layer_num                   = 2;
-    config.layer_all_num               = 2;
-    config.block_num                   = 16;
-    config.seq_size_per_block          = 256;
-    config.kernel_seq_size_per_block   = 256;
-    config.use_typed_cache_regions     = true;
-    config.use_opaque_kv_cache_store   = true;
+    config.dtype                     = rtp_llm::DataType::TYPE_UINT8;
+    config.layer_num                 = 2;
+
+    config.block_num                 = 16;
+    config.seq_size_per_block        = 256;
+    config.use_typed_cache_regions   = true;
+    config.use_opaque_kv_cache_store = true;
 
     const auto seq_size = static_cast<uint32_t>(config.seq_size_per_block);
     config.fromGroupedSpecs({makeResolvedOpaqueSpec(/*state_cache=*/false, "csa_kv", config.dtype, 64, seq_size),
@@ -266,7 +264,7 @@ CacheConfig makeKvOnlyTypedOpaqueConfig() {
                             /*layers_by_group=*/{{0, 1}, {0, 1}},
                             {CacheGroupType::FULL, CacheGroupType::FULL},
                             {"csa_kv", "indexer_kv"});
-    config.setGroupBlockLayout({config.block_num, config.block_num}, {64, 32}, {0, 0});
+    rtp_llm::test::setGroupBlockLayout(config, {config.block_num, config.block_num}, {64, 32}, {0, 0});
     return config;
 }
 
@@ -349,7 +347,7 @@ public:
         const auto layer_group_ids = config.layerGroupIdsSnapshot();
         const auto kv_strides      = config.groupKvBlockStrideBytesSnapshot();
         const auto scale_strides   = config.groupKvScaleStrideBytesSnapshot();
-        for (int layer = 0; layer < static_cast<int>(config.layer_all_num); ++layer) {
+        for (int layer = 0; layer < static_cast<int>(config.layer_all_num()); ++layer) {
             if (static_cast<size_t>(layer) >= layer_group_ids.size()) {
                 continue;
             }
@@ -576,7 +574,7 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<std::string>& host_tags) {
     const auto slots = connector->layerTagSlots();
     ASSERT_TRUE(connector->hasTypedLayerTagSlots(slots));
     ASSERT_TRUE(connector->supportsTypedPrefixCacheLayout(slots));
-    ASSERT_GT(slots.size(), config.layer_all_num);
+    ASSERT_GT(slots.size(), config.layer_all_num());
 
     auto mem_blocks = memory_pool->malloc(2);
     ASSERT_EQ(mem_blocks.size(), 2u);

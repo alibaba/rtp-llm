@@ -93,9 +93,34 @@ using LayerKVCacheSpecs = std::vector<std::vector<KVCacheSpecPtr>>;
 
 struct KVCacheSpec {
     std::string tag;
-    uint32_t    seq_size_per_block = 1;
+    uint32_t    seq_size_per_block;         // tokens/physical block of this group
+    uint32_t    kernel_seq_size_per_block;  // tokens/kernel page of this group
+    uint32_t    local_kv_head_num;          // layout heads on this rank
 
     KVCacheSpecType type = KVCacheSpecType::MultiHeadAttention;
+
+    KVCacheSpec(std::string tag,
+                uint32_t    seq_size_per_block,
+                uint32_t    kernel_seq_size_per_block,
+                uint32_t    local_kv_head_num):
+        tag(std::move(tag)),
+        seq_size_per_block(seq_size_per_block),
+        kernel_seq_size_per_block(kernel_seq_size_per_block),
+        local_kv_head_num(local_kv_head_num) {
+        RTP_LLM_CHECK_WITH_INFO(
+            seq_size_per_block > 0, "KVCacheSpecDesc tag=%s requires positive seq_size_per_block", this->tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(kernel_seq_size_per_block > 0,
+                                "KVCacheSpecDesc tag=%s requires positive kernel_seq_size_per_block",
+                                this->tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(
+            seq_size_per_block % kernel_seq_size_per_block == 0,
+            "KVCacheSpecDesc tag=%s seq_size_per_block=%u must be divisible by kernel_seq_size_per_block=%u",
+            this->tag.c_str(),
+            seq_size_per_block,
+            kernel_seq_size_per_block);
+        RTP_LLM_CHECK_WITH_INFO(
+            local_kv_head_num > 0, "KVCacheSpecDesc tag=%s requires positive local_kv_head_num", this->tag.c_str());
+    }
 
     virtual size_t block_size() const   = 0;
     virtual size_t k_block_size() const = 0;
@@ -132,7 +157,8 @@ struct KVCacheSpec {
     std::string fingerprint() const {
         std::ostringstream os;
         os << "tag=" << tag << ";type=" << static_cast<int>(type) << ";dtype=" << static_cast<int>(memoryLayoutDType())
-           << ";seq_size_per_block=" << seq_size_per_block << ";block_elems=" << block_size()
+           << ";seq_size_per_block=" << seq_size_per_block << ";kernel_seq_size_per_block=" << kernel_seq_size_per_block
+           << ";local_kv_head_num=" << local_kv_head_num << ";block_elems=" << block_size()
            << ";k_block_elems=" << k_block_size() << ";v_block_elems=" << v_block_size()
            << ";block_bytes=" << block_size_bytes() << ";k_block_bytes=" << k_block_size_bytes()
            << ";v_block_bytes=" << v_block_size_bytes() << ";block_payload_bytes=" << block_payload_bytes()
@@ -156,6 +182,8 @@ protected:
         os << indent1 << "type=" << KVCacheSpecTypeToString(type) << "(" << static_cast<int>(type) << ")\n";
         os << indent1 << "dtype=" << static_cast<int>(memoryLayoutDType()) << "\n";
         os << indent1 << "seq_size_per_block=" << seq_size_per_block << "\n";
+        os << indent1 << "kernel_seq_size_per_block=" << kernel_seq_size_per_block << "\n";
+        os << indent1 << "local_kv_head_num=" << local_kv_head_num << "\n";
         os << indent1 << "block_size=" << block_size() << "\n";
         os << indent1 << "k_block_size=" << k_block_size() << "\n";
         os << indent1 << "v_block_size=" << v_block_size() << "\n";
@@ -170,6 +198,7 @@ protected:
         os << indent1 << "v_scale_block_size_bytes=" << v_scale_block_size_bytes() << "\n";
         return os.str();
     }
+
 };
 
 }  // namespace rtp_llm

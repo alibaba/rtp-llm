@@ -882,13 +882,12 @@ TEST_F(KVCacheAllocatorSinglePathTest, BlockBatchCopyCopiesCompleteSparseIndexer
     config.finalizeBlockNums(/*global_block_num=*/4, RuntimeConfig{});
 
     ASSERT_TRUE(config.is_sparse);
-    ASSERT_GT(config.kv_scale_stride_bytes, 0u);
-    ASSERT_EQ(config.kv_scale_stride_bytes, config.kvScaleStrideBytesForGroup(0));
+    ASSERT_GT(config.kvScaleStrideBytesForGroup(0), 0u);
 
     allocator_ = std::make_shared<KVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
 
-    const auto stride   = config.kv_scale_stride_bytes;
+    const auto stride   = config.kvScaleStrideBytesForGroup(0);
     auto       snapshot = [&]() {
         std::vector<std::vector<uint8_t>> blocks(config.block_num, std::vector<uint8_t>(stride));
         for (uint32_t block = 0; block < config.block_num; ++block) {

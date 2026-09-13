@@ -1,4 +1,5 @@
 #include <limits>
+#include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include <memory>
 #include <numeric>
 #include "torch/all.h"
@@ -16,6 +17,8 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 
 using namespace std;
 
@@ -37,7 +40,7 @@ static void initFullCacheConfig(CacheConfig& cache_config, int layer_num) {
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     cache_config.layer_num     = static_cast<uint32_t>(layer_num);
-    cache_config.layer_all_num = static_cast<uint32_t>(layer_num);
+
     cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
 }
 
@@ -138,6 +141,168 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     EXPECT_EQ(toVec<int64_t>(cache_keys), (std::vector<int64_t>{101, 102, 103, 0, 0, 201, 202, 203, 204, 205}));
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testModelKernelPageIgnoresLargerStatePool) {
+    for (const bool state_first : {false, true}) {
+        SCOPED_TRACE(state_first);
+        ModelConfig model_config;
+        model_config.num_layers = 2;
+        CacheConfig cache_config;
+        cache_config.layer_num                              = 2;
+        cache_config.seq_size_per_block                     = 256;
+        auto attention = std::make_shared<MHAKVCacheSpec>("attention", 256, 128, 1);
+        auto state     = std::make_shared<FixedStateCacheSpec>("state", 512, 512, 1);
+        if (state_first) {
+            cache_config.fromGroupedSpecs(
+                {state, attention}, {{0}, {1}}, {CacheGroupType::SWA, CacheGroupType::FULL}, {"state", "attention"});
+        } else {
+            cache_config.fromGroupedSpecs(
+                {attention, state}, {{1}, {0}}, {CacheGroupType::FULL, CacheGroupType::SWA}, {"attention", "state"});
+        }
+
+        EXPECT_EQ(cache_config.kernelSeqSizePerBlockForGroup(cache_config.groupIdForTag("attention")), 128u);
+        EXPECT_EQ(cache_config.kernelSeqSizePerBlockForGroup(cache_config.groupIdForTag("state")), 512u);
+        NormalBatchStreamProcessor processor(
+            model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, true);
+        EXPECT_EQ(processor.model_input_gatherer_config_.seq_size_per_block, 256u);
+        EXPECT_EQ(processor.model_input_gatherer_config_.kernel_seq_size_per_block, 0u);
+        EXPECT_EQ(processor.model_input_gatherer_config_.kernel_blocks_per_kv_block, 2u);
+
+        GraphParams graph;
+        graph.tokens_per_block = cache_config.seq_size_per_block;
+        graph.cache_topology   = cache_config.topologyPtr();
+        graph.resolveCacheGeometry();
+        EXPECT_EQ(graph.tokens_per_block, 256);
+        EXPECT_EQ(graph.max_kernel_blocks_per_kv_block, 2u);
+        EXPECT_EQ(graph.kv_cache_group_tags, cache_config.groupTagsSnapshot());
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDistinctKernelPagesRemainGroupLocal) {
+    for (const bool reversed : {false, true}) {
+        ModelConfig model;
+        model.num_layers = 1;
+        CacheConfig config;
+        config.layer_num                        = 1;
+        config.seq_size_per_block               = 256;  // tokens/cache-key block
+        auto first                              = std::make_shared<MHAKVCacheSpec>("first", 256, 64, 1);
+        auto second                             = std::make_shared<MHAKVCacheSpec>("second", 512, 128, 1);
+        config.fromGroupedSpecs(reversed ? std::vector<KVCacheSpecPtr>{second, first} :
+                                           std::vector<KVCacheSpecPtr>{first, second},
+                                {{0}, {0}},
+                                {CacheGroupType::FULL, CacheGroupType::FULL});
+        NormalBatchStreamProcessor processor(model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, config, true);
+        EXPECT_EQ(processor.model_input_gatherer_config_.kernel_seq_size_per_block, 0u);
+        EXPECT_EQ(config.groupForLayer(0, "first").kernelSeqSizePerBlock(), 64u);
+        EXPECT_EQ(config.groupForLayer(0, "second").kernelSeqSizePerBlock(), 128u);
+
+        GraphParams graph;
+        graph.tokens_per_block               = config.seq_size_per_block;
+        graph.kernel_tokens_per_block        = 3;  // stale scalar must not determine tagged geometry
+        graph.max_kernel_blocks_per_kv_block = 999;
+        graph.cache_topology                 = config.topologyPtr();
+        graph.resolveCacheGeometry();
+        EXPECT_EQ(graph.max_kernel_blocks_per_kv_block, 4u);  // kernel pages/physical block
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testSingleGroupGraphUsesSpecGeometry) {
+    CacheConfig config;
+    config.layer_num                        = 1;
+    config.seq_size_per_block               = 256;  // tokens/cache-key block
+    auto spec                               = std::make_shared<MHAKVCacheSpec>("attention", 512, 64, 1);
+    config.fromGroupedSpecs({spec}, {{0}}, {CacheGroupType::FULL});
+
+    GraphParams graph;
+    graph.tokens_per_block = config.seq_size_per_block;
+    graph.cache_topology   = config.topologyPtr();
+    graph.resolveCacheGeometry();
+    EXPECT_EQ(graph.kernel_tokens_per_block, 0);
+    EXPECT_EQ(graph.max_kernel_blocks_per_kv_block, 8u);  // kernel pages/physical block
+    EXPECT_EQ(graph.kv_cache_group_tags, config.groupTagsSnapshot());
+    graph.tokens_per_block = 384;  // tokens/cache-key block; not a divisor of the group span
+    EXPECT_ANY_THROW(graph.resolveCacheGeometry());
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testCachelessGraphGeometryValidation) {
+    GraphParams graph;
+    graph.tokens_per_block        = 256;
+    graph.kernel_tokens_per_block = 64;
+    graph.resolveCacheGeometry();
+    EXPECT_EQ(graph.max_kernel_blocks_per_kv_block, 4u);
+    graph.tokens_per_block = 0;
+    EXPECT_ANY_THROW(graph.resolveCacheGeometry());
+    graph.tokens_per_block        = 256;
+    graph.kernel_tokens_per_block = 96;
+    EXPECT_ANY_THROW(graph.resolveCacheGeometry());
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testMixedGroupBlockWidthsGatherCompleteRows) {
+    for (const int full_bpk : {4, 128}) {
+        for (const bool full_first : {false, true}) {
+            SCOPED_TRACE("full_bpk=" + std::to_string(full_bpk) + " full_first=" + std::to_string(full_first));
+            ModelConfig model_config;
+            model_config.max_seq_len = 2048;
+            model_config.vocab_size  = 2048;
+            model_config.num_layers  = 2;
+            CacheConfig cache_config;
+            cache_config.layer_num = 2;
+            auto      full         = std::make_shared<MHAKVCacheSpec>("full", 128, 128 / full_bpk, 1);
+            auto      swa          = std::make_shared<MHAKVCacheSpec>("swa", 128, 128, 1);
+            const int full_gid = full_first ? 0 : 1;
+            const int swa_gid  = 1 - full_gid;
+            if (full_first) {
+                cache_config.fromGroupedSpecs(
+                    {full, swa}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::SWA}, {"full", "swa"});
+            } else {
+                cache_config.fromGroupedSpecs(
+                    {swa, full}, {{1}, {0}}, {CacheGroupType::SWA, CacheGroupType::FULL}, {"swa", "full"});
+            }
+            ResourceContext              resource_context;
+            RuntimeConfig                runtime_config;
+            std::list<GenerateStreamPtr> streams;
+            for (int batch = 0; batch < 2; ++batch) {
+                auto query             = std::make_shared<GenerateInput>();
+                query->input_ids       = hostIntBuffer({1, 2, 3});
+                query->generate_config = std::make_shared<GenerateConfig>();
+                auto stream            = std::make_shared<NormalGenerateStream>(
+                    query, model_config, runtime_config, resource_context, nullptr);
+                BatchKVCacheResource resource;
+                resource.resetBatchSize(1);
+                resource.initGroups(cache_config.topologyPtr());
+                resource.setBatchBlocks(0, full_gid, {10 + batch * 2, 11 + batch * 2});
+                resource.setBatchBlocks(0, swa_gid, {20 + batch});
+                stream->setKVCache(resource);
+                stream->generate_status_->status = StreamState::RUNNING;
+                streams.push_back(stream);
+            }
+            StreamGroups               groups(streams);
+            NormalBatchStreamProcessor processor(
+                model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, false);
+            NormalModelInputGatherer gatherer(processor.model_input_gatherer_config_);
+            TensorHolder             holder;
+            auto                     device_table = gatherer.gatherKvCacheKernelBlockId(groups, holder);
+            ASSERT_TRUE(device_table.ok());
+            auto inputs = processor.gatherModelInput(groups, holder);
+            ASSERT_TRUE(inputs.ok());
+            ASSERT_EQ(inputs->kv_cache_kernel_block_id.size(2), 2 * full_bpk);
+            EXPECT_EQ(toVec<int32_t>(*device_table), toVec<int32_t>(inputs->kv_cache_kernel_block_id));
+            for (int batch = 0; batch < 2; ++batch) {
+                std::vector<int32_t> expected_full(2 * full_bpk);
+                std::iota(expected_full.begin(), expected_full.end(), (10 + batch * 2) * full_bpk);
+                EXPECT_EQ(toVec<int32_t>(inputs->kv_cache_kernel_block_id[full_gid][batch]), expected_full);
+                std::vector<int32_t> expected_swa(2 * full_bpk, 0);
+                expected_swa[0] = 20 + batch;
+                EXPECT_EQ(toVec<int32_t>(inputs->kv_cache_kernel_block_id[swa_gid][batch]), expected_swa);
+            }
+            auto undersized_config                       = processor.model_input_gatherer_config_;
+            undersized_config.kernel_blocks_per_kv_block = 1;
+            NormalModelInputGatherer undersized(undersized_config);
+            EXPECT_ANY_THROW((void)undersized.gatherKvCacheKernelBlockId(groups, holder));
+            EXPECT_ANY_THROW((void)undersized.gather(groups, holder));
+        }
+    }
+}
+
 class TestStatefulLogitsProcessor: public BaseLogitsProcessor {
 public:
     explicit TestStatefulLogitsProcessor(bool async_device_state): async_device_state_(async_device_state) {}
@@ -187,8 +352,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
     initFullCacheConfig(cache_config, model_config.num_layers);
-    cache_config.kv_block_stride_bytes = 4096;
-    cache_config.kv_scale_stride_bytes = 256;
+    rtp_llm::test::setGroupBlockLayout(cache_config, {cache_config.block_num}, {4096}, {256});
 
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
@@ -271,8 +435,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
         EXPECT_EQ(kv_cache_block_id, toVec<int>(model_input.kv_cache_block_id));
-        EXPECT_EQ(model_input.kv_block_stride_bytes, cache_config.kv_block_stride_bytes);
-        EXPECT_EQ(model_input.kv_scale_stride_bytes, cache_config.kv_scale_stride_bytes);
+        EXPECT_EQ(model_input.kv_block_stride_bytes, cache_config.kvBlockStrideBytesForGroup(0));
+        EXPECT_EQ(model_input.kv_scale_stride_bytes, cache_config.kvScaleStrideBytesForGroup(0));
     }
     {
         MMModelConfig mm_model_config;

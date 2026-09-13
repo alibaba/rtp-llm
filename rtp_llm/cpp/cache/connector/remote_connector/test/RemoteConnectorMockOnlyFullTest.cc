@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
@@ -133,22 +134,19 @@ private:
 
     void initCacheConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {
         cache_config_.layer_num          = layer_num;
-        cache_config_.layer_all_num      = layer_num;
+
         cache_config_.block_num          = block_num;
         cache_config_.seq_size_per_block = seq_size_per_block;
 
-        auto mha_spec                       = makeTestMhaSpec("default", static_cast<uint32_t>(seq_size_per_block));
-        cache_config_.dtype                 = rtp_llm::DataType::TYPE_FP16;
-        cache_config_.kv_block_stride_bytes = mha_spec->block_size_bytes();  // one-layer KV bytes for one logical block
-        cache_config_.kv_scale_stride_bytes = 0;
-        cache_config_.kv_block_size_bytes   = static_cast<size_t>(layer_num) * cache_config_.kv_block_stride_bytes;
-        cache_config_.kv_scale_size_bytes   = 0;
-        cache_config_.block_size_bytes      = cache_config_.kv_block_size_bytes;  // (kv + scale)
+        auto mha_spec       = makeTestMhaSpec("default", static_cast<uint32_t>(seq_size_per_block));
+        cache_config_.dtype = rtp_llm::DataType::TYPE_FP16;
         std::vector<int> layer_ids(layer_num);
         for (int i = 0; i < layer_num; ++i) {
             layer_ids[i] = i;
         }
         cache_config_.fromGroupedSpecs({mha_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+        rtp_llm::test::setGroupBlockLayout(
+            cache_config_, {static_cast<uint32_t>(block_num)}, {mha_spec->block_size_bytes()}, {0});
     }
 };
 

@@ -114,9 +114,6 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
 std::shared_ptr<const CacheTopology> projectTopology(const CacheTopology&       source,
                                                      const std::vector<size_t>& global_layer_ids) {
     std::vector<GroupBase> groups = source.groups();
-    for (auto& group : groups) {
-        group.layer_ids.clear();
-    }
 
     std::vector<LayerBase> layers;
     layers.reserve(global_layer_ids.size());
@@ -125,9 +122,6 @@ std::shared_ptr<const CacheTopology> projectTopology(const CacheTopology&       
         LayerBase   layer;
         layer.layer_id   = static_cast<int>(local_layer_id);
         layer.group_tags = source_layer.group_tags;
-        for (const auto& tag : layer.group_tags) {
-            groups[source.groupIdForTag(tag)].layer_ids.push_back(static_cast<int>(local_layer_id));
-        }
         layers.push_back(std::move(layer));
     }
     return CacheTopology::create(std::move(groups), std::move(layers));
@@ -146,7 +140,7 @@ GroupedCacheLayerLayout projectLayout(const GroupedCacheLayerLayout&       sourc
     for (const auto& target_group : target_topology->groups()) {
         std::vector<BlockBufferPtrInfo> layers(global_layer_ids.size());
         const auto&                     source_group = source.group(target_group.tag);
-        for (int local_layer_id : target_group.layer_ids) {
+        for (int local_layer_id : target_topology->layerIdsForGroup(target_topology->groupIdForTag(target_group.tag))) {
             RTP_LLM_CHECK_WITH_INFO(local_layer_id >= 0
                                         && static_cast<size_t>(local_layer_id) < global_layer_ids.size(),
                                     "cache layout projection tag=%s invalid local layer=%d",
@@ -220,7 +214,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_num=%d, block_size=%dB, seq_size_per_block=%zu",
                      config_.layer_num,
                      config_.block_num,
-                     config_.block_size_bytes,
+                     config_.totalGroupBlockSizeBytes(),
                      config_.seq_size_per_block);
 }
 

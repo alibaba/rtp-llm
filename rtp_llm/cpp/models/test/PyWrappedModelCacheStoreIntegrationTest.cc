@@ -32,10 +32,10 @@ constexpr int    kLayerId        = 0;
 constexpr size_t kPhysicalBlocks = 8;
 
 struct TestCacheSpec: public KVCacheSpec {
-    TestCacheSpec(std::string cache_tag, size_t tokens_per_block, size_t bytes): bytes_(bytes) {
-        tag                       = std::move(cache_tag);
-        seq_size_per_block        = static_cast<uint32_t>(tokens_per_block);
-        kernel_seq_size_per_block = seq_size_per_block;
+    TestCacheSpec(std::string cache_tag, size_t tokens_per_block, size_t bytes):
+        KVCacheSpec(
+            std::move(cache_tag), static_cast<uint32_t>(tokens_per_block), static_cast<uint32_t>(tokens_per_block), 1),
+        bytes_(bytes) {
         type                      = KVCacheSpecType::OpaqueState;
     }
 
@@ -81,7 +81,7 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
     CacheConfig config;
     config.dtype                     = DataType::TYPE_INT8;
     config.layer_num                 = 1;
-    config.layer_all_num             = 1;
+
     config.block_num                 = kPhysicalBlocks;
     config.seq_size_per_block        = groups.front().tokens_per_block;
     config.use_opaque_kv_cache_store = true;
@@ -96,9 +96,7 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
         group.spec   = std::make_shared<TestCacheSpec>(spec.tag, spec.tokens_per_block, spec.stride_bytes);
         group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
         group.policy.explicit_block_num = kPhysicalBlocks;
-        group.layer_ids                 = {kLayerId};
         group.block_num                 = kPhysicalBlocks;
-        group.kv_block_stride_bytes     = spec.stride_bytes;
         topology_groups.push_back(std::move(group));
         layer_tags.push_back(spec.tag);
     }
@@ -120,7 +118,7 @@ LayoutAndBases makeLayout(const CacheConfig& config) {
     std::map<std::string, uintptr_t>      bases;
     for (const auto& group : config.topology().groups()) {
         auto storage =
-            torch::zeros({static_cast<int64_t>(kPhysicalBlocks), static_cast<int64_t>(group.kv_block_stride_bytes)},
+            torch::zeros({static_cast<int64_t>(kPhysicalBlocks), static_cast<int64_t>(group.kvBlockStrideBytes())},
                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
         bases.emplace(group.tag, reinterpret_cast<uintptr_t>(storage.data_ptr()));
         layouts.emplace(group.tag,

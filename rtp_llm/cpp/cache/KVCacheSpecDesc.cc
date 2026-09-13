@@ -40,6 +40,16 @@ CacheGroupType SpecBuilder::groupType(const KVCacheSpecDesc& desc) {
     return CacheGroupType::FULL;
 }
 
+uint32_t SpecBuilder::kernelSeqSizePerBlock(const KVCacheSpecDesc&  desc,
+                                            const SpecBuildContext& ctx,
+                                            uint32_t                physical_seq_size_per_block) {
+    const auto requested = ctx.kernel_tokens_per_block == 0 ? physical_seq_size_per_block : ctx.kernel_tokens_per_block;
+    if (groupType(desc) != CacheGroupType::FULL) {
+        return physical_seq_size_per_block;
+    }
+    return std::min(requested, physical_seq_size_per_block);
+}
+
 CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
     CacheGroupPolicy policy = defaultCacheGroupPolicy(groupType(desc));
     if (desc.is_state_cache) {

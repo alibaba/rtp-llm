@@ -21,21 +21,23 @@ public:
                       int64_t                  kernel_tokens_per_block,
                       std::vector<int>         prefill_capture_seq_lens,
                       int64_t                  hidden_size,
-                      std::vector<std::string> group_tags) {
+                      std::vector<std::string> group_tags,
+                      size_t                   max_kernel_blocks_per_kv_block) {
         reset_runner();
         GraphParams params;
-        params.enable_cuda_graph_debug_mode = true;
-        params.is_prefill_cuda_graph_mode   = true;
-        params.max_seq_len                  = static_cast<int>(max_seq_len);
-        params.tokens_per_block             = static_cast<int>(tokens_per_block);
-        params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
-        params.num_tokens_per_bs            = static_cast<int>(max_seq_len);
-        params.max_context_batch_size       = static_cast<size_t>(max_context_batch_size);
-        params.hidden_size                  = static_cast<size_t>(hidden_size);
-        params.input_hidden_size            = static_cast<size_t>(hidden_size);
-        params.model_data_type              = c10::ScalarType::BFloat16;
-        params.prefill_capture_seq_lens     = std::move(prefill_capture_seq_lens);
-        params.kv_cache_group_tags          = std::move(group_tags);
+        params.enable_cuda_graph_debug_mode   = true;
+        params.is_prefill_cuda_graph_mode     = true;
+        params.max_seq_len                    = static_cast<int>(max_seq_len);
+        params.tokens_per_block               = static_cast<int>(tokens_per_block);
+        params.kernel_tokens_per_block        = static_cast<int>(kernel_tokens_per_block);
+        params.num_tokens_per_bs              = static_cast<int>(max_seq_len);
+        params.max_context_batch_size         = static_cast<size_t>(max_context_batch_size);
+        params.hidden_size                    = static_cast<size_t>(hidden_size);
+        params.input_hidden_size              = static_cast<size_t>(hidden_size);
+        params.model_data_type                = c10::ScalarType::BFloat16;
+        params.prefill_capture_seq_lens       = std::move(prefill_capture_seq_lens);
+        params.kv_cache_group_tags            = std::move(group_tags);
+        params.max_kernel_blocks_per_kv_block = max_kernel_blocks_per_kv_block;
 
         runner_ = CudaGraphRunner::createForPrefill(std::move(py_instance), std::move(params));
     }
@@ -48,22 +50,24 @@ public:
                      std::vector<int>         decode_capture_batch_sizes,
                      std::vector<std::string> group_tags,
                      bool                     is_target_verify,
-                     int64_t                  num_tokens_per_bs) {
+                     int64_t                  num_tokens_per_bs,
+                     size_t                   max_kernel_blocks_per_kv_block) {
         reset_runner();
         GraphParams params;
-        params.enable_cuda_graph_debug_mode = false;
-        params.is_prefill_cuda_graph_mode   = false;
-        params.max_seq_len                  = static_cast<int>(max_seq_len);
-        params.tokens_per_block             = static_cast<int>(tokens_per_block);
-        params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
-        params.input_hidden_size            = static_cast<size_t>(hidden_size);
-        params.num_tokens_per_bs            = static_cast<int>(num_tokens_per_bs);
-        params.hidden_size                  = static_cast<size_t>(hidden_size);
-        params.model_data_type              = c10::ScalarType::BFloat16;
-        params.max_context_batch_size       = 128;
-        params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
-        params.kv_cache_group_tags          = std::move(group_tags);
-        params.is_target_verify             = is_target_verify;
+        params.enable_cuda_graph_debug_mode   = false;
+        params.is_prefill_cuda_graph_mode     = false;
+        params.max_seq_len                    = static_cast<int>(max_seq_len);
+        params.tokens_per_block               = static_cast<int>(tokens_per_block);
+        params.kernel_tokens_per_block        = static_cast<int>(kernel_tokens_per_block);
+        params.input_hidden_size              = static_cast<size_t>(hidden_size);
+        params.num_tokens_per_bs              = static_cast<int>(num_tokens_per_bs);
+        params.hidden_size                    = static_cast<size_t>(hidden_size);
+        params.model_data_type                = c10::ScalarType::BFloat16;
+        params.max_context_batch_size         = 128;
+        params.decode_capture_batch_sizes     = std::move(decode_capture_batch_sizes);
+        params.kv_cache_group_tags            = std::move(group_tags);
+        params.is_target_verify               = is_target_verify;
+        params.max_kernel_blocks_per_kv_block = max_kernel_blocks_per_kv_block;
 
         runner_ = CudaGraphRunner::createForDecode(std::move(py_instance), std::move(params));
     }
@@ -117,7 +121,8 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("kernel_tokens_per_block"),
              py::arg("prefill_capture_seq_lens"),
              py::arg("hidden_size"),
-             py::arg("group_tags") = std::vector<std::string>{})
+             py::arg("group_tags")                     = std::vector<std::string>{},
+             py::arg("max_kernel_blocks_per_kv_block") = 0)
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),
@@ -126,9 +131,10 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("tokens_per_block"),
              py::arg("kernel_tokens_per_block"),
              py::arg("decode_capture_batch_sizes"),
-             py::arg("group_tags")        = std::vector<std::string>{},
-             py::arg("is_target_verify")  = false,
-             py::arg("num_tokens_per_bs") = 1)
+             py::arg("group_tags")                     = std::vector<std::string>{},
+             py::arg("is_target_verify")               = false,
+             py::arg("num_tokens_per_bs")              = 1,
+             py::arg("max_kernel_blocks_per_kv_block") = 0)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);

@@ -9,24 +9,22 @@ bool KVCacheGroup::init() {
     auto layer_tensors = block_pool_->allLayerCacheBase();
     auto scale_tensors = block_pool_->allLayerScaleCacheBase();
 
-    const auto& layer_ids = cache_group_.layer_ids;
-    RTP_LLM_CHECK_WITH_INFO(layer_tensors.size() >= layer_ids.size(),
+    const auto layer_count = global_layer_to_local_layer.size();
+    RTP_LLM_CHECK_WITH_INFO(layer_tensors.size() >= layer_count,
                             "layer_tensors size (%zu) is less than layer_ids size (%zu)",
                             layer_tensors.size(),
-                            layer_ids.size());
-    RTP_LLM_CHECK_WITH_INFO(scale_tensors.size() >= layer_ids.size(),
+                            layer_count);
+    RTP_LLM_CHECK_WITH_INFO(scale_tensors.size() >= layer_count,
                             "scale_tensors size (%zu) is less than layer_ids size (%zu)",
                             scale_tensors.size(),
-                            layer_ids.size());
+                            layer_count);
 
-    for (int i = 0; i < static_cast<int>(layer_ids.size()); ++i) {
-        const int global_layer_id                   = layer_ids[static_cast<size_t>(i)];
+    for (const auto& [global_layer_id, i] : global_layer_to_local_layer) {
         global_layer_to_kv_tensors[global_layer_id] = layer_tensors[static_cast<size_t>(i)];
 
         if (!scale_tensors.empty()) {
             global_layer_to_kv_scale_tensors[global_layer_id] = scale_tensors[static_cast<size_t>(i)];
         }
-        global_layer_to_local_layer[layer_ids[static_cast<size_t>(i)]] = i;
     }
 
     return true;
@@ -114,7 +112,7 @@ size_t KVCacheGroup::freeBlocksNum() const {
 }
 
 int KVCacheGroup::seqSizePerBlock() const {
-    return static_cast<int>(cache_group_.seq_size_per_block);
+    return static_cast<int>(cache_group_.seqSizePerBlock());
 }
 
 const std::string& KVCacheGroup::tag() const {
