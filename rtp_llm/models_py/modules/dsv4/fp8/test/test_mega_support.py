@@ -79,6 +79,7 @@ def _supported_extension():
         "n_main_flash": FLASH_GEOMETRY.n_main,
         "n_merged_flash": FLASH_GEOMETRY.n_merged,
         "num_main_heads_flash": FLASH_GEOMETRY.main_heads,
+        "max_m": MAX_BATCH,
     }
     extension.geometry_hca = lambda: {
         "n_q_pro": PRO_GEOMETRY.n_main,
@@ -88,6 +89,7 @@ def _supported_extension():
         "slot_dtype_bits": 64,
         "n_q_flash": FLASH_GEOMETRY.n_main,
         "front_n_fp8_flash": FLASH_GEOMETRY.front_fp8_rows,
+        "max_m": MAX_BATCH,
     }
     extension.geometry_moe_front = lambda hidden: {
         "abi_version": 1,
@@ -239,7 +241,7 @@ class MegaSupportTest(unittest.TestCase):
 
     def test_compiled_geometry_mismatch_is_reported_at_startup(self) -> None:
         extension = _supported_extension()
-        extension.geometry_hca = lambda: {"n_q_pro": -1}
+        extension.geometry_hca = lambda: {"n_q_pro": -1, "max_m": MAX_BATCH}
         fake_rtp_kernel = SimpleNamespace(dsv4_mega=extension)
         fake_deep_gemm = _module_with_symbols(_REQUIRED_DEEP_GEMM_SYMBOLS)
         with patch.object(
@@ -253,6 +255,37 @@ class MegaSupportTest(unittest.TestCase):
             )
 
         self.assertIn("HCA geometry mismatch", reason or "")
+
+    def test_attention_capacity_is_checked_even_without_moe_front(self) -> None:
+        for name in ("csa", "hca"):
+            for capacity in (None, 128, MAX_BATCH, MAX_BATCH * 2):
+                with self.subTest(component=name, capacity=capacity):
+                    extension = _supported_extension()
+                    geometry = getattr(extension, f"geometry_{name}")()
+                    if capacity is None:
+                        del geometry["max_m"]
+                    else:
+                        geometry["max_m"] = capacity
+                    with patch.object(
+                        extension, f"geometry_{name}", return_value=geometry
+                    ), patch.object(
+                        torch.cuda, "get_device_capability", return_value=(10, 3)
+                    ), patch.dict(
+                        sys.modules,
+                        {
+                            "rtp_kernel": SimpleNamespace(dsv4_mega=extension),
+                            "deep_gemm": _module_with_symbols(
+                                _REQUIRED_DEEP_GEMM_SYMBOLS
+                            ),
+                        },
+                    ):
+                        reason = mega_decode_unavailable_reason(
+                            V4Args(ep_size=1), torch.device("cuda:0")
+                        )
+                    if capacity is None or capacity < MAX_BATCH:
+                        self.assertIn(f"{name.upper()} max_m=", reason or "")
+                    else:
+                        self.assertIsNone(reason)
 
     def test_moe_front_geometry_requires_hc_width(self) -> None:
         extension = _supported_extension()

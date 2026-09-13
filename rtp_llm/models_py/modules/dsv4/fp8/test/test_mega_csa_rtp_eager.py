@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import unittest
 from dataclasses import dataclass
+from unittest.mock import patch
 
 import torch
 
@@ -49,6 +50,10 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_weights import (
     MAIN_HEADS,
     Q_LORA_RANK,
     ROPE_DIM,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test.mega_attention_test_utils import (
+    check_dynamic_graph_replays,
+    slots_from_block_table,
 )
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
 from rtp_llm.ops.compute_ops import CacheGroupType, KVCache, KVCacheRegionName
@@ -326,11 +331,8 @@ def _fill_random_context(pools: _Pools, device: torch.device, seed: int) -> None
         dtype=torch.int64,
         device=device,
     )
-    swa_slots = torch.arange(
-        _SWA_ENTRIES_PER_BLOCK,
-        _SWA_ENTRIES_PER_BLOCK + batch_size * _SWA_ENTRIES_PER_BLOCK,
-        dtype=torch.int64,
-        device=device,
+    swa_slots = slots_from_block_table(
+        pools.block_tables[SWA_KV], _SWA_ENTRIES_PER_BLOCK
     )
     main = torch.randn(
         compressed_count,
@@ -347,7 +349,7 @@ def _fill_random_context(pools: _Pools, device: torch.device, seed: int) -> None
         device=device,
     ).mul_(0.05)
     swa = torch.randn(
-        batch_size * _SWA_ENTRIES_PER_BLOCK,
+        swa_slots.numel(),
         HEAD_DIM,
         generator=generator,
         dtype=torch.bfloat16,
@@ -384,12 +386,15 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             )
 
         cls.device = torch.device("cuda", torch.cuda.current_device())
-        os.environ["DSV4_HC_IMPL"] = "tilelang"
+        environment = {"DSV4_HC_IMPL": "tilelang"}
         test_tmpdir = os.environ.get("TEST_TMPDIR")
         if test_tmpdir:
-            os.environ["TILELANG_CACHE_DIR"] = os.path.join(
+            environment["TILELANG_CACHE_DIR"] = os.path.join(
                 test_tmpdir, "tilelang_cache"
             )
+        env_patch = patch.dict(os.environ, environment)
+        env_patch.start()
+        cls.addClassCleanup(env_patch.stop)
         weights = _make_layer_weights(cls.device)
         attention = AttentionFP8(
             layer_id=0,
@@ -424,6 +429,10 @@ class MegaCSARTPEagerTest(unittest.TestCase):
         cls.adapter = MegaCSAAdapter(cls.block, weights, cls.runtime)
         cls.mega_pools = _make_pools(cls.device, batch_size=1)
         cls.reference_pools = _make_pools(cls.device, batch_size=1)
+
+    def setUp(self) -> None:
+        self.mega_pools.reset()
+        self.reference_pools.reset()
 
     def _metadata(self, position: int, pools: _Pools, q_len: int = 1):
         batch_size = int(pools.block_tables[CSA_KV].shape[0])
@@ -580,70 +589,27 @@ class MegaCSARTPEagerTest(unittest.TestCase):
         return output.clone()
 
     def test_cuda_graph_capture_and_replay(self) -> None:
-        self.mega_pools.reset()
-        generator = torch.Generator(device=self.device).manual_seed(47)
-        history = [
-            torch.randn(
-                (1, 1, HC, DIM),
-                generator=generator,
-                device=self.device,
-                dtype=torch.bfloat16,
-            ).mul_(0.05)
-            for _ in range(4)
-        ]
-
-        # Warm every JIT path and persistent workspace before capture.
-        for position in range(4):
-            self._run_mega_step(position, history[position].clone(), self.mega_pools)
-
-        self.mega_pools.reset()
-        for position in range(3):
-            self._run_mega_step(position, history[position].clone(), self.mega_pools)
-
-        metadata = self._metadata(3, self.mega_pools)
-        metadata.is_cuda_graph = True
-        self.runtime.begin_decode(metadata)
-        self.runtime.mqa_schedule(
-            metadata.compressed_lens_per_token[4][:1, :1],
-            _COMPRESSED_ENTRIES_PER_BLOCK,
-        )
-        torch.cuda.synchronize(self.device)
-
-        graph_input = history[3].clone()
-        graph_work = torch.empty_like(graph_input)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            graph_work.copy_(graph_input)
-            graph_output = self.adapter.forward_attention_sublayer(
-                self.block,
-                graph_work,
-                metadata,
-                kv_cache=self.mega_pools.kv_cache,
-            )
-
-        graph.replay()
-        torch.cuda.synchronize(self.device)
-        first = graph_output.clone()
-        graph.replay()
-        torch.cuda.synchronize(self.device)
-        second = graph_output.clone()
-        self.assertTrue(torch.isfinite(first).all().item())
-        torch.testing.assert_close(first, second, rtol=0.0, atol=0.0)
+        check_dynamic_graph_replays(self, _make_pools, _fill_random_context)
 
     def test_eager_compression_boundary_and_slot_reuse(self) -> None:
         first = self._run_until_boundary(hidden_seed=11)
         self.assertTrue(self.mega_pools.tensors[CSA_KV][1].any().item())
         self.assertTrue(self.mega_pools.tensors[INDEXER_KV][1].any().item())
         self.assertTrue(self.mega_pools.tensors[SWA_KV][1].any().item())
+        first_pools = {
+            kind: value.clone() for kind, value in self.mega_pools.tensors.items()
+        }
 
         self.mega_pools.reset()
-        second = self._run_until_boundary(hidden_seed=29)
+        second = self._run_until_boundary(hidden_seed=11)
         self.assertTrue(torch.isfinite(second).all().item())
-        self.assertFalse(torch.equal(first, second))
+        torch.testing.assert_close(first, second, rtol=0.0, atol=0.0)
+        for kind, first_pool in first_pools.items():
+            torch.testing.assert_close(
+                first_pool, self.mega_pools.tensors[kind], rtol=0.0, atol=0.0
+            )
 
     def test_matches_original_rtp_attention_sublayer(self) -> None:
-        self.mega_pools.reset()
-        self.reference_pools.reset()
         generator = torch.Generator(device=self.device).manual_seed(2026)
         mega_output = reference_output = None
         mega_metadata = reference_metadata = None
@@ -744,8 +710,6 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             self.assertLess(value_diff, 1.0e-4, msg=name)
 
     def test_matches_original_rtp_at_nontrivial_topk_context(self) -> None:
-        self.mega_pools.reset()
-        self.reference_pools.reset()
         _fill_random_context(self.mega_pools, self.device, seed=31415)
         _fill_random_context(self.reference_pools, self.device, seed=31415)
         generator = torch.Generator(device=self.device).manual_seed(27182)

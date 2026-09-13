@@ -80,11 +80,9 @@ class MegaCSARuntime:
     def __init__(self) -> None:
         self._step = 0
         self._metadata_id: Optional[int] = None
-        self._active_is_cuda_graph = False
         self._schedule_step = -1
         self._schedule_key: Optional[Tuple[str, int, int, int]] = None
         self._schedule: Optional[torch.Tensor] = None
-        self._graph_schedule_history: list[torch.Tensor] = []
         self._rope_cache: Dict[
             Tuple[int, str, Tuple[int, ...]], Tuple[torch.Tensor, torch.Tensor]
         ] = {}
@@ -93,7 +91,6 @@ class MegaCSARuntime:
         """Mark one Python forward for shared metadata and schedule lifetime."""
         self._step += 1
         self._metadata_id = id(metadata)
-        self._active_is_cuda_graph = bool(getattr(metadata, "is_cuda_graph", False))
 
     @staticmethod
     def num_hc_splits(m: int, device: torch.device, dim: int = DIM) -> int:
@@ -237,10 +234,7 @@ class MegaCSARuntime:
         schedule = deep_gemm.get_paged_mqa_logits_metadata(
             context_2d, entries_per_block, deep_gemm.get_num_sms()
         )
-        if self._active_is_cuda_graph:
-            # Every warmup/capture may bake a different schedule pointer into a
-            # graph. Keep all of them alive for the transformer lifetime.
-            self._graph_schedule_history.append(schedule)
+        # Like the ordinary indexer, let the allocator/capture pool own storage.
         self._schedule = schedule
         self._schedule_key = key
         self._schedule_step = self._step
