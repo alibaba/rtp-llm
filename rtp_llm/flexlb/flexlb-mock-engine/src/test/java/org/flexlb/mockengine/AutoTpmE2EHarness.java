@@ -485,9 +485,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         request.setModel("test-model");
         request.setPriority(priority);
 
-        BalanceContext ctx = new BalanceContext();
+        BalanceContext ctx = new BalanceContext(config);
         ctx.setRequest(request);
-        ctx.setConfig(config);
         ctx.setGenerateInputPb(
                 ByteString.copyFrom(generateInputBytes(requestId, (int) seqLen, maxNewTokens)));
         // Mirror production admission with immutable request scheduling metadata.

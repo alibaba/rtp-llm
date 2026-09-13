@@ -44,11 +44,4 @@ public class ServerStatus {
     @JsonProperty("message")
     private String message;
 
-    public static ServerStatus code(StrategyErrorType code) {
-        ServerStatus result = new ServerStatus();
-        result.setSuccess(false);
-        result.setCode(code.getErrorCode());
-        result.setMessage(code.getErrorMsg());
-        return result;
-    }
 }

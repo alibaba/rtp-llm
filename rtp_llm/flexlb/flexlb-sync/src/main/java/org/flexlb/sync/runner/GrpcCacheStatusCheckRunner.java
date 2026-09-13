@@ -38,7 +38,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService cacheAwareService;
-    private final DynamicCacheIntervalService cacheIntervalService;
     private final String ip;
     private final int grpcPort;
     private final long startTime = System.nanoTime() / 1000;
@@ -56,7 +55,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                                       EngineHealthReporter engineHealthReporter,
                                       EngineGrpcService engineGrpcService,
                                       CacheAwareService cacheAwareService,
-                                      DynamicCacheIntervalService cacheIntervalService,
                                       long requestTimeoutMs,
                                       LongAdder syncCount,
                                       Long syncEngineStatusInterval,
@@ -80,8 +78,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.cacheAwareService = cacheAwareService;
-        this.cacheIntervalService = java.util.Objects.requireNonNull(
-                cacheIntervalService, "cacheIntervalService");
         this.debug = fullSnapshotDebugMode;
         this.requestTimeoutMs = requestTimeoutMs;
         this.syncCount = syncCount;

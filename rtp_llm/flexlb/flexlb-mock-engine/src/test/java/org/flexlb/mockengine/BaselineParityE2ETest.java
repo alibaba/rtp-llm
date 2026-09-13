@@ -24,12 +24,10 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
 /**
- * Task35 场景 E：基线对照 —— Auto-TPM 开关全部关闭（默认值）时行为与旧逻辑
- * 完全一致：priority 对派发次序无任何影响（严格 FIFO），无任何抢占/victim，
- * 与场景 B 同流量（P70/P50/P30 各 50，轮转提交）。
- *
- * <p>FIFO 使用唯一递增的 enqueueSeq，同毫秒提交也保持顺序。这里验证单个
- * Prefill 的批次决策顺序；异步派发线程进入引擎调用的先后不属于 FIFO 保证。
+ * With one planner and priority disabled, route completion order equals FIFO
+ * slot assignment and the single Prefill's batch decisions preserve that order.
+ * Parallel planners deliberately permit overtaking; GlobalQueueProgressTest covers
+ * that contract. RPC arrival order is independent of batch decision order.
  */
 class BaselineParityE2ETest {
 
@@ -39,9 +37,9 @@ class BaselineParityE2ETest {
 
     @Test
     @Timeout(90)
-    void e_switches_off_priority_has_no_effect_and_dispatch_is_fifo() throws Exception {
+    void singlePlannerWithPriorityDisabledPreservesFifoBatchDecisions() throws Exception {
         // autoTpm=false：批队列用 FIFO 序（构造时冻结），全部开关保持默认关闭
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 1, 1, "5", 1.0, false, false)) {
+        try (AutoTpmE2EHarness h = singlePlannerHarness()) {
             h.fixedWindowDecision().setMaxCollectionWaitMs(5);
             h.fixedWindowDecision().setMaxRequests(2);
             h.startAutoPump(10);
@@ -99,7 +97,7 @@ class BaselineParityE2ETest {
                     .filter(priorityByRid::containsKey)
                     .toList();
             assertEquals(submissionOrder, decisionOrder,
-                    "with all switches off batch decisions and their request order must be exactly FIFO");
+                    "with one planner and priority disabled batch decisions must preserve FIFO");
 
             // 无任何抢占痕迹
             verify(h.requestReporter, never()).reportVictim(anyInt(), anyInt(),
@@ -127,4 +125,19 @@ class BaselineParityE2ETest {
                     PER_PRIORITY);
         }
     }
+
+    private static AutoTpmE2EHarness singlePlannerHarness() {
+        String previous = System.getProperty("flexlb.queue.planner.threads");
+        try {
+            System.setProperty("flexlb.queue.planner.threads", "1");
+            return new AutoTpmE2EHarness(BASE_PORT, 1, 1, "5", 1.0, false, false);
+        } finally {
+            if (previous == null) {
+                System.clearProperty("flexlb.queue.planner.threads");
+            } else {
+                System.setProperty("flexlb.queue.planner.threads", previous);
+            }
+        }
+    }
+
 }

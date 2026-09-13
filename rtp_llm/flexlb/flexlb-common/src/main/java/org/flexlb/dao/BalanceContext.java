@@ -7,6 +7,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -20,7 +21,7 @@ public class BalanceContext {
 
     //======================== Basic =======================//
 
-    private FlexlbConfig config;
+    private final FlexlbConfig config;
 
     private Request request;
 
@@ -96,6 +97,10 @@ public class BalanceContext {
     private int victimCount;
 
     //===================== Method ===================//
+
+    public BalanceContext(FlexlbConfig config) {
+        this.config = Objects.requireNonNull(config, "config");
+    }
 
     public long getRequestId() {
         return request.getRequestId();

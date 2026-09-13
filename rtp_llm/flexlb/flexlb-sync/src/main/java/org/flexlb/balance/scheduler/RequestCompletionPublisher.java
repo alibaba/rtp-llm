@@ -165,11 +165,6 @@ final class RequestCompletionPublisher implements AutoCloseable {
         }
     }
 
-    boolean awaitTermination(long timeout, TimeUnit unit)
-            throws InterruptedException {
-        return executor.awaitTermination(timeout, unit);
-    }
-
     @Override
     public void close() {
         boolean reentrant = publicationDepth.get() != null;

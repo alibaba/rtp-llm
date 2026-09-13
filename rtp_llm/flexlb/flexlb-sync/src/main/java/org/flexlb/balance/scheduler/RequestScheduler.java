@@ -28,7 +28,6 @@ import java.util.concurrent.CompletableFuture;
 @Component
 public final class RequestScheduler {
 
-    private final ConfigService configService;
     private final DefaultRouter router;
     private final EndpointRegistry endpointRegistry;
     private final RequestRegistry lifecycle;
@@ -43,16 +42,15 @@ public final class RequestScheduler {
             EvictionManager evictionManager,
             RequestRegistry lifecycle,
             PlacementAvailability placementAvailability) {
-        this.configService = Objects.requireNonNull(
-                configService, "configService");
+        Objects.requireNonNull(configService, "configService");
         this.router = Objects.requireNonNull(router, "router");
         this.endpointRegistry = Objects.requireNonNull(
                 endpointRegistry, "endpointRegistry");
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
-        FlexlbConfig startupConfig = this.configService.loadBalanceConfig();
+        FlexlbConfig startupConfig = configService.loadBalanceConfig();
         this.globalQueue = startupConfig != null && startupConfig.isQueue()
                 ? new GlobalQueueCoordinator(
-                        this.configService,
+                        configService,
                         Objects.requireNonNull(router, "router"),
                         Objects.requireNonNull(reporter, "reporter"),
                         Objects.requireNonNull(evictionManager, "evictionManager"),
@@ -68,31 +66,17 @@ public final class RequestScheduler {
             return CompletableFuture.completedFuture(error(
                     StrategyErrorType.INVALID_REQUEST, null));
         }
-        FlexlbConfig activeConfig;
-        try {
-            activeConfig = configService.loadBalanceConfig();
-        } catch (Throwable failure) {
-            return CompletableFuture.completedFuture(error(
-                    StrategyErrorType.DISPATCH_FAILED,
-                    "Failed to load scheduler configuration: "
-                            + failure.getMessage()));
-        }
-        if (activeConfig == null) {
-            return CompletableFuture.completedFuture(error(
-                    StrategyErrorType.DISPATCH_FAILED,
-                    "Scheduler configuration is unavailable"));
-        }
-        if (activeConfig.isQueue() && globalQueue == null) {
+        FlexlbConfig requestConfig = context.getConfig();
+        if (requestConfig.isQueue() && globalQueue == null) {
             return CompletableFuture.completedFuture(error(StrategyErrorType.DISPATCH_FAILED,
                     "QUEUE configuration was enabled after scheduler startup"));
         }
-        context.setConfig(activeConfig);
         CompletableFuture<Response> future = lifecycle.register(context);
         context.setFuture(future);
         if (future.isDone()) {
             return future;
         }
-        if (activeConfig.isDirect()) {
+        if (requestConfig.isDirect()) {
             submitDirect(context);
             return future;
         }
@@ -170,10 +154,6 @@ public final class RequestScheduler {
 
     public RequestState getRequestState(long requestId, long expectedBatchId) {
         return lifecycle.getRequestState(requestId, expectedBatchId);
-    }
-
-    public boolean ownsRequestGeneration(long requestId) {
-        return lifecycle.ownsRequestGeneration(requestId);
     }
 
     public void closePlacement() {

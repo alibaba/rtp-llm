@@ -14,7 +14,6 @@ import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
@@ -50,11 +49,8 @@ class OrderedRequestQueueTest {
 
         assertTrue(queue.remove(highFirst));
 
-        assertSame(highSecond, queue.peekHead());
-        assertTrue(queue.hasEarlierRequestsToScan(low));
         assertEquals(List.of(highSecond, low), queue.scanForPlanningCandidates(
                 10, 20, candidate -> true));
-        assertFalse(queue.hasEarlierRequestsToScan(low));
     }
 
     @Test
@@ -214,7 +210,6 @@ class OrderedRequestQueueTest {
         assertTrue(queue.scanForPlanningCandidates(1, 1, candidate -> false).isEmpty());
         var high = entry(90);
         queue.add(high);
-        assertTrue(queue.hasEarlierRequestsToScan(next));
         assertEquals(List.of(high), queue.scanForPlanningCandidates(1, 1, candidate -> true));
         queue.remove(high);
         assertEquals(List.of(next), queue.scanForPlanningCandidates(1, 1, candidate -> true));

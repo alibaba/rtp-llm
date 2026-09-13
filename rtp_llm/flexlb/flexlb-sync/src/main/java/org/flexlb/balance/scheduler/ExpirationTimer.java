@@ -1,7 +1,6 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.config.ConfigService;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 
 import java.util.List;
@@ -143,7 +142,6 @@ final class ExpirationTimer implements AutoCloseable {
 
     private final RequestRegistry lifecycle;
     private final ConfigService config;
-    private final BatchSchedulerReporter reporter;
     private final LongSupplier clock;
     private final ScheduledThreadPoolExecutor executor;
     private final Object registrationMonitor = new Object();
@@ -153,19 +151,16 @@ final class ExpirationTimer implements AutoCloseable {
 
     ExpirationTimer(
             RequestRegistry lifecycle,
-            ConfigService config,
-            BatchSchedulerReporter reporter) {
-        this(lifecycle, config, reporter, System::currentTimeMillis);
+            ConfigService config) {
+        this(lifecycle, config, System::currentTimeMillis);
     }
 
     ExpirationTimer(
             RequestRegistry lifecycle,
             ConfigService config,
-            BatchSchedulerReporter reporter,
             LongSupplier clock) {
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
         this.config = Objects.requireNonNull(config, "config");
-        this.reporter = Objects.requireNonNull(reporter, "reporter");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.executor = new ScheduledThreadPoolExecutor(1, runnable -> {
             Thread thread = new Thread(

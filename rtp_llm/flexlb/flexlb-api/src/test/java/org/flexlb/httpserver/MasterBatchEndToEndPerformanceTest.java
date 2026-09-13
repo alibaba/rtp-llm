@@ -193,18 +193,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private static final MasterElectService STANDALONE_MASTER_ELECT_SERVICE =
             new MasterElectService() {
                 @Override
-                public void start() {
-                }
-
-                @Override
-                public void offline() {
-                }
-
-                @Override
-                public void destroy() {
-                }
-
-                @Override
                 public boolean isNeedConsistency() {
                     return false;
                 }
@@ -214,9 +202,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                     return false;
                 }
 
-                @Override
-                public void refreshMasterHost(boolean forceSync) {
-                }
             };
     private static final RequestSchedulerReporter NO_OP_REQUEST_REPORTER =
             new RequestSchedulerReporter(new NoOpFlexMonitor());
@@ -343,14 +328,14 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     @Override
     protected DefaultRouter createRouter() {
-        CacheAwareService cache = mock(CacheAwareService.class);
+        CacheAwareService cache = mock(CacheAwareService.class, withSettings().stubOnly());
         when(cache.findMatchingEngines(any(), any(), any()))
                 .thenReturn(Map.of());
         CostBasedPrefillStrategy prefillSelector =
                 new CostBasedPrefillStrategy(
                         engineWorkerStatus,
                         cache,
-                        mock(EngineHealthReporter.class));
+                        mock(EngineHealthReporter.class, withSettings().stubOnly()));
         ModelMetaConfig modelMeta = mock(
                 ModelMetaConfig.class, withSettings().stubOnly());
         when(modelMeta.requiredRoles()).thenReturn(
@@ -373,7 +358,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         simulatedStatusThread.start();
 
         RouteService routeService = new RouteService(
-                configService,
                 scheduler,
                 new RecentCacheKeyTraceReporter());
 

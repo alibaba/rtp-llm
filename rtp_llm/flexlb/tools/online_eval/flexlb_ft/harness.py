@@ -1896,16 +1896,6 @@ class EnvManager:
         mp.kill9()
         env.masters[name] = None
 
-    def stop_master_instance(
-        self, env: FlexEnv, name: str, settle_s: float = 2.0
-    ) -> None:
-        """Graceful SIGTERM stop of ONE instance (orderly, drains on SIGTERM)."""
-        mp = self._live_instance(env, name)
-        self._log(f"stopping master instance '{name}' (pid={mp.pid})")
-        mp.terminate()
-        env.masters[name] = None
-        time.sleep(settle_s)
-
     def restart_master_instance(self, env: FlexEnv, name: str) -> ManagedProcess:
         """Mode 1 recovery: fresh JVM from the SAME MasterSpec (cold start —
         in-memory state zeroed, converges from the zero-point)."""

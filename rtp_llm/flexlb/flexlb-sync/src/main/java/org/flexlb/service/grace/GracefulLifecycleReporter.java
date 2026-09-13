@@ -1,6 +1,5 @@
 package org.flexlb.service.grace;
 
-import lombok.extern.slf4j.Slf4j;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -9,7 +8,6 @@ import org.springframework.stereotype.Component;
 
 import static org.flexlb.constant.MetricConstant.GRACEFUL_LIFECYCLE_EVENT;
 
-@Slf4j
 @Component
 public class GracefulLifecycleReporter {
 
