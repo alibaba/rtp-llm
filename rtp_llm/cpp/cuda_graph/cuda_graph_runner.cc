@@ -647,6 +647,12 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, output_rows);
     }
+    const auto& mtp_hidden = graph_instances_[is_prefill_cuda_graph_mode_ ?
+                                               state.current_real_graph_seq_len :
+                                               state.current_real_graph_bs].mem_hold_.mtp_target_hidden_states_;
+    if (mtp_hidden.defined()) {
+        outputs.mtp_target_hidden_states = mtp_hidden.narrow(0, 0, outputs.hidden_states.size(0));
+    }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());
     RTP_LLM_LOG_DEBUG("Replay End");
@@ -1129,6 +1135,14 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
                 throw;
+            }
+            // Python attributes retain the last captured batch, not the graph
+            // being replayed. Keep each graph's pre-norm MTP output with it.
+            if (py::hasattr(py_instance_, "get_mtp_target_hidden_states")) {
+                auto mtp_hidden = py_instance_.attr("get_mtp_target_hidden_states")(outputs.hidden_states.size(0));
+                if (!mtp_hidden.is_none()) {
+                    graph_instances_[key].mem_hold_.mtp_target_hidden_states_ = mtp_hidden.cast<torch::Tensor>();
+                }
             }
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
             graph.capture_end();

@@ -193,6 +193,7 @@ private:
     torch::Tensor                            decode_zero_cu_kv_seqlens_;
     torch::Tensor                            decode_cu_seqlens_;
     TensorHolder                             buffer_holder_;
+    torch::Tensor                            graph_mtp_target_hidden_states_;
 
     GraphBase* graph_runner_{nullptr};
     py::object py_model_;

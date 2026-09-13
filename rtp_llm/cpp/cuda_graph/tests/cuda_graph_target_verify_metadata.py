@@ -248,6 +248,46 @@ class CudaGraphTargetVerifyMetadataTest(unittest.TestCase):
         inputs.attention_inputs = attention
         return inputs
 
+    def test_mtp_hidden_follows_replayed_graph_after_eager_forward(self):
+        class MtpProbe(_SequenceHostProbeModel):
+            def forward(self, inputs, _fmha_impl=None):
+                self.recurrent = inputs.input_hiddens + 7
+                return PyModelOutputs(inputs.input_hiddens + 1)
+
+            def get_mtp_target_hidden_states(self, rows):
+                return self.recurrent.narrow(0, 0, rows)
+
+        for q_len in (1, 4):
+            with self.subTest(q_len=q_len):
+                model = MtpProbe()
+                runner = CudaGraphRunner()
+                runner.init_decode(
+                    model, hidden_size=16, max_seq_len=384,
+                    tokens_per_block=64, kernel_tokens_per_block=64,
+                    decode_capture_batch_sizes=[1, 4],
+                    num_tokens_per_bs=q_len, is_target_verify=q_len > 1,
+                    max_context_batch_size=4,
+                )
+                # Capture ends at B1, but B2 uses the padded B4 graph.
+                self.assertEqual(model.recurrent.size(0), q_len)
+                for batch, value in ((2, 3), (1, 5), (2, 9)):
+                    inputs = (self._build_decode_replay_inputs([126, 255][:batch])
+                              if q_len == 1 else self._build_replay_inputs(batch, q_len))
+                    inputs.input_hiddens.fill_(value)
+                    # An intervening eager forward must not redirect graph outputs.
+                    model.forward(inputs)
+                    self.assertTrue(runner.canRun(inputs))
+                    output = runner.forward(inputs)
+                    torch.cuda.synchronize()
+                    torch.testing.assert_close(
+                        output.mtp_target_hidden_states,
+                        torch.full_like(inputs.input_hiddens, value + 7),
+                    )
+                    torch.testing.assert_close(
+                        output.hidden_states,
+                        torch.full_like(inputs.input_hiddens, value + 1),
+                    )
+
     def test_runner_mirrors_decode_sequence_lengths_on_host(self):
         model = _SequenceHostProbeModel()
         runner = CudaGraphRunner()

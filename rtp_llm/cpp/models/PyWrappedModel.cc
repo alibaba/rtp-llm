@@ -135,6 +135,10 @@ void PyWrappedModel::releaseBuffers() {
 }
 
 torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
+    if (graph_mtp_target_hidden_states_.defined()) {
+        const auto rows = num_tokens < 0 ? graph_mtp_target_hidden_states_.size(0) : num_tokens;
+        return graph_mtp_target_hidden_states_.narrow(0, 0, rows);
+    }
     if (!py_model_) {
         return torch::Tensor();
     }
@@ -966,6 +970,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
+    graph_mtp_target_hidden_states_ = torch::Tensor();
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
     DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
     holdInputsHostBuffers(inputs);
@@ -1087,6 +1092,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 graph_state_.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
+            graph_mtp_target_hidden_states_ = py_model_outputs.mtp_target_hidden_states;
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
             hidden_states = py_model_outputs.hidden_states.clone();
         } else {

@@ -448,6 +448,7 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor          hidden_states;
+    torch::Tensor          mtp_target_hidden_states;
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
     py::object             py_attn_params{py::none()};
     bool                   lm_output_already_selected{false};
