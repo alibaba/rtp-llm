@@ -54,6 +54,7 @@ class ProcessManager:
         self.monitor_interval = monitor_interval
         self.process_groups: Dict[str, List[Process]] = {}
         self.shutdown_group_order: List[str] = []
+        self._force_killed_processes: Set[Process] = set()
         self._defer_first_sigterm = allow_defer_first_sigterm and (
             os.environ.get(DEFER_FIRST_SIGTERM_ENV) == DEFER_FIRST_SIGTERM_VALUE
         )
@@ -641,6 +642,7 @@ class ProcessManager:
                 logging.warning(f"Force killing process {proc.pid}")
                 try:
                     os.kill(proc.pid, signal.SIGKILL)
+                    self._force_killed_processes.add(proc)
                 except (OSError, ProcessLookupError):
                     # Process may have already died
                     pass
@@ -739,16 +741,22 @@ class ProcessManager:
             # (race at startup) or during it without tripping the in-loop
             # dead-detection branch (e.g. simultaneous death between
             # iterations). Inspect final exitcodes to surface silent crashes
-            # the monitor missed.
-            if not self.shutdown_requested and not self.failure_detected:
+            # the monitor missed, including crashes during requested shutdown.
+            if not self.failure_detected:
                 crashed = [
                     (p.name, p.exitcode)
                     for p in self.processes
-                    if p.exitcode is not None and p.exitcode != 0
+                    if p.exitcode is not None
+                    and not self._is_clean_shutdown_exitcode(p.exitcode)
+                    and not (
+                        self.shutdown_requested
+                        and p.exitcode == -signal.SIGKILL
+                        and p in self._force_killed_processes
+                    )
                 ]
                 if crashed:
                     logging.error(
-                        f"Children exited non-zero without shutdown request: {crashed}"
+                        f"Children exited abnormally (shutdown_requested={self.shutdown_requested}): {crashed}"
                     )
                     self.failure_detected = True
         else:

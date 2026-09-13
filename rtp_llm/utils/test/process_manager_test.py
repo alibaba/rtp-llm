@@ -9,16 +9,16 @@ from unittest.mock import Mock, patch
 
 from rtp_llm.utils.process_manager import (
     BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV,
-    DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV,
     DEFER_FIRST_SIGTERM_ENV,
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
     DEFER_FIRST_SIGTERM_VALUE,
+    DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV,
     FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV,
     PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV,
     PRE_STOP_DRAIN_SIGNAL_ENV,
-    ProcessManager,
     SHUTDOWN_TIMEOUT_ENV,
     STOP_TIMEOUT_MS_ENV,
+    ProcessManager,
 )
 
 
@@ -47,6 +47,18 @@ def dummy_worker(duration=1, should_crash=False):
         time.sleep(0.5)
         raise RuntimeError("Simulated crash")
     time.sleep(duration)
+
+
+def exit_status_worker(exitcode):
+    if exitcode < 0:
+        import resource
+
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        signum = -exitcode
+        if signum != signal.SIGKILL:
+            signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+    os._exit(exitcode)
 
 
 def forever_worker(queue):
@@ -361,6 +373,61 @@ class TestProcessManager(unittest.TestCase):
         for proc in procs:
             self.assertFalse(proc.is_alive())
         self.assertTrue(self.manager.failure_detected)
+
+    def test_shutdown_preserves_aborted_child_failure(self):
+        self.manager.shutdown_requested = True
+        proc = multiprocessing.Process(
+            target=exit_status_worker, args=(-signal.SIGABRT,)
+        )
+        proc.start()
+        self.manager.add_process(proc)
+        proc.join(timeout=5)
+        self.assertEqual(proc.exitcode, -signal.SIGABRT)
+        with patch("os._exit", side_effect=SystemExit(1)) as exit_parent:
+            with self.assertRaises(SystemExit):
+                self.manager.monitor_and_release_processes()
+        exit_parent.assert_called_once_with(1)
+        self.assertTrue(self.manager.failure_detected)
+
+    def test_shutdown_accepts_expected_child_exits(self):
+        self.manager.shutdown_requested = True
+        for code in (0, -signal.SIGTERM, -signal.SIGINT):
+            proc = multiprocessing.Process(target=exit_status_worker, args=(code,))
+            proc.start()
+            self.manager.add_process(proc)
+            proc.join(timeout=5)
+            self.assertEqual(proc.exitcode, code)
+        with patch("os._exit") as exit_parent:
+            self.manager.monitor_and_release_processes()
+        exit_parent.assert_not_called()
+        self.assertFalse(self.manager.failure_detected)
+
+    def test_shutdown_preserves_external_kill_failure(self):
+        self.manager.shutdown_requested = True
+        proc = multiprocessing.Process(
+            target=exit_status_worker, args=(-signal.SIGKILL,)
+        )
+        proc.start()
+        self.manager.add_process(proc)
+        proc.join(timeout=5)
+        self.assertEqual(proc.exitcode, -signal.SIGKILL)
+        with patch("os._exit", side_effect=SystemExit(1)) as exit_parent:
+            with self.assertRaises(SystemExit):
+                self.manager.monitor_and_release_processes()
+        exit_parent.assert_called_once_with(1)
+
+    def test_shutdown_preserves_requested_force_kill(self):
+        proc = multiprocessing.Process(target=dummy_worker, args=(60,))
+        proc.start()
+        self.manager.add_process(proc)
+        self.manager.shutdown_requested = True
+        self.manager._force_kill_processes()
+        proc.join(timeout=5)
+        self.assertEqual(proc.exitcode, -signal.SIGKILL)
+        with patch("os._exit") as exit_parent:
+            self.manager.monitor_and_release_processes()
+        exit_parent.assert_not_called()
+        self.assertFalse(self.manager.failure_detected)
 
     def test_monitor_with_shutdown_signal(self):
         """Test monitoring with shutdown signal"""
