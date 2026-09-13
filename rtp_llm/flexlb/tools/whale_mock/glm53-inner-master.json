@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "scheduler": {
+    "type": "QUEUE",
+    "queueTimeoutMs": 60000,
+    "ordering": {
+      "type": "PRIORITY",
+      "defaultPriority": 50,
+      "preemption": {
+        "allowedVictimStages": [
+          "PREFILL_QUEUED",
+          "DECODE_RESERVED",
+          "DECODE_ENGINE_OWNED"
+        ],
+        "engineCancellation": {
+          "ackTimeoutMs": 50,
+          "completionTimeoutMs": 1000
+        }
+      }
+    },
+    "capacity": {
+      "maxOutstandingRequestsGlobal": 500000
+    },
+    "lifecycle": {
+      "staleInflightTimeoutMs": 300000,
+      "deliveredNotAcceptedTimeoutMs": 30000,
+      "maxDeliveredNotAcceptedRequestsGlobal": 500000
+    }
+  },
+  "dispatcher": {
+    "type": "NON_BATCH",
+    "maxInflightRequestsPerPrefillWorker": 64
+  },
+  "router": {
+    "availabilityHysteresisPercent": 15,
+    "roles": {
+      "prefill": {
+        "availability": {
+          "maxPendingRequests": 256
+        },
+        "executionTimeEstimator": {
+          "type": "FORMULA",
+          "expression": "max(140.828491147712, 111.256889675413 + 26.3308431903003 * batchSize + 1.04634364647578 * sum(computeTokens / 1024.) + 0.221829268840524 * sum(hitCacheTokens / 1024.) + 3.81597065883742e-05 * sum(computeTokens / 1024. * computeTokens / 1024.) + 0.0178483852837953 * sum((computeTokens / 1024.) * (hitCacheTokens / 1024. + 0.5 * computeTokens / 1024.)) + 3.69006247142324 * max(sum(computeTokens / 1024.) - 16, 0) + 2.25296924863322 * max(sum(computeTokens / 1024.) - 32, 0) - 0.378599064303598 * max(sum(computeTokens / 1024.) - 64, 0) + 0.290333467605753 * max(sum(computeTokens / 1024.) - 96, 0) + 0.220201115088892 * max(sum(computeTokens / 1024.) - 128, 0) + 0.314856570286859 * max(sum(computeTokens / 1024.) - 256, 0) + 0.381759110265864 * max(sum(computeTokens / 1024.) - 384, 0) + 0.135460269489786 * max(sum(computeTokens / 1024.) - 512, 0) + 0.277416603840331 * max(sum(computeTokens / 1024.) - 768, 0) - 0.103722213676345 * max(sum(hitCacheTokens / 1024.) - 32, 0) + 0.246534800260685 * max(sum(hitCacheTokens / 1024.) - 64, 0) - 0.0962573986773179 * max(sum(hitCacheTokens / 1024.) - 128, 0) - 0.087551815971061 * max(sum(hitCacheTokens / 1024.) - 256, 0) + 0.131332018741672 * max(sum(hitCacheTokens / 1024.) - 384, 0) + 1.04523003171615 * sum(max(computeTokens / 1024. - 2, 0)) + 1.11542313292283 * sum(max(computeTokens / 1024. - 4, 0)) + 1.25332147036251 * sum(max(computeTokens / 1024. - 8, 0)) + 1.15120873166216 * sum(max(computeTokens / 1024. - 12, 0)) + 0.437458737848412 * sum(max(computeTokens / 1024. - 16, 0)) - 1.03050684203291 * sum(max(computeTokens / 1024. - 32, 0)) - 0.164304161613201 * sum(max(computeTokens / 1024. - 64, 0)) - 0.376775323358665 * sum(max(computeTokens / 1024. - 128, 0)) - 0.267197465661968 * sum(max(computeTokens / 1024. - 256, 0)) - 0.346728996206665 * sum(max(computeTokens / 1024. - 512, 0)) + 0.158708146142527 * sum(max(hitCacheTokens / 1024. - 2, 0)) + 0.0944329232407479 * sum(max(hitCacheTokens / 1024. - 4, 0)) - 0.0515004420411799 * sum(max(hitCacheTokens / 1024. - 8, 0)) - 0.215740602819631 * sum(max(hitCacheTokens / 1024. - 12, 0)) - 40.0315301837174 * max(batchSize - 2, 0) + 7.78518725407091 * max(batchSize - 4, 0) + 7.02972210694315 * max(batchSize - 8, 0) + 4.15599866666233 * max(batchSize - 16, 0) - 2.50890887347507 * max(batchSize - 24, 0) - 23.3193700654001 * max(batchSize - 32, 0) - 0.0369055139532236 * max(batchSize - 8, 0) * sum(computeTokens / 1024.) - 0.117287892897347 * max(batchSize - 16, 0) * sum(computeTokens / 1024.) - 0.270623328926389 * max(batchSize - 24, 0) * sum(computeTokens / 1024.))"
+        },
+        "selector": {
+          "type": "ESTIMATED_TTFT",
+          "candidateChoice": {
+            "type": "RANDOM_WITHIN_TOLERANCE",
+            "relativeTolerance": 0.1,
+            "minimumToleranceMs": 20,
+            "outlierRejection": {
+              "maxPendingVsAverageMultiplier": 3.0,
+              "maxWaitVsAverageMultiplier": 3.0
+            }
+          }
+        },
+        "cacheAffinity": {
+          "maxExtraTtftMs": 5000000,
+          "minPrefixHitPercent": 5
+        }
+      },
+      "decode": {
+        "availability": {
+          "maxKvUsagePercent": 90,
+          "maxEngineRequests": 16
+        },
+        "kvReservation": {
+          "maxOutputTokensForEstimate": 1000
+        },
+        "selector": {
+          "type": "KV_USAGE_WEIGHTED_RANDOM",
+          "decayPerToken": 0.001,
+          "outlierRejection": {
+            "maxEngineLoadVsAverageMultiplier": 3.0,
+            "maxKvUsedVsAverageMultiplier": 3.0
+          }
+        }
+      },
+      "vit": {
+        "selector": {
+          "type": "RANDOM"
+        }
+      }
+    }
+  },
+  "workerRegistry": {
+    "health": {
+      "statusPollIntervalMs": 20,
+      "statusRpcTimeoutMs": 5000,
+      "statusStaleAfterMs": 10000
+    },
+    "cacheStatus": {
+      "targetDiffSize": 30,
+      "minRefreshIntervalMs": 50,
+      "maxRefreshIntervalMs": 3000,
+      "fullSnapshotDebugMode": false
+    }
+  },
+  "observability": {
+    "cacheHit": {
+      "recentKeyWindow": {
+        "writeEnabled": true,
+        "durationMs": 1800000,
+        "maxKeyOccurrences": 80000000
+      },
+      "metricsEnabled": true,
+      "requestTraceLogEnabled": false
+    }
+  }
+}

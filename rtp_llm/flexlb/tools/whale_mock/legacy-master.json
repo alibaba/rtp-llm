@@ -1,0 +1,6 @@
+{
+  "source_commit": "96890a10736b53dbb2cbb9af8f0f15739ebb3c16",
+  "schema_version": 1,
+  "jar": "legacy-master.jar",
+  "production_image": "hub.docker.alibaba-inc.com/isearch/flexlb:0.2.0_0.2.0_2026_08_31_09_41_96890a107_accelerated"
+}

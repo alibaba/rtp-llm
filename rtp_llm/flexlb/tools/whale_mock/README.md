@@ -176,3 +176,20 @@ pool (31218 × 512 = 15983616 tokens), D is 46157 × 64 = 2954048 tokens.
 Apply `frontend_env` alongside the master profile: it hashes 512-token blocks
 without additionally striding for CP. The mock P already represents all P ranks.
 This changes cache routing metadata, not copied request tokens or traffic rate.
+
+### 生产旧版 master 与新 mock 混合运行（显式启用）
+
+`MOCK_BUNDLE_LEGACY_MASTER=1` 选择 legacy-master.json 固定的生产源码版本；
+`glm53-inner-master.json` 保存未经迁移的 schema 1 原文。CI 在临时目录构建该版本，
+只增加测试打包的 KMonitor 依赖，沿用其已有 DOMAIN_ADDRESS 静态发现实现，不修改 Java 产品源码。
+当前 master.jar 与 legacy-master.jar 并存，默认仍使用当前版本。
+
+旧配置原文直接传入旧 master 并落盘 master-source-config.json。mock 只需 P 公式，
+因此为其独立生成当前解析器可读的公式投影；这个投影绝不传给 master。
+旧版本静态发现不会感知运行时新增地址；修改逻辑 P/D 数量需重启 bundle。
+
+NON_BATCH 时引擎用真实 Pod IP 加独立端口公开 RPC，避免 frontend 访问到自己的 loopback。
+frontend 额外设置 `RTP_LLM_MOCK_NON_BATCH=1`，用现有 GenerateStreamCall 发给已选 P，
+读取至真实终态，错误正常透传；不调用 FetchResponse，不修改请求输出上限。
+BATCH 仍仅返回 schedule acknowledgement；NON_BATCH 终态返回 inference_completed=true，
+两种模式的应答时延不能混作相同的 frontend TTFT。指标的逻辑实例用 engine/engine_port/dp_rank 区分。

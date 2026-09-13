@@ -1,6 +1,8 @@
 """Supervise one master and a local mock cluster as separate JVMs in a test Pod."""
 
 import json
+
+from master_compat import mock_formula_config, legacy_discovery
 import os
 import signal
 import socket
@@ -46,17 +48,19 @@ def run():
     cfg.update(overrides)
     if os.environ.get("FETCH_OUTPUT_STREAM", "0") != "0":
         raise ValueError("bundle mode requires FETCH_OUTPUT_STREAM=0")
-    if cfg["profile"] not in {"single-batch", "batch-window"}:
-        raise ValueError("no-fetch requires BATCH dispatcher")
     http_port = int(os.environ.get("START_PORT", "7001"))
     mock_port = http_port + cfg["mock_port_offset"]
     runtime = Path(os.environ.get("MOCK_BUNDLE_RUN_DIR", "/home/admin/ai-whale/mock"))
     runtime.mkdir(parents=True, exist_ok=False)
     jars = Path(os.environ.get("MOCK_BUNDLE_JAR_DIR", ROOT / "jars"))
     raw = os.environ.get("FLEXLB_CONFIG") or render_env(cfg["profile"])
+    legacy = os.environ.get("MOCK_BUNDLE_LEGACY_MASTER") == "1"
+    mock_raw = mock_formula_config(raw, legacy)
+    (runtime / "master-source-config.json").write_text(raw)
+    dispatcher = json.loads(raw).get("dispatcher", {}).get("type", "BATCH")
     (runtime / "master-config.json").write_text(
         render_process_config(
-            cfg["profile"], jvm_heap=cfg["master_heap"], raw_config=raw
+            cfg["profile"], jvm_heap=cfg["master_heap"], raw_config=mock_raw
         )
     )
     performance_path = (cfg_path.parent / cfg["performance"]).resolve()
@@ -147,6 +151,8 @@ def run():
                 str(mock_port),
                 "--host",
                 pod_ip,
+                "--unique-engine-ips",
+                str(dispatcher != "NON_BATCH").lower(),
                 "--auto-fetch",
                 "true",
                 "--endpoint-file",
@@ -179,7 +185,8 @@ def run():
             env,
         )
         ready(mock_port - 1, mock, pod_ip)
-        env.update(json.loads((runtime / "endpoints.json").read_text())["env"])
+        endpoints = json.loads((runtime / "endpoints.json").read_text())
+        env.update(legacy_discovery(endpoints) if legacy else endpoints["env"])
         env.update(
             FLEXLB_CONFIG=raw,
             SERVER_PORT=str(http_port),
@@ -192,7 +199,7 @@ def run():
                 "-Xmx" + cfg["master_heap"],
                 "-Dreactor.schedulers.defaultBoundedElasticSize=64",
                 "-jar",
-                str(jars / "master.jar"),
+                str(jars / ("legacy-master.jar" if legacy else "master.jar")),
                 "--server.port=" + str(http_port),
                 "--management.server.port=" + str(http_port + 1),
                 "--flexlb.log.path=" + str(runtime / "master-logs"),
@@ -237,6 +244,8 @@ def run():
                     "mock_http_port": mock_port - 1,
                     "configuration": cfg,
                     "source": os.environ.get("BUILD_SOURCE_SHA", "unknown"),
+                    "legacy_master": legacy,
+                    "dispatcher": dispatcher,
                 },
                 indent=2,
             )

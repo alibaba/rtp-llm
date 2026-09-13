@@ -50,7 +50,7 @@ class ScheduleOnlyTest(unittest.IsolatedAsyncioTestCase):
         value = types.SimpleNamespace(prompt_length=100, request_id=123, enqueued_by_master=False,
                                       generate_config=types.SimpleNamespace(validate=Mock()))
         visitor = types.SimpleNamespace(fill_request_info=Mock(), route_ips=AsyncMock())
-        with self.assertRaisesRegex(ValueError, 'BATCH'):
+        with self.assertRaisesRegex(ValueError, 'NON_BATCH'):
             await self.call(visitor, value)
 
     async def test_route_failure_is_propagated(self):
@@ -59,3 +59,34 @@ class ScheduleOnlyTest(unittest.IsolatedAsyncioTestCase):
         visitor = types.SimpleNamespace(fill_request_info=Mock(), route_ips=AsyncMock(side_effect=TimeoutError('route')))
         with self.assertRaises(TimeoutError):
             await self.call(visitor, value)
+
+    async def test_non_batch_consumes_terminal_without_fetch_or_second_route(self):
+        import os
+        value = types.SimpleNamespace(prompt_length=100, request_id=123,
+                                      enqueued_by_master=False,
+                                      generate_config=types.SimpleNamespace(validate=Mock()))
+        async def stream(request):
+            self.assertIs(request, value)
+            yield types.SimpleNamespace(generate_outputs=[types.SimpleNamespace(finished=False)])
+            yield types.SimpleNamespace(generate_outputs=[types.SimpleNamespace(finished=True)])
+        client = types.SimpleNamespace(enqueue=Mock(side_effect=stream))
+        visitor = types.SimpleNamespace(fill_request_info=Mock(), route_ips=AsyncMock(), model_rpc_client=client)
+        with patch.dict(os.environ, {"RTP_LLM_MOCK_NON_BATCH": "1"}):
+            response = await self.call(visitor, value)
+        visitor.route_ips.assert_awaited_once_with(value)
+        client.enqueue.assert_called_once_with(value)
+        self.assertTrue(response.infer_response.parameters["inference_completed"].bool_param)
+        self.assertEqual(0, len(response.infer_response.outputs))
+
+    async def test_non_batch_empty_or_unfinished_stream_never_claims_completion(self):
+        import os
+        for frames in ([], [False]):
+            async def stream(request):
+                for finished in frames:
+                    yield types.SimpleNamespace(generate_outputs=[types.SimpleNamespace(finished=finished)])
+            value = types.SimpleNamespace(prompt_length=100, request_id=123, enqueued_by_master=False,
+                                          generate_config=types.SimpleNamespace(validate=Mock()))
+            visitor = types.SimpleNamespace(fill_request_info=Mock(), route_ips=AsyncMock(),
+                                            model_rpc_client=types.SimpleNamespace(enqueue=stream))
+            with patch.dict(os.environ, {"RTP_LLM_MOCK_NON_BATCH": "1"}), self.assertRaisesRegex(RuntimeError, "terminal"):
+                await self.call(visitor, value)
