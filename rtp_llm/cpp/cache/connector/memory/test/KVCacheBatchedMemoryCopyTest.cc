@@ -13,7 +13,6 @@
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -89,7 +88,6 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     config.block_num                   = 512;
     config.seq_size_per_block          = 256;
     config.kernel_seq_size_per_block   = 256;
-    config.use_independent_block_pools = true;
     config.use_typed_cache_regions     = true;
     config.use_opaque_kv_cache_store   = true;
     config.is_sparse                   = true;
@@ -228,7 +226,7 @@ CacheConfig makeRealDsv4TypedMemoryCopyConfig(bool use_flash) {
     kv_config.seq_size_per_block        = 128;
     kv_config.kernel_seq_size_per_block = 128;
     kv_config.dsv4_fixed_pool_blocks    = 512;
-    auto config                         = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
+    auto config                         = CacheConfigCreator::createBasicConfig(mc, pc, kv_config, false, 0);
     config.block_num                    = 512;
     return config;
 }
@@ -241,7 +239,6 @@ CacheConfig makeTinyTypedHybridPoolConfig() {
     config.block_num                   = 16;
     config.seq_size_per_block          = 4;
     config.kernel_seq_size_per_block   = 4;
-    config.use_independent_block_pools = true;
 
     config.fromGroupedSpecs({makeMhaSpec("csa_kv", config.seq_size_per_block, config.dtype, 1, 4),
                              makeMhaSpec("swa_kv", config.seq_size_per_block, config.dtype, 1, 8)},
@@ -260,7 +257,6 @@ CacheConfig makeKvOnlyTypedOpaqueConfig() {
     config.block_num                   = 16;
     config.seq_size_per_block          = 256;
     config.kernel_seq_size_per_block   = 256;
-    config.use_independent_block_pools = true;
     config.use_typed_cache_regions     = true;
     config.use_opaque_kv_cache_store   = true;
 
@@ -540,7 +536,7 @@ TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout)
         compact_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
     EXPECT_TRUE(compact_connector->supportsTypedPrefixCacheLayout(compact_connector->layerTagSlots()));
 
-    // Real DSv4 Flash/Pro configs built by HybridPoolConfigCreator are eligible.
+    // Real DSv4 Flash/Pro configs built by CacheConfigCreator are eligible.
     auto flash_config    = makeRealDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
     auto flash_connector = std::make_shared<KVCacheMemoryConnector>(
         flash_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);

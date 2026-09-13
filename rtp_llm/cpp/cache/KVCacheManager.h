@@ -157,19 +157,6 @@ public:
         return cp_slot_mapper_;
     }
 
-    // Write one KV block (optionally per-layer) from host/device tensors for test
-    virtual bool
-    writeKVBlockForTest(int block_index, int layer_id, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
-    virtual bool writeKVBlockForTest(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
-
-    bool setKVBlockValue(int block_index, int layer_id, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer) {
-        return writeKVBlockForTest(block_index, layer_id, k_buffer, v_buffer);
-    }
-
-    bool setKVBlockValue(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer) {
-        return writeKVBlockForTest(block_index, k_buffer, v_buffer);
-    }
-
 private:
     void initConnectorCoordinator();
     void initCacheEventPublisher();

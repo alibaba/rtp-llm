@@ -129,8 +129,7 @@ private:
     static std::vector<size_t> completionQueueExpectedResponseCounts(size_t worker_size);
     static int                 markLoadedCacheReuse(const std::shared_ptr<GenerateStream>& stream,
                                                     const LoadCacheResult&                 load_result,
-                                                    int                                    seq_size_per_block,
-                                                    bool                                   use_independent_block_pools);
+                                                    int                                    seq_size_per_block);
     static grpc::Status        generateRequestReadFailureStatus(bool cancelled);
     static ErrorInfo           cacheLoadClientError(int64_t request_id, ErrorCode error_code);
     // Classifies error.type for the synthesized Decode phase spans. Static and

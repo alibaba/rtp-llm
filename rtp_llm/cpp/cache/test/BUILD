@@ -260,6 +260,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps + [
+        "//rtp_llm/cpp/testing:device_test_utils",
         ":block_pool_test_helper",
         "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",

@@ -89,16 +89,13 @@ private:
 
 class CacheStoreAsyncWriterTest: public ::testing::Test {};
 
-static CacheConfig
-makeWriterTestCacheConfig(const std::string& tag, size_t kv_stride, uint32_t block_num = 1) {
+static CacheConfig makeWriterTestCacheConfig(const std::string& tag, size_t kv_stride, uint32_t block_num = 1) {
     CacheConfig config;
-    config.dtype                     = DataType::TYPE_BF16;
-    config.layer_num                 = 1;
-    config.layer_all_num             = 1;
-    config.block_num                 = block_num;
-    config.seq_size_per_block        = 1;
-    config.kernel_seq_size_per_block = 1;
-    config.kv_block_stride_bytes     = kv_stride;
+    config.dtype              = DataType::TYPE_BF16;
+    config.layer_num          = 1;
+    config.layer_all_num      = 1;
+    config.block_num          = block_num;
+    config.seq_size_per_block = 1;
 
     AttentionConfigs attn_config;
     attn_config.kv_head_num   = 1;
@@ -117,14 +114,12 @@ makeWriterTestCacheConfig(const std::string& tag, size_t kv_stride, uint32_t blo
     auto spec              = SpecBuilder::build(desc, ctx);
 
     GroupBase group;
-    group.tag                       = tag;
-    group.spec                      = spec;
-    group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    group.layer_ids                 = {0};
-    group.block_num                 = block_num;
-    group.seq_size_per_block        = 1;
-    group.kernel_seq_size_per_block = 1;
-    group.kv_block_stride_bytes     = kv_stride;
+    group.tag                   = tag;
+    group.spec                  = spec;
+    group.policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.layer_ids             = {0};
+    group.block_num             = block_num;
+    group.kv_block_stride_bytes = kv_stride;
 
     config.setTopology({std::move(group)}, {{0, {tag}}});
     return config;
@@ -499,7 +494,7 @@ TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCa
     layer_cache.group_id           = 0;
     layer_cache.tag                = "default";
 
-    const auto initial_free_blocks = cache_manager->freeBlocksNum();
+    const auto            initial_free_blocks = cache_manager->freeBlocksNum();
     CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager, /*cache_model_id=*/0);
     writer.init(/*track_store_completions=*/false);
     writer.write(inputs, layer_cache);
@@ -601,7 +596,7 @@ TEST_F(CacheStoreAsyncWriterTest, DoubleWaitAllDoneThrows) {
 }
 
 TEST_F(CacheStoreAsyncWriterTest, TrackedWriteWithoutCacheStoreFailsClosed) {
-    CacheStoreAsyncWriter        writer;  // default writer -> null cache manager/store
+    CacheStoreAsyncWriter         writer;  // default writer -> null cache manager/store
     torch_ext::PyCacheStoreInputs cache_store_inputs;
     torch_ext::LayerKVCache       layer_kv;
 
@@ -614,7 +609,7 @@ TEST_F(CacheStoreAsyncWriterTest, TrackedWriteWithoutCacheStoreFailsClosed) {
 }
 
 TEST_F(CacheStoreAsyncWriterTest, UntrackedWriteWithoutCacheStoreIsSilentNoOp) {
-    CacheStoreAsyncWriter        writer;  // default writer -> null cache manager/store
+    CacheStoreAsyncWriter         writer;  // default writer -> null cache manager/store
     torch_ext::PyCacheStoreInputs cache_store_inputs;
     torch_ext::LayerKVCache       layer_kv;
 

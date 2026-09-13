@@ -486,6 +486,14 @@ void GenerateStream::setReuseLength(int reuse_length) {
     reuse_length_ = reuse_length;
 }
 
+int GenerateStream::pdKvReadyLength() const {
+    return pd_kv_ready_length_;
+}
+
+void GenerateStream::setPdKvReadyLength(int length) {
+    pd_kv_ready_length_ = length;
+}
+
 void GenerateStream::setLocalReuseLength(int length) {
     local_reuse_length_ = length;
     setDeviceReuseLength(local_reuse_length_ > memory_reuse_length_ ? local_reuse_length_ - memory_reuse_length_ : 0);

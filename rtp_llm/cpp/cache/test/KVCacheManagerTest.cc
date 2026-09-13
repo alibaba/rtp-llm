@@ -13,9 +13,9 @@
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/testing/KVCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
@@ -429,6 +429,44 @@ TEST_F(KVCacheManagerTest, MetricsThreadSmoke) {
     cache_manager.reset();
 }
 
+TEST_F(KVCacheManagerTest, WriteKVBlockUsesTargetLayerSpec) {
+    auto config     = makeSimpleMhaCacheConfig(2, 4, 2, DataType::TYPE_INT8);
+    auto large_spec = makeResolvedMhaSpec(DataType::TYPE_INT8, 1, 8, 2, "large");
+    auto small_spec = makeResolvedMhaSpec(DataType::TYPE_INT8, 1, 4, 2, "small");
+    config.fromGroupedSpecs(
+        {large_spec, small_spec}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"large", "small"});
+    config.setGroupBlockLayout({4, 4},
+                               {large_spec->block_size_bytes(), small_spec->block_size_bytes()},
+                               {large_spec->scale_block_size_bytes(), small_spec->scale_block_size_bytes()});
+    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+
+    auto k = torch::full({static_cast<int64_t>(small_spec->k_block_size_bytes())}, 7, torch::kInt8);
+    auto v = torch::full({static_cast<int64_t>(small_spec->v_block_size_bytes())}, 9, torch::kInt8);
+    ASSERT_TRUE(writeKVBlockForTest(*manager, 1, 1, k, v));
+    std::vector<int8_t> expected(small_spec->block_size_bytes(), 9);
+    std::fill(expected.begin(), expected.begin() + small_spec->k_block_size_bytes(), 7);
+    assertBlockBytesEq(manager, 1, 1, expected);
+    EXPECT_FALSE(writeKVBlockForTest(*manager, 1, 0, k, v));
+    EXPECT_ANY_THROW(writeKVBlockForTest(*manager, 1, 2, k, v));
+}
+
+TEST_F(KVCacheManagerTest, WriteKVBlockRejectsMultiGroupLayer) {
+    auto config = makeSimpleMhaCacheConfig(1, 4, 2, DataType::TYPE_INT8);
+    auto first  = makeResolvedMhaSpec(DataType::TYPE_INT8, 1, 4, 2, "first");
+    auto second = makeResolvedMhaSpec(DataType::TYPE_INT8, 1, 4, 2, "second");
+    config.fromGroupedSpecs(
+        {first, second}, {{0}, {0}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"first", "second"});
+    config.setGroupBlockLayout({4, 4},
+                               {first->block_size_bytes(), second->block_size_bytes()},
+                               {first->scale_block_size_bytes(), second->scale_block_size_bytes()});
+    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+    auto k = torch::zeros({static_cast<int64_t>(first->k_block_size_bytes())}, torch::kInt8);
+    auto v = torch::zeros({static_cast<int64_t>(first->v_block_size_bytes())}, torch::kInt8);
+    EXPECT_ANY_THROW(writeKVBlockForTest(*manager, 1, 0, k, v));
+}
+
 TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     // Use non-warmup config so we have usable blocks (block 0 is reserved in BlockPool).
     auto cache_config = makeSimpleMhaCacheConfig(
@@ -450,7 +488,7 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     auto                k_t = torch::from_blob(k_vec.data(), {(int64_t)k_bytes}, torch::kInt8).clone();
     auto                v_t = torch::from_blob(v_vec.data(), {(int64_t)v_bytes}, torch::kInt8).clone();
 
-    ASSERT_TRUE(cache_manager->writeKVBlockForTest(block_src, k_t, v_t));
+    ASSERT_TRUE(writeKVBlockForTest(*cache_manager, block_src, k_t, v_t));
 
     std::vector<int8_t> expected_block(k_bytes + v_bytes, 0);
     std::fill(expected_block.begin(), expected_block.begin() + k_bytes, 7);
@@ -470,7 +508,7 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     std::vector<int8_t> v2_vec(v_bytes, 2);
     auto                k2_t = torch::from_blob(k2_vec.data(), {(int64_t)k_bytes}, torch::kInt8).clone();
     auto                v2_t = torch::from_blob(v2_vec.data(), {(int64_t)v_bytes}, torch::kInt8).clone();
-    ASSERT_TRUE(cache_manager->writeKVBlockForTest(block_dst, /*layer_id=*/0, k2_t, v2_t));
+    ASSERT_TRUE(writeKVBlockForTest(*cache_manager, block_dst, /*layer_id=*/0, k2_t, v2_t));
 
     std::vector<int8_t> expected_layer0(k_bytes + v_bytes, 0);
     std::fill(expected_layer0.begin(), expected_layer0.begin() + k_bytes, 1);
@@ -547,7 +585,7 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
         std::vector<int8_t> v_vec(v_bytes, static_cast<int8_t>(block_id + 10));
         auto                k_t = torch::from_blob(k_vec.data(), {(int64_t)k_bytes}, torch::kInt8).clone();
         auto                v_t = torch::from_blob(v_vec.data(), {(int64_t)v_bytes}, torch::kInt8).clone();
-        ASSERT_TRUE(cache_manager->writeKVBlockForTest(block_id, k_t, v_t));
+        ASSERT_TRUE(writeKVBlockForTest(*cache_manager, block_id, k_t, v_t));
     }
 
     std::vector<BlockIdPair> mapping;

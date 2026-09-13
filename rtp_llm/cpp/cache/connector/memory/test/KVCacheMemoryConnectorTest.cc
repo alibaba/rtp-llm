@@ -174,7 +174,6 @@ CacheConfig createDsv4TypedConnectorConfig() {
     config.seq_size_per_block          = 128;
     config.kernel_seq_size_per_block   = 128;
     config.linear_step                 = 4;
-    config.use_independent_block_pools = true;
     config.use_typed_cache_regions     = true;
     config.use_opaque_kv_cache_store   = true;
     config.is_sparse                   = true;
@@ -3442,7 +3441,6 @@ protected:
         config.block_size_bytes = config.kv_block_size_bytes;
         config.layer_to_block_stride_bytes.assign(static_cast<size_t>(layer_num), static_cast<int>(full_stride));
 
-        config.use_independent_block_pools = true;
 
         return config;
     }
