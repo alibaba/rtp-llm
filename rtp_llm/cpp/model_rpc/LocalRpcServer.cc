@@ -204,14 +204,32 @@ void LocalRpcServer::installSleepHooks() {
                      parallelism_config.ep_size);
     engine_->sleepController().setRuntimeSupport(runtime_supported, disabled_reason);
 
+    const auto local_rank = maga_init_params_.parallelism_config.local_rank;
     SleepHooks hooks;
+    hooks.requiresCoordinatedQuiesce = engine->requiresCoordinatedSleepQuiesce();
+    hooks.freezeEngineRounds         = [engine]() { return engine->freezeSleepRounds(); };
+    hooks.quiesceEngineAtRound       = [engine, local_rank](uint64_t round, int64_t timeout_ms) {
+        // The engine loop owns the final CUDA drain. This control thread only
+        // publishes the target and waits on a CPU condition variable.
+        const auto status = [&]() {
+            if (engine->requiresCoordinatedSleepQuiesce()) {
+                return engine->pauseAtSleepRound(round, timeout_ms);
+            }
+            // The legacy TP-only path may submit the final empty TP broadcast
+            // on this RPC thread and still needs its device guard.
+            OptionalSleepDeviceGuard device_guard(local_rank);
+            return engine->pauseAtSleepRound(round, timeout_ms);
+        }();
+        if (!status.ok()) {
+            RTP_LLM_LOG_ERROR("pauseAtSleepRound failed: %s", status.ToString().c_str());
+        }
+        return status.ok();
+    };
     drain_manager_->installHooks(hooks);  // drain + activeRequestCount + activeCacheTransferCount
-    const auto local_rank  = maga_init_params_.parallelism_config.local_rank;
     auto       vmm_backend = vmm_backend_;
-    hooks.armEngineQuiesce = [engine, local_rank](const SleepOptions&) {
-        OptionalSleepDeviceGuard device_guard(local_rank);
-        // Arm the collective sleep-quiesce consensus at DRAINING, before the rank-asymmetric
-        // drain, symmetrically on every rank. Multi-rank DP/EP only; single-rank no-op.
+    hooks.armEngineQuiesce = [engine](const SleepOptions&) {
+        // Keep empty peers polling until every rank has drained. Freeze and
+        // the common stopping target arrive later over the control plane.
         engine->armCollectiveSleepQuiesce();
         return true;
     };
@@ -447,20 +465,6 @@ void LocalRpcServer::installSleepHooks() {
                     RTP_LLM_LOG_WARNING("level-2 wake: reload_weights_from_loader failed: %s", e.what());
                     ok = false;
                 }
-            }
-        }
-        // Restore Python-owned runtime state explicitly discarded by the sleep
-        // hook (currently TP symmetric-memory state). DSV4 RoPE/cos-sin caches
-        // intentionally remain resident because decode CUDA graphs capture
-        // their device pointers; replacing them here would leave graph replay
-        // dereferencing a stale address.
-        if (ok && !weight_manager_.is_none()) {
-            try {
-                py::gil_scoped_acquire acquire;
-                weight_manager_.attr("restore_runtime_gpu_caches")("wake");
-            } catch (const py::error_already_set& e) {
-                RTP_LLM_LOG_WARNING("wake: restore_runtime_gpu_caches failed: %s", e.what());
-                ok = false;
             }
         }
         if (!ok && memory_cache_restore_future_.valid()) {
@@ -1067,10 +1071,10 @@ grpc::Status LocalRpcServer::DumpTorchAllocatorInternal(grpc::ServerContext*    
 grpc::Status
 LocalRpcServer::CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
-    // A sleeping or transitioning instance is not ready; report the sleep state and
-    // a retryable UNAVAILABLE so LB health checks take it out of rotation.
+    // A sleeping or transitioning instance is not ready: UNAVAILABLE takes it
+    // out of LB rotation. Non-OK gRPC responses carry state in error_details,
+    // not the normal response body.
     if (auto admission = checkAdmission(); !admission.ok()) {
-        response->set_health(sleepStateToString(engine_->sleepController().state()));
         return admission;
     }
     response->set_health("OK");
@@ -1159,18 +1163,48 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
 }
 
 grpc::Status LocalRpcServer::SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
-    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
-    OptionalSleepDeviceGuard device_guard(maga_init_params_.parallelism_config.local_rank);
-    auto                     status = engine_->pauseAndWaitQuiesced(60000);
-    if (!status.ok()) {
-        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, status.ToString());
+    RTP_LLM_LOG_DEBUG("receive SetPause rpc request from client: %s", context->peer().c_str());
+    // A state check alone races sleep prepare. Retain a lease until the legacy
+    // control operation finishes, so drain cannot release backing underneath it.
+    auto admission = acquireAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto admission_lease = std::move(admission.lease);
+    if (!engine_) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "engine is not initialized");
+    }
+    if (engine_->requiresCoordinatedSleepQuiesce()) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "use the all-rank sleep/wake lifecycle instead");
+    }
+    try {
+        // Preserve the legacy RL contract: this only stalls scheduling. Sleep
+        // quiescence is owned by the lifecycle protocol, never by this RPC.
+        engine_->pause();
+    } catch (const std::exception& e) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
     }
     return grpc::Status::OK;
 }
 
 grpc::Status LocalRpcServer::SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
-    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s,", context->peer().c_str());
-    engine_->restart();
+    RTP_LLM_LOG_DEBUG("receive SetRestart rpc request from client: %s", context->peer().c_str());
+    auto admission = acquireAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto admission_lease = std::move(admission.lease);
+    if (!engine_) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "engine is not initialized");
+    }
+    if (engine_->requiresCoordinatedSleepQuiesce()) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "use the all-rank sleep/wake lifecycle instead");
+    }
+    try {
+        engine_->restart();
+    } catch (const std::exception& e) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+    }
     return grpc::Status::OK;
 }
 
@@ -1196,7 +1230,30 @@ LocalRpcServer::SleepServing(grpc::ServerContext* context, const SleepRequestPB*
     options.tags         = std::vector<std::string>(request->tags().begin(), request->tags().end());
     options.prepare_only = request->prepare_only();
     options.commit_only  = request->commit_only();
+    options.drain_only           = request->drain_only();
+    options.quiesce_token        = request->quiesce_token();
+    options.expected_incarnation = request->expected_incarnation();
+    options.expected_sleep_epoch = request->expected_sleep_epoch();
     const auto result    = engine_->sleepController().sleep(options);
+    return sleep_rpc::resultToGrpcStatus(result);
+}
+
+grpc::Status LocalRpcServer::QuiesceSleep(grpc::ServerContext*         context,
+                                          const SleepQuiesceRequestPB* request,
+                                          SleepQuiesceResponsePB*      response) {
+    // In particular, do not create a CUDA device guard or acquire the Python
+    // GIL before freeze ACK: a peer may be blocked in its current forward.
+    if (context->IsCancelled()) {
+        return grpc::Status(grpc::StatusCode::CANCELLED, "sleep quiesce request cancelled");
+    }
+    SleepQuiesceOptions options;
+    options.token        = request->token();
+    options.freeze_only  = request->freeze_only();
+    options.target_round = request->target_round();
+    options.timeout_ms   = request->timeout_ms();
+    uint64_t   round     = 0;
+    const auto result    = engine_->sleepController().quiesce(options, round);
+    response->set_frozen_round(round);
     return sleep_rpc::resultToGrpcStatus(result);
 }
 
@@ -1207,6 +1264,7 @@ LocalRpcServer::WakeUpServing(grpc::ServerContext* context, const WakeUpRequestP
                      request->prepare_only(),
                      request->commit_only());
     WakeUpOptions options;
+    options.cancel_quiesce_token = request->cancel_quiesce_token();
     options.prepare_only = request->prepare_only();
     options.commit_only  = request->commit_only();
     const auto result    = engine_->sleepController().wakeUp(options);

@@ -70,6 +70,7 @@ class _FakeStore:
 
 
 class _FakeSleepRequestPB(_FakeProtoMessage):
+
     def __init__(
         self,
         level: int = 0,
@@ -79,6 +80,10 @@ class _FakeSleepRequestPB(_FakeProtoMessage):
         tags=None,
         prepare_only: bool = False,
         commit_only: bool = False,
+        drain_only: bool = False,
+        quiesce_token: str = "",
+        expected_incarnation: str = "",
+        expected_sleep_epoch: int = 0,
         **_: Any,
     ):
         self.level = level
@@ -88,6 +93,10 @@ class _FakeSleepRequestPB(_FakeProtoMessage):
         self.tags = list(tags or [])
         self.prepare_only = prepare_only
         self.commit_only = commit_only
+        self.drain_only = drain_only
+        self.quiesce_token = quiesce_token
+        self.expected_incarnation = expected_incarnation
+        self.expected_sleep_epoch = expected_sleep_epoch
 
     def CopyFrom(self, other: "_FakeSleepRequestPB"):
         self.level = other.level
@@ -97,17 +106,34 @@ class _FakeSleepRequestPB(_FakeProtoMessage):
         self.tags = list(other.tags)
         self.prepare_only = other.prepare_only
         self.commit_only = other.commit_only
+        self.drain_only = other.drain_only
+        self.quiesce_token = other.quiesce_token
+        self.expected_incarnation = other.expected_incarnation
+        self.expected_sleep_epoch = other.expected_sleep_epoch
 
 
 class _FakeWakeUpRequestPB(_FakeProtoMessage):
+
     def __init__(
         self,
         prepare_only: bool = False,
         commit_only: bool = False,
+        cancel_quiesce_token: str = "",
         **_: Any,
     ):
         self.prepare_only = prepare_only
         self.commit_only = commit_only
+        self.cancel_quiesce_token = cancel_quiesce_token
+
+
+class _FakeSleepQuiescePB(_FakeProtoMessage):
+    def __init__(self, **kwargs):
+        self.token = ""
+        self.freeze_only = False
+        self.target_round = 0
+        self.timeout_ms = 0
+        self.frozen_round = 0
+        self.__dict__.update(kwargs)
 
 
 class _FakeSleepStatusResponsePB(_FakeProtoMessage):
@@ -142,6 +168,9 @@ def _install_sleep_proto_test_fallback(pb2, grpc_client_wrapper_module):
         pb2.WakeUpRequestPB = _FakeWakeUpRequestPB
     if not hasattr(pb2, "SleepStatusResponsePB"):
         pb2.SleepStatusResponsePB = _FakeSleepStatusResponsePB
+    if not hasattr(pb2, "SleepQuiesceRequestPB"):
+        pb2.SleepQuiesceRequestPB = _FakeSleepQuiescePB
+        pb2.SleepQuiesceResponsePB = _FakeSleepQuiescePB
 
     message_to_dict = grpc_client_wrapper_module.MessageToDict
     if getattr(message_to_dict, "_supports_sleep_test_fakes", False):
@@ -461,6 +490,9 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         for address in wrapper.control_addresses:
             wrapper._dp_channels[address] = MagicMock()
             wrapper._dp_stubs[address] = MagicMock()
+            wrapper._dp_stubs[address].QuiesceSleep = AsyncMock(
+                return_value=pb2.SleepQuiesceResponsePB(frozen_round=0)
+            )
         return wrapper, pb2
 
     def _aio_error(self, code, details):
@@ -473,6 +505,8 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
 
     def _status_pb(self, pb2, **kwargs):
         defaults = {
+            "quiesce_protocol": 1,
+            "worker_incarnation": "test-worker",
             "state": "RUNNING",
             "sleep_mode_enabled": True,
             "effective": True,
@@ -484,6 +518,219 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         }
         defaults.update(kwargs)
         return pb2.SleepStatusResponsePB(**defaults)
+
+    async def test_round_fence_waits_for_all_freeze_acks_before_target(self):
+        from rtp_llm.utils.lifecycle_quiesce import prepare_sleep_rounds
+
+        addresses = ["rank-0", "rank-1", "rank-2", "rank-3"]
+        _, pb2 = self._build_wrapper(control_addresses=addresses)
+        statuses = [
+            {
+                "address": a,
+                "state": "RUNNING",
+                "quiesce_protocol": 1,
+                "worker_incarnation": a,
+                "sleep_epoch": "4",
+            }
+            for a in addresses
+        ]
+        calls = []
+
+        async def drain(address, rpc, request, timeout):
+            self.assertEqual(rpc, "SleepServing")
+            self.assertTrue(request.drain_only)
+            self.assertTrue(request.prepare_only)
+            self.assertEqual(request.expected_incarnation, address)
+            self.assertEqual(request.expected_sleep_epoch, 4)
+            self.assertEqual(request.quiesce_token, "attempt")
+            calls.append(address)
+            return {"address": address}
+
+        async def broadcast(rpc, request, timeout):
+            self.assertCountEqual(calls[:4], addresses)
+            self.assertEqual(rpc, "QuiesceSleep")
+            self.assertEqual(request.token, "attempt")
+            if request.freeze_only:
+                calls.append("freeze")
+                await asyncio.sleep(0)
+                calls.append("all_frozen")
+                return [
+                    {"address": a, "frozen_round": r}
+                    for a, r in zip(addresses, [11, 13, 10, 12])
+                ]
+            self.assertEqual(calls[-1], "all_frozen")
+            self.assertEqual(request.target_round, 13)
+            calls.append("target")
+            return [{"address": a} for a in addresses]
+
+        results = await prepare_sleep_rounds(
+            pb2.SleepRequestPB(quiesce_token="attempt"),
+            addresses,
+            statuses,
+            drain,
+            broadcast,
+            60.0,
+        )
+        self.assertFalse(any("error" in r for r in results))
+        self.assertEqual(calls[-1], "target")
+
+    async def test_round_fence_missing_or_bad_freeze_ack_never_sends_target(self):
+        from rtp_llm.utils.lifecycle_quiesce import prepare_sleep_rounds
+
+        addresses = ["rank-0", "rank-1"]
+        _, pb2 = self._build_wrapper(control_addresses=addresses)
+        statuses = [
+            {
+                "address": a,
+                "state": "RUNNING",
+                "quiesce_protocol": 1,
+                "worker_incarnation": a,
+                "sleep_epoch": 0,
+            }
+            for a in addresses
+        ]
+
+        async def drain(address, *args):
+            return {"address": address}
+
+        bad_acks = [
+            [{"address": addresses[0], "frozen_round": 4}],
+            [{"address": a, "error": "timeout"} for a in addresses],
+            [{"address": a} for a in addresses],
+            [{"address": a, "frozen_round": -1} for a in addresses],
+            [{"address": a, "frozen_round": 1 << 63} for a in addresses],
+            [{"address": addresses[0], "frozen_round": 4}] * 2,
+        ]
+        for acks in bad_acks:
+            with self.subTest(acks=acks):
+                broadcast = AsyncMock(return_value=acks)
+                results = await prepare_sleep_rounds(
+                    pb2.SleepRequestPB(quiesce_token="attempt"),
+                    addresses,
+                    statuses,
+                    drain,
+                    broadcast,
+                    60.0,
+                )
+                self.assertTrue(any("error" in r for r in results))
+                broadcast.assert_awaited_once()
+                self.assertTrue(broadcast.await_args.args[1].freeze_only)
+
+    async def test_round_fence_mixed_version_rejected_before_any_drain(self):
+        from rtp_llm.utils.lifecycle_quiesce import prepare_sleep_rounds
+
+        addresses = ["rank-0", "rank-1"]
+        _, pb2 = self._build_wrapper(control_addresses=addresses)
+        statuses = [
+            {
+                "address": a,
+                "state": "RUNNING",
+                "quiesce_protocol": 1,
+                "worker_incarnation": a,
+                "sleep_epoch": 0,
+            }
+            for a in addresses
+        ]
+        del statuses[1]["quiesce_protocol"]
+        drain, broadcast = AsyncMock(), AsyncMock()
+        results = await prepare_sleep_rounds(
+            pb2.SleepRequestPB(quiesce_token="attempt"),
+            addresses,
+            statuses,
+            drain,
+            broadcast,
+            60.0,
+        )
+        self.assertTrue(any("error" in r for r in results))
+        drain.assert_not_awaited()
+        broadcast.assert_not_awaited()
+
+    async def test_round_fence_zero_is_a_valid_common_stopping_round(self):
+        from rtp_llm.utils.lifecycle_quiesce import prepare_sleep_rounds
+
+        addresses = ["rank-0", "rank-1"]
+        _, pb2 = self._build_wrapper(control_addresses=addresses)
+        statuses = [
+            {
+                "address": a,
+                "state": "RUNNING",
+                "quiesce_protocol": 1,
+                "worker_incarnation": a,
+                "sleep_epoch": 0,
+            }
+            for a in addresses
+        ]
+
+        async def drain(address, *args):
+            return {"address": address}
+
+        broadcast = AsyncMock(
+            side_effect=[
+                [{"address": a, "frozen_round": "0"} for a in addresses],
+                [{"address": a} for a in addresses],
+            ]
+        )
+        results = await prepare_sleep_rounds(
+            pb2.SleepRequestPB(quiesce_token="attempt"),
+            addresses,
+            statuses,
+            drain,
+            broadcast,
+            60.0,
+        )
+        self.assertFalse(any("error" in r for r in results))
+        target = broadcast.await_args_list[-1].args[1]
+        self.assertFalse(target.freeze_only)
+        self.assertEqual(target.target_round, 0)
+
+    async def test_freeze_rpc_failure_rolls_back_with_the_same_token(self):
+        wrapper, pb2 = self._build_wrapper()
+        stub = wrapper._dp_stubs[wrapper.control_addresses[0]]
+        stub.GetSleepStatus = AsyncMock(return_value=self._status_pb(pb2))
+        stub.SleepServing = AsyncMock(return_value=pb2.EmptyPB())
+        stub.WakeUpServing = AsyncMock(return_value=pb2.EmptyPB())
+        stub.QuiesceSleep = AsyncMock(
+            side_effect=self._aio_error(
+                grpc.StatusCode.DEADLINE_EXCEEDED, "freeze timeout"
+            )
+        )
+        result = await wrapper.sleep_serving({"level": 1})
+        self.assertIn("rolled back", result["error"])
+        stub.SleepServing.assert_awaited_once()
+        token = stub.SleepServing.await_args.args[0].quiesce_token
+        self.assertTrue(token)
+        self.assertEqual(
+            stub.WakeUpServing.await_args.args[0].cancel_quiesce_token, token
+        )
+
+    async def test_cancel_during_freeze_rolls_back_without_committing(self):
+        wrapper, pb2 = self._build_wrapper()
+        stub = wrapper._dp_stubs[wrapper.control_addresses[0]]
+        stub.GetSleepStatus = AsyncMock(return_value=self._status_pb(pb2))
+        stub.SleepServing = AsyncMock(return_value=pb2.EmptyPB())
+        stub.WakeUpServing = AsyncMock(return_value=pb2.EmptyPB())
+        entered = asyncio.Event()
+
+        async def freeze(*args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        stub.QuiesceSleep = AsyncMock(side_effect=freeze)
+        task = asyncio.create_task(wrapper.sleep_serving({"level": 1}))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        stub.SleepServing.assert_awaited_once()
+        self.assertEqual(
+            stub.WakeUpServing.await_args.args[0].cancel_quiesce_token,
+            stub.SleepServing.await_args.args[0].quiesce_token,
+        )
 
     async def test_health_check_failure_preserves_lifecycle_channels(self):
         # Regression: a routine health probe timing out during a sleep/wake
@@ -911,7 +1158,7 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
                     )
                 failing.GetSleepStatus.side_effect = [self._status_pb(pb2), after]
 
-                result = await wrapper.sleep_serving({"level": 2, "timeout_ms": 1})
+                result = await wrapper.sleep_serving({"level": 1, "timeout_ms": 1})
                 self.assertTrue(result["recovery_required"])
                 self.assertIn("RECOVERY_REQUIRED", result["error"])
                 self.assertIn("drain timed out", result["details"][0]["error"])
@@ -951,14 +1198,17 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
                 return_value=pb2.EmptyPB()
             )
             wrapper._dp_stubs[address].GetSleepStatus = AsyncMock(
-                return_value=self._status_pb(
-                    pb2,
-                    state="SLEEPING",
-                    sleep_epoch=1,
-                    kv_memory_state="PAUSED",
-                    device_kv_cache_valid=False,
-                    gpu_resource_state="RELEASED",
-                )
+                side_effect=[
+                    self._status_pb(pb2),
+                    self._status_pb(
+                        pb2,
+                        state="SLEEPING",
+                        sleep_epoch=1,
+                        kv_memory_state="PAUSED",
+                        device_kv_cache_valid=False,
+                        gpu_resource_state="RELEASED",
+                    ),
+                ]
             )
 
         result = await wrapper.sleep_serving(
@@ -981,6 +1231,17 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(commit_request.prepare_only)
             self.assertTrue(commit_request.commit_only)
             self.assertEqual(commit_request.timeout_ms, 0)
+
+    async def test_sleep_already_sleeping_is_idempotent_without_a_new_token(self):
+        wrapper, pb2 = self._build_wrapper()
+        stub = wrapper._dp_stubs[wrapper.control_addresses[0]]
+        stub.GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(pb2, state="SLEEPING")
+        )
+        stub.SleepServing = AsyncMock()
+        self.assertEqual(await wrapper.sleep_serving({"level": 1}), {"status": "ok"})
+        stub.SleepServing.assert_not_awaited()
+        stub.QuiesceSleep.assert_not_awaited()
 
     async def test_sleep_serving_phase_rejected_before_status_probe(self):
         wrapper, pb2 = self._build_wrapper()

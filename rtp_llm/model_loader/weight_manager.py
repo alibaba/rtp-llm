@@ -422,51 +422,12 @@ class WeightManager:
         nothing was. Reading the switch here would turn a mid-sleep config change
         into a communicator left unmapped.
 
-        Ordering is load-bearing, which is why this is not a step inside
-        :meth:`restore_runtime_gpu_caches` -- see
-        :mod:`rtp_llm.utils.nccl_memory` rule (7).
+        Ordering is load-bearing: this must finish before weight reload or any
+        other collective -- see :mod:`rtp_llm.utils.nccl_memory` rule (7).
         """
         from rtp_llm.utils.nccl_memory import resume_after_wake
 
         resume_after_wake(self._device, reason=reason)
-
-    @timed_sleep_method("wake", "restore_runtime_gpu_caches")
-    def restore_runtime_gpu_caches(self, reason: str = "wake") -> None:
-        """Restore Python-owned runtime state explicitly dropped at sleep."""
-        # The TP symmetric-memory staging buffer is deliberately dropped while
-        # sleeping (the process group remains valid). Recreate it before the
-        # engine warmup so the normal TP fast path is restored on wake.
-        try:
-            from rtp_llm.models_py.distributed import collective_torch
-            from rtp_llm.models_py.distributed.collective_torch import Group
-            from rtp_llm.models_py.distributed.symm_mem import (
-                restore_symm_mem_communicator_after_wake,
-            )
-
-            parallelism_config = getattr(collective_torch, "_parallelism_config", None)
-            if parallelism_config is None or parallelism_config.tp_size <= 1:
-                raise RuntimeError(
-                    "TP symmetric-memory communicator is disabled for TP<=1"
-                )
-            tp_group = collective_torch._get_group(Group.TP)
-            restored_symm = restore_symm_mem_communicator_after_wake(tp_group)
-            logging.info(
-                "restore_runtime_gpu_caches[%s]: TP symmetric-memory communicator restored=%s",
-                reason,
-                restored_symm,
-            )
-        except Exception as e:
-            # Some deployments have TP=1 or no torch.distributed process group;
-            # those paths never had a symmetric-memory communicator to restore.
-            logging.info(
-                "restore_runtime_gpu_caches[%s]: TP symmetric-memory restore skipped: %s",
-                reason,
-                e,
-            )
-        # DSV4 RoPE caches deliberately remain resident across sleep/wake. Their
-        # device pointers are captured by decode CUDA graphs; rebuilding them
-        # here would not update an already-captured graph. See the TODO in
-        # sleep_gpu_reclaim.py for the required invalidate+recapture protocol.
 
     @timed_sleep_method("wake", "reload_weights")
     def reload_weights_from_loader(self) -> None:

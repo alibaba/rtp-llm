@@ -71,6 +71,36 @@ TEST(LocalRpcServerSleepAbortTest, DirectSleepRpcRejectsNonEmptyTags) {
     EXPECT_EQ(controller->sleepEpoch(), 0);
 }
 
+TEST(LocalRpcServerSleepAbortTest, HealthReportsUnavailableWhileSleepingAndOkAfterWake) {
+    SleepLifecycleController controller(true);
+    SleepHooks               hooks;
+    hooks.drain = [](const SleepOptions&) { return true; };
+    controller.setHooks(hooks);
+    LocalRpcServer server;
+    server.admission_gate_ = std::make_shared<AdmissionGate>(&controller, "test_instance");
+    grpc::ServerContext context;
+    EmptyPB             request;
+
+    CheckHealthResponsePB running_response;
+    EXPECT_TRUE(server.CheckHealth(&context, &request, &running_response).ok());
+    EXPECT_EQ(running_response.health(), "OK");
+
+    ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+    CheckHealthResponsePB sleeping_response;
+    const auto            status = server.CheckHealth(&context, &request, &sleeping_response);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
+    EXPECT_TRUE(sleeping_response.health().empty());
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(status.error_details()));
+    EXPECT_EQ(details.state(), "SLEEPING");
+    EXPECT_EQ(details.sleep_epoch(), controller.sleepEpoch());
+
+    ASSERT_TRUE(controller.wakeUp().ok);
+    CheckHealthResponsePB awake_response;
+    EXPECT_TRUE(server.CheckHealth(&context, &request, &awake_response).ok());
+    EXPECT_EQ(awake_response.health(), "OK");
+}
+
 TEST(LocalRpcServerSleepAbortTest, AbortRegistryCancelsOnlyNonStreamingStreams) {
     LocalRpcServer server;
 
@@ -90,6 +120,54 @@ TEST(LocalRpcServerSleepAbortTest, AbortRegistryCancelsOnlyNonStreamingStreams) 
 
     non_streaming_guard.reset();
     EXPECT_EQ(server.cancelAbortableStreams(), 0u);
+}
+
+TEST(LocalRpcServerSleepAbortTest, LegacyControlsCannotBypassSleepAdmission) {
+    SleepLifecycleController controller(true);
+    SleepHooks               hooks;
+    hooks.drain = [](const SleepOptions&) { return true; };
+    controller.setHooks(hooks);
+    LocalRpcServer server;
+    server.admission_gate_ = std::make_shared<AdmissionGate>(&controller, "test_instance");
+
+    ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+    for (auto rpc : {&LocalRpcServer::SetPause, &LocalRpcServer::SetRestart}) {
+        grpc::ServerContext context;
+        EmptyPB             request;
+        EmptyPB             response;
+        auto                status = (server.*rpc)(&context, &request, &response);
+        EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
+        ErrorDetailsPB details;
+        ASSERT_TRUE(details.ParseFromString(status.error_details()));
+        EXPECT_EQ(details.state(), "SLEEPING");
+        EXPECT_EQ(controller.state(), SleepState::SLEEPING);
+    }
+
+    ASSERT_TRUE(controller.wakeUp().ok);
+    for (auto rpc : {&LocalRpcServer::SetPause, &LocalRpcServer::SetRestart}) {
+        grpc::ServerContext context;
+        EmptyPB             request;
+        EmptyPB             response;
+        // Admission is open again. A missing engine fails explicitly rather
+        // than dereferencing it (the sleeping path must never reach it).
+        auto status = (server.*rpc)(&context, &request, &response);
+        EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+        EXPECT_EQ(status.error_message(), "engine is not initialized");
+    }
+}
+
+TEST(LocalRpcServerSleepAbortTest, LegacyControlsCannotBypassDrainAdmission) {
+    auto           controller = drainingController();
+    LocalRpcServer server;
+    server.admission_gate_ = std::make_shared<AdmissionGate>(controller.get(), "test_instance");
+    for (auto rpc : {&LocalRpcServer::SetPause, &LocalRpcServer::SetRestart}) {
+        grpc::ServerContext context;
+        EmptyPB             request;
+        EmptyPB             response;
+        auto                status = (server.*rpc)(&context, &request, &response);
+        EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
+        EXPECT_EQ(controller->state(), SleepState::DRAINING);
+    }
 }
 
 TEST(LocalRpcServerSleepAbortTest, NormalGenerateStreamReportErrorWakesOutputWaiter) {

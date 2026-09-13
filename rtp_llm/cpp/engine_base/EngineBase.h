@@ -59,10 +59,20 @@ public:
         return absl::OkStatus();
     }
 
-    // Arm the collective sleep-quiesce consensus at the DRAINING transition (before the
-    // rank-asymmetric drain), symmetrically on every rank. Overridden by NormalEngine; no-op in
-    // the base so engines without a collective quiesce path (and single-rank) do nothing.
+    // Keep empty DP/EP peers polling during drain, before the control plane
+    // freezes executor rounds. This does not pause the engine or run a collective.
     virtual void armCollectiveSleepQuiesce() {}
+
+    virtual bool requiresCoordinatedSleepQuiesce() const {
+        return false;
+    }
+    virtual uint64_t freezeSleepRounds() {
+        return 0;
+    }
+    virtual absl::Status pauseAtSleepRound(uint64_t round, int64_t timeout_ms) {
+        (void)round;
+        return pauseAndWaitQuiesced(timeout_ms);
+    }
 
     virtual std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) = 0;
 

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from time import perf_counter
 from typing import Any, Callable, Dict, List, Optional
 
@@ -17,6 +18,7 @@ from rtp_llm.frontend.sleep_validation import (
 )
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.utils.lifecycle_lease import LifecycleLease
+from rtp_llm.utils.lifecycle_quiesce import prepare_sleep_rounds
 from rtp_llm.utils.lifecycle_rpc import LifecycleRpcTransport
 from rtp_llm.utils.lifecycle_status import (
     _as_int,
@@ -327,7 +329,9 @@ class GrpcClientWrapper:
             "GetSleepStatus", pb2.EmptyPB(), timeout_s=3
         )
 
-    async def _initial_lifecycle_status(self, operation: str) -> Dict[str, Any]:
+    async def _initial_lifecycle_status(
+        self, operation: str, *, rank_snapshots: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
         """Probe the pre-condition state shared by every control rank.
 
         Each operation owns the instance-wide lease through its terminal state.
@@ -347,6 +351,8 @@ class GrpcClientWrapper:
         """
         await self._refresh_control_addresses_if_needed()
         statuses = await self._raw_sleep_statuses()
+        if rank_snapshots is not None:
+            rank_snapshots.extend(statuses)
         status = self._aggregate_sleep_status(statuses)
         _report_sleep_status_metrics(status)
         if "error" in status:
@@ -414,7 +420,9 @@ class GrpcClientWrapper:
             )
         return result
 
-    async def _rollback_sleep_prepare(self) -> List[Dict[str, Any]]:
+    async def _rollback_sleep_prepare(
+        self, quiesce_token: str = ""
+    ) -> List[Dict[str, Any]]:
         """Abort drain and verify every rank is usable before returning ownership.
 
         Called only before commit, inside ``_drive_to_terminal``. RPC success
@@ -422,7 +430,9 @@ class GrpcClientWrapper:
         In-flight requests may still be running, so their counts need not be zero.
         """
         results = await self._broadcast_control_rpc(
-            "WakeUpServing", pb2.WakeUpRequestPB(), timeout_s=60
+            "WakeUpServing",
+            pb2.WakeUpRequestPB(cancel_quiesce_token=quiesce_token),
+            timeout_s=75,
         )
         statuses = await self._raw_sleep_statuses()
         if {status.get("address") for status in statuses} != set(
@@ -599,7 +609,10 @@ class GrpcClientWrapper:
                     "error": "non-empty sleep tags are unsupported; partial sleep is not implemented",
                     "grpc_status": "INVALID_ARGUMENT",
                 }
-            status = await self._initial_lifecycle_status("sleep")
+            rank_snapshots: List[Dict[str, Any]] = []
+            status = await self._initial_lifecycle_status(
+                "sleep", rank_snapshots=rank_snapshots
+            )
             if "error" in status:
                 return status
             if not bool(status.get("effective", False)):
@@ -618,28 +631,44 @@ class GrpcClientWrapper:
                     "supported_levels": status.get("supported_levels", []),
                     "supported_modes": status.get("supported_modes", []),
                 }
+            if level not in status.get("supported_levels", []):
+                return {
+                    "error": "sleep level does not match the startup sleep_mode_level",
+                    "grpc_status": "INVALID_ARGUMENT",
+                    "supported_levels": status.get("supported_levels", []),
+                }
+            if status.get("state") == "SLEEPING":
+                return {"status": "ok"}
+            if status.get("state") != "RUNNING":
+                return {
+                    "error": "sleep requires all ranks RUNNING; cancel an unfinished drain with wake_up first",
+                    "grpc_status": "FAILED_PRECONDITION",
+                }
             request = pb2.SleepRequestPB(
                 level=level,
                 mode=mode,
                 timeout_ms=timeout_ms,
                 reason=str(req.get("reason", "")),
                 tags=list(tags),
+                quiesce_token=uuid.uuid4().hex,
             )
-            prepare_request = pb2.SleepRequestPB()
-            prepare_request.CopyFrom(request)
-            prepare_request.prepare_only = True
             commit_request = pb2.SleepRequestPB()
             commit_request.CopyFrom(request)
             commit_request.commit_only = True
             commit_request.timeout_ms = 0
 
-            # prepare blocks on drain; leave headroom on top of drain timeout.
-            # Only after every rank is drained do we send commit, avoiding a
-            # partially sleeping instance when one rank times out.
+            # Every rank drains while empty peers still execute fake forwards.
+            # Only then freeze admission, collect stable ticket snapshots, and
+            # allow bounded catch-up. All three stages remain reversible.
             timeout_s = max(60.0, timeout_ms / 1000.0 + 30.0)
             try:
-                prepare_results = await self._broadcast_control_rpc(
-                    "SleepServing", prepare_request, timeout_s
+                prepare_results = await prepare_sleep_rounds(
+                    request,
+                    self.control_addresses,
+                    rank_snapshots,
+                    self._call_control_rpc,
+                    self._broadcast_control_rpc,
+                    timeout_s,
                 )
             except asyncio.CancelledError:
                 # Prepare only closes admission and drains in-flight work -- no
@@ -652,7 +681,7 @@ class GrpcClientWrapper:
                     "sleep prepare cancelled; rolling back drain to RUNNING"
                 )
                 abort_results = await self._drive_to_terminal(
-                    self._rollback_sleep_prepare()
+                    self._rollback_sleep_prepare(request.quiesce_token)
                 )
                 if any("error" in result for result in abort_results):
                     return {
@@ -663,10 +692,15 @@ class GrpcClientWrapper:
                         "details": error_details(abort_results),
                     }
                 raise
+            except Exception as error:
+                # A malformed freeze response or local transport exception is
+                # still a reversible prepare failure; do not strand frozen ranks.
+                logging.exception("sleep round prepare failed")
+                prepare_results = [{"error": str(error), "grpc_status": "UNKNOWN"}]
             failures = [result for result in prepare_results if "error" in result]
             if failures:
                 abort_results = await self._drive_to_terminal(
-                    self._rollback_sleep_prepare()
+                    self._rollback_sleep_prepare(request.quiesce_token)
                 )
                 abort_failures = [r for r in abort_results if "error" in r]
                 if abort_failures:

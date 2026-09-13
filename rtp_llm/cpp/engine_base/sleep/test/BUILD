@@ -1,6 +1,17 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
 
 cc_test_wrapper(
+    name = "sleep_round_fence_test",
+    srcs = ["SleepRoundFenceTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/engine_base/sleep",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test_wrapper(
     name = "sleep_lifecycle_controller_test",
     srcs = [
         "SleepLifecycleControllerTest.cc",

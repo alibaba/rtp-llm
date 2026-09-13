@@ -4,9 +4,11 @@ cc_library(
     name = "sleep",
     hdrs = [
         "SleepLifecycleController.h",
+        "SleepRoundFence.h",
     ],
     srcs = [
         "SleepLifecycleController.cc",
+        "SleepRoundFence.cc",
     ],
     copts = copts(),
     deps = [

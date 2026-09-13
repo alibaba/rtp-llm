@@ -768,11 +768,28 @@ message SleepRequestPB {
     repeated string tags = 5;     // reserved for partial release; non-empty tags are rejected.
     bool prepare_only = 6;        // close admission + drain; do not release GPU
     bool commit_only = 7;         // release GPU after all ranks prepared/drained
+    bool drain_only = 8;          // prepare without stopping the executor; coordinator only
+    string quiesce_token = 9;     // fences drain/quiesce/commit for one instance operation
+    string expected_incarnation = 10; // initial drain must target the probed worker
+    int64 expected_sleep_epoch = 11;  // initial drain must target the probed epoch
+}
+
+// Host-only control RPC. Freeze ACK must not wait for GPU work or acquire the GIL.
+message SleepQuiesceRequestPB {
+    string token = 1;
+    bool freeze_only = 2;         // snapshot admitted rounds, allowing existing work to finish
+    uint64 target_round = 3;      // set only after every rank's freeze ACK was received
+    int64 timeout_ms = 4;
+}
+
+message SleepQuiesceResponsePB {
+    uint64 frozen_round = 1;
 }
 
 message WakeUpRequestPB {
     bool prepare_only = 1;        // restore/register resources; keep admission closed
     bool commit_only = 2;         // restart engine after all ranks prepared
+    string cancel_quiesce_token = 3; // rollback only this uncommitted drain; never restore sleeping resources
 }
 
 message SleepStatusResponsePB {
@@ -789,6 +806,8 @@ message SleepStatusResponsePB {
     repeated int32 supported_levels = 11;
     repeated string supported_modes = 12;
     string disabled_reason = 13;
+    int32 quiesce_protocol = 14;  // 1 = drain, freeze, catch-up, commit; 0 = older backend
+    string worker_incarnation = 15;
 }
 
 message IsSleepingResponsePB {
@@ -815,6 +834,7 @@ service RpcService {
     rpc SetPause(EmptyPB) returns (EmptyPB);
     rpc SetRestart(EmptyPB) returns (EmptyPB);
     rpc SleepServing(SleepRequestPB) returns (EmptyPB);
+    rpc QuiesceSleep(SleepQuiesceRequestPB) returns (SleepQuiesceResponsePB);
     rpc WakeUpServing(WakeUpRequestPB) returns (EmptyPB);
     rpc IsSleeping(EmptyPB) returns (IsSleepingResponsePB);
     rpc GetSleepStatus(EmptyPB) returns (SleepStatusResponsePB);

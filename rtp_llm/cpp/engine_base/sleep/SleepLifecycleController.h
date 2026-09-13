@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -90,12 +91,25 @@ struct SleepOptions {
     std::vector<std::string> tags;
     bool                     prepare_only = false;  // DRAINING + drained, no GPU release
     bool                     commit_only  = false;  // DRAINING -> SUSPENDING -> SLEEPING
+    // Instance coordinator: drain every rank before freezing any executor.
+    bool        drain_only = false;
+    std::string quiesce_token;
+    std::string expected_incarnation;
+    int64_t     expected_sleep_epoch = 0;
+};
+
+struct SleepQuiesceOptions {
+    std::string token;
+    bool        freeze_only  = false;
+    uint64_t    target_round = 0;
+    int64_t     timeout_ms   = 0;
 };
 
 // Options passed in via WakeUpServing RPC.
 struct WakeUpOptions {
     bool prepare_only = false;  // restore/register resources, keep admission closed
     bool commit_only  = false;  // restart engine and reopen admission after every rank prepared
+    std::string cancel_quiesce_token;
 };
 
 // Snapshot returned by status() / GetSleepStatus RPC (proto SleepStatusResponsePB).
@@ -115,6 +129,9 @@ struct SleepStatus {
     int64_t     active_cache_transfer_count = 0;
     std::string gpu_resource_state;
     std::string last_error;
+    // Control-plane capability/identity; no per-step status collection.
+    int32_t     quiesce_protocol = 1;
+    std::string worker_incarnation;
 };
 
 // Lightweight result type so the core state machine stays free of grpc/absl deps
@@ -153,6 +170,10 @@ struct SleepResult {
 // restorable GPU memory, MR/engine quiesce). Hooks left empty are treated as
 // no-op success so the core state machine remains unit-testable.
 struct SleepHooks {
+    bool requiresCoordinatedQuiesce = false;
+    // Pure C++ snapshot: must not wait for the engine/GPU or acquire the GIL.
+    std::function<uint64_t()>              freezeEngineRounds;
+    std::function<bool(uint64_t, int64_t)> quiesceEngineAtRound;
     // Arm the engine's collective sleep-quiesce consensus at the DRAINING transition,
     // BEFORE drain, symmetrically on every rank. Needed for any multi-rank DP/EP deployment
     // where drain is rank-asymmetric: a rank that armed only after its local drain would
@@ -200,7 +221,7 @@ struct SleepHooks {
 // admission_mutex_; long-running lifecycle hooks never hold that mutex.
 class SleepLifecycleController {
 public:
-    explicit SleepLifecycleController(bool enabled = false): enabled_(enabled) {}
+    explicit SleepLifecycleController(bool enabled = false);
     virtual ~SleepLifecycleController() = default;
 
     SleepLifecycleController(const SleepLifecycleController&)            = delete;
@@ -245,6 +266,9 @@ public:
     // DRAINING so no rank releases GPU memory until every rank has prepared.
     // commit_only then performs the release from DRAINING.
     SleepResult sleep(const SleepOptions& opt);
+
+    // Reversible control-only stages between all-rank drain and memory commit.
+    SleepResult quiesce(const SleepQuiesceOptions& opt, uint64_t& frozen_round);
 
     // Trigger wake_up: SLEEPING -> WAKING_UP -> RUNNING. Idempotent when already
     // RUNNING. On failure transitions to ERROR (terminal); the control plane
@@ -304,6 +328,15 @@ private:
     std::atomic<KvMemoryState> kv_memory_state_{KvMemoryState::ACTIVE};
     std::atomic<bool>          device_kv_cache_valid_{true};
     std::atomic<bool>          engine_quiesced_{false};
+    // Guarded by transition_mutex_. Tokens fence delayed control messages;
+    // incarnation + expected epoch also fence a delayed initial drain request.
+    const std::string       worker_incarnation_;
+    std::string             quiesce_token_;
+    std::string             last_cancelled_quiesce_token_;
+    bool                    drain_prepared_{false};
+    bool                    rounds_frozen_{false};
+    uint64_t                frozen_round_{0};
+    std::optional<uint64_t> target_round_;
 
     mutable std::mutex status_mutex_;  // guards last_error_ and runtime_disabled_reason_
     std::string        last_error_;

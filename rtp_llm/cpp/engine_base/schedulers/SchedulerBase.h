@@ -32,10 +32,9 @@ public:
     virtual absl::Status stop() = 0;
     virtual void         wake() {}
     // When enabled, schedule() must NOT block indefinitely on an empty queue: it polls with a
-    // short timeout so the engine loop keeps cycling even with no work. Needed only while the
-    // collective sleep-quiesce consensus is armed on a rank whose local work has fully drained --
-    // tp0 must keep issuing empty co-steps (tpSyncModelInputs) so the async SLEEP_QUIESCE rounds
-    // advance to the terminal verdict. No-op by default.
+    // short timeout so empty peers can match busy peers during all-rank sleep drain
+    // and catch up to the common stopping round. The engine parks at the round fence
+    // before scheduling again; wake/cancel clears forced polling. No-op by default.
     virtual void    setForcePoll(bool /*enable*/) {}
     virtual bool    empty()            = 0;
     virtual int64_t lastScheduleTime() = 0;

@@ -1,4 +1,4 @@
-"""The step-aligned sleep vote must never be promoted to a GPU collective."""
+"""Sleep adds no communicator; the reserved legacy callback remains host-only."""
 
 import sys
 import unittest
@@ -11,6 +11,23 @@ from rtp_llm.models_py.distributed import collective_torch as ct
 
 
 class SleepQuiesceHostCollectiveTest(unittest.TestCase):
+
+    def test_sleep_enabled_dp_does_not_create_or_warm_a_quiesce_group(self):
+        config = SimpleNamespace(
+            world_rank=0, world_size=2, tp_size=1, dp_size=2, ep_size=2
+        )
+        with mock.patch.dict(
+            "os.environ", {"ENABLE_SLEEP_MODE": "1"}
+        ), mock.patch.object(ct, "_group_map", {}), mock.patch.object(
+            torch.distributed, "new_group"
+        ) as new_group, mock.patch.object(
+            torch.distributed, "all_reduce"
+        ) as reduce:
+            ct._create_process_groups(config, "nccl", None)
+            new_group.assert_not_called()
+            reduce.assert_not_called()
+            self.assertNotIn(ct.Group.SLEEP_QUIESCE, ct._group_map)
+
     def test_sleep_vote_and_destination_stay_on_cpu(self):
         callbacks = []
         extension = SimpleNamespace(

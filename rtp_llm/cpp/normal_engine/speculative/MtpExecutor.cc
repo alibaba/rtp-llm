@@ -21,6 +21,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <sstream>
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
@@ -2094,37 +2095,27 @@ bool MtpExecutor::consumeLastPauseSignal() {
 }
 
 void MtpExecutor::drainAsyncRunners() {
-    // MTP launches cross-step async prepare/verify/bookkeeping work (target-verify prepare,
-    // draft-prefill prepare, spec-logits verify, bookkeeping) whose sync() normally lands at
-    // the START of the next process() step. When the engine arms a sleep-quiesce it stops
-    // issuing forwards, so those pending tasks would otherwise never be synced and their
-    // stream work would still reference weights/KV when torch_memory_saver releases them at
-    // sleep -- corrupting NCCL/CUDA state so the next sleep's SLEEP_QUIESCE all-reduce hangs.
-    // Drain them all here. sync() is a no-op for a runner with nothing in flight.
-    //
-    // AsyncRunner::sync() rethrows any exception its worker fn raised. This runs on the engine loop
-    // thread inside the sleep-quiesce arm path (step() -> maybeReachCollectiveSleepQuiesce), where an
-    // uncaught throw would escape step()/loop() and kill the engine thread. Swallow it here: log +
-    // clear any sticky CUDA error. The drain is best-effort (its point is to retire cross-step work
-    // before torch_memory_saver releases weights/KV); if a runner actually failed, the subsequent
-    // quiesce cudaDeviceSynchronize (NormalEngine) detects the poisoned context and refuses to commit
-    // the sleep, so we never park on a broken state.
+    // These workers normally join at the next process() entry. Sleep has no next
+    // forward: retire every runner here before weights/KV can be released. A CPU
+    // exception need not poison CUDA, so a successful device sync cannot replace
+    // propagating that exception to the engine's fail-closed quiesce acknowledgement.
     const auto stream = cuda_graph::graphGetCurrentStream();
-    try {
-        target_verify_prepare_runner_.sync(stream);
-        draft_prefill_prepare_runner_.sync(stream);
-        spec_logits_verify_async_runner_.sync(stream);
-        spec_bookkeeping_runner_.sync(stream);
-    } catch (const std::exception& e) {
-        RTP_LLM_LOG_ERROR("drainAsyncRunners: async runner sync failed during sleep quiesce: %s", e.what());
-#if USING_CUDA
-        cudaGetLastError();  // clear sticky so it cannot resurface on an unrelated later call
-#endif
-    } catch (...) {
-        RTP_LLM_LOG_ERROR("drainAsyncRunners: async runner sync failed during sleep quiesce (unknown exception)");
-#if USING_CUDA
-        cudaGetLastError();
-#endif
+    std::exception_ptr failure;
+    auto               drain = [&](auto& runner) {
+        try {
+            runner.sync(stream);
+        } catch (...) {
+            if (!failure) {
+                failure = std::current_exception();
+            }
+        }
+    };
+    drain(target_verify_prepare_runner_);
+    drain(draft_prefill_prepare_runner_);
+    drain(spec_logits_verify_async_runner_);
+    drain(spec_bookkeeping_runner_);
+    if (failure) {
+        std::rethrow_exception(failure);
     }
 }
 

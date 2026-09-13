@@ -10,8 +10,10 @@ from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.sleep_mode_compatibility import (
     Level2SleepCompatibility,
+    SleepQuiesceCompatibility,
     reject_embedding_sleep,
     validate_level2_sleep_compatibility,
+    validate_sleep_quiesce_compatibility,
 )
 from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
 from rtp_llm.metrics import kmonitor
@@ -94,6 +96,31 @@ class BackendManager(object):
             enable_sleep_mode=engine_config.runtime_config.enable_sleep_mode,
             is_embedding=model_config.task_type != TaskType.LANGUAGE_MODEL,
         )
+
+        if engine_config.runtime_config.enable_sleep_mode:
+            # Keep sleep-disabled initialization unchanged. These prerequisites
+            # apply equally to levels 1 and 2 and must be checked before NCCL or
+            # model construction can enter rank-dependent execution paths.
+            parallelism = engine_config.parallelism_config
+            validate_sleep_quiesce_compatibility(
+                enable_sleep_mode=True,
+                compatibility=SleepQuiesceCompatibility(
+                    world_size=parallelism.world_size,
+                    tp_size=parallelism.tp_size,
+                    dp_size=parallelism.dp_size,
+                    ep_size=parallelism.ep_size,
+                    num_layers=model_config.num_layers,
+                    expert_num=model_config.expert_num,
+                    moe_style=model_config.moe_style,
+                    moe_layer_index=tuple(model_config.moe_layer_index),
+                    has_system_prompt=bool(
+                        engine_config.kv_cache_config.multi_task_prompt_tokens
+                        or engine_config.kv_cache_config.multi_task_prompt
+                        or engine_config.kv_cache_config.multi_task_prompt_str
+                    ),
+                    ffn_disaggregate=parallelism.ffn_disaggregate_config.enable_ffn_disaggregate,
+                ),
+            )
 
         if engine_config.parallelism_config.world_size > 1:
             log_gpu_mem("before_nccl_init")

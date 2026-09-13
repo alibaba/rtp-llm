@@ -96,10 +96,15 @@ TEST_F(FIFOSchedulerTest, testWakeUnblocksIdleSchedule) {
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
     auto schedule_future = std::async(std::launch::async, [&scheduler]() { return scheduler.schedule(); });
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_EQ(schedule_future.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
     scheduler.wake();
 
-    ASSERT_EQ(schedule_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    const auto status = schedule_future.wait_for(std::chrono::seconds(1));
+    EXPECT_EQ(status, std::future_status::ready);
+    if (status != std::future_status::ready) {
+        // A failed wake must fail the test, not hang the async future's destructor.
+        EXPECT_TRUE(scheduler.stop().ok());
+    }
     auto result = schedule_future.get();
     ASSERT_TRUE(result.ok());
     EXPECT_TRUE(result.value().empty());
@@ -111,10 +116,15 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeWakeUnblocksIdleSchedule) {
     BatchDecodeScheduler scheduler(runtime_config, nullptr, nullptr);
 
     auto schedule_future = std::async(std::launch::async, [&scheduler]() { return scheduler.schedule(); });
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_EQ(schedule_future.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
     scheduler.wake();
 
-    ASSERT_EQ(schedule_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    const auto status = schedule_future.wait_for(std::chrono::seconds(1));
+    EXPECT_EQ(status, std::future_status::ready);
+    if (status != std::future_status::ready) {
+        // Stop before getting the future, including when wake itself regresses.
+        EXPECT_TRUE(scheduler.stop().ok());
+    }
     auto result = schedule_future.get();
     ASSERT_TRUE(result.ok());
     EXPECT_TRUE(result.value().empty());

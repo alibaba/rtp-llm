@@ -173,6 +173,28 @@ TEST_F(AdmissionGateTest, ErrorBodyFieldsComplete) {
     EXPECT_NE(json.find("\"state\":\"SLEEPING\""), std::string::npos);
 }
 
+TEST_F(AdmissionGateTest, JsonEscapesEveryControlByteAndPreservesUtf8) {
+    auto detail = gate_.checkDetail();
+    detail.message.clear();
+    for (int byte = 0; byte < 0x20; ++byte) {
+        detail.message.push_back(static_cast<char>(byte));
+    }
+    const std::string utf8 = u8"休眠";
+    detail.message += "\"\\" + utf8;
+    const std::string escaped = "\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007"
+                                "\\u0008\\t\\n\\u000b\\u000c\\r\\u000e\\u000f"
+                                "\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017"
+                                "\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f"
+                                "\\\"\\\\"
+                                + utf8;
+
+    const auto json = AdmissionGate::toJson(detail);
+    EXPECT_NE(json.find("\"message\":\"" + escaped + "\""), std::string::npos);
+    for (const unsigned char byte : json) {
+        EXPECT_GE(byte, 0x20);
+    }
+}
+
 TEST_F(AdmissionGateTest, AdmitsAgainAfterWakeUp) {
     controller_.setHooks(successHooks());
     ASSERT_TRUE(controller_.sleep(SleepOptions{}).ok);

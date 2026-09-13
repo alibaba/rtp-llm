@@ -20,6 +20,159 @@ SleepOptions gracefulOptions() {
 
 }  // namespace
 
+static SleepOptions coordinatedDrain(const SleepLifecycleController& controller, const std::string& token) {
+    auto options                 = gracefulOptions();
+    options.prepare_only         = true;
+    options.drain_only           = true;
+    options.quiesce_token        = token;
+    options.expected_incarnation = controller.status().worker_incarnation;
+    options.expected_sleep_epoch = controller.sleepEpoch();
+    return options;
+}
+
+TEST(SleepLifecycleControllerTest, CoordinatedDrainFreezeCatchupAndCommitAreSeparate) {
+    SleepLifecycleController controller(true);
+    std::vector<std::string> calls;
+    SleepHooks               hooks;
+    hooks.requiresCoordinatedQuiesce = true;
+    hooks.drain                      = [&](const SleepOptions&) {
+        calls.emplace_back("drain");
+        return true;
+    };
+    hooks.freezeEngineRounds = [&] {
+        calls.emplace_back("freeze");
+        return uint64_t{5};
+    };
+    hooks.quiesceEngineAtRound = [&](uint64_t round, int64_t) {
+        EXPECT_EQ(round, 7);
+        calls.emplace_back("quiesce");
+        return true;
+    };
+    hooks.releaseKvMemoryBacking = [&](const SleepOptions&) {
+        calls.emplace_back("release");
+        return true;
+    };
+    controller.setHooks(hooks);
+    EXPECT_FALSE(controller.sleep(gracefulOptions()).ok);
+    EXPECT_TRUE(calls.empty());
+    const auto drain = coordinatedDrain(controller, "operation-1");
+    ASSERT_TRUE(controller.sleep(drain).ok);
+    EXPECT_EQ(calls, std::vector<std::string>({"drain"}));
+    auto commit         = drain;
+    commit.prepare_only = commit.drain_only = false;
+    commit.commit_only                      = true;
+    EXPECT_FALSE(controller.sleep(commit).ok);
+    uint64_t            frozen = 0;
+    SleepQuiesceOptions quiesce{"operation-1", true, 0, 100};
+    ASSERT_TRUE(controller.quiesce(quiesce, frozen).ok);
+    EXPECT_EQ(frozen, 5);
+    ASSERT_TRUE(controller.quiesce(quiesce, frozen).ok);
+    EXPECT_EQ(calls, std::vector<std::string>({"drain", "freeze"}));
+    quiesce.freeze_only  = false;
+    quiesce.target_round = 4;
+    EXPECT_FALSE(controller.quiesce(quiesce, frozen).ok);
+    quiesce.target_round = 7;
+    ASSERT_TRUE(controller.quiesce(quiesce, frozen).ok);
+    ASSERT_TRUE(controller.quiesce(quiesce, frozen).ok);
+    quiesce.target_round = 8;
+    EXPECT_FALSE(controller.quiesce(quiesce, frozen).ok);
+    EXPECT_EQ(calls, std::vector<std::string>({"drain", "freeze", "quiesce"}));
+    ASSERT_TRUE(controller.sleep(commit).ok);
+    EXPECT_EQ(calls, std::vector<std::string>({"drain", "freeze", "quiesce", "release"}));
+    EXPECT_EQ(controller.state(), SleepState::SLEEPING);
+    WakeUpOptions cancel;
+    cancel.cancel_quiesce_token = "operation-1";
+    EXPECT_FALSE(controller.wakeUp(cancel).ok);
+    EXPECT_EQ(controller.state(), SleepState::SLEEPING);
+}
+
+TEST(SleepLifecycleControllerTest, CancelBeforeDelayedInitialDrainFencesThatRequest) {
+    SleepLifecycleController controller(true);
+    const auto               old_drain = coordinatedDrain(controller, "old");
+    WakeUpOptions            cancel;
+    cancel.cancel_quiesce_token = "old";
+    ASSERT_TRUE(controller.wakeUp(cancel).ok);
+    const auto epoch = controller.sleepEpoch();
+    ASSERT_TRUE(controller.wakeUp(cancel).ok);
+    EXPECT_EQ(controller.sleepEpoch(), epoch);
+    EXPECT_FALSE(controller.sleep(old_drain).ok);
+    EXPECT_EQ(controller.state(), SleepState::RUNNING);
+    EXPECT_TRUE(controller.sleep(coordinatedDrain(controller, "new")).ok);
+}
+
+TEST(SleepLifecycleControllerTest, OldWorkerIncarnationCannotPrepareANewWorker) {
+    SleepLifecycleController old_worker(true), new_worker(true);
+    EXPECT_NE(old_worker.status().worker_incarnation, new_worker.status().worker_incarnation);
+    EXPECT_FALSE(new_worker.sleep(coordinatedDrain(old_worker, "old-process")).ok);
+    EXPECT_EQ(new_worker.state(), SleepState::RUNNING);
+}
+
+TEST(SleepLifecycleControllerTest, OldFreezeTargetCommitAndCancelCannotAffectANewDrain) {
+    SleepLifecycleController controller(true);
+    auto                     old = coordinatedDrain(controller, "old");
+    ASSERT_TRUE(controller.sleep(old).ok);
+    WakeUpOptions cancel;
+    cancel.cancel_quiesce_token = "old";
+    ASSERT_TRUE(controller.wakeUp(cancel).ok);
+    ASSERT_TRUE(controller.sleep(coordinatedDrain(controller, "new")).ok);
+    uint64_t round = 0;
+    EXPECT_FALSE(controller.quiesce({"old", true, 0, 100}, round).ok);
+    EXPECT_FALSE(controller.quiesce({"old", false, 7, 100}, round).ok);
+    old.drain_only = old.prepare_only = false;
+    old.commit_only                   = true;
+    EXPECT_FALSE(controller.sleep(old).ok);
+    EXPECT_FALSE(controller.wakeUp(cancel).ok);
+    EXPECT_EQ(controller.state(), SleepState::DRAINING);
+    EXPECT_TRUE(controller.quiesce({"new", true, 0, 100}, round).ok);
+}
+
+TEST(SleepLifecycleControllerTest, DrainTimeoutNeverFreezesAndCanRollBack) {
+    SleepLifecycleController controller(true);
+    int                      frozen = 0, released = 0;
+    SleepHooks               hooks;
+    hooks.drain              = [](const SleepOptions&) { return false; };
+    hooks.freezeEngineRounds = [&] {
+        ++frozen;
+        return uint64_t{1};
+    };
+    hooks.releaseKvMemoryBacking = [&](const SleepOptions&) {
+        ++released;
+        return true;
+    };
+    controller.setHooks(hooks);
+    EXPECT_FALSE(controller.sleep(coordinatedDrain(controller, "timeout")).ok);
+    uint64_t round = 0;
+    EXPECT_FALSE(controller.quiesce({"timeout", true, 0, 100}, round).ok);
+    WakeUpOptions cancel;
+    cancel.cancel_quiesce_token = "timeout";
+    EXPECT_TRUE(controller.wakeUp(cancel).ok);
+    EXPECT_EQ(controller.state(), SleepState::RUNNING);
+    EXPECT_EQ(frozen, 0);
+    EXPECT_EQ(released, 0);
+}
+
+TEST(SleepLifecycleControllerTest, FailedAsyncQuiesceCannotCommitResources) {
+    SleepLifecycleController controller(true);
+    int                      released = 0;
+    SleepHooks               hooks;
+    hooks.quiesceEngineAtRound   = [](uint64_t, int64_t) -> bool { throw std::runtime_error("async CPU error"); };
+    hooks.releaseKvMemoryBacking = [&](const SleepOptions&) {
+        ++released;
+        return true;
+    };
+    controller.setHooks(hooks);
+    auto drain = coordinatedDrain(controller, "failed");
+    ASSERT_TRUE(controller.sleep(drain).ok);
+    uint64_t round = 0;
+    ASSERT_TRUE(controller.quiesce({"failed", true, 0, 100}, round).ok);
+    EXPECT_FALSE(controller.quiesce({"failed", false, 0, 100}, round).ok);
+    drain.drain_only = drain.prepare_only = false;
+    drain.commit_only                     = true;
+    EXPECT_FALSE(controller.sleep(drain).ok);
+    EXPECT_EQ(released, 0);
+    EXPECT_EQ(controller.state(), SleepState::DRAINING);
+}
+
 TEST(SleepLifecycleControllerTest, InitialStateIsRunning) {
     SleepLifecycleController controller(true);
     EXPECT_EQ(controller.state(), SleepState::RUNNING);

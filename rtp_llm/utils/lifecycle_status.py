@@ -101,6 +101,10 @@ def aggregate(
     )
     aggregate_status.pop("address", None)
     aggregate_status.pop("status", None)
+    # Per-worker fencing data belongs to the internal coordination protocol,
+    # not the public instance status (workers have different incarnations).
+    aggregate_status.pop("quiesce_protocol", None)
+    aggregate_status.pop("worker_incarnation", None)
     if coverage_error:
         aggregate_status["effective"] = False
         aggregate_status["supported_levels"] = []

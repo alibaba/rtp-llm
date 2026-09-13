@@ -28,7 +28,14 @@ std::string jsonEscape(const std::string& input) {
                 out += "\\t";
                 break;
             default:
-                out += c;
+                if (const auto byte = static_cast<unsigned char>(c); byte < 0x20) {
+                    constexpr char kHex[] = "0123456789abcdef";
+                    out += "\\u00";
+                    out += kHex[byte >> 4];
+                    out += kHex[byte & 0x0f];
+                } else {
+                    out += c;  // Preserve UTF-8 bytes, including on signed-char platforms.
+                }
         }
     }
     return out;

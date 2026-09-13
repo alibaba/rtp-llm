@@ -62,6 +62,8 @@ public:
     grpc::Status SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response);
 
     grpc::Status SleepServing(grpc::ServerContext* context, const SleepRequestPB* request, EmptyPB* response);
+    grpc::Status
+    QuiesceSleep(grpc::ServerContext* context, const SleepQuiesceRequestPB* request, SleepQuiesceResponsePB* response);
 
     grpc::Status WakeUpServing(grpc::ServerContext* context, const WakeUpRequestPB* request, EmptyPB* response);
 

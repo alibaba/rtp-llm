@@ -23,6 +23,8 @@ grpc::Status resultToGrpcStatus(const SleepResult& result) {
 void fillStatusProto(const SleepStatus& status, SleepStatusResponsePB* response) {
     response->set_state(sleepStateToString(status.state));
     response->set_sleep_epoch(status.sleep_epoch);
+    response->set_quiesce_protocol(status.quiesce_protocol);
+    response->set_worker_incarnation(status.worker_incarnation);
     response->set_kv_memory_state(status.kv_memory_state);
     response->set_device_kv_cache_valid(status.device_kv_cache_valid);
     response->set_active_request_count(status.active_request_count);

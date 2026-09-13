@@ -141,6 +141,12 @@ public:
         return local_server_->WakeUpServing(context, request, response);
     }
 
+    ::grpc::Status QuiesceSleep(::grpc::ServerContext*       context,
+                                const SleepQuiesceRequestPB* request,
+                                SleepQuiesceResponsePB*      response) override {
+        return local_server_->QuiesceSleep(context, request, response);
+    }
+
     ::grpc::Status
     IsSleeping(::grpc::ServerContext* context, const EmptyPB* request, IsSleepingResponsePB* response) override {
         return local_server_->IsSleeping(context, request, response);

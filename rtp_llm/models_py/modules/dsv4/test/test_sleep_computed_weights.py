@@ -30,6 +30,47 @@ from rtp_llm.utils.model_weight import W
 
 class SleepComputedWeightsTest(unittest.TestCase):
 
+    def test_attention_and_compressor_registration_is_scoped_and_weak(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import attention, compressor
+
+        for module, register_name, registry_name in (
+            (attention, "_register_attention", "_ATTENTION_REGISTRY"),
+            (compressor, "_register_compressor", "_COMPRESSOR_REGISTRY"),
+        ):
+            with self.subTest(module=module.__name__):
+                obj = torch.nn.Module()
+                with mock.patch.object(module, registry_name, weakref.WeakSet()):
+                    with model_build_scope("draft"):
+                        getattr(module, register_name)(obj)
+                    self.assertEqual(obj._sleep_model_scope, "draft")
+                    self.assertIn(obj, getattr(module, registry_name))
+                    ref = weakref.ref(obj)
+                    del obj
+                    gc.collect()
+                    self.assertIsNone(ref())
+                    self.assertEqual(list(getattr(module, registry_name)), [])
+
+    def test_attention_and_compressor_registration_failures_propagate(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import attention, compressor
+
+        for module, register_name, registry_name in (
+            (attention, "_register_attention", "_ATTENTION_REGISTRY"),
+            (compressor, "_register_compressor", "_COMPRESSOR_REGISTRY"),
+        ):
+            register = getattr(module, register_name)
+            with self.subTest(module=module.__name__, stage="scope"):
+                with mock.patch(
+                    "rtp_llm.model_loader.weight_memory_saver.current_model_scope",
+                    side_effect=RuntimeError("scope failed"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "scope failed"):
+                        register(torch.nn.Module())
+            with self.subTest(module=module.__name__, stage="weak registration"):
+                with mock.patch.object(module, registry_name) as registry:
+                    registry.add.side_effect = TypeError("weak registration failed")
+                    with self.assertRaisesRegex(TypeError, "weak registration failed"):
+                        register(torch.nn.Module())
+
     def test_mega_strategy_registration_is_scoped_and_weak(self):
         from rtp_llm.models_py.modules.dsv4.moe import mega_buf
 

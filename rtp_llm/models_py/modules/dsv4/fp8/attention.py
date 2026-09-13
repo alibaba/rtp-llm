@@ -128,16 +128,12 @@ _ATTENTION_REGISTRY = weakref.WeakSet()
 
 
 def _register_attention(attention: "AttentionFP8") -> None:
-    try:
-        from rtp_llm.model_loader.weight_memory_saver import current_model_scope
+    # Registration is required to restore blank-remapped computed weights.
+    # A failed registration must abort construction, not silently skip wake.
+    from rtp_llm.model_loader.weight_memory_saver import current_model_scope
 
-        attention._sleep_model_scope = current_model_scope()
-    except Exception:
-        pass
-    try:
-        _ATTENTION_REGISTRY.add(attention)
-    except Exception:
-        pass
+    attention._sleep_model_scope = current_model_scope()
+    _ATTENTION_REGISTRY.add(attention)
 
 
 def iter_attentions() -> list:

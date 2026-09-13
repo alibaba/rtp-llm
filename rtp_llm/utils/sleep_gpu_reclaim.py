@@ -123,21 +123,11 @@ def _clear_module_device_caches() -> list[str]:
             notes.append(f"DeepGEMM runtime scale caches KEPT ({reason})")
     except Exception as e:
         notes.append(f"DeepGEMM runtime scale cache release skipped: {e}")
-    try:
-        from rtp_llm.models_py.distributed.symm_mem import (
-            release_symm_mem_communicator_for_sleep,
-        )
-
-        if _optional_release_allowed(graph_baked):
-            symm_bytes = release_symm_mem_communicator_for_sleep()
-            notes.append(
-                f"TP symmetric-memory communicator RELEASED {symm_bytes / _MiB:.1f} MiB"
-            )
-        else:
-            reason = "CUDA-graph pointer stability" if graph_baked else "env disabled"
-            notes.append(f"TP symmetric-memory communicator KEPT ({reason})")
-    except Exception as e:
-        notes.append(f"TP symmetric-memory communicator release skipped: {e}")
+    # Keep the small TP staging buffer even on no-graph roles. Recreating it
+    # requires a collective rendezvous; a rank-local allocation failure could
+    # leave peers on different symmetric-memory/NCCL paths after wake. Sleep
+    # must preserve the cold-start communication topology, including None.
+    notes.append("TP symmetric-memory communicator KEPT (communication topology)")
     try:
         from rtp_llm.models_py.modules.dsv4.moe import mega_buf
 

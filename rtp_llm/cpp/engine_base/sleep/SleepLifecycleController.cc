@@ -5,6 +5,7 @@
 #include <chrono>
 #include <exception>
 #include <utility>
+#include <unistd.h>
 
 namespace rtp_llm {
 
@@ -71,6 +72,14 @@ std::string hookFailureMessage(const SleepHooks& hooks, const char* hook_name, c
 }
 
 }  // namespace
+
+SleepLifecycleController::SleepLifecycleController(bool enabled):
+    enabled_(enabled), worker_incarnation_([] {
+        static std::atomic<uint64_t> sequence{0};
+        return std::to_string(getpid()) + ":"
+               + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ":"
+               + std::to_string(sequence.fetch_add(1));
+    }()) {}
 
 AdmissionLease::~AdmissionLease() {
     release();
@@ -264,6 +273,12 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
     if (opt.prepare_only && opt.commit_only) {
         return SleepResult::invalidArgument("sleep rejected: prepare_only and commit_only cannot both be true");
     }
+    if (opt.drain_only && (!opt.prepare_only || opt.quiesce_token.empty())) {
+        return SleepResult::invalidArgument("drain_only requires prepare_only and a quiesce token");
+    }
+    if (hooks_.requiresCoordinatedQuiesce && opt.quiesce_token.empty()) {
+        return SleepResult::failedPrecondition("multi-rank sleep requires the all-rank round-fence coordinator");
+    }
     if (!opt.tags.empty()) {
         return SleepResult::invalidArgument(
             "sleep rejected: non-empty tags are unsupported; partial sleep is not implemented");
@@ -293,6 +308,21 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
     }
 
     const SleepState current = state_.load(std::memory_order_acquire);
+    if (!opt.quiesce_token.empty()) {
+        if (current == SleepState::RUNNING) {
+            if (!opt.drain_only || opt.expected_incarnation != worker_incarnation_
+                || opt.expected_sleep_epoch != sleep_epoch_.load(std::memory_order_acquire)) {
+                return SleepResult::failedPrecondition("stale sleep drain request or worker incarnation");
+            }
+        } else if (opt.quiesce_token != quiesce_token_) {
+            return SleepResult::failedPrecondition("sleep request belongs to a different quiesce token");
+        }
+        if (!opt.drain_only && !opt.commit_only) {
+            return SleepResult::invalidArgument("coordinated sleep must use drain, quiesce, then commit");
+        }
+    } else if (current == SleepState::DRAINING && !quiesce_token_.empty()) {
+        return SleepResult::failedPrecondition("coordinated sleep requires its quiesce token");
+    }
     // Idempotency: already sleeping or inside the release section. DRAINING is
     // intentionally retriable so a timeout can later progress, or be escalated
     // with mode=abort.
@@ -312,6 +342,10 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
 
     if (current == SleepState::RUNNING) {
         engine_quiesced_.store(false, std::memory_order_release);
+        quiesce_token_  = opt.quiesce_token;
+        drain_prepared_ = false;
+        rounds_frozen_  = false;
+        target_round_.reset();
         // Record the level of this sleep so the wake_up restore hook knows
         // whether to reload discarded weights (level 2) or not (level 1).
         active_sleep_level_.store(opt.level, std::memory_order_release);
@@ -320,14 +354,8 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
         }
     }
 
-    // Arm the collective sleep-quiesce consensus BEFORE the (rank-asymmetric) drain, on
-    // every rank symmetrically. Only the rank holding an in-flight request blocks in the
-    // drain hook below; if arming waited until after that block, the busy rank would never
-    // arm while its idle peers issue unmatched consensus rounds -> forward/EP desync ->
-    // DeepEP timeout / worker death. Best-effort: a failure here does not abort the sleep
-    // (drain + quiesceEngine still run and arm as a fallback). No-op for single-rank.
-    // Placed before the drain block so it also runs on an idempotent DRAINING retry (where
-    // the underlying pause() is a no-op CAS).
+    // Keep empty peers executing while real requests drain. This does NOT
+    // freeze an engine: the coordinator first waits for ALL local drains.
     if (!opt.commit_only && hooks_.armEngineQuiesce) {
         timing.run("arm_engine_quiesce", hooks_.armEngineQuiesce, opt);
     }
@@ -345,6 +373,14 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
             setLastError("drain not finished (timeout or aborted), staying in DRAINING");
             return SleepResult::failedPrecondition("drain not finished, state=DRAINING");
         }
+    }
+
+    if (!opt.commit_only) {
+        drain_prepared_ = true;
+    }
+    if (opt.drain_only) {
+        timing.end("drain_prepare_end");
+        return SleepResult::success();
     }
 
     if (!opt.commit_only && !engine_quiesced_.load(std::memory_order_acquire)) {
@@ -417,6 +453,58 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
     return SleepResult::success();
 }
 
+SleepResult SleepLifecycleController::quiesce(const SleepQuiesceOptions& opt, uint64_t& frozen_round) {
+    std::lock_guard<std::mutex> lock(transition_mutex_);
+    if (!effective()) {
+        return SleepResult::disabled(disabledReason());
+    }
+    if (opt.timeout_ms < 0 || opt.token.empty()) {
+        return SleepResult::invalidArgument("quiesce requires a token and non-negative timeout");
+    }
+    if (state_.load(std::memory_order_acquire) != SleepState::DRAINING || !drain_prepared_
+        || opt.token != quiesce_token_) {
+        return SleepResult::failedPrecondition("quiesce requires the matching prepared drain");
+    }
+    try {
+        if (opt.freeze_only) {
+            if (!rounds_frozen_) {
+                frozen_round_  = hooks_.freezeEngineRounds ? hooks_.freezeEngineRounds() : 0;
+                rounds_frozen_ = true;
+            }
+            frozen_round = frozen_round_;
+            return SleepResult::success();
+        }
+        if (!rounds_frozen_ || opt.target_round < frozen_round_ || opt.target_round >= (uint64_t{1} << 63)
+            || (target_round_ && *target_round_ != opt.target_round)) {
+            return SleepResult::failedPrecondition("quiesce target is missing, changed, or behind the frozen round");
+        }
+        target_round_ = opt.target_round;
+        frozen_round  = frozen_round_;
+        if (engine_quiesced_.load(std::memory_order_acquire)) {
+            return SleepResult::success();
+        }
+        bool ok = true;
+        if (hooks_.quiesceEngineAtRound) {
+            ok = hooks_.quiesceEngineAtRound(opt.target_round, opt.timeout_ms);
+        } else if (hooks_.quiesceEngine) {
+            SleepOptions pause_options;
+            pause_options.timeout_ms = opt.timeout_ms;
+            ok                       = hooks_.quiesceEngine(pause_options);
+        }
+        if (!ok) {
+            setLastError("round-fenced engine quiesce failed, staying in DRAINING");
+            return SleepResult::failedPrecondition(lastError());
+        }
+        engine_quiesced_.store(true, std::memory_order_release);
+        return SleepResult::success();
+    } catch (const std::exception& e) {
+        setLastError(std::string("round-fenced engine quiesce failed: ") + e.what());
+    } catch (...) {
+        setLastError("round-fenced engine quiesce failed with unknown exception");
+    }
+    return SleepResult::failedPrecondition(lastError());
+}
+
 SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
     std::lock_guard<std::mutex> lock(transition_mutex_);
 
@@ -430,7 +518,17 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
     const SleepState current = state_.load(std::memory_order_acquire);
     // Idempotency: already running.
     if (current == SleepState::RUNNING) {
+        if (!opt.cancel_quiesce_token.empty() && opt.cancel_quiesce_token != last_cancelled_quiesce_token_) {
+            // Cancellation can arrive BEFORE the corresponding drain RPC. Fence
+            // that delayed initial request even though no drain advanced the epoch.
+            sleep_epoch_.fetch_add(1, std::memory_order_acq_rel);
+            last_cancelled_quiesce_token_ = opt.cancel_quiesce_token;
+        }
         return SleepResult::success();
+    }
+    if (!opt.cancel_quiesce_token.empty()
+        && (current != SleepState::DRAINING || opt.cancel_quiesce_token != quiesce_token_)) {
+        return SleepResult::failedPrecondition("stale drain cancellation or GPU release already started");
     }
     // Instance-level coordinator uses wake_up as the abort path for a prepared
     // sleep that never committed. No GPU resource was released in DRAINING.
@@ -452,6 +550,7 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
             }
         }
         engine_quiesced_.store(false, std::memory_order_release);
+        last_cancelled_quiesce_token_ = opt.cancel_quiesce_token;
         // Sleep aborted before any commit: clear the level captured at
         // RUNNING->DRAINING so a stale value is not observable via
         // activeSleepLevel() until the next sleep re-stamps it.
@@ -562,6 +661,7 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
 SleepStatus SleepLifecycleController::status() const {
     SleepStatus s;
     s.sleep_mode_enabled = enabled();
+    s.worker_incarnation = worker_incarnation_;
     s.effective          = effective();
     // This process supports exactly one non-zero level, fixed at startup by
     // sleep_mode_level (2 = discard weights, else 1); see sleep() gate.

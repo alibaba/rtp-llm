@@ -3,6 +3,74 @@ from typing import List
 
 
 @dataclass(frozen=True)
+class SleepQuiesceCompatibility:
+    """Static prerequisites for matching executor rounds on every sleep rank."""
+
+    world_size: int = 1
+    tp_size: int = 1
+    dp_size: int = 1
+    ep_size: int = 1
+    num_layers: int = 1
+    expert_num: int = 0
+    moe_style: int = 0
+    moe_layer_index: tuple[int, ...] = ()
+    has_system_prompt: bool = False
+    ffn_disaggregate: bool = False
+
+
+def validate_sleep_quiesce_compatibility(
+    *, enable_sleep_mode: bool, compatibility: SleepQuiesceCompatibility
+) -> None:
+    """Reject unsupported sleep layouts before models or GPU groups are created.
+
+    Applies to both sleep levels. TP ranks share an input broadcast per executor
+    call; different DP replicas only share those round boundaries when an active
+    MoE layer communicates over the whole world. An EP *size* alone does not
+    establish that dependency for dense models.
+    """
+    if not enable_sleep_mode:
+        return
+
+    conflicts: List[str] = []
+    if compatibility.has_system_prompt:
+        # Rank0's resident-prompt preRun calls bypass the engine-loop tickets;
+        # their persistent KV entries also lack a sleep/wake reconstruction path.
+        conflicts.append("resident system prompts (multi_task_prompt_tokens)")
+    if compatibility.ffn_disaggregate:
+        conflicts.append("FFN disaggregate executors with asymmetric rounds")
+    if (
+        compatibility.tp_size < 1
+        or compatibility.dp_size < 1
+        or compatibility.world_size != compatibility.tp_size * compatibility.dp_size
+        or compatibility.ep_size not in (1, compatibility.world_size)
+    ):
+        conflicts.append(
+            "parallel topology requires world_size=tp_size*dp_size and EP=1 or world_size"
+        )
+
+    has_moe_layer = compatibility.expert_num > 0 and (
+        (compatibility.moe_style == 1 and compatibility.num_layers > 0)
+        or (
+            compatibility.moe_style == 2
+            and any(
+                0 <= layer < compatibility.num_layers
+                for layer in compatibility.moe_layer_index
+            )
+        )
+    )
+    if compatibility.dp_size > 1 and (
+        compatibility.ep_size != compatibility.world_size or not has_moe_layer
+    ):
+        conflicts.append("DP replicas require an active MoE layer with EP=world_size")
+    if conflicts:
+        raise ValueError(
+            "sleep mode does not support "
+            + "; ".join(conflicts)
+            + ". Disable sleep mode for this configuration."
+        )
+
+
+@dataclass(frozen=True)
 class Level2SleepCompatibility:
     """GPU weight owners that must survive a level-2 sleep/wake cycle."""
 

@@ -11,6 +11,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/engine_base/sleep/SleepRoundFence.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
@@ -40,9 +41,11 @@ public:
     void                              pause() override;
     void                              restart() override;
     absl::Status                      pauseAndWaitQuiesced(int64_t timeout_ms) override;
-    // Arm the collective sleep-quiesce consensus at the DRAINING transition (before drain),
-    // symmetrically on every rank (DP/EP). No-op for single-rank. See definition.
+    // Keep multi-rank peers polling during drain; the control plane freezes them later.
     void armCollectiveSleepQuiesce() override;
+    bool         requiresCoordinatedSleepQuiesce() const override;
+    uint64_t     freezeSleepRounds() override;
+    absl::Status pauseAtSleepRound(uint64_t round, int64_t timeout_ms) override;
 
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
@@ -71,10 +74,9 @@ private:
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
     size_t                          getWarmUpInputLength() const;
     void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
-    absl::Status                    runExecutorProcess(const std::list<GenerateStreamPtr>& streams);
     absl::Status                    releasePendingTpCollectiveForPause(uint64_t pause_epoch);
     bool                            collectiveSleepQuiesceEnabled() const;
-    absl::Status                    maybeReachCollectiveSleepQuiesce();
+    bool                            acquireSleepRound();
     void                            enterPausedState();
     void                            markPauseQuiesced(uint64_t pause_epoch);
 
@@ -88,8 +90,7 @@ private:
     autil::ThreadPtr  loop_thread_;
     std::atomic<bool> running_{false};
     std::mutex        process_mutex_;
-    std::mutex        collective_quiesce_state_mutex_;
-    torch::Tensor     collective_quiesce_state_;
+    SleepRoundFence         sleep_round_fence_;
     std::mutex              pause_mutex_;
     std::condition_variable pause_cv_;
     // Monotonic quiesce acknowledgement: the highest pause epoch a quiesce has

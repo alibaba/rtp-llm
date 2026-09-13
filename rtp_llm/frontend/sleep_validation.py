@@ -1,6 +1,17 @@
 from typing import Any, Dict, List, Optional
 
-UNSUPPORTED_LIFECYCLE_CONTROL_FIELDS = ("phase", "prepare_only", "commit_only")
+UNSUPPORTED_LIFECYCLE_CONTROL_FIELDS = (
+    "phase",
+    "prepare_only",
+    "commit_only",
+    "drain_only",
+    "quiesce_token",
+    "expected_incarnation",
+    "expected_sleep_epoch",
+    "cancel_quiesce_token",
+    "freeze_only",
+    "target_round",
+)
 
 
 def unsupported_lifecycle_control_field(req: Dict[Any, Any]) -> Optional[str]:

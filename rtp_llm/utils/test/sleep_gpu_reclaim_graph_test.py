@@ -1,9 +1,54 @@
 import os
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 
 class TestCudaGraphSleepReclaim(unittest.TestCase):
+
+    def test_sleep_preserves_tp_communicator_and_disabled_topology(self):
+        from rtp_llm.models_py.distributed import symm_mem
+        from rtp_llm.models_py.modules.dsv4.moe import mega_buf
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
+            CudaFp8DeepGEMMLinear,
+        )
+        from rtp_llm.utils import sleep_gpu_reclaim as reclaim
+
+        buffer = SimpleNamespace(numel=lambda: 128, element_size=lambda: 2)
+        comm = SimpleNamespace(buffer=buffer)
+        for original_comm in (None, comm):
+            for graph_baked in (False, True):
+                with self.subTest(
+                    had_comm=original_comm is not None, graph_baked=graph_baked
+                ), mock.patch.dict(
+                    os.environ, {"RTP_LLM_SLEEP_FREE_RUNTIME_CACHES": "1"}
+                ), mock.patch.object(
+                    symm_mem, "_symm_mem_comm", original_comm
+                ), mock.patch.object(
+                    symm_mem, "init_symm_mem_communicator"
+                ) as init, mock.patch.object(
+                    reclaim, "_cuda_graph_baked", return_value=graph_baked
+                ), mock.patch.object(
+                    reclaim.torch._C, "_cuda_clearCublasWorkspaces", create=True
+                ), mock.patch.object(
+                    CudaFp8DeepGEMMLinear,
+                    "release_runtime_caches_for_sleep",
+                    return_value=0,
+                ), mock.patch.object(
+                    mega_buf, "mega_buffers_graph_baked", return_value=graph_baked
+                ), mock.patch.object(
+                    mega_buf, "release_mega_symm_buffers", return_value=0
+                ):
+                    for _ in range(2):
+                        notes = reclaim._clear_module_device_caches()
+                        self.assertIs(symm_mem._symm_mem_comm, original_comm)
+                        self.assertIs(comm.buffer, buffer)
+                        self.assertIn(
+                            "TP symmetric-memory communicator KEPT (communication topology)",
+                            notes,
+                        )
+                    init.assert_not_called()
+
     def test_destructive_release_failure_reaches_sleep_hook(self):
         from rtp_llm.utils import sleep_gpu_reclaim as reclaim
 
