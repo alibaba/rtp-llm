@@ -183,8 +183,9 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
     RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() > 0,
                             "remote connector requires an initialized cache topology with at least one group");
     std::vector<int32_t> full_group_ids, linear_group_ids;
-    for (int32_t group_id = 0; group_id < cache_config.groupNums(); group_id++) {
-        if (cache_config.typeForGroup(static_cast<size_t>(group_id)) == CacheGroupType::FULL) {
+    for (const auto& group : cache_config.topology().groups()) {
+        const auto group_id = static_cast<int32_t>(cache_config.topology().groupIdForTag(group.tag));
+        if (group.policy.group_type == CacheGroupType::FULL) {
             full_group_ids.push_back(group_id);
         } else {
             linear_group_ids.push_back(group_id);
@@ -215,9 +216,8 @@ RemoteConnector::genLocationSpecInfoMapAndGroups(int64_t tp_size) {
     RTP_LLM_CHECK_WITH_INFO(!group_policy_->groups().empty(), "remote connector requires at least one cache group");
     auto location_spec_info_map_ptr = std::make_shared<RemoteConnectorConfig::LocationSpecInfoMap>();
     for (const auto& entry : group_policy_->groups()) {
-        const auto  group_id         = static_cast<size_t>(entry.first);
-        const auto  group_block_size = init_params_->cache_config.blockSizeBytesForGroup(group_id);
         const auto& group            = entry.second;
+        const auto  group_block_size = init_params_->cache_config.blockSizeBytesForGroup(group.tag);
         auto [iter, success]         = location_spec_groups_ptr->insert({group.group_name, {}});
         assert(success);
         group_policy_->addLocationSpecGroup(group.group_name_bithash, group.group_name);

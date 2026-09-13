@@ -229,8 +229,8 @@ TEST_F(BlockPoolTest, GroupPoolMTPLayoutsUseGroupBlockNumAfterTpSync) {
 
     // All layouts in the full pool use its synchronized group capacity,
     // even if MTP sub-configs still contain the pre-sync local value.
-    rtp_llm::test::setGroupBlockLayout(
-        cache_cfg, {3}, cache_cfg.groupKvBlockStrideBytesSnapshot(), cache_cfg.groupKvScaleStrideBytesSnapshot());
+    const auto& group = cache_cfg.group("full");
+    rtp_llm::test::setGroupBlockLayout(cache_cfg, {3}, {group.kvBlockStrideBytes()}, {group.kvScaleStrideBytes()});
 
     auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfigForGroup(cache_cfg, cache_cfg.groupIdForTag("full"));
     ASSERT_EQ(pool_cfg.block_num, 3u);

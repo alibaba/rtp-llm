@@ -342,20 +342,17 @@ public:
         const auto cuda_options    = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
         const auto host_options    = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
         const auto layer_group_ids = config.layerGroupIdsSnapshot();
-        const auto kv_strides      = config.groupKvBlockStrideBytesSnapshot();
-        const auto scale_strides   = config.groupKvScaleStrideBytesSnapshot();
         for (int layer = 0; layer < static_cast<int>(config.layer_all_num()); ++layer) {
             if (static_cast<size_t>(layer) >= layer_group_ids.size()) {
                 continue;
             }
             const auto& layer_groups = layer_group_ids[static_cast<size_t>(layer)];
             for (const int gid : layer_groups) {
-                if (gid < 0 || static_cast<size_t>(gid) >= kv_strides.size()) {
+                if (gid < 0 || static_cast<size_t>(gid) >= config.topology().groups().size()) {
                     continue;
                 }
-                const size_t stride =
-                    kv_strides[static_cast<size_t>(gid)]
-                    + (static_cast<size_t>(gid) < scale_strides.size() ? scale_strides[static_cast<size_t>(gid)] : 0);
+                const auto&  group  = config.topology().groupById(static_cast<size_t>(gid));
+                const size_t stride = group.kvBlockStrideBytes() + group.kvScaleStrideBytes();
                 if (stride == 0) {
                     continue;
                 }

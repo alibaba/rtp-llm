@@ -35,6 +35,15 @@ static bool isUsableBlockIdx(BlockIdxType block_idx) {
     return block_idx > 0 && !isNullBlockIdx(block_idx);
 }
 
+static const GroupBase* findSlotGroup(const CacheConfig& config, int group_id, const std::string& tag) {
+    if (group_id < 0 || group_id >= config.groupNums()) {
+        return nullptr;
+    }
+    const auto& groups = config.topology().groups();
+    const auto  it = std::find_if(groups.begin(), groups.end(), [&](const auto& group) { return group.tag == tag; });
+    return it == groups.end() ? nullptr : &*it;
+}
+
 static void
 appendBatchedMemoryCopyTile(void* dst, const void* src, size_t bytes, std::vector<BatchedMemoryCopyTile>& tiles) {
     if (bytes > 0) {
@@ -223,10 +232,8 @@ bool KVCacheMemoryConnector::isDualPool() const {
 }
 
 bool KVCacheMemoryConnector::isFullOnlySlot(const LayerTagSlot& slot) const {
-    if (slot.group_id < 0 || slot.group_id >= cache_config_.groupNums()) {
-        return true;
-    }
-    return cache_config_.typeForGroup(static_cast<size_t>(slot.group_id)) == CacheGroupType::FULL;
+    const auto* group = findSlotGroup(cache_config_, slot.group_id, slot.tag);
+    return group == nullptr || group->policy.group_type == CacheGroupType::FULL;
 }
 
 void KVCacheMemoryConnector::initBlockPool() {
@@ -550,35 +557,18 @@ void KVCacheMemoryConnector::initDiskBlockPools() {
 
 std::vector<KVCacheMemoryConnector::LayerTagSlot> KVCacheMemoryConnector::layerTagSlots() const {
     std::vector<LayerTagSlot> slots;
-    const size_t              layer_num = cache_config_.layer_all_num();
-
-    auto group_stride = [this](int gid, int layer_id) -> size_t {
-        if (gid >= 0 && gid < cache_config_.groupNums()) {
-            const size_t kv_stride    = cache_config_.kvBlockStrideBytesForGroup(static_cast<size_t>(gid));
-            const size_t scale_stride = cache_config_.kvScaleStrideBytesForGroup(static_cast<size_t>(gid));
-            if (kv_stride + scale_stride > 0) {
-                return kv_stride + scale_stride;
+    for (const auto& layer : cache_config_.topology().layers()) {
+        for (const auto& group_ref : cache_config_.groupsForLayer(layer.layer_id)) {
+            const auto& group = group_ref.get();
+            if (!group.policy.enable_prefix_reuse) {
+                continue;
             }
-        }
-        return layer_id >= 0 ? cache_config_.layerBlockStrideBytes(static_cast<size_t>(layer_id)) : 0;
-    };
-
-    const auto layer_group_ids = cache_config_.layerGroupIdsSnapshot();
-    for (size_t layer = 0; layer < layer_num; ++layer) {
-        if (layer < layer_group_ids.size()) {
-            for (int gid : layer_group_ids[layer]) {
-                RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < cache_config_.groupNums(),
-                                        "invalid memory connector group id=%d for layer=%zu",
-                                        gid,
-                                        layer);
-                const auto policy = cache_config_.policyForGroup(static_cast<size_t>(gid));
-                if (!policy.enable_prefix_reuse) {
-                    continue;
-                }
-                const std::string tag = cache_config_.tagForGroup(static_cast<size_t>(gid));
-                slots.push_back(
-                    LayerTagSlot{static_cast<int>(layer), tag, gid, group_stride(gid, static_cast<int>(layer))});
+            size_t stride_bytes = group.kvBlockStrideBytes() + group.kvScaleStrideBytes();
+            if (stride_bytes == 0) {
+                stride_bytes = cache_config_.layerBlockStrideBytes(static_cast<size_t>(layer.layer_id));
             }
+            const auto group_id = static_cast<int>(cache_config_.topology().groupIdForTag(group.tag));
+            slots.push_back(LayerTagSlot{layer.layer_id, group.tag, group_id, stride_bytes});
         }
     }
     return slots;
@@ -611,20 +601,20 @@ bool KVCacheMemoryConnector::supportsTypedPrefixCacheLayout(const std::vector<La
     if (!cache_config_.use_typed_cache_regions || !cache_config_.use_opaque_kv_cache_store) {
         return false;
     }
-    const auto group_num       = static_cast<size_t>(cache_config_.groupNums());
-    const auto layer_group_ids = cache_config_.layerGroupIdsSnapshot();
-    if (group_num == 0 || layer_group_ids.size() < cache_config_.layer_all_num()) {
+    const auto& groups = cache_config_.topology().groups();
+    const auto& layers = cache_config_.topology().layers();
+    if (groups.empty() || layers.size() < cache_config_.layer_all_num()) {
         return false;
     }
 
     bool has_compressed = false;
     bool has_state      = false;
-    for (size_t gid = 0; gid < group_num; ++gid) {
-        const auto& spec = cache_config_.specForGroup(gid);
+    for (const auto& group : groups) {
+        const auto& spec = group.spec;
         if (spec == nullptr) {
             return false;
         }
-        if (cache_config_.kvBlockStrideBytesForGroup(gid) + cache_config_.kvScaleStrideBytesForGroup(gid) == 0) {
+        if (group.kvBlockStrideBytes() + group.kvScaleStrideBytes() == 0) {
             return false;
         }
         if (spec->type == KVCacheSpecType::OpaqueKV) {
@@ -638,23 +628,21 @@ bool KVCacheMemoryConnector::supportsTypedPrefixCacheLayout(const std::vector<La
     if (!has_compressed || !has_state) {
         return false;
     }
-    for (size_t layer = 0; layer < cache_config_.layer_all_num(); ++layer) {
-        const auto& row = layer_group_ids[layer];
-        if (row.empty()) {
+    for (const auto& layer : layers) {
+        if (layer.group_tags.empty()) {
             return false;
         }
     }
 
     for (const auto& slot : slots) {
         const auto layer = static_cast<size_t>(slot.layer_id);
-        if (slot.group_id < 0 || static_cast<size_t>(slot.group_id) >= group_num || layer >= layer_group_ids.size()
-            || std::find(layer_group_ids[layer].begin(), layer_group_ids[layer].end(), slot.group_id)
-                   == layer_group_ids[layer].end()) {
+        const auto* group = findSlotGroup(cache_config_, slot.group_id, slot.tag);
+        if (group == nullptr || layer >= layers.size() || groups[static_cast<size_t>(slot.group_id)].tag != slot.tag
+            || std::find(layers[layer].group_tags.begin(), layers[layer].group_tags.end(), slot.tag)
+                   == layers[layer].group_tags.end()) {
             return false;
         }
-        const auto group_id = static_cast<size_t>(slot.group_id);
-        const auto group_stride =
-            cache_config_.kvBlockStrideBytesForGroup(group_id) + cache_config_.kvScaleStrideBytesForGroup(group_id);
+        const auto group_stride = group->kvBlockStrideBytes() + group->kvScaleStrideBytes();
         if (slot.stride_bytes != group_stride) {
             return false;
         }
@@ -854,8 +842,8 @@ bool KVCacheMemoryConnector::usePrefixTreeMemoryCache() const {
 }
 
 CacheBlockKind KVCacheMemoryConnector::kindForSlot(const LayerTagSlot& slot) const {
-    if (slot.group_id >= 0 && static_cast<size_t>(slot.group_id) < static_cast<size_t>(cache_config_.groupNums())) {
-        const auto& spec = cache_config_.specForGroup(static_cast<size_t>(slot.group_id));
+    if (const auto* group = findSlotGroup(cache_config_, slot.group_id, slot.tag)) {
+        const auto& spec = group->spec;
         if (spec && spec->type == KVCacheSpecType::OpaqueKV) {
             return CacheBlockKind::COMPRESSED_KV;
         }
@@ -867,10 +855,8 @@ CacheBlockKind KVCacheMemoryConnector::kindForSlot(const LayerTagSlot& slot) con
 }
 
 CacheGroupPolicy KVCacheMemoryConnector::groupPolicyForSlot(const LayerTagSlot& slot) const {
-    if (slot.group_id < 0 || slot.group_id >= cache_config_.groupNums()) {
-        return CacheGroupPolicy{};
-    }
-    return cache_config_.policyForGroup(static_cast<size_t>(slot.group_id));
+    const auto* group = findSlotGroup(cache_config_, slot.group_id, slot.tag);
+    return group == nullptr ? CacheGroupPolicy{} : group->policy;
 }
 
 bool KVCacheMemoryConnector::kindRequiredAt(const LayerAttnBlockIds&         layer_attn_block_ids,

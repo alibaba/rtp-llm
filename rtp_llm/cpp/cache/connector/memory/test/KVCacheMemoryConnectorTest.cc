@@ -233,8 +233,12 @@ CacheConfig createDsv4TypedConnectorConfig() {
 // group untouched.  Replaces DEV's direct per-group stride vector writes.
 void setGroupKvStrideBytes(CacheConfig& config, const std::string& tag, size_t stride_bytes) {
     auto       block_nums    = config.groupBlockNumsSnapshot();
-    auto       kv_strides    = config.groupKvBlockStrideBytesSnapshot();
-    auto       scale_strides = config.groupKvScaleStrideBytesSnapshot();
+    std::vector<size_t> kv_strides;
+    std::vector<size_t> scale_strides;
+    for (const auto& group : config.topology().groups()) {
+        kv_strides.push_back(group.kvBlockStrideBytes());
+        scale_strides.push_back(group.kvScaleStrideBytes());
+    }
     const auto gid           = static_cast<size_t>(config.groupIdForTag(tag));
     kv_strides.at(gid)       = stride_bytes;
     rtp_llm::test::setGroupBlockLayout(config, block_nums, kv_strides, scale_strides);
@@ -1837,6 +1841,44 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
     EXPECT_EQ(plan->copy_infos[0].gpu_blocks, (std::vector<BlockIdxType>{11, 21}));
     EXPECT_EQ(plan->copy_infos[1].gpu_blocks, (std::vector<BlockIdxType>{12, NULL_BLOCK_IDX}));
     EXPECT_EQ(plan->copy_infos[2].gpu_blocks, (std::vector<BlockIdxType>{13, 23}));
+}
+
+TEST_F(KVCacheMemoryConnectorTest, typedLayoutProbeRejectsUnknownOrMismatchedGroupIdentity) {
+    auto       cfg   = createDsv4TypedConnectorConfig();
+    auto       conn  = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cache_config_, allocator_, server_addrs_);
+    const auto slots = conn->layerTagSlots();
+    ASSERT_FALSE(slots.empty());
+    ASSERT_TRUE(conn->supportsTypedPrefixCacheLayout(slots));
+
+    // The resource matrix still uses local group indices. Identity validation rejects
+    // malformed slots; it does not enable independently reordered resource matrices.
+    auto unknown        = slots;
+    unknown.front().tag = "missing";
+    EXPECT_FALSE(conn->supportsTypedPrefixCacheLayout(unknown));
+
+    auto        mismatched = slots;
+    const auto& other      = cfg.topology().groupById((static_cast<size_t>(mismatched.front().group_id) + 1)
+                                                 % cfg.topology().groups().size());
+    ASSERT_NE(other.tag, mismatched.front().tag);
+    mismatched.front().tag          = other.tag;
+    mismatched.front().stride_bytes = other.kvBlockStrideBytes() + other.kvScaleStrideBytes();
+    EXPECT_FALSE(conn->supportsTypedPrefixCacheLayout(mismatched));
+}
+
+TEST_F(KVCacheMemoryConnectorTest, slotClassificationPreservesDefaultsForInvalidGroupIndex) {
+    auto       cfg   = createDsv4TypedConnectorConfig();
+    auto       conn  = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cache_config_, allocator_, server_addrs_);
+    const auto slots = conn->layerTagSlots();
+    ASSERT_FALSE(slots.empty());
+    for (const int invalid_group_id : {-1, cfg.groupNums()}) {
+        auto invalid_slots             = slots;
+        invalid_slots.front().group_id = invalid_group_id;
+        const auto& invalid            = invalid_slots.front();
+        EXPECT_FALSE(conn->supportsTypedPrefixCacheLayout(invalid_slots));
+        EXPECT_TRUE(conn->isFullOnlySlot(invalid));
+        EXPECT_EQ(conn->kindForSlot(invalid), CacheBlockKind::COMPRESSED_KV);
+        EXPECT_TRUE(CacheConfig::samePolicy(conn->groupPolicyForSlot(invalid), CacheGroupPolicy{}));
+    }
 }
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_SkipsHCAStateSlots) {

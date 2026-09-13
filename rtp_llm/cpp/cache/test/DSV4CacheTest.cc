@@ -434,6 +434,48 @@ static GroupBase makeTestGroup(const KVCacheSpecPtr& spec, CacheGroupType type) 
     return group;
 }
 
+TEST(CacheConfigTest, GroupIdentityQueriesPreserveGeometryMembershipAndAggregateBytesAcrossOrders) {
+    auto full = makeTestGroup(std::make_shared<MHAKVCacheSpec>("full", 16, 4, 2), CacheGroupType::FULL);
+    auto swa  = makeTestGroup(std::make_shared<MHAKVCacheSpec>("swa", 8, 8, 1), CacheGroupType::SWA);
+    rtp_llm::test::setGroupLayout(full, 128, 4);
+    rtp_llm::test::setGroupLayout(swa, 256, 8);
+    const std::vector<LayerBase> layers{{0, {"swa"}}, {1, {"full", "swa"}}, {2, {"full"}}};
+    for (const auto& groups : {std::vector<GroupBase>{full, swa}, std::vector<GroupBase>{swa, full}}) {
+        CacheConfig config;
+        config.layer_num = 3;
+        config.setTopology(groups, layers);
+        const auto& group = config.groupForLayer(2, "full");
+        EXPECT_EQ(group.spec->tag, "full");
+        EXPECT_EQ(group.spec->type, full.spec->type);
+        EXPECT_EQ(group.policy.group_type, CacheGroupType::FULL);
+        EXPECT_EQ(group.seqSizePerBlock(), 16u);       // tokens/physical block
+        EXPECT_EQ(group.kernelSeqSizePerBlock(), 4u);  // tokens/kernel page
+        EXPECT_EQ(group.kvBlockStrideBytes(), 128u);   // bytes/physical block/layer
+        EXPECT_EQ(group.kvScaleStrideBytes(), 4u);     // bytes/physical block/layer
+        EXPECT_EQ(config.group("swa").seqSizePerBlock(), 8u);
+        EXPECT_EQ(config.layerIdsForGroup("full"), (std::vector<int>{1, 2}));
+        EXPECT_EQ(config.layerIdsForGroup("swa"), (std::vector<int>{0, 1}));
+        EXPECT_EQ(config.blockSizeBytesForGroup("full"), 264u);  // bytes/physical block across two layers
+        EXPECT_EQ(config.blockSizeBytesForGroup("swa"), 528u);
+        EXPECT_EQ(config.soleGroupForLayer(0).tag, "swa");
+        EXPECT_ANY_THROW(config.groupForLayer(0, "full"));
+        EXPECT_ANY_THROW(config.soleGroupForLayer(1));
+        EXPECT_ANY_THROW(config.layerIdsForGroup("missing"));
+        EXPECT_ANY_THROW(config.blockSizeBytesForGroup("missing"));
+    }
+}
+
+TEST(CacheConfigTest, GroupIdentityAggregateBytesRejectOverflow) {
+    const auto max_bytes = std::numeric_limits<size_t>::max();
+    for (const auto& strides :
+         {std::pair<size_t, size_t>{max_bytes, 1}, std::pair<size_t, size_t>{max_bytes / 2 + 1, 0}}) {
+        auto group = makeTestGroup(std::make_shared<MHAKVCacheSpec>("full", 8, 8, 1), CacheGroupType::FULL);
+        rtp_llm::test::setGroupLayout(group, strides.first, strides.second);
+        auto topology = CacheTopology::create({group}, {{0, {"full"}}, {1, {"full"}}});
+        EXPECT_ANY_THROW(topology->blockSizeBytesForGroup("full"));
+    }
+}
+
 TEST(CacheConfigTest, SetTopologyInstallsTagAndGroupTopology) {
     CacheConfig config;
     config.layer_num = 3;
@@ -451,7 +493,7 @@ TEST(CacheConfigTest, SetTopologyInstallsTagAndGroupTopology) {
     EXPECT_EQ(config.groupTagsSnapshot(), std::vector<std::string>({"swa", "csa"}));
     EXPECT_EQ(config.groupIdForLayerTag(1, "swa"), 0);
     EXPECT_EQ(config.groupIdForLayerTag(1, "csa"), 1);
-    EXPECT_THROW((void)config.groupIdFor(1), std::exception);
+    EXPECT_THROW((void)config.soleGroupForLayer(1), std::exception);
     EXPECT_EQ(config.layerGroupIdsSnapshot()[1], std::vector<int>({0, 1}));
 }
 
@@ -485,8 +527,9 @@ TEST(CacheConfigTest, TopologyRemainsTheSingleSourceAcrossSupportedUpdates) {
 
     EXPECT_NE(layout_topology.get(), policy_topology.get());
     EXPECT_EQ(config.groupBlockNumsSnapshot(), (std::vector<uint32_t>{17, 9}));
-    EXPECT_EQ(config.groupKvBlockStrideBytesSnapshot(), (std::vector<size_t>{128, 256}));
-    EXPECT_EQ(config.groupKvScaleStrideBytesSnapshot(), (std::vector<size_t>{4, 8}));
+    EXPECT_EQ(config.group("full").kvBlockStrideBytes(), 128u);
+    EXPECT_EQ(config.group("full").kvScaleStrideBytes(), 4u);
+    EXPECT_EQ(config.group("linear").kvScaleStrideBytes(), 8u);
     EXPECT_EQ(config.group("linear").block_num, 9u);
     EXPECT_EQ(config.group("linear").kvBlockStrideBytes(), 256u);
     EXPECT_EQ(policy_topology->group("linear").block_num, 0u);
@@ -731,7 +774,7 @@ TEST(CacheConfigCreatorTest, Fp8BlockSizeBytesUsePaddedPhysicalStride) {
     auto config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
-    ASSERT_EQ(config.groupKvBlockStrideBytesSnapshot().size(), 7u);
+    ASSERT_EQ(config.topology().groups().size(), 7u);
 
     EXPECT_EQ(config.specForGroup(gidForTag(config, "csa_kv"))->block_size_bytes(), 19008u);
     EXPECT_EQ(config.specForGroup(gidForTag(config, "hca_kv"))->block_size_bytes(), 1152u);
@@ -858,7 +901,7 @@ TEST(CacheConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlocks) {
     auto config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
-    ASSERT_EQ(config.groupKvBlockStrideBytesSnapshot().size(), 7u);
+    ASSERT_EQ(config.topology().groups().size(), 7u);
 
     EXPECT_EQ(config.specForGroup(gidForTag(config, "csa_kv"))->block_size_bytes(), 19008u);
     EXPECT_EQ(config.specForGroup(gidForTag(config, "hca_kv"))->block_size_bytes(), 1152u);

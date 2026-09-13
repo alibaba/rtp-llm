@@ -46,6 +46,10 @@ uint32_t GroupBase::localKvHeadNum() const {
     return spec->local_kv_head_num;
 }
 
+size_t CacheTopology::blockSizeBytesForGroup(std::string_view group_tag) const {
+    return blockSizeBytesForGroup(groupIdForTag(group_tag));
+}
+
 size_t CacheTopology::blockSizeBytesForGroup(size_t group_id) const {
     const auto& group                 = groupById(group_id);
     const auto  kv_block_stride_bytes = group.kvBlockStrideBytes();
@@ -219,6 +223,10 @@ std::vector<int> CacheTopology::groupIdsForLayer(int layer_id) const {
         group_ids.push_back(static_cast<int>(groupIdForTag(tag)));
     }
     return group_ids;
+}
+
+std::vector<int> CacheTopology::layerIdsForGroup(std::string_view group_tag) const {
+    return layerIdsForGroup(groupIdForTag(group_tag));
 }
 
 std::vector<int> CacheTopology::layerIdsForGroup(size_t group_id) const {

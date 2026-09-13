@@ -95,13 +95,15 @@ bool DefaultLayerGroupPolicy::init() {
     const auto  layer_layout       = allocator_->allLayerCacheBase();
     const auto& topology           = layer_layout.topology();
     uint64_t    group_name_bithash = 1;
-    const auto& layer_group_ids    = topology.layerGroupIdsSnapshot();
-    for (int layer = 0; layer < static_cast<int>(layer_group_ids.size()); ++layer) {
-        if (layer_group_ids.at(layer).empty()) {
+    for (const auto& layer_config : topology.layers()) {
+        const int layer = layer_config.layer_id;
+        if (layer_config.group_tags.empty()) {
             RTP_LLM_LOG_ERROR("layer [%d] has no cache group id", layer);
             return false;
         }
-        for (const int group_idx : layer_group_ids.at(layer)) {
+        for (const auto& group_ref : topology.groupsForLayer(layer)) {
+            const auto& topology_group = group_ref.get();
+            const int   group_idx      = static_cast<int>(topology.groupIdForTag(topology_group.tag));
             bool is_full_group = false;
             if (full_group_ids_.find(group_idx) != full_group_ids_.end()) {
                 is_full_group = true;
@@ -118,7 +120,6 @@ bool DefaultLayerGroupPolicy::init() {
                     return false;
                 }
                 RTP_LLM_CHECK_WITH_INFO(group_idx >= 0, "invalid remote cache group id=%d", group_idx);
-                const auto& topology_group    = topology.groupById(static_cast<size_t>(group_idx));
                 const auto& cache_tag         = topology_group.tag;
                 const auto [tag_it, inserted] = tag_to_group_id_.emplace(cache_tag, group_idx);
                 if (!inserted && tag_it->second != group_idx) {
@@ -130,7 +131,7 @@ bool DefaultLayerGroupPolicy::init() {
                 }
                 const std::string prefix     = is_full_group ? "F" : GetOtherGroupPrefixName();
                 std::string       group_name = prefix + cache_tag;
-                const size_t      block_size_bytes = topology.blockSizeBytesForGroup(static_cast<size_t>(group_idx));
+                const size_t      block_size_bytes = topology.blockSizeBytesForGroup(cache_tag);
                 groups_[group_idx] = Group{is_full_group, group_name_bithash, group_name, cache_tag, block_size_bytes};
                 group_to_layer_ids_[group_idx] = {};
                 if (groups_.size() < 64) {
