@@ -102,8 +102,7 @@ public:
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override {
         return {};
     }
-    std::vector<BlockInfo>
-    convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const override {
         tagged_buffer_requests_.emplace_back(layer_id, tag, block_id);
         BlockInfo info;
         info.addr           = reinterpret_cast<void*>(static_cast<uintptr_t>(block_id + 1));

@@ -117,7 +117,6 @@ public:
 
     LayerBlockIds            layerBlocks() const;
     const LayerAttnBlockIds& layerGroupBlocks() const;
-    int                      groupId(int layer_id, int group_id) const;
 
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
@@ -165,7 +164,7 @@ public:
     size_t remoteReuseBlocksNum() const;
     void   setRemoteReuseBlocksNum(size_t remote_reuse_blocks_num);
 
-    void swapBlocks(size_t group_id, size_t rhs, size_t lhs);
+    void swapBlocks(std::string_view group_tag, size_t rhs, size_t lhs);
 
     std::string debugString() const;
 

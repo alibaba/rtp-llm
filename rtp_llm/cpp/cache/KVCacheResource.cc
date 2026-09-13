@@ -324,15 +324,6 @@ const LayerAttnBlockIds& KVCacheResource::layerGroupBlocks() const {
     return layer_group_block_ids;
 }
 
-int KVCacheResource::groupId(int layer_id, int group_id) const {
-    RTP_LLM_CHECK(static_cast<size_t>(layer_id) < layer_group_block_ids.size());
-    if (group_id < 0 || static_cast<size_t>(group_id) >= layer_group_block_ids[static_cast<size_t>(layer_id)].size()
-        || !layer_group_block_ids[static_cast<size_t>(layer_id)][static_cast<size_t>(group_id)]) {
-        return -1;
-    }
-    return group_id;
-}
-
 CacheKeysType& KVCacheResource::cacheKeys() {
     return cache_keys;
 }
@@ -446,8 +437,8 @@ std::string KVCacheResource::debugString() const {
     return debug_string.str();
 }
 
-void KVCacheResource::swapBlocks(size_t group_id, size_t rhs, size_t lhs) {
-    group_block_ids[group_id]->swap(rhs, lhs);
+void KVCacheResource::swapBlocks(std::string_view group_tag, size_t rhs, size_t lhs) {
+    mutableBlockIds(group_tag).swap(rhs, lhs);
 }
 
 }  // namespace rtp_llm

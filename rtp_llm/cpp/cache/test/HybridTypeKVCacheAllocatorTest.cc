@@ -1433,8 +1433,8 @@ TEST_F(KVCacheAllocatorHybridPathTest, ConvertIndexToBufferAndAllLayerCacheBaseS
 
     const auto linear_gid = static_cast<size_t>(config.groupIdForTag("linear"));
     const auto full_gid   = static_cast<size_t>(config.groupIdForTag("full1"));
-    auto       linear_buf = base->convertIndexToBufferByTag(/*layer_id=*/0, "linear", /*block_id=*/1);
-    auto       full_buf   = base->convertIndexToBufferByTag(/*layer_id=*/2, "full1", /*block_id=*/1);
+    auto       linear_buf = base->convertIndexToBuffer(/*layer_id=*/0, "linear", /*block_id=*/1);
+    auto       full_buf   = base->convertIndexToBuffer(/*layer_id=*/2, "full1", /*block_id=*/1);
     ASSERT_FALSE(linear_buf.empty());
     ASSERT_FALSE(full_buf.empty());
     EXPECT_NE(linear_buf[0].addr, nullptr);

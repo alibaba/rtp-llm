@@ -289,7 +289,7 @@ static void writeDsv4RegionPattern(const std::shared_ptr<KVCacheManager>& manage
                                    int                                    group_id,
                                    size_t                                 bytes,
                                    uint8_t                                pattern) {
-    auto addr_info = manager->convertIndexToAddr(block_id, layer_id, group_id);
+    auto addr_info = manager->convertIndexToAddr(layer_id, manager->cacheConfig().tagForGroup(group_id), block_id);
     ASSERT_NE(addr_info.kv_addr, nullptr);
 
     auto dst =
@@ -305,7 +305,7 @@ static void assertDsv4RegionPatternEq(const std::shared_ptr<KVCacheManager>& man
                                       int                                    group_id,
                                       size_t                                 bytes,
                                       uint8_t                                expected) {
-    auto addr_info = manager->convertIndexToAddr(block_id, layer_id, group_id);
+    auto addr_info = manager->convertIndexToAddr(layer_id, manager->cacheConfig().tagForGroup(group_id), block_id);
     ASSERT_NE(addr_info.kv_addr, nullptr);
 
     auto dev_t =
@@ -382,8 +382,8 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     const auto& config = manager.cacheConfig();
     EXPECT_EQ(config.block_num, candidate);
     ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
-    ASSERT_EQ(manager.coordinator_manager_->group_block_pools_.size(), 1u);
-    const auto& pool = manager.coordinator_manager_->group_block_pools_[0];
+    ASSERT_EQ(manager.allocator_->group_block_pools_.size(), 1u);
+    const auto& pool = manager.allocator_->group_block_pools_[0];
     ASSERT_EQ(pool->config_.memory_layouts.size(), 3u);
     // FP16 K+V: 4 tokens/block * 2 bytes/element * (2 target + 2*4 draft elements/token).
     constexpr size_t bytes_per_block = 4 * 2 * 2 * (2 + 2 * 4);
@@ -417,6 +417,46 @@ TEST_F(KVCacheManagerTest, InitAcceptsSingleLinearGroupWithIndependentPool) {
     ASSERT_NE(cache_manager->allocator_, nullptr);
     ASSERT_EQ(cache_manager->allocator_->group_block_pools_.size(), 1u);
     EXPECT_NE(cache_manager->allocator_->group_block_pools_[0], nullptr);
+}
+
+TEST_F(KVCacheManagerTest, TaggedAddressLookupIgnoresGroupOrderAndPreservesLayerBlockOrder) {
+    for (const bool reversed : {false, true}) {
+        CacheConfig config;
+        config.layer_num          = 2;
+        config.block_num          = 5;
+        config.seq_size_per_block = 2;
+        config.dtype              = DataType::TYPE_FP16;
+        config.fromGroupedSpecs(
+            {makeResolvedMhaSpec(config.dtype, 1, 1, 2, "narrow"), makeResolvedMhaSpec(config.dtype, 2, 4, 2, "wide")},
+            {{0}, {1}},
+            {CacheGroupType::FULL, CacheGroupType::FULL});
+        if (reversed) {
+            auto groups = config.topology().groups();
+            std::reverse(groups.begin(), groups.end());
+            config.setTopology(std::move(groups), config.topology().layers());
+        }
+        KVCacheManager manager(config);
+        ASSERT_TRUE(manager.init());
+        for (const auto& tag : {std::string("narrow"), std::string("wide")}) {
+            const int     layer_id = tag == "narrow" ? 0 : 1;
+            constexpr int block_id = 3;
+            const auto    addr     = manager.convertIndexToAddr(layer_id, tag, block_id);
+            const auto    buffers  = manager.convertIndexToBuffer(layer_id, tag, block_id);
+            ASSERT_FALSE(buffers.empty());
+            EXPECT_EQ(addr.kv_addr, buffers.front().addr);
+            EXPECT_EQ(addr.kv_addr, manager.convertIndexToAddr(block_id, layer_id).kv_addr);
+            EXPECT_EQ(buffers.front().size_bytes, config.group(tag).kvBlockStrideBytes());
+            const auto base = manager.convertIndexToAddr(layer_id, tag, 0);
+            EXPECT_EQ(static_cast<char*>(addr.kv_addr) - static_cast<char*>(base.kv_addr),
+                      block_id * config.group(tag).kvBlockStrideBytes());
+            const auto partition = manager.convertIndexToBuffer(layer_id, tag, block_id, 1, 0);
+            ASSERT_FALSE(partition.empty());
+            EXPECT_EQ(partition.front().addr, addr.kv_addr);
+        }
+        EXPECT_ANY_THROW(manager.convertIndexToAddr(1, "missing", 3));
+        EXPECT_ANY_THROW(manager.convertIndexToBuffer(1, "narrow", 3));
+        EXPECT_ANY_THROW(manager.convertIndexToBuffer(0, "wide", 3, 1, 0));
+    }
 }
 
 TEST_F(KVCacheManagerTest, InitAcceptsFullAndLinearGroups) {
@@ -852,16 +892,16 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
     const int hca_state_gid = manager_config.groupIdForTag("hca_state");
     const int csa_layer     = manager_config.layerIdsForGroup(static_cast<size_t>(csa_gid))[0];
     const int hca_layer     = manager_config.layerIdsForGroup(static_cast<size_t>(hca_gid))[0];
-    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, csa_gid)[0], csa_layer, csa_gid).kv_addr, nullptr);
-    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, indexer_gid)[0], csa_layer, indexer_gid).kv_addr,
+    EXPECT_NE(manager->convertIndexToAddr(csa_layer, "csa_kv", resource->blocks(0, csa_gid)[0]).kv_addr, nullptr);
+    EXPECT_NE(manager->convertIndexToAddr(csa_layer, "indexer_kv", resource->blocks(0, indexer_gid)[0]).kv_addr,
               nullptr);
-    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, csa_state_gid)[2], csa_layer, csa_state_gid).kv_addr,
+    EXPECT_NE(manager->convertIndexToAddr(csa_layer, "csa_state", resource->blocks(0, csa_state_gid)[2]).kv_addr,
               nullptr);
-    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, hca_state_gid).back(), hca_layer, hca_state_gid).kv_addr,
+    EXPECT_NE(manager->convertIndexToAddr(hca_layer, "hca_state", resource->blocks(0, hca_state_gid).back()).kv_addr,
               nullptr);
-    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, hca_gid)[0], hca_layer, hca_gid).kv_addr, nullptr);
-    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, swa_gid)[2], csa_layer, swa_gid).kv_addr, nullptr);
-    EXPECT_ANY_THROW((void)manager->convertIndexToAddr(resource->blocks(0, hca_gid)[0], csa_layer, hca_gid));
+    EXPECT_NE(manager->convertIndexToAddr(hca_layer, "hca_kv", resource->blocks(0, hca_gid)[0]).kv_addr, nullptr);
+    EXPECT_NE(manager->convertIndexToAddr(csa_layer, "swa_kv", resource->blocks(0, swa_gid)[2]).kv_addr, nullptr);
+    EXPECT_ANY_THROW((void)manager->convertIndexToAddr(csa_layer, "hca_kv", resource->blocks(0, hca_gid)[0]));
 
     FreeInfo free_info{resource, tokens};
     manager->free(free_info);
@@ -887,7 +927,7 @@ TEST_F(KVCacheManagerTest, DSV4LayerRegionBlockTablesMatchInferenceAccessPattern
     auto expectTagGroup = [&](int layer_id, const std::string& tag, int expected_gid) {
         EXPECT_EQ(manager_config.groupIdForLayerTag(layer_id, tag), expected_gid)
             << "layer=" << layer_id << " tag=" << tag;
-        EXPECT_EQ(resource->groupId(/*batch_id=*/0, layer_id, expected_gid), expected_gid)
+        EXPECT_EQ(resource->blocksForLayer(/*batch_id=*/0, layer_id, tag), resource->blocks(0, expected_gid))
             << "layer=" << layer_id << " tag=" << tag;
         EXPECT_EQ(resource->blocks(/*batch_id=*/0, layer_id, expected_gid), resource->blocks(0, expected_gid))
             << "layer=" << layer_id << " tag=" << tag;
@@ -991,7 +1031,7 @@ TEST_F(KVCacheManagerTest, DSV4BlockCopyPreservesTypedRegionBytes) {
     for (const auto& group : manager_config.topology().groups()) {
         copy_mapping.push_back({group.tag, src_block, dst_block});
     }
-    manager->blockBatchCopyByTag(copy_mapping);
+    manager->blockBatchCopyByGroup(copy_mapping);
     runtimeSyncAndCheck();
 
     for (const auto& region_case : cases) {

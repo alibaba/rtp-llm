@@ -1286,44 +1286,22 @@ KVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id, int partition
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(
         layer_id, block_id, partition_count, partition_id);
 }
-
-BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int layer_id, int group_id, int block_id) const {
-    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology group id=%d", group_id);
-    return convertIndexToAddrByTag(layer_id, config_.topology().groupById(static_cast<size_t>(group_id)).tag, block_id);
-}
-
-std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(int layer_id, int group_id, int block_id) const {
-    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology group id=%d", group_id);
-    return convertIndexToBufferByTag(
-        layer_id, config_.topology().groupById(static_cast<size_t>(group_id)).tag, block_id);
-}
-
-std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(
-    int layer_id, int group_id, int block_id, int partition_count, int partition_id) const {
-    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology group id=%d", group_id);
-    return convertIndexToBufferByTag(layer_id,
-                                     config_.topology().groupById(static_cast<size_t>(group_id)).tag,
-                                     block_id,
-                                     partition_count,
-                                     partition_id);
-}
-
-BlockAddrInfo KVCacheAllocator::convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const {
-    const auto gid = static_cast<int>(config_.topology().groupIdForTag(tag));
+BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id) const {
+    const auto gid = static_cast<int>(config_.topology().groupIdForTag(group_tag));
     validateGroupIdForLayer(layer_id, gid);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, block_id);
 }
 
 std::vector<BlockInfo>
-KVCacheAllocator::convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const {
-    const auto gid = static_cast<int>(config_.topology().groupIdForTag(tag));
+KVCacheAllocator::convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const {
+    const auto gid = static_cast<int>(config_.topology().groupIdForTag(group_tag));
     validateGroupIdForLayer(layer_id, gid);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(layer_id, block_id);
 }
 
-std::vector<BlockInfo> KVCacheAllocator::convertIndexToBufferByTag(
-    int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const {
-    const auto gid = static_cast<int>(config_.topology().groupIdForTag(tag));
+std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(
+    int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const {
+    const auto gid = static_cast<int>(config_.topology().groupIdForTag(group_tag));
     validateGroupIdForLayer(layer_id, gid);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(
         layer_id, block_id, partition_count, partition_id);
@@ -1343,10 +1321,10 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
             tagged_mappings.push_back({group.tag, it->src, it->dst});
         }
     }
-    blockBatchCopyByTag(tagged_mappings);
+    blockBatchCopyByGroup(tagged_mappings);
 }
 
-void KVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping) {
+void KVCacheAllocator::blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping) {
     if (copy_mapping.empty()) {
         return;
     }
@@ -2097,7 +2075,7 @@ void KVCacheAllocator::blockBatchCopy(const torch::Tensor& copy_mapping) {
                                    mappings[i].src,
                                    mappings[i].dst});
     }
-    blockBatchCopyByTag(tagged_mappings);
+    blockBatchCopyByGroup(tagged_mappings);
 }
 bool KVCacheAllocator::cpShardThisGroupForCapacity(size_t gid) const {
     return cp_slot_mapper_ && cp_slot_mapper_->isSharded() && cp_slot_mapper_->blockRoundRobinGroup(config_, gid);

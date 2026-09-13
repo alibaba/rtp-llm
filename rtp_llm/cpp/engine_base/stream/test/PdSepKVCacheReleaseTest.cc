@@ -158,7 +158,7 @@ public:
 
 void fillDsv4RegionBytes(
     const std::shared_ptr<KVCacheManager>& manager, int block_id, int layer_id, const std::string& tag, uint8_t value) {
-    auto parts = manager->convertIndexToBufferByTag(block_id, layer_id, tag);
+    auto parts = manager->convertIndexToBuffer(layer_id, tag, block_id);
     ASSERT_EQ(parts.size(), 1u);
     auto device = torch::from_blob(
         parts[0].addr, {(int64_t)parts[0].size_bytes}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
@@ -169,7 +169,7 @@ void fillDsv4RegionBytes(
 
 void expectDsv4RegionBytes(
     const std::shared_ptr<KVCacheManager>& manager, int block_id, int layer_id, const std::string& tag, uint8_t value) {
-    auto parts = manager->convertIndexToBufferByTag(block_id, layer_id, tag);
+    auto parts = manager->convertIndexToBuffer(layer_id, tag, block_id);
     ASSERT_EQ(parts.size(), 1u);
     auto device = torch::from_blob(
         parts[0].addr, {(int64_t)parts[0].size_bytes}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
@@ -902,7 +902,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
             const auto block = loaded_request->getBlock(key);
             ASSERT_NE(block, nullptr) << "cp_rank=" << cp_rank << " logical_pos=" << logical_pos;
             const auto decode_block = decode_resource->blocks(0, 0)[static_cast<size_t>(logical_pos)];
-            const auto expected     = decode_manager->convertIndexToBufferByTag(decode_block, 0, "default");
+            const auto expected     = decode_manager->convertIndexToBuffer(0, "default", decode_block);
             ASSERT_EQ(expected.size(), 1u);
             EXPECT_EQ(block->addr.get(), expected[0].addr);
             EXPECT_EQ(block->len, expected[0].size_bytes);

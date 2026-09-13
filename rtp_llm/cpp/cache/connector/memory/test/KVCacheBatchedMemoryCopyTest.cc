@@ -375,23 +375,25 @@ public:
     void insertIntoCache(const InsertInfo&) override {}
 
     BlockAddrInfo convertIndexToAddr(int layer_id, int block_id) const override {
-        return convertIndexToAddr(layer_id, 0, block_id);
+        return convertIndexToAddr(layer_id, config_.soleGroupForLayer(layer_id).tag, block_id);
     }
 
-    BlockAddrInfo convertIndexToAddr(int layer_id, int group_id, int block_id) const override {
-        const auto buffers = convertIndexToBuffer(layer_id, group_id, block_id);
+    BlockAddrInfo convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id) const override {
+        const auto buffers = convertIndexToBuffer(layer_id, group_tag, block_id);
         return buffers.empty() ? BlockAddrInfo{} : BlockAddrInfo{buffers[0].addr, nullptr};
     }
 
     std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const override {
-        return convertIndexToBuffer(layer_id, 0, block_id);
+        return convertIndexToBuffer(layer_id, config_.soleGroupForLayer(layer_id).tag, block_id);
     }
 
     std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id, int, int) const override {
         return convertIndexToBuffer(layer_id, block_id);
     }
 
-    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int group_id, int block_id) const override {
+    std::vector<BlockInfo>
+    convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const override {
+        const auto group_id  = config_.groupIdForLayerTag(layer_id, group_tag);
         const auto k         = key(layer_id, group_id);
         const auto tensor_it = tensors_.find(k);
         const auto stride_it = strides_.find(k);
@@ -412,23 +414,9 @@ public:
         }};
     }
 
-    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int group_id, int block_id, int, int) const override {
-        return convertIndexToBuffer(layer_id, group_id, block_id);
-    }
-
-    BlockAddrInfo convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const override {
-        return convertIndexToAddr(layer_id, config_.groupIdForLayerTag(layer_id, tag), block_id);
-    }
-
     std::vector<BlockInfo>
-    convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const override {
-        return convertIndexToBuffer(layer_id, config_.groupIdForLayerTag(layer_id, tag), block_id);
-    }
-
-    std::vector<BlockInfo> convertIndexToBufferByTag(
-        int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
-        return convertIndexToBuffer(
-            layer_id, config_.groupIdForLayerTag(layer_id, tag), block_id, partition_count, partition_id);
+    convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id, int, int) const override {
+        return convertIndexToBuffer(layer_id, group_tag, block_id);
     }
 
     std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource&, const CacheKeysType&, bool) override {
@@ -617,7 +605,7 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<std::string>& host_tags) {
             const auto& slot = slots[i];
             const char  tag  = copyTag(block_idx * slots.size() + i);
             const auto  gpu_bufs =
-                allocator->convertIndexToBuffer(slot.layer_id, slot.group_id, gpu_block_sets[block_idx][i]);
+                allocator->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block_sets[block_idx][i]);
             ASSERT_GT(sumBlockInfosBytes(gpu_bufs), 0u);
             ASSERT_LE(sumBlockInfosBytes(gpu_bufs), slot.stride_bytes);
             setBlockInfosContent(gpu_bufs, tag);
@@ -637,7 +625,7 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<std::string>& host_tags) {
         for (size_t i = 0; i < slots.size(); ++i) {
             const auto& slot = slots[i];
             const auto  gpu_bufs =
-                allocator->convertIndexToBuffer(slot.layer_id, slot.group_id, gpu_block_sets[block_idx][i]);
+                allocator->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block_sets[block_idx][i]);
             verifyBlockBytesEq(
                 mem_buffer, byte_off, sumBlockInfosBytes(gpu_bufs), copyTag(block_idx * slots.size() + i));
             if (slot.stride_bytes > sumBlockInfosBytes(gpu_bufs)) {
@@ -660,7 +648,7 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<std::string>& host_tags) {
             const auto& slot = slots[i];
             const char  tag  = copyTag(1000 + block_idx * slots.size() + i);
             const auto  gpu_bufs =
-                allocator->convertIndexToBuffer(slot.layer_id, slot.group_id, gpu_block_sets[block_idx][i]);
+                allocator->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block_sets[block_idx][i]);
             setBlockInfosContent(gpu_bufs, 0);
             setBlockBytes(mem_buffer, byte_off, sumBlockInfosBytes(gpu_bufs), tag);
             byte_off += slot.stride_bytes;
@@ -673,7 +661,7 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<std::string>& host_tags) {
         for (size_t i = 0; i < slots.size(); ++i) {
             const auto& slot = slots[i];
             const auto  gpu_bufs =
-                allocator->convertIndexToBuffer(slot.layer_id, slot.group_id, gpu_block_sets[block_idx][i]);
+                allocator->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block_sets[block_idx][i]);
             verifyBlockInfosContent(gpu_bufs, copyTag(1000 + block_idx * slots.size() + i));
         }
     }
@@ -997,10 +985,9 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeBlockZeroAndNullSlotsAreNotCopiedFo
 
     const auto& valid_slot      = slots[state_slots[0]];
     const auto  valid_gpu_block = static_cast<BlockIdxType>(7);
-    setBlockInfosContent(allocator->convertIndexToBuffer(valid_slot.layer_id, valid_slot.group_id, valid_gpu_block),
-                         'V');
+    setBlockInfosContent(allocator->convertIndexToBuffer(valid_slot.layer_id, valid_slot.tag, valid_gpu_block), 'V');
     setBlockInfosContent(allocator->convertIndexToBuffer(slots[state_slots[1]].layer_id,
-                                                         slots[state_slots[1]].group_id,
+                                                         slots[state_slots[1]].tag,
                                                          /*block_id=*/0),
                          'Z');
     set_prefix_slot(mem_block, state_slots[0], 'M');
@@ -1035,10 +1022,9 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeBlockZeroAndNullSlotsAreNotCopiedFo
     set_prefix_slot(mem_block, state_slots[0], 'A');
     set_prefix_slot(mem_block, state_slots[1], 'B');
     set_prefix_slot(mem_block, state_slots[2], 'C');
-    setBlockInfosContent(allocator->convertIndexToBuffer(valid_slot.layer_id, valid_slot.group_id, valid_gpu_block),
-                         'x');
+    setBlockInfosContent(allocator->convertIndexToBuffer(valid_slot.layer_id, valid_slot.tag, valid_gpu_block), 'x');
     setBlockInfosContent(allocator->convertIndexToBuffer(slots[state_slots[1]].layer_id,
-                                                         slots[state_slots[1]].group_id,
+                                                         slots[state_slots[1]].tag,
                                                          /*block_id=*/0),
                          'z');
 
@@ -1046,10 +1032,9 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeBlockZeroAndNullSlotsAreNotCopiedFo
     response.Clear();
     ASSERT_TRUE(connector->copyCache(request, response));
     EXPECT_TRUE(response.success());
-    verifyBlockInfosContent(allocator->convertIndexToBuffer(valid_slot.layer_id, valid_slot.group_id, valid_gpu_block),
-                            'A');
+    verifyBlockInfosContent(allocator->convertIndexToBuffer(valid_slot.layer_id, valid_slot.tag, valid_gpu_block), 'A');
     verifyBlockInfosContent(
-        allocator->convertIndexToBuffer(slots[state_slots[1]].layer_id, slots[state_slots[1]].group_id, 0), 'z');
+        allocator->convertIndexToBuffer(slots[state_slots[1]].layer_id, slots[state_slots[1]].tag, 0), 'z');
 }
 
 TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeD2HMergeSourceKeepsOldSlotsAndOverlaysNewSlots) {
@@ -1124,7 +1109,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeD2HMergeSourceKeepsOldSlotsAndOverl
 
     const auto& new_slot      = slots[state_slots[1]];
     const auto  new_gpu_block = static_cast<BlockIdxType>(7);
-    setBlockInfosContent(allocator->convertIndexToBuffer(new_slot.layer_id, new_slot.group_id, new_gpu_block), 'N');
+    setBlockInfosContent(allocator->convertIndexToBuffer(new_slot.layer_id, new_slot.tag, new_gpu_block), 'N');
 
     MemoryOperationRequestPB request;
     request.set_copy_direction(MemoryOperationRequestPB::D2H);

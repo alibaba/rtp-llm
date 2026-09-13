@@ -2131,7 +2131,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const NormalizedCo
                 continue;
             }
 
-            const auto gpu_buffers      = allocator_->convertIndexToBufferByTag(slot.layer_id, slot.tag, gpu_block);
+            const auto gpu_buffers      = allocator_->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block);
             size_t     within_layer_off = 0;
             for (const auto& gpu_buffer : gpu_buffers) {
                 if (gpu_buffer.addr == nullptr || gpu_buffer.size_bytes == 0) {
@@ -2266,7 +2266,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const NormalizedC
                 continue;
             }
 
-            const auto gpu_buffers      = allocator_->convertIndexToBufferByTag(slot.layer_id, slot.tag, gpu_block);
+            const auto gpu_buffers      = allocator_->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block);
             size_t     within_layer_off = 0;
             for (const auto& gpu_buffer : gpu_buffers) {
                 if (gpu_buffer.addr == nullptr || gpu_buffer.size_bytes == 0) {
@@ -2419,7 +2419,7 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const NormalizedCopyItems&   
                 byte_off += slot.stride_bytes;
                 continue;
             }
-            const auto gpu_buffers      = allocator_->convertIndexToBufferByTag(slot.layer_id, slot.tag, gpu_block);
+            const auto gpu_buffers      = allocator_->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block);
             size_t     within_layer_off = 0;
             for (const auto& gpu_buffer : gpu_buffers) {
                 if (within_layer_off + gpu_buffer.size_bytes > slot.stride_bytes
@@ -2550,7 +2550,7 @@ bool KVCacheMemoryConnector::copyDiskItem(const NormalizedCopyItem&        item,
             byte_off += slot.stride_bytes;
             continue;
         }
-        const auto gpu_buffers      = allocator_->convertIndexToBufferByTag(slot.layer_id, slot.tag, gpu_block);
+        const auto gpu_buffers      = allocator_->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block);
         size_t     within_layer_off = 0;
         for (const auto& gpu_buffer : gpu_buffers) {
             const auto off = byte_off + within_layer_off;
@@ -2685,7 +2685,7 @@ bool KVCacheMemoryConnector::prepareCopyBuffers(BlockIdxType                    
             continue;
         }
 
-        const auto gpu_buffers      = allocator_->convertIndexToBufferByTag(slot.layer_id, slot.tag, gpu_block);
+        const auto gpu_buffers      = allocator_->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block);
         size_t     within_layer_off = 0;
         for (const auto& gpu_buffer : gpu_buffers) {
             if (within_layer_off + gpu_buffer.size_bytes > layer_stride) {

@@ -1,6 +1,7 @@
 #include "gtest/gtest.h"
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <mutex>
 #include <optional>
@@ -469,41 +470,61 @@ TEST_F(CacheStoreAsyncWriterTest, TimeoutRetainsAllocatorBlockUntilLatePublicati
     EXPECT_EQ(allocator->freeBlocksNum(), initial_free_blocks);
 }
 
-TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCallback) {
-    auto config        = makeWriterTestCacheConfig("default", /*kv_stride=*/16, /*block_num=*/3);
-    auto cache_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
-    ASSERT_TRUE(cache_manager->init());
-    auto cache_store = std::make_shared<DelayedCacheStore>();
-    cache_manager->setCacheStore(cache_store);
+TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsTaggedBlockAcrossGroupOrdersUntilStoreCallback) {
+    for (const bool reversed : {false, true}) {
+        auto       config  = makeWriterTestCacheConfig("other", /*kv_stride=*/32, /*block_num=*/3);
+        const auto tracked = makeWriterTestCacheConfig("tracked", /*kv_stride=*/16, /*block_num=*/3);
+        auto       groups  = config.topology().groups();
+        groups.push_back(tracked.group("tracked"));
+        if (reversed) {
+            std::reverse(groups.begin(), groups.end());
+        }
+        config.layer_num = 2;
+        config.setTopology(std::move(groups), {{0, {"other"}}, {1, {"tracked"}}});
+        auto cache_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
+        ASSERT_TRUE(cache_manager->init());
+        auto cache_store = std::make_shared<DelayedCacheStore>();
+        cache_manager->setCacheStore(cache_store);
 
-    torch_ext::PyCacheStoreInputs inputs;
-    inputs.input_lengths_host    = torch::tensor({1}, torch::kInt32);
-    inputs.prefix_lengths_host   = torch::tensor({0}, torch::kInt32);
-    inputs.host_kv_cache_offset  = torch::tensor({1}, torch::kInt32).reshape({1, 1});
-    inputs.request_id            = torch::tensor({int64_t{42}}, torch::kInt64);
-    inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
-    inputs.cache_keys            = torch::tensor({int64_t{7001}}, torch::kInt64).reshape({1, 1});
+        torch_ext::PyCacheStoreInputs inputs;
+        inputs.input_lengths_host    = torch::tensor({1}, torch::kInt32);
+        inputs.prefix_lengths_host   = torch::tensor({0}, torch::kInt32);
+        inputs.host_kv_cache_offset  = torch::tensor({1}, torch::kInt32).reshape({1, 1});
+        inputs.request_id            = torch::tensor({int64_t{42}}, torch::kInt64);
+        inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
+        inputs.cache_keys            = torch::tensor({int64_t{7001}}, torch::kInt64).reshape({1, 1});
 
-    auto                    layout = cache_manager->getMainModelCacheLayerLayout();
-    torch_ext::LayerKVCache layer_cache;
-    layer_cache.kv_cache_base      = layout.at("default", 0).kv_addr;
-    layer_cache.seq_size_per_block = 1;
-    layer_cache.layer_id           = 0;
-    layer_cache.group_id           = 0;
-    layer_cache.tag                = "default";
+        auto                    layout = cache_manager->getMainModelCacheLayerLayout();
+        torch_ext::LayerKVCache layer_cache;
+        layer_cache.kv_cache_base      = layout.at("tracked", 1).kv_addr;
+        layer_cache.seq_size_per_block = 1;
+        layer_cache.layer_id           = 1;
+        layer_cache.group_id           = 0;
+        layer_cache.tag                = "tracked";
 
-    const auto            initial_free_blocks = cache_manager->freeBlocksNum();
-    CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager, /*cache_model_id=*/0);
-    writer.init(/*track_store_completions=*/false);
-    writer.write(inputs, layer_cache);
-    writer.waitAllDone();
+        const auto            initial_free_blocks = cache_manager->freeBlocksNum();
+        CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager, /*cache_model_id=*/0);
+        writer.init(/*track_store_completions=*/false);
+        writer.write(inputs, layer_cache);
+        writer.waitAllDone();
 
-    ASSERT_TRUE(cache_store->hasPendingStore());
-    EXPECT_EQ(cache_manager->freeBlocksNum() + 1, initial_free_blocks)
-        << "ordinary forward completion must not release an in-flight store's KV block";
+        ASSERT_TRUE(cache_store->hasPendingStore());
+        EXPECT_EQ(cache_manager->freeBlocksNum() + 1, initial_free_blocks)
+            << "ordinary forward completion must retain the in-flight store's block";
 
-    ASSERT_TRUE(cache_store->completeStore());
-    EXPECT_EQ(cache_manager->freeBlocksNum(), initial_free_blocks);
+        KVCacheResource resource;
+        resource.initGroups(cache_manager->cacheConfig().topologyPtr());
+        resource.setCacheKeys({7001});
+        resource.mutableBlockIds("tracked").assign({1});
+        auto same_block_lease = cache_manager->incrKVCacheRef(resource, {7001}, /*is_connector=*/true);
+        ASSERT_NE(same_block_lease, nullptr);
+        EXPECT_EQ(cache_manager->freeBlocksNum() + 1, initial_free_blocks)
+            << "the store must hold tracked block 1, not the same numeric slot in the other pool";
+        same_block_lease.reset();
+
+        ASSERT_TRUE(cache_store->completeStore());
+        EXPECT_EQ(cache_manager->freeBlocksNum(), initial_free_blocks);
+    }
 }
 
 TEST_F(CacheStoreAsyncWriterTest, PublicationCancellationFailsWaitAndReleasesCycle) {

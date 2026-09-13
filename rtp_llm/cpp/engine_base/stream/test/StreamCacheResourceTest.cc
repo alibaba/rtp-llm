@@ -143,6 +143,31 @@ TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
     EXPECT_EQ(resource.kvCache().blocks(0, "__warmup__").size(), 2);
 }
 
+TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReordering) {
+    for (const bool reversed : {false, true}) {
+        auto config = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);
+        if (reversed) {
+            auto groups = config.topology().groups();
+            std::reverse(groups.begin(), groups.end());
+            config.setTopology(std::move(groups), config.topology().layers());
+        }
+        ResourceContext context;
+        context.cache_manager = std::make_shared<KVCacheManager>(config);
+        StreamCacheResource resource(nullptr, context, /*need_release_resource=*/false);
+        resource.init(1);
+        auto& batch = resource.kvCacheMutable();
+        for (const auto& group : config.topology().groups()) {
+            batch.mutableBlockIds(0, group.tag).assign({2, 5});
+        }
+        resource.swapLinearBlocks(0, 0, 1);
+        for (const auto& group : config.topology().groups()) {
+            EXPECT_EQ(batch.blocks(0, group.tag),
+                      group.policy.group_type == CacheGroupType::LINEAR ? (BlockIndicesType{5, 2}) :
+                                                                          (BlockIndicesType{2, 5}));
+        }
+    }
+}
+
 TEST_F(StreamCacheResourceTest, testAllocateResource) {
     prepareResource();
 

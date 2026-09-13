@@ -171,17 +171,17 @@ static CacheConfig makeCacheConfig(size_t             tokens_per_block,
                                    size_t             transfer_scale_bytes = 0,
                                    bool               opaque_store         = false) {
     CacheConfig config;
-    config.layer_num                 = static_cast<uint32_t>(layer_id + 1);
+    config.layer_num = static_cast<uint32_t>(layer_id + 1);
 
     config.block_num                 = static_cast<uint32_t>(block_num);
     config.seq_size_per_block        = tokens_per_block;
     config.use_opaque_kv_cache_store = opaque_store;
 
     GroupBase target_group;
-    target_group.tag                   = tag;
-    target_group.spec                  = makeTestSpec(tag, tokens_per_block, mla_cache);
-    target_group.policy                = policy;
-    target_group.block_num             = static_cast<uint32_t>(block_num);
+    target_group.tag       = tag;
+    target_group.spec      = makeTestSpec(tag, tokens_per_block, mla_cache);
+    target_group.policy    = policy;
+    target_group.block_num = static_cast<uint32_t>(block_num);
     rtp_llm::test::setGroupLayout(target_group,
                                   transfer_kv_bytes == 0 ? physical_kv_stride : transfer_kv_bytes,
                                   transfer_scale_bytes == 0 ? physical_scale_stride : transfer_scale_bytes);
@@ -194,10 +194,10 @@ static CacheConfig makeCacheConfig(size_t             tokens_per_block,
     std::vector<GroupBase> groups;
     if (add_dummy_group) {
         GroupBase dummy_group;
-        dummy_group.tag                   = tag == "full" ? "linear" : "full";
-        dummy_group.spec                  = makeTestSpec(dummy_group.tag, tokens_per_block, false);
-        dummy_group.policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        dummy_group.block_num             = static_cast<uint32_t>(block_num);
+        dummy_group.tag       = tag == "full" ? "linear" : "full";
+        dummy_group.spec      = makeTestSpec(dummy_group.tag, tokens_per_block, false);
+        dummy_group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        dummy_group.block_num = static_cast<uint32_t>(block_num);
         rtp_llm::test::setGroupLayout(dummy_group, physical_kv_stride, physical_scale_stride);
         for (int i = 0; i < layer_id; ++i) {
             layers[static_cast<size_t>(i)].group_tags = {dummy_group.tag};
@@ -510,17 +510,18 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCallbackFailureReachesPublicationWait) {
     CacheStoreAsyncWriter writer;
     writer.init(/*track_store_completions=*/true);
 
-    EXPECT_NO_THROW(runtimeWriteCacheStore(inputs,
-                                           layer_cache,
-                                           config,
-                                           cache_store,
-                                           /*cache_model_id=*/0,
-                                           /*cp_rank=*/0,
-                                           /*cp_size=*/1,
-                                           nullptr,
-                                           [&writer](const std::vector<int64_t>&, const std::vector<int32_t>&, size_t) {
-                                               return writer.registerStoreCompletion();
-                                           }));
+    EXPECT_NO_THROW(
+        runtimeWriteCacheStore(inputs,
+                               layer_cache,
+                               config,
+                               cache_store,
+                               /*cache_model_id=*/0,
+                               /*cp_rank=*/0,
+                               /*cp_size=*/1,
+                               nullptr,
+                               [&writer](const std::vector<int64_t>&, const std::vector<int32_t>&, const std::string&) {
+                                   return writer.registerStoreCompletion();
+                               }));
     writer.finishSubmissions();
     EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
 }
@@ -546,18 +547,19 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSynchronousThrowCompletesTokenExactlyOnce
     CacheStoreAsyncWriter writer;
     writer.init(/*track_store_completions=*/true);
 
-    EXPECT_THROW(runtimeWriteCacheStore(inputs,
-                                        layer_cache,
-                                        config,
-                                        cache_store,
-                                        /*cache_model_id=*/0,
-                                        /*cp_rank=*/0,
-                                        /*cp_size=*/1,
-                                        nullptr,
-                                        [&writer](const std::vector<int64_t>&, const std::vector<int32_t>&, size_t) {
-                                            return writer.registerStoreCompletion();
-                                        }),
-                 std::runtime_error);
+    EXPECT_THROW(
+        runtimeWriteCacheStore(inputs,
+                               layer_cache,
+                               config,
+                               cache_store,
+                               /*cache_model_id=*/0,
+                               /*cp_rank=*/0,
+                               /*cp_size=*/1,
+                               nullptr,
+                               [&writer](const std::vector<int64_t>&, const std::vector<int32_t>&, const std::string&) {
+                                   return writer.registerStoreCompletion();
+                               }),
+        std::runtime_error);
     writer.finishSubmissions();
     EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
     EXPECT_NO_THROW(writer.waitStoreCompletions());
@@ -584,17 +586,18 @@ TEST_F(ExecOpsTest, testWriteCacheStoreDuplicateCallbackDoesNotUnderflow) {
     CacheStoreAsyncWriter writer;
     writer.init(/*track_store_completions=*/true);
 
-    EXPECT_NO_THROW(runtimeWriteCacheStore(inputs,
-                                           layer_cache,
-                                           config,
-                                           cache_store,
-                                           /*cache_model_id=*/0,
-                                           /*cp_rank=*/0,
-                                           /*cp_size=*/1,
-                                           nullptr,
-                                           [&writer](const std::vector<int64_t>&, const std::vector<int32_t>&, size_t) {
-                                               return writer.registerStoreCompletion();
-                                           }));
+    EXPECT_NO_THROW(
+        runtimeWriteCacheStore(inputs,
+                               layer_cache,
+                               config,
+                               cache_store,
+                               /*cache_model_id=*/0,
+                               /*cp_rank=*/0,
+                               /*cp_size=*/1,
+                               nullptr,
+                               [&writer](const std::vector<int64_t>&, const std::vector<int32_t>&, const std::string&) {
+                                   return writer.registerStoreCompletion();
+                               }));
     writer.finishSubmissions();
     EXPECT_NO_THROW(writer.waitStoreCompletions());
 }
@@ -620,17 +623,18 @@ TEST_F(ExecOpsTest, testWriteCacheStoreZeroSelectedBlocksRegistersNoCompletion) 
     CacheStoreAsyncWriter writer;
     writer.init(/*track_store_completions=*/true);
 
-    EXPECT_NO_THROW(runtimeWriteCacheStore(inputs,
-                                           layer_cache,
-                                           config,
-                                           cache_store,
-                                           /*cache_model_id=*/0,
-                                           /*cp_rank=*/0,
-                                           /*cp_size=*/1,
-                                           nullptr,
-                                           [&writer](const std::vector<int64_t>&, const std::vector<int32_t>&, size_t) {
-                                               return writer.registerStoreCompletion();
-                                           }));
+    EXPECT_NO_THROW(
+        runtimeWriteCacheStore(inputs,
+                               layer_cache,
+                               config,
+                               cache_store,
+                               /*cache_model_id=*/0,
+                               /*cp_rank=*/0,
+                               /*cp_size=*/1,
+                               nullptr,
+                               [&writer](const std::vector<int64_t>&, const std::vector<int32_t>&, const std::string&) {
+                                   return writer.registerStoreCompletion();
+                               }));
     writer.finishSubmissions();
     EXPECT_NO_THROW(writer.waitStoreCompletions());
     EXPECT_TRUE(cache_store->records.empty());
@@ -666,7 +670,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreTrackedPublicationWithoutCacheStoreThrows
                                /*cp_rank=*/0,
                                /*cp_size=*/1,
                                nullptr,
-                               [&writer](const std::vector<int64_t>&, const std::vector<int32_t>&, size_t) {
+                               [&writer](const std::vector<int64_t>&, const std::vector<int32_t>&, const std::string&) {
                                    return writer.registerStoreCompletion();
                                }));
     writer.finishSubmissions();
@@ -1204,17 +1208,17 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSameLayerRoutesByTag) {
     constexpr size_t block_stride     = 64;
 
     CacheConfig config;
-    config.layer_num          = 1;
+    config.layer_num = 1;
 
     config.block_num          = block_num;
     config.seq_size_per_block = tokens_per_block;
 
     auto make_group = [](const std::string& tag, CacheGroupType type) {
         GroupBase group;
-        group.tag                   = tag;
-        group.spec                  = makeTestSpec(tag, tokens_per_block, false);
-        group.policy                = defaultCacheGroupPolicy(type);
-        group.block_num             = block_num;
+        group.tag       = tag;
+        group.spec      = makeTestSpec(tag, tokens_per_block, false);
+        group.policy    = defaultCacheGroupPolicy(type);
+        group.block_num = block_num;
         rtp_llm::test::setGroupLayout(group, block_stride, group.kvScaleStrideBytes());
         return group;
     };
@@ -1370,6 +1374,38 @@ TEST_F(ExecOpsTest, testWriteCacheStoreUsesCacheModelIdInKeyNamespace) {
     ASSERT_EQ(cache_store->records.size(), 1u);
     EXPECT_NE(cache_store->records[0].blocks.find("kv_" + cacheKeyAt(inputs, 0, 0, "default", cache_model_id)),
               cache_store->records[0].blocks.end());
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreCompletionRegistrarReceivesSemanticTag) {
+    auto cache_store = std::make_shared<MockCacheStore>();
+    auto inputs      = makePyCacheStoreInputs(2, 1);
+    auto config = makeCacheConfig(2, 64, 0, 1, "tracked", 1, defaultCacheGroupPolicy(CacheGroupType::FULL), true, true);
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({1, 64}, torch::kUInt8);
+    layer_cache.seq_size_per_block = 2;
+    layer_cache.layer_id           = 1;
+    layer_cache.tag                = "tracked";
+    std::string          registered_tag;
+    std::vector<int64_t> registered_keys;
+    std::vector<int32_t> registered_blocks;
+    runtimeWriteCacheStore(
+        inputs,
+        layer_cache,
+        config,
+        cache_store,
+        0,
+        0,
+        1,
+        nullptr,
+        [&](const std::vector<int64_t>& keys, const std::vector<int32_t>& blocks, const std::string& group_tag) {
+            registered_tag    = group_tag;
+            registered_keys   = keys;
+            registered_blocks = blocks;
+            return CacheStoreCompletionCallback{};
+        });
+    EXPECT_EQ(registered_tag, "tracked");
+    EXPECT_EQ(registered_keys, std::vector<int64_t>({100}));
+    EXPECT_EQ(registered_blocks, std::vector<int32_t>({0}));
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreReadsNonContiguousHostMetadata) {
