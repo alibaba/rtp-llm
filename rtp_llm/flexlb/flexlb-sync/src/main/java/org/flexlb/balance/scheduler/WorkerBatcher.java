@@ -192,8 +192,13 @@ public final class WorkerBatcher {
      * delivery and drain. It is exposed in diagnostic snapshots.
      */
     private final AtomicLong queueVersion = new AtomicLong();
-    /** Worker-status and predictor generation used by optimistic decisions. */
-    private final AtomicLong schedulingInputVersion = new AtomicLong();
+    /**
+     * Generation of non-queue scheduling inputs: worker status, prediction and
+     * delivery-capacity blocks. Invalidates both decisions and route projections.
+     * Writes hold queueLock; volatile supports the lock-free cache check.
+     * Updated only through schedulingInputsChangedUnderLock().
+     */
+    private volatile long schedulingInputVersion;
     /**
      * Immutable projection inputs reused while this endpoint's queue and
      * scheduling inputs are unchanged. Route decisions still evaluate every
@@ -909,7 +914,7 @@ public final class WorkerBatcher {
         try {
             ScheduledRequest head = activeIndex.peek();
             return new ActiveQueueSnapshot(
-                    queueVersion.get(), schedulingInputVersion.get(),
+                    queueVersion.get(), schedulingInputVersion,
                     head == null ? List.of() : List.of(head));
         } finally {
             queueLock.unlock();
@@ -923,7 +928,7 @@ public final class WorkerBatcher {
         queueLock.lock();
         try {
             version = queueVersion.get();
-            inputVersion = schedulingInputVersion.get();
+            inputVersion = schedulingInputVersion;
             if (activeIndex.isEmpty()) {
                 return new ActiveQueueSnapshot(
                         version, inputVersion, List.of());
@@ -946,83 +951,89 @@ public final class WorkerBatcher {
         }
     }
 
+    private record ProjectionVersion(
+            long queue,
+            long schedulingInputs,
+            long ownership) {
+    }
+
     private record ProjectionCache(
-            long queueVersion,
-            long schedulingInputVersion,
-            long ownershipVersion,
+            ProjectionVersion version,
             RouteProjection.Inputs inputs) {
     }
 
+    /** State and version captured together under queueLock; materialized outside it. */
+    private record ProjectionSource(
+            ProjectionVersion version,
+            PrefillState.Snapshot ownership,
+            GroupPlanner.Constraints constraints,
+            AdmissionBlock admissionBlock) {
+    }
+
     public RouteProjection.Inputs captureRouteProjectionInputs() {
-        long observedQueueVersion = queueVersion.get();
-        long observedInputVersion = schedulingInputVersion.get();
-        long observedOwnershipVersion = prefillState.mutationVersion();
-        ProjectionCache observed = projectionCache;
-        if (observed != null
-                && observed.queueVersion() == observedQueueVersion
-                && observed.schedulingInputVersion() == observedInputVersion
-                && observed.ownershipVersion() == observedOwnershipVersion) {
-            return observed.inputs();
+        ProjectionCache cached = projectionCache;
+        if (cached != null && isCurrentProjection(cached.version())) {
+            return cached.inputs();
         }
-        long currentQueueVersion;
-        long currentSchedulingInputVersion;
-        long currentOwnershipVersion;
-        BatchCapacitySnapshot capacity;
-        PrefillState.Snapshot ownership;
-        AdmissionBlock admissionBlock;
+        ProjectionSource source;
         queueLock.lock();
         try {
-            currentQueueVersion = queueVersion.get();
-            currentSchedulingInputVersion =
-                    schedulingInputVersion.get();
-            currentOwnershipVersion =
-                    prefillState.mutationVersionUnderLock();
-            ProjectionCache cached = projectionCache;
-            if (cached != null
-                    && cached.queueVersion() == currentQueueVersion
-                    && cached.schedulingInputVersion()
-                            == currentSchedulingInputVersion
-                    && cached.ownershipVersion()
-                            == currentOwnershipVersion) {
+            cached = projectionCache;
+            if (cached != null && isCurrentProjection(cached.version())) {
                 return cached.inputs();
             }
-            capacity = batchCapacitySnapshot();
-            ownership = prefillState.snapshotUnderLock();
-            admissionBlock = ownership.activeItems().isEmpty() ? null : admissionBlockUnderLock();
+            source = captureProjectionSourceUnderLock();
         } finally {
             queueLock.unlock();
         }
-        List<GroupPlanner.Item> items = ownership.activeItems().stream()
+
+        RouteProjection.Inputs captured = materializeProjection(source);
+        queueLock.lock();
+        try {
+            // Checking and publishing share the mutation lock. An old capture
+            // may serve its caller, but cannot become the current cache entry.
+            if (isCurrentProjection(source.version())) {
+                projectionCache = new ProjectionCache(source.version(), captured);
+            }
+        } finally {
+            queueLock.unlock();
+        }
+        return captured;
+    }
+
+    private boolean isCurrentProjection(ProjectionVersion version) {
+        return version.queue() == queueVersion.get()
+                && version.schedulingInputs() == schedulingInputVersion
+                && version.ownership() == prefillState.mutationVersion();
+    }
+
+    /** Caller holds queueLock. */
+    private ProjectionSource captureProjectionSourceUnderLock() {
+        ProjectionVersion version = new ProjectionVersion(
+                queueVersion.get(), schedulingInputVersion,
+                prefillState.mutationVersionUnderLock());
+        BatchCapacitySnapshot capacity = batchCapacitySnapshot();
+        PrefillState.Snapshot ownership = prefillState.snapshotUnderLock();
+        return new ProjectionSource(
+                version, ownership,
+                new GroupPlanner.Constraints(
+                        maxDecisionRequests(), capacity.batchTokenCapacity(),
+                        capacity.batchKvCapacity(), predictedExecutionBudgetMs(),
+                        collectionWindowMs()),
+                ownership.activeItems().isEmpty() ? null : admissionBlockUnderLock());
+    }
+
+    private RouteProjection.Inputs materializeProjection(ProjectionSource source) {
+        List<GroupPlanner.Item> items = source.ownership().activeItems().stream()
                 .sorted(queueOrder)
                 .map(WorkerBatcher::projectionItem)
                 .toList();
-        org.flexlb.balance.projection.QueueSnapshot queueSnapshot =
-                new org.flexlb.balance.projection.QueueSnapshot(
-                        ownership.capturedAtMs(),
-                        queueScheduling,
-                        projectionOrder,
-                        new GroupPlanner.Constraints(
-                                maxDecisionRequests(),
-                                capacity.batchTokenCapacity(),
-                                capacity.batchKvCapacity(),
-                                predictedExecutionBudgetMs(),
-                                collectionWindowMs()),
-                        items,
-                        admissionBlock);
-        RouteProjection.Inputs captured = new RouteProjection.Inputs(
-                queueSnapshot,
-                ownership.work().materialize(),
-                currentOwnershipVersion);
-        if (queueVersion.get() == currentQueueVersion
-                && schedulingInputVersion.get() == currentSchedulingInputVersion
-                && prefillState.mutationVersion() == currentOwnershipVersion) {
-            projectionCache = new ProjectionCache(
-                    currentQueueVersion,
-                    currentSchedulingInputVersion,
-                    currentOwnershipVersion,
-                    captured);
-        }
-        return captured;
+        var queueSnapshot = new org.flexlb.balance.projection.QueueSnapshot(
+                source.ownership().capturedAtMs(), queueScheduling, projectionOrder,
+                source.constraints(), items, source.admissionBlock());
+        return new RouteProjection.Inputs(
+                queueSnapshot, source.ownership().work().materialize(),
+                source.version().ownership());
     }
 
     private static GroupPlanner.Item projectionItem(ScheduledRequest item) {
@@ -1454,7 +1465,7 @@ public final class WorkerBatcher {
             observedHead = activeIndex.peek();
             observedSize = activeIndex.size();
             observedQueueVersion = queueVersion.get();
-            observedSchedulingInputVersion = schedulingInputVersion.get();
+            observedSchedulingInputVersion = schedulingInputVersion;
             for (ScheduledRequest item : activeIndex) {
                 observedOldestEnqueuedAtMs = Math.min(
                         observedOldestEnqueuedAtMs, item.enqueuedAtMs());
@@ -1780,7 +1791,7 @@ public final class WorkerBatcher {
             while (!stopped
                     && activeIndex.peek() == waiting.request()
                     && queueVersion.get() == waiting.queueVersion()
-                    && schedulingInputVersion.get()
+                    && schedulingInputVersion
                     == waiting.schedulingInputVersion()) {
                 long nowMs = System.currentTimeMillis();
                 if (waiting.wakeAtMs() <= nowMs) {
@@ -1811,7 +1822,7 @@ public final class WorkerBatcher {
         queueLock.lock();
         try {
             if (capacityBlockedHead != null) {
-                projectionCache = null;
+                schedulingInputsChangedUnderLock();
                 stateChanged.signal();
             }
         } finally {
@@ -1834,15 +1845,26 @@ public final class WorkerBatcher {
         }
         if (capacityBlockedHead != blocked) {
             capacityBlockedHead = blocked;
-            projectionCache = null;
+            schedulingInputsChangedUnderLock();
         }
+    }
+
+    /**
+     * Record an input change independently of waking a thread. The generation
+     * rejects cached and unfinished projections as well as stale decision waits.
+     */
+    private void schedulingInputsChangedUnderLock() {
+        if (!queueLock.isHeldByCurrentThread()) {
+            throw new IllegalStateException("scheduling input update requires queueLock");
+        }
+        schedulingInputVersion++;
     }
 
     /** Wake decisions whose advisory worker-status or predictor input changed. */
     public void signalSchedulingInputsChanged() {
         queueLock.lock();
         try {
-            schedulingInputVersion.incrementAndGet();
+            schedulingInputsChangedUnderLock();
             stateChanged.signal();
         } finally {
             queueLock.unlock();

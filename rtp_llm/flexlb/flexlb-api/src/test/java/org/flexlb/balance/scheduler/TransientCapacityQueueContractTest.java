@@ -376,8 +376,10 @@ class TransientCapacityQueueContractTest {
 
     @Test
     @Timeout(20)
-    void releasedSeatPreservesFifoAtTheSamePriority() throws Exception {
-        try (Fixture fixture = new Fixture(RoleType.PREFILL)) {
+    void globalWaitersPreserveFifoAtTheSamePriority() throws Exception {
+        // BATCH can accept a route behind a busy Prefill. Saturate Decode to keep
+        // both requests in the global wait queue before testing its retry order.
+        try (Fixture fixture = new Fixture(RoleType.DECODE)) {
             fixture.config.fixedWindowDecision().setMaxRequests(2);
             fixture.config.fixedWindowDecision().setMaxCollectionWaitMs(50L);
             fixture.submission.holdCompletions();
@@ -392,6 +394,10 @@ class TransientCapacityQueueContractTest {
                     .getQueuedRequestCount() >= 2, 2_000L);
             assertFalse(older.isDone());
             assertFalse(later.isDone());
+            // Queue membership includes in-flight planners. Establish capacity waiting
+            // before asserting the ordering of awakened requests.
+            assertTrue(awaitPlacementAttempts(fixture.metrics, 2, 2_000L));
+            assertTrue(awaitPlacementQuiescence(fixture.metrics, 100L, 2_000L));
             fixture.releaseCapacity();
 
             assertTrue(fixture.submission.awaitCommands(
@@ -404,9 +410,11 @@ class TransientCapacityQueueContractTest {
 
     @Test
     @Timeout(20)
-    void releasedSeatUsesPriorityOrderingBeforeArrivalOrder()
+    void globalWaitersUsePriorityOrderingBeforeArrivalOrder()
             throws Exception {
-        try (Fixture fixture = new Fixture(RoleType.PREFILL)) {
+        // BATCH can accept a route behind a busy Prefill. Saturate Decode to keep
+        // both requests in the global wait queue before testing its retry order.
+        try (Fixture fixture = new Fixture(RoleType.DECODE)) {
             fixture.config.fixedWindowDecision().setMaxRequests(2);
             fixture.config.fixedWindowDecision().setMaxCollectionWaitMs(50L);
             fixture.submission.holdCompletions();
@@ -415,6 +423,10 @@ class TransientCapacityQueueContractTest {
 
             awaitCondition(() -> fixture.runtime.scheduler()
                     .getQueuedRequestCount() >= 2, 2_000L);
+            // Queue membership includes in-flight planners. Establish capacity waiting
+            // before asserting the ordering of awakened requests.
+            assertTrue(awaitPlacementAttempts(fixture.metrics, 2, 2_000L));
+            assertTrue(awaitPlacementQuiescence(fixture.metrics, 100L, 2_000L));
             fixture.releaseCapacity();
 
             assertTrue(fixture.submission.awaitCommands(
@@ -433,6 +445,10 @@ class TransientCapacityQueueContractTest {
             fixture.runtime.scheduler().submit(fixture.context(271L, 50));
             fixture.runtime.scheduler().submit(fixture.context(272L, 50));
 
+            // Queue membership includes in-flight planners. Establish capacity waiting
+            // before asserting the ordering of awakened requests.
+            assertTrue(awaitPlacementAttempts(fixture.metrics, 2, 2_000L));
+            assertTrue(awaitPlacementQuiescence(fixture.metrics, 100L, 2_000L));
             fixture.releaseCapacity();
 
             assertTrue(fixture.submission.awaitCommands(
@@ -452,6 +468,10 @@ class TransientCapacityQueueContractTest {
             fixture.runtime.scheduler().submit(fixture.context(281L, 50));
             fixture.runtime.scheduler().submit(fixture.context(282L, 50));
 
+            // Queue membership includes in-flight planners. Establish capacity waiting
+            // before asserting the ordering of awakened requests.
+            assertTrue(awaitPlacementAttempts(fixture.metrics, 2, 2_000L));
+            assertTrue(awaitPlacementQuiescence(fixture.metrics, 100L, 2_000L));
             fixture.releaseCapacity();
             fixture.runtime.applyStatus(
                     fixture.decodeStatus,

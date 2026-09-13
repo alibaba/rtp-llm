@@ -67,10 +67,6 @@ final class PlacementWaitQueue {
         release(PlacementKey.anyGroup(key.role()));
     }
 
-    boolean hasEarlierReadyRequest(GlobalQueueEntry entry) {
-        return !ready.isEmpty() && order.compare(ready.first().entries.first(), entry) < 0;
-    }
-
     boolean hasReadyRequests() {
         return !ready.isEmpty();
     }

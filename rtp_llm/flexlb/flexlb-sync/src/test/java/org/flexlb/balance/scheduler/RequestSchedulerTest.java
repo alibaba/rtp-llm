@@ -837,7 +837,6 @@ class RequestSchedulerTest {
         private final List<Long> admitted = new CopyOnWriteArrayList<>();
         private final List<CapacityRequest> requests = new ArrayList<>();
         private final ConcurrentLinkedQueue<CapacityRequest> pendingReports = new ConcurrentLinkedQueue<>();
-        private final CountDownLatch followersParked = new CountDownLatch(2);
         private final CountDownLatch allPublished = new CountDownLatch(3);
         private final CountDownLatch headRetryStarted = new CountDownLatch(1);
         private final CountDownLatch allowHeadRetry = new CountDownLatch(1);
@@ -940,15 +939,6 @@ class RequestSchedulerTest {
                 pendingReports.add(request);
                 return PlacementResult.success(item);
             });
-            AtomicInteger closes = new AtomicInteger();
-            doAnswer(invocation -> {
-                if (closes.incrementAndGet() == 1
-                        && request.primaryEndpoint && requestId != 820L) {
-                    // Followers have finished their initial unsuccessful placement.
-                    followersParked.countDown();
-                }
-                return null;
-            }).when(route).close();
             return request;
         }
 
@@ -956,8 +946,7 @@ class RequestSchedulerTest {
             for (CapacityRequest request : requests) {
                 scheduler.submit(request.context);
             }
-            assertTrue(followersParked.await(5, TimeUnit.SECONDS),
-                    "all three requests must be parked before the first capacity event");
+            RequestLifecycleTestSupport.awaitGlobalCapacityWaiters(scheduler, requests.size());
         }
 
         private void releaseSlots(int count) {

@@ -135,16 +135,6 @@ final class OrderedRequestQueue {
         }
     }
 
-    boolean hasEarlierRequestsToScan(GlobalQueueEntry entry) {
-        int priority = priorityOrdering
-                ? pendingPriorities.previousSetBit(PRIORITY_LEVELS - 1) : -1;
-        Bucket bucket = priorityOrdering
-                ? (priority < 0 ? null : priorityBuckets[priority]) : fifo;
-        GlobalQueueEntry next = bucket == null ? null : bucket.peekNextRequest();
-        return next != null
-                && (priorityOrdering ? PRIORITY_ORDER : SEQUENCE_ORDER).compare(next, entry) < 0;
-    }
-
     boolean remove(GlobalQueueEntry entry) {
         return markRemoved(entry);
     }

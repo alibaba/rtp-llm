@@ -8,9 +8,13 @@ import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 
+import org.springframework.test.util.ReflectionTestUtils;
+
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -79,6 +83,26 @@ final class RequestLifecycleTestSupport {
             lifecycle.beginDelivery(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
         }
         return claim;
+    }
+
+    static void awaitGlobalCapacityWaiters(RequestScheduler scheduler, int expected)
+            throws InterruptedException {
+        Object coordinator = ReflectionTestUtils.getField(scheduler, "globalQueue");
+        var lock = (ReentrantLock)
+                ReflectionTestUtils.getField(coordinator, "lock");
+        Object waitQueue = ReflectionTestUtils.getField(coordinator, "waitingRequests");
+        var waiting = (Map<?, ?>)
+                ReflectionTestUtils.getField(waitQueue, "waiting");
+        // A route's close callback runs before park. Observe actual wait registration
+        // under the coordinator lock, rather than treating that callback as a barrier.
+        awaitCondition(() -> {
+            lock.lock();
+            try {
+                return waiting.size() == expected;
+            } finally {
+                lock.unlock();
+            }
+        });
     }
 
     static void await(CountDownLatch latch) {
