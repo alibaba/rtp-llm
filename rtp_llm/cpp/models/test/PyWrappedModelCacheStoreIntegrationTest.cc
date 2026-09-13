@@ -484,7 +484,9 @@ py::dict serializeResult(const RecordingCacheStore& store, const std::map<std::s
     return result;
 }
 
-py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::string& scenario_name) {
+py::dict runPyWrappedModelCacheStoreScenario(py::object py_model,
+                                            const std::string& scenario_name,
+                                            py::object metadata_inputs) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() {
         initRuntime(/*device_id=*/0,
@@ -493,7 +495,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
                     MlaOpsType::AUTO);
     });
 
-    auto scenario    = makeScenario(scenario_name);
+    auto scenario    = makeScenario(metadata_inputs.is_none() ? scenario_name : "multi_tag");
     auto cache_store = std::make_shared<RecordingCacheStore>();
     auto manager     = std::make_shared<KVCacheManager>(scenario.manager_config,
                                                     /*warmup=*/true,
@@ -535,6 +537,21 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
 
     {
         PyWrappedModel model(params, std::move(py_model));
+        if (!metadata_inputs.is_none()) {
+            auto metadata = metadata_inputs.cast<py::dict>();
+            GptModelInputs inputs;
+            inputs.input_lengths = metadata["input_lengths"].cast<torch::Tensor>();
+            inputs.prefix_lengths = metadata["prefix_lengths"].cast<torch::Tensor>();
+            inputs.sequence_lengths = pinnedTensor({}, {0});
+            inputs.combo_tokens = torch::empty({metadata["total_tokens"].cast<int64_t>()},
+                                               torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+            inputs.is_target_verify = true;
+            auto attention = model.buildPyAttentionInputs(inputs);
+            fusedCopy(model.d2d_copies_);
+            py::dict result;
+            result["attention"] = std::move(attention);
+            return result;
+        }
         if (scenario.replace_cp_processor) {
             model.context_parallel_processor_ = std::make_unique<TestContextParallelProcessor>(scenario.parallelism);
         }
@@ -551,5 +568,6 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     m.def("run_scenario",
           &rtp_llm::test::runPyWrappedModelCacheStoreScenario,
           py::arg("py_model"),
-          py::arg("scenario_name"));
+          py::arg("scenario_name"),
+          py::arg("metadata_inputs") = py::none());
 }

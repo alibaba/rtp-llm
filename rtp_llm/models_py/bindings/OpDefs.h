@@ -301,6 +301,7 @@ struct PyAttentionInputs {
     torch::Tensor cu_seqlens_device;
     torch::Tensor cu_kv_seqlens_device;  // device only (no host mirror needed)
     torch::Tensor decode_cu_seqlens;
+    // -1 defers the legacy host scalar to the exact device cumulative-length tail.
     int           context_total_kv_length = 0;
     int           total_tokens            = 0;
     torch::Tensor padding_offset;
@@ -325,6 +326,16 @@ struct PyAttentionInputs {
 
     // Headwise attention config (Python dict or None).
     py::object headwise_config{py::none()};
+
+    int contextTotalKvLength() const {
+        if (context_total_kv_length >= 0) {
+            return context_total_kv_length;
+        }
+        TORCH_CHECK(cu_kv_seqlens_device.defined() && cu_kv_seqlens_device.dim() == 1
+                        && cu_kv_seqlens_device.numel() > 0,
+                    "deferred context KV length requires cumulative device lengths");
+        return cu_kv_seqlens_device.select(0, cu_kv_seqlens_device.numel() - 1).item<int>();
+    }
 };
 
 struct BertEmbeddingInputs {

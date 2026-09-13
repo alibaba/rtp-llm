@@ -186,10 +186,16 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         buffer_holder_.hold_host(result);
         return result;
     };
-    auto to_device_i32 = [this, &normalize_i32](const torch::Tensor& tensor) -> torch::Tensor {
+    const bool device_metadata = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda();
+    auto to_device_i32 = [this, &normalize_i32, device_metadata](const torch::Tensor& tensor) -> torch::Tensor {
         auto normalized = normalize_i32(tensor);
         if (!normalized.defined() || normalized.is_cuda()) {
             return normalized;
+        }
+        if (device_metadata) {
+            // The metadata kernel below consumes these lengths before the
+            // model's later fused-copy flush. Enqueue mixed-residency H2D now.
+            return normalized.to(torch::kCUDA, /*non_blocking=*/true);
         }
         return tensorHoldHostAndToCuda(normalized);
     };
@@ -258,17 +264,9 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
     if (context_batch_size > 0 && py_attn_inputs.input_lengths.is_cuda()) {
         py_attn_inputs.total_tokens = inputs.combo_tokens.defined() ? static_cast<int>(inputs.combo_tokens.numel()) : 0;
-        // Must match cu_kv_seqlens_device's definition (input_lengths +
-        // prefix_lengths): the CUDA graph padding fill copies this scalar into
-        // the cu_kv_seqlens tail, and a prefix-less value makes the array
-        // non-monotonic whenever prefix reuse / target verify is active.
-        // prefix_lengths here is a source tensor (never a deferred H2D copy),
-        // so summing it is safe; item() adds one stream sync on this path.
-        int64_t prefix_sum = 0;
-        if (py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.numel() > 0) {
-            prefix_sum = py_attn_inputs.prefix_lengths.sum().item<int64_t>();
-        }
-        py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens + static_cast<int>(prefix_sum);
+        // The exact total is the device cumulative-length tail. Keep it there
+        // for DSpark and graph replay; legacy Python consumers resolve on demand.
+        py_attn_inputs.context_total_kv_length = -1;
         py_attn_inputs.cu_seqlens              = torch::empty({0}, host_i32);
         py_attn_inputs.cu_seqlens_device       = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.cu_kv_seqlens_device    = torch::empty({batch_size + 1}, cuda_i32);

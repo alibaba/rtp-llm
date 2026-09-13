@@ -387,6 +387,12 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     query_len=query_len,
                     prefix_len=prefix_len,
                 )
+                # Device-resident metadata need not materialize this legacy host scalar.
+                # The valid cumulative KV tail remains authoritative during graph padding.
+                tagged = inputs.attention_inputs
+                for tagged_inputs in tagged.values():
+                    tagged_inputs.context_total_kv_length = -1
+                inputs.attention_inputs = tagged
                 self.assertTrue(runner.canRun(inputs))
                 self.assertEqual(runner.getCurrentRealGraphSize(), 4)
 

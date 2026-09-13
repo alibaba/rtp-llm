@@ -610,17 +610,21 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             .slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(0);
 
-        const int last_valid_q  = is_prefill_cuda_graph_mode_ ? state.current_seq_len : state.seq_len_sum;
-        const int last_valid_kv = inputs.attention_inputs.context_total_kv_length;
+        const int last_valid_q = is_prefill_cuda_graph_mode_ ? state.current_seq_len : state.seq_len_sum;
         py_model_inputs_.attention_inputs.cu_seqlens
             .slice(0, state.current_batch_size + 1, selected_graph_batch_size + 1)
             .fill_(last_valid_q);
         py_model_inputs_.attention_inputs.cu_seqlens_device
             .slice(0, state.current_batch_size + 1, selected_graph_batch_size + 1)
             .fill_(last_valid_q);
-        py_model_inputs_.attention_inputs.cu_kv_seqlens_device
-            .slice(0, state.current_batch_size + 1, selected_graph_batch_size + 1)
-            .fill_(last_valid_kv);
+        auto kv_tail = py_model_inputs_.attention_inputs.cu_kv_seqlens_device.slice(
+            0, state.current_batch_size + 1, selected_graph_batch_size + 1);
+        const auto& source_kv_lengths = inputs.attention_inputs.cu_kv_seqlens_device;
+        if (source_kv_lengths.defined() && source_kv_lengths.numel() > state.current_batch_size) {
+            kv_tail.copy_(source_kv_lengths.select(0, state.current_batch_size));
+        } else {
+            kv_tail.fill_(inputs.attention_inputs.contextTotalKvLength());
+        }
     }
 
     // launch prepare_cuda_graph when attention inputs are ready.

@@ -87,6 +87,56 @@ def _record_for_request(result: dict, request_id: int) -> dict:
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def test_device_metadata_preserves_long_prefix_counts_without_scalar_sync(self) -> None:
+        for batch_size in (1, 3, 8, 16):
+            with self.subTest(batch_size=batch_size):
+                query = torch.full((batch_size,), 4, dtype=torch.int32, device="cuda")
+                prefix = torch.tensor(
+                    [524284, 999996, 1048563] * ((batch_size + 2) // 3),
+                    dtype=torch.int32,
+                    device="cuda",
+                )[:batch_size]
+                torch.cuda.synchronize()
+                with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
+                    attention = run_scenario(
+                        CacheStoreForwardModel(),
+                        "metadata",
+                        {"input_lengths": query, "prefix_lengths": prefix, "total_tokens": 4 * batch_size},
+                    )["attention"]
+                builds = [event for event in profile.events() if event.name == "py_model.buildPyAttentionInputs"]
+                self.assertEqual(len(builds), 1)
+                descendants = list(builds[0].cpu_children)
+                names = []
+                while descendants:
+                    event = descendants.pop()
+                    names.append(event.name)
+                    descendants.extend(event.cpu_children)
+                self.assertNotIn("aten::_local_scalar_dense", names)
+                expected_q = torch.cat([torch.zeros(1, dtype=torch.int32), query.cpu().cumsum(0).int()])
+                expected_kv = torch.cat([torch.zeros(1, dtype=torch.int32), (query + prefix).cpu().cumsum(0).int()])
+                torch.testing.assert_close(attention.cu_seqlens_device.cpu(), expected_q)
+                torch.testing.assert_close(attention.cu_kv_seqlens_device.cpu(), expected_kv)
+                self.assertEqual(attention.context_total_kv_length, int(expected_kv[-1]))
+
+    def test_metadata_handles_mixed_length_tensor_residency(self) -> None:
+        for input_device, prefix_device in (("cuda", "cpu"), ("cpu", "cuda"), ("cpu", "cpu")):
+            with self.subTest(input_device=input_device, prefix_device=prefix_device):
+                query = torch.tensor([2, 4, 3], dtype=torch.int32, device=input_device)
+                prefix = torch.tensor([512, 1048560, 999990], dtype=torch.int32, device=prefix_device)
+                if input_device == "cpu":
+                    query = query.pin_memory()
+                if prefix_device == "cpu":
+                    prefix = prefix.pin_memory()
+                attention = run_scenario(
+                    CacheStoreForwardModel(),
+                    "metadata",
+                    {"input_lengths": query, "prefix_lengths": prefix, "total_tokens": 9},
+                )["attention"]
+                torch.testing.assert_close(attention.cu_seqlens_device.cpu(), torch.tensor([0, 2, 6, 9], dtype=torch.int32))
+                expected = torch.tensor([0, 514, 1049078, 2049071], dtype=torch.int32)
+                torch.testing.assert_close(attention.cu_kv_seqlens_device.cpu(), expected)
+                self.assertEqual(attention.context_total_kv_length, int(expected[-1]))
+
     def test_multi_tag_uses_each_tag_local_physical_block_table(self) -> None:
         model = CacheStoreForwardModel()
         result = run_scenario(model, "multi_tag")
