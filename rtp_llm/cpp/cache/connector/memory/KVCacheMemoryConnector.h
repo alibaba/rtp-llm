@@ -26,23 +26,23 @@ namespace rtp_llm {
 
 class BlockPool;
 class BroadcastManager;
-class KVCacheAllocator;
+class CoordinatorCacheManager;
 class MemoryAsyncContext;
 struct StagedMemoryCopyScratch;
 
 class KVCacheMemoryConnector: public KVCacheConnector {
 public:
-    KVCacheMemoryConnector(const CacheConfig&                       cache_config,
-                           const KVCacheConfig&                     kv_cache_config,
-                           const ParallelismConfig&                 parallelism_config,
-                           const std::shared_ptr<KVCacheAllocator>& allocator,
-                           const std::vector<std::string>&          tp_addrs,
-                           const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr);
-    KVCacheMemoryConnector(const CacheConfig&                       cache_config,
-                           const KVCacheConfig&                     kv_cache_config,
-                           const std::shared_ptr<KVCacheAllocator>& allocator,
-                           const std::vector<std::string>&          tp_addrs,
-                           const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr);
+    KVCacheMemoryConnector(const CacheConfig&                              cache_config,
+                           const KVCacheConfig&                            kv_cache_config,
+                           const ParallelismConfig&                        parallelism_config,
+                           const std::shared_ptr<CoordinatorCacheManager>& coordinator_manager,
+                           const std::vector<std::string>&                 tp_addrs,
+                           const kmonitor::MetricsReporterPtr&             metrics_reporter = nullptr);
+    KVCacheMemoryConnector(const CacheConfig&                              cache_config,
+                           const KVCacheConfig&                            kv_cache_config,
+                           const std::shared_ptr<CoordinatorCacheManager>& coordinator_manager,
+                           const std::vector<std::string>&                 tp_addrs,
+                           const kmonitor::MetricsReporterPtr&             metrics_reporter = nullptr);
     ~KVCacheMemoryConnector() override;
 
 public:
@@ -315,11 +315,11 @@ private:
     void reportMetricsLoop();
 
 private:
-    const CacheConfig&                cache_config_;
-    const KVCacheConfig&              kv_cache_config_;
-    const ParallelismConfig           parallelism_config_;
-    std::shared_ptr<KVCacheAllocator> allocator_;
-    const std::vector<std::string>    tp_addrs_;
+    const CacheConfig&                       cache_config_;
+    const KVCacheConfig&                     kv_cache_config_;
+    const ParallelismConfig                  parallelism_config_;
+    std::shared_ptr<CoordinatorCacheManager> coordinator_manager_;
+    const std::vector<std::string>           tp_addrs_;
 
     std::shared_ptr<BlockPool>                              block_pool_;
     mutable std::mutex                                      malloc_mutex_;

@@ -4,23 +4,23 @@
 #include <vector>
 #include <cstdint>
 
-#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 
 namespace rtp_llm {
 
-class LinearKVCacheGroup: public KVCacheGroup {
+class LinearCacheManager: public SingleTypeCacheManager {
 public:
-    LinearKVCacheGroup(GroupBase                           cache_group,
+    LinearCacheManager(GroupBase                           cache_group,
                        BlockPoolPtr                        block_pool,
                        int                                 group_id,
                        int                                 linear_step      = 0,
                        SharedBlockCache*                   shared_cache     = nullptr,
                        const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(std::move(cache_group), std::move(block_pool), group_id, shared_cache, metrics_reporter),
+        SingleTypeCacheManager(std::move(cache_group), std::move(block_pool), group_id, shared_cache, metrics_reporter),
         linear_step_(linear_step) {}
 
     // Transition-only overload.
-    LinearKVCacheGroup(const LayerIdsType&                 layer_ids,
+    LinearCacheManager(const LayerIdsType&                 layer_ids,
                        std::shared_ptr<KVCacheSpec>        kvcache_spec,
                        BlockPoolPtr                        block_pool,
                        int                                 group_id,
@@ -28,7 +28,7 @@ public:
                        SharedBlockCache*                   shared_cache     = nullptr,
                        const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr,
                        CacheGroupPolicy                    policy = defaultCacheGroupPolicy(CacheGroupType::LINEAR)):
-        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy, shared_cache, metrics_reporter),
+        SingleTypeCacheManager(layer_ids, kvcache_spec, block_pool, group_id, policy, shared_cache, metrics_reporter),
         linear_step_(linear_step) {}
 
     MatchResult matchSingleKey(CacheKeyType cache_key) const override;
@@ -73,6 +73,6 @@ private:
     int linear_step_ = 0;
 };
 
-using LinearKVCacheGroupPtr = std::shared_ptr<LinearKVCacheGroup>;
+using LinearCacheManagerPtr = std::shared_ptr<LinearCacheManager>;
 
 }  // namespace rtp_llm

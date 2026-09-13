@@ -13,7 +13,7 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
@@ -92,8 +92,8 @@ class CacheStoreAsyncWriterTest: public ::testing::Test {};
 
 static CacheConfig makeWriterTestCacheConfig(const std::string& tag, size_t kv_stride, uint32_t block_num = 1) {
     CacheConfig config;
-    config.dtype              = DataType::TYPE_BF16;
-    config.layer_num          = 1;
+    config.dtype     = DataType::TYPE_BF16;
+    config.layer_num = 1;
 
     config.block_num          = block_num;
     config.seq_size_per_block = 1;
@@ -115,10 +115,10 @@ static CacheConfig makeWriterTestCacheConfig(const std::string& tag, size_t kv_s
     auto spec              = SpecBuilder::build(desc, ctx);
 
     GroupBase group;
-    group.tag                   = tag;
-    group.spec                  = spec;
-    group.policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    group.block_num             = block_num;
+    group.tag       = tag;
+    group.spec      = spec;
+    group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.block_num = block_num;
 
     config.setTopology({std::move(group)}, {{0, {tag}}});
     return config;
@@ -442,19 +442,19 @@ TEST_F(CacheStoreAsyncWriterTest, LatePublicationCallbackAfterTimeoutIsIgnored) 
 }
 
 TEST_F(CacheStoreAsyncWriterTest, TimeoutRetainsAllocatorBlockUntilLatePublicationCompletes) {
-    auto config    = makeWriterTestCacheConfig("default", /*kv_stride=*/16, /*block_num=*/2);
-    auto allocator = std::make_shared<KVCacheAllocator>(config, AllocationType::HOST);
-    ASSERT_TRUE(allocator->init());
-    const auto initial_free_blocks = allocator->freeBlocksNum();
+    auto config              = makeWriterTestCacheConfig("default", /*kv_stride=*/16, /*block_num=*/2);
+    auto coordinator_manager = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
+    ASSERT_TRUE(coordinator_manager->init());
+    const auto initial_free_blocks = coordinator_manager->freeBlocksNum();
     ASSERT_GT(initial_free_blocks, 0u);
 
     KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
     resource.setCacheKeys({42});
     resource.mutableBlockIds(0).assign({1});
-    auto publication_lease = allocator->incrKVCacheRef(resource, {42}, /*is_connector=*/true);
+    auto publication_lease = coordinator_manager->incrKVCacheRef(resource, {42}, /*is_connector=*/true);
     ASSERT_NE(publication_lease, nullptr);
-    ASSERT_EQ(allocator->freeBlocksNum() + 1, initial_free_blocks);
+    ASSERT_EQ(coordinator_manager->freeBlocksNum() + 1, initial_free_blocks);
 
     CacheStoreAsyncWriter writer(
         /*device_id=*/-1, nullptr, /*cache_model_id=*/0, std::nullopt, std::chrono::milliseconds(20));
@@ -463,11 +463,11 @@ TEST_F(CacheStoreAsyncWriterTest, TimeoutRetainsAllocatorBlockUntilLatePublicati
     writer.finishSubmissions();
 
     EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
-    EXPECT_EQ(allocator->freeBlocksNum() + 1, initial_free_blocks)
+    EXPECT_EQ(coordinator_manager->freeBlocksNum() + 1, initial_free_blocks)
         << "the timed-out store can still publish the old key, so its block must not be reusable";
 
     complete(nullptr);
-    EXPECT_EQ(allocator->freeBlocksNum(), initial_free_blocks);
+    EXPECT_EQ(coordinator_manager->freeBlocksNum(), initial_free_blocks);
 }
 
 TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsTaggedBlockAcrossGroupOrdersUntilStoreCallback) {

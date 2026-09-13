@@ -13,10 +13,10 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
-#include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
-#include "rtp_llm/cpp/cache/LinearKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/FullCacheManager.h"
+#include "rtp_llm/cpp/cache/LinearCacheManager.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
-#include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SWACacheManager.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
@@ -40,15 +40,15 @@ struct KVCachePoolMetricsSnapshot {
     float       used_ratio           = 0.0f;
 };
 
-class KVCacheAllocator: public std::enable_shared_from_this<KVCacheAllocator> {
+class CoordinatorCacheManager: public std::enable_shared_from_this<CoordinatorCacheManager> {
 public:
-    KVCacheAllocator(const CacheConfig&                 config,
-                     AllocationType                     allocation_type     = AllocationType::DEVICE,
-                     const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
-                     int64_t                            reserve_block_ratio = 0,
-                     RoleType                           role_type           = RoleType::PDFUSION);
+    CoordinatorCacheManager(const CacheConfig&                 config,
+                            AllocationType                     allocation_type     = AllocationType::DEVICE,
+                            const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
+                            int64_t                            reserve_block_ratio = 0,
+                            RoleType                           role_type           = RoleType::PDFUSION);
 
-    virtual ~KVCacheAllocator() = default;
+    virtual ~CoordinatorCacheManager() = default;
 
     bool                           init();
     virtual void                   free(const FreeInfo& free_info);
@@ -63,11 +63,10 @@ public:
         int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
     virtual std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector = false);
-    std::shared_ptr<KVCacheResource>
-    incrKVCacheRefWithReleaseCallback(const KVCacheResource& kvcache_resource,
-                                      const CacheKeysType&   cache_keys,
-                                      bool                   is_connector,
-                                      std::function<void()>  release_callback);
+    std::shared_ptr<KVCacheResource> incrKVCacheRefWithReleaseCallback(const KVCacheResource& kvcache_resource,
+                                                                       const CacheKeysType&   cache_keys,
+                                                                       bool                   is_connector,
+                                                                       std::function<void()>  release_callback);
 
     virtual GroupedCacheLayerLayout allLayerCacheBase() const;
     virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
@@ -193,7 +192,7 @@ protected:
     AllocationType                     allocation_type_;
     SharedBlockCachePtr                shared_block_cache_;
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
-    const kmonitor::MetricsReporterPtr metrics_reporter_           = nullptr;
+    const kmonitor::MetricsReporterPtr metrics_reporter_             = nullptr;
     bool                               use_device_malloc_block_pool_ = false;
 
 private:
@@ -227,19 +226,19 @@ private:
     size_t             totalReservableAvailableBlocks() const;
     size_t             reserveBlocksForPool(size_t gid, size_t reserve_blocks, size_t total_reservable_blocks) const;
 
-    std::vector<BlockPoolPtr>    group_block_pools_;
-    std::vector<KVCacheGroupPtr> kv_cache_groups_;
-    std::vector<int>             full_group_ids_;
-    std::vector<int>             linear_group_ids_;
-    std::vector<int>             swa_group_ids_;
-    RoleType                     role_type_{RoleType::PDFUSION};
+    std::vector<BlockPoolPtr>              group_block_pools_;
+    std::vector<SingleTypeCacheManagerPtr> kv_cache_groups_;
+    std::vector<int>                       full_group_ids_;
+    std::vector<int>                       linear_group_ids_;
+    std::vector<int>                       swa_group_ids_;
+    RoleType                               role_type_{RoleType::PDFUSION};
 
 protected:
-    size_t  reserve_block_num_{0};
-    int64_t reserve_block_ratio_{0};
+    size_t     reserve_block_num_{0};
+    int64_t    reserve_block_ratio_{0};
     std::mutex malloc_mutex_;
 };
 
-using KVCacheAllocatorPtr = std::shared_ptr<KVCacheAllocator>;
+using CoordinatorCacheManagerPtr = std::shared_ptr<CoordinatorCacheManager>;
 
 }  // namespace rtp_llm

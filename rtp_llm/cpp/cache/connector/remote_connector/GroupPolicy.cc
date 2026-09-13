@@ -5,7 +5,7 @@
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
 #include "rtp_llm/cpp/cache/Types.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -102,7 +102,7 @@ bool DefaultLayerGroupPolicy::init() {
         RTP_LLM_LOG_ERROR("exist intersection between full and other [%s]", ss.str().c_str());
         return false;
     }
-    const auto  layer_layout       = allocator_->allLayerCacheBase();
+    const auto  layer_layout       = coordinator_manager_->allLayerCacheBase();
     const auto& topology           = layer_layout.topology();
     uint64_t    group_name_bithash = 1;
     for (const auto& layer_config : topology.layers()) {
@@ -226,7 +226,7 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<std::string>& gr
         iovs.reserve(layer_ids.size() * 2);
         for (size_t j = 0; j < layer_ids.size(); ++j) {
             // if support scale, block_infos: {kv_info, scale_info}
-            const auto& block_infos = allocator_->convertIndexToBuffer(layer_ids[j], tag, block_ids[i]);
+            const auto& block_infos = coordinator_manager_->convertIndexToBuffer(layer_ids[j], tag, block_ids[i]);
             if (block_infos.empty()) {
                 RTP_LLM_LOG_WARNING("convertIndexToBuffer returned empty for layer_id [%d] group_id [%d] block_id[%d]",
                                     layer_ids[j],

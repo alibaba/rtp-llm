@@ -13,7 +13,7 @@
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
@@ -32,21 +32,21 @@ class KVCacheAllocationWaitState;
 class KVCacheManager {
 public:
     KVCacheManager(const CacheConfig&                 config,
-                   bool                               warmup                     = false,
-                   const kmonitor::MetricsReporterPtr metrics_reporter           = nullptr,
-                   const KVCacheConfig&               kv_cache_config            = KVCacheConfig{},
-                   const ParallelismConfig&           parallelism_config         = ParallelismConfig{},
-                   const RuntimeConfig&               runtime_config             = RuntimeConfig{},
-                   const SpeculativeExecutionConfig&  sp_config                  = SpeculativeExecutionConfig{},
-                   const PDSepConfig&                 pd_sep_config              = PDSepConfig{},
-                   const CacheStoreConfig&            cache_store_config         = CacheStoreConfig{},
+                   bool                               warmup                       = false,
+                   const kmonitor::MetricsReporterPtr metrics_reporter             = nullptr,
+                   const KVCacheConfig&               kv_cache_config              = KVCacheConfig{},
+                   const ParallelismConfig&           parallelism_config           = ParallelismConfig{},
+                   const RuntimeConfig&               runtime_config               = RuntimeConfig{},
+                   const SpeculativeExecutionConfig&  sp_config                    = SpeculativeExecutionConfig{},
+                   const PDSepConfig&                 pd_sep_config                = PDSepConfig{},
+                   const CacheStoreConfig&            cache_store_config           = CacheStoreConfig{},
                    bool                               use_device_malloc_block_pool = false);
     ~KVCacheManager();
 
     // 初始化和配置相关
     bool init();
     bool initialized() const {
-        return allocator_ != nullptr;
+        return coordinator_manager_ != nullptr;
     }
 
     const CacheConfig& cacheConfig() const;
@@ -92,7 +92,7 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
     std::vector<BlockInfo>
                   convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
-    BlockAddrInfo          convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id) const;
+    BlockAddrInfo convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id) const;
     std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const;
     std::vector<BlockInfo> convertIndexToBuffer(
         int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
@@ -161,19 +161,19 @@ public:
     }
 
 private:
-    void initConnectorCoordinator();
-    void initCacheEventPublisher();
-    void stopCacheEventPublisher();
-    void allocateAndSync();
-    uint32_t synchronizeBlockNum(uint32_t candidate_block_num);
-    void reportMetricsLoop();
-    void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
-    void notifyAllocationChange();
+    void                  initConnectorCoordinator();
+    void                  initCacheEventPublisher();
+    void                  stopCacheEventPublisher();
+    void                  allocateAndSync();
+    uint32_t              synchronizeBlockNum(uint32_t candidate_block_num);
+    void                  reportMetricsLoop();
+    void                  reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
+    void                  notifyAllocationChange();
     std::function<void()> allocationChangeCallback() const;
 
     // 成员变量
-    CacheConfig         config_;
-    KVCacheAllocatorPtr allocator_;
+    CacheConfig                config_;
+    CoordinatorCacheManagerPtr coordinator_manager_;
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const KVCacheConfig                kv_cache_config_;

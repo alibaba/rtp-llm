@@ -261,7 +261,7 @@ cc_test(
 cc_test(
     name = "full_kv_cache_group_test",
     srcs = [
-        "FullKVCacheGroupTest.cc",
+        "FullCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -275,7 +275,7 @@ cc_test(
 cc_test(
     name = "single_type_kv_cache_allocator_test",
     srcs = [
-        "SingleTypeKVCacheAllocatorTest.cc",
+        "SingleTypeCoordinatorCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -323,7 +323,7 @@ cc_test(
 cc_test(
     name = "linear_kv_cache_group_test",
     srcs = [
-        "LinearKVCacheGroupTest.cc",
+        "LinearCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -337,7 +337,7 @@ cc_test(
 cc_test(
     name = "hybrid_kv_cache_allocator_test",
     srcs = [
-        "HybridTypeKVCacheAllocatorTest.cc",
+        "HybridTypeCoordinatorCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -351,7 +351,7 @@ cc_test(
 cc_test(
     name = "hybrid_kv_cache_allocator_cp_shard_test",
     srcs = [
-        "HybridKVCacheAllocatorCPShardTest.cc",
+        "HybridCoordinatorCacheManagerCPShardTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -365,7 +365,7 @@ cc_test(
 cc_test(
     name = "hybrid_pool_kv_cache_allocator_test",
     srcs = [
-        "HybridPoolKVCacheAllocatorTest.cc",
+        "HybridPoolCoordinatorCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -379,7 +379,7 @@ cc_test(
 cc_test(
     name = "swa_kv_cache_group_test",
     srcs = [
-        "SWAKVCacheGroupTest.cc",
+        "SWACacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -393,12 +393,12 @@ cc_test(
 cc_test(
     name = "swa_kv_cache_group_malloc_range_test",
     srcs = [
-        "SWAKVCacheGroupMallocRangeTest.cc",
+        "SWACacheManagerMallocRangeTest.cc",
     ],
     data = [],
     copts = test_copts,
     deps = [
-        "//rtp_llm/cpp/cache:kv_cache_group",
+        "//rtp_llm/cpp/cache:single_type_cache_manager",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + cuda13_torch_link_deps,
