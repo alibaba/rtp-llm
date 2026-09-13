@@ -10,16 +10,14 @@ import torch.nn as nn
 from PIL import Image
 from transformers.configuration_utils import PretrainedConfig
 
-from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
-    ImageEmbeddingInterface,
-)
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
-    K3_MAX_IMAGE_FILE_SIZE_KB,
-    K3_MAX_IMAGE_PIXELS,
     KimiK3VisionProcessor,
 )
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_moonvit import (
     MoonViT3dPretrainedModel,
+)
+from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
+    ImageEmbeddingInterface,
 )
 from rtp_llm.multimodal.multimodal_util import MMUrlType, get_bytes_io_from_url
 
@@ -160,7 +158,7 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
         )
         self.vision_tower = MoonViT3dPretrainedModel(self.vision_config)
         self.mm_projector = KimiK3PatchMergerMLPV2(self.vision_config)
-        self.image_processor = KimiK3VisionProcessor()
+        self.image_processor = KimiK3VisionProcessor(config["media_proc_cfg"])
 
     @property
     def _device(self):
@@ -181,10 +179,14 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
                 raise ValueError("Kimi-K3 image tensor must be a 1-D uint8 tensor")
             # Third byte entry point: a direct model RPC call skips the renderer
             # preflight, so the shared per-image cap has to be enforced here too.
-            if mm_input.tensor.numel() > K3_MAX_IMAGE_FILE_SIZE_KB * 1024:
+            if (
+                vit_config.mm_image_max_file_size_kb > 0
+                and mm_input.tensor.numel()
+                > vit_config.mm_image_max_file_size_kb * 1024
+            ):
                 raise ValueError(
                     "Kimi K3 image bytes exceed the per-image limit: "
-                    f"{mm_input.tensor.numel()} > {K3_MAX_IMAGE_FILE_SIZE_KB * 1024}"
+                    f"{mm_input.tensor.numel()} > {vit_config.mm_image_max_file_size_kb * 1024}"
                 )
             # memoryview, not .tobytes(): BytesIO copies its initializer anyway.
             data = BytesIO(mm_input.tensor.detach().cpu().contiguous().numpy().data)
@@ -192,17 +194,9 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
             data = get_bytes_io_from_url(
                 mm_input.url,
                 vit_config.download_headers,
-                max_file_size_kb=K3_MAX_IMAGE_FILE_SIZE_KB,
+                max_file_size_kb=vit_config.mm_image_max_file_size_kb,
             )
         with Image.open(data) as image:
-            # Direct model RPC calls skip frontend preflight, so the backend
-            # must still enforce pixel limits and fully materialize the image.
-            width, height = image.size
-            if width * height > K3_MAX_IMAGE_PIXELS:
-                raise ValueError(
-                    "Kimi K3 image pixel count exceeds the per-image limit: "
-                    f"{width}x{height} > {K3_MAX_IMAGE_PIXELS}"
-                )
             if image.format in ("HEIF", "HEIC"):
                 return Image.frombytes(image.mode, image.size, image.tobytes())
             return image.copy()
@@ -221,9 +215,7 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
             staged.copy_(pixel_values)
             pixel_values = staged.to(device=self._device, non_blocking=True)
         else:
-            pixel_values = pixel_values.to(
-                device=self._device, dtype=self._data_type
-            )
+            pixel_values = pixel_values.to(device=self._device, dtype=self._data_type)
         # Shape metadata stays on CPU so Python consumers never synchronize CUDA.
         grid_thws = processed["grid_thws"]
         vision_outputs = self.vision_tower(pixel_values, grid_thws)
@@ -233,9 +225,7 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
     def embedding(self, data, **kwargs):
         """Single-image entry used by the multimodal processing engine."""
         with mm_lock:
-            features = (
-                self.image_embedding([data])[0].to(self._data_type).contiguous()
-            )
+            features = self.image_embedding([data])[0].to(self._data_type).contiguous()
         return features, None
 
     @torch.inference_mode()

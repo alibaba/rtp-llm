@@ -20,6 +20,7 @@ import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import (
@@ -234,7 +235,14 @@ def _assert_parameter_error_response(
         expected_message_part,
         payload["status_message"],
     )
-    testcase.assertEqual(_finish_reason(resp), LLMFinishReason.STOP_ENGINE_PARAM)
+    testcase.assertEqual(_finish_reason(resp), LLMFinishReason.USE_PARAMETER_STATUS)
+    testcase.assertEqual(infer.parameters["status_code"].int64_param, 400)
+    testcase.assertEqual(
+        infer.parameters["status_name"].string_param, "InvalidParameter"
+    )
+    testcase.assertEqual(
+        infer.parameters["status_message"].string_param, payload["status_message"]
+    )
     testcase.assertEqual(_gen_ids(resp), [])
 
 
@@ -469,12 +477,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_kimi_k3_rejects_non_image_parts_as_bad_request(self) -> None:
         req = self._minimal_request()
-        tokenizer = _FakeTokenizer(
-            {
-                "<|kimi_image_placeholder|>": [22, 11],
-                "<|media_content|>": [163603],
-            }
-        )
+        tokenizer = _FakeTokenizer({})
 
         for mm_type in (MMUrlType.VIDEO, MMUrlType.AUDIO):
             with self.subTest(mm_type=mm_type):
@@ -517,7 +520,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         tokenizer = _FakeTokenizer(
             {
                 "<|kimi_image_placeholder|>": [22, 11],
-                "<|media_content|>": [163603],
+                "<|media_pad|>": [163605],
             }
         )
         visitor = _FakeVisitor(_FakeAsyncStream([]))
@@ -537,7 +540,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             chunks = await _drain(
                 iter_real_model_stream_infer(
                     req,
-                    [163603],
+                    [163605],
                     SamplingParams(),
                     OtherParams(),
                     visitor,
@@ -556,7 +559,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         tokenizer = _FakeTokenizer(
             {
                 "<|kimi_image_placeholder|>": [22, 11],
-                "<|media_content|>": [163603],
+                "<|media_pad|>": [163605],
             }
         )
         visitor = _FakeVisitor(_FakeAsyncStream([]))
@@ -580,7 +583,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             chunks = await _drain(
                 iter_real_model_stream_infer(
                     req,
-                    [163603],
+                    [163605],
                     SamplingParams(),
                     OtherParams(),
                     visitor,
@@ -2066,7 +2069,9 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         class _KimiTokenizer:
             @staticmethod
             def decode(*args, **kwargs) -> str:
-                raise AssertionError("K3 multimodal preparation must not decode input_ids")
+                raise AssertionError(
+                    "K3 multimodal preparation must not decode input_ids"
+                )
 
             @staticmethod
             def encode(
@@ -2079,8 +2084,10 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 if not allow_special_tokens:
                     raise AssertionError("K3 structural prompts require special tokens")
                 mapping = {
+                    "<|open|>response<|sep|>": [10, 11, 12],
+                    "<|open|>think<|sep|>": [10, 13, 12],
                     "<|kimi_image_placeholder|>": [22, 11],
-                    "<|media_content|>": [163603],
+                    "<|media_pad|>": [163605],
                     (
                         "<|media_begin|>image 640x480"
                         "<|media_content|><|media_pad|><|media_end|>"
@@ -2096,11 +2103,14 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         visitor = _FakeVisitor(
             _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
         )
+        vit_config = VitConfig()
+        vit_config.download_headers = '{"Authorization":"test"}'
+        vit_config.mm_image_max_file_size_kb = 17
         servicer = DashScInferenceServicer(
             backend_visitor=visitor,
             tokenizer=_KimiTokenizer(),
             model_type="kimi_k3",
-            mm_download_headers='{"Authorization":"test"}',
+            vit_config=vit_config,
         )
         req = predict_v2_pb2.ModelInferRequest()
         req.id = "kimi-k3-mm"
@@ -2120,7 +2130,8 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 "input": {
                     "messages": [
                         {
-                            "role": "user",
+                            "role": "tool",
+                            "tool_call_id": "watch_video_screenshot:0",
                             "content": [
                                 {
                                     "image": "https://example.com/image.jpg",
@@ -2155,7 +2166,8 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mm_input.tensor.tolist(), [1, 2, 3])
         self.assertEqual(mm_input.mm_preprocess_config.min_pixels, 50176)
         preflight.assert_called_once_with(
-            "https://example.com/image.jpg", '{"Authorization":"test"}'
+            "https://example.com/image.jpg",
+            vit_config,
         )
 
     async def test_timeout_request_sets_dashscope_partial_response_metadata(
@@ -2261,6 +2273,78 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(responses), 1)
         _assert_parameter_error_response(self, responses[0], "bad parameter")
 
+    async def test_prompt_token_offset_is_kimi_k3_only(self):
+        class Tokenizer:
+            eos_token_id = 99
+
+            def encode(self, text):
+                return {
+                    "<|open|>response<|sep|>": [10, 11, 12],
+                    "<|open|>think<|sep|>": [10, 13, 14, 12],
+                }[text]
+
+        for is_kimi_k3 in (False, True):
+            for multi_chunk in (False, True):
+                for input_len, suffix in (
+                    (122, [10, 11, 12]),
+                    (39, [10, 11, 12]),
+                    (40, [10, 13, 14, 12]),
+                    (39, [900, 901]),
+                ):
+                    with self.subTest(
+                        k3=is_kimi_k3,
+                        multi_chunk=multi_chunk,
+                        input_len=input_len,
+                        suffix=suffix,
+                    ):
+                        ids = [7] * (input_len - len(suffix)) + suffix
+                        outputs = [
+                            GenerateOutput(
+                                output_ids=torch.tensor([8]),
+                                finished=finished,
+                                aux_info=AuxInfo(input_len=input_len, reuse_len=10),
+                            )
+                            for finished in ((False, True) if multi_chunk else (True,))
+                        ]
+                        visitor = _FakeVisitor(
+                            _FakeAsyncStream(
+                                [
+                                    GenerateOutputs(generate_outputs=[out])
+                                    for out in outputs
+                                ]
+                            )
+                        )
+                        request = predict_v2_pb2.ModelInferRequest(
+                            id="pending", model_name="m"
+                        )
+                        responses = await _drain(
+                            iter_real_model_stream_infer(
+                                request,
+                                ids,
+                                SamplingParams(),
+                                OtherParams(),
+                                visitor,
+                                rtp_llm_request_id=1,
+                                tokenizer=Tokenizer(),
+                                is_kimi_k3=is_kimi_k3,
+                            )
+                        )
+                        self.assertEqual(len(responses), len(outputs))
+                        offset = len(suffix) if is_kimi_k3 and suffix[0] == 10 else 0
+                        for response in responses:
+                            self.assertFalse(response.error_message)
+                            self.assertEqual(
+                                response.infer_response.parameters[
+                                    "prompt_token_num"
+                                ].int64_param,
+                                input_len - offset,
+                            )
+                        self.assertEqual(
+                            visitor.last_generate_input.token_ids.tolist(), ids
+                        )
+                        for out in outputs:
+                            self.assertEqual(out.aux_info.input_len, input_len)
+
     async def test_kimi_k3_applies_shared_sampling_defaults(self) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
         servicer = DashScInferenceServicer(
@@ -2298,12 +2382,62 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 0)
         self.assertEqual(len(responses), 1)
         _assert_parameter_error_response(self, responses[0], "n")
-
     async def test_kimi_k3_rejects_invalid_tool_history_before_enqueue(self) -> None:
+        invalid_functions = (
+            ({"arguments": "{}"}, "function.name"),
+            ({"name": None, "arguments": "{}"}, "function.name"),
+            ({"name": "lookup"}, "function.arguments"),
+            ({"name": "lookup", "arguments": None}, "function.arguments"),
+            ({"name": "lookup", "arguments": "not json"}, "valid JSON"),
+            ({"name": "lookup", "arguments": "[]"}, "JSON object"),
+        )
+        for key in ("payload", "__messages__"):
+            for function, error_field in invalid_functions:
+                for wrapping in ("dash", "wrapped_dash", "openai"):
+                    with self.subTest(key=key, function=function, wrapping=wrapping):
+                        visitor = _FakeVisitor(_FakeAsyncStream([]))
+                        servicer = DashScInferenceServicer(
+                            backend_visitor=visitor, model_type="kimi_k3"
+                        )
+                        req = self._valid_infer_request()
+                        messages = [
+                            {"role": "user", "content": "look up the weather"},
+                            {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_0",
+                                        "type": "function",
+                                        "function": function,
+                                    }
+                                ],
+                            },
+                            {
+                                "role": "tool",
+                                "tool_call_id": "call_0",
+                                "content": "sunny",
+                            },
+                        ]
+                        if wrapping == "openai":
+                            body = {"messages": messages}
+                        else:
+                            body = {"input": {"messages": messages}}
+                            if wrapping == "wrapped_dash":
+                                body = {"payload": body}
+                        req.parameters[key].string_param = json.dumps(body)
+                        responses = await _drain(
+                            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+                        )
+                        self.assertEqual(visitor.enqueue_called, 0)
+                        self.assertEqual(len(responses), 1)
+                        _assert_parameter_error_response(
+                            self, responses[0], error_field
+                        )
+
+    async def test_kimi_k3_valid_tool_history_reaches_backend(self) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
         servicer = DashScInferenceServicer(
-            backend_visitor=visitor,
-            model_type="kimi_k3",
+            backend_visitor=visitor, model_type="kimi_k3"
         )
         req = self._valid_infer_request()
         req.parameters["payload"].string_param = json.dumps(
@@ -2314,32 +2448,77 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                             "role": "assistant",
                             "tool_calls": [
                                 {
-                                    "id": "call_1",
+                                    "id": "call_0",
                                     "type": "function",
                                     "function": {
-                                        "name": None,
-                                        "arguments": '{"city":"杭州"}',
+                                        "name": "lookup",
+                                        "arguments": '{"city":"Boston"}',
                                     },
                                 }
                             ],
                         },
-                        {
-                            "role": "tool",
-                            "tool_call_id": "call_1",
-                            "content": "sunny",
-                        },
+                        {"role": "tool", "tool_call_id": "call_0", "content": "sunny"},
                     ]
                 }
             }
         )
-
-        responses = await _drain(
+        await _drain(
             servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
         )
+        self.assertEqual(visitor.enqueue_called, 1)
 
-        self.assertEqual(visitor.enqueue_called, 0)
-        self.assertEqual(len(responses), 1)
-        _assert_parameter_error_response(self, responses[0], "function.name")
+    async def test_tool_history_check_is_kimi_k3_only(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "messages": [
+                    {"role": "assistant", "tool_calls": [{"function": {"name": None}}]},
+                ]
+            }
+        )
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+        self.assertEqual(visitor.enqueue_called, 1)
+
+    async def test_kimi_k3_media_payload_is_not_complete_tool_history(self) -> None:
+        for key in ("payload", "__messages__"):
+            for messages in (
+                [],
+                [
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call_0",
+                                "type": "function",
+                                "function": {"name": "lookup", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {"role": "user", "content": "next retained media turn"},
+                ],
+                [
+                    {
+                        "role": "tool",
+                        "tool_call_id": "watch_video_screenshot:0",
+                        "content": "media-only tool result",
+                    }
+                ],
+            ):
+                with self.subTest(key=key, messages=messages):
+                    visitor = _FakeVisitor(_FakeAsyncStream([]))
+                    servicer = DashScInferenceServicer(
+                        backend_visitor=visitor, model_type="kimi_k3"
+                    )
+                    req = self._valid_infer_request()
+                    req.parameters[key].string_param = json.dumps(
+                        {"input": {"messages": messages}}
+                    )
+                    await _drain(
+                        servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+                    )
+                    self.assertEqual(visitor.enqueue_called, 1)
 
     async def test_kimi_k3_rejects_invalid_top_p_before_enqueue(self) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
@@ -2367,9 +2546,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         req = self._valid_infer_request()
         _add_input_tensor(req, "top_p", "FP32", [1], struct.pack("<f", 0.95))
 
-        await _drain(
-            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
-        )
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
 
         self.assertEqual(visitor.enqueue_called, 1)
         self.assertEqual(visitor.last_generate_input.generate_config.top_p, 0.95)

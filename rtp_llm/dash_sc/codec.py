@@ -77,19 +77,19 @@ DASHSERVING_INNER_ENGINE_ERROR_NO = 19
 
 DASH_ERROR_BAD_REQUEST = DashErrorSpec(
     error_no=LLMFinishReason.STOP_ENGINE_PARAM,
-    finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=400,
     status_name="InvalidParameter",
 )
 DASH_ERROR_TOO_LONG = DashErrorSpec(
     error_no=LLMFinishReason.STOP_ENGINE_PARAM,
-    finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=413,
     status_name="InvalidParameter",
 )
 DASH_ERROR_UNSUPPORTED = DashErrorSpec(
     error_no=LLMFinishReason.STOP_ENGINE_PARAM,
-    finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=422,
     status_name="InvalidParameter",
 )
@@ -808,6 +808,10 @@ def parse_sampling_params(
     v = _parse_optional_scalar_int(request, "num_return_sequences")
     if v is None:
         v = _parse_optional_scalar_int(request, "n")
+    if v is None:
+        v = _parse_optional_parameter_int(request, "num_return_sequences")
+    if v is None:
+        v = _parse_optional_parameter_int(request, "n")
     if v is not None:
         num_return_sequences = max(0, v)
         if v != 0:
@@ -1236,18 +1240,14 @@ def _load_multimodal_payload(request) -> Any:
 
 
 def parse_messages_from_request(request) -> list[Any] | None:
-    """Return original messages when a DashSc request carries its JSON payload.
+    """Read the structured messages supplied alongside pre-tokenized input.
 
-    Text-only callers are allowed to omit the payload because ``input_ids`` are
-    authoritative on this wire.  When the payload is present, model-specific
-    request contracts can validate the original structured conversation before
-    the engine is enqueued.
+    ``payload`` / ``__messages__`` may contain only media turns, not the full
+    conversation. Callers must not infer missing tool results from this subset.
+    Requests carrying only input IDs have no structured history to validate.
     """
-
     obj = _load_multimodal_payload(request)
-    if obj is None:
-        return None
-    return list(_iter_messages_from_payload(obj))
+    return None if obj is None else list(_iter_messages_from_payload(obj))
 
 
 def parse_multimodal_parts_from_request(request) -> list[MultimodalPart]:
@@ -1576,11 +1576,18 @@ def _append_aux_info_metrics_outputs(
     infer: predict_v2_pb2.ModelInferResponse,
     out_py: Any,
     prompt_token_fallback: int = 0,
+    prompt_token_offset: int = 0,
 ) -> None:
-    """``prompt_token_num`` = AuxInfo.input_len; ``prompt_cached_token_num`` = AuxInfo.reuse_len."""
+    """Write public usage without mutating the engine's input/cache lengths."""
     ax = getattr(out_py, "aux_info", None)
     input_len = int(ax.input_len) if ax is not None else int(prompt_token_fallback)
     reuse_len = int(ax.reuse_len) if ax is not None else 0
+    if prompt_token_offset:
+        if prompt_token_offset < 0 or input_len < prompt_token_offset:
+            raise ValueError("prompt usage is shorter than its token offset")
+        input_len -= prompt_token_offset
+        # Cached tokens are a prefix; exclude overlap with the hidden suffix.
+        reuse_len = min(reuse_len, input_len)
     _append_int32_scalar_output(infer, "prompt_token_num", input_len)
     _append_int32_scalar_output(infer, "prompt_cached_token_num", reuse_len)
     _append_prompt_cache_usage_parameters(infer, input_len, reuse_len)
@@ -1608,6 +1615,7 @@ def build_stream_response_from_generate_outputs(
     token_ids: list[int] | None = None,
     top_logprobs: int = 0,
     emit_logprobs: bool = True,
+    prompt_token_offset: int = 0,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
 
@@ -1617,6 +1625,9 @@ def build_stream_response_from_generate_outputs(
 
     ``token_ids``: if provided, overrides the generated_ids from ``out_py``.
     Use when the servicer rewrites the token payload (e.g. injecting </think>).
+
+    ``prompt_token_offset``: backend-only prompt suffix length excluded from
+    public prompt/cache usage. The engine's accounting is left unchanged.
     """
     del _request_shape  # reserved for future shape alignment
     if not go.generate_outputs:
@@ -1651,6 +1662,7 @@ def build_stream_response_from_generate_outputs(
         infer,
         out_py,
         prompt_token_fallback=len(request_input_ids or []),
+        prompt_token_offset=prompt_token_offset,
     )
     if emit_logprobs and bool(getattr(generate_config, "return_all_probs", False)):
         _append_logprobs_parameter(
@@ -1734,4 +1746,7 @@ def build_dash_error_response(
     infer.parameters["incremental_output"].int64_param = 1
     infer.parameters["error_no"].int64_param = int(error_spec.error_no)
     infer.parameters["error_msg"].string_param = error_msg
+    infer.parameters["status_code"].int64_param = int(error_spec.status_code)
+    infer.parameters["status_name"].string_param = error_spec.status_name
+    infer.parameters["status_message"].string_param = status_message
     return resp
