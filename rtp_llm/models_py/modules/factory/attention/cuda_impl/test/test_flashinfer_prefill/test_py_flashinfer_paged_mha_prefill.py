@@ -6,6 +6,7 @@ import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferPrefillPagedAttnOp,
+    estimate_py_flashinfer_workspace_size,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.attention_ref import (
     compute_flashinfer_prefill_reference,
@@ -32,6 +33,29 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
 
         # Call parent setUp for common initialization
         super().setUp()
+
+    def test_workspace_estimate_covers_mimo_split_kv_plan(self):
+        """MiMo TP4 global attention must not fall back to the 128 MiB floor."""
+        estimated = estimate_py_flashinfer_workspace_size(
+            local_head_num=16,
+            local_kv_head_num=1,
+            head_dim_vo=128,
+            sm_count=78,
+        )
+        logged_tmp_v_bytes = 139460608
+        logged_tmp_s_bytes = logged_tmp_v_bytes // 128
+
+        self.assertEqual(estimated, 158 * 1024 * 1024)
+        self.assertGreaterEqual(estimated, logged_tmp_v_bytes + logged_tmp_s_bytes)
+
+    def test_workspace_estimate_keeps_default_floor(self):
+        estimated = estimate_py_flashinfer_workspace_size(
+            local_head_num=8,
+            local_kv_head_num=8,
+            head_dim_vo=128,
+            sm_count=78,
+        )
+        self.assertEqual(estimated, 128 * 1024 * 1024)
 
     def _create_paged_kv_cache(
         self,

@@ -33,6 +33,16 @@ from rtp_llm.ops.compute_ops import (
 
 # Constants
 DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
+_MIB = 1024 * 1024
+
+# FlashInfer's FA2 prefill scheduler uses at most two CTAs per SM and a Q tile
+# of at most 128 rows. A split-KV plan stores one FP32 partial V vector and
+# one FP32 LSE value for every (Q head, scheduled Q row) pair. Keep these
+# constants next to the workspace calculation so changes in FlashInfer's
+# scheduler do not silently invalidate the allocation bound.
+_FLASHINFER_PREFILL_BLOCKS_PER_SM = 2
+_FLASHINFER_PREFILL_MAX_CTA_TILE_Q = 128
+_FLOAT32_SIZE_BYTES = 4
 
 # FP8 KV cache uses a unit quantization scale: K/V are cast
 # directly to float8_e4m3fn and FA3 FP8 kernels run with scale_q/k/v = 1.0.
@@ -76,19 +86,105 @@ _g_py_flashinfer_workspace_pool: list[torch.Tensor] = []
 _g_py_flashinfer_pool_lock = __import__("threading").Lock()
 
 
-def get_py_flashinfer_workspace_buffer(device: str = "cuda") -> torch.Tensor:
+def _round_up(value: int, alignment: int) -> int:
+    return (value + alignment - 1) // alignment * alignment
+
+
+def estimate_py_flashinfer_workspace_size(
+    local_head_num: int,
+    local_kv_head_num: int,
+    head_dim_vo: int,
+    sm_count: int,
+) -> int:
+    """Return a safe non-CUDA-graph FlashInfer prefill workspace size.
+
+    FlashInfer's split-KV prefill planner bounds its expanded batch by
+    ``(2 * SM count) // KV heads``. Its float workspace then contains
+    ``tmp_v`` and ``tmp_s`` with these element counts::
+
+        Q heads * expanded batch * Q tile * V dim
+        Q heads * expanded batch * Q tile
+
+    The old fixed 128 MiB allocation omitted those model- and device-dependent
+    terms. In particular, MiMo V2.5's global-attention group has a large GQA
+    ratio after tensor parallel sharding, so a valid plan can exceed 128 MiB.
+    """
+    if min(local_head_num, local_kv_head_num, head_dim_vo, sm_count) <= 0:
+        raise ValueError("FlashInfer workspace dimensions must be positive")
+    if local_head_num % local_kv_head_num != 0:
+        raise ValueError(
+            "FlashInfer workspace sizing requires Q heads divisible by KV heads"
+        )
+
+    max_split_batch_size = (
+        _FLASHINFER_PREFILL_BLOCKS_PER_SM * sm_count // local_kv_head_num
+    )
+    scheduled_q_rows = max_split_batch_size * _FLASHINFER_PREFILL_MAX_CTA_TILE_Q
+    split_workspace_bytes = (
+        local_head_num * scheduled_q_rows * (head_dim_vo + 1) * _FLOAT32_SIZE_BYTES
+    )
+    minimum_bytes = DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB * _MIB
+    return max(minimum_bytes, _round_up(split_workspace_bytes, _MIB))
+
+
+def _workspace_device(device: str | torch.device) -> torch.device:
+    resolved = torch.device(device)
+    if resolved.type == "cuda" and resolved.index is None:
+        resolved = torch.device("cuda", torch.cuda.current_device())
+    return resolved
+
+
+def get_py_flashinfer_workspace_buffer(
+    device: str | torch.device = "cuda",
+    required_size_bytes: Optional[int] = None,
+) -> torch.Tensor:
     """Get a PyFlashInfer workspace buffer from the pool.
 
-    This function manages workspace buffers to support multiple concurrent instances.
+    Pool entries are matched by both CUDA device and capacity. This matters when
+    attention groups have different GQA ratios: a 128 MiB buffer released by one
+    group must not be returned to another group that needs a larger workspace.
     """
+    resolved_device = _workspace_device(device)
+    if required_size_bytes is None:
+        required_size_bytes = DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB * _MIB
+    required_size_bytes = _round_up(required_size_bytes, _MIB)
+
     with _g_py_flashinfer_pool_lock:
-        if _g_py_flashinfer_workspace_pool:
-            return _g_py_flashinfer_workspace_pool.pop()
+        best_index = None
+        best_size = None
+        for index, buffer in enumerate(_g_py_flashinfer_workspace_pool):
+            buffer_size = buffer.numel() * buffer.element_size()
+            if buffer.device != resolved_device or buffer_size < required_size_bytes:
+                continue
+            if best_size is None or buffer_size < best_size:
+                best_index = index
+                best_size = buffer_size
+        if best_index is not None:
+            return _g_py_flashinfer_workspace_pool.pop(best_index)
+
     return torch.zeros(
-        DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB * 1024 * 1024,
+        required_size_bytes,
         dtype=torch.uint8,
-        device=device,
+        device=resolved_device,
     )
+
+
+def get_sized_py_flashinfer_workspace_buffer(
+    local_head_num: int,
+    local_kv_head_num: int,
+    head_dim_vo: int,
+    device: str | torch.device = "cuda",
+) -> torch.Tensor:
+    """Allocate a workspace using the current GPU and attention-group shape."""
+    resolved_device = _workspace_device(device)
+    sm_count = torch.cuda.get_device_properties(resolved_device).multi_processor_count
+    required_size_bytes = estimate_py_flashinfer_workspace_size(
+        local_head_num,
+        local_kv_head_num,
+        head_dim_vo,
+        sm_count,
+    )
+    return get_py_flashinfer_workspace_buffer(resolved_device, required_size_bytes)
 
 
 def release_py_flashinfer_workspace_buffer(buffer: torch.Tensor) -> None:
@@ -282,11 +378,13 @@ class PyFlashinferPrefillPagedAttnOp(object):
         attn_inputs: PyAttentionInputs,
         backend: str = "auto",
     ) -> None:
-        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
         self.head_dim_vo = attn_head_dim_vo(attn_configs)
+        self.g_workspace_buffer = get_sized_py_flashinfer_workspace_buffer(
+            self.local_head_num, self.local_kv_head_num, self.head_dim_vo
+        )
         self.page_size = attn_configs.kernel_tokens_per_block
         self.dtype = attn_configs.dtype
         self.kv_dtype = attn_kv_dtype(attn_configs)
@@ -602,13 +700,15 @@ class PyFlashinferPrefillAttnOp(object):
         attn_configs: AttentionConfigs,
         backend: str = "auto",
     ) -> None:
-        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         # attn_configs.head_num and kv_head_num are already divided by tp_size in ModelConfig::getAttentionConfigs
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
         self.page_size = attn_configs.kernel_tokens_per_block
         self.head_dim_vo = attn_head_dim_vo(attn_configs)
+        self.g_workspace_buffer = get_sized_py_flashinfer_workspace_buffer(
+            self.local_head_num, self.local_kv_head_num, self.head_dim_vo
+        )
         self.backend = resolve_ragged_backend(
             backend, self.head_dim_qk, self.head_dim_vo
         )
@@ -748,11 +848,13 @@ class PyFlashinferHybridPrefillAttnOp(object):
         attn_inputs: PyAttentionInputs,
         backend: str = "auto",
     ) -> None:
-        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
         self.head_dim_vo = attn_configs.size_per_head
+        self.g_workspace_buffer = get_sized_py_flashinfer_workspace_buffer(
+            self.local_head_num, self.local_kv_head_num, self.head_dim_vo
+        )
         self.page_size = attn_configs.kernel_tokens_per_block
         self.dtype = attn_configs.dtype
         self.kv_dtype = attn_kv_dtype(attn_configs)
@@ -1237,12 +1339,14 @@ class PyFlashinferDecodeAttnOp(object):
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
     ) -> None:
-        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         # attn_configs already has head_num and kv_head_num divided by tp_size
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
         self.head_dim_vo = attn_head_dim_vo(attn_configs)
+        self.g_workspace_buffer = get_sized_py_flashinfer_workspace_buffer(
+            self.local_head_num, self.local_kv_head_num, self.head_dim_vo
+        )
         self.seq_size_per_block = attn_configs.kernel_tokens_per_block
         self.window_left = window_left_from_sliding_window(attn_configs.sliding_window)
         self.is_sliding_window = attn_configs.sliding_window > 0
