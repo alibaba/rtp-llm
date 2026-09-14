@@ -63,22 +63,22 @@ final class RequestLifecycleTestSupport {
         }
     }
 
-    static RequestRegistry.DeliveryClaim claimRoute(RequestRegistry lifecycle,
+    static DeliveryClaim claimRoute(RequestRegistry lifecycle,
                                                      ScheduledRequest item,
                                                      BooleanSupplier endpointHandoff) {
-        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimRouteDelivery(item, endpointHandoff);
+        DeliveryClaim claim = lifecycle.tryClaimRouteDelivery(item, endpointHandoff);
         if (claim != null) {
-            lifecycle.beginDelivery(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
+            claim.begin(new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
         }
         return claim;
     }
 
-    static RequestRegistry.DeliveryClaim claimBatch(RequestRegistry lifecycle,
+    static DeliveryClaim claimBatch(RequestRegistry lifecycle,
                                                      ScheduledRequest item, long batchId,
                                                      BooleanSupplier endpointHandoff) {
-        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimBatchDelivery(item, batchId, endpointHandoff);
+        DeliveryClaim claim = lifecycle.tryClaimBatchDelivery(item, batchId, endpointHandoff);
         if (claim != null) {
-            lifecycle.beginDelivery(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
+            claim.begin(new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
         }
         return claim;
     }

@@ -262,7 +262,7 @@ final class ExpirationTimer implements AutoCloseable {
             }
         }
         try {
-            lifecycle.expireInactiveRequest(slot, clock.getAsLong());
+            slot.expireInactiveRequest(clock.getAsLong());
         } finally {
             // Engine facts only renew the timestamp. Rearm when the old wake-up
             // fires, so frequent status reports do not create new timer tasks.
@@ -392,7 +392,7 @@ final class ExpirationTimer implements AutoCloseable {
             cancelRequest = exactSlot.expireRequestDeadline(exactDeadline);
         }
         if (cancelRequest) {
-            lifecycle.cancelForDeadline(exactSlot);
+            exactSlot.cancelRequest(0L, CancelReason.DEADLINE_EXCEEDED);
         }
     }
 
@@ -404,7 +404,7 @@ final class ExpirationTimer implements AutoCloseable {
             expiry = exactSlot.expireDecisionDeadline(exactDeadline);
         }
         if (expiry != null) {
-            lifecycle.decisionExpired(expiry);
+            exactSlot.onDecisionExpired(expiry);
         }
     }
 

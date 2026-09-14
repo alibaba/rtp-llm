@@ -64,6 +64,6 @@ class PreemptionRegistrationTest {
     }
 
     private static PreemptionRegistration registration() {
-        return new PreemptionRegistration(7L, 11L, "test preemption");
+        return new PreemptionRegistration(null, 7L, 11L, "test preemption");
     }
 }

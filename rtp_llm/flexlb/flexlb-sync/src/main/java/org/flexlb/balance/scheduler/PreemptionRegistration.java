@@ -16,6 +16,7 @@ import java.util.concurrent.CompletionStage;
  * lifecycle decisions.</p>
  */
 public final class PreemptionRegistration {
+    private final RequestSlot owner;
     private final long requestId;
     private final long attemptToken;
     private final String detail;
@@ -29,13 +30,20 @@ public final class PreemptionRegistration {
     private long pendingConfirmationBatchId;
 
     PreemptionRegistration(
-            long requestId,
+            RequestSlot owner, long requestId,
             long attemptToken,
             String detail) {
+        this.owner = owner;
         this.requestId = requestId;
         this.attemptToken = attemptToken;
         this.detail = detail == null ? "priority preemption" : detail;
     }
+
+    public boolean applyPhase(PreemptionCancelPhase phase) { return owner.onPreemptionPhase(this, phase); }
+
+    public boolean release() { return owner.onPreemptionReleased(this); }
+
+    public boolean settleTerminal(String detail) { return owner.onPreemptionTerminal(this, detail); }
 
     public long requestId() {
         return requestId;

@@ -258,6 +258,29 @@ class RequestRegistryTest {
         }
     }
 
+    @Test
+    void oldDeliveryAndPreemptionCapabilitiesCannotReachAReusedRequestId() {
+        Registered registered = registerItem(703L);
+        assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
+        RequestSlot old = lifecycle.requestSlot(703L);
+        DeliveryClaim delivery = lifecycle.tryClaimBatchDelivery(registered.item(), 17L, () -> true);
+        assertNotNull(delivery);
+        PreemptionRegistration preemption = lifecycle.tryClaim(703L, 1L, 19L, "victim").orElseThrow();
+
+        old.expireInactiveRequest(old.createdAtMs()
+                + config.getRequestLifecycle().getRequest().getTimeoutMs());
+        registered.future().join();
+        assertTrue(lifecycle.removeExactTombstone(old, Long.MAX_VALUE));
+        CompletableFuture<Response> replacement = lifecycle.register(context(703L));
+
+        delivery.complete(org.flexlb.balance.delivery.DeliveryResult.delivered());
+        assertFalse(preemption.settleTerminal("late engine cancellation"));
+        assertFalse(preemption.release());
+        assertNull(old.cancelRequest(0L, CancelReason.CLIENT_CANCELLED));
+        assertFalse(replacement.isDone());
+        assertEquals(RequestState.Phase.QUEUED, lifecycle.getRequestState(703L, 0L).state());
+    }
+
     private BalanceContext context(long requestId) {
         return RequestLifecycleTestSupport.context(config, requestId);
     }
