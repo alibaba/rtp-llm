@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import struct
 import unittest
 from unittest.mock import MagicMock, patch
@@ -512,6 +513,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_gen_ids(chunks[0]), [7, 8, 9])
         self.assertEqual(_finish_reason(chunks[0]), 1)
 
+    @patch.dict(os.environ, {"RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING": "1"})
     async def test_thinking_unlimited_max_new_tokens_counts_reasoning_and_content(
         self,
     ) -> None:
@@ -549,6 +551,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         # Unlimited thinking uses the combined reasoning + content budget.
         self.assertEqual(_finish_reason(chunks[0]), 1)
 
+    @patch.dict(os.environ, {"RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING": "1"})
     async def test_separate_thinking_budget_excludes_reasoning_from_content_limit(
         self,
     ) -> None:
@@ -586,6 +589,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         # Total output is 5 (> max_new_tokens), but content is only 2.
         self.assertEqual(_finish_reason(chunks[0]), 0)
 
+    @patch.dict(os.environ, {"RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING": "1"})
     async def test_separate_thinking_budget_content_at_limit_reports_length(
         self,
     ) -> None:
@@ -618,6 +622,64 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(chunks), 1)
         # The independent content budget is exactly exhausted.
         self.assertEqual(_finish_reason(chunks[0]), 1)
+
+    async def test_thinking_finish_reason_respects_backend_budget_mode(self) -> None:
+        env_key = "RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING"
+        for env_value, token_limit, expected_reason in (
+            (None, 90, LLMFinishReason.LENGTH),
+            ("0", 90, LLMFinishReason.LENGTH),
+            ("false", 90, LLMFinishReason.LENGTH),
+            ("invalid", 90, LLMFinishReason.LENGTH),
+            ("0", 91, LLMFinishReason.STOP),
+            ("1", 90, LLMFinishReason.STOP),
+            (" true ", 90, LLMFinishReason.STOP),
+            ("YES", 90, LLMFinishReason.STOP),
+            ("1", 81, LLMFinishReason.LENGTH),
+        ):
+            with self.subTest(env=env_value, token_limit=token_limit):
+                with patch.dict(os.environ):
+                    os.environ.pop(env_key, None)
+                    if env_value is not None:
+                        os.environ[env_key] = env_value
+                    # Eight reasoning tokens, a close tag, and 81 content tokens.
+                    # Split across frames to exercise cumulative accounting.
+                    outputs = [
+                        GenerateOutputs(
+                            generate_outputs=[
+                                GenerateOutput(
+                                    output_ids=torch.tensor(ids, dtype=torch.int32),
+                                    finished=finished,
+                                    aux_info=AuxInfo(input_len=21, reuse_len=0),
+                                )
+                            ]
+                        )
+                        for ids, finished in (
+                            ([10] * 8, False),
+                            ([128822] + [20] * 81, True),
+                        )
+                    ]
+                    tok = _dsv4_tokenizer()
+                    env_cfg = _GenerateEnvCfg()
+                    chunks = await _drain(
+                        iter_real_model_stream_infer(
+                            self._minimal_request(),
+                            [1] * 21,
+                            SamplingParams(
+                                max_new_tokens=token_limit, max_new_think_tokens=10
+                            ),
+                            OtherParams(enable_thinking=True),
+                            _FakeVisitor(_FakeAsyncStream(outputs)),
+                            rtp_llm_request_id=1,
+                            tokenizer=tok,
+                            generate_env_config=env_cfg,
+                            think_runtime=build_think_runtime(
+                                tok, env_cfg, "deepseek_v4"
+                            ),
+                        )
+                    )
+                    self.assertEqual(len(chunks), 2)
+                    self.assertEqual(_finish_reason(chunks[0]), 2)
+                    self.assertEqual(_finish_reason(chunks[-1]), expected_reason)
 
     async def test_empty_list_yields_error_response(self) -> None:
         req = self._minimal_request()

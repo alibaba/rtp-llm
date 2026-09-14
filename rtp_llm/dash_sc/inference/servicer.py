@@ -18,6 +18,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Iterator, Optional
 
@@ -65,12 +66,12 @@ from rtp_llm.dash_sc.grpc_metrics import (
     report_chunk,
     report_frontend_rpc_done,
 )
-from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.inference.grammar_validator import (
     GrammarCheckUnavailable,
     GrammarCompilationError,
     GrammarValidator,
 )
+from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
 from rtp_llm.frontend.frontend_request_metrics import FrontendRequestMetrics
 from rtp_llm.frontend.request_id_generator import generate_request_id
@@ -1015,9 +1016,14 @@ async def iter_real_model_stream_infer(
         term_id = runtime.terminate_token_id
         think_close_token_id = runtime.close_token_id
         max_new_tokens = int(getattr(generate_config, "max_new_tokens", 0) or 0)
-        request_max_new_think_tokens = sampling.max_new_think_tokens
-        if request_max_new_think_tokens is None:
-            request_max_new_think_tokens = other.max_new_think_tokens
+        # Match GenerateStream::maxTokenNum(), including autil's bool parsing
+        # and its default of false. Resolve once for the whole response stream.
+        max_tokens_exclude_thinking = (
+            os.environ.get("RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING", "0").strip().lower()
+            in {"1", "true", "t", "yes", "y"}
+            and generate_config.in_think_mode
+            and generate_config.max_thinking_tokens > 0
+        )
         matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
             input_ids_list, list(runtime.bos_tokens)
         )
@@ -1274,13 +1280,9 @@ async def iter_real_model_stream_infer(
             cumulative_sent_ids.extend(ids_for_accounting)
             finish_reason_override = None
             generated_ids_for_max_new_tokens = len(cumulative_sent_ids)
-            # With an explicit thinking budget, max_new_tokens applies only to
-            # content. A value of -1 keeps the legacy shared reasoning+content
-            # budget, so the full generated-token count remains authoritative.
-            if (
-                request_max_new_think_tokens != -1
-                and generate_think_token_num is not None
-            ):
+            # Only subtract reasoning when the backend also excludes it from
+            # max_new_tokens. Otherwise a total-token limit looks like a stop.
+            if max_tokens_exclude_thinking and generate_think_token_num is not None:
                 generated_ids_for_max_new_tokens = max(
                     0,
                     generated_ids_for_max_new_tokens - generate_think_token_num,
