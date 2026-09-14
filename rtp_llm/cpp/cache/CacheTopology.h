@@ -21,11 +21,11 @@ struct GroupBase {
     std::shared_ptr<const KVCacheSpec> spec;
     CacheGroupPolicy                   policy;
 
-    uint32_t block_num             = 0;
+    uint32_t block_num = 0;
 
-    size_t seqSizePerBlock() const;
-    size_t kernelSeqSizePerBlock() const;
-    size_t kernelBlocksPerKvBlock() const;
+    size_t   seqSizePerBlock() const;
+    size_t   kernelSeqSizePerBlock() const;
+    size_t   kernelBlocksPerKvBlock() const;
     size_t   kvBlockStrideBytes() const;
     size_t   kvScaleStrideBytes() const;
     uint32_t localKvHeadNum() const;
@@ -62,7 +62,7 @@ public:
     bool   hasSingleGlobalGroup() const;
     bool   hasOneGroupPerLayer() const;
 
-    size_t totalGroupBlockSizeBytes() const;
+    size_t           totalGroupBlockSizeBytes() const;
     size_t           blockSizeBytesForGroup(size_t group_id) const;
     std::vector<int> layerIdsForGroup(size_t group_id) const;
     size_t           blockSizeBytesForGroup(std::string_view group_tag) const;
@@ -78,16 +78,13 @@ public:
     }
 
     // Compatibility projections are values, never a second configuration source.
-    std::vector<std::string>      groupTagsSnapshot() const;
-    std::vector<CacheGroupType>   groupTypesSnapshot() const;
-    std::vector<std::vector<int>> layerGroupIdsSnapshot() const;
 
 private:
     CacheTopology(std::vector<GroupBase> groups, std::vector<LayerBase> layers);
     void validateAndBuildIndex();
 
-    std::vector<GroupBase>                  groups_;
-    std::vector<LayerBase>                  layers_;
+    std::vector<GroupBase> groups_;
+    std::vector<LayerBase> layers_;
 
     std::unordered_map<std::string, size_t> tag_to_group_id_;
 };

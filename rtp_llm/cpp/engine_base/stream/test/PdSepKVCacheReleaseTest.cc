@@ -807,7 +807,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
         const auto& manager  = prefill_managers[cp_rank];
         const auto& resource = prefill_resources[cp_rank];
         const auto& blocks   = resource->blocks(0, 0);
-        auto        layout   = manager->getMainModelCacheLayerLayout();
+        auto        layout   = manager->getMainModelGroupedCacheLayerLayout();
         auto        kv_base  = layout.at("default", 0).kv_addr;
 
         for (size_t local_pos = 0; local_pos < blocks.size(); ++local_pos) {
@@ -825,7 +825,6 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
         layer_cache.kv_cache_base      = kv_base;
         layer_cache.seq_size_per_block = spb;
         layer_cache.layer_id           = 0;
-        layer_cache.group_id           = 0;
         layer_cache.tag                = "default";
         runtimeWriteCacheStore(inputs,
                                layer_cache,
@@ -987,7 +986,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     runtimeSyncAndCheck();
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
-    auto layout      = prefill_manager->getMainModelCacheLayerLayout();
+    auto layout      = prefill_manager->getMainModelGroupedCacheLayerLayout();
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : cache_config.groupIdsForLayer(layer_id)) {
             const auto& tag = cache_config.tagForGroup(static_cast<size_t>(gid));
@@ -1004,7 +1003,6 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
             layer_cache.kv_cache_base      = layout.at(tag, static_cast<size_t>(layer_id)).kv_addr;
             layer_cache.seq_size_per_block = static_cast<int>(cache_config.seqSizePerBlockForGroup(gid));
             layer_cache.layer_id           = layer_id;
-            layer_cache.group_id           = gid;
             layer_cache.tag                = tag;
 
             runtimeWriteCacheStore(inputs,
@@ -1127,7 +1125,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     runtimeSyncAndCheck();
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
-    auto layout      = prefill_manager->getMainModelCacheLayerLayout();
+    auto layout      = prefill_manager->getMainModelGroupedCacheLayerLayout();
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : cache_config.groupIdsForLayer(layer_id)) {
             const auto& tag = cache_config.tagForGroup(static_cast<size_t>(gid));
@@ -1147,7 +1145,6 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
             layer_cache.seq_size_per_block =
                 cache_config.typeForGroup(static_cast<size_t>(gid)) == CacheGroupType::FULL ? kernel_spb : spb;
             layer_cache.layer_id = layer_id;
-            layer_cache.group_id = gid;
             layer_cache.tag      = tag;
 
             runtimeWriteCacheStore(inputs,
@@ -1305,7 +1302,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     runtimeSyncAndCheck();
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
-    auto layout      = prefill_manager->getMainModelCacheLayerLayout();
+    auto layout      = prefill_manager->getMainModelGroupedCacheLayerLayout();
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : cache_config.groupIdsForLayer(layer_id)) {
             const auto& tag = cache_config.tagForGroup(static_cast<size_t>(gid));
@@ -1322,7 +1319,6 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
             layer_cache.kv_cache_base      = layout.at(tag, static_cast<size_t>(layer_id)).kv_addr;
             layer_cache.seq_size_per_block = static_cast<int>(cache_config.seqSizePerBlockForGroup(gid));
             layer_cache.layer_id           = layer_id;
-            layer_cache.group_id           = gid;
             layer_cache.tag                = tag;
 
             runtimeWriteCacheStore(inputs,
@@ -1417,7 +1413,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
 
     // Fill KV cache blocks with a known pattern so MemoryBackedCacheStore can
     // verify the transfer.
-    auto layout = manager->getMainModelCacheLayerLayout();
+    auto layout = manager->getMainModelGroupedCacheLayerLayout();
     for (int layer_id = 0; layer_id < 3; ++layer_id) {
         auto buf = layout.at(static_cast<size_t>(layer_id)).kv_addr;
         ASSERT_TRUE(buf.defined());
@@ -1474,7 +1470,6 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
         layer_cache.kv_cache_base      = layout.at(static_cast<size_t>(layer_id)).kv_addr;
         layer_cache.seq_size_per_block = spb;
         layer_cache.layer_id           = layer_id;
-        layer_cache.group_id           = 0;
         layer_cache.tag                = "default";
 
         runtimeWriteCacheStore(inputs,
@@ -1522,7 +1517,6 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvBuffe
     layer_cache.kv_cache_base      = kv_buffer;
     layer_cache.seq_size_per_block = spb;
     layer_cache.layer_id           = 0;
-    layer_cache.group_id           = 0;
     layer_cache.tag                = "csa_state";
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
@@ -1569,7 +1563,6 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuSplitKv
     layer_cache.kv_cache_base      = kv_buffer;
     layer_cache.seq_size_per_block = spb;
     layer_cache.layer_id           = 0;
-    layer_cache.group_id           = 0;
     layer_cache.tag                = "default";
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
@@ -1625,7 +1618,6 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvScale
     layer_cache.kv_scale_base      = kv_scale_buffer;
     layer_cache.seq_size_per_block = spb;
     layer_cache.layer_id           = 0;
-    layer_cache.group_id           = 0;
     layer_cache.tag                = "csa_state";
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();

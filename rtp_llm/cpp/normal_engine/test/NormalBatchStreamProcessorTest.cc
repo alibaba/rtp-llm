@@ -204,7 +204,9 @@ TEST_F(NormalBatchStreamProcessorTest, testModelKernelPageIgnoresLargerStatePool
         graph.resolveCacheGeometry();
         EXPECT_EQ(graph.tokens_per_block, 256);
         EXPECT_EQ(graph.max_kernel_blocks_per_kv_block, 2u);
-        EXPECT_EQ(graph.kv_cache_group_tags, cache_config.groupTagsSnapshot());
+        EXPECT_EQ(graph.kv_cache_group_tags,
+                  state_first ? std::vector<std::string>({"state", "attention"}) :
+                                std::vector<std::string>({"attention", "state"}));
     }
 }
 
@@ -249,7 +251,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSingleGroupGraphUsesSpecGeometry) {
     graph.resolveCacheGeometry();
     EXPECT_EQ(graph.kernel_tokens_per_block, 0);
     EXPECT_EQ(graph.max_kernel_blocks_per_kv_block, 8u);  // kernel pages/physical block
-    EXPECT_EQ(graph.kv_cache_group_tags, config.groupTagsSnapshot());
+    EXPECT_EQ(graph.kv_cache_group_tags, std::vector<std::string>({"attention"}));
     graph.tokens_per_block = 384;  // tokens/cache-key block; not a divisor of the group span
     EXPECT_ANY_THROW(graph.resolveCacheGeometry());
 }

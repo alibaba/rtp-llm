@@ -143,10 +143,10 @@ def make_sparse_routing_attention():
 class SparseMlaRoutingTest(TestCase):
     def setUp(self) -> None:
         self.default_cache = LayerKVCache(
-            torch.ones(8, dtype=torch.uint8), 64, 0, 7, "default"
+            torch.ones(8, dtype=torch.uint8), 64, 0, "default"
         )
         self.indexer_cache = LayerKVCache(
-            torch.ones(8, dtype=torch.uint8) * 2, 64, 0, 3, "indexer_kv"
+            torch.ones(8, dtype=torch.uint8) * 2, 64, 0, "indexer_kv"
         )
 
     @staticmethod

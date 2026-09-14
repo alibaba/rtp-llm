@@ -54,9 +54,7 @@ class _PagedPrefillCache:
         ):
             base = torch.arange((2 * columns + 1) * entries * 8, device=device)
             base = base.to(torch.uint8).reshape(2 * columns + 1, entries * 8)
-            self.layers[tag] = LayerKVCache(
-                base, tokens_per_block, 0, len(self.layers), tag
-            )
+            self.layers[tag] = LayerKVCache(base, tokens_per_block, 0, tag)
             self.block_tables[tag] = torch.arange(
                 1, 2 * columns + 1, dtype=torch.int32, device=device
             ).reshape(2, columns)
@@ -107,9 +105,7 @@ class _CsaPrefillCache(_PagedPrefillCache):
                     base.shape[0], device=device
                 ).to(torch.uint8)[:, None]
                 base[:, entries * INDEXER_HEAD_DIM :].view(torch.float32).fill_(1)
-            self.layers[tag] = LayerKVCache(
-                base, tokens_per_block, 0, len(self.layers), tag
-            )
+            self.layers[tag] = LayerKVCache(base, tokens_per_block, 0, tag)
             self.block_tables[tag] = torch.arange(
                 1, 2 * columns + 1, dtype=torch.int32, device=device
             ).reshape(2, columns)

@@ -167,9 +167,9 @@ void initResourceGroupsForConfig(KVCacheResource& resource, const CacheConfig& c
 void setGroupStridesForConfig(CacheConfig&               config,
                               const std::vector<size_t>& kv_block_stride_bytes,
                               const std::vector<size_t>& kv_scale_stride_bytes) {
-    std::vector<uint32_t> block_nums = config.groupBlockNumsSnapshot();
-    if (block_nums.empty()) {
-        block_nums.assign(static_cast<size_t>(config.groupNums()), config.block_num);
+    std::vector<uint32_t> block_nums;
+    for (const auto& group : config.topology().groups()) {
+        block_nums.push_back(group.block_num);
     }
     rtp_llm::test::setGroupBlockLayout(config, block_nums, kv_block_stride_bytes, kv_scale_stride_bytes);
 }
@@ -339,19 +339,12 @@ public:
         KVCacheAllocator(config, AllocationType::DEVICE),
         host_groups_(std::move(host_groups)),
         payload_gap_bytes_(payload_gap_bytes) {
-        const auto cuda_options    = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
-        const auto host_options    = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
-        const auto layer_group_ids = config.layerGroupIdsSnapshot();
+        const auto cuda_options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+        const auto host_options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
         for (int layer = 0; layer < static_cast<int>(config.layer_all_num()); ++layer) {
-            if (static_cast<size_t>(layer) >= layer_group_ids.size()) {
-                continue;
-            }
-            const auto& layer_groups = layer_group_ids[static_cast<size_t>(layer)];
-            for (const int gid : layer_groups) {
-                if (gid < 0 || static_cast<size_t>(gid) >= config.topology().groups().size()) {
-                    continue;
-                }
-                const auto&  group  = config.topology().groupById(static_cast<size_t>(gid));
+            for (const auto& group_ref : config.groupsForLayer(layer)) {
+                const auto&  group  = group_ref.get();
+                const int    gid    = config.groupIdForTag(group.tag);
                 const size_t stride = group.kvBlockStrideBytes() + group.kvScaleStrideBytes();
                 if (stride == 0) {
                     continue;
@@ -390,10 +383,11 @@ public:
 
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const override {
-        const auto group_id  = config_.groupIdForLayerTag(layer_id, group_tag);
-        const auto k         = key(layer_id, group_id);
-        const auto tensor_it = tensors_.find(k);
-        const auto stride_it = strides_.find(k);
+        const auto& group     = config_.groupForLayer(layer_id, group_tag);
+        const auto  group_id  = config_.groupIdForTag(group.tag);
+        const auto  k         = key(layer_id, group_id);
+        const auto  tensor_it = tensors_.find(k);
+        const auto  stride_it = strides_.find(k);
         if (tensor_it == tensors_.end() || stride_it == strides_.end() || block_id < 0
             || static_cast<uint32_t>(block_id) >= config_.block_num) {
             return {};
@@ -738,13 +732,13 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRunti
         ASSERT_NE(slot.tag, "hca_state");
     }
 
-    const int hca_layer     = 3;
-    const int hca_kv_gid    = config.groupIdForLayerTag(hca_layer, "hca_kv");
-    const int hca_state_gid = config.groupIdForLayerTag(hca_layer, "hca_state");
-    const int swa_gid       = config.groupIdForLayerTag(hca_layer, "swa_kv");
-    ASSERT_EQ(hca_kv_gid, config.groupIdForTag("hca_kv"));
-    ASSERT_EQ(hca_state_gid, config.groupIdForTag("hca_state"));
-    ASSERT_EQ(swa_gid, config.groupIdForTag("swa_kv"));
+    const int hca_layer = 3;
+    ASSERT_EQ(config.groupForLayer(hca_layer, "hca_kv").tag, "hca_kv");
+    ASSERT_EQ(config.groupForLayer(hca_layer, "hca_state").tag, "hca_state");
+    ASSERT_EQ(config.groupForLayer(hca_layer, "swa_kv").tag, "swa_kv");
+    const int hca_kv_gid    = config.groupIdForTag("hca_kv");
+    const int hca_state_gid = config.groupIdForTag("hca_state");
+    const int swa_gid       = config.groupIdForTag("swa_kv");
 
     KVCacheResource resource;
     resource.cacheKeys() = {901, 902};
@@ -817,8 +811,8 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadRejectsCompressedOnlyWhenStateS
     ASSERT_TRUE(connector->supportsTypedPrefixCacheLayout(slots));
 
     const int       hca_layer  = 3;
-    const int       hca_kv_gid = config.groupIdForLayerTag(hca_layer, "hca_kv");
-    const int       swa_gid    = config.groupIdForLayerTag(hca_layer, "swa_kv");
+    const int       hca_kv_gid = config.groupIdForTag(config.groupForLayer(hca_layer, "hca_kv").tag);
+    const int       swa_gid    = config.groupIdForTag(config.groupForLayer(hca_layer, "swa_kv").tag);
     KVCacheResource resource;
     resource.cacheKeys() = {901, 902};
     initResourceGroupsForConfig(resource, config);
@@ -875,8 +869,8 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadAllowsStateOnlyWhenCompressedNo
     ASSERT_TRUE(connector->supportsTypedPrefixCacheLayout(slots));
 
     const int       hca_layer  = 3;
-    const int       hca_kv_gid = config.groupIdForLayerTag(hca_layer, "hca_kv");
-    const int       swa_gid    = config.groupIdForLayerTag(hca_layer, "swa_kv");
+    const int       hca_kv_gid = config.groupIdForTag(config.groupForLayer(hca_layer, "hca_kv").tag);
+    const int       swa_gid    = config.groupIdForTag(config.groupForLayer(hca_layer, "swa_kv").tag);
     KVCacheResource resource;
     resource.cacheKeys() = {901, 902};
     initResourceGroupsForConfig(resource, config);
@@ -1425,10 +1419,10 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWriteAllocationFailureDoesNotDouble
     resource.setCacheKeys(cache_keys);
     resource.ensureLinearBlockDependencies();
 
-    const auto layer_group_ids = config.layerGroupIdsSnapshot();
-    for (size_t layer = 0; layer < layer_group_ids.size(); ++layer) {
-        for (const int gid : layer_group_ids[layer]) {
-            auto& blocks = resource.mutableBlockIds(static_cast<int>(layer), gid);
+    for (const auto& layer : config.topology().layers()) {
+        for (const auto& tag : layer.group_tags) {
+            const int gid    = config.groupIdForTag(tag);
+            auto&     blocks = resource.mutableBlockIds(layer.layer_id, gid);
             blocks.setAt(0, static_cast<BlockIdxType>(10 + gid));
             blocks.setAt(1, static_cast<BlockIdxType>(20 + gid));
         }

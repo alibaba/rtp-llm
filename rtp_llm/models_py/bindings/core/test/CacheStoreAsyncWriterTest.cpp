@@ -494,12 +494,11 @@ TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsTaggedBlockAcrossGroupOrde
         inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
         inputs.cache_keys            = torch::tensor({int64_t{7001}}, torch::kInt64).reshape({1, 1});
 
-        auto                    layout = cache_manager->getMainModelCacheLayerLayout();
+        auto                    layout = cache_manager->getMainModelGroupedCacheLayerLayout();
         torch_ext::LayerKVCache layer_cache;
         layer_cache.kv_cache_base      = layout.at("tracked", 1).kv_addr;
         layer_cache.seq_size_per_block = 1;
         layer_cache.layer_id           = 1;
-        layer_cache.group_id           = 0;
         layer_cache.tag                = "tracked";
 
         const auto            initial_free_blocks = cache_manager->freeBlocksNum();

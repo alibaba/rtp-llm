@@ -117,6 +117,10 @@ LayoutAndBases makeLayout(const CacheConfig& config) {
     GroupedCacheLayerLayout::GroupLayouts layouts;
     std::map<std::string, uintptr_t>      bases;
     for (const auto& group : config.topology().groups()) {
+        if (config.topology().layerIdsForGroup(group.tag).empty()) {
+            layouts.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>(config.layer_num)));
+            continue;
+        }
         auto storage =
             torch::zeros({static_cast<int64_t>(kPhysicalBlocks), static_cast<int64_t>(group.kvBlockStrideBytes())},
                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
@@ -428,6 +432,40 @@ Scenario makeMtpScenario() {
 }
 
 Scenario makeScenario(const std::string& name) {
+    if (name == "mtp_placeholders" || name == "mtp_placeholders_extra_payload" || name == "mtp_missing_placeholder"
+        || name == "single_model_extra_payload") {
+        const bool single_group = name == "single_model_extra_payload";
+        auto       main_config  = makeCacheConfig({{"unused", 2, 16}, {"draft", 2, 32}, {"other", 2, 24}});
+        auto       draft_config = std::make_shared<CacheConfig>(makeCacheConfig({{"draft", 2, 32}}));
+        if (!single_group) {
+            draft_config->setTopology(main_config.topology().groups(), {LayerBase{kLayerId, {"draft"}}});
+        }
+        auto layout = makeLayout(*draft_config);
+        main_config.mtp_sub_configs.push_back(draft_config);
+        auto inputs = makeInputs(/*input_lengths=*/{4},
+                                 /*request_ids=*/{401},
+                                 /*cache_keys=*/{4101, 4102},
+                                 /*cache_keys_width=*/2,
+                                 /*block_ids=*/{5, 6, 1, 2, 3, 4},
+                                 /*group_tags=*/{"other", "draft", "unused"},
+                                 /*block_table_width=*/2,
+                                 /*global_tokens_per_block=*/2,
+                                 /*global_stride_bytes=*/16);
+        if (name == "mtp_placeholders_extra_payload") {
+            inputs.kv_cache_group_tags.push_back("target_only");
+            inputs.kv_cache_block_id =
+                torch::cat({inputs.kv_cache_block_id, pinnedTensor({7, 0}, {1, 1, 2})}, 0).pin_memory();
+        } else if (name == "mtp_missing_placeholder") {
+            inputs.kv_cache_group_tags = {"other", "draft"};
+            inputs.kv_cache_block_id   = inputs.kv_cache_block_id.narrow(0, 0, 2);
+        }
+        inputs.kv_cache_kernel_block_id = inputs.kv_cache_block_id.clone().pin_memory();
+        Scenario scenario{
+            std::move(main_config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
+        scenario.model_id               = 7;
+        scenario.mtp_cache_config_index = 0;
+        return scenario;
+    }
     if (name == "micro_batch_multi_tag") {
         auto config = makeCacheConfig({{"linear", 1, 24}, {"full", 2, 16}});
         auto layout = makeLayout(config);

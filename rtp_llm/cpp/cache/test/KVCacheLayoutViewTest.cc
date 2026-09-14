@@ -19,7 +19,7 @@ class TestKVCacheSpec: public KVCacheSpec {
 public:
     TestKVCacheSpec(std::string tag, KVCacheSpecType type, size_t seq_size, size_t k_elems, size_t v_elems):
         KVCacheSpec(std::move(tag), static_cast<uint32_t>(seq_size), 1, 1), k_elems_(k_elems), v_elems_(v_elems) {
-        this->type               = type;
+        this->type = type;
     }
 
     size_t block_size() const override {
@@ -107,7 +107,6 @@ TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
     EXPECT_EQ(layer.kv_scale_base.sizes().vec(), (std::vector<int64_t>{12, 4}));
     EXPECT_EQ(layer.kv_cache_base.data_ptr(), base.data_ptr());
     EXPECT_EQ(by_tag.kv_cache_base.data_ptr(), layer.kv_cache_base.data_ptr());
-    EXPECT_EQ(by_tag.group_id, 0);
     EXPECT_EQ(by_tag.tag, "full");
     EXPECT_EQ(cache.groupTags(), std::vector<std::string>{"full"});
     EXPECT_EQ(cache.layerCount(), 1u);
@@ -171,10 +170,10 @@ TEST(KVCacheLayoutViewTest, CompressedSpecPreservesPaddingBetweenKernelPages) {
     ctx.seq_size_per_block      = 32;
     ctx.kernel_tokens_per_block = 8;
     GroupBase group;
-    group.tag                   = desc.tag;
-    group.spec                  = CompressedKVCacheSpec::build(desc, ctx);
-    group.policy.group_type     = CacheGroupType::FULL;
-    group.block_num             = 3;
+    group.tag               = desc.tag;
+    group.spec              = CompressedKVCacheSpec::build(desc, ctx);
+    group.policy.group_type = CacheGroupType::FULL;
+    group.block_num         = 3;
     ASSERT_EQ(group.kvBlockStrideBytes(), 32u);
     auto               base = torch::arange(96, torch::TensorOptions().dtype(torch::kUInt8)).reshape({3, 32});
     torch_ext::KVCache cache(makeLayout({group}, {desc.tag}, {{base, {}}}));

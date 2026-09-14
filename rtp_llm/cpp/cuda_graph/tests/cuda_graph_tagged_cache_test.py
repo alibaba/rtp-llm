@@ -142,6 +142,22 @@ class TaggedBlockRowModel:
         return PyModelOutputs(inputs.input_hiddens + signature.unsqueeze(1))
 
 
+class DraftBlockTableModel:
+    """Only draft owns layers; compatibility tags must not become consumers."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        attention = inputs.attention_inputs
+        if isinstance(attention, dict):
+            attention = attention["draft"]
+        signature = attention.kv_cache_kernel_block_id_device[:, 0].to(
+            inputs.input_hiddens.dtype
+        )
+        return PyModelOutputs(inputs.input_hiddens + signature.unsqueeze(1))
+
+
 def _tag_attention_inputs(
     common: PyAttentionInputs, tags: list[str], values: dict[str, int]
 ) -> dict[str, PyAttentionInputs]:
@@ -314,6 +330,66 @@ def _build_target_verify_inputs(
 
 
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    def test_draft_placeholder_map_preserves_eager_graph_contract(self):
+        tags = ["unused", "draft", "other"]
+        model = DraftBlockTableModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+            tags,
+        )
+        for value, order in ((2, tags), (5, list(reversed(tags)))):
+            inputs = _build_decode_inputs(
+                order, {"unused": 31, "draft": value, "other": 47}
+            )
+            expected = model.forward(inputs).hidden_states.clone()
+            self.assertTrue(runner.canRun(inputs))
+            output = runner.forward(inputs)
+            torch.cuda.synchronize()
+            torch.testing.assert_close(output.hidden_states, expected)
+            torch.testing.assert_close(
+                output.hidden_states, torch.full_like(output.hidden_states, value)
+            )
+        self.assertFalse(
+            runner.canRun(
+                _build_decode_inputs(["draft", "other"], {"draft": 2, "other": 47})
+            )
+        )
+        self.assertFalse(
+            runner.canRun(
+                _build_decode_inputs(
+                    tags + ["extra"],
+                    {"unused": 31, "draft": 2, "other": 47, "extra": 99},
+                )
+            )
+        )
+
+    def test_single_draft_group_uses_direct_graph_inputs(self):
+        model = DraftBlockTableModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+            ["draft"],
+        )
+        for value in (2, 5):
+            inputs = _build_decode_inputs(["draft"], {"draft": value})
+            inputs.attention_inputs = inputs.attention_inputs["draft"]
+            expected = model.forward(inputs).hidden_states.clone()
+            self.assertTrue(runner.canRun(inputs))
+            output = runner.forward(inputs)
+            torch.cuda.synchronize()
+            torch.testing.assert_close(output.hidden_states, expected)
+
     def test_decode_heterogeneous_block_width_replay(self) -> None:
         for tags in (GROUP_TAGS, list(reversed(GROUP_TAGS))):
             for bpk in (4, 128):

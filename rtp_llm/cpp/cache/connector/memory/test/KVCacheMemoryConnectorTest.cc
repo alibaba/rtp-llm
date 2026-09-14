@@ -232,10 +232,11 @@ CacheConfig createDsv4TypedConnectorConfig() {
 // Assign `stride_bytes` to a single group of an already-built topology, keeping every other
 // group untouched.  Replaces DEV's direct per-group stride vector writes.
 void setGroupKvStrideBytes(CacheConfig& config, const std::string& tag, size_t stride_bytes) {
-    auto                block_nums = config.groupBlockNumsSnapshot();
-    std::vector<size_t> kv_strides;
-    std::vector<size_t> scale_strides;
+    std::vector<uint32_t> block_nums;
+    std::vector<size_t>   kv_strides;
+    std::vector<size_t>   scale_strides;
     for (const auto& group : config.topology().groups()) {
+        block_nums.push_back(group.block_num);
         kv_strides.push_back(group.kvBlockStrideBytes());
         scale_strides.push_back(group.kvScaleStrideBytes());
     }
@@ -355,22 +356,14 @@ private:
         return total;
     }
     size_t memoryCacheBlockBytes(const CacheConfig& cfg) const {
-        size_t     total           = 0;
-        const auto layer_group_ids = cfg.layerGroupIdsSnapshot();
-        for (size_t layer = 0; layer < static_cast<size_t>(cfg.layer_all_num()); ++layer) {
-            if (layer >= layer_group_ids.size()) {
-                continue;
-            }
-            for (int gid : layer_group_ids[layer]) {
-                if (gid < 0 || gid >= cfg.groupNums()) {
+        size_t total = 0;
+        for (const auto& layer : cfg.topology().layers()) {
+            for (const auto& group_ref : cfg.groupsForLayer(layer.layer_id)) {
+                const auto& group = group_ref.get();
+                if (!group.policy.enable_prefix_reuse) {
                     continue;
                 }
-                const auto policy = cfg.policyForGroup(static_cast<size_t>(gid));
-                if (!policy.enable_prefix_reuse) {
-                    continue;
-                }
-                total += cfg.kvBlockStrideBytesForGroup(static_cast<size_t>(gid))
-                         + cfg.kvScaleStrideBytesForGroup(static_cast<size_t>(gid));
+                total += group.kvBlockStrideBytes() + group.kvScaleStrideBytes();
             }
         }
         return total;

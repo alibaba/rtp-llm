@@ -101,7 +101,6 @@ void CacheTopology::validateAndBuildIndex() {
                                 group.tag.c_str(),
                                 group.seqSizePerBlock(),
                                 group.kernelSeqSizePerBlock());
-
     }
 
     for (size_t layer_index = 0; layer_index < layers_.size(); ++layer_index) {
@@ -123,7 +122,6 @@ void CacheTopology::validateAndBuildIndex() {
                                     tag.c_str());
         }
     }
-
 }
 
 size_t CacheTopology::groupIdForTag(std::string_view tag) const {
@@ -199,24 +197,6 @@ size_t CacheTopology::totalGroupBlockSizeBytes() const {
     return total;
 }
 
-std::vector<std::string> CacheTopology::groupTagsSnapshot() const {
-    std::vector<std::string> tags;
-    tags.reserve(groups_.size());
-    for (const auto& group : groups_) {
-        tags.push_back(group.tag);
-    }
-    return tags;
-}
-
-std::vector<CacheGroupType> CacheTopology::groupTypesSnapshot() const {
-    std::vector<CacheGroupType> types;
-    types.reserve(groups_.size());
-    for (const auto& group : groups_) {
-        types.push_back(group.policy.group_type);
-    }
-    return types;
-}
-
 std::vector<int> CacheTopology::groupIdsForLayer(int layer_id) const {
     std::vector<int> group_ids;
     for (const auto& tag : layer(layer_id).group_tags) {
@@ -236,15 +216,6 @@ std::vector<int> CacheTopology::layerIdsForGroup(size_t group_id) const {
         if (std::find(layer.group_tags.begin(), layer.group_tags.end(), tag) != layer.group_tags.end()) {
             ids.push_back(layer.layer_id);
         }
-    }
-    return ids;
-}
-
-std::vector<std::vector<int>> CacheTopology::layerGroupIdsSnapshot() const {
-    std::vector<std::vector<int>> ids;
-    ids.reserve(layers_.size());
-    for (const auto& layer : layers_) {
-        ids.push_back(groupIdsForLayer(layer.layer_id));
     }
     return ids;
 }

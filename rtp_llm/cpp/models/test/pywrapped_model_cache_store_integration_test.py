@@ -19,6 +19,8 @@ class CacheStoreForwardModel:
         self.seen_input_lengths: list[list[int]] = []
         self.seen_kernel_tables: dict[str, list[list[int]]] = {}
         self.seen_cache_tables: list[dict[str, dict[str, list[list[int]]]]] = []
+        self.seen_attention_tables: list[dict[str, list[list[int]]]] = []
+        self.seen_direct_inputs: list[bool] = []
 
     def initialize(self, resources) -> bool:
         self.kv_cache = resources.kv_cache
@@ -29,6 +31,14 @@ class CacheStoreForwardModel:
 
     def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
         attention_inputs = inputs.attention_inputs
+        self.seen_direct_inputs.append(not isinstance(attention_inputs, dict))
+        if isinstance(attention_inputs, dict):
+            self.seen_attention_tables.append(
+                {
+                    tag: item.kv_cache_kernel_block_id_device.cpu().tolist()
+                    for tag, item in attention_inputs.items()
+                }
+            )
         first_inputs = (
             next(iter(attention_inputs.values()))
             if isinstance(attention_inputs, dict)
@@ -98,6 +108,52 @@ def _record_for_request(result: dict, request_id: int) -> dict:
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def test_mtp_placeholders_preserve_model_tag_set_with_extra_payload_rows(self):
+        for scenario in ("mtp_placeholders", "mtp_placeholders_extra_payload"):
+            with self.subTest(scenario=scenario):
+                model = CacheStoreForwardModel()
+                result = run_scenario(model, scenario)
+                self.assertEqual(model.seen_direct_inputs, [False])
+                self.assertEqual(
+                    model.seen_attention_tables,
+                    [{"unused": [[3, 4]], "draft": [[1, 2]], "other": [[5, 6]]}],
+                )
+                self.assertEqual(set(model.seen_cache_tables[0]), {"draft"})
+                self.assertEqual(set(result["base_addresses"]), {"draft"})
+                record = _record_for_request(result, 401)
+                self.assertEqual(
+                    sorted(
+                        block["address"] - result["base_addresses"]["draft"]
+                        for block in record["blocks"]
+                    ),
+                    [32, 64],
+                )
+
+    def test_missing_mtp_placeholder_is_rejected_before_forward(self):
+        model = CacheStoreForwardModel()
+        with self.assertRaisesRegex(
+            RuntimeError, "missing model cache group tag=unused"
+        ):
+            run_scenario(model, "mtp_missing_placeholder")
+        self.assertEqual(model.forward_calls, 0)
+
+    def test_single_model_group_selects_direct_input_from_shared_payload(self):
+        model = CacheStoreForwardModel()
+        result = run_scenario(model, "single_model_extra_payload")
+        self.assertEqual(model.seen_direct_inputs, [True])
+        self.assertEqual(
+            model.seen_cache_tables,
+            [{"draft": {"physical": [[1, 2]], "kernel": [[1, 2]]}}],
+        )
+        record = _record_for_request(result, 401)
+        self.assertEqual(
+            sorted(
+                block["address"] - result["base_addresses"]["draft"]
+                for block in record["blocks"]
+            ),
+            [32, 64],
+        )
+
     def test_cacheless_multigroup_warmup_exposes_single_input(self):
         class WarmupModel(CacheStoreForwardModel):
             def _forward_one(self, inputs):

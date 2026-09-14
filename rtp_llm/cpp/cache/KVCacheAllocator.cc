@@ -1344,11 +1344,19 @@ void KVCacheAllocator::blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair
         const auto gid = static_cast<int>(config_.topology().groupIdForTag(mapping.tag));
         RTP_LLM_CHECK_WITH_INFO(
             static_cast<size_t>(gid) < group_block_pools_.size(), "missing block pool for group %d", gid);
-        const auto   copy_type = BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(gid)]->where(),
+        const auto  copy_type = BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(gid)]->where(),
                                                               group_block_pools_[static_cast<size_t>(gid)]->where());
-        const auto&  group     = config_.topology().groupById(static_cast<size_t>(gid));
-        const size_t buffers_per_layer = group.kvScaleStrideBytes() > 0 ? 2 : 1;
-        copy_nums[copy_type] += config_.layerIdsForGroup(static_cast<size_t>(gid)).size() * buffers_per_layer;
+        const auto& group     = config_.group(mapping.tag);
+        const auto  layer_ids = config_.layerIdsForGroup(mapping.tag);
+        const auto  main_layer_num = std::count_if(layer_ids.begin(), layer_ids.end(), [this](int layer_id) {
+            return layer_id >= 0 && static_cast<uint32_t>(layer_id) < config_.layer_num;
+        });
+        copy_nums[copy_type] += main_layer_num * (group.kvScaleStrideBytes() > 0 ? 2 : 1);
+        for (const auto& mtp_config : config_.mtp_sub_configs) {
+            const auto& mtp_group = mtp_config->group(mapping.tag);
+            copy_nums[copy_type] +=
+                mtp_config->layerIdsForGroup(mapping.tag).size() * (mtp_group.kvScaleStrideBytes() > 0 ? 2 : 1);
+        }
     }
 
     BatchCopyParams copy_params;
@@ -2067,25 +2075,10 @@ void KVCacheAllocator::blockBatchCopy(const torch::Tensor& copy_mapping) {
     RTP_LLM_CHECK_WITH_INFO(copy_mapping.device().is_cpu() && copy_mapping.scalar_type() == torch::kInt32
                                 && copy_mapping.is_contiguous() && copy_mapping.dim() == 2,
                             "cache block copy mapping must be a contiguous CPU int32 matrix");
-    if (copy_mapping.size(1) == 2) {
-        const auto* begin_ptr = reinterpret_cast<const BlockIdPair*>(copy_mapping.data_ptr());
-        blockBatchCopy(begin_ptr, begin_ptr + copy_mapping.size(0));
-        return;
-    }
-    RTP_LLM_CHECK_WITH_INFO(copy_mapping.size(1) == 3,
-                            "cache block copy mapping must have 2 legacy columns or 3 tagged columns, got %ld",
-                            copy_mapping.size(1));
-    const auto*                    mappings = reinterpret_cast<const GroupBlockIdPair*>(copy_mapping.data_ptr());
-    std::vector<TaggedBlockIdPair> tagged_mappings;
-    tagged_mappings.reserve(static_cast<size_t>(copy_mapping.size(0)));
-    for (int64_t i = 0; i < copy_mapping.size(0); ++i) {
-        RTP_LLM_CHECK_WITH_INFO(
-            mappings[i].group_id >= 0, "cache block copy mapping has invalid group_id=%d", mappings[i].group_id);
-        tagged_mappings.push_back({config_.topology().groupById(static_cast<size_t>(mappings[i].group_id)).tag,
-                                   mappings[i].src,
-                                   mappings[i].dst});
-    }
-    blockBatchCopyByGroup(tagged_mappings);
+    RTP_LLM_CHECK_WITH_INFO(
+        copy_mapping.size(1) == 2, "cache block copy mapping must have 2 columns, got %ld", copy_mapping.size(1));
+    const auto* begin_ptr = reinterpret_cast<const BlockIdPair*>(copy_mapping.data_ptr());
+    blockBatchCopy(begin_ptr, begin_ptr + copy_mapping.size(0));
 }
 bool KVCacheAllocator::cpShardThisGroupForCapacity(size_t gid) const {
     return cp_slot_mapper_ && cp_slot_mapper_->isSharded() && cp_slot_mapper_->blockRoundRobinGroup(config_, gid);

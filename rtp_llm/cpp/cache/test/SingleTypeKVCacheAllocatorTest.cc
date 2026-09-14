@@ -722,9 +722,12 @@ TEST_F(KVCacheAllocatorSinglePathTest, LayerCacheBase) {
 
     auto layout = allocator_->allLayerCacheBase();
     ASSERT_EQ(layout.groups().size(), 1u);
-    EXPECT_EQ(layout.topology().layerGroupIdsSnapshot(), (std::vector<std::vector<int>>(4, std::vector<int>{0})));
-    EXPECT_EQ(layout.topology().groupTypesSnapshot(), std::vector<CacheGroupType>{CacheGroupType::FULL});
-    EXPECT_EQ(layout.topology().groupTagsSnapshot(), std::vector<std::string>{"default"});
+    ASSERT_EQ(layout.topology().layers().size(), 4u);
+    for (const auto& layer : layout.topology().layers()) {
+        EXPECT_EQ(layer.group_tags, std::vector<std::string>{"default"});
+    }
+    EXPECT_EQ(layout.topology().group("default").policy.group_type, CacheGroupType::FULL);
+    EXPECT_EQ(publishedGroupTags(layout.topology()), std::vector<std::string>{"default"});
     const auto& default_layout = layout.group("default");
     EXPECT_EQ(default_layout.size(), config.layer_num);
     EXPECT_EQ(default_layout.activeLayerCount(), config.layer_num);
@@ -742,14 +745,14 @@ TEST_F(KVCacheAllocatorSinglePathTest, ManagerLayoutsPreserveSingleTypeGroupTens
     ASSERT_TRUE(manager->init());
 
     const auto all_layout  = manager->allLayerCacheBase();
-    const auto main_layout = manager->getMainModelCacheLayerLayout();
+    const auto main_layout = manager->getMainModelGroupedCacheLayerLayout();
     ASSERT_EQ(all_layout.group("default").size(), 8u);
 
     auto verify_layout = [](const GroupedCacheLayerLayout& local_layout,
                             const GroupedCacheLayerLayout& all,
                             size_t                         global_begin) {
-        ASSERT_EQ(local_layout.topology().groupTypesSnapshot(), std::vector<CacheGroupType>{CacheGroupType::FULL});
-        ASSERT_EQ(local_layout.topology().groupTagsSnapshot(), std::vector<std::string>{"default"});
+        ASSERT_EQ(local_layout.topology().group("default").policy.group_type, CacheGroupType::FULL);
+        ASSERT_EQ(publishedGroupTags(local_layout.topology()), std::vector<std::string>{"default"});
         const auto& local_group = local_layout.group("default");
         const auto& all_group   = all.group("default");
         for (size_t local_layer = 0; local_layer < local_group.size(); ++local_layer) {
@@ -770,10 +773,10 @@ TEST_F(KVCacheAllocatorSinglePathTest, ManagerLayoutsPreserveSingleTypeGroupTens
     };
 
     verify_layout(main_layout, all_layout, /*global_begin=*/0);
-    verify_layout(manager->getMTPModuleCacheLayerLayout(0), all_layout, /*global_begin=*/2);
-    verify_layout(manager->getMTPModuleCacheLayerLayout(1), all_layout, /*global_begin=*/5);
-    EXPECT_THROW(manager->getMTPModuleCacheLayerLayout(-1), std::runtime_error);
-    EXPECT_THROW(manager->getMTPModuleCacheLayerLayout(2), std::runtime_error);
+    verify_layout(manager->getMTPModuleGroupedCacheLayerLayout(0), all_layout, /*global_begin=*/2);
+    verify_layout(manager->getMTPModuleGroupedCacheLayerLayout(1), all_layout, /*global_begin=*/5);
+    EXPECT_THROW(manager->getMTPModuleGroupedCacheLayerLayout(-1), std::runtime_error);
+    EXPECT_THROW(manager->getMTPModuleGroupedCacheLayerLayout(2), std::runtime_error);
 }
 
 // Test block copy
@@ -1057,6 +1060,67 @@ TEST_F(KVCacheAllocatorSinglePathTest, BlockBatchCopyBuffer) {
                 << "V cache mismatch for block pair (" << src_block << "->" << dst_block << "), layer " << layer_id;
         }
     }
+}
+
+TEST_F(KVCacheAllocatorSinglePathTest, BlockBatchCopyBufferRejectsInvalidMappings) {
+    auto config          = createSingleTypeTestConfig();
+    allocator_ = std::make_shared<KVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+
+    EXPECT_NO_THROW(allocator_->blockBatchCopy(torch::empty({0, 2}, torch::kInt32)));
+    EXPECT_ANY_THROW(allocator_->blockBatchCopy(torch::zeros({1, 3}, torch::kInt32)));
+    EXPECT_ANY_THROW(allocator_->blockBatchCopy(torch::empty({0, 3}, torch::kInt32)));
+    EXPECT_ANY_THROW(allocator_->blockBatchCopy(torch::zeros({1, 1}, torch::kInt32)));
+    EXPECT_ANY_THROW(allocator_->blockBatchCopy(torch::zeros({1, 2}, torch::kInt64)));
+    EXPECT_ANY_THROW(allocator_->blockBatchCopy(torch::zeros({2}, torch::kInt32)));
+    EXPECT_ANY_THROW(allocator_->blockBatchCopy(torch::zeros({1, 1, 2}, torch::kInt32)));
+    const auto noncontiguous = torch::zeros({2, 4}, torch::kInt32).slice(1, 0, 4, 2);
+    ASSERT_FALSE(noncontiguous.is_contiguous());
+    EXPECT_ANY_THROW(allocator_->blockBatchCopy(noncontiguous));
+}
+
+TEST_F(KVCacheAllocatorSinglePathTest, BlockBatchCopyBufferSupportsDisjointLayerGroups) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/2, /*block_num=*/4, /*seq_size_per_block=*/2);
+    config.fromGroupedSpecs(
+        {makeMhaSpec("first", 2, DataType::TYPE_FP16, 1, 1), makeMhaSpec("second", 2, DataType::TYPE_FP16, 1, 1)},
+        {{0}, {1}},
+        {CacheGroupType::FULL, CacheGroupType::FULL},
+        {"first", "second"});
+    ASSERT_EQ(config.groupNums(), 2);
+    ASSERT_TRUE(config.topology().hasOneGroupPerLayer());
+    allocator_ = std::make_shared<KVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+
+    for (int layer_id = 0; layer_id < 2; ++layer_id) {
+        const auto& group = config.topology().soleGroupForLayer(layer_id);
+        const auto  src   = allocator_->convertIndexToAddr(layer_id, group.tag, 1);
+        const auto  dst   = allocator_->convertIndexToAddr(layer_id, group.tag, 2);
+        memset(src.kv_addr, layer_id + 17, group.kvBlockStrideBytes());
+        memset(dst.kv_addr, 0, group.kvBlockStrideBytes());
+    }
+    const auto mapping = torch::tensor({1, 2}, torch::kInt32).reshape({1, 2});
+    EXPECT_NO_THROW(allocator_->blockBatchCopy(mapping));
+    for (int layer_id = 0; layer_id < 2; ++layer_id) {
+        const auto& group = config.topology().soleGroupForLayer(layer_id);
+        const auto  src   = allocator_->convertIndexToAddr(layer_id, group.tag, 1);
+        const auto  dst   = allocator_->convertIndexToAddr(layer_id, group.tag, 2);
+        EXPECT_EQ(memcmp(src.kv_addr, dst.kv_addr, group.kvBlockStrideBytes()), 0);
+    }
+}
+
+TEST_F(KVCacheAllocatorSinglePathTest, BlockBatchCopyBufferRejectsMultipleGroupsOnOneLayer) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/1, /*block_num=*/4, /*seq_size_per_block=*/2);
+    config.fromGroupedSpecs(
+        {makeMhaSpec("first", 2, DataType::TYPE_FP16, 1, 1), makeMhaSpec("second", 2, DataType::TYPE_FP16, 1, 1)},
+        {{0}, {0}},
+        {CacheGroupType::FULL, CacheGroupType::FULL},
+        {"first", "second"});
+    ASSERT_FALSE(config.topology().hasOneGroupPerLayer());
+    allocator_ = std::make_shared<KVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+    EXPECT_NO_THROW(allocator_->blockBatchCopy(torch::empty({0, 2}, torch::kInt32)));
+    const auto mapping = torch::tensor({1, 2}, torch::kInt32).reshape({1, 2});
+    EXPECT_ANY_THROW(allocator_->blockBatchCopy(mapping));
 }
 
 // Test getter methods
