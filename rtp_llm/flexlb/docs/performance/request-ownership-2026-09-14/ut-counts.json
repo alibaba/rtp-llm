@@ -1,0 +1,38 @@
+{
+  "flexlb-cache": {
+    "tests": 27,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "flexlb-api": {
+    "tests": 105,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 1
+  },
+  "flexlb-mock-engine": {
+    "tests": 325,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "flexlb-common": {
+    "tests": 191,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "flexlb-sync": {
+    "tests": 842,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "flexlb-grpc": {
+    "tests": 15,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  }
+}
