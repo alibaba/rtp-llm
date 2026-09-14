@@ -959,7 +959,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("EAGLE3", SP_TYPE_EAGLE3)
         .value("EAGLE", SP_TYPE_EAGLE)
         .value("DETERMINISTIC", SP_TYPE_DETERMINISTIC)
-        .value("DSPARK", SP_TYPE_DSPARK);
+        .value("DSPARK", SP_TYPE_DSPARK)
+        .value("DFLASH", SP_TYPE_DFLASH);
 
     // Register SpeculativeExecutionConfig
     py::class_<SpeculativeExecutionConfig>(m, "SpeculativeExecutionConfig")

@@ -29,16 +29,22 @@ cc_library(
     copts = test_copts,
     deps =  [
         "//rtp_llm/cpp/testing:device_test_utils",
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/engine_base:weights_converter",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ] + torch_deps() + cuda13_torch_link_deps,
+    ] + torch_deps() + cuda13_torch_link_deps + select({
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+        ],
+        "//conditions:default": [
+            "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+    }),
     alwayslink = 1,
     visibility = ["//visibility:public"],
 )

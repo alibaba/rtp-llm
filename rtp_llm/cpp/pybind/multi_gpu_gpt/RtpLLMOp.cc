@@ -48,7 +48,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     auto            sp_model = propose_model.attr("model");
     SpeculativeType sp_type  = propose_model.attr("sp_type").cast<SpeculativeType>();
     RTP_LLM_CHECK(sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE3 || sp_type == SP_TYPE_EAGLE
-                  || sp_type == SP_TYPE_DSPARK);
+                  || isBlockDraftType(sp_type));
 
     std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_params =
         std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
@@ -69,7 +69,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         py_eplb = sp_model.attr("py_eplb");
     }
 
-    if (sp_type == SP_TYPE_DSPARK) {
+    if (isBlockDraftType(sp_type)) {
         // DSpARK is one multi-layer draft model: gen_num_per_cycle controls the
         // width of its draft block, not the number of one-layer MTP modules, so
         // it keeps the full checkpoint config instead of an MTP module plan.
@@ -309,7 +309,7 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
                                                                     py_eplb);
             model_id_++;
         } else if (sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3
-                   || sp_type == SP_TYPE_DSPARK) {
+                   || isBlockDraftType(sp_type)) {
             params = prepareMTPEngineInitParams(model_id_, propose_model, base_params);
             if (sp_type == SP_TYPE_MTP) {
                 size_t gen_num_per_cycle = base_params.sp_config.gen_num_per_cycle;
