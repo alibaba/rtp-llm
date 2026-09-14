@@ -375,9 +375,10 @@ def init_vit_group_args(parser, vit_config):
         help="LLM 侧单个 RDMA receipt 的总载荷上限，默认 8GiB，与 RDMA 总显存池大小一致",
     )
     # KVMeta connection, registration identity, SDK, and timeout settings are
-    # derived from RECO_CLIENT_CONFIG after parsing.  Keeping them out of this
-    # argument group prevents a second set of client env vars from drifting
-    # away from the fixed-block Meta client that shares the same KVCM service.
+    # derived from the existing RECO_* KVCM configuration after parsing.
+    # RECO_CLIENT_CONFIG takes precedence when present. Keeping them out of
+    # this argument group prevents a second set of client env vars from
+    # drifting away from the fixed-block Meta client sharing the KVCM service.
     vit_group.add_argument(
         "--mm_kvcm_object_gc_timeout_ms",
         env_name="MM_KVCM_OBJECT_GC_TIMEOUT_MS",

@@ -320,8 +320,9 @@ class MMRdmaConfig:
 class MMKvcmConfig:
     def __init__(self):
         # Client connection and registration fields are resolved at startup
-        # from RECO_CLIENT_CONFIG.  They intentionally have no independent
-        # MM_KVCM_* environment variables.
+        # from the existing RECO_* KVCM settings (RECO_CLIENT_CONFIG takes
+        # precedence when present). They intentionally have no independent
+        # MM_KVCM_* connection or identity environment variables.
         self.addresses: List[str] = []
         self.instance_id: str = ""
         self.instance_group: str = ""

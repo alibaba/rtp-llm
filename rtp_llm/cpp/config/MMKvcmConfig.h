@@ -25,8 +25,8 @@ inline constexpr std::size_t kMMKvcmMaxLogicalValues     = 16384;
 inline constexpr std::size_t kMMKvcmMaxTensorDimensions  = 16;
 
 // Configuration for the isolated KVMeta exact-size object path used by EPD
-// multimodal embeddings. Python derives the client fields from the shared
-// fixed-block KVCM config while prefixing both identities with "kve_". The
+// multimodal embeddings. Python derives the client fields from the existing
+// fixed-block KVCM settings while prefixing both identities with "kve_". The
 // data schema and runtime ownership remain independent of the KV-cache path.
 struct MMKvcmConfig {
     std::vector<std::string> addresses;

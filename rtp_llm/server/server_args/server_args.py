@@ -543,8 +543,9 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
     py_env_configs.server_config.validate_allocator_dump_config()
 
     # Derive the isolated exact-object identity and data-plane schema from the
-    # same final client config consumed by the fixed-block Meta path.  Import
-    # this only for the opt-in mode so existing grpc/rdma startup cannot gain a
+    # existing fixed-block Meta settings. RECO_CLIENT_CONFIG takes precedence;
+    # otherwise the established split RECO_* fields are reused. Import this
+    # only for the opt-in mode so existing grpc/rdma startup cannot gain a
     # KVCM/VIPServer dependency or validation side effect.
     if py_env_configs.vit_config.output_transport.mode == "kvcm":
         from rtp_llm.config.mm_kvcm_config import configure_mm_kvcm_client

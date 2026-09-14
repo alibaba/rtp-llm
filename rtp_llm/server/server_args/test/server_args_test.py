@@ -4,6 +4,7 @@ import json
 import os
 import pickle
 import sys
+from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import patch
 
@@ -843,6 +844,59 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(kvcm.user_data, "epd-model-a")
         self.assertEqual(kvcm.call_timeout_ms, 5000)
         self.assertEqual(kvcm.write_timeout_seconds, 30)
+
+    def test_setup_args_reuses_online_split_reco_configuration_for_kvcm(self):
+        from rtp_llm.server.server_args import server_args
+
+        online_environment = {
+            "RECO_ENABLE_VIPSERVER": "1",
+            "RECO_VIPSERVER_DOMAIN": ("kvcm-na130-m3-bailian-grpc-2.vipserver"),
+            "RECO_INSTANCE_GROUP": "pace_group_m3",
+            "RECO_PUT_TIMEOUT_MS": "100000",
+            "RECO_GET_TIMEOUT_MS": "100000",
+            "RECO_MODEL_SDK_CONFIG": json.dumps(
+                [
+                    {
+                        "type": "pace",
+                        "sdk_log_file_path": "logs/pace_client.log",
+                        "sdk_log_level": "INFO",
+                    }
+                ]
+            ),
+            "TAIR_MEMPOOL_KMONITOR_SINK_ADDRESS": "127.0.0.1:4141",
+            "KVCM_LOG_LEVEL": "INFO",
+        }
+        resolved_hosts = [SimpleNamespace(ip="10.23.1.7", port=19001)]
+        with patch.dict(os.environ, online_environment, clear=True), patch(
+            "rtp_llm.config.mm_kvcm_config._default_vipserver_resolver",
+            return_value=resolved_hosts,
+        ) as resolver:
+            config = server_args.setup_args(["--mm_transport_mode", "kvcm"])
+
+        resolver.assert_called_once_with("kvcm-na130-m3-bailian-grpc-2.vipserver")
+        kvcm = config.vit_config.output_transport.kvcm
+        transfer = json.loads(kvcm.transfer_client_config)
+        self.assertEqual(kvcm.addresses, ["10.23.1.7:19001"])
+        self.assertEqual(kvcm.instance_group, "kve_pace_group_m3")
+        self.assertEqual(kvcm.instance_id, "kve_pace_group_m3")
+        self.assertEqual(kvcm.call_timeout_ms, 1500)
+        self.assertEqual(kvcm.write_timeout_seconds, 105)
+        self.assertEqual(transfer["sdk_config"]["thread_num"], 4)
+        self.assertEqual(transfer["sdk_config"]["queue_size"], 2000)
+        self.assertEqual(
+            transfer["sdk_config"]["timeout_config"],
+            {"put_timeout_ms": 100_000, "get_timeout_ms": 100_000},
+        )
+        self.assertEqual(
+            transfer["sdk_config"]["sdk_backend_configs"],
+            [
+                {
+                    "type": "pace",
+                    "sdk_log_file_path": "logs/pace_client.log",
+                    "sdk_log_level": "INFO",
+                }
+            ],
+        )
 
     def test_setup_args_default_transport_ignores_kvcm_only_config(self):
         from rtp_llm.config.py_config_modules import MM_TRANSPORT_MODE_GRPC

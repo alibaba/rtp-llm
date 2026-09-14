@@ -72,7 +72,7 @@ flowchart LR
 
 | 组件 | 职责 |
 |---|---|
-| `MMTransportConfig` / server args | 解析模式和大小上限，并从共享 `RECO_CLIENT_CONFIG` 派生 KVMeta client 配置，默认保持 `grpc` |
+| `MMTransportConfig` / server args | 解析模式和大小上限，并从现有 `RECO_*` KVCM 配置派生 KVMeta client 配置，默认保持 `grpc` |
 | `KvcmOutputBackend` | 校验 ViT 输出、拼接逻辑 tensor、切片、生成 UUID key、构造 receipt、维护 release/GC |
 | RTP Python `RtpKvMetaObjectClient` | 接收一份 RTP `kvcm_config`，映射通用 client 参数，并负责 client 注册与生命周期 |
 | KVCM Python `KvMetaObjectClient` | 将连续 torch tensor 转为 caller-owned pointer descriptor，并按 64 keys/4 GiB 分批 Save/Remove |
@@ -159,9 +159,8 @@ with RtpKvMetaObjectClient(transport_config.kvcm) as client:
     client.remove(keys)
 ```
 
-构造 client 时即完成通用配置校验和带 `kve_` 前缀 instance 的注册。业务调用方不再重复解析
-`RECO_CLIENT_CONFIG`，也不直接拼装 KVCM 通用 client 的连接、SDK 或超时参数；生产 backend 负责在异常路径和
-关闭路径回收 client。
+构造 client 时即完成通用配置校验和带 `kve_` 前缀 instance 的注册。业务调用方不再解析 `RECO_*`，
+也不直接拼装 KVCM 通用 client 的连接、SDK 或超时参数；生产 backend 负责在异常路径和关闭路径回收 client。
 
 ### 6.1 写入前校验和布局
 
@@ -322,13 +321,14 @@ reclaimer 等运维兜底，不能只依赖进程内 GC。
 
 ### 9.2 运行配置
 
-固定 block Meta client 与 EMB KVMeta client 连接同一 KVCM 主端口，统一从 `RECO_CLIENT_CONFIG` 读取
-endpoint、注册身份、SDK、metadata timeout 和 `user_data`。EMB 不再有第二套 client 环境变量：
+固定 block Meta client 与 EMB KVMeta client 连接同一 KVCM 主端口。RTP 优先读取已有的
+`RECO_CLIENT_CONFIG`；该字段为空时，直接复用线上固定 block 路径已经使用的分字段 `RECO_*` 配置。
+EMB 不再有第二套 endpoint、identity、SDK 或 timeout 环境变量：
 
 | 环境变量 | 默认值 | 说明 |
 |---|---:|---|
 | `MM_TRANSPORT_MODE` | `grpc` | 启用时设为 `kvcm` |
-| `RECO_CLIENT_CONFIG` | 空 | 固定 block 与 EMB 共用的 KVCM client config map；选择 `kvcm` 时必须显式提供 |
+| `RECO_CLIENT_CONFIG` | 空 | 可选的 KVCM client config map；非空时固定 block 与 EMB 都优先使用它 |
 | `MM_KVCM_OBJECT_GC_TIMEOUT_MS` | `180000` | ViT 未收到 release 的兜底回收时间 |
 | `MM_KVCM_MAX_OBJECT_BYTES` | `1 GiB` | 单物理 object 上限 |
 | `MM_KVCM_MAX_RECEIPT_BYTES` | `8 GiB` | 单 receipt 总 tensor bytes 上限 |
@@ -336,21 +336,39 @@ endpoint、注册身份、SDK、metadata timeout 和 `user_data`。EMB 不再有
 | `MM_KVCM_MAX_PENDING_BYTES` | `64 GiB` | ViT 进程未确认回收的 object 总字节上限 |
 | `MM_RDMA_RELEASE_TIMEOUT_MS` | `1000` | 历史命名；实际是所有 external transport 共用的 release RPC deadline |
 
-`RECO_CLIENT_CONFIG` 是一个 client config map。KVMeta 选择规则与旧 data-plane client 保持可验证的一致性：
+分字段模式按以下关系复用现有配置：
+
+| KVMeta 配置 | 现有 RTP 配置来源 |
+|---|---|
+| 服务发现 | `RECO_ENABLE_VIPSERVER` + `RECO_VIPSERVER_DOMAIN`，或 `RECO_SERVER_ADDRESS` |
+| instance group | `kve_<RECO_INSTANCE_GROUP>` |
+| instance id | `kve_<RECO_INSTANCE_ID_SALT>`；salt 为空时稳定回退为 `kve_<RECO_INSTANCE_GROUP>` |
+| metadata timeout/retry | `RECO_META_CHANNEL_{RETRY_TIME,CONNECTION_TIMEOUT,CALL_TIMEOUT}` |
+| SDK worker/queue | `RECO_STORAGE_THREAD_NUM`、`RECO_STORAGE_QUEUE_SIZE` |
+| data timeout | `RECO_PUT_TIMEOUT_MS`、`RECO_GET_TIMEOUT_MS` |
+| backend SDK | `RECO_MODEL_SDK_CONFIG` |
+| registration user data | `RECO_MODEL_USER_DATA` |
+
+固定 block 自动配置模式的最终 instance id 要到 C++ 初始化阶段才结合模型和 cache 拓扑生成。KVMeta 不重算、
+不回写该值，避免让 EMB 启动影响主链路；它只使用上表中已经存在且能保证 E/P/D 一致的稳定身份输入。
+`TAIR_MEMPOOL_KMONITOR_SINK_ADDRESS`、`KVCM_LOG_LEVEL` 等 SDK/进程级环境变量由原 KVCM 组件直接读取，
+RTP 不复制也不改写。
+
+当 `RECO_CLIENT_CONFIG` 非空时，它是一个 client config map。KVMeta 选择规则与旧 data-plane client 保持
+可验证的一致性：
 
 - map 有空 key 时选择空 key 对应项；旧 C++ `std::map::begin()` 也必然选择该项；
 - 没有空 key 时只允许 map 中恰好有一项；多个非空 key 会拒绝启动，避免 Python 与 C++ 选择不同实例；
-- 不接受自动生成模式。`RECO_CLIENT_CONFIG` 为空时，旧 Meta 的最终 `instance_id` 要到 C++ 初始化阶段才通过
-  模型和拓扑哈希生成，Python 不能安全重算，因此 KVMeta 模式要求提供包含最终身份的 config map。
 
-RTP 深拷贝选中项后生成内部 transfer JSON，不修改或回写 `RECO_CLIENT_CONFIG`：
+RTP 从显式 map 或分字段配置构造独立的内部 transfer JSON，不修改或回写固定 block 配置：
 
 | 字段 | KVMeta 派生值 |
 |---|---|
-| `instance_group` | `kve_<原 instance_group>` |
-| `instance_id` | `kve_<原 instance_id>` |
+| `instance_group` | 显式 map 为 `kve_<原 instance_group>`；分字段模式见上表 |
+| `instance_id` | 显式 map 为 `kve_<原 instance_id>`；分字段模式见上表 |
 | `address` | 原静态 endpoints；VIPServer 模式在启动时解析为同一服务的静态 endpoint snapshot |
-| `sdk_config` / `model_deployment` | 原样复用 |
+| `sdk_config` | 原样复用；分字段模式由现有 thread/queue/timeout/backend 字段构造 |
+| `model_deployment` | 显式 map 原样复用；分字段模式使用 KVCM KVMeta 的固定 opaque-object 描述 |
 | `block_size` | `1`，仅为 exact-object schema marker |
 | `location_spec_infos` | `{"value": 1}` |
 | `location_spec_groups` | `{}` |
@@ -364,7 +382,7 @@ RTP 深拷贝选中项后生成内部 transfer JSON，不修改或回写 `RECO_C
 - 满足
   `write_timeout_seconds * 1000 > put_timeout_ms + 3 * call_timeout_ms`。
 
-`call_timeout_ms` 取共享配置的 `meta_channel_config.call_timeout`。`write_timeout_seconds` 没有第二个环境变量，
+`call_timeout_ms` 取对应的 metadata call timeout。`write_timeout_seconds` 没有第二个环境变量，
 按上述严格不等式自动取最小整数秒，并保证至少 30 秒、最多 1800 秒；无法满足时启动失败。
 
 旧的 `MM_KVCM_ADDRESSES`、`MM_KVCM_INSTANCE_ID`、`MM_KVCM_INSTANCE_GROUP`、`MM_KVCM_USER_DATA`、
@@ -385,8 +403,8 @@ ViT writer 和 LLM reader，否则可能在一端写入后被另一端按不同�
   失败。未启用 flag 的普通 LLM 构建始终选择无依赖 stub；
 - KVCM server 必须设置 `kvcm.kv_meta.enabled=true`；KVMeta 与固定 block MetaService 共用
   `kvcm.service.rpc_port`，通过 protobuf service 全名区分路由；
-- 遗留非零 `kvcm.kv_meta.rpc_port` 会被新版 KVCM fail closed；升级时必须同时迁移服务端 flag 和
-  `RECO_CLIENT_CONFIG.address`，不能继续指向旧的独立端口；
+- 遗留非零 `kvcm.kv_meta.rpc_port` 会被新版 KVCM fail closed；升级时必须迁移服务端 flag，并让现有
+  `RECO_VIPSERVER_DOMAIN` / `RECO_SERVER_ADDRESS`（或显式 `RECO_CLIENT_CONFIG.address`）指向主 RPC 端口；
 - KVCM 中必须同时存在旧 Meta 使用的 `<原 instance_group>` 和 KVMeta 使用的
   `kve_<原 instance_group>`；两种 proto 共用端口但不能混用 Instance Group；
 - Python/C++ object client 在创建时先校验 transfer config，再调用 KVMeta `RegisterInstance`；关闭 client
@@ -400,18 +418,33 @@ ViT writer 和 LLM reader，否则可能在一端写入后被另一端按不同�
 
 ### 10.1 推荐部署顺序
 
-1. 在 KVCM 配置中设置 `kvcm.kv_meta.enabled=true`，让共享 `RECO_CLIENT_CONFIG.address` 指向
-   `kvcm.service.rpc_port`；已有 group 为 `<group>` 时，预先创建只包含 KVMeta instance 的
-   `kve_<group>`；
+1. 在 KVCM 配置中设置 `kvcm.kv_meta.enabled=true`，让现有 VIPServer domain / server address 指向
+   `kvcm.service.rpc_port`；已有 group 为 `<group>` 时，预先创建只包含 KVMeta instance 的 `kve_<group>`；
 2. 准备与 KVCM server 协议匹配、包含 object API 的 client RPM 和 `kvcm_py_client` wheel；
 3. 在 ViT Python 环境安装 wheel，并用 `--define=use_kvcm_emb_storage=true` 构建包含 native reader 的 LLM；
-4. 在 ViT 和 LLM 两端设置同一 `RECO_CLIENT_CONFIG`，按容量设置 `MM_KVCM_*` policy 上限，再设置
-   `MM_TRANSPORT_MODE=kvcm`；
+4. 保持 ViT 和 LLM 两端现有 `RECO_*` KVCM 配置一致，按容量按需覆盖 `MM_KVCM_*` policy 上限，再设置
+   `MM_TRANSPORT_MODE=kvcm`；不需要新增 EMB 专用 KVCM client 变量；
 5. 先用 CPU 小对象验证 write -> receipt -> load -> release，再验证目标 CUDA/backend 配置；
 6. 观察 ViT pending/GC 与 KVCM capacity，确认正常 release 后 metadata 收敛，并配置进程 crash 后的 orphan
    运维策略。
 
-共享配置骨架如下。这里仍填写固定 block 的原始 group/id；RTP 会为 KVMeta 自动派生
+若线上已经使用分字段配置，最小增量只有 transport 开关，例如：
+
+```text
+RECO_ENABLE_VIPSERVER=1
+RECO_VIPSERVER_DOMAIN=kvcm-na130-m3-bailian-grpc-2.vipserver
+RECO_INSTANCE_GROUP=pace_group_m3
+RECO_PUT_TIMEOUT_MS=100000
+RECO_GET_TIMEOUT_MS=100000
+RECO_MODEL_SDK_CONFIG=[{"type":"pace","sdk_log_file_path":"logs/pace_client.log","sdk_log_level":"INFO"}]
+MM_TRANSPORT_MODE=kvcm
+```
+
+这会派生 `instance_group=kve_pace_group_m3`、`instance_id=kve_pace_group_m3`；SDK thread/queue 和 metadata
+timeout 使用 RTP 既有默认值。显式配置了 `RECO_INSTANCE_ID_SALT` 时，instance id 改为
+`kve_<RECO_INSTANCE_ID_SALT>`。
+
+需要完整覆盖时仍可使用下面的 `RECO_CLIENT_CONFIG` 骨架。这里填写固定 block 的原始 group/id；RTP 会派生
 `kve_epd`/`kve_epd-model` 和 exact-object marker。空 `sdk_backend_configs` 会保留 KVCM client 的编译时默认值，
 需要 mountpoint、凭据或其他 backend 参数时必须显式覆盖：
 
@@ -461,10 +494,10 @@ KVMeta 上限或无法在 1800 秒内满足预算，RTP 在注册 instance 之�
 
 | 测试 | 覆盖范围 |
 |---|---|
-| `mm_kvcm_config_test.py` | 共享 config 选择、`kve_` 身份派生、严格 JSON/UTF-8/地址/VIPServer/timeout 校验、旧变量拒绝、失败原子性和 grpc 主链路隔离 |
+| `mm_kvcm_config_test.py` | 显式 map 优先级、线上分字段 RECO 配置复用、`kve_` 身份派生、严格 JSON/UTF-8/地址/VIPServer/timeout 校验、旧变量拒绝、失败原子性和 grpc 主链路隔离 |
 | `mm_output_transport_test.py` | 使用 fake writer 覆盖 Python producer 的 receipt、切片、rollback、release、GC、shutdown races、in-flight/全局 pending 容量、post-close retry、日志脱敏和输入上限；另覆盖 factory → packaged-client contract → output metrics → release/close 组合链路，以及默认 gRPC 不导入 KVCM/RDMA 可选模块的主链路隔离 |
 | `MMKvcmTransportTest` / `MMKvcmNativeClientTest` | C++ reader、manifest/reassembly、真实分片字节与 receipt 顺序、deadline/release 失败、client 配置、对象和分批边界，以及首个 provider mutation 前完整预构建所有 service batches |
-| `mm_kvcm_cross_repo_integration_test.py` | 共享旧 Meta config → `kve_` 派生 → RTP transport factory/`MMOutputTransport` → KVCM wheel object client 注册 → 同端口真实 KVCM service → proxy-routed release/GC；校验变长 payload 字节，并等待全部 listener/KVMeta recovery ready、检查停机日志无非预期 ERROR/FATAL/Sanitizer |
+| `mm_kvcm_cross_repo_integration_test.py` | 分字段 RECO/PACE config → `kve_` 派生 → RTP transport factory/`MMOutputTransport` → KVCM wheel object client 注册；同时用旧 Meta proto 在同一 KVCM 主端口注册固定块实例，再验证 EMB write/load/release/GC 和变长 payload 字节，并检查全部 listener/recovery/停机状态及 ERROR/FATAL/Sanitizer 日志 |
 
 跨仓测试执行生产 factory、`KvcmOutputBackend.create`、`MMOutputTransport`、proxy release router 和 KVCM Python
 client，但不执行 C++ reader；reader 的同一 receipt/object 契约由内容级 C++ UT 覆盖。完整 RTP 进程、GPU tensor

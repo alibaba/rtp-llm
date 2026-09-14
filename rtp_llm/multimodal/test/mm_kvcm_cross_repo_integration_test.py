@@ -22,6 +22,7 @@ import uuid
 from contextlib import contextmanager
 from importlib import metadata
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import TestCase, main, skipUnless
 from urllib import request as urllib_request
 
@@ -30,6 +31,7 @@ import torch
 
 from rtp_llm.config.mm_kvcm_config import (
     KVE_INSTANCE_PREFIX,
+    configure_mm_kvcm_client,
     derive_mm_kvcm_client_config,
 )
 from rtp_llm.config.py_config_modules import MM_TRANSPORT_MODE_KVCM, MMTransportConfig
@@ -480,56 +482,84 @@ def _transport_config(
     instance_id: str,
     instance_group: str,
     gc_timeout_ms: int,
+    use_split_reco_fields: bool = False,
 ):
-    shared_client_config = json.dumps(
-        {
-            "": {
-                "enable_vipserver": False,
-                "vipserver_domain": "",
-                "instance_group": instance_group,
-                "instance_id": instance_id,
-                "address": [endpoint],
-                "block_size": 128,
-                "location_spec_infos": {"tp0": 4096},
-                "location_spec_groups": {},
-                "meta_channel_config": {
-                    "retry_time": 3,
-                    "connection_timeout": 3_000,
-                    "call_timeout": 3_000,
-                },
-                "sdk_config": {
-                    "thread_num": 2,
-                    "queue_size": 64,
-                    "sdk_backend_configs": [],
-                    "timeout_config": {
-                        "get_timeout_ms": 10_000,
-                        "put_timeout_ms": 10_000,
-                    },
-                },
-                "model_deployment": {
-                    "model_name": "rtp-mm-kvcm-integration",
-                    "dtype": "fp32",
-                    "use_mla": False,
-                    "tp_size": 1,
-                    "dp_size": 1,
-                    "pp_size": 1,
-                    "extra": "",
-                    "user_data": "rtp-mm-kvcm-integration",
-                },
-            }
-        }
-    )
-    derived = derive_mm_kvcm_client_config(shared_client_config)
+    primary_client_config = {
+        "enable_vipserver": False,
+        "vipserver_domain": "",
+        "instance_group": instance_group,
+        "instance_id": instance_id,
+        "address": [endpoint],
+        "block_size": 128,
+        "location_spec_infos": {"tp0": 4096},
+        "location_spec_groups": {},
+        "meta_channel_config": {
+            "retry_time": 3,
+            "connection_timeout": 3_000,
+            "call_timeout": 3_000,
+        },
+        "sdk_config": {
+            "thread_num": 2,
+            "queue_size": 64,
+            "sdk_backend_configs": [],
+            "timeout_config": {
+                "get_timeout_ms": 10_000,
+                "put_timeout_ms": 10_000,
+            },
+        },
+        "model_deployment": {
+            "model_name": "rtp-mm-kvcm-integration",
+            "dtype": "fp32",
+            "use_mla": False,
+            "tp_size": 1,
+            "dp_size": 1,
+            "pp_size": 1,
+            "extra": "",
+            "user_data": "rtp-mm-kvcm-integration",
+        },
+    }
     config = MMTransportConfig()
     config.mode = MM_TRANSPORT_MODE_KVCM
+    if use_split_reco_fields:
+        runtime_config = SimpleNamespace(
+            vit_config=SimpleNamespace(output_transport=config),
+            kv_cache_config=SimpleNamespace(
+                reco_client_config="",
+                reco_enable_vipserver=False,
+                reco_vipserver_domain="",
+                reco_server_address=endpoint,
+                reco_instance_group=instance_group,
+                reco_instance_id_salt="",
+                reco_meta_channel_retry_time=3,
+                reco_meta_channel_connection_timeout=6_000,
+                reco_meta_channel_call_timeout=1_500,
+                reco_storage_thread_num=4,
+                reco_storage_queue_size=2_000,
+                reco_put_timeout_ms=100_000,
+                reco_get_timeout_ms=100_000,
+                reco_model_sdk_config=json.dumps(
+                    [
+                        {
+                            "type": "pace",
+                            "sdk_log_file_path": "logs/pace_client.log",
+                            "sdk_log_level": "INFO",
+                        }
+                    ]
+                ),
+                reco_model_user_data="rtp-mm-kvcm-integration",
+            ),
+        )
+        configure_mm_kvcm_client(runtime_config, environ={})
+    else:
+        derived = derive_mm_kvcm_client_config(json.dumps({"": primary_client_config}))
+        config.kvcm.addresses = list(derived.addresses)
+        config.kvcm.instance_id = derived.instance_id
+        config.kvcm.instance_group = derived.instance_group
+        config.kvcm.user_data = derived.user_data
+        config.kvcm.transfer_client_config = derived.transfer_client_config
+        config.kvcm.call_timeout_ms = derived.call_timeout_ms
+        config.kvcm.write_timeout_seconds = derived.write_timeout_seconds
     config.control.release_timeout_ms = 3_000
-    config.kvcm.addresses = list(derived.addresses)
-    config.kvcm.instance_id = derived.instance_id
-    config.kvcm.instance_group = derived.instance_group
-    config.kvcm.user_data = derived.user_data
-    config.kvcm.transfer_client_config = derived.transfer_client_config
-    config.kvcm.call_timeout_ms = derived.call_timeout_ms
-    config.kvcm.write_timeout_seconds = derived.write_timeout_seconds
     config.kvcm.max_object_bytes = 32
     config.kvcm.max_receipt_bytes = 1024
     config.kvcm.object_gc_timeout_ms = gc_timeout_ms
@@ -663,6 +693,16 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                         instance_id=instance_id,
                         instance_group=instance_group,
                         gc_timeout_ms=5_000,
+                        use_split_reco_fields=True,
+                    )
+                    transfer_client_config = json.loads(
+                        transport_config.kvcm.transfer_client_config
+                    )
+                    self.assertEqual(transport_config.kvcm.call_timeout_ms, 1_500)
+                    self.assertEqual(transport_config.kvcm.write_timeout_seconds, 105)
+                    self.assertEqual(
+                        transfer_client_config["sdk_config"]["timeout_config"],
+                        {"get_timeout_ms": 100_000, "put_timeout_ms": 100_000},
                     )
                     transport = create_mm_output_transport(transport_config)
                     backend = transport._backend
@@ -674,7 +714,7 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                     )
                     self.assertEqual(
                         store.instance_id,
-                        KVE_INSTANCE_PREFIX + instance_id,
+                        KVE_INSTANCE_PREFIX + instance_group,
                     )
                     legacy_info = legacy_stub.GetInstanceInfo(
                         meta_pb2.GetInstanceInfoRequest(

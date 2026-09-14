@@ -30,9 +30,9 @@ class RtpKvMetaObjectClient:
     """Small RTP-facing adapter that owns one generic KVCM object client.
 
     ``kvcm_config`` is the canonical RTP startup config already derived from
-    ``RECO_CLIENT_CONFIG``. Constructing this adapter constructs the generic
-    client, whose native ``Create`` path validates the transfer config and
-    registers the prefixed KVMeta instance.
+    the existing ``RECO_*`` KVCM settings. Constructing this adapter constructs
+    the generic client, whose native ``Create`` path validates the transfer
+    config and registers the prefixed KVMeta instance.
     """
 
     def __init__(self, kvcm_config: "MMKvcmConfig") -> None:

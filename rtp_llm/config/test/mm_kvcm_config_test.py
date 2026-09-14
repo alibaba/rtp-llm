@@ -61,6 +61,37 @@ def _serialized(config_map=None):
     return json.dumps({"": _primary_config()} if config_map is None else config_map)
 
 
+def _split_reco_config(**overrides):
+    config = {
+        "reco_client_config": "",
+        "reco_enable_vipserver": False,
+        "reco_vipserver_domain": "",
+        "reco_server_address": "127.0.0.1:19001",
+        "reco_instance_group": "shared-group",
+        "reco_meta_channel_retry_time": 3,
+        "reco_meta_channel_connection_timeout": 6000,
+        "reco_meta_channel_call_timeout": 1500,
+        "reco_storage_thread_num": 4,
+        "reco_storage_queue_size": 2000,
+        "reco_put_timeout_ms": 12_000,
+        "reco_get_timeout_ms": 12_000,
+        "reco_model_sdk_config": json.dumps(
+            [
+                {
+                    "type": "file",
+                    "sdk_log_file_path": "",
+                    "sdk_log_level": "ERROR",
+                }
+            ]
+        ),
+        "reco_model_user_data": "deployment-data",
+        "reco_model_extra_info": "unused-by-kvmeta",
+        "reco_instance_id_salt": "",
+    }
+    config.update(overrides)
+    return SimpleNamespace(**config)
+
+
 def _runtime_config(mode="kvcm", shared=None):
     kvcm = SimpleNamespace(
         addresses=[],
@@ -80,7 +111,7 @@ def _runtime_config(mode="kvcm", shared=None):
         vit_config=SimpleNamespace(
             output_transport=SimpleNamespace(mode=mode, kvcm=kvcm)
         ),
-        kv_cache_config=SimpleNamespace(
+        kv_cache_config=_split_reco_config(
             reco_client_config=_serialized() if shared is None else shared
         ),
     )
@@ -152,6 +183,17 @@ class DeriveMMKvcmClientConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(MMKvcmConfigError, "write lease limit"):
             derive_mm_kvcm_client_config(_serialized({"": primary}))
 
+    def test_preserves_zero_retry_and_connection_timeout_compatibility(self):
+        primary = _primary_config()
+        primary["meta_channel_config"]["retry_time"] = 0
+        primary["meta_channel_config"]["connection_timeout"] = 0
+
+        derived = derive_mm_kvcm_client_config(_serialized({"": primary}))
+        transfer = json.loads(derived.transfer_client_config)
+
+        self.assertEqual(transfer["meta_channel_config"]["retry_time"], 0)
+        self.assertEqual(transfer["meta_channel_config"]["connection_timeout"], 0)
+
     def test_identity_limits_count_utf8_bytes_after_prefix(self):
         accepted = _primary_config(instance_id="界" * 169)
         # 4-byte ASCII prefix + 169*3 UTF-8 bytes = 511 bytes.
@@ -191,12 +233,16 @@ class DeriveMMKvcmClientConfigTest(unittest.TestCase):
             (("instance_group",), 7),
             (("enable_vipserver",), 1),
             (("meta_channel_config",), []),
+            (("meta_channel_config", "retry_time"), -1),
+            (("meta_channel_config", "connection_timeout"), False),
             (("meta_channel_config", "call_timeout"), True),
             (("meta_channel_config", "call_timeout"), 600_001),
             (("sdk_config",), None),
             (("sdk_config", "thread_num"), 0),
             (("sdk_config", "queue_size"), 63),
             (("sdk_config", "sdk_backend_configs"), {}),
+            (("sdk_config", "sdk_backend_configs"), ["not-an-object"]),
+            (("sdk_config", "sdk_backend_configs"), [{}]),
             (("sdk_config", "timeout_config"), []),
             (("sdk_config", "timeout_config", "put_timeout_ms"), 0),
             (("sdk_config", "timeout_config", "get_timeout_ms"), False),
@@ -312,6 +358,172 @@ class ConfigureMMKvcmClientTest(unittest.TestCase):
             },
             policy_before,
         )
+
+    def test_split_reco_fields_reuse_online_vipserver_configuration(self):
+        config = _runtime_config(shared="")
+        config.kv_cache_config = _split_reco_config(
+            reco_enable_vipserver=True,
+            reco_vipserver_domain="kvcm-na130-m3-bailian-grpc-2.vipserver",
+            reco_server_address="",
+            reco_instance_group="pace_group_m3",
+            reco_put_timeout_ms=100_000,
+            reco_get_timeout_ms=100_000,
+            reco_model_sdk_config=json.dumps(
+                [
+                    {
+                        "type": "pace",
+                        "sdk_log_file_path": "logs/pace_client.log",
+                        "sdk_log_level": "INFO",
+                    }
+                ]
+            ),
+            reco_model_user_data="production-model",
+        )
+        source_before = copy.deepcopy(config.kv_cache_config.__dict__)
+        calls = []
+
+        def resolve(domain):
+            calls.append(domain)
+            return [SimpleNamespace(ip="10.23.1.7", port=19001)]
+
+        configure_mm_kvcm_client(
+            config,
+            environ={
+                "TAIR_MEMPOOL_KMONITOR_SINK_ADDRESS": "127.0.0.1:4141",
+                "KVCM_LOG_LEVEL": "INFO",
+            },
+            vipserver_resolver=resolve,
+        )
+
+        kvcm = config.vit_config.output_transport.kvcm
+        transfer = json.loads(kvcm.transfer_client_config)
+        self.assertEqual(calls, ["kvcm-na130-m3-bailian-grpc-2.vipserver"])
+        self.assertEqual(kvcm.addresses, ["10.23.1.7:19001"])
+        self.assertEqual(kvcm.instance_group, "kve_pace_group_m3")
+        self.assertEqual(kvcm.instance_id, "kve_pace_group_m3")
+        self.assertEqual(kvcm.user_data, "production-model")
+        self.assertEqual(kvcm.call_timeout_ms, 1500)
+        self.assertEqual(kvcm.write_timeout_seconds, 105)
+        self.assertEqual(transfer["instance_group"], "kve_pace_group_m3")
+        self.assertEqual(transfer["instance_id"], "kve_pace_group_m3")
+        self.assertFalse(transfer["enable_vipserver"])
+        self.assertEqual(transfer["vipserver_domain"], "")
+        self.assertEqual(transfer["address"], ["10.23.1.7:19001"])
+        self.assertEqual(transfer["block_size"], 1)
+        self.assertEqual(transfer["location_spec_infos"], {"value": 1})
+        self.assertEqual(transfer["location_spec_groups"], {})
+        self.assertEqual(transfer["meta_channel_config"]["retry_time"], 3)
+        self.assertEqual(transfer["meta_channel_config"]["connection_timeout"], 6000)
+        self.assertEqual(transfer["meta_channel_config"]["call_timeout"], 1500)
+        self.assertEqual(transfer["sdk_config"]["thread_num"], 4)
+        self.assertEqual(transfer["sdk_config"]["queue_size"], 2000)
+        self.assertEqual(
+            transfer["sdk_config"]["timeout_config"],
+            {"put_timeout_ms": 100_000, "get_timeout_ms": 100_000},
+        )
+        self.assertEqual(
+            transfer["sdk_config"]["sdk_backend_configs"],
+            [
+                {
+                    "type": "pace",
+                    "sdk_log_file_path": "logs/pace_client.log",
+                    "sdk_log_level": "INFO",
+                }
+            ],
+        )
+        self.assertEqual(
+            transfer["model_deployment"],
+            {
+                "model_name": "__kv_meta_object__",
+                "dtype": "opaque_bytes",
+                "use_mla": False,
+                "tp_size": 1,
+                "dp_size": 1,
+                "pp_size": 1,
+                "extra": "kv_meta_v1",
+                "user_data": "production-model",
+            },
+        )
+        self.assertEqual(config.kv_cache_config.__dict__, source_before)
+
+    def test_split_reco_fields_prefer_existing_instance_id_salt(self):
+        config = _runtime_config(shared="")
+        config.kv_cache_config.reco_instance_id_salt = "stable-deployment"
+
+        configure_mm_kvcm_client(config, environ={})
+
+        kvcm = config.vit_config.output_transport.kvcm
+        self.assertEqual(kvcm.instance_group, "kve_shared-group")
+        self.assertEqual(kvcm.instance_id, "kve_stable-deployment")
+
+    def test_explicit_client_config_takes_precedence_over_split_fields(self):
+        config = _runtime_config()
+        config.kv_cache_config.reco_enable_vipserver = "not-a-bool"
+        config.kv_cache_config.reco_model_sdk_config = "not-json"
+
+        configure_mm_kvcm_client(config, environ={})
+
+        kvcm = config.vit_config.output_transport.kvcm
+        self.assertEqual(kvcm.instance_group, "kve_shared-group")
+        self.assertEqual(kvcm.instance_id, "kve_shared-instance")
+
+    def test_split_reco_fields_reject_invalid_values_without_partial_apply(self):
+        cases = (
+            ("reco_client_config", None),
+            ("reco_enable_vipserver", 1),
+            ("reco_instance_group", ""),
+            ("reco_instance_id_salt", 1),
+            ("reco_server_address", "127.0.0.1: 19001"),
+            ("reco_meta_channel_retry_time", -1),
+            ("reco_meta_channel_connection_timeout", True),
+            ("reco_meta_channel_call_timeout", 600_001),
+            ("reco_storage_thread_num", 0),
+            ("reco_storage_queue_size", 63),
+            ("reco_put_timeout_ms", 0),
+            ("reco_get_timeout_ms", False),
+            ("reco_model_sdk_config", "{}"),
+            ("reco_model_sdk_config", '["not-an-object"]'),
+            ("reco_model_sdk_config", '[{"type":"pace","type":"file"}]'),
+            ("reco_model_user_data", 7),
+        )
+        for name, value in cases:
+            with self.subTest(name=name, value=value):
+                config = _runtime_config(shared="")
+                setattr(config.kv_cache_config, name, value)
+                before = copy.deepcopy(config.vit_config.output_transport.kvcm.__dict__)
+                with self.assertRaises(MMKvcmConfigError):
+                    configure_mm_kvcm_client(config, environ={})
+                self.assertEqual(
+                    config.vit_config.output_transport.kvcm.__dict__, before
+                )
+
+    def test_split_reco_fields_require_one_connection_source(self):
+        config = _runtime_config(shared="")
+        config.kv_cache_config.reco_server_address = ""
+
+        with self.assertRaisesRegex(MMKvcmConfigError, "address count"):
+            configure_mm_kvcm_client(config, environ={})
+
+        config.kv_cache_config.reco_enable_vipserver = True
+        with self.assertRaisesRegex(MMKvcmConfigError, "vipserver_domain"):
+            configure_mm_kvcm_client(
+                config,
+                environ={},
+                vipserver_resolver=lambda _domain: self.fail("must not resolve"),
+            )
+
+    def test_split_reco_fields_preserve_zero_retry_timeout_compatibility(self):
+        config = _runtime_config(shared="")
+        config.kv_cache_config.reco_meta_channel_retry_time = 0
+        config.kv_cache_config.reco_meta_channel_connection_timeout = 0
+
+        configure_mm_kvcm_client(config, environ={})
+
+        transfer = json.loads(
+            config.vit_config.output_transport.kvcm.transfer_client_config
+        )
+        self.assertEqual(transfer["meta_channel_config"]["retry_time"], 0)
+        self.assertEqual(transfer["meta_channel_config"]["connection_timeout"], 0)
 
     def test_rejects_removed_client_env_vars_before_mutation(self):
         removed = (
