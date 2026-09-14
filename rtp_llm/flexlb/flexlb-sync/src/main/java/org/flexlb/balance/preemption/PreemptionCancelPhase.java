@@ -31,7 +31,7 @@ public enum PreemptionCancelPhase {
         return this == CLAIMED || this == CANCEL_IN_FLIGHT;
     }
 
-    public boolean acceptsTombstone() {
+    public boolean acceptsRequestFenced() {
         return this == CANCEL_IN_FLIGHT
                 || this == NOT_FOUND_STALE
                 || this == CANCEL_UNKNOWN;

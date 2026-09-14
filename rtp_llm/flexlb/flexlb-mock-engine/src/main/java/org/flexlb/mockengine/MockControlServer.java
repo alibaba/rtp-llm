@@ -296,7 +296,7 @@ final class MockControlServer {
                     }
                     // ── Cancel-RPC fault family (RPC-layer failures simulated
                     // BEFORE the engine cancel state machine is touched — no
-                    // fences, no tombstones; the gRPC Cancel handler and the
+                    // fences, no terminal records; the gRPC Cancel handler and the
                     // in-process MockEngineCancelChannel run the same gate) ──
                     case "cancel_no_respond" -> builder.cancelNoRespond(enabled);
                     case "cancel_error" -> builder.cancelError(enabled);
@@ -555,8 +555,8 @@ final class MockControlServer {
      *
      * <p>{@code status} mirrors the full three-branch contract (block-2 fix):
      * {@code ACCEPTED} (tracked + cancelled), {@code NOT_FOUND} (seen but
-     * already finished), {@code TOMBSTONED} (never seen — an absent-fence
-     * tombstone is installed and later same-rid enqueues are 8429-rejected).
+     * already finished), {@code TOMBSTONED} (mapped to REQUEST_FENCED; never seen — an absent-fence
+     * terminal record is installed and later same-rid enqueues are 8429-rejected).
      *
      * <p>Armed cancel fault injections ({@code cancel_no_respond} /
      * {@code cancel_error} / {@code cancel_unexpected_status}) short-circuit
@@ -576,7 +576,7 @@ final class MockControlServer {
             // the arrival is counted once, the armed fault short-circuits
             // BEFORE cancelRequest so the engine cancel state machine is never
             // touched (production semantics "RPC failed = engine state
-            // unchanged": no fences, no tombstones, no census branch).
+            // unchanged": no fences, no terminal records, no census branch).
             JavaMockEngineCluster.CancelFaultKind fault = service.arriveCancelRpc();
             if (fault == JavaMockEngineCluster.CancelFaultKind.NO_RESPOND) {
                 // cancel_no_respond over HTTP: outlive HttpMockEngineCancel
@@ -617,7 +617,7 @@ final class MockControlServer {
             }
             Map<String, Object> response = new LinkedHashMap<>();
             // Full three-branch contract mirror (block-2 fix): ACCEPTED /
-            // NOT_FOUND (already-finished) / TOMBSTONED (never-seen — absent
+            // NOT_FOUND (already-finished) / REQUEST_FENCED (never-seen — absent
             // fence installed, later same-rid enqueues are 8429-rejected).
             response.put("status", result.found() ? "ACCEPTED"
                     : result.alreadyFinished() ? "NOT_FOUND" : "TOMBSTONED");

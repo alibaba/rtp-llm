@@ -145,12 +145,12 @@ class RequestCompletionPublicationRaceTest {
                 assertFalse(Thread.holdsLock(fixture.slot())));
         synchronized (fixture.slot()) {
             RequestLifecycleTestSupport.recordCancellation(fixture.slot(), CancelReason.DEADLINE_EXCEEDED, "request inactive");
-            TerminalAction terminal = fixture.slot().beginTerminalizing(true, false, false, null,
+            TerminalAction terminal = fixture.slot().beginTerminalizing(
                     TerminalOutcome.timeout("request inactive"), new Response());
             assertNotNull(terminal);
             assertNull(terminal.publication(), "an already selected delivery owns the frontend result");
             assertEquals(RequestState.Phase.TIMED_OUT,
-                    fixture.slot().finishTombstone(terminal).terminal().state());
+                    fixture.slot().finishTermination(terminal).terminal().state());
         }
         assertTrue(publishSuccess.complete());
         assertSame(success, fixture.slot().future().join());
@@ -166,10 +166,10 @@ class RequestCompletionPublicationRaceTest {
         TerminalAction terminal;
         synchronized (fixture.slot()) {
             // ACKNOWLEDGED records the Engine fact, not a selected frontend result.
-            terminal = fixture.slot().beginTerminalizing(true, false, false, null,
+            terminal = fixture.slot().beginTerminalizing(
                     TerminalOutcome.fail("worker failed before response publication"), failure);
             assertNotNull(terminal.publication());
-            fixture.slot().finishTombstone(terminal);
+            fixture.slot().finishTermination(terminal);
         }
         Response success = new Response();
         success.setSuccess(true);

@@ -2241,7 +2241,7 @@
         "DeferredTerminal",
         "DeferredTerminal$Kind",
         "TerminalAction",
-        "TombstoneResult",
+        "TerminationResult",
         "RequestFuture"
       ],
       "fields": 123,

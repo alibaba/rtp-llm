@@ -180,7 +180,7 @@ class DecodeEndpointLayeredViewTest {
     }
 
     @Test
-    void evictExpiredRequests_boundsPriorityCanceledTombstones() throws InterruptedException {
+    void evictExpiredRequests_boundsPriorityCanceledTerminalRecords() throws InterruptedException {
         reserve(1L, 500, 508, 30);
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
         long version = endpoint.routingView().admissionVersion();
@@ -206,7 +206,7 @@ class DecodeEndpointLayeredViewTest {
     }
 
     @Test
-    void priorityTombstoneIsAuthoritativeWithoutAcceptedOrWorkerCanceled() {
+    void priorityTerminalRecordIsAuthoritativeWithoutAcceptedOrWorkerCanceled() {
         reserve(1L, 500, 508, 30);
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
         long version = endpoint.routingView().admissionVersion();
@@ -215,7 +215,7 @@ class DecodeEndpointLayeredViewTest {
                         9L, 128, 136, 70));
         assertTrue(endpoint.markPriorityCancelInFlight(102L));
 
-        assertTrue(endpoint.settlePriorityTombstoned(
+        assertTrue(endpoint.settlePriorityRequestFenced(
                 102L, reservations.get(1L)));
         assertTrue(endpoint.commitPriorityPreemption(102L));
 
@@ -223,7 +223,7 @@ class DecodeEndpointLayeredViewTest {
         assertTrue(endpoint.layeredAdmissionView().reserved().containsKey(9L));
         assertEquals(1, endpoint.routingView().totalLoad());
         // The same late Decode sample rejected by typed-CANCELED fencing must
-        // also be rejected after the stronger absent+tombstone proof.
+        // also be rejected after the stronger absent+terminal record proof.
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
         assertFalse(isConfirmed(1L));
     }
@@ -294,6 +294,42 @@ class DecodeEndpointLayeredViewTest {
                 101L, 2L, PreemptionCancelPhase.CANCEL_REQUESTED));
         assertTrue(isConfirmed(2L));
         assertTrue(endpoint.routingView().admissionVersion() > version);
+    }
+
+    @Test
+    void cancelAckAndUnknownKeepVictimCapacityUntilItsOwnInactivityExpiry() {
+        var victim = reserve(2L, 400L, 408L, 30);
+        updateStatus(Map.of("2", runningTask(2L, TaskPhase.RUNNING, 256)), null, 10_000);
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                beginPreemption(101L, List.of(2L), 9L, 700L, 708L, 70));
+        var incoming = endpoint.reservationHandle(9L);
+        assertTrue(incoming != null);
+        var before = endpoint.layeredAdmissionView();
+        assertEquals(1, before.runningCount());
+        assertEquals(700L, before.routing().inflightHardKv());
+        assertEquals(708L, before.routing().inflightExpectedKv());
+        assertTrue(endpoint.markPriorityCancelInFlight(101L));
+        assertTrue(endpoint.recordPriorityCancelPhase(101L, 2L, PreemptionCancelPhase.CANCEL_REQUESTED));
+        assertEquals(before.engineCapacityUsed(), endpoint.layeredAdmissionView().engineCapacityUsed());
+        assertEquals(before.routing().inflightExpectedKv(), endpoint.routingView().inflightExpectedKv());
+        assertTrue(endpoint.recordPriorityCancelPhase(101L, 2L, PreemptionCancelPhase.CANCEL_UNKNOWN));
+        assertEquals(1, endpoint.layeredAdmissionView().runningCount());
+
+        // Expiring the incoming request must not release a victim whose Cancel outcome is unknown.
+        assertTrue(endpoint.expireReservationExact(incoming));
+        assertEquals(0L, endpoint.routingView().inflightHardKv());
+        assertEquals(0L, endpoint.routingView().inflightExpectedKv());
+        assertEquals(1, endpoint.layeredAdmissionView().runningCount());
+        assertEquals(1, endpoint.routingView().engineCapacityUsed());
+        assertTrue(endpoint.expireReservationExact(victim));
+        assertFalse(endpoint.expireReservationExact(victim));
+        var after = endpoint.layeredAdmissionView();
+        assertEquals(0, after.runningCount());
+        assertEquals(0, after.acceptedCount());
+        assertEquals(0, after.activeDispatchPermits());
+        assertEquals(0, after.engineCapacityUsed());
+        assertTrue(after.reserved().isEmpty());
+        assertTrue(after.confirmed().isEmpty());
     }
 
     @Test

@@ -25,14 +25,14 @@ class PreemptionRegistrationTest {
         assertTrue(registration.advanceTo(
                 PreemptionCancelPhase.CANCEL_UNKNOWN));
         assertTrue(registration.isUnknown());
-        assertTrue(registration.canSettleTombstone());
-        assertTrue(registration.settle());
-        assertFalse(registration.settle());
-        assertTrue(registration.isSettled());
+        assertTrue(registration.canCompletePreemption());
+        assertTrue(registration.tryFinish());
+        assertFalse(registration.tryFinish());
+        assertTrue(registration.isFinished());
     }
 
     @Test
-    void notFoundRetainsTheAttemptUntilEvidenceOrRequestExpirySettlesIt() {
+    void notFoundRetainsTheAttemptUntilEvidenceOrRequestExpiryFinishesIt() {
         PreemptionRegistration registration = registration();
 
         assertTrue(registration.advanceTo(
@@ -43,9 +43,9 @@ class PreemptionRegistrationTest {
                 PreemptionCancelPhase.CANCEL_UNKNOWN));
         assertTrue(registration.isNotFound());
         assertFalse(registration.isReleasable());
-        assertTrue(registration.canSettleTombstone());
-        assertTrue(registration.settle());
-        assertFalse(registration.canSettleTombstone());
+        assertTrue(registration.canCompletePreemption());
+        assertTrue(registration.tryFinish());
+        assertFalse(registration.canCompletePreemption());
         assertFalse(registration.advanceTo(PreemptionCancelPhase.CANCEL_IN_FLIGHT));
     }
 

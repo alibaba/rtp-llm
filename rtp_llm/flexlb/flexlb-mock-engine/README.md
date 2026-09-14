@@ -353,7 +353,7 @@ across engine addresses.
 
 ### Priority preemption (auto-tpm)
 
-End-to-end QoS priority, from trace to engine tombstone:
+End-to-end QoS priority, from trace to engine terminal record:
 
 - **Load client**: `PRIORITY` env sets the default priority (50, the
   neutral QoS level — priority 0 is rejected by master admission, so it must
@@ -365,7 +365,7 @@ End-to-end QoS priority, from trace to engine tombstone:
   avg_schedule_ms}`, built by `priorityBreakdown`).
 - **Engine side**: on eviction, the finished TaskInfo carries error code
   **8429 (`PRIORITY_PREEMPTED_ERROR_CODE`, "preempted by higher-priority
-  request")** — an idempotent tombstone that masters can re-observe safely
+  request")** — an idempotent terminal record that masters can re-observe safely
   after restarts. The cancelled entry preserves the ACTUAL phase the request
   was cancelled in (a queued decode request surfaces
   `TASK_PHASE_KV_ALLOCATED`, a queued prefill `TASK_PHASE_RECEIVED`;
