@@ -650,6 +650,7 @@ public class EngineHealthReporter {
                     FlexMetricTags serverSelectionTags = FlexMetricTags.of(
                             "role", serverStatus.getRole().name(),
                             "strategy", strategyName(ctx, serverStatus.getRole()),
+                            "reason", selectionReason(ctx, serverStatus.getRole()),
                             "engineIp", serverStatus.getMetricIpPort(),
                             "success", String.valueOf(isSuccess),
                             "code", String.valueOf(code)
@@ -658,6 +659,11 @@ public class EngineHealthReporter {
                 }
             }
         }
+    }
+
+    private String selectionReason(BalanceContext context, RoleType roleType) {
+        String selectionReason = context.selectionReason(roleType);
+        return selectionReason == null ? "UNKNOWN" : selectionReason;
     }
 
     private String strategyName(BalanceContext context, RoleType roleType) {
