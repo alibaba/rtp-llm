@@ -3833,7 +3833,7 @@ def _fence_rejected_8429(ack, rid: int) -> tuple:
 
 def _crash_and_restart(ops, engine_name: str) -> tuple:
     """True-crash + restart cycle on one engine (crash_after n=1) — the
-    per-engine memory wipe (running tasks, tombstones, absent-fence
+    per-engine memory wipe (running tasks, terminal records, absent-fence
     records, RPC counters), so the restarted instance has never seen any
     pre-restart rid.  The sacrificial request's own fate is the
     empty-ack uncertain path and is deliberately not asserted."""
@@ -3918,7 +3918,7 @@ def _nf_spec(ctx: CaseContext) -> EnvSpec:
 
 
 def _ts_spec(ctx: CaseContext) -> EnvSpec:
-    """ENV for atpm_preempt_cancel_tombstoned: the live preemption config
+    """ENV for atpm_preempt_cancel_request_fenced: the live preemption config
     (all three stages + an explicit Decode TPOT profile) + decode maxEngineRequests=1
     on the BATCH dispatcher (1P+1D) — same shape as cancel.py's
     cancel_preemption_victim."""
@@ -4256,25 +4256,25 @@ def atpm_preempt_cancel_not_found(ctx: CaseContext):
 
 
 @case(
-    "atpm_preempt_cancel_tombstoned",
+    "atpm_preempt_cancel_request_fenced",
     profiles=["single-batch"],
     requires=["enqueue_batch"],
-    source="preemption-stages audit (2026-09) — Cancel TOMBSTONED branch",
+    source="preemption-stages audit (2026-09) — Cancel REQUEST_FENCED branch",
 )
-def atpm_preempt_cancel_tombstoned(ctx: CaseContext):
-    """Preemption-chain Cancel TOMBSTONED branch: the victim's original
+def atpm_preempt_cancel_request_fenced(ctx: CaseContext):
+    """Preemption-chain Cancel REQUEST_FENCED branch: the victim's original
     prefill TRUE-CRASHED and restarted (memory wipe) before the
     preemption Cancel fires, so the FRESH instance has never seen the
-    rid — the engine answers TOMBSTONED, installs the ABSENT_FENCE
-    tombstone, and the master's coordinator settles the PREEMPTION
-    through it (resumeTombstoned → committed: the incoming wins the
+    rid — the engine answers REQUEST_FENCED, installs the ABSENT_FENCE
+    terminal record, and the master's coordinator settles the PREEMPTION
+    through it (resumeRequestFenced → committed: the incoming wins the
     freed slot and completes).
 
     Consumer-side difference vs the client-chain twin
-    (cancel.py cancel_engine_restarted_tombstoned_settle): there the
+    (cancel.py cancel_engine_restarted_request_fenced_settle): there the
     trigger is a CLIENT cancel settling one stream; here the trigger is
     the ADMISSION preemption and what must close is the preemption
-    state machine — the eviction is COMMITTED by the tombstone, the
+    state machine — the eviction is COMMITTED by the terminal record, the
     victim's slot is freed for the incoming, and the victim itself
     settles at the master as a priority terminal.
 
@@ -4291,11 +4291,11 @@ def atpm_preempt_cancel_tombstoned(ctx: CaseContext):
     healthy and reporting) → decode placement BLOCKED
     (maxEngineRequests=1) → DECODE_ENGINE_OWNED eviction → the
     tokenized Cancel reaches the FRESH prefill → never-seen branch →
-    TOMBSTONED + ABSENT_FENCE.
+    REQUEST_FENCED + ABSENT_FENCE.
 
     Contract:
       * the incoming completes 200 with real FetchResponse output
-        (tombstone-settled preemption);
+        (terminal record-settled preemption);
       * the victim's stream is TERMINATED not completed (cut by the
         crash) and the victim's engine-side decode leg finishes its
         bounded orphan computation (engine inflight drains);
@@ -4353,7 +4353,7 @@ def atpm_preempt_cancel_tombstoned(ctx: CaseContext):
         )
         cancel_delta = _cancel_rpc_total(ops) - baseline_cancel
 
-        # The ABSENT_FENCE tombstone installed by the TOMBSTONED answer
+        # The ABSENT_FENCE terminal record installed by the REQUEST_FENCED answer
         # rejects a direct late Enqueue of the victim rid with 8429.
         fence_ok, fence_detail = False, "no probe"
         try:
@@ -4377,12 +4377,12 @@ def atpm_preempt_cancel_tombstoned(ctx: CaseContext):
         report.invariant(
             "PR10",
             victim_cut and inc_ok and inc_completed and cancel_delta >= 1,
-            context="tombstoned_preemption_settlement",
+            context="request_fenced_preemption_settlement",
             detail=(
                 f"victim stream cut by crash={victim_cut} "
                 f"(terminated, completed={victim_handle.snap.completed}), "
                 f"incoming schedule={inc_resp.code} FetchResponse "
-                f"completed={inc_completed} (tombstone-settled preemption "
+                f"completed={inc_completed} (terminal record-settled preemption "
                 f"— the freed slot went to the incoming), "
                 f"cancel_rpc_delta={cancel_delta} (>=1 on the fresh "
                 f"instance)"
@@ -4391,7 +4391,7 @@ def atpm_preempt_cancel_tombstoned(ctx: CaseContext):
         report.invariant(
             "PR6",
             fence_ok and cancel_reached,
-            context="tombstoned_absent_fence_installed",
+            context="request_fenced_absent_fence_installed",
             detail=(
                 f"ABSENT_FENCE direct-enqueue rejection 8429={fence_ok} "
                 f"({fence_detail}), cancel reached engine={cancel_reached}"
@@ -4407,7 +4407,7 @@ def atpm_preempt_cancel_tombstoned(ctx: CaseContext):
             ),
         )
         return report.finish(
-            f"tombstoned preemption: victim cut+8429-fenced, incoming "
+            f"request_fenced preemption: victim cut+8429-fenced, incoming "
             f"completed={inc_completed}, cancel_delta={cancel_delta}, "
             f"grades: {report.summary()}"
         )

@@ -2022,7 +2022,7 @@ def status_finished_then_running(ctx: CaseContext):
 
 
 # ===========================================================================
-# P1 — zombie running vs tombstone (1 case)
+# P1 — zombie running vs terminal record (1 case)
 # ===========================================================================
 
 
@@ -2037,7 +2037,7 @@ def status_zombie_completed_running(ctx: CaseContext):
     completes.
 
     Behaviour: every terminal the master settles is followed by zombie
-    ACTIVE facts for the same reservations — the tombstone path must absorb
+    ACTIVE facts for the same reservations — the terminal record path must absorb
     them without re-confirming.
 
     Expectation (contract): master stays HTTP 200; NO new confirmed entries
@@ -2075,7 +2075,7 @@ def status_zombie_completed_running(ctx: CaseContext):
                     "unknown_tasks",
                     "unknown_count",
                     "zombie_reports",
-                    "tombstone_hits",
+                    "terminal_record_hits",
                     "confirmed",
                 )
                 if f in snap.get(n, {})

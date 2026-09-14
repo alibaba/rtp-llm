@@ -104,10 +104,10 @@ public class RequestRegistry {
         return List.copyOf(requestSlots.values());
     }
 
-    public boolean removeExactTombstone(
+    public boolean removeExactTerminalRecord(
             RequestSlot exactSlot, long updatedBeforeMs) {
         synchronized (exactSlot) {
-            if (!exactSlot.isRemovableTombstone(updatedBeforeMs)
+            if (!exactSlot.isRemovableTerminalRecord(updatedBeforeMs)
                     || !requestSlots.remove(
                             exactSlot.requestId(), exactSlot)) {
                 return false;

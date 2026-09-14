@@ -426,7 +426,7 @@ class RequestLifecycleDeliveryLockContractTest {
         lifecycle.setDeliveryPrediction(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
         claim.complete(DeliveryResult.delivered());
         assertSame(terminal, registered.future().join());
-        assertTrue(lifecycle.removeExactTombstone(original, Long.MAX_VALUE));
+        assertTrue(lifecycle.removeExactTerminalRecord(original, Long.MAX_VALUE));
 
         Registered replacement = registerItem(207L, endpoint);
         bind(lifecycle, replacement);
