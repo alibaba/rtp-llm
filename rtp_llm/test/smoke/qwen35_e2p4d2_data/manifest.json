@@ -1,0 +1,19 @@
+{
+  "historical_date": "2026-09-11",
+  "model": "Qwen3.5-397B-A17B-FP8",
+  "historical_source_head": "ee510269110af5ac3cd04c22e6dfc0460a27b2f8",
+  "historical_harness_sha256": "eacd8c1bd227104d3aef958db8f92358f8fe45fe78e91af1443b933acb97caec",
+  "input_tokens": 24422,
+  "video_tokens": 20240,
+  "video_grid": [
+    23,
+    44,
+    80
+  ],
+  "frames": 46,
+  "max_seq_len": 30720,
+  "assets_sha256": {
+    "messages.json": "112bca45e08745061def18592fd06b19d6987dfea7cceddc6a9cf896cadf8ac9",
+    "video.mp4": "d8b10b3fd5669c6d4db8cab1d0b2cd970d4e9db09a2ce09059b3a3e3a76987b0"
+  }
+}

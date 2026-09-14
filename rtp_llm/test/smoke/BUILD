@@ -1,6 +1,7 @@
 load(":defs.bzl", "custom_smoke_test", "smoke_test")
 load(":suites_timeout_recovery.bzl", "timeout_recovery_suites")
 load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu")
+load(":qwen35_e2p4d2_repro.bzl", "qwen35_e2p4d2_repro_suite")
 package(default_visibility = ["//visibility:public"])
 
 # Native cache-stack smoke: real disk/SDK transfers, RPC deadlines and the
@@ -328,3 +329,4 @@ custom_smoke_test(
     tags = ["dsv41_cuda13", "model_contract", "no_dspark_control"],
     data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py"],
 )
+qwen35_e2p4d2_repro_suite()
