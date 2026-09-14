@@ -479,6 +479,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
+        .def_readwrite("runtime_mem_safety_ratio", &KVCacheConfig::runtime_mem_safety_ratio)
         .def_readwrite("seq_size_per_block", &KVCacheConfig::seq_size_per_block)
         .def_readwrite("kernel_seq_size_per_block", &KVCacheConfig::kernel_seq_size_per_block)
         .def_readwrite("test_block_num", &KVCacheConfig::test_block_num)
@@ -592,10 +593,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_manager_endpoint,
                                       self.kv_cache_event_instance_group,
                                       self.kv_cache_event_instance_id,
-                                      self.kv_cache_event_host_ip_port);
+                                      self.kv_cache_event_host_ip_port,
+                                      self.runtime_mem_safety_ratio);
             },
             [](py::tuple t) {
-                if (t.size() != 43 && t.size() != 54 && t.size() != 57 && t.size() != 62)
+                if (t.size() != 43 && t.size() != 54 && t.size() != 57 && t.size() != 62 && t.size() != 63)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -661,7 +663,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.dsv4_hca_state_pool_blocks = t[55].cast<uint32_t>();
                         c.dsv4_fixed_pool_use_memory = t[56].cast<bool>();
                     }
-                    if (t.size() == 62) {
+                    if (t.size() == 62 || t.size() == 63) {
                         // Keep these indices aligned with the event-field declaration order
                         // in __getstate__; append future fields after this block.
                         c.kv_cache_event_publisher_type   = t[57].cast<std::string>();
@@ -669,6 +671,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.kv_cache_event_instance_group   = t[59].cast<std::string>();
                         c.kv_cache_event_instance_id      = t[60].cast<std::string>();
                         c.kv_cache_event_host_ip_port     = t[61].cast<std::string>();
+                    }
+                    if (t.size() == 63) {
+                        c.runtime_mem_safety_ratio = t[62].cast<double>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());

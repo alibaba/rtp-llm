@@ -1071,6 +1071,10 @@ void CudaGraphRunner::initCapture() {
     if (enable_cuda_graph_) {
         RTP_LLM_LOG_INFO("CUDA graph capture is enabled");
         shared_graph_pool_ = cuda_graph::graphPoolHandle();
+        cuda_graph::graphDeviceSynchronize();
+        size_t free_before_capture  = 0;
+        size_t total_before_capture = 0;
+        cuda_graph::graphMemGetInfo(&free_before_capture, &total_before_capture);
         if (is_prefill_cuda_graph_mode_) {
             RTP_LLM_LOG_INFO("CUDA graph capture for prefill, num_tokens_per_bs_: %d", num_tokens_per_bs_);
         }
@@ -1138,6 +1142,17 @@ void CudaGraphRunner::initCapture() {
             captureDecode();
         }
         logCudaGraphPoolMemory("after_capture");
+        cuda_graph::graphDeviceSynchronize();
+        size_t free_after_capture  = 0;
+        size_t total_after_capture = 0;
+        cuda_graph::graphMemGetInfo(&free_after_capture, &total_after_capture);
+        RTP_LLM_CHECK_WITH_INFO(total_before_capture == total_after_capture,
+                                "CUDA graph memory total changed during capture: before=%zu, after=%zu",
+                                total_before_capture,
+                                total_after_capture);
+        cuda_graph_memory_bytes_ =
+            free_before_capture > free_after_capture ? free_before_capture - free_after_capture : 0;
+        RTP_LLM_LOG_INFO("[CudaGraph Memory] measured capture memory=%zu MiB", cuda_graph_memory_bytes_ / 1024 / 1024);
     } else {
         initKernelInternalMemory();
         RTP_LLM_LOG_INFO("CUDA graph capture is not enabled, skipping initialization");

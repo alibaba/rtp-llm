@@ -700,6 +700,7 @@ class KVCacheConfig:
     dsv4_fixed_pool_use_memory: bool
     fp8_kv_cache: int
     kv_cache_mem_mb: int
+    runtime_mem_safety_ratio: float
     linear_step: int
     max_block_size_per_item: int
     memory_cache_size_mb: int
