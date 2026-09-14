@@ -67,10 +67,11 @@ def get_ue8m0_usage(kernel_type: KernelType) -> bool:
 def get_kernel_types(use_bf16: bool = False) -> Tuple[KernelType, ...]:
     if use_bf16:
         return (KernelType.KernelNoSF,)
+    # SM100 kernels require UE8M0 scales; FP32-scale 1D2D is SM90-only.
     return (
         (KernelType.Kernel1D2D,)
         if get_arch_major() == 9
-        else (KernelType.Kernel1D1D, KernelType.Kernel1D2D)
+        else (KernelType.Kernel1D1D,)
     )
 
 

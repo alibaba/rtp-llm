@@ -2753,16 +2753,16 @@ void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& mod
     std::ostringstream summary;
     summary << "[debug-target-verify] batch=" << batch << " sbp=" << sbp << " group_dim=" << group_dim
             << " batch_dim=" << batch_dim << " max_blocks=" << max_blocks;
+    auto stream_it = all_streams.begin();
     for (int b = 0; b < batch && b < batch_dim; ++b) {
         const int seq_len   = sl[b];
         const int read_off  = (seq_len - 2) / sbp;
         int64_t   stream_id = -1;
-        if (b < static_cast<int>(all_streams.size())) {
-            auto it = all_streams.begin();
-            std::advance(it, b);
-            if (*it) {
-                stream_id = (*it)->streamId();
+        if (stream_it != all_streams.end()) {
+            if (*stream_it) {
+                stream_id = (*stream_it)->streamId();
             }
+            ++stream_it;
         }
         for (int64_t g = 0; g < group_dim; ++g) {
             std::string row_dump;

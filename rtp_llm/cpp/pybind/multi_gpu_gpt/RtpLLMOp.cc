@@ -100,7 +100,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         model_id++;
     }
 
-    return std::move(std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
+    return std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params));
 };
 
 RtpLLMOp::RtpLLMOp() {}

@@ -218,15 +218,15 @@ void RtpEmbeddingOp::startRpcServer(int64_t                              model_r
                                     py::object                           py_tokenizer,
                                     kmonitor::MetricsReporterPtr         reporter,
                                     std::shared_ptr<MultimodalProcessor> mm_processor) {
-    auto arpc_service = std::move(createEmbeddingArpcService(model_rpc_port,
-                                                             arpc_thread_num,
-                                                             arpc_queue_num,
-                                                             arpc_io_thread_num,
-                                                             py_render,
-                                                             py_tokenizer,
-                                                             mm_processor,
-                                                             embedding_engine_,
-                                                             reporter));
+    auto arpc_service = createEmbeddingArpcService(model_rpc_port,
+                                                  arpc_thread_num,
+                                                  arpc_queue_num,
+                                                  arpc_io_thread_num,
+                                                  py_render,
+                                                  py_tokenizer,
+                                                  mm_processor,
+                                                  embedding_engine_,
+                                                  reporter);
     if (arpc_service) {
         RTP_LLM_LOG_INFO("creating arpc service");
         embedding_rpc_service_.reset(new ArpcServerWrapper(
