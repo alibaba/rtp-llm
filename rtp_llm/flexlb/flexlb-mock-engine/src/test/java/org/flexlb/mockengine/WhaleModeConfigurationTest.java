@@ -289,23 +289,21 @@ class WhaleModeConfigurationTest {
     }
 
     @Test
-    void monitoringAliasesSeparateRolesWithoutChangingProcessIdentity() {
-        var env = java.util.Map.of(
-                "HIPPO_APP", "whale_prod_test", "HIPPO_ROLE", "test.master_part",
-                "MOCK_KMONITOR_PREFILL_HIPPO_APP", " test_mock_prefill ",
-                "MOCK_KMONITOR_DECODE_HIPPO_APP", "test_mock_decode",
-                "MOCK_KMONITOR_PREFILL_HIPPO_ROLE", "test.mock_prefill",
-                "MOCK_KMONITOR_DECODE_HIPPO_ROLE", " ");
+    void derivesMonitoringRolesFromPlatformIdentityWithoutBusinessPrefixes() {
+        var env = java.util.Map.of("HIPPO_APP", "whale_prod_master_test",
+                "HIPPO_ROLE", "master_test_deployment_g07.master_part");
         var p = WhaleMockMonitor.engineTags(env, "10.1.0.2", "ROLE_TYPE_PREFILL");
         var d = WhaleMockMonitor.engineTags(env, "10.1.0.2", "ROLE_TYPE_DECODE");
-        assertEquals("test_mock_prefill", p.get("hippo_app"));
-        assertEquals("test_mock_decode", d.get("hippo_app"));
-        assertEquals("test.mock_prefill", p.get("hippo_role"));
-        assertEquals("test.master_part", d.get("hippo_role"));
-        assertEquals("whale_prod_test", env.get("HIPPO_APP"));
+        assertEquals("master_test_deployment_g07.prefill_part0", p.get("hippo_role"));
+        assertEquals("master_test_deployment_g07.decode_part0", d.get("hippo_role"));
+        assertEquals("whale_prod_master_test", p.get("hippo_app"));
+        assertEquals(p.get("hippo_app"), d.get("hippo_app"));
+        assertEquals("master_test_deployment_g07.master_part", env.get("HIPPO_ROLE"));
         assertEquals(p.get("container_ip"), d.get("container_ip"));
-        assertEquals("whale_prod_test", WhaleMockMonitor.engineTags(
-                env, "10.1.0.2", "ROLE_TYPE_UNKNOWN").get("hippo_app"));
+        assertEquals(env.get("HIPPO_ROLE"), WhaleMockMonitor.engineTags(
+                env, "10.1.0.2", "ROLE_TYPE_UNKNOWN").get("hippo_role"));
+        assertEquals("", WhaleMockMonitor.engineTags(
+                java.util.Map.of(), "10.1.0.2", "ROLE_TYPE_PREFILL").get("hippo_role"));
     }
 
     @Test

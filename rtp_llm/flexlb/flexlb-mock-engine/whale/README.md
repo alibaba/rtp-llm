@@ -46,19 +46,17 @@ Whale 健康探测使用 `START_PORT` 的 `/health`；停止/排空状态返回 
 
 ## 监控和验证边界
 
-同 Pod 寄生多个 P/D engine 时，可按角色设置监控别名，避免现有大盘将 P/D 平均到一条曲线：
+同 Pod 寄生多个 P/D engine 时，监控标签自动从平台身份派生，无需填写业务名或监控别名环境变量：
 
-```sh
-MOCK_KMONITOR_PREFILL_HIPPO_APP=example_mock_prefill
-MOCK_KMONITOR_DECODE_HIPPO_APP=example_mock_decode
-MOCK_KMONITOR_PREFILL_HIPPO_ROLE=example.mock_prefill
-MOCK_KMONITOR_DECODE_HIPPO_ROLE=example.mock_decode
-```
+- `hippo_app` 原样使用平台传入的 `HIPPO_APP`。
+- 若 `HIPPO_ROLE` 以 `.master_part` 结尾，只将这个末尾角色段替换为 `.prefill_part0` 或 `.decode_part0`。
+- 业务名、部署名、`gNN` 分组号保留。例如 `example_deployment_g07.master_part` 派生为
+  `example_deployment_g07.prefill_part0` / `example_deployment_g07.decode_part0`，不猜测其他角色的分组号。
+- 独立 P/D Pod 的角色名和不符合上述格式的名称保持不变。
 
-四项各自可选，未设置或空白时沿用原始 HIPPO 标签。若希望同一 app 下按 role 选择，只设置后两项。
-别名覆盖该角色所有 mock KMonitor 指标，包括周期采样、执行事件和缓存驱逐寿命；启动时配置后重启生效。
-仅修改指标标签，不修改进程的 `HIPPO_APP`/`HIPPO_ROLE`、服务发现、Pod 地址或 master/frontend 指标。
-别名应使用明确的 mock 名称，避免与真实服务指标混合。切换后历史曲线仍保留在旧标签下，新曲线从启用时开始。
+该规则作用于所有 mock KMonitor 指标，包括周期采样、执行事件和缓存驱逐寿命。
+只改变上报标签，不修改进程环境变量、服务发现、Pod 地址或 master/frontend 指标。
+更新镜像并重启后生效；历史曲线留在旧角色下。若 URL 固定了角色列表，需选择自动派生的新角色值。
 
 Whale KMonitor 上报累计 context/generate token、KV tokens、waiting/running requests、completed/cancelled 数，以及按实际时间差计算的 TPS。所有指标带 engine、role、进程 generation、backend=mock 标签。累计 token 读数不被 HTTP 抓取消耗。
 

@@ -137,17 +137,18 @@ final class WhaleMockMonitor implements AutoCloseable {
         tags.put("priority", "0"); // Aggregate mock series, not a per-priority breakdown.
         tags.put("mtp_model_type", "main");
         tags.put("pool", "0"); // The mock has one physical KV pool, matching C++ gid=0.
-        String prefix = switch (role) {
-            case "ROLE_TYPE_PREFILL" -> "MOCK_KMONITOR_PREFILL_";
-            case "ROLE_TYPE_DECODE" -> "MOCK_KMONITOR_DECODE_";
-            default -> "";
+        String engineRole = switch (role) {
+            case "ROLE_TYPE_PREFILL" -> "prefill_part0";
+            case "ROLE_TYPE_DECODE" -> "decode_part0";
+            default -> null;
         };
-        if (!prefix.isEmpty()) {
-            // Metric aliases only: discovery and the process HIPPO identity remain unchanged.
-            for (String key : java.util.List.of("hippo_app", "hippo_role")) {
-                String alias = environment.get(prefix + key.toUpperCase(java.util.Locale.ROOT));
-                if (alias != null && !alias.isBlank()) tags.put(key, alias.trim());
-            }
+        String platformRole = tags.get("hippo_role");
+        String masterSuffix = ".master_part";
+        if (engineRole != null && platformRole.endsWith(masterSuffix)) {
+            // Derive only the terminal role component. Preserve app, deployment,
+            // group index and physical Pod identity, including "master" in a biz name.
+            tags.put("hippo_role", platformRole.substring(0, platformRole.length() - masterSuffix.length())
+                    + "." + engineRole);
         }
         return tags;
     }
