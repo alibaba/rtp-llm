@@ -84,6 +84,9 @@ _collective_release_override: Optional[bool] = None
 _region_depth = threading.local()
 _region_suppressed = threading.local()
 _model_scope = threading.local()
+_scratch_pools = threading.local()
+# Keep native pools alive until process exit, even if a model-build thread exits.
+_scratch_pool_owners: list[Any] = []
 # Process-global mirror of the active build scope. DSV4's py-model construction
 # dispatches the actual module __init__ (MegaMoEStrategy / CompressorFP8, which
 # self-register into the global registries) onto a WORKER thread -- the JIT
@@ -766,24 +769,56 @@ def feature_weights_region() -> Iterator[None]:
         yield
 
 
+def _get_scratch_pool(device_index=None):
+    import torch
+
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    pools = getattr(_scratch_pools, "pools", None)
+    if pools is None:
+        pools = _scratch_pools.pools = {}
+    if device_index not in pools:
+        import librtp_compute_ops
+
+        if not librtp_compute_ops.rtp_llm_ops.sleep_memory_allocator_available():
+            raise RuntimeError("pausable scratch requires the TMS preload allocator")
+        malloc_name = (
+            "rtp_sleep_scratch_malloc"
+            if sleep_mode_level() == 2
+            else "rtp_sleep_scratch_malloc_backup"
+        )
+        # A native MemPool cannot be entered concurrently on different threads.
+        # Use separate pools without serializing allocations on a Python lock.
+        with torch.cuda.device(device_index):
+            allocator = torch.cuda.memory.CUDAPluggableAllocator(
+                librtp_compute_ops.__file__, malloc_name, "rtp_sleep_scratch_free"
+            )
+            pool = torch.cuda.MemPool(allocator=allocator.allocator())
+        _scratch_pool_owners.append(pool)
+        pools[device_index] = pool
+    return pools[device_index]
+
+
 def pausable_empty(*args, **kwargs):
-    """``torch.empty`` whose result joins the pausable weights region.
+    """Allocate persistent scratch on cache misses without changing runtime policy.
 
-    The returned tensor is VMM-unmapped on sleep (``pause("weights")``) and
-    remapped at the same VA on wake, exactly like a model weight -- so a
-    persistent runtime workspace can be reclaimed at sleep without any
-    destroy/recreate, registry, or hot-path ``None`` juggling.
-
-    Use for PERSISTENT buffers only, and call it ONLY on the allocation
-    (cache-miss) path -- never per-forward. ``weights_region()`` runs
-    ``empty_cache()`` on entry, so wrapping a per-call fast path would empty the
-    caching allocator on every forward. A throwaway temporary allocated here
-    would also be trapped in the private weights MemPool (which ``empty_cache``
-    cannot return to the driver), so keep the scope to the buffer itself.
+    A private custom-allocator pool keeps fixed-VA, pausable backing separate
+    from ordinary expandable activations. No empty_cache(), global allocator
+    setting change or weights_region is needed, including on online growth.
+    PyTorch retains its stream-aware caching/free semantics. Cache hits must
+    continue returning their existing tensors without entering this function.
     """
     import torch
 
-    with weights_region():
+    if not is_enabled():
+        return torch.empty(*args, **kwargs)
+    device = kwargs.get("device")
+    if device is None:
+        device = torch.get_default_device()
+    device = torch.device(device)
+    if device.type != "cuda":
+        return torch.empty(*args, **kwargs)
+    with torch.cuda.use_mem_pool(_get_scratch_pool(device.index), device=device):
         return torch.empty(*args, **kwargs)
 
 
@@ -871,7 +906,10 @@ def _reset_for_testing() -> None:
     global _expandable_prepared, _expandable_requested, _expandable_active
     global _expandable_base_conf, _expandable_live
     global _base_conf_captured, _split_cap_live
+    global _scratch_pools, _scratch_pool_owners
     with _lock:
+        _scratch_pools = threading.local()
+        _scratch_pool_owners = []
         _tms = None
         _import_attempted = False
         _paused = False

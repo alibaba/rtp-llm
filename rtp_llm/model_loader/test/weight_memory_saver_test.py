@@ -13,6 +13,7 @@ to be un-importable with a None sys.modules entry), so the tests validate:
 import contextlib
 import os
 import sys
+import threading
 import types
 import unittest
 from typing import Any, Dict, Iterator, List, Optional
@@ -21,6 +22,148 @@ from unittest import mock
 from rtp_llm.model_loader import weight_memory_saver as wms
 
 _TMS_MODULE = "torch_memory_saver"
+
+
+class PausableScratchTest(unittest.TestCase):
+    def test_online_scratch_allocation_does_not_flush_or_change_allocator(self):
+        import torch
+
+        pool = object()
+        result = object()
+        with (
+            mock.patch.object(wms, "is_enabled", return_value=True),
+            mock.patch.object(wms, "_get_scratch_pool", return_value=pool),
+            mock.patch.object(
+                wms,
+                "weights_region",
+                side_effect=AssertionError("weight region on forward"),
+            ),
+            mock.patch.object(
+                wms,
+                "_apply_live_alloc_conf",
+                side_effect=AssertionError("runtime allocator changed"),
+            ),
+            mock.patch.object(
+                torch.cuda, "empty_cache", side_effect=AssertionError("cache flushed")
+            ),
+            mock.patch.object(
+                torch.cuda, "use_mem_pool", return_value=contextlib.nullcontext()
+            ) as use_pool,
+            mock.patch.object(torch, "empty", return_value=result) as empty,
+        ):
+            for size in (64, 1024, 2048):
+                self.assertIs(
+                    wms.pausable_empty(
+                        (size, 16), device="cuda:0", dtype=torch.bfloat16
+                    ),
+                    result,
+                )
+            self.assertEqual(use_pool.call_count, 3)
+            use_pool.assert_called_with(pool, device=torch.device("cuda:0"))
+            self.assertEqual(empty.call_count, 3)
+
+    def test_disabled_or_cpu_scratch_bypasses_custom_pool(self):
+        import torch
+
+        with (
+            mock.patch.object(
+                wms,
+                "_get_scratch_pool",
+                side_effect=AssertionError("custom pool not needed"),
+            ),
+            mock.patch.object(torch, "empty") as empty,
+        ):
+            with mock.patch.object(wms, "is_enabled", return_value=False):
+                wms.pausable_empty((16, 16), device="cuda:0")
+            with mock.patch.object(wms, "is_enabled", return_value=True):
+                wms.pausable_empty((16, 16), device="cpu")
+            self.assertEqual(empty.call_count, 2)
+
+    def test_implicit_cuda_device_uses_the_pausable_pool(self):
+        import torch
+
+        pool = object()
+        with (
+            mock.patch.object(wms, "is_enabled", return_value=True),
+            mock.patch.object(
+                torch, "get_default_device", return_value=torch.device("cuda:0")
+            ),
+            mock.patch.object(wms, "_get_scratch_pool", return_value=pool),
+            mock.patch.object(
+                torch.cuda, "use_mem_pool", return_value=contextlib.nullcontext()
+            ) as use_pool,
+            mock.patch.object(torch, "empty"),
+        ):
+            wms.pausable_empty((16, 16))
+            use_pool.assert_called_once_with(pool, device=torch.device("cuda:0"))
+
+    def test_pool_is_created_once_and_selects_the_startup_backup_policy(self):
+        import torch
+
+        for level, malloc in (
+            (1, "rtp_sleep_scratch_malloc_backup"),
+            (2, "rtp_sleep_scratch_malloc"),
+        ):
+            with self.subTest(level=level):
+                library = types.SimpleNamespace(
+                    __file__="test_compute_ops.so",
+                    rtp_llm_ops=types.SimpleNamespace(
+                        sleep_memory_allocator_available=lambda: True
+                    ),
+                )
+                pool = object()
+                with (
+                    mock.patch.dict(sys.modules, {"librtp_compute_ops": library}),
+                    mock.patch.object(wms, "_scratch_pools", threading.local()),
+                    mock.patch.object(wms, "_scratch_pool_owners", []),
+                    mock.patch.object(wms, "sleep_mode_level", return_value=level),
+                    mock.patch.object(
+                        torch.cuda, "device", return_value=contextlib.nullcontext()
+                    ),
+                    mock.patch.object(
+                        torch.cuda.memory, "CUDAPluggableAllocator"
+                    ) as allocator,
+                    mock.patch.object(
+                        torch.cuda, "MemPool", return_value=pool
+                    ) as make_pool,
+                ):
+                    self.assertIs(wms._get_scratch_pool(0), pool)
+                    self.assertIs(wms._get_scratch_pool(0), pool)
+                    allocator.assert_called_once_with(
+                        "test_compute_ops.so", malloc, "rtp_sleep_scratch_free"
+                    )
+                    make_pool.assert_called_once()
+
+    def test_threads_and_devices_do_not_enter_the_same_pool(self):
+        import torch
+
+        library = types.SimpleNamespace(
+            __file__="test_compute_ops.so",
+            rtp_llm_ops=types.SimpleNamespace(
+                sleep_memory_allocator_available=lambda: True
+            ),
+        )
+        pools = []
+        with (
+            mock.patch.dict(sys.modules, {"librtp_compute_ops": library}),
+            mock.patch.object(wms, "_scratch_pools", threading.local()),
+            mock.patch.object(wms, "_scratch_pool_owners", []) as owners,
+            mock.patch.object(
+                torch.cuda, "device", side_effect=lambda _: contextlib.nullcontext()
+            ),
+            mock.patch.object(torch.cuda.memory, "CUDAPluggableAllocator"),
+            mock.patch.object(torch.cuda, "MemPool", side_effect=lambda **_: object()),
+        ):
+            first = wms._get_scratch_pool(0)
+            second = wms._get_scratch_pool(1)
+            worker = threading.Thread(
+                target=lambda: pools.append(wms._get_scratch_pool(0))
+            )
+            worker.start()
+            worker.join()
+            self.assertIs(wms._get_scratch_pool(0), first)
+            self.assertEqual(len({id(first), id(second), id(pools[0])}), 3)
+            self.assertEqual(len(owners), 3)
 
 
 class _FakeTms:

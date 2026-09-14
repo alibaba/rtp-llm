@@ -20,6 +20,7 @@
 #include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
 #include "rtp_llm/models_py/bindings/cuda/UserBuffersOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FakeBalanceExpertOp.h"
+#include "rtp_llm/models_py/bindings/cuda/SleepMemoryAllocator.h"
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
@@ -31,6 +32,7 @@ using namespace rtp_llm;
 namespace torch_ext {
 
 void registerBasicCudaOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("sleep_memory_allocator_available", &sleepMemoryAllocatorAvailable);
     rtp_ops_m.def("debug_kernel",
                   &debugKernel,
                   "Debug kernel to print 2D data blocks from GPU tensor",

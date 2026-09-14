@@ -673,9 +673,8 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         """
         import deep_gemm
 
-        # Lazily re-create the symm buffer if it was released at sleep (all ranks
-        # hit this in lockstep on the first post-wake forward -> collective safe).
-        self._ensure_mega_buffers()
+        if self._mega_buf is None or self._mega_y is None:
+            self._ensure_mega_buffers()
         T = x.size(0)
         buf = self._mega_buf
         if T > buf.num_max_tokens_per_rank:
@@ -752,9 +751,8 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             _,
         ) = kernels
 
-        # Lazily re-create the symm buffer if it was released at sleep (all ranks
-        # hit this in lockstep on the first post-wake forward -> collective safe).
-        self._ensure_mega_buffers()
+        if self._mega_buf is None or self._mega_y is None:
+            self._ensure_mega_buffers()
         T = x.size(0)
         buf = self._mega_buf
         if T > buf.num_max_tokens_per_rank:
