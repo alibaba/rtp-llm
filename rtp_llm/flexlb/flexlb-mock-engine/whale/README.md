@@ -88,19 +88,20 @@ colocated P topology; separate-pod mode cannot inspect other processes with this
 ### Optional Memory copy lifecycle
 
 In the existing `prefill.memory_cache` performance JSON, set `copy_lifecycle: true`.
-It defaults to false to preserve existing case behavior. `read_ms_per_block` controls
-host-to-device transfer time; `write_ms_per_block` controls device-to-host transfer time
-(default 0, finite nonnegative milliseconds). Capacity remains one host pool plus one
+It defaults to false to preserve existing case behavior. Copies add no simulated latency;
+legacy `read_ms_per_block` and `write_ms_per_block` settings are ignored.
+Capacity remains one host pool plus one
 device pool; there is no unconditional write-on-GPU-eviction rule.
 
-At batch preparation, host matches are revalidated and pinned; pins release at modeled
-read completion, not at decode termination. Successful P compute starts an optional host
+At batch preparation, host matches are revalidated and pinned; pins release when the
+execution lane starts, with no copy timer. Successful P compute performs an optional host
 write: missing entries reserve host capacity, GPU source blocks retain a connector lease,
 and new host keys become visible only at copy commit. Existing host keys are skipped
 without LRU refresh. Host pressure skips pinned and pending blocks; a failed optional host
 reservation skips the cache write without failing inference. Cancellation/reset/shutdown
-release leases, and old callbacks cannot republish keys after reset. Zero copy durations
-mean synchronous completion, not a fabricated DMA delay.
+release leases, and old callbacks cannot republish keys after reset. Host writes commit
+synchronously while the GPU source is pinned. These host copies remain reusable after
+GPU eviction; no Memory capacity is added to GPU admission capacity.
 
 `mock_memory_cache_pinned_blocks`, `mock_memory_cache_pending_write_blocks`, and
 `mock_memory_cache_write_rejected_total` expose copy pressure. Host allocated blocks

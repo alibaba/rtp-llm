@@ -276,9 +276,7 @@ final class MockPerformanceModel {
         copy.prefillGpuPrefixTree = prefillGpuPrefixTree;
         copy.decodeGpuPrefixTree = decodeGpuPrefixTree;
         copy.memoryCacheBlocks = memoryCacheBlocks;
-        copy.memoryReadMsPerBlock = memoryReadMsPerBlock;
         copy.memoryCopyLifecycle = memoryCopyLifecycle;
-        copy.memoryWriteMsPerBlock = memoryWriteMsPerBlock;
         copy.decodeReserveBlockRatio = decodeReserveBlockRatio;
         copy.prefillBatchPolicy = prefillBatchPolicy;
         copy.nativeTokenCacheKeys = nativeTokenCacheKeys;
@@ -399,19 +397,11 @@ final class MockPerformanceModel {
             if (!blocks.isIntegralNumber() || !blocks.canConvertToInt() || blocks.asInt() <= 0)
                 throw new IllegalStateException("prefill.memory_cache.capacity_blocks must be a positive integer");
             model.memoryCacheBlocks = blocks.asInt();
-            JsonNode read = memory.path("read_ms_per_block");
-            double value = read.isMissingNode() ? 0 : read.asDouble(Double.NaN);
-            if ((!read.isMissingNode() && !read.isNumber()) || !Double.isFinite(value) || value < 0)
-                throw new IllegalStateException("prefill.memory_cache.read_ms_per_block must be finite and nonnegative");
-            model.memoryReadMsPerBlock = value;
+            // Legacy read/write latency settings are ignored: copies are instantaneous.
             if (memory.has("copy_lifecycle") && !memory.get("copy_lifecycle").isBoolean())
                 throw new IllegalStateException("prefill.memory_cache.copy_lifecycle must be boolean");
             model.memoryCopyLifecycle = memory.path("copy_lifecycle").asBoolean(false);
-            JsonNode write = memory.path("write_ms_per_block");
-            double writeMs = write.isMissingNode() ? 0 : write.asDouble(Double.NaN);
-            if ((!write.isMissingNode() && !write.isNumber()) || !Double.isFinite(writeMs) || writeMs < 0)
-                throw new IllegalStateException("prefill.memory_cache.write_ms_per_block must be finite and nonnegative");
-            model.memoryWriteMsPerBlock = writeMs;
+
         }
         model.eosModel = MockEosModel.load(decode.path("eos"));
         model.prefillBatchPolicy = MockPrefillBatchPolicy.load(prefill.path("fifo"));
@@ -725,9 +715,7 @@ final class MockPerformanceModel {
     }
 
     int memoryCacheBlocks;
-    double memoryReadMsPerBlock;
     boolean memoryCopyLifecycle;
-    double memoryWriteMsPerBlock;
 
     record RequestShape(EngineRpcService.GenerateInputPB input,
                         int inputLen,

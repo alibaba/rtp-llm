@@ -110,9 +110,7 @@ class MockMemoryBlockCacheTest {
         assertEquals(0, model("{}").memoryCacheBlocks);
         var copy = model("{\"enabled\":true,\"capacity_blocks\":10,\"read_ms_per_block\":0.2}").forEngine();
         assertEquals(10, copy.memoryCacheBlocks);
-        assertEquals(.2, copy.memoryReadMsPerBlock);
         assertThrows(IllegalStateException.class, () -> model("{\"enabled\":true,\"capacity_blocks\":0}"));
-        assertThrows(IllegalStateException.class, () -> model("{\"enabled\":true,\"capacity_blocks\":2,\"read_ms_per_block\":-1}"));
     }
     @Test void pinnedReadsSurvivePressureAndReleaseExactlyOnce() {
         var c = new MockMemoryBlockCache(2, ignored -> {});
@@ -156,20 +154,19 @@ class MockMemoryBlockCacheTest {
         t.set(25_000_000); c.beginWrite(List.of(2L)).commit();
         assertEquals(List.of(5.0), ages);
         var m = model("{\"enabled\":true,\"capacity_blocks\":10,\"copy_lifecycle\":true,\"write_ms_per_block\":2}").forEngine();
-        assertTrue(m.memoryCopyLifecycle); assertEquals(2.0, m.memoryWriteMsPerBlock);
-        assertThrows(IllegalStateException.class, () -> model("{\"enabled\":true,\"capacity_blocks\":2,\"write_ms_per_block\":-1}"));
+        assertTrue(m.memoryCopyLifecycle);
         assertThrows(IllegalStateException.class, () -> model("{\"enabled\":true,\"capacity_blocks\":2,\"copy_lifecycle\":1}"));
     }
 
-    @Test void asyncWriteRetainsGpuUntilCommitAndCancellationReleasesBothPools() throws Exception {
-        var m = model("{\"enabled\":true,\"capacity_blocks\":10,\"copy_lifecycle\":true,\"write_ms_per_block\":200}");
+    @Test void copyCommitsWithoutLegacyDelayAndGpuEvictionPreservesMemory() throws Exception {
+        var m = model("{\"enabled\":true,\"capacity_blocks\":10,\"copy_lifecycle\":true,\"write_ms_per_block\":60000,\"read_ms_per_block\":60000}");
         try (var cluster = MockEngineTestCluster.create(m, 61040, 1, 0)) {
             var p = cluster.prefill(0);
             var mem = (MockMemoryBlockCache) field(p, "memoryCache");
             var gpu = (MockLruBlockCache) field(p, "cache");
             for (int round = 0; round < 2; round++) {
                 long id = 800 + round;
-                String keys = round == 0 ? "[1,2,3]" : "[4,5,6]";
+                String keys = "[1,2,3]";
                 var req = EngineRpcService.GenerateInputPB.newBuilder().setRequestId(id)
                         .addAllTokenIds(java.util.Collections.nCopies(192, 123))
                         .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(1)
@@ -185,17 +182,17 @@ class MockMemoryBlockCacheTest {
                     public void onCompleted() { done.countDown(); }
                 });
                 assertTrue(done.await(3, java.util.concurrent.TimeUnit.SECONDS)); assertNull(error.get());
-                assertEquals(3, mem.pendingBlocks());
-                assertTrue(gpu.referencedKeyBlocks() >= 3, "GPU copy source remains pinned after P terminal");
-                if (round == 1) p.cancel(id);
+                assertEquals(0, mem.pendingBlocks(), "copy commits immediately despite legacy delay config");
+                assertEquals(0, mem.pinnedBlocks());
+                assertEquals(3, mem.size());
                 long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
-                while (mem.pendingBlocks() != 0 && System.nanoTime() < deadline) Thread.sleep(5);
-                assertEquals(0, mem.pendingBlocks());
-                // Copy completion releases the GPU reference just after publishing host keys.
                 while (gpu.referencedKeyBlocks() != 0 && System.nanoTime() < deadline) Thread.sleep(5);
                 assertEquals(0, gpu.referencedKeyBlocks());
+                if (round == 0) gpu.clear(); // next request must read from Memory
+
             }
             assertEquals(java.util.Set.of(1L, 2L, 3L), new java.util.HashSet<>(mem.keys()));
+            assertEquals(3, p.whaleMetrics().get("mock_memory_cache_read_blocks_total").longValue());
         }
     }
 

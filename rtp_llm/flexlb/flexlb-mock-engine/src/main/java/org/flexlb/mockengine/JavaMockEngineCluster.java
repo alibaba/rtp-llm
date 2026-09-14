@@ -710,17 +710,8 @@ public final class JavaMockEngineCluster {
                 var copy = new MemoryWrite(host, device);
                 var previous = memoryWrites.put(id, copy);
                 if (previous != null) previous.finish(false);
-                Runnable finish = () -> {
-                    if (memoryWrites.remove(id, copy)) copy.finish(!cancelledRequests.containsKey(id));
-                };
-                long nanos = (long) (host.blocks() * performance.memoryWriteMsPerBlock * 1_000_000.0);
-                if (nanos == 0) finish.run();
-                else {
-                    try { scheduler.schedule(finish, nanos, TimeUnit.NANOSECONDS); }
-                    catch (java.util.concurrent.RejectedExecutionException stopped) {
-                        if (memoryWrites.remove(id, copy)) copy.finish(false);
-                    }
-                }
+                // Keep source pins and commit visibility, without a simulated copy timer.
+                if (memoryWrites.remove(id, copy)) copy.finish(!cancelledRequests.containsKey(id));
             }
         }
 
@@ -3650,8 +3641,7 @@ public final class JavaMockEngineCluster {
             long executionMs = performance.prefillMs(shapes);
             long memoryBlocks = shapes.stream().mapToLong(MockPerformanceModel.RequestShape::memoryHitBlocks).sum();
             memoryReadBlocks.add(memoryBlocks);
-            long memoryLoadMs = Math.round(memoryBlocks * performance.memoryReadMsPerBlock);
-            long generateDelayMs = faultConfig.getGenerateDelayMs() + memoryLoadMs;
+            long generateDelayMs = faultConfig.getGenerateDelayMs();
             long now = System.nanoTime();
             long executionNanos = TimeUnit.MILLISECONDS.toNanos(executionMs + generateDelayMs);
             // When max_prefill_concurrency was explicitly configured via /set_perf, a
@@ -3696,8 +3686,8 @@ public final class JavaMockEngineCluster {
                 for (var member : members) {
                     long id = member.shape().input().getRequestId();
                     var read = memoryReads.get(id);
-                    long readDelay = startDelayNanos + (long) (member.shape().memoryHitBlocks()
-                            * performance.memoryReadMsPerBlock * 1_000_000.0);
+                    // Pins last until the existing execution lane starts; copying adds no delay.
+                    long readDelay = startDelayNanos;
                     Runnable release = () -> {
                         if (read != null && memoryReads.remove(id, read)) read.close();
                     };
@@ -3803,7 +3793,7 @@ public final class JavaMockEngineCluster {
                                     "rtp_llm_kv_cache_hit_rate", inputLen == 0 ? 0 : 100.0 * hitTokens / inputLen,
                                     "rtp_llm_kv_cache_memory_cache_read_token", hostTokens,
                                     "rtp_llm_kv_cache_memory_cache_read_latency_us",
-                                    shape.memoryHitBlocks() * performance.memoryReadMsPerBlock * 1000));
+                                    0.0));
                         }
                         computedContext |= inputLen > hitTokens;
                         processedContext |= inputLen > 0;
