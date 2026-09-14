@@ -117,7 +117,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         List<ClaimedRoute> claimed = new ArrayList<>(items.size());
         try {
             for (ScheduledRequest item : items) {
-                RequestRegistry.DeliveryClaim claim;
+                DeliveryClaim claim;
                 try {
                     claim = requests.tryClaimRouteDelivery(
                             item,
@@ -144,7 +144,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                     long itemWorkMs = transaction.predictions.get(item);
                     unstartedWorkMs = unstartedWorkMs > Long.MAX_VALUE - itemWorkMs
                             ? Long.MAX_VALUE : unstartedWorkMs + itemWorkMs;
-                    requests.beginRouteDelivery(route.claim(), precedingWork, unstartedWorkMs);
+                    route.claim().publishRoute(precedingWork, unstartedWorkMs);
                     delivered.add(item);
                 } catch (Throwable completionFailure) {
                     deliveryFailure = append(
@@ -163,7 +163,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         }
     }
 
-    private record ClaimedRoute(ScheduledRequest item, RequestRegistry.DeliveryClaim claim) { }
+    private record ClaimedRoute(ScheduledRequest item, DeliveryClaim claim) { }
 
     @Override
     public double projectGroupDurationMs(
