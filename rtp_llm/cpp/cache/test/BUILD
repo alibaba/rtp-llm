@@ -355,7 +355,10 @@ cc_test(
     name = "dsv41_gpu_cache_allocator_test",
     srcs = ["DSV41GpuCacheAllocatorTest.cc"],
     copts = test_copts,
-    deps = test_deps + ["//rtp_llm/cpp/cache/connector/memory:memory_connector"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/connector:connector",
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+    ],
 )
 
 cc_test(

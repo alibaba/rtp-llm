@@ -56,6 +56,23 @@ Rows readRows(CompleteTokenIds& tokens, int begin, int count, int batch = 0) {
 
 class V41InputBridgeTest: public DeviceTestBase {};
 
+TEST_F(V41InputBridgeTest, ReusableCheckpointLeavesPromptWorkAndDoesNotSplitImages) {
+    V41RequestInputs input;
+    input.token_types = torch::full({1048576}, -1, torch::kInt32);
+    for (const auto [length, expected] :
+         std::vector<std::pair<int64_t, int64_t>>{{0, 0}, {1, 0}, {1023, 0}, {1024, 0},
+                                                  {1025, 1024}, {16384, 15360}, {16385, 16384},
+                                                  {1048320, 1047552}, {1048576, 1047552}}) {
+        EXPECT_EQ(input.alignedCheckpointEnd(length, 1024), expected);
+    }
+    V41ImageInput image;
+    image.start = 15100;
+    image.types = torch::zeros({300}, torch::kInt32);
+    input.images.push_back(image);
+    EXPECT_EQ(input.alignedCheckpointEnd(16384, 1024), 14336);
+    EXPECT_EQ(input.alignedCheckpointEnd(16385, 1024), 16384);
+}
+
 TEST_F(V41InputBridgeTest, RpcOwnsExactCanonicalPayloadAfterProtoLifetime) {
     auto wire  = imageRequest();
     auto input = QueryConverter::transQuery(&wire);

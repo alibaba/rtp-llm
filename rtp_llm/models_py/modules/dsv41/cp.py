@@ -78,6 +78,8 @@ _SOURCE_ROWS = 512
 _READ_QUERIES = 4
 _REINDEX_BLOCKS = 512
 _INDEX_ROWS = CANDIDATE_BLOCKS * SPARSE_BLOCK
+# Per gathered row: int64 page/index vectors and transient mask/index results.
+_SELECTED_METADATA_BYTES = 80
 
 
 def _check(condition, message):
@@ -792,6 +794,14 @@ class V41CPAttentionContext(V41AttentionContext):
         spec, pool, table = self._page_specs[slot], self.pools[slot], self.tables[slot]
         requests, width = positions.shape
         wanted = self._all_gather(positions, retained_bytes=retained_bytes).reshape(-1)
+        output_bytes = requests * width * spec.encoding.entry_bytes
+        self._record_gather(
+            output_bytes,
+            retained_bytes
+            + _bytes(positions, wanted)
+            + 9 * output_bytes
+            + wanted.numel() * _SELECTED_METADATA_BYTES,
+        )
         logical = wanted.clamp_min(0).long() // spec.entries
         owners, virtual = logical % 8, logical // 8
         owned = (wanted >= 0) & (owners == self.cp.cp_rank)
@@ -801,25 +811,27 @@ class V41CPAttentionContext(V41AttentionContext):
             ~owned | (in_table & (ids > 0) & (ids < pool.shape[0])),
             "CP selected KV row has no allocated owner page",
         )
-        columns = torch.arange(spec.encoding.entry_bytes, device=self.query_device)
-        offsets = (wanted.clamp_min(0).long() % spec.entries)[
-            :, None
-        ] * spec.encoding.entry_bytes + columns
-        local = pool[ids.clamp(0, pool.shape[0] - 1)[:, None], offsets]
-        local.masked_fill_(~owned[:, None], 0)
-        output_bytes = requests * width * spec.encoding.entry_bytes
-        received = self._all_gather(
-            local,
-            retained_bytes=retained_bytes + _bytes(wanted),
-            restored_bytes=output_bytes,
-        ).view(8, wanted.numel(), spec.encoding.entry_bytes)
-        first = self.cp.cp_rank * requests * width
-        row = torch.arange(first, first + requests * width, device=self.query_device)
-        values = received[owners[first : first + requests * width], row].view(
-            requests, width, -1
+        page_rows = pool[:, : spec.entries * spec.encoding.entry_bytes].view(
+            pool.shape[0], spec.entries, spec.encoding.entry_bytes
         )
+        local = page_rows[
+            ids.clamp(0, pool.shape[0] - 1), wanted.clamp_min(0).long() % spec.entries
+        ]
+        local.masked_fill_(~owned[:, None], 0)
+        del logical, owners, virtual, owned, in_table, ids
+        values = torch.empty(
+            (requests * width, spec.encoding.entry_bytes),
+            dtype=torch.uint8,
+            device=self.query_device,
+        )
+        # Each byte has exactly one page owner; SUM preserves its bit pattern.
+        # Rank-major requests make each scatter chunk the requesting rank's rows.
+        torch.distributed.reduce_scatter_tensor(
+            values, local, group=collective_torch._get_group(Group.TP)
+        )
+        values = values.view(requests, width, -1)
         values.masked_fill_((positions < 0)[:, :, None], 0)
-        return values, self.lease(slot, (received, values), layer)
+        return values, self.lease(slot, (values,), layer)
 
     def swa_queries(self, layer, first, last, initial, encoded):
         """Restore each local query's causal ring before any later row overwrites it."""
@@ -1333,7 +1345,7 @@ def _score_queries(attention, hidden, qr, context):
     slot = RegionSlot(CacheRegion.INDEX_K, source.index_k_owner)
     top, blocks, status = {}, {}, {}
     calls = max_logits = max_packed = 0
-    query_tile = 1 if layer > 20 else QUERY_TILE
+    query_tile = QUERY_TILE
     source_tiles = (
         (0,)
         if layer > 20
@@ -1381,17 +1393,28 @@ def _score_queries(attention, hidden, qr, context):
                     dtype=torch.uint8,
                     device=hidden.device,
                 )
+                # Retain the complete candidates while bounding the rank-major
+                # answers, reduced output and gathered int32 request positions.
+                transport_blocks = min(
+                    _REINDEX_BLOCKS,
+                    (MAX_GATHER_BYTES - _bytes(values, actual))
+                    // (
+                        (last - first)
+                        * SPARSE_BLOCK
+                        * (9 * 68 + 8 * (4 + _SELECTED_METADATA_BYTES) + 4)
+                    ),
+                )
                 # Tile transport, then score the complete candidate set once.
                 # This preserves the existing selector's tie behavior.
                 for row_first in range(
-                    0, actual.shape[1], _REINDEX_BLOCKS * SPARSE_BLOCK
+                    0, actual.shape[1], transport_blocks * SPARSE_BLOCK
                 ):
-                    row_last = row_first + _REINDEX_BLOCKS * SPARSE_BLOCK
+                    row_last = row_first + transport_blocks * SPARSE_BLOCK
                     received, row_lease = context.gather_selected(
                         slot,
                         actual[:, row_first:row_last].contiguous(),
                         layer,
-                        retained_bytes=_bytes(values),
+                        retained_bytes=_bytes(values, actual),
                     )
                     values[:, row_first:row_last].copy_(received)
                     context.release(row_lease, layer)

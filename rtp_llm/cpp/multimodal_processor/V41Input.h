@@ -27,7 +27,8 @@ struct V41RequestInputs {
     int64_t alignedCheckpointEnd(int64_t prompt_end, int64_t reuse_unit) const {
         RTP_LLM_CHECK_WITH_INFO(prompt_end >= 0 && prompt_end <= token_types.numel() && reuse_unit > 0,
                                 "invalid V4.1 checkpoint selection boundary");
-        int64_t end = prompt_end / reuse_unit * reuse_unit;
+        // Prefix reuse must leave a token to produce the next-token logits.
+        int64_t end = prompt_end == 0 ? 0 : (prompt_end - 1) / reuse_unit * reuse_unit;
         for (auto image = images.rbegin(); image != images.rend(); ++image) {
             if (end > image->start && end < static_cast<int64_t>(image->start) + image->types.numel())
                 end = image->start / reuse_unit * reuse_unit;

@@ -3,13 +3,17 @@
 #include <grpcpp/grpcpp.h>
 
 #include <atomic>
+#include <chrono>
 #include <future>
 #include <map>
 #include <numeric>
+#include <thread>
 
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -76,6 +80,22 @@ public:
             return {grpc::StatusCode::INTERNAL, error.what()};
         }
     }
+};
+
+class MemoryReadContext final: public KVCacheConnectorReadWriteContext {
+public:
+    MemoryReadContext(BatchKVCacheResourcePtr resource, std::shared_ptr<Meta> meta):
+        resource_(std::move(resource)), meta_(std::move(meta)) {}
+    const KVCacheResource& kvCacheResource() const override {
+        return resource_->cacheResource();
+    }
+    const std::shared_ptr<Meta>& meta() const override {
+        return meta_;
+    }
+
+private:
+    BatchKVCacheResourcePtr resource_;
+    std::shared_ptr<Meta>   meta_;
 };
 
 void cudaCheck(cudaError_t status) {
@@ -279,12 +299,8 @@ TEST_F(DSV41GpuCacheAllocatorTest, SameKeysKeepModeIdentityAndRestoreExactBytesI
         auto result      = allocator_->malloc(MallocInfo{destination, tokens(129)});
         ASSERT_TRUE(result.success);
         EXPECT_EQ(destination->cacheResource().deviceReuseBlockNum(), 1);
-        EXPECT_EQ(result.reuse_len, mode == DSV41ReplayMode::FULL ? 128 : 0);
-        if (mode == DSV41ReplayMode::FULL) {
-            EXPECT_EQ(destination->blocks(0, 0)[0], source_global);
-        } else {
-            EXPECT_NE(destination->blocks(0, 0)[0], source_global);
-        }
+        EXPECT_EQ(result.reuse_len, 128);
+        EXPECT_EQ(destination->blocks(0, 0)[0], source_global);
         EXPECT_NE(destination->blocks(0, 5)[0], source_swa);
         EXPECT_EQ(bytes(destination->cacheResource(), 1), expected);
         EXPECT_EQ(destination->cacheResource().dsv41CacheState()->view().decoder_checkpoint_end, 128);
@@ -495,6 +511,54 @@ TEST_F(DSV41GpuCacheAllocatorTest, MemoryTransferKeepsGpuCheckpointOnFailureAndP
     free(destination);
 }
 
+TEST_F(DSV41GpuCacheAllocatorTest, GpuDataHitsDoNotHideEarlierMemoryExecutionCheckpoint) {
+    auto source = resource(2, DSV41ReplayMode::BOUNDED_CHECKPOINT_V1);
+    for (int group : {4, 5}) {
+        auto blocks = source->blocks(0, group);
+        blocks[0] = blocks[1];
+        blocks[1] = NULL_BLOCK_IDX;
+        source->mutableBlockIds(0, group).assign(std::move(blocks));
+    }
+    fill(source, 83);
+    const auto expected = bytes(source->cacheResource(), 1);
+    const auto state = source->cacheResource().dsv41CacheState();
+    state->advanceEncoder(128);
+    state->completeDecoder(metadata(state->view().identity, 1), 128);
+    ASSERT_TRUE(memory_->stageDsv41Checkpoint(std::make_shared<KVCacheResource>(source->cacheResource()),
+                                             [] { cudaCheck(cudaDeviceSynchronize()); }, meta_));
+    state->advanceEncoder(256);
+    allocator_->insertIntoCache(InsertInfo{source, tokens(257), false});
+    free(source);
+
+    auto destination = resource(2, DSV41ReplayMode::BOUNDED_CHECKPOINT_V1, false);
+    const auto allocated = allocator_->malloc(MallocInfo{destination, tokens(257)});
+    ASSERT_TRUE(allocated.success);
+    ASSERT_EQ(allocated.reuse_len, 0);
+    ASSERT_EQ(destination->cacheResource().deviceReuseBlockNum(), 2);
+    ASSERT_EQ(destination->cacheResource().dsv41CacheState()->view().target_ready_end, 0);
+
+    auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
+        config_, kv_, RuntimeConfig{}, parallelism(), SpeculativeExecutionConfig{}, allocator_);
+    coordinator->connectors_ = {memory_};
+    auto context = coordinator->asyncRead(std::make_shared<MemoryReadContext>(destination, meta_));
+    ASSERT_TRUE(context);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (!context->done() && std::chrono::steady_clock::now() < deadline) {
+        coordinator->updateOnce();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(context->done());
+    ASSERT_TRUE(context->success());
+    const auto read = std::dynamic_pointer_cast<FusedAsyncReadContext>(context);
+    ASSERT_TRUE(read);
+    EXPECT_EQ(read->resource()->deviceReuseBlockNum(), 0);
+    EXPECT_EQ(read->resource()->memoryReuseBlockNum(), 1);
+    EXPECT_EQ(destination->cacheResource().deviceReuseBlockNum(), 2);
+    EXPECT_EQ(destination->cacheResource().dsv41CacheState()->view().target_ready_end, 128);
+    EXPECT_EQ(bytes(*read->resource(), 1), expected);
+    free(destination);
+}
+
 class DSV41GpuDecodeCP8Test: public DSV41GpuCacheAllocatorTest {
 protected:
     ParallelismConfig parallelism() const override {
@@ -557,7 +621,7 @@ TEST_F(DSV41GpuLongSuffixTest, InitialAllocationRetainsExactCheckpointAcrossShor
             auto      destination = resource((total - 1) / 128, mode, false);
             auto      result      = allocator_->malloc(MallocInfo{destination, tokens(total)});
             ASSERT_TRUE(result.success);
-            ASSERT_EQ(result.reuse_len, mode == DSV41ReplayMode::FULL ? 128 : 0);
+            ASSERT_EQ(result.reuse_len, 128);
             ASSERT_EQ(destination->cacheResource().deviceReuseBlockNum(), 1);
             ASSERT_GT(destination->blocks(0, 4)[0], 0);
             ASSERT_GT(destination->blocks(0, 5)[0], 0);

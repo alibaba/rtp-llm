@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/DSV41CacheState.h"
 #include "rtp_llm/cpp/cache/DSV41KVCacheSpec.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -270,6 +271,17 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         RTP_LLM_LOG_WARNING("async read failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
         return nullptr;
+    }
+
+    const auto meta = connector_context->meta();
+    if (cache_config_.dsv41_cache_layout_version != 0 && resource->dsv41CacheState() && meta
+        && meta->enableMemoryCache()) {
+        // GPU data hits without their tail state cannot skip a memory restore.
+        // Adjust only the connector's reference; keep the allocator's data hits.
+        const size_t unit = cache_config_.seq_size_per_block * cp_size;
+        RTP_LLM_CHECK_WITH_INFO(unit > 0, "V4.1 memory reuse requires a nonzero cache unit");
+        const size_t ready = std::max<int64_t>(0, resource->dsv41CacheState()->view().target_ready_end) / unit;
+        resource->setDeviceReuseBlockNum(std::min(resource->deviceReuseBlockNum(), ready));
     }
 
     std::vector<std::shared_ptr<AsyncContext>> match_contexts(connectors_.size());
