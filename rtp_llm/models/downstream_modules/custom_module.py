@@ -26,6 +26,13 @@ class Trigger(str, Enum):
     CONTEXT = "context"
 
 
+class HiddenStateStage(str, Enum):
+    """Source of generate-path hidden states, independent of token selection."""
+
+    POST_FINAL_NORM = "post_final_norm"
+    PRE_FINAL_NORM = "pre_final_norm"
+
+
 class CustomModule(object):
     renderer: "CustomRenderer"
     handler: "CustomHandler"
@@ -95,6 +102,15 @@ class CustomHandler(object):
     # engine invokes extend_forward. The embedding engine ignores this.
     def trigger_mode(self) -> Trigger:
         return Trigger.CONTEXT
+
+    def hidden_state_stage(self) -> HiddenStateStage:
+        """Match the stage used to train this head; embedding ignores this.
+
+        The default preserves the model's final normalized output. PRE_FINAL_NORM
+        means the input to the final model norm, not the norms inside each block.
+        Unsupported models/backends must reject it rather than substitute data.
+        """
+        return HiddenStateStage.POST_FINAL_NORM
 
     # extended_forward
     # input_lengths: [batch_size]

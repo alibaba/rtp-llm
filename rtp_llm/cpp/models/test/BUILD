@@ -87,3 +87,33 @@ py_test(
     },
     exec_properties = {"gpu": "H20"},
 )
+
+cc_library(
+    name = "pywrapped_model_custom_output_test_lib",
+    srcs = ["PyWrappedModelCustomOutputTest.cc"],
+    alwayslink = True,
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/engine_base/executor_base:post_layers_processor",
+        "//rtp_llm/models_py/bindings:op_defs",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
+    ] + torch_deps(),
+)
+
+cc_binary(
+    name = "th_pywrapped_model_custom_output_test",
+    deps = [":pywrapped_model_custom_output_test_lib"],
+    linkshared = 1,
+)
+
+py_test(
+    name = "pywrapped_model_custom_output_test",
+    srcs = ["pywrapped_model_custom_output_test.py"],
+    data = [":th_pywrapped_model_custom_output_test"],
+    deps = ["//rtp_llm:torch"],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "H20"},
+)

@@ -64,7 +64,11 @@ private:
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
                                                           const GptModelInputs& inputs,
                                                           bool                  skip_final_layernorm,
-                                                          size_t                num_valid_tokens = -1);
+                                                          size_t                num_valid_tokens      = -1,
+                                                          torch::Tensor         pre_final_norm_hidden = {});
+    // Context-only row indexes shared by Python pre-norm capture and C++
+    // post-layers selection. Existing selector/prefix-cache logic owns positions.
+    torch::Tensor                   customOutputIndexes(const GptModelInputs& inputs);
     torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
     // Methods absorbed from GptModel
@@ -77,7 +81,8 @@ private:
                                       size_t                token_num,
                                       const GptModelInputs& inputs,
                                       torch::Tensor         merged_eagle3_hidden,
-                                      bool                  skip_final_layernorm = false);
+                                      bool                  skip_final_layernorm  = false,
+                                      torch::Tensor         pre_final_norm_hidden = {});
     GptModelOutputs forwardPostLayersLastHidden(torch::Tensor hidden, const GptModelInputs& inputs);
     MicroBatchPlan  planMicroBatches(const GptModelInputs& inputs);
     std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>

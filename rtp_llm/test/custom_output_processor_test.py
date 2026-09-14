@@ -5,6 +5,7 @@ from unittest import mock
 
 from rtp_llm.models.downstream_modules.custom_module import (
     CustomHandler,
+    HiddenStateStage,
     Trigger,
 )
 from rtp_llm.models.downstream_modules.utils import create_post_layers_module
@@ -30,6 +31,19 @@ def create_custom_module(config, tokenizer):
 """
 
 class TriggerProtocolTest(unittest.TestCase):
+    def test_default_stage_preserves_post_final_norm(self):
+        self.assertEqual(
+            CustomHandler(None).hidden_state_stage(), HiddenStateStage.POST_FINAL_NORM
+        )
+
+    def test_stage_is_independent_of_token_selection(self):
+        class ScoreHandler(CustomHandler):
+            def hidden_state_stage(self):
+                return HiddenStateStage.PRE_FINAL_NORM
+
+        self.assertEqual(ScoreHandler(None).hidden_state_stage(), "pre_final_norm")
+        self.assertEqual(HiddenStateStage.POST_FINAL_NORM.value, "post_final_norm")
+
     def test_default_trigger_is_context(self):
         handler = CustomHandler(None)
         self.assertEqual(handler.trigger_mode(), Trigger.CONTEXT)

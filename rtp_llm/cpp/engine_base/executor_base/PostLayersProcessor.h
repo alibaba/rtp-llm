@@ -31,6 +31,10 @@ public:
         return has_handler_;
     }
 
+    bool usesPreFinalNorm() const {
+        return uses_pre_final_norm_;
+    }
+
     // True when the handler should run on this step (CONTEXT trigger).
     bool shouldRunOnContext(bool has_context_request) const {
         return has_handler_ && wants_context_ && has_context_request;
@@ -57,6 +61,7 @@ private:
 
     bool              has_handler_   = false;
     bool              wants_context_ = false;
+    bool              uses_pre_final_norm_ = false;
     pybind11::object  handler_;
     HandlerArgs::Flag handler_args_{};
 };

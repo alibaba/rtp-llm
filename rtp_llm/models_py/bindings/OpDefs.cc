@@ -266,12 +266,18 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite(
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
         .def_readwrite("input_embeddings", &PyModelInputs::input_embeddings, "Input embeddings tensors")
-        .def_readwrite("input_embeddings_locs", &PyModelInputs::input_embeddings_locs, "Input embeddings locations");
+        .def_readwrite("input_embeddings_locs", &PyModelInputs::input_embeddings_locs, "Input embeddings locations")
+        .def_readwrite("pre_final_norm_output_indexes",
+                       &PyModelInputs::pre_final_norm_output_indexes,
+                       "Optional device int64 indexes of context rows to retain before the final norm");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
         .def(pybind11::init<torch::Tensor>(), pybind11::arg("hidden_states"), "Initialize with hidden states tensor")
-        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor");
+        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
+        .def_readwrite("pre_final_norm_hidden_states",
+                       &PyModelOutputs::pre_final_norm_hidden_states,
+                       "Optional selected pre-final-norm rows [context_batch, hidden]");
 }
 
 }  // namespace torch_ext

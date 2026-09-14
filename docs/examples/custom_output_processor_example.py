@@ -31,6 +31,10 @@ last-layer hidden states，过自定义 MLP 打分，打分随生成结果一起
     context 请求最后一个 token 的 hidden state。
   * MLP 权重放在模型 ckpt 里，通过 custom_weight_info() 走现有权重加载链，
     不要在业务代码里自行 torch.load。
+  * hidden_state_stage() 默认 POST_FINAL_NORM（最终归一化后）。若打分头
+    训练时取最后一个 decoder block 的输出，显式返回 PRE_FINAL_NORM。
+    这与 token ID / 位置选择无关，不会改变生成分支的最终归一化。
+    未支持该阶段的模型/后端会启动失败，不能用“后”静默替代“前”。
   * extend_forward 运行在引擎 forward 热路径上（每个 prefill step 一次，
     batched），禁止任何同步操作: .item() / .cpu() / .tolist() /
     torch.cuda.synchronize() / print / logging。输出留在 GPU 上，
@@ -48,6 +52,7 @@ from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.models.downstream_modules.custom_module import (
     CustomHandler,
     CustomModule,
+    HiddenStateStage,
     Trigger,
 )
 from rtp_llm.utils.model_weight import CkptWeightInfo
@@ -89,6 +94,11 @@ class ScoreHandler(CustomHandler):
 
     def trigger_mode(self) -> Trigger:
         return Trigger.CONTEXT  # 基类默认值，显式写出便于阅读
+
+    def hidden_state_stage(self) -> HiddenStateStage:
+        # 必须与打分头训练时一致；card_score_head 的最后层 hook 应选
+        # HiddenStateStage.PRE_FINAL_NORM。普通示例保留默认“后”。
+        return HiddenStateStage.POST_FINAL_NORM
 
     def extend_forward(self, **kwargs: Any) -> torch.Tensor:
         # selected_hidden_states: [context_batch, hidden]，每条请求倒数
