@@ -187,6 +187,98 @@ def test_fused_recurrent_narrow_block_map_view():
     assert_close("narrow cache", contiguous_cache, narrow_cache, 0.0)
 
 
+def test_fused_recurrent_cuda_graph_padding_row_does_not_touch_cache():
+    device = "cuda"
+    dtype = torch.bfloat16
+    valid_batch = 3
+    graph_batch = 4
+    seqlen = 8
+    heads = 2
+    value_heads = 2
+    dim = 32
+    seq_size_per_block = 64
+    sequence_lengths = [130, 193, 257]
+
+    torch.manual_seed(23)
+    q = torch.randn(graph_batch, seqlen, heads, dim, dtype=dtype, device=device)
+    k = torch.randn_like(q)
+    v = torch.randn(
+        graph_batch, seqlen, value_heads, dim, dtype=dtype, device=device
+    )
+    beta = torch.rand(
+        graph_batch, seqlen, value_heads, dtype=dtype, device=device
+    )
+    g = F.logsigmoid(
+        torch.rand(
+            graph_batch,
+            seqlen,
+            value_heads,
+            dtype=torch.float32,
+            device=device,
+        )
+    )
+
+    block_map = torch.zeros(
+        graph_batch, 16, dtype=torch.int32, device=device
+    )
+    next_block = 1
+    for row, sequence_length in enumerate(sequence_lengths):
+        block_count = math.ceil(sequence_length / seq_size_per_block) + seqlen
+        block_map[row, :block_count] = torch.arange(
+            next_block,
+            next_block + block_count,
+            dtype=torch.int32,
+            device=device,
+        )
+        next_block += block_count
+
+    cache_seed = torch.randn(
+        next_block,
+        value_heads,
+        dim,
+        dim,
+        dtype=torch.float32,
+        device=device,
+    )
+    valid_cache = cache_seed.clone()
+    padded_cache = cache_seed.clone()
+
+    valid_out, _ = fused_recurrent_gated_delta_rule(
+        q=q[:valid_batch],
+        k=k[:valid_batch],
+        v=v[:valid_batch],
+        beta=beta[:valid_batch],
+        g=g[:valid_batch],
+        initial_state=valid_cache,
+        block_map=block_map[:valid_batch],
+        sequence_lengths=torch.tensor(
+            sequence_lengths, dtype=torch.int32, device=device
+        ),
+        seq_size_per_block=seq_size_per_block,
+        use_qk_l2norm_in_kernel=True,
+        inplace_final_state=True,
+    )
+    padded_out, _ = fused_recurrent_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        beta=beta,
+        g=g,
+        initial_state=padded_cache,
+        block_map=block_map,
+        sequence_lengths=torch.tensor(
+            sequence_lengths + [0], dtype=torch.int32, device=device
+        ),
+        seq_size_per_block=seq_size_per_block,
+        use_qk_l2norm_in_kernel=True,
+        inplace_final_state=True,
+    )
+    torch.cuda.synchronize()
+
+    assert_close("padding output", valid_out, padded_out[:valid_batch], 0.0)
+    assert_close("padding cache", valid_cache, padded_cache, 0.0)
+
+
 if __name__ == "__main__":
     H = 16
     HV = 32
@@ -200,3 +292,4 @@ if __name__ == "__main__":
                 bs, seq, H, HV, D, scale, gate_logit_normalizer, torch.bfloat16
             )
     test_fused_recurrent_narrow_block_map_view()
+    test_fused_recurrent_cuda_graph_padding_row_does_not_touch_cache()

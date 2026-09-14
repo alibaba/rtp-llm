@@ -77,12 +77,11 @@ private:
         size_t                  cache_model_id;
     };
 
-    void         initThreadPool();
-    void         prepareGenerateContext(DecodeGenerateContext& decode_context);
-    void         allocateResource(DecodeGenerateContext& decode_context);
-    grpc::Status allocateResourceFunc(DecodeGenerateContext& decode_context);
-    void         loadCacheFromPrefill(DecodeGenerateContext& decode_context);
-    void         localGenerate(DecodeGenerateContext& decode_context);
+    void initThreadPool();
+    void prepareGenerateContext(DecodeGenerateContext& decode_context);
+    void allocateResource(DecodeGenerateContext& decode_context);
+    void loadCacheFromPrefill(DecodeGenerateContext& decode_context);
+    void localGenerate(DecodeGenerateContext& decode_context);
     // Report a terminal early failure to FlexLB via meta_->finishTask(); guaranteed at most once per
     // request. MUST NOT be called inside functions driven by EXECUTE_WITH_RETRY (would report while
     // retries could still succeed); only call at final failure points.
@@ -126,6 +125,7 @@ private:
                                                const std::vector<size_t>& required_cache_key_counts,
                                                const std::vector<size_t>& transferred_cache_key_counts);
     static size_t minLoadedCacheBlockCount(const std::vector<size_t>& rank_loaded_cache_block_counts);
+    static ErrorInfo validateRemoteLoadTopology(size_t worker_size, size_t peer_size);
     static std::vector<size_t> completionQueueExpectedResponseCounts(size_t worker_size);
     static int                 markLoadedCacheReuse(const std::shared_ptr<GenerateStream>& stream,
                                                     const LoadCacheResult&                 load_result,

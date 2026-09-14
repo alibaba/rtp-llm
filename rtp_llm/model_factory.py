@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import os
@@ -22,6 +23,7 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
+from rtp_llm.device.device_type import is_hip
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
 from rtp_llm.ops import (
     ProfilingDebugLoggingConfig,
@@ -180,10 +182,28 @@ class ModelFactory:
             if alias_names and target_model.weight is None:
                 raise RuntimeError("speculative shared-weight owner is not loaded")
 
+            propose_hw_kernel_config = engine_config.hw_kernel_config
+            if (
+                sp_type == SpeculativeType.DSPARK
+                and propose_model_config.model_type == "qwen_3_dspark"
+                and is_hip()
+                and propose_hw_kernel_config.use_swizzleA
+            ):
+                # The target's FP8 PTPC path benefits from ROCm swizzle, but the
+                # Qwen3 DSpark checkpoint is BF16.  hipBLASLt on MI308X has no
+                # preshuffled BF16 solution for the draft's 5120x5120 GEMMs.
+                # Keep the target config unchanged and give the draft an
+                # independent raw-layout config for both loading and dispatch.
+                propose_hw_kernel_config = copy.deepcopy(propose_hw_kernel_config)
+                propose_hw_kernel_config.use_swizzleA = False
+                logging.info(
+                    "disable ROCm swizzleA for BF16 qwen_3_dspark propose model"
+                )
+
             gpt_model = model_cls.from_config(
                 model_config=propose_model_config,
                 parallelism_config=engine_config.parallelism_config,
-                hw_kernel_config=engine_config.hw_kernel_config,
+                hw_kernel_config=propose_hw_kernel_config,
                 kv_cache_config=engine_config.kv_cache_config,
                 fmha_config=engine_config.fmha_config,
                 moe_config=engine_config.moe_config,
@@ -525,10 +545,22 @@ class ModelFactory:
             )
 
         noise_token_id = int(propose_model_config.dspark_noise_token_id)
-        if noise_token_id < 0 or noise_token_id >= propose_model_config.vocab_size:
+        # The noise token is consumed by the draft backbone embedding, not by
+        # the reduced Markov output head.  Speculators checkpoints may expose
+        # a 20K draft output vocabulary while retaining the target-sized input
+        # embedding, so validate in the input-token id space.
+        # ModelConfig uses zero when the input vocabulary was not set
+        # separately; in that case the embedding spans the model vocabulary.
+        configured_input_vocab_size = getattr(
+            propose_model_config, "input_vocab_size", 0
+        )
+        input_vocab_size = int(
+            configured_input_vocab_size or propose_model_config.vocab_size
+        )
+        if noise_token_id < 0 or noise_token_id >= input_vocab_size:
             raise ValueError(
-                f"invalid dspark_noise_token_id {noise_token_id} for vocab_size "
-                f"{propose_model_config.vocab_size}"
+                f"invalid dspark_noise_token_id {noise_token_id} for "
+                f"input_vocab_size {input_vocab_size}"
             )
 
         target_layer_ids = [
@@ -536,6 +568,11 @@ class ModelFactory:
         ]
         if not target_layer_ids:
             raise ValueError("dspark_target_layer_ids must not be empty")
+        if target_layer_ids != sorted(set(target_layer_ids)):
+            raise ValueError(
+                "dspark_target_layer_ids must be unique and ordered by target "
+                f"layer boundary, got {target_layer_ids}"
+            )
         invalid_layer_ids = [
             layer_id
             for layer_id in target_layer_ids
@@ -552,6 +589,9 @@ class ModelFactory:
             raise ValueError(f"invalid dspark_markov_rank: {markov_rank}")
 
         sp_config.sp_dspark_mask_token_id = noise_token_id
+        sp_config.sp_dspark_sample_from_anchor = bool(
+            getattr(propose_model_config, "dspark_sample_from_anchor", True)
+        )
         # Both models carry the capture ids: the target uses them to capture
         # and to size the shared MTP hidden buffer rows; the draft only needs
         # them for the same row-width derivation (it never captures).

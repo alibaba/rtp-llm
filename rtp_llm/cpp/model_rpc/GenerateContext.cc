@@ -163,10 +163,14 @@ void GenerateContext::stopStream() {
                 stream_->reportError(ErrorCode::CANCELLED, "context cleanup before stream finished");
             }
         }
-        while (stream_->getStatus() == StreamState::RUNNING) {
-            RTP_LLM_LOG_DEBUG("waiting stream [%d] running done to cancel", stream_->generateInput()->request_id);
-            usleep(1000);
+        if (!stream_->finishOrCancel(kStopStreamWaitTimeoutMs, "cancel stream")) {
+            RTP_LLM_LOG_WARNING("stopStream timeout (%ld ms) waiting for Engine Loop for request [%d]",
+                                kStopStreamWaitTimeoutMs,
+                                stream_->generateInput()->request_id);
         }
+        // RuntimeMeta snapshots the stream's terminal status during dequeue.
+        // Capture only after reportError/finishOrCancel have committed it so
+        // FlexLB observes the real cancellation or context error code.
         meta->dequeue(request_id, stream_);
         stream_.reset();
     }

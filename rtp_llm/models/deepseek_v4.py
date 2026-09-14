@@ -1066,7 +1066,7 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
                 identity,
             ),
             AtomicWeight(
-                W.v4_dspark_markov_w1,
+                W.dspark_markov_w1,
                 [
                     CkptWeightInfo(
                         f"mtp.{last_stage}.markov_head.markov_w1.weight", identity
@@ -1076,7 +1076,7 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
                 data_type=torch.bfloat16,
             ),
             AtomicWeight(
-                W.v4_dspark_markov_w2,
+                W.dspark_markov_w2,
                 [
                     CkptWeightInfo(
                         f"mtp.{last_stage}.markov_head.markov_w2.weight", identity

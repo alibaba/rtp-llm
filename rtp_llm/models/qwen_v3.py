@@ -27,6 +27,12 @@ class QwenV3(QWenV2):
         config.qk_norm = True
         return config
 
+    @classmethod
+    def _create_config_from_json(cls, ckpt_path: str, config_json):
+        config = super()._create_config_from_json(ckpt_path, config_json)
+        config.qk_norm = True
+        return config
+
     def _init_custom_module(self) -> Optional[CustomModule]:
         logging.info(f"task_type : {self.model_config.task_type}")
         if self.model_config.task_type == TaskType.RERANKER:

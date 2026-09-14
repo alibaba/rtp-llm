@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <limits>
 #include <unordered_set>
+#include <utility>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
@@ -12,6 +13,28 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
+
+std::shared_ptr<KVCacheResource>
+KVCacheAllocator::incrKVCacheRefWithReleaseCallback(const KVCacheResource& kvcache_resource,
+                                                    const CacheKeysType&   cache_keys,
+                                                    bool                   is_connector,
+                                                    std::function<void()>  release_callback) {
+    auto resource = incrKVCacheRef(kvcache_resource, cache_keys, is_connector);
+    if (!resource || !release_callback) {
+        return resource;
+    }
+
+    // Keep the allocator-owned resource as the inner owner. Releasing the outer
+    // handle first runs the allocator's custom deleter, then publishes the
+    // resulting capacity change. The callback owns no KVCacheManager lifetime.
+    auto* resource_ptr = resource.get();
+    return std::shared_ptr<KVCacheResource>(
+        resource_ptr,
+        [resource = std::move(resource), release_callback = std::move(release_callback)](KVCacheResource*) mutable {
+            resource.reset();
+            release_callback();
+        });
+}
 
 bool KVCacheAllocator::init() {
     RTP_LLM_CHECK_WITH_INFO(doInit(), "init failed");
@@ -116,6 +139,12 @@ MallocStatus KVCacheAllocator::evaluateInitCapacity(const MallocInfo& malloc_inf
 }
 
 MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
+    // Keep capacity classification and the physical allocations it authorizes
+    // in one transaction.  Decode-side P/D admission invokes this entry point
+    // from concurrent RPC threads, while running streams can allocate from the
+    // engine thread at the same time.
+    std::lock_guard<std::mutex> lock(malloc_mutex_);
+
     if (!malloc_info.batch_kv_cache_resource) {
         RTP_LLM_LOG_ERROR("BatchKVCacheResource is null");
         return {false, 0};

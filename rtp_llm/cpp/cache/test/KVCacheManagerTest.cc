@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <future>
 #include <memory>
 #include <optional>
 #include <algorithm>
@@ -267,13 +268,15 @@ static BatchKVCacheResourcePtr makeDSV4BatchResource(const CacheConfig& config) 
     return res;
 }
 
-static CompleteTokenIdsPtr makeDSV4CompleteTokenIds(int initial_seq_len, int max_seq_len, int seq_size_per_block) {
+static CompleteTokenIdsPtr
+makeDSV4CompleteTokenIds(int initial_seq_len, int max_seq_len, int seq_size_per_block, int batch_size = 1) {
     auto input_ids      = torch::arange(max_seq_len, torch::kInt32);
     auto gi             = std::make_shared<GenerateInput>();
     gi->input_ids       = input_ids;
     gi->generate_config = std::make_shared<GenerateConfig>();
 
-    auto complete_token_ids = std::make_shared<CompleteTokenIds>(1, 1, max_seq_len + 16, seq_size_per_block);
+    auto complete_token_ids =
+        std::make_shared<CompleteTokenIds>(batch_size, batch_size, max_seq_len + 16, seq_size_per_block);
     complete_token_ids->init(gi);
     complete_token_ids->setSeqLength(initial_seq_len);
     return complete_token_ids;
@@ -394,6 +397,100 @@ TEST_F(KVCacheManagerTest, MetricsThreadSmoke) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1100));
 
     cache_manager.reset();
+}
+
+TEST_F(KVCacheManagerTest, AllocationWaitObservesReleaseGeneration) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    ASSERT_TRUE(cache_manager->init());
+
+    const auto generation_before_release = cache_manager->allocationGeneration();
+    cache_manager->notifyAllocationChange();
+    EXPECT_TRUE(cache_manager->waitForAllocationChange(generation_before_release, /*timeout_ms=*/1));
+
+    const auto generation_before_wait = cache_manager->allocationGeneration();
+    std::promise<void> waiter_started;
+    auto               waiter_ready = waiter_started.get_future();
+    auto waiter = std::async(std::launch::async, [cache_manager, generation_before_wait, &waiter_started] {
+        waiter_started.set_value();
+        return cache_manager->waitForAllocationChange(generation_before_wait, /*timeout_ms=*/1000);
+    });
+    waiter_ready.get();
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+    cache_manager->notifyAllocationChange();
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(100)), std::future_status::ready);
+    EXPECT_TRUE(waiter.get());
+}
+
+TEST_F(KVCacheManagerTest, ConnectorReferenceReleaseWakesAllocationWaiter) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    ASSERT_TRUE(cache_manager->init());
+
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    resource->initGroups(cache_config.topologyPtr());
+    auto tokens = makeDSV4CompleteTokenIds(/*initial_seq_len=*/2, /*max_seq_len=*/4, /*seq_size_per_block=*/2);
+
+    MallocInfo malloc_info{resource, tokens};
+    malloc_info.reuse_cache         = false;
+    malloc_info.enable_device_cache = false;
+    ASSERT_TRUE(cache_manager->malloc(malloc_info).success);
+
+    auto connector_ref = cache_manager->incrKVCacheRef(
+        resource->cacheResource(0), resource->cacheKeys(0), /*is_connector=*/true);
+    ASSERT_NE(connector_ref, nullptr);
+    cache_manager->free(FreeInfo{resource, tokens});
+
+    const auto generation_before_release = cache_manager->allocationGeneration();
+    std::promise<void> waiter_started;
+    auto               waiter_ready = waiter_started.get_future();
+    auto waiter = std::async(std::launch::async, [cache_manager, generation_before_release, &waiter_started] {
+        waiter_started.set_value();
+        return cache_manager->waitForAllocationChange(generation_before_release, /*timeout_ms=*/1000);
+    });
+    waiter_ready.get();
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+
+    connector_ref.reset();
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(100)), std::future_status::ready);
+    EXPECT_TRUE(waiter.get());
+}
+
+TEST_F(KVCacheManagerTest, UpdateKVBlockReleaseWakesAllocationWaiter) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    ASSERT_TRUE(cache_manager->init());
+
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(2);
+    resource->initGroups(cache_config.topologyPtr());
+    auto tokens = makeDSV4CompleteTokenIds(
+        /*initial_seq_len=*/2, /*max_seq_len=*/4, /*seq_size_per_block=*/2, /*batch_size=*/2);
+
+    MallocInfo malloc_info{resource, tokens};
+    malloc_info.reuse_cache         = false;
+    malloc_info.enable_device_cache = false;
+    ASSERT_TRUE(cache_manager->malloc(malloc_info).success);
+
+    const auto generation_before_release = cache_manager->allocationGeneration();
+    std::promise<void> waiter_started;
+    auto               waiter_ready = waiter_started.get_future();
+    auto waiter = std::async(std::launch::async, [cache_manager, generation_before_release, &waiter_started] {
+        waiter_started.set_value();
+        return cache_manager->waitForAllocationChange(generation_before_release, /*timeout_ms=*/1000);
+    });
+    waiter_ready.get();
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+
+    std::vector<TaggedBlockIdPair> block_update_mapping;
+    ASSERT_TRUE(cache_manager->updateKVBlock(
+        resource, /*block_src_batch=*/{0}, /*copy_last_block=*/false, block_update_mapping));
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(100)), std::future_status::ready);
+    EXPECT_TRUE(waiter.get());
 }
 
 TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {

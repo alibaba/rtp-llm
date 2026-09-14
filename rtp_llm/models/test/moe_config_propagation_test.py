@@ -243,7 +243,7 @@ class MoeConfigPropagationTest(unittest.TestCase):
         # Device-specific packing is outside this CPU loader contract.
         exported_device = SimpleNamespace(
             shuffle_moe_weight=lambda tensor, *_args: tensor,
-            maybe_rewrite_weight_by_key=lambda _name, tensor: tensor,
+            maybe_rewrite_weight_by_key=lambda _name, tensor, use_swizzle_a=None: tensor,
         )
         with tempfile.TemporaryDirectory() as checkpoint_path:
             save_file(checkpoint, os.path.join(checkpoint_path, "model.safetensors"))
@@ -307,7 +307,7 @@ class MoeConfigPropagationTest(unittest.TestCase):
 
         exported_device = SimpleNamespace(
             shuffle_moe_weight=lambda tensor, *_args: tensor,
-            maybe_rewrite_weight_by_key=lambda _name, tensor: tensor,
+            maybe_rewrite_weight_by_key=lambda _name, tensor, use_swizzle_a=None: tensor,
         )
         load_config = SimpleNamespace(
             compute_dtype=torch.float32,
@@ -316,6 +316,7 @@ class MoeConfigPropagationTest(unittest.TestCase):
             tp_size=1,
             dp_size=1,
             ep_size=1,
+            use_swizzleA=False,
             exported_device=exported_device,
             get_selected_experts=lambda _layer_id, expert_num: range(expert_num),
         )

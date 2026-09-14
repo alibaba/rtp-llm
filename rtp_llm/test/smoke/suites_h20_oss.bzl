@@ -454,6 +454,9 @@ def h20_oss_suites():
             ),
             smoke_test(
                 name="eagle_mtp_cudagraph_concurrent",
+                # H20 concurrent runs have produced 44 through 46 iterations for
+                # query 7 with identical output tokens. Keep a bounded ±2
+                # assertion so a collapse toward output_len=50 still fails.
                 task_info="data/model/qwen2_14b/q_r_mtp_cuda_graph_concurrent.json",
                 smoke_args="--max_seq_len 16384 --ft_disable_custom_ar 1 --eplb_mode NONE --redundant_expert 0 --act_type FP16 --concurrency_limit 16 --frontend_server_count 1 --warm_up 0 --reserver_runtime_mem_mb 42000 --seq_size_per_block 64 --enable_xqa 1 --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --sp_act_type FP16 --decode_capture_config '1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16' --prefill_capture_config '80:1' --enable_cuda_graph 1 --tp_size 2",
                 envs=["NCCL_DISABLE_ABORT=1", "NCCL_DEBUG=INFO", "LOG_LEVEL=INFO"],

@@ -58,6 +58,16 @@ py_test(
     timeout = "short",
 )
 
+py_test(
+    name = "collective_torch_comm_ops_unit_test",
+    srcs = ["collective_torch_comm_ops_unit_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
+)
+
 # Kept on H20: this one needs 4 devices that can address each other, not just 4
 # visible devices. allocate_shared_buffer/open_ipc_handle go through
 # cudaIpcGetMemHandle + cudaIpcOpenMemHandle(cudaIpcMemLazyEnablePeerAccess)
@@ -71,6 +81,39 @@ py_test(
 # 2/2 errors -- it fails loudly rather than skipping, but it does fail. A10 has
 # no NVLink and the peer-access/native-peer-atomic status of the A10 CI pool
 # could not be established, so moving this is not yet safe.
+py_test(
+    name = "symm_mem_unit_test",
+    srcs = ["symm_mem_unit_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
+)
+
+py_test(
+    name = "flashinfer_all_reduce_unit_test",
+    srcs = ["flashinfer_all_reduce_unit_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
+)
+
+py_test(
+    name = "flashinfer_all_reduce_integration_test",
+    srcs = ["flashinfer_all_reduce_integration_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    env = {"GPU_COUNT": "2"},
+    exec_properties = {"gpu": "H20", "gpu_count": "2"},
+    tags = ["H20", "open_skip"],
+    timeout = "moderate",
+)
+
 py_test(
    name = "user_buffers_test",
    srcs = ["user_buffers_test.py"],

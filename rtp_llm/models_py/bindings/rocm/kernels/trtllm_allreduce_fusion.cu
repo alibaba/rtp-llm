@@ -7,7 +7,10 @@
 #include <limits>
 #include <vector>
 #include <array>
+#include <string>
 #include <tuple>
+#include <unordered_map>
+#include <utility>
 #include "rtp_llm/models_py/bindings/rocm/kernels/hip_float8_impl.h"
 
 #include <hip/hip_bf16.h>
@@ -21,6 +24,7 @@
 #include <torch/all.h>
 
 #include "rtp_llm/models_py/bindings/rocm/kernels/trtllm_allreduce_fusion.h"
+#include "rtp_llm/models_py/bindings/rocm/kernels/trtllm_allreduce_sync.cuh"
 
 using namespace std;
 using namespace at;
@@ -41,18 +45,6 @@ static_assert(!shouldUseOneStageAllReduce(64, 8, 80 * 1024));
 namespace details {
 
 static constexpr int kBytesPerAccess = 16;
-
-template<bool RELAXED = true>
-__device__ __forceinline__ void st_flag(int* addr, int flag) {
-    __scoped_atomic_store_n(addr, flag, RELAXED ? __ATOMIC_RELAXED : __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
-}
-
-template<bool RELAXED = true>
-__device__ __forceinline__ int ld_flag(int* addr) {
-    int flag;
-    flag = __scoped_atomic_load_n(addr, RELAXED ? __ATOMIC_RELAXED : __ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
-    return flag;
-}
 
 }  // namespace details
 
@@ -256,14 +248,6 @@ using namespace kernel_utils;
 #define WARP_SIZE 32
 #define MAX_RANKS 8
 
-template<int NRanks>
-struct CommDeviceMeta {
-    void* barrier_flag_ptrs[NRanks];
-    void* sync_clock;
-    int   rank;
-    int   nranks;
-};
-
 struct CommMeta {
     void* barrier_flag_ptrs[MAX_RANKS];
     void* sync_clock;
@@ -273,52 +257,6 @@ struct CommMeta {
 
 struct CommPtrs {
     void* data_ptrs[MAX_RANKS];
-};
-
-// Cached IPC slot entry: pairs the device-side CommPtrs pointer with the
-// allocation range that was current when the slot was registered.  On cache
-// hit we re-query the HIP runtime and compare — if the caching allocator
-// freed and reused the same data_ptr inside a different allocation block,
-// range_start / range_size will differ and we invalidate the stale entry.
-struct CachedSlot {
-    CommPtrs* comm_ptrs;
-    void*     range_start;
-    size_t    range_size;
-};
-
-template<int NRanks>
-struct SyncComm {
-    __device__ __forceinline__ SyncComm(CommDeviceMeta<NRanks>& meta) {
-        flag_ptr = ((int*)meta.sync_clock) + blockIdx.x;
-        int rank = meta.rank;
-        if (threadIdx.x < NRanks) {
-            int target_rank = threadIdx.x;
-            target_flag     = reinterpret_cast<int*>(meta.barrier_flag_ptrs[target_rank]) + blockIdx.x * NRanks + rank;
-            current_flag    = reinterpret_cast<int*>(meta.barrier_flag_ptrs[rank]) + blockIdx.x * NRanks + target_rank;
-        }
-        flag = *flag_ptr;
-    }
-
-    template<bool RELAXED = true, bool FINAL = true>
-    __device__ __forceinline__ void sync() {
-        __syncthreads();
-        flag += 1;
-        if (threadIdx.x < NRanks) {
-            details::st_flag<RELAXED>(target_flag, flag);
-            while (details::ld_flag<RELAXED>(current_flag) < flag) {}
-        }
-        __syncthreads();
-        if constexpr (FINAL) {
-            if (threadIdx.x == 0) {
-                *flag_ptr = flag;
-            }
-        }
-    }
-
-    int* flag_ptr;
-    int* target_flag;
-    int* current_flag;
-    int  flag;
 };
 
 enum QuantType {
@@ -976,6 +914,10 @@ void open_handles(int rank, std::vector<Tensor>& handles, void* ptr, std::vector
     ipc_ptrs.swap(opened);
 }
 
+std::string handle_generation(const gpuIpcMemHandle_t& handle) {
+    return std::string(reinterpret_cast<const char*>(&handle), sizeof(handle));
+}
+
 void create_base_ptr(void** base_ptr, void* ptr) {
     if (gpuPointerGetAttribute(base_ptr, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR, (gpuDeviceptr_t)ptr) != gpuSuccess) {
         throw std::runtime_error("failed to get pointer attr");
@@ -1016,8 +958,8 @@ public:
                         hipGetErrorString(err));
         };
 
-        size_t sync_clock_bytes    = max_thread_blocks_ * sizeof(int);
-        size_t barrier_flags_bytes = max_thread_blocks_ * world_size_ * sizeof(int);
+        size_t sync_clock_bytes    = max_thread_blocks_ * sizeof(SyncEpoch);
+        size_t barrier_flags_bytes = max_thread_blocks_ * world_size_ * sizeof(SyncEpoch);
         size_t data_bytes          = static_cast<size_t>(size_in_bytes_) * 2;
         size_t comm_ptrs_bytes     = comm_ptrs_buf_len_ * sizeof(CommPtrs);
 
@@ -1030,6 +972,7 @@ public:
         gpuMemset(barrier_flags_, 0, barrier_flags_bytes);
         used_comm_ptrs_ = 0;
         round_robin_    = round_robin;
+        captured_ipc_by_rank_.resize(world_size_);
     }
 
     ~CommWorkspace() {
@@ -1044,11 +987,15 @@ public:
                 hipIpcCloseMemHandle(ipc_data_[i]);
             }
         }
-        // Close IPC handles from CUDA Graph captured pointers
-        for (auto& handles : captured_ipc_handles_) {
-            for (size_t i = 0; i < handles.size(); ++i) {
-                if (static_cast<int>(i) != rank_) {
-                    hipIpcCloseMemHandle(handles[i]);
+        // Capture mappings are keyed by the exporting rank and the opaque IPC
+        // handle bytes, which identify that rank's allocation generation even
+        // when its caching allocator reuses the same address.
+        for (int i = 0; i < world_size_; ++i) {
+            if (i == rank_)
+                continue;
+            for (const auto& entry : captured_ipc_by_rank_[i]) {
+                if (entry.second != nullptr) {
+                    hipIpcCloseMemHandle(entry.second);
                 }
             }
         }
@@ -1096,45 +1043,28 @@ public:
         meta.rank       = rank_;
         meta.nranks     = world_size_;
 
-        int64_t   token_num    = input.numel() / input.size(-1);
-        bool      direct_input = shouldUseOneStageAllReduce(token_num, world_size_, size);
-        CommPtrs* cptrs;
-        bool      cache_hit = false;
-        auto      it        = direct_input ? ptr_to_comm_ptrs_.find(ptr) : ptr_to_comm_ptrs_.end();
-        if (it != ptr_to_comm_ptrs_.end()) {
-            // Validate that the allocation backing this data_ptr hasn't
-            // changed (freed + reused by the caching allocator).  If the
-            // range no longer matches, the cached IPC slot is stale.
-            auto&  slot      = it->second;
-            void*  cur_start = nullptr;
-            size_t cur_size  = 0;
-            hipPointerGetAttribute(
-                &cur_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR, reinterpret_cast<hipDeviceptr_t>(ptr));
-            hipPointerGetAttribute(&cur_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE, reinterpret_cast<hipDeviceptr_t>(ptr));
-            if (cur_start == slot.range_start && cur_size == slot.range_size) {
-                cptrs     = slot.comm_ptrs;
-                cache_hit = true;
-            } else {
-                // Stale entry — allocation was recycled.  Erase so we fall
-                // through to the capture / copy-fallback path below.
-                ptr_to_comm_ptrs_.erase(it);
-            }
-        }
-        if (!cache_hit) {
-            // One-stage graph replay reads peer inputs directly; other paths use the workspace.
-            gpuStreamCaptureStatus status = gpuStreamCaptureStatusNone;
-            if (gpuStreamIsCapturing(stream, &status) != gpuSuccess)
-                status = gpuStreamCaptureStatusNone;
-            int remaining = comm_ptrs_buf_len_ - used_comm_ptrs_ - static_cast<int>(unregistered_ptrs_.size());
-            if (direct_input && status == gpuStreamCaptureStatusActive && size < size_in_bytes_ && remaining > 0) {
-                unregistered_ptrs_.push_back(ptr);
-                cptrs = comm_ptrs_ + used_comm_ptrs_ + static_cast<int>(unregistered_ptrs_.size()) - 1;
-            } else {
-                cptrs = comm_ptrs_ + 0;
-                TORCH_CHECK(size <= size_in_bytes_, "allreduce input exceeds comm workspace capacity");
-                TORCH_CHECK(gpuMemcpyAsync(data_, ptr, size, gpuMemcpyDeviceToDevice, stream) == gpuSuccess,
-                            "failed to stage allreduce input into the comm workspace");
-            }
+        int64_t                token_num    = input.numel() / input.size(-1);
+        bool                   direct_input = shouldUseOneStageAllReduce(token_num, world_size_, size);
+        CommPtrs*              cptrs;
+        gpuStreamCaptureStatus status = gpuStreamCaptureStatusNone;
+        if (gpuStreamIsCapturing(stream, &status) != gpuSuccess)
+            status = gpuStreamCaptureStatusNone;
+        int remaining = comm_ptrs_buf_len_ - used_comm_ptrs_ - static_cast<int>(unregistered_ptrs_.size());
+        if (direct_input && status == gpuStreamCaptureStatusActive && size < size_in_bytes_ && remaining > 0) {
+            // Treat every graph capture as a new collective generation. All
+            // ranks therefore exchange the complete current handle sequence;
+            // no rank can silently choose an old slot from its local data_ptr
+            // while another rank registers a replacement allocation.
+            unregistered_ptrs_.push_back(ptr);
+            cptrs = comm_ptrs_ + used_comm_ptrs_ + static_cast<int>(unregistered_ptrs_.size()) - 1;
+        } else {
+            // Eager execution cannot collectively validate peer allocation
+            // generations, so use the stable workspace instead of a captured
+            // direct-input slot.
+            cptrs = comm_ptrs_ + 0;
+            TORCH_CHECK(size <= size_in_bytes_, "allreduce input exceeds comm workspace capacity");
+            TORCH_CHECK(gpuMemcpyAsync(data_, ptr, size, gpuMemcpyDeviceToDevice, stream) == gpuSuccess,
+                        "failed to stage allreduce input into the comm workspace");
         }
 
         return {meta, cptrs};
@@ -1178,8 +1108,8 @@ public:
         void* ptr      = unregistered_ptrs_[ptr_idx];
         void* base_ptr = unregistered_base_ptrs_[ptr_idx];
 
-        // Defensive check: verify the cached pointer still belongs to a valid
-        // device allocation.  The caching allocator may have freed and re-used
+        // Defensive check: verify the captured pointer still belongs to a valid
+        // device allocation. The caching allocator may have freed and re-used
         // the underlying block between capture and consume.
         // TORCH_CHECK hard-fails instead of early-return because the captured
         // graph already has kernel launches bound to this comm_ptrs slot; an
@@ -1194,7 +1124,7 @@ public:
         hipPointerAttribute_t ptr_attrs = {};
         hipError_t            attr_err  = hipPointerGetAttributes(&ptr_attrs, base_ptr);
         TORCH_CHECK(attr_err == hipSuccess,
-                    "[TrtllmAllreduce] cached base_ptr ",
+                    "[TrtllmAllreduce] captured base_ptr ",
                     base_ptr,
                     " (ptr_idx=",
                     ptr_idx,
@@ -1203,7 +1133,7 @@ public:
                     "). The pointer is no longer valid — "
                     "discard the captured graph and re-capture.");
         TORCH_CHECK(ptr_attrs.type == hipMemoryTypeDevice || ptr_attrs.type == hipMemoryTypeUnified,
-                    "[TrtllmAllreduce] cached base_ptr ",
+                    "[TrtllmAllreduce] captured base_ptr ",
                     base_ptr,
                     " (ptr_idx=",
                     ptr_idx,
@@ -1232,7 +1162,7 @@ public:
                     "and re-capture.");
         TORCH_CHECK(reinterpret_cast<char*>(base_ptr) >= reinterpret_cast<char*>(range_start)
                         && reinterpret_cast<char*>(ptr) < reinterpret_cast<char*>(range_start) + range_size,
-                    "[TrtllmAllreduce] cached ptr ",
+                    "[TrtllmAllreduce] captured ptr ",
                     ptr,
                     " (base_ptr=",
                     base_ptr,
@@ -1246,10 +1176,57 @@ public:
                     "). The allocation was likely freed and re-used. "
                     "Discard the captured graph and re-capture.");
 
-        std::vector<void*> ipc_data;
-        ipc_details::open_handles(rank_, handles, base_ptr, ipc_data);
-        // Store opened IPC handles so they can be closed in the destructor.
-        captured_ipc_handles_.push_back(ipc_data);
+        TORCH_CHECK(static_cast<int>(handles.size()) == world_size_,
+                    "captured IPC handle count does not match world size");
+        TORCH_CHECK(offsets.size() == handles.size(), "captured IPC handle/offset count mismatch");
+        TORCH_CHECK(used_comm_ptrs_ == capture_snapshot_used_ + ptr_idx,
+                    "captured IPC slots must be registered in capture order");
+
+        std::vector<gpuIpcMemHandle_t> ipc_handles;
+        std::vector<void*>             ipc_data(world_size_, nullptr);
+        struct NewlyOpened {
+            int         rank;
+            std::string generation;
+            void*       ptr;
+        };
+        std::vector<NewlyOpened> newly_opened;
+        ipc_handles.reserve(world_size_);
+        newly_opened.reserve(world_size_ - 1);
+        for (auto& handle : handles) {
+            gpuIpcMemHandle_t ipc_handle;
+            std::memcpy(&ipc_handle, handle.data_ptr(), sizeof(gpuIpcMemHandle_t));
+            ipc_handles.push_back(ipc_handle);
+        }
+
+        for (int i = 0; i < world_size_; ++i) {
+            if (i == rank_) {
+                ipc_data[i] = base_ptr;
+                continue;
+            }
+            std::string generation = ipc_details::handle_generation(ipc_handles[i]);
+            auto&       rank_cache = captured_ipc_by_rank_[i];
+            auto        cached     = rank_cache.find(generation);
+            if (cached != rank_cache.end()) {
+                ipc_data[i] = cached->second;
+                continue;
+            }
+
+            void* opened = nullptr;
+            auto  err    = gpuIpcOpenMemHandle(&opened, ipc_handles[i], gpuIpcMemLazyEnablePeerAccess);
+            if (err != gpuSuccess) {
+                for (const auto& entry : newly_opened) {
+                    hipIpcCloseMemHandle(entry.ptr);
+                }
+                TORCH_CHECK(false,
+                            "hipIpcOpenMemHandle failed for captured allocation generation from rank ",
+                            i,
+                            ": ",
+                            hipGetErrorString(err));
+            }
+            ipc_data[i] = opened;
+            newly_opened.push_back(NewlyOpened{i, std::move(generation), opened});
+        }
+
         CommPtrs cptrs;
         for (size_t i = 0; i < offsets.size(); ++i) {
             ipc_data[i] = (void*)((char*)ipc_data[i] + offsets[i]);
@@ -1258,21 +1235,17 @@ public:
             int r              = round_robin_ ? ((rank_ + i) % world_size_) : i;
             cptrs.data_ptrs[i] = ipc_data[r];
         }
-        gpuMemcpy(comm_ptrs_ + used_comm_ptrs_, &cptrs, sizeof(CommPtrs), gpuMemcpyHostToDevice);
-
-        // Record allocation range at registration time so that cache hits
-        // can detect freed-and-reused data_ptrs (same address, different
-        // allocation block).
-        void*  reg_start = nullptr;
-        size_t reg_size  = 0;
-        hipPointerGetAttribute(
-            &reg_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR, reinterpret_cast<hipDeviceptr_t>(ptr));
-        hipPointerGetAttribute(&reg_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE, reinterpret_cast<hipDeviceptr_t>(ptr));
-        ptr_to_comm_ptrs_[ptr] = CachedSlot{comm_ptrs_ + used_comm_ptrs_, reg_start, reg_size};
-
-        // Track every ptr registered in this session (vector, NOT set) so
-        // that duplicate data_ptrs are counted correctly for rollback.
-        pending_capture_ptrs_.push_back(ptr);
+        auto copy_err = gpuMemcpy(comm_ptrs_ + used_comm_ptrs_, &cptrs, sizeof(CommPtrs), gpuMemcpyHostToDevice);
+        if (copy_err != gpuSuccess) {
+            for (const auto& entry : newly_opened) {
+                hipIpcCloseMemHandle(entry.ptr);
+            }
+            TORCH_CHECK(false, "failed to publish captured IPC pointers: ", hipGetErrorString(copy_err));
+        }
+        for (auto& entry : newly_opened) {
+            captured_ipc_by_rank_[entry.rank].emplace(entry.generation, entry.ptr);
+            pending_capture_generations_.emplace_back(entry.rank, std::move(entry.generation));
+        }
         used_comm_ptrs_++;
     }
 
@@ -1280,19 +1253,17 @@ public:
     // to committed state.  After this call, invalidate_capture() will NOT
     // touch these slots — only future (failed) capture sessions are rolled back.
     void commit_capture() {
-        pending_capture_ptrs_.clear();
+        pending_capture_generations_.clear();
         // Reset snapshot — nothing to roll back.
-        capture_snapshot_used_      = used_comm_ptrs_;
-        capture_snapshot_ipc_count_ = static_cast<int>(captured_ipc_handles_.size());
+        capture_snapshot_used_ = used_comm_ptrs_;
     }
 
     // Begin a new capture session: snapshot the current high-water marks so
     // that invalidate_capture() can rewind to exactly this point.
     // Called from Python before the per-handle open loop begins.
     void begin_capture_session() {
-        capture_snapshot_used_      = used_comm_ptrs_;
-        capture_snapshot_ipc_count_ = static_cast<int>(captured_ipc_handles_.size());
-        pending_capture_ptrs_.clear();
+        capture_snapshot_used_ = used_comm_ptrs_;
+        pending_capture_generations_.clear();
     }
 
     // Transactional rollback: undo IPC slot registrations made during the
@@ -1305,23 +1276,20 @@ public:
         // 1. Rewind used_comm_ptrs_ to the snapshot watermark.
         used_comm_ptrs_ = capture_snapshot_used_;
 
-        // 2. Erase ptr_to_comm_ptrs_ entries registered in this session.
-        //    Use the vector (may contain duplicates — erase is idempotent).
-        for (void* ptr : pending_capture_ptrs_) {
-            ptr_to_comm_ptrs_.erase(ptr);
-        }
-        pending_capture_ptrs_.clear();
-
-        // 3. Close and remove IPC handles opened during this session.
-        while (static_cast<int>(captured_ipc_handles_.size()) > capture_snapshot_ipc_count_) {
-            auto& last = captured_ipc_handles_.back();
-            for (int i = 0; i < world_size_; ++i) {
-                if (i != rank_ && last[i] != nullptr) {
-                    hipIpcCloseMemHandle(last[i]);
+        // 2. Close only mappings first opened by this capture session.
+        //    Mappings committed by earlier graphs remain valid, so those
+        //    graphs can coexist with a recapture that uses new allocations.
+        for (auto it = pending_capture_generations_.rbegin(); it != pending_capture_generations_.rend(); ++it) {
+            auto& rank_cache = captured_ipc_by_rank_[it->first];
+            auto  cached     = rank_cache.find(it->second);
+            if (cached != rank_cache.end()) {
+                if (cached->second != nullptr) {
+                    hipIpcCloseMemHandle(cached->second);
                 }
+                rank_cache.erase(cached);
             }
-            captured_ipc_handles_.pop_back();
         }
+        pending_capture_generations_.clear();
     }
 
 private:
@@ -1339,13 +1307,11 @@ private:
     std::vector<void*>                    ipc_data_;
     std::vector<void*>                    unregistered_ptrs_;
     std::vector<void*>                    unregistered_base_ptrs_;
-    std::vector<std::vector<void*>>       captured_ipc_handles_;
-    CommPtrs*                             comm_ptrs_;
-    int                                   used_comm_ptrs_;
-    std::unordered_map<void*, CachedSlot> ptr_to_comm_ptrs_;
-    std::vector<void*> pending_capture_ptrs_;            // ptrs registered in current session (allows duplicates)
-    int                capture_snapshot_used_      = 0;  // used_comm_ptrs_ at session start
-    int                capture_snapshot_ipc_count_ = 0;  // captured_ipc_handles_.size() at session start
+    std::vector<std::unordered_map<std::string, void*>> captured_ipc_by_rank_;
+    CommPtrs*                                             comm_ptrs_;
+    int                                                   used_comm_ptrs_;
+    std::vector<std::pair<int, std::string>> pending_capture_generations_;
+    int                                      capture_snapshot_used_ = 0;
 };
 
 // ============================================================================
