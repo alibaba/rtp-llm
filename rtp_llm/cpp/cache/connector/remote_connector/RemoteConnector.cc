@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <cstdlib>
 #include <sstream>
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -15,6 +16,14 @@
 
 namespace rtp_llm {
 namespace {
+
+bool externalZeroCopyConfigured(const KVCacheConfig& kv_cache_config) {
+    const char* zero_copy_env = std::getenv("TAIR_MEMPOOL_ENABLE_EXTERNAL_ZERO_COPY");
+    const bool  zero_copy_enabled = zero_copy_env == nullptr || std::atoi(zero_copy_env) != 0;
+    const char* pin_mode_env      = std::getenv("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE");
+    const bool  memfd_configured  = pin_mode_env != nullptr && std::string(pin_mode_env) == "memfd_register";
+    return zero_copy_enabled && kv_cache_config.enable_memory_cache && memfd_configured;
+}
 
 struct MatchMetricsHelper {
     MatchMetricsHelper(const std::string& trace_id, const kmonitor::MetricsReporterPtr& metrics_reporter):
@@ -389,7 +398,13 @@ bool RemoteConnector::init() {
         genLocationSpecName(tp_rank, group_policy_->groups().at(full_group_idx).group_name)};
     kv_cache_manager::SharedMemoryRegistration shared_memory_registration;
     const kv_cache_manager::SharedMemoryRegistration* shared_memory_registration_ptr = nullptr;
-    if (auto memory_connector = memory_connector_.lock()) {
+    auto memory_connector = memory_connector_.lock();
+    if (externalZeroCopyConfigured(init_params_->kv_cache_config) &&
+        (!memory_connector || memory_connector->hostPoolSharedMemoryFd() < 0)) {
+        RTP_LLM_LOG_ERROR("external zero-copy is enabled but shared host block pool memfd is unavailable");
+        return false;
+    }
+    if (memory_connector) {
         const int shared_memory_fd = memory_connector->hostPoolSharedMemoryFd();
         if (shared_memory_fd >= 0) {
             shared_memory_registration = {memory_connector->hostPoolBaseAddress(),
