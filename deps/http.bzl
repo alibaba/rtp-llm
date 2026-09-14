@@ -107,11 +107,81 @@ def http_deps():
     )
 
     http_archive(
+        name = "jsoncpp_git",
+        build_file = clean_dep("@rtp_llm//3rdparty/jsoncpp:jsoncpp.BUILD"),
+        sha256 = "c49deac9e0933bcb7044f08516861a2d560988540b23de2ac1ad443b219afdb6",
+        strip_prefix = "jsoncpp-1.8.4",
+        urls = [
+            "http://search-cicd.oss-cn-hangzhou-zmf.aliyuncs.com/odps_tensorflow/other/raw/master/mirror.bazel.build/github.com/open-source-parsers/jsoncpp/archive/1.8.4.tar.gz",
+            "http://search-cicd.oss-cn-hangzhou-zmf.aliyuncs.com/odps_tensorflow/other/raw/master/github.com/open-source-parsers/jsoncpp/archive/1.8.4.tar.gz",
+        ],
+    )
+
+    http_archive(
+        name = "boost",
+        urls = [
+            "http://search-cicd.oss-cn-hangzhou-zmf.aliyuncs.com/third_party_archives/boost_1_70_0.tar.gz",
+            "https://boostorg.jfrog.io/artifactory/main/release/1.70.0/source/boost_1_70_0.tar.gz",
+        ],
+        build_file = clean_dep("@rtp_llm//3rdparty/boost:boost.BUILD"),
+        patches = ["@rtp_llm//patches/boost:boost.patch"],
+        strip_prefix = "boost_1_70_0",
+        sha256 = "882b48708d211a5f48e60b0124cf5863c1534cd544ecd0664bb534a4b5d506e9",
+    )
+
+    http_file(
+        name = "easy",
+        urls = [
+            "http://yum.tbsite.net/taobao/7/x86_64/current/t_libeasy/t_libeasy-1.1.33-799806.el7.x86_64.rpm",
+        ],
+        sha256 = "2509b359cb0d784dee719c214c491aa5c9c75f623807a0083499adbc7334c3c0",
+    )
+
+    http_file(
+        name = "solar",
+        urls = ["https://search-cicd.oss-cn-hangzhou-zmf.aliyuncs.com/third_party_archives/solar-1.0.0-1.x86_64.rpm"],
+        sha256 = "12781d5301e641e6011d33949e59058e987068a7bf28ce2966fe1e99e9a4bde0",
+    )
+
+    http_file(
+        name = "tnet",
+        urls = ["https://search-cicd.oss-cn-hangzhou-zmf.aliyuncs.com/third_party_archives/tnet-devel-3.1.0-1.noarch.rpm"],
+        sha256 = "5d78de3c3bd15b2e66448470b9d01006a2e45cfc1b5858f0b180f9f7c588882e",
+    )
+
+    http_file(
+        name = "unicm",
+        urls = ["http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/eic-packages%2Funicm-1.8.1-1.x86_64.rpm"],
+        sha256 = "654d707399a7c40a159ed5e5e9aa969fa678c8333b62fdb8da6101c73daecbef",
+    )
+
+    http_file(
+        name = "u2mm",
+        urls = ["http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/eic-packages/u2mm-3.3.2-r20250303_cuda11.x86_64.rpm"],
+        sha256 = "816500b86207b178893c1a9f638249a3f2ba2493c1c5de2036851bc65b6cdb2c",
+    )
+
+    http_file(
+        name = "ali-rdma-core",
+        urls = ["http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/eic-packages/ali-rdma-core-2506.1-1.x86_64.rpm"],
+        sha256 = "9ba4080a8ca9ba8d8632e488b61928aa2355ae36c1a6027a097818be9bfc0253",
+    )
+
+    http_archive(
         # Hedron's Compile Commands Extractor for Bazel
         name = "hedron_compile_commands",
         urls = ["https://github.com/hedronvision/bazel-compile-commands-extractor/archive/4f28899228fb3ad0126897876f147ca15026151e.tar.gz"],
         strip_prefix = "bazel-compile-commands-extractor-4f28899228fb3ad0126897876f147ca15026151e",
         sha256 = "658122cfb1f25be76ea212b00f5eb047d8e2adc8bcf923b918461f2b1e37cdf2",
+    )
+
+    # CUDA 12 internal builds enable the ACCL Expert Parallel backend via
+    # use_accl_ep=1. Keep the prebuilt runtime available even when rtp_deps
+    # resolves to this repository instead of internal_source/deps.
+    http_file(
+        name = "accl_ep_rpm",
+        urls = ["http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/pkg%2Facclep%2FAcclEP-1.1.0.9-f02e709c.alios7.x86_64.rpm"],
+        sha256 = "553ef1ad72f4e52d679c84b1795ee44e4a0571aa4c7fb0d3c362be01bd54c807",
     )
 
     http_file(

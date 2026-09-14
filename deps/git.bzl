@@ -7,6 +7,12 @@ def clean_dep(dep):
     return str(Label(dep))
 
 def git_deps():
+    native.new_local_repository(
+        name = "alibaba_rdma",
+        path = "internal_source/rdma",
+        build_file = clean_dep("@rtp_llm//internal_source:rdma.BUILD"),
+    )
+
     git_repository(
         name = "rules_cc",
         remote = "https://github.com/bazelbuild/rules_cc.git",
@@ -206,6 +212,18 @@ def git_deps():
             "@rtp_llm//patches/nacos_sdk_cpp:nacos-compile.patch",
         ],
         build_file = clean_dep("@rtp_llm//3rdparty/nacos_sdk_cpp:nacos_sdk_cpp.BUILD")
+    )
+
+    # Internal builds enable the VIPServer-backed remote-cache subscriber.
+    # Define the repository here as well so flattened source layouts do not
+    # depend on rtp_deps being redirected to internal_source/deps.
+    new_git_repository(
+        name = "vipserver",
+        remote = "git@gitlab.alibaba-inc.com:search_external/vipserver4c.git",
+        build_file = clean_dep("@rtp_llm//3rdparty/vipserver:vipserver.BUILD"),
+        # Based on tag t-midware-vipserver-c-client_A_1_0_12_4_1126043_20170330.
+        commit = "66f782fdb8c56a8ad72e2629dd30fc52f27becd6",
+        shallow_since = "1667292833 +0800",
     )
 
     http_archive(
