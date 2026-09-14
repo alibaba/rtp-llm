@@ -31,13 +31,8 @@ public final class RerankerMerger {
         chunkBody.remove("top_k");
     }
 
-    public static void merge(JSONObject mergedBody, List<SubBatchResult> subs, List<Integer> failedIndices,
-                             JSONObject originalRequest) {
+    public static void merge(JSONObject mergedBody, List<SubBatchResult> subs, JSONObject originalRequest) {
         BatchEndpointSpec spec = BatchEndpointSpec.RERANKER;
-        // Partial failures return an error; never sort the placeholder nulls.
-        if (!failedIndices.isEmpty()) {
-            return;
-        }
 
         JSONArray results = mergedBody.getJSONArray(spec.getResponseArrayField());
 
@@ -75,7 +70,7 @@ public final class RerankerMerger {
                 }
                 seen[localIndex] = true;
                 item.put("index", Math.addExact(sub.startIndex(), localIndex));
-                scoreOf(item); // Validate before sorting, including the sorted=false path.
+                validateScore(item); // Validate before sorting, including the sorted=false path.
             }
 
         }
@@ -95,8 +90,8 @@ public final class RerankerMerger {
     }
 
     private static int compareScores(JSONObject left, JSONObject right) {
-        double leftScore = scoreOf(left);
-        double rightScore = scoreOf(right);
+        double leftScore = ((Number) left.get("relevance_score")).doubleValue();
+        double rightScore = ((Number) right.get("relevance_score")).doubleValue();
         // Treat signed zero as a tie, matching Python float equality and preserving input order.
         if (leftScore == rightScore) {
             return 0;
@@ -104,16 +99,14 @@ public final class RerankerMerger {
         return Double.compare(rightScore, leftScore);
     }
 
-    private static double scoreOf(JSONObject item) {
+    private static void validateScore(JSONObject item) {
         Object value = item.get("relevance_score");
         if (!(value instanceof Number number)) {
             throw new IllegalStateException("reranker result item is missing relevance_score");
         }
-        double score = number.doubleValue();
-        if (!Double.isFinite(score)) {
+        if (!Double.isFinite(number.doubleValue())) {
             throw new IllegalStateException("reranker relevance_score must be finite");
         }
-        return score;
     }
 
     /** Mirrors Python {@code values[:min(len(values), top_k)]}, including negative top_k. */

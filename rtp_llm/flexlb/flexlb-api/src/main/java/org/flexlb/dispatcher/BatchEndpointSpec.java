@@ -83,11 +83,10 @@ public enum BatchEndpointSpec {
         }
     }
 
-    public void finishMerge(JSONObject body, List<SubBatchResult> subs,
-                            List<Integer> failedIndices, JSONObject originalRequest) {
+    public void finishMerge(JSONObject body, List<SubBatchResult> subs, JSONObject originalRequest) {
         switch (this) {
             case EMBEDDING -> EmbeddingMerger.merge(body, subs, originalRequest);
-            case RERANKER -> RerankerMerger.merge(body, subs, failedIndices, originalRequest);
+            case RERANKER -> RerankerMerger.merge(body, subs, originalRequest);
             default -> { }
         }
     }

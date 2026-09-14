@@ -10,13 +10,7 @@ import java.util.List;
 public final class ResponseMerger {
     private ResponseMerger() {}
 
-    public record MergedResponse(JSONObject body,
-                                 boolean allFailed,
-                                 int totalChunks,
-                                 int totalItems,
-                                 List<Integer> failedIndices,
-                                 List<String> failedReasons,
-                                 int errorStatus) {
+    public record MergedResponse(int status, JSONObject body) {
     }
 
     public static MergedResponse merge(List<SubBatchResult> subs, BatchEndpointSpec spec,
@@ -43,18 +37,24 @@ public final class ResponseMerger {
                 }
             }
         }
+        boolean allFailed = envelope == null && !subs.isEmpty();
+        if (allFailed || (spec.isFailOnPartialFailure() && !failedIndices.isEmpty())) {
+            return new MergedResponse(allFailed ? commonErrorStatus(subs) : 500,
+                    JSONObject.of("error", allFailed ? "all_sub_batches_failed" : "sub_batch_failed",
+                            "failed_count", failedIndices.size(), "total_count", totalItems,
+                            "total_chunks", subs.size(),
+                            "failed_reasons", failedReasons.stream().distinct().toList()));
+        }
         if (envelope == null) {
-            return new MergedResponse(new JSONObject(), !subs.isEmpty(), subs.size(), totalItems,
-                    failedIndices, failedReasons, commonErrorStatus(subs));
+            envelope = new JSONObject();
         }
         envelope.put(spec.getResponseArrayField(), merged);
         if (!failedIndices.isEmpty()) {
             envelope.put("_partial_failure", JSONObject.of("failed_count", failedIndices.size(),
                     "total_count", totalItems, "failed_indices", new JSONArray(failedIndices)));
         }
-        spec.finishMerge(envelope, subs, failedIndices, originalRequest);
-        return new MergedResponse(envelope, false, subs.size(), totalItems,
-                failedIndices, failedReasons, 500);
+        spec.finishMerge(envelope, subs, originalRequest);
+        return new MergedResponse(200, envelope);
     }
 
     /** On total failure, use the shared FE 4xx if all contacted FEs return it; otherwise 500. */

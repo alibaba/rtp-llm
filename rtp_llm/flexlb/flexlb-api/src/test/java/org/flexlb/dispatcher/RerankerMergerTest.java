@@ -45,11 +45,13 @@ class RerankerMergerTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"0.5,1", "0,0", "1,1", "-1,1", "2147483648,1"})
-    void rejectsInvalidOrDuplicateChunkIndices(String first, String second) {
+    @CsvSource({"0.5,1,1,true", "0,0,1,true", "1,1,1,true", "-1,1,1,true", "2147483648,1,1,true",
+            "0,1,null,true", "0,1,null,false", "0,1,\"bad\",true", "0,1,\"bad\",false",
+            "0,1,1e999,true", "0,1,1e999,false"})
+    void rejectsInvalidIndicesAndScoresBeforeSorting(String first, String second, String score, boolean sorted) {
         JSONObject body = JSON.parseObject("{\"total_tokens\":2,\"results\":[{\"index\":" + first
-                + ",\"relevance_score\":1},{\"index\":" + second + ",\"relevance_score\":1}]}");
+                + ",\"relevance_score\":" + score + "},{\"index\":" + second + ",\"relevance_score\":1}]}");
         assertThrows(IllegalStateException.class, () -> ResponseMerger.merge(
-                List.of(SubBatchResult.ok(body, 2, 0)), BatchEndpointSpec.RERANKER, new JSONObject()));
+                List.of(SubBatchResult.ok(body, 2, 0)), BatchEndpointSpec.RERANKER, JSONObject.of("sorted", sorted)));
     }
 }

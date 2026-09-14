@@ -117,9 +117,7 @@ public class BatchHandler {
             return badRequest(validationError);
         }
         if (arr.isEmpty() && !dryRun) {
-            JSONObject emptyEnvelope = JSONObject.of(spec.getResponseArrayField(), new JSONArray());
-            spec.finishMerge(emptyEnvelope, List.of(), List.of(), body);
-            return DispatcherResponses.jsonBytes(200, BatchBodyParser.serialize(emptyEnvelope));
+            return mergedResponse(ResponseMerger.merge(List.of(), spec, body));
         }
 
         TrafficPolicyConfig policy = loadBalanceConfig.getRouter().getGroupSelector();
@@ -163,14 +161,7 @@ public class BatchHandler {
                                     request.uri().getRawQuery())
                             .publishOn(cpuScheduler)
                             .map(subs -> ResponseMerger.merge(subs, spec, body))
-                            .flatMap(merged -> {
-                                if (merged.allFailed()
-                                        || (spec.isFailOnPartialFailure()
-                                        && !merged.failedIndices().isEmpty())) {
-                                    return errorResponse(merged);
-                                }
-                                return DispatcherResponses.jsonBytes(200, BatchBodyParser.serialize(merged.body()));
-                            });
+                            .flatMap(this::mergedResponse);
                 });
     }
 
@@ -196,12 +187,8 @@ public class BatchHandler {
         return DispatcherResponses.error(400, "invalid_batch_request", message);
     }
 
-    private Mono<ServerResponse> errorResponse(ResponseMerger.MergedResponse merged) {
-        JSONObject body = JSONObject.of("error", merged.allFailed() ? "all_sub_batches_failed" : "sub_batch_failed",
-                "failed_count", merged.failedIndices().size(), "total_count", merged.totalItems(),
-                "total_chunks", merged.totalChunks(),
-                "failed_reasons", merged.failedReasons().stream().distinct().toList());
-        return DispatcherResponses.jsonBytes(merged.errorStatus(), BatchBodyParser.serialize(body));
+    private Mono<ServerResponse> mergedResponse(ResponseMerger.MergedResponse merged) {
+        return DispatcherResponses.jsonBytes(merged.status(), BatchBodyParser.serialize(merged.body()));
     }
 
     private Mono<BatchScheduleResponse> resolveTargets(
