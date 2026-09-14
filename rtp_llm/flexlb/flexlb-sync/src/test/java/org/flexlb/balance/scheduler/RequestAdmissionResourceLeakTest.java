@@ -65,7 +65,7 @@ class RequestAdmissionResourceLeakTest {
                     lifecycle.commitRoute(registered.item(), () -> false));
             assertNull(activeItem(1L));
             assertTrue(lifecycle.isAdmissionOpen(1L, registered.future()));
-            verify(registered.item().decodeEp(), never()).releaseReservationExact(any());
+            verify(registered.item().decodeEp(), never()).releaseLocalShadowIfExact(any());
         }
     }
 
@@ -88,10 +88,10 @@ class RequestAdmissionResourceLeakTest {
         assertEquals(PlacementResult.Status.CLOSED,
                 lifecycle.commitRoute(registered.item(), () -> true));
         assertSame(registered.item(), activeItem(3L));
-        verify(registered.item().decodeEp(), never()).releaseReservationExact(any());
+        verify(registered.item().decodeEp(), never()).releaseLocalShadowIfExact(any());
         lifecycle.cancelRequest(3L, 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), registered.future().join().getCode());
-        verify(registered.item().decodeEp(), times(1)).releaseReservationExact(registered.item().decodeReservation());
+        verify(registered.item().decodeEp(), times(1)).releaseLocalShadowIfExact(registered.item().decodeReservation());
     }
 
     @Test
@@ -103,10 +103,10 @@ class RequestAdmissionResourceLeakTest {
                 lifecycle.commitRoute(registered.item(), () -> true));
         assertEquals(RequestState.Phase.CANCEL_REQUESTED,
                 lifecycle.cancelRequest(4L, 0L, CancelReason.CLIENT_CANCELLED).state());
-        verify(registered.item().decodeEp(), never()).releaseReservationExact(any());
+        verify(registered.item().decodeEp(), never()).releaseLocalShadowIfExact(any());
         admission.close();
         registered.future().join();
-        verify(registered.item().decodeEp(), times(1)).releaseReservationExact(registered.item().decodeReservation());
+        verify(registered.item().decodeEp(), times(1)).releaseLocalShadowIfExact(registered.item().decodeReservation());
     }
 
     @Test
@@ -129,7 +129,7 @@ class RequestAdmissionResourceLeakTest {
                 canceled.get(5, TimeUnit.SECONDS);
                 completed.get(5, TimeUnit.SECONDS);
                 verify(registered.item().decodeEp(), timeout(1000).times(1))
-                        .releaseReservationExact(registered.item().decodeReservation());
+                        .releaseLocalShadowIfExact(registered.item().decodeReservation());
             }
         }
     }
@@ -140,9 +140,9 @@ class RequestAdmissionResourceLeakTest {
         RequestLifecycleTestSupport.bindRoute(lifecycle, registered);
         assertTrue(lifecycle.closeAdmissionAndAwaitMutations());
         lifecycle.closeOutstandingAndTerminalize();
-        verify(registered.item().decodeEp(), times(1)).releaseReservationExact(registered.item().decodeReservation());
+        verify(registered.item().decodeEp(), times(1)).releaseLocalShadowIfExact(registered.item().decodeReservation());
         lifecycle.closeOutstandingAndTerminalize();
-        verify(registered.item().decodeEp(), times(1)).releaseReservationExact(registered.item().decodeReservation());
+        verify(registered.item().decodeEp(), times(1)).releaseLocalShadowIfExact(registered.item().decodeReservation());
         lifecycle.closeExpiration();
         lifecycle.closePublisher();
     }
@@ -157,7 +157,7 @@ class RequestAdmissionResourceLeakTest {
                 victim.future().get(5, TimeUnit.SECONDS).getCode());
         lifecycle.onQueuedItemPreempted(victim.item(), incoming.item());
         lifecycle.cancelRequest(61L, 0L, CancelReason.CLIENT_CANCELLED);
-        verify(victim.item().decodeEp(), times(1)).releaseReservationExact(victim.item().decodeReservation());
+        verify(victim.item().decodeEp(), times(1)).releaseLocalShadowIfExact(victim.item().decodeReservation());
         assertTrue(lifecycle.isAdmissionOpen(62L, incoming.future()));
     }
 

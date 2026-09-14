@@ -15,7 +15,7 @@ import java.util.function.Predicate;
  *
  * <p>The coordinator lock is the sole synchronization boundary. Entries are
  * intrusive nodes, so completion and cancellation unlink an arbitrary request
- * in O(1) without leaving a tombstone behind a blocked head. Ready retries use
+ * in O(1) without leaving a removed entry behind a blocked head. Ready retries use
  * a separate ordered index and share the scan budget with forward progress.</p>
  */
 final class OrderedRequestQueue {

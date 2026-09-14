@@ -139,7 +139,7 @@ engine→master 状态上报通道的故障注入：ack 丢失 / 部分失败 / 
 | `status_duplicate_finished` | 同一终态上报两次 | 重放幂等；无二次结算 |
 | `status_cursor_regress` | 完成游标回退 3 步 | 幂等；已结算的不回退 |
 | `status_finished_then_running` | 已终态请求随后又上报 RUNNING | 终态不可复活 |
-| `status_zombie_completed_running` | 已完成任务的僵尸 RUNNING 持续上报 | tombstone 吸收；账目不回退 |
+| `status_zombie_completed_running` | 已完成任务的僵尸 RUNNING 持续上报 | terminal record 吸收；账目不回退 |
 | `status_zombie_fake_running` | 永久驻留的假 RUNNING 探针 | 重复未知事实不得创建 Master 请求；连续观察期间保持零幻影请求 |
 | `status_fetch_error` | 批量 FetchResponse 流中途故障 | 故障表面化到客户端；账目收敛；恢复 |
 
@@ -270,7 +270,7 @@ master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻
 | `atpm_observability_integrity` | ENV-O1 复合编排（debug 日志 + `flexlb_auto_tpm` 白名单） | 客户面形状 + `auto_tpm.request.count` 分桶 4/3/2/1 + latency success 桶 + `[priority-scheduler]` 日志 + pv.log admissionRejectReason 全在场（AT8/AT6） |
 | `atpm_preempt_decode_reserved_live` | BATCH + 生产基线 stage 组合 {DECODE_RESERVED} + 单 decode 4 块 KV 池：P90/P30 影子各 512 占池、P70 input=3500 溢出 hardAvailable | 真实影子预留驱逐：victim 8400 且非 8429（stage 判别性特征）+ `victim.kv_tokens{stage=decode_reserved}`≥428（影子覆盖 deficit）+ 幸存者完成 |
 | `atpm_preempt_cancel_not_found` | victim 已完成（decode 侧 clearUpstreamOwnership + prefill 侧 lifecycle completed）时抢占 Cancel 才到原 prefill（status_no_respond 冻结 master 视图撑过 3s 窗口） | incoming 精确 8431（cleanSingleNotFound abort 语义）、victim 正常完成未被取消、Cancel RPC delta≥1、解除注入后账目排空 + 恢复 |
-| `atpm_preempt_cancel_tombstoned` | victim 原 prefill 真 crash 重启（内存清零，crash_after）后抢占 Cancel 到达 fresh 实例（victim 长 decode 撕过 crash 窗口） | TOMBSTONED 消费端收口：incoming 完成占用释放槽位（resumeTombstoned→committed）、victim 流被 crash 切断非完成、ABSENT_FENCE 直连重投 8429 拒绝、牺牲请求 residue 有界不增长 + 恢复 |
+| `atpm_preempt_cancel_request_fenced` | victim 原 prefill 真 crash 重启（内存清零，crash_after）后抢占 Cancel 到达 fresh 实例（victim 长 decode 撕过 crash 窗口） | REQUEST_FENCED 消费端收口：incoming 完成占用释放槽位（resumeRequestFenced→committed）、victim 流被 crash 切断非完成、ABSENT_FENCE 直连重投 8429 拒绝、牺牲请求 residue 有界不增长 + 恢复 |
 
 **抢占 stage 覆盖注记（2026-09，live 家族设计输入：抢占 stage 审计报告）**：
 

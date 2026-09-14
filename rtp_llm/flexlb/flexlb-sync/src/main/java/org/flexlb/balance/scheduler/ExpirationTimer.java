@@ -23,7 +23,7 @@ import java.util.function.LongSupplier;
  * the request registry; a slot stores the opaque registration returned
  * by this class.
  *
- * <p>Maintenance removes settled tombstones before sweeping endpoint orphans.
+ * <p>Maintenance removes settled terminal records before sweeping endpoint orphans.
  * A request's inactivity deadline bounds local ownership independently of
  * Engine cancellation acknowledgements or terminal status delivery.
  */
@@ -287,13 +287,6 @@ final class ExpirationTimer implements AutoCloseable {
         }
     }
 
-    /** Release exact terminal resources; the terminal reducer aggregates failure. */
-    void release(RequestSlot.TerminalResources resources) {
-        if (resources != null) {
-            resources.release(this);
-        }
-    }
-
     /** Run one complete maintenance pass using one dynamic policy snapshot. */
     void maintain(
             BiConsumer<Long, LongPredicate> exactSweeper) {
@@ -310,10 +303,10 @@ final class ExpirationTimer implements AutoCloseable {
             failure = snapshotFailure;
         }
 
-        long tombstoneCutoff = subtractSaturated(nowMs, ttlMs);
+        long terminalRecordCutoff = subtractSaturated(nowMs, ttlMs);
         for (RequestSlot exactSlot : exactSlots) {
             try {
-                lifecycle.removeExactTombstone(exactSlot, tombstoneCutoff);
+                lifecycle.removeExactTerminalRecord(exactSlot, terminalRecordCutoff);
             } catch (RuntimeException | Error removalFailure) {
                 failure = append(failure, removalFailure);
             }

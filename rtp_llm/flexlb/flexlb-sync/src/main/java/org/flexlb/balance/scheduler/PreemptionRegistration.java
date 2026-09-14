@@ -24,7 +24,7 @@ public final class PreemptionRegistration {
             new CompletableFuture<>();
 
     private PreemptionCancelPhase phase = PreemptionCancelPhase.CLAIMED;
-    private boolean settled;
+    private boolean finished;
     private DeferredTerminal pendingTerminal;
     private boolean pendingDeliveryConfirmation;
     private long pendingConfirmationBatchId;
@@ -43,7 +43,7 @@ public final class PreemptionRegistration {
 
     public boolean release() { return owner.releasePreemption(this); }
 
-    public boolean settleTerminal(String detail) { return owner.completePreemption(this, detail); }
+    public boolean completePreemption(String detail) { return owner.completePreemption(this, detail); }
 
     public long requestId() {
         return requestId;
@@ -78,39 +78,40 @@ public final class PreemptionRegistration {
     }
 
     boolean advanceTo(PreemptionCancelPhase next) {
-        if (settled || !phase.canTransitionTo(next)) {
+        if (finished || !phase.canTransitionTo(next)) {
             return false;
         }
         phase = next;
         return true;
     }
 
-    boolean settle() {
-        if (settled) {
+    /** Finish this registration once; this does not release endpoint resources or publish a response. */
+    boolean tryFinish() {
+        if (finished) {
             return false;
         }
-        settled = true;
+        finished = true;
         return true;
     }
 
     boolean isReleasable() {
-        return !settled && phase.isLocallyReleasable();
+        return !finished && phase.isLocallyReleasable();
     }
 
     boolean isNotFound() {
-        return !settled && phase == PreemptionCancelPhase.NOT_FOUND_STALE;
+        return !finished && phase == PreemptionCancelPhase.NOT_FOUND_STALE;
     }
 
     boolean isUnknown() {
-        return !settled && phase == PreemptionCancelPhase.CANCEL_UNKNOWN;
+        return !finished && phase == PreemptionCancelPhase.CANCEL_UNKNOWN;
     }
 
-    boolean isSettled() {
-        return settled;
+    boolean isFinished() {
+        return finished;
     }
 
-    boolean canSettleTombstone() {
-        return !settled && phase.acceptsTombstone();
+    boolean canCompletePreemption() {
+        return !finished && phase.acceptsRequestFenced();
     }
 
     void storeTerminal(DeferredTerminal selected) {

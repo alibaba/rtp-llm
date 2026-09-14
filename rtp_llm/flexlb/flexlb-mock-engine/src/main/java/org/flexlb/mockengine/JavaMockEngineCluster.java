@@ -423,7 +423,7 @@ public final class JavaMockEngineCluster {
                         + "decode_admitted=%d decode_done=%d decode_exec_p50=%d decode_exec_p95=%d decode_exec_max=%d "
                         + "heap_used_mb=%d heap_max_mb=%d "
                         + "generate_stream_rpcs=%d fetch_response_rpcs=%d cancel_rpcs=%d "
-                        + "cancel_census_tracked=%d cancel_census_finished=%d cancel_census_unknown=%d cancel_census_tombstone=%d "
+                        + "cancel_census_tracked=%d cancel_census_finished=%d cancel_census_unknown=%d cancel_census_already_cancelled=%d "
                         + "cancel_census_injected=%d cancel_census_client_gone=%d%n",
                 System.currentTimeMillis(),
                 stats.enqueueRpcs.sum(), stats.enqueuedRequests.sum(),
@@ -438,7 +438,7 @@ public final class JavaMockEngineCluster {
                 heapUsedMb, heapMaxMb,
                 stats.generateStreamRpcs.sum(), stats.fetchResponseRpcs.sum(), stats.cancelRpcs.sum(),
                 stats.cancelCensusTracked.sum(), stats.cancelCensusAlreadyFinished.sum(),
-                stats.cancelCensusUnknown.sum(), stats.cancelCensusTombstone.sum(),
+                stats.cancelCensusUnknown.sum(), stats.cancelCensusAlreadyCancelled.sum(),
                 stats.cancelCensusInjected.sum(), stats.cancelCensusClientGone.sum());
     }
 
@@ -658,20 +658,20 @@ public final class JavaMockEngineCluster {
         private final LinkedHashMap<Long, Map<String, Object>> requestLifecycles = new LinkedHashMap<>();
         // Bounded cancelled rid history (Python _cancelled / snapshot "cancelled_rids").
         private final LinkedHashSet<Long> cancelledRidHistory = new LinkedHashSet<>();
-        // Priority-Cancel tombstones mirror the C++ Prefill contract: once a
+        // Priority-Cancel terminal records mirror the C++ Prefill contract: once a
         // request accepted priority cancellation, retries stay ACCEPTED even
         // after the live ownership entry has been removed.  Keep this separate
         // from client-cancel history so a normal terminal remains NOT_FOUND.
-        private final LinkedHashSet<Long> priorityCancelTombstones = new LinkedHashSet<>();
-        // Absent-fence tombstones mirror the C++ Prefill ABSENT_FENCE
+        private final LinkedHashSet<Long> priorityCancelledRequestIds = new LinkedHashSet<>();
+        // Absent-fence terminal records mirror the C++ Prefill ABSENT_FENCE
         // contract: a Cancel for a rid this engine NEVER saw installs a
         // fence; any racing later Enqueue of the same rid is rejected with
         // the typed 8429 (PRIORITY_PREEMPTED) error before it reaches the
-        // scheduler.  Kept separate from priorityCancelTombstones (the
+        // scheduler.  Kept separate from priorityCancelledRequestIds (the
         // ACTIVE_CANCEL marker, whose cancel retries stay ACCEPTED) and from
         // cancelledRidHistory (terminal history, whose late cancels answer
         // NOT_FOUND — seen-but-terminal, the production recently-seen set).
-        private final LinkedHashSet<Long> absentFenceTombstones = new LinkedHashSet<>();
+        private final LinkedHashSet<Long> fencedRequestIds = new LinkedHashSet<>();
         // Recent execution times for snapshot prefill_ms_*/decode_ms_* fields.
         private final ArrayDeque<Double> recentPrefillTimes = new ArrayDeque<>();
         private final ArrayDeque<Double> recentDecodeTimes = new ArrayDeque<>();
@@ -1155,7 +1155,7 @@ public final class JavaMockEngineCluster {
                         // (PRIORITY_PREEMPTED) error — before the scheduler,
                         // before any engine state is created (the fenced rid
                         // stays unknown to every bookkeeping map).
-                        if (hasAbsentFenceTombstone(requestId)) {
+                        if (hasFencedRequestId(requestId)) {
                             response.addErrorsBuilder()
                                     .setRequestId(requestId)
                                     .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
@@ -1686,7 +1686,7 @@ public final class JavaMockEngineCluster {
                         boolean terminal = false;
                         if (output.hasErrorInfo()) {
                             // Error-only frames (cancel, P->D downstream
-                            // cancel, preemption tombstones) terminate the
+                            // cancel, preemption terminal records) terminate the
                             // stream: gRPC semantics deliver the failure then
                             // close. Without this the pump keeps polling until
                             // the frame-gap timeout (600s default), leaving
@@ -1789,7 +1789,7 @@ public final class JavaMockEngineCluster {
                         boolean terminal = false;
                         if (output.hasErrorInfo()) {
                             // Error-only frames (cancel, P->D downstream
-                            // cancel, preemption tombstones) terminate the
+                            // cancel, preemption terminal records) terminate the
                             // stream — mirrors the generateStreamCall pump.
                             // Without this a cancelled request's FetchResponse
                             // hangs until the 600s frame-gap timeout.
@@ -1883,7 +1883,7 @@ public final class JavaMockEngineCluster {
             }
             addCancelledRid(requestId);
             if (priorityPreemption) {
-                addPriorityCancelTombstone(requestId);
+                addPriorityCancelledRequestId(requestId);
             }
             recordLifecycleEnd(requestId, true);
             // Queued-vs-running discrimination, the runningTasks removal, the
@@ -2046,7 +2046,7 @@ public final class JavaMockEngineCluster {
          * the armed injection kind or {@code null} for the normal path.
          *
          * <p>An injected cancel is an RPC-LAYER failure simulated BEFORE the
-         * engine cancel state machine is touched: no fences, no tombstones,
+         * engine cancel state machine is touched: no fences, no terminal records,
          * no census branch — production semantics "RPC failed = engine state
          * unchanged". The master's one-shot cancel contract (never retries,
          * 50ms ack timeout) turns every injected kind into a failed future
@@ -2073,15 +2073,15 @@ public final class JavaMockEngineCluster {
         /**
          * Three-branch cancel used by {@link MockEngineCancelChannel} and the
          * gRPC Cancel handler, mapped to the production C++ Prefill contract:
-         * a live request (or an accepted-cancel tombstone retry) is
+         * a live request (or an accepted-cancel terminal record retry) is
          * {@code found} → ACCEPTED; a request this engine has seen but which
          * already finished (completed or previously cancelled) is
          * {@code alreadyFinished} → NOT_FOUND — seen-but-terminal; the
          * completion record stays deliverable from the retain-window
          * backlog (the 10-minute production recently-seen TTL is
          * simplified away: mock test cancels are all sub-second races,
-         * far inside the window); a rid the engine NEVER saw is unknown → TOMBSTONED with the
-         * ABSENT_FENCE tombstone installed here (later Enqueues of that rid
+         * far inside the window); a rid the engine NEVER saw is unknown → REQUEST_FENCED with the
+         * ABSENT_FENCE record installed here (later Enqueues of that rid
          * are rejected with 8429). The mock behaviour on the found branch is
          * identical to {@link #cancel(long)}: the request is removed and a
          * CANCELLED completion is surfaced in the next WorkerStatus finished
@@ -2099,14 +2099,14 @@ public final class JavaMockEngineCluster {
                 throw new UnsupportedOperationException(
                         "priority Cancel is only implemented by the original Prefill");
             }
-            if (hasPriorityCancelTombstone(requestId)) {
-                stats.cancelCensusTombstone.increment();
+            if (hasPriorityCancelledRequestId(requestId)) {
+                stats.cancelCensusAlreadyCancelled.increment();
                 return new CancelResult(true, null, true);
             }
-            if (hasAbsentFenceTombstone(requestId)) {
+            if (hasFencedRequestId(requestId)) {
                 // ABSENT_FENCE retry: the rid is still never-seen — the
-                // production handler answers TOMBSTONED again (idempotent),
-                // it must NOT flip onto the ACCEPTED priority-tombstone
+                // production handler answers REQUEST_FENCED again (idempotent),
+                // it must NOT flip onto the ACCEPTED priority-terminal record
                 // branch.
                 stats.cancelCensusUnknown.increment();
                 return new CancelResult(false, null, false);
@@ -2155,11 +2155,11 @@ public final class JavaMockEngineCluster {
             }
             // A2 census: cancel addressed a request this engine never knew —
             // stale master bookkeeping or a cancelled generation. Production
-            // behaviour: install the ABSENT_FENCE tombstone and answer
-            // TOMBSTONED so the caller's map (alreadyFinished→NOT_FOUND,
-            // unknown→TOMBSTONED) fences any racing later Enqueue with 8429.
+            // behaviour: install the ABSENT_FENCE record and answer
+            // REQUEST_FENCED so the caller's map (alreadyFinished→NOT_FOUND,
+            // unknown→REQUEST_FENCED) fences any racing later Enqueue with 8429.
             stats.cancelCensusUnknown.increment();
-            addAbsentFenceTombstone(requestId);
+            addFencedRequestId(requestId);
             return new CancelResult(false, null, false);
         }
 
@@ -2398,7 +2398,7 @@ public final class JavaMockEngineCluster {
 
         private void recordPriorityPreemptionCanceled(long requestId,
                                                       EngineRpcService.TaskPhase phase) {
-            addPriorityCancelTombstone(requestId);
+            addPriorityCancelledRequestId(requestId);
             EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
                     .setRequestId(requestId)
                     .setPhase(phase)
@@ -4353,13 +4353,13 @@ public final class JavaMockEngineCluster {
         /**
          * gRPC Cancel (proto {@code RpcService/Cancel}, the priority-preemption
          * engine contract) with the production-faithful C++ Prefill mapping:
-         * a live request and its accepted-cancel tombstone both return
+         * a live request and its accepted-cancel terminal record both return
          * ACCEPTED (idempotent retry, the ACTIVE_CANCEL branch); a request
          * this addressed Prefill has SEEN but which already finished returns
          * NOT_FOUND — seen-but-terminal, the production recently-seen
          * behaviour (the completion record stays deliverable from the
-         * retain-window backlog); a rid the engine NEVER saw returns TOMBSTONED —
-         * {@link #cancelRequest} installs the ABSENT_FENCE tombstone, so any
+         * retain-window backlog); a rid the engine NEVER saw returns REQUEST_FENCED —
+         * {@link #cancelRequest} installs the ABSENT_FENCE record, so any
          * racing later Enqueue of the same rid is rejected with the typed
          * 8429 before reaching the scheduler. The production 10-minute
          * recently-seen TTL is simplified away (mock cancels are sub-second
@@ -4377,7 +4377,7 @@ public final class JavaMockEngineCluster {
             // arriveCancelRpc gate). Everything below short-circuits BEFORE
             // cancelRequest so the engine state machine is never touched —
             // production semantics "RPC failed = engine state unchanged"
-            // (no fences, no tombstones), and the master's one-shot cancel
+            // (no fences, no terminal records), and the master's one-shot cancel
             // contract (never retries, 50ms ack timeout) is what turns
             // these into failed futures master-side.
             CancelFaultKind fault = arriveCancelRpc();
@@ -4419,8 +4419,8 @@ public final class JavaMockEngineCluster {
                     // backlog via GetWorkerStatus.
                     status = EngineRpcService.CancelStatusPB.CANCEL_STATUS_NOT_FOUND;
                 } else {
-                    // Never-seen rid: TOMBSTONED — cancelRequest already
-                    // installed the ABSENT_FENCE tombstone, and any racing
+                    // Never-seen rid: REQUEST_FENCED — cancelRequest already
+                    // installed the ABSENT_FENCE record, and any racing
                     // later Enqueue of this rid is rejected with the typed
                     // 8429 before reaching the scheduler (production
                     // ABSENT_FENCE contract).
@@ -4650,11 +4650,11 @@ public final class JavaMockEngineCluster {
             synchronized (cancelledRidHistory) {
                 cancelledRidHistory.clear();
             }
-            synchronized (priorityCancelTombstones) {
-                priorityCancelTombstones.clear();
+            synchronized (priorityCancelledRequestIds) {
+                priorityCancelledRequestIds.clear();
             }
-            synchronized (absentFenceTombstones) {
-                absentFenceTombstones.clear();
+            synchronized (fencedRequestIds) {
+                fencedRequestIds.clear();
             }
             synchronized (recentPrefillTimes) {
                 recentPrefillTimes.clear();
@@ -4898,11 +4898,11 @@ public final class JavaMockEngineCluster {
             }
         }
 
-        private void addPriorityCancelTombstone(long requestId) {
-            synchronized (priorityCancelTombstones) {
-                priorityCancelTombstones.add(requestId);
-                while (priorityCancelTombstones.size() > CANCELLED_RID_CAP) {
-                    var iterator = priorityCancelTombstones.iterator();
+        private void addPriorityCancelledRequestId(long requestId) {
+            synchronized (priorityCancelledRequestIds) {
+                priorityCancelledRequestIds.add(requestId);
+                while (priorityCancelledRequestIds.size() > CANCELLED_RID_CAP) {
+                    var iterator = priorityCancelledRequestIds.iterator();
                     if (!iterator.hasNext()) {
                         break;
                     }
@@ -4912,17 +4912,17 @@ public final class JavaMockEngineCluster {
             }
         }
 
-        private boolean hasPriorityCancelTombstone(long requestId) {
-            synchronized (priorityCancelTombstones) {
-                return priorityCancelTombstones.contains(requestId);
+        private boolean hasPriorityCancelledRequestId(long requestId) {
+            synchronized (priorityCancelledRequestIds) {
+                return priorityCancelledRequestIds.contains(requestId);
             }
         }
 
-        private void addAbsentFenceTombstone(long requestId) {
-            synchronized (absentFenceTombstones) {
-                absentFenceTombstones.add(requestId);
-                while (absentFenceTombstones.size() > CANCELLED_RID_CAP) {
-                    var iterator = absentFenceTombstones.iterator();
+        private void addFencedRequestId(long requestId) {
+            synchronized (fencedRequestIds) {
+                fencedRequestIds.add(requestId);
+                while (fencedRequestIds.size() > CANCELLED_RID_CAP) {
+                    var iterator = fencedRequestIds.iterator();
                     if (!iterator.hasNext()) {
                         break;
                     }
@@ -4932,9 +4932,9 @@ public final class JavaMockEngineCluster {
             }
         }
 
-        private boolean hasAbsentFenceTombstone(long requestId) {
-            synchronized (absentFenceTombstones) {
-                return absentFenceTombstones.contains(requestId);
+        private boolean hasFencedRequestId(long requestId) {
+            synchronized (fencedRequestIds) {
+                return fencedRequestIds.contains(requestId);
             }
         }
 
@@ -5330,11 +5330,11 @@ public final class JavaMockEngineCluster {
     /**
      * Result of {@link FastRpcService#cancelRequest(long)}, mapped by every
      * caller to the production C++ Prefill cancel contract: {@code found}
-     * (live, or an idempotent ACTIVE_CANCEL tombstone retry) → ACCEPTED;
+     * (live, or an idempotent ACTIVE_CANCEL terminal record retry) → ACCEPTED;
      * {@code alreadyFinished} (seen-but-terminal: completed or previously
      * cancelled) → NOT_FOUND (the completion record stays deliverable from
-     * the retain window); unknown (never-seen rid, ABSENT_FENCE tombstone
-     * installed by cancelRequest) → TOMBSTONED, and later Enqueues of that
+     * the retain window); unknown (never-seen rid, ABSENT_FENCE record
+     * installed by cancelRequest) → REQUEST_FENCED, and later Enqueues of that
      * rid are rejected with the typed 8429.
      */
     record CancelResult(boolean found, EngineRpcService.TaskPhase phase, boolean alreadyFinished) {
@@ -5365,20 +5365,20 @@ public final class JavaMockEngineCluster {
         private final LongAdder fetchResponseRpcs = new LongAdder();
         private final LongAdder cancelRpcs = new LongAdder();
         // Leak-attribution census (Jack A1/A2): how incoming cancel RPCs
-        // distribute across tracked / already-finished / unknown / tombstone.
+        // distribute across tracked / already-finished / unknown / terminal record.
         // B1 on the master side should stay close to zero once the cancel
         // setBatchId fix lands; a sustained B1 ~= tracked count means typed
         // CANCELLED terminals are still being dropped in reconcile.
         final LongAdder cancelCensusTracked = new LongAdder();
         final LongAdder cancelCensusAlreadyFinished = new LongAdder();
         final LongAdder cancelCensusUnknown = new LongAdder();
-        final LongAdder cancelCensusTombstone = new LongAdder();
+        final LongAdder cancelCensusAlreadyCancelled = new LongAdder();
         // Cancel-RPC fault-injection census: arrivals short-circuited by an
         // armed cancel_no_respond / cancel_error / cancel_unexpected_status
         // injection (arriveCancelRpc). Separate from the state-machine
         // branches so the census family stays an exhaustive split of cancel
         // RPC arrivals — an injected cancel is neither tracked, finished,
-        // unknown nor a tombstone: the engine state never saw it.
+        // unknown nor a terminal record: the engine state never saw it.
         final LongAdder cancelCensusInjected = new LongAdder();
         // Autonomous client-gone cancellations (broken GenerateStream /
         // FetchResponse stream): how many in-flight requests the engine
