@@ -30,6 +30,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -154,6 +155,13 @@ public final class JavaMockEngineCluster {
                         values -> whaleMonitor.reportScheduler(values, service.whaleMetricTags());
                 if (whaleMonitor != null) service.eventMetricReporter =
                         values -> whaleMonitor.reportEvent(values, service.whaleMetricTags());
+                if (whaleMonitor != null) service.cacheEvictionReporter = (scope, ms) -> {
+                    var tags = new HashMap<>(service.whaleMetricTags());
+                    tags.put("scope", scope);
+                    tags.put("backing", scope.equals("gpu") ? "device" : "memory");
+                    tags.put("kind", scope.equals("gpu") ? "chain" : "complete");
+                    whaleMonitor.reportEvent(Map.of("rtp_llm_kv_cache_evicted_block_lifetime_ms", ms), tags);
+                };
             }
             if (!config.whale || config.whaleBundle) writeDiscoveryFiles(config);
             // File-based discovery mode (--discovery-file): maintain the dynamic
@@ -594,6 +602,26 @@ public final class JavaMockEngineCluster {
     static final class FastRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         private volatile boolean whaleRemote;
         private boolean whaleBundle;
+        private MockMemoryBlockCache memoryCache;
+        private final java.util.concurrent.atomic.LongAdder memoryReadBlocks = new java.util.concurrent.atomic.LongAdder();
+        private java.util.function.BiConsumer<String, Double> cacheEvictionReporter;
+
+        private void reportCacheEviction(String scope, double ms) {
+            if (cacheEvictionReporter != null) cacheEvictionReporter.accept(scope, ms);
+            else reportMetricEvent(Map.of(scope.equals("memory")
+                    ? "mock_memory_evicted_block_lifetime_ms" : "rtp_llm_kv_cache_evicted_block_lifetime_ms", ms));
+        }
+
+        MockPerformanceModel.RequestShape matchPrefillMemory(MockPerformanceModel.RequestShape shape) {
+            if (memoryCache == null) return shape;
+            int gpu = cache.prefixHitBlocks(shape.blockKeys());
+            int host = memoryCache.match(shape.blockKeys(), gpu);
+            int total = gpu + host;
+            return new MockPerformanceModel.RequestShape(shape.input(), shape.inputLen(), shape.outputLen(),
+                    shape.blockKeys(), Math.min((long) total * seqSizePerBlock, shape.inputLen()),
+                    total, shape.nativeKeys(), host);
+        }
+
         private String whalePodIp;
         private final Map<Long, Object> remoteDecodeLeaseOwners = new ConcurrentHashMap<>();
         private final Map<Long, Runnable> remoteDecodeStops = new ConcurrentHashMap<>();
@@ -1278,6 +1306,9 @@ public final class JavaMockEngineCluster {
             this.services = services;
             this.scheduler = scheduler;
             this.performance = performance.forEngine();
+            if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL && performance.memoryCacheBlocks > 0)
+                this.memoryCache = new MockMemoryBlockCache(performance.memoryCacheBlocks,
+                        ms -> reportCacheEviction("memory", ms));
             this.cache = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
                     && performance.decodeReserveBlockRatio != null
                     ? new MockLruBlockCache(totalBlocks, performance.decodeReserveBlockRatio / 100.0, true)
@@ -1439,7 +1470,7 @@ public final class JavaMockEngineCluster {
                             requestStates.put(requestId, "rejected");
                             continue;
                         }
-                        MockPerformanceModel.RequestShape shape = performance.shape(input.getInput(), cache);
+                        MockPerformanceModel.RequestShape shape = matchPrefillMemory(performance.shape(input.getInput(), cache));
                         // Key-level cache-hit accounting at the admission hit
                         // computation point (recorded whether or not the request
                         // later admits — a rejected request still observed the
@@ -1883,7 +1914,7 @@ public final class JavaMockEngineCluster {
             }
 
             long requestId = request.getRequestId();
-            MockPerformanceModel.RequestShape shape = performance.shape(request, cache);
+            MockPerformanceModel.RequestShape shape = matchPrefillMemory(performance.shape(request, cache));
             // Key-level cache-hit accounting (direct path, same admission hit
             // computation point as the enqueue-batch path above).
             cacheKeyHits.add(shape.hitBlocks());
@@ -2204,8 +2235,7 @@ public final class JavaMockEngineCluster {
         /** Wire the cluster-shared engine_events.jsonl writer (null disables). */
         void setEngineEventLog(EngineEventLog engineEventLog) {
             this.engineEventLog = engineEventLog;
-            cache.setEvictionLifetimeListener(ms -> reportMetricEvent(
-                    Map.of("rtp_llm_kv_cache_evicted_block_lifetime_ms", ms)));
+            cache.setEvictionLifetimeListener(ms -> reportCacheEviction("gpu", ms));
             cache.setEvictionListener(event -> {
                 reportMetricEvent(Map.of("rtp_llm_kv_cache_direct_evicted_block_count", event.blocksFreed()));
                 if (engineEventLog == null) return;
@@ -3114,9 +3144,9 @@ public final class JavaMockEngineCluster {
                     // A preceding batch may have populated or evicted this prefix
                     // since enqueue. Price the batch using the execution-time hit.
                     int hits = cache.prefixHitBlocks(queued.blockKeys());
-                    var current = new MockPerformanceModel.RequestShape(queued.input(), queued.inputLen(),
+                    var current = matchPrefillMemory(new MockPerformanceModel.RequestShape(queued.input(), queued.inputLen(),
                             queued.outputLen(), queued.blockKeys(),
-                            Math.min((long) hits * performance.blockSize(), queued.inputLen()), hits, queued.nativeKeys());
+                            Math.min((long) hits * performance.blockSize(), queued.inputLen()), hits, queued.nativeKeys()));
                     if (!budget.fits(current.inputLen(), current.hitTokens())) return null;
                     if (acquireBlockLease(id, current) == null) return null;
                     cacheKeyHits.add(current.hitBlocks() - queued.hitBlocks());
@@ -3491,7 +3521,10 @@ public final class JavaMockEngineCluster {
         private void runPrefillBatch(List<BatchMember> members) {
             List<MockPerformanceModel.RequestShape> shapes = shapesOf(members);
             long executionMs = performance.prefillMs(shapes);
-            long generateDelayMs = faultConfig.getGenerateDelayMs();
+            long memoryBlocks = shapes.stream().mapToLong(MockPerformanceModel.RequestShape::memoryHitBlocks).sum();
+            memoryReadBlocks.add(memoryBlocks);
+            long memoryLoadMs = Math.round(memoryBlocks * performance.memoryReadMsPerBlock);
+            long generateDelayMs = faultConfig.getGenerateDelayMs() + memoryLoadMs;
             long now = System.nanoTime();
             long executionNanos = TimeUnit.MILLISECONDS.toNanos(executionMs + generateDelayMs);
             // When max_prefill_concurrency was explicitly configured via /set_perf, a
@@ -3613,8 +3646,19 @@ public final class JavaMockEngineCluster {
                         // excluded), with_cache = il (the
                         // rtp_llm_context_tps_with_cache numerator, the
                         // DeepSeek-style "input tokens/s incl. cache hits").
+                        if (memoryCache != null && !asyncFail) memoryCache.write(shape.blockKeys());
                         long inputLen = shape.inputLen();
                         long hitTokens = shape.hitTokens();
+                        if (memoryCache != null) {
+                            long hostTokens = Math.min(hitTokens, (long) shape.memoryHitBlocks() * seqSizePerBlock);
+                            reportMetricEvent(Map.of("rtp_llm_stream_cache_memory_reuse_length", hostTokens,
+                                    "rtp_llm_stream_cache_device_reuse_length", hitTokens - hostTokens,
+                                    "rtp_llm_kv_cache_reuse_length", hitTokens,
+                                    "rtp_llm_kv_cache_hit_rate", inputLen == 0 ? 0 : 100.0 * hitTokens / inputLen,
+                                    "rtp_llm_kv_cache_memory_cache_read_token", hostTokens,
+                                    "rtp_llm_kv_cache_memory_cache_read_latency_us",
+                                    shape.memoryHitBlocks() * performance.memoryReadMsPerBlock * 1000));
+                        }
                         computedContext |= inputLen > hitTokens;
                         processedContext |= inputLen > 0;
                         contextComputeTokens.addAndGet(Math.max(0L, inputLen - hitTokens));
@@ -4908,9 +4952,9 @@ public final class JavaMockEngineCluster {
                     .setBlockSize(performance.blockSize())
                     .setVersion(cacheVersion.get());
             if (request.getNeedCacheKeys()) {
-                for (Long key : cache.snapshotKeys()) {
-                    status.putCacheKeys(key, true);
-                }
+                for (Long key : cache.snapshotKeys()) status.putCacheKeys(key, true);
+                if (memoryCache != null)
+                    for (Long key : memoryCache.keys()) status.putCacheKeys(key, true);
             }
             observer.onNext(status.build());
             observer.onCompleted();
@@ -5537,6 +5581,7 @@ public final class JavaMockEngineCluster {
             }
             // KV memory: every held block and LRU entry is gone with the process.
             cache.clear();
+            if (memoryCache != null) memoryCache.clear();
             cacheVersion.incrementAndGet();
             statusVersion.incrementAndGet();
             // Observability histories are process memory as well.
@@ -5707,7 +5752,7 @@ public final class JavaMockEngineCluster {
         }
 
         Map<String, Number> whaleMetrics() {
-            return Map.ofEntries(
+            var metrics = new HashMap<String, Number>(Map.ofEntries(
                     Map.entry("mock_context_compute_tokens_total", lifetimeContextComputeTokens.sum()),
                     Map.entry("mock_context_tokens_total", lifetimeContextTokens.sum()),
                     Map.entry("mock_generate_tokens_total", lifetimeGenerateTokens.sum()),
@@ -5742,7 +5787,19 @@ public final class JavaMockEngineCluster {
                     Map.entry("rtp_llm_kv_cache_pool_available_blocks", cache.availableBlocks()),
                     Map.entry("rtp_llm_kv_cache_pool_total_blocks", cache.totalBlocks()),
                     Map.entry("rtp_llm_kv_cache_pool_used_ratio", cache.totalBlocks() == 0 ? 0.0
-                            : 100.0 * (cache.totalBlocks() - cache.availableBlocks()) / cache.totalBlocks()));
+                            : 100.0 * (cache.totalBlocks() - cache.availableBlocks()) / cache.totalBlocks())));
+            if (memoryCache != null) {
+                metrics.put("rtp_llm_kv_cache_memory_cache_status_total_block_num", memoryCache.capacity());
+                metrics.put("rtp_llm_kv_cache_memory_cache_status_allocated_block_num", memoryCache.size());
+                // Metadata copies complete atomically; cached blocks are all reclaimable.
+                metrics.put("rtp_llm_kv_cache_memory_cache_status_available_block_num", memoryCache.capacity());
+                metrics.put("rtp_llm_kv_cache_memory_cache_status_used_ratio", 0);
+                metrics.put("mock_memory_cache_occupancy_ratio", (double) memoryCache.size() / memoryCache.capacity());
+                metrics.put("mock_memory_cache_total_tokens", (long) memoryCache.capacity() * seqSizePerBlock);
+                metrics.put("mock_memory_cache_evicted_blocks_total", memoryCache.evictions());
+                metrics.put("mock_memory_cache_read_blocks_total", memoryReadBlocks.sum());
+            }
+            return metrics;
         }
         int getGrpcPort() { return grpcPort; }
         int getDownstreamOwnershipCount() { return downstreamDecodeOwners.size(); }

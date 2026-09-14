@@ -271,6 +271,8 @@ final class MockPerformanceModel {
         // Explicit overrides installed before startup are part of that engine's initial settings.
         copy.eosModel = eosModel;
         copy.decodeReuseCache = decodeReuseCache;
+        copy.memoryCacheBlocks = memoryCacheBlocks;
+        copy.memoryReadMsPerBlock = memoryReadMsPerBlock;
         copy.decodeReserveBlockRatio = decodeReserveBlockRatio;
         copy.prefillBatchPolicy = prefillBatchPolicy;
         copy.nativeTokenCacheKeys = nativeTokenCacheKeys;
@@ -376,6 +378,20 @@ final class MockPerformanceModel {
                 throw new IllegalStateException("decode.reserve_block_ratio must be a percentage in [0, 50]");
             }
             model.decodeReserveBlockRatio = value;
+        }
+        JsonNode memory = prefill.path("memory_cache");
+        if (memory.has("enabled") && !memory.get("enabled").isBoolean())
+            throw new IllegalStateException("prefill.memory_cache.enabled must be boolean");
+        if (memory.path("enabled").asBoolean(false)) {
+            JsonNode blocks = memory.path("capacity_blocks");
+            if (!blocks.isIntegralNumber() || !blocks.canConvertToInt() || blocks.asInt() <= 0)
+                throw new IllegalStateException("prefill.memory_cache.capacity_blocks must be a positive integer");
+            model.memoryCacheBlocks = blocks.asInt();
+            JsonNode read = memory.path("read_ms_per_block");
+            double value = read.isMissingNode() ? 0 : read.asDouble(Double.NaN);
+            if ((!read.isMissingNode() && !read.isNumber()) || !Double.isFinite(value) || value < 0)
+                throw new IllegalStateException("prefill.memory_cache.read_ms_per_block must be finite and nonnegative");
+            model.memoryReadMsPerBlock = value;
         }
         model.eosModel = MockEosModel.load(decode.path("eos"));
         model.prefillBatchPolicy = MockPrefillBatchPolicy.load(prefill.path("fifo"));
@@ -688,12 +704,19 @@ final class MockPerformanceModel {
         return blockSize;
     }
 
+    int memoryCacheBlocks;
+    double memoryReadMsPerBlock;
+
     record RequestShape(EngineRpcService.GenerateInputPB input,
                         int inputLen,
                         int outputLen,
                         List<Long> blockKeys,
                         long hitTokens,
-                        int hitBlocks, boolean nativeKeys) {
+                        int hitBlocks, boolean nativeKeys, int memoryHitBlocks) {
+        RequestShape(EngineRpcService.GenerateInputPB input, int inputLen, int outputLen,
+                     List<Long> blockKeys, long hitTokens, int hitBlocks, boolean nativeKeys) {
+            this(input, inputLen, outputLen, blockKeys, hitTokens, hitBlocks, nativeKeys, 0);
+        }
     }
 
     private record DecodePoint(int batchSize, double stepMs) {
