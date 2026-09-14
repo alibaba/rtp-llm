@@ -654,6 +654,54 @@ class EncodeExtraStopWordsTest(TestCase):
 
         self.assertEqual(self.renderer.encode_extra_stop_words(["x"]), [[9, 9]])
 
+    def _legacy_tokenizer(self, encode_result, special_token_map):
+        tokenizer = Mock()
+        tokenizer.all_special_tokens = list(special_token_map)
+        tokenizer.convert_tokens_to_ids = Mock(
+            side_effect=lambda tokens: [special_token_map[token] for token in tokens]
+        )
+
+        def encode(word, **kwargs):
+            if kwargs:
+                raise TypeError("encode() got an unexpected keyword argument")
+            return list(encode_result)
+
+        tokenizer.encode = Mock(side_effect=encode)
+        return tokenizer
+
+    def test_fallback_trims_bos_eos_wrapped_around_the_word(self):
+        # 旧式 encode() 默认会追加 BOS/EOS：包着特殊 token 的序列在生成输出中
+        # 永不出现，注册了也匹配不到，等于静默失效。
+        self.renderer.tokenizer = self._legacy_tokenizer(
+            [1, 42, 43, 2], {"<s>": 1, "</s>": 2}
+        )
+
+        self.assertEqual(
+            self.renderer.encode_extra_stop_words(["Observation:"]), [[42, 43]]
+        )
+
+    def test_fallback_keeps_a_word_that_is_itself_a_special_token(self):
+        # <|endoftext|> 解析出来就是特殊 token：可以去掉包裹的 BOS，但不能把
+        # 词自己一起裁掉，否则停止词静默消失。
+        self.renderer.tokenizer = self._legacy_tokenizer(
+            [1, 2], {"<s>": 1, "<|endoftext|>": 2}
+        )
+
+        self.assertEqual(
+            self.renderer.encode_extra_stop_words(["<|endoftext|>"]), [[2]]
+        )
+
+    def test_fallback_without_special_token_metadata_is_unchanged(self):
+        # 拿不到 all_special_tokens 时不猜：保持原样返回，行为与旧实现相同。
+        def encode(word, **kwargs):
+            if kwargs:
+                raise TypeError("encode() got an unexpected keyword argument")
+            return [9, 9]
+
+        self.renderer.tokenizer.encode = Mock(side_effect=encode)
+
+        self.assertEqual(self.renderer.encode_extra_stop_words(["x"]), [[9, 9]])
+
     def test_returns_copy_not_tokenizer_buffer(self):
         shared = [7, 8]
         self.renderer.tokenizer.encode = Mock(return_value=shared)
@@ -1204,8 +1252,9 @@ class ToolChoiceNoneTest(TestCase):
 
 
 class GlmTojsonFilterTest(TestCase):
-    """GLM4.5 renderer 不再覆盖 _customize_jinja_env：基类提供的 tojson 必须与被
-    删除的覆盖行为一致——字符串原样返回（不加引号），其余按 json.dumps 序列化。"""
+    """GLM4.5 renderer 不再覆盖 _customize_jinja_env：基类提供的 tojson 必须覆盖
+    被删除的实现——字符串原样返回（不加引号）、ensure_ascii 语义一致，并且把
+    json.dumps 的 kwargs 透传出去（删掉的那份会忽略 extra kwargs）。"""
 
     def test_renderer_relies_on_the_base_filter(self):
         self.assertIs(
@@ -1213,9 +1262,9 @@ class GlmTojsonFilterTest(TestCase):
             ReasoningToolBaseRenderer._customize_jinja_env,
         )
 
-    def _render_value(self, value):
+    def _render_value(self, value, template="{{ value | tojson }}"):
         renderer = Mock(spec=ReasoningToolBaseRenderer)
-        renderer.chat_template = "{{ value | tojson }}"
+        renderer.chat_template = template
         for name in (
             "_effective_tools",
             "_preprocess_messages",
@@ -1238,6 +1287,24 @@ class GlmTojsonFilterTest(TestCase):
 
     def test_non_string_value_is_serialized_without_sorted_keys(self):
         self.assertEqual(self._render_value({"b": 1, "a": 2}), '{"b": 1, "a": 2}')
+
+    def test_ensure_ascii_arg_matches_the_deleted_override(self):
+        # GLM4.5 模板只用 tojson(ensure_ascii=False)（testdata/glm45/tokenizer/
+        # chat_template.jinja 第 11、77 行）；被删的覆盖同样走
+        # kwargs.get("ensure_ascii", False)，两者一致：非 ASCII 不转义、字符串
+        # 不加引号。
+        template = "{{ value | tojson(ensure_ascii=False) }}"
+
+        self.assertEqual(
+            self._render_value({"名字": "张三"}, template), '{"名字": "张三"}'
+        )
+
+    def test_json_dumps_kwargs_are_passed_through(self):
+        # 被删的覆盖会忽略 extra kwargs，基类透传（Kimi-K2 模板依赖 separators）。
+        # GLM4.5 模板未使用这些 kwargs，故无行为变化；这里锁定基类的透传语义。
+        template = "{{ value | tojson(sort_keys=True, separators=(',', ':')) }}"
+
+        self.assertEqual(self._render_value({"b": 1, "a": 2}, template), '{"a":2,"b":1}')
 
 
 if __name__ == "__main__":

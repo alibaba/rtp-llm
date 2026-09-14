@@ -1839,6 +1839,7 @@ class MaxThinkingTokensClampTest(TestCase):
         max_new_tokens=36000,
         max_thinking_tokens=32000,
         end_think_token_ids=None,
+        in_think_mode=True,
     ):
         return GenerateInput(
             request_id=0,
@@ -1847,6 +1848,7 @@ class MaxThinkingTokensClampTest(TestCase):
             generate_config=GenerateConfig(
                 max_new_tokens=max_new_tokens,
                 max_thinking_tokens=max_thinking_tokens,
+                in_think_mode=in_think_mode,
                 end_think_token_ids=(
                     [] if end_think_token_ids is None else end_think_token_ids
                 ),
@@ -1940,6 +1942,29 @@ class MaxThinkingTokensClampTest(TestCase):
         self.visitor._validate_input(generate_input)
 
         self.assertIsNone(config.max_thinking_tokens)
+
+    def test_non_think_request_budget_is_untouched_and_silent(self):
+        """clamp 只服务于 in_think_mode 的请求：预算仅在 C++ 的同名处理器里被
+        消费（该处理器只在 in_think_mode 下创建），其余请求上默认的 32000 没有
+        语义，不能逐请求触发告警与改写。"""
+        generate_input = self._make_input(in_think_mode=False)
+        with patch("rtp_llm.server.backend_rpc_server_visitor.logging") as mock_logging:
+            self.visitor._validate_input(generate_input)
+
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 32000)
+        mock_logging.warning.assert_not_called()
+
+    def test_in_think_mode_absent_is_treated_as_non_think(self):
+        config = self._make_config_stub(
+            max_new_tokens=36000,
+            max_thinking_tokens=32000,
+            end_think_token_ids=[],
+        )
+        generate_input = Mock(prompt_length=40, generate_config=config)
+
+        self.visitor._validate_input(generate_input)
+
+        self.assertEqual(config.max_thinking_tokens, 32000)
 
 
 class ThinkAnchorPredicateTest(TestCase):

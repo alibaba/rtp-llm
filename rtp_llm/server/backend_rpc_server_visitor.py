@@ -607,6 +607,12 @@ class BackendRPCServerVisitor:
                 f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
             )
 
+        # 预算只在 in_think_mode 下被引擎消费（ThinkModeLogitsProcessor 仅在
+        # in_think_mode 且预算 > 0 时才会创建），其余请求上该字段没有语义：未经
+        # 端点解析的构造路径会保留默认值 32000，逐请求触发无谓的告警与改写。
+        if not getattr(input.generate_config, "in_think_mode", False):
+            return
+
         # think 预算若超过实际可生成的 token 数，C++ 侧「预算耗尽即强制写入 think
         # 结束标记」的兜底永远不成立，模型会被 think 语法约束卡住直到撞上序列上限。
         # 结束标记是逐 token 强制写入的，所以要为它留出长度：收敛到恰好等于可生成
