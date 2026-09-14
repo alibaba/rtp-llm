@@ -61,6 +61,15 @@ py_test(
 )
 
 py_test(
+    name = "maga_server_manager_test",
+    srcs = ["maga_server_manager_test.py"],
+    deps = [
+        ":maga_server_manager",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "numeric_util_test",
     srcs = ["numeric_util_test.py"],
     deps = [

@@ -559,6 +559,64 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
                                 eager_workspace.cmp_seq_lens,
                             )
 
+    def test_cp_sharded_indexer_metadata_rejects_cuda_graph_capture(self):
+        device = torch.device("cuda", torch.cuda.current_device())
+        for batch_size in (1, 2):
+            with self.subTest(batch_size=batch_size):
+                indexer = IndexerFP8.__new__(IndexerFP8)
+                nn.Module.__init__(indexer)
+                indexer.compress_ratio = 4
+                indexer.freqs_cis = torch.ones(
+                    (32, 32), dtype=torch.complex64, device=device
+                )
+                lengths = torch.full((batch_size,), 2, dtype=torch.int32, device=device)
+                prefixes = torch.zeros_like(lengths)
+                cu = torch.arange(batch_size + 1, device=device, dtype=torch.int32) * 2
+                positions = torch.arange(2, device=device).repeat(batch_size)
+                requests = torch.arange(
+                    batch_size, device=device, dtype=torch.int32
+                ).repeat_interleave(2)
+                indexer._cp_ctx = SimpleNamespace(
+                    cp_size=2,
+                    cp_rank=0,
+                    kv_cache_sharded=True,
+                    input_lengths_global=lengths * 2,
+                )
+                block_table = torch.ones(
+                    (batch_size, 1), dtype=torch.int32, device=device
+                )
+                marker = torch.zeros(1, device=device)
+                torch.cuda.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph), torch.inference_mode():
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "CUDA Graph capture is not supported for CP-sharded indexer",
+                    ):
+                        indexer.prepare(
+                            bsz=1,
+                            seqlen=batch_size * 2,
+                            sp_int=0,
+                            device=device,
+                            kv_block_table=block_table,
+                            kv_eb=4,
+                            use_varlen=True,
+                            batch_size=batch_size,
+                            cu_seqlens=cu,
+                            input_lengths=lengths,
+                            prefix_lengths=prefixes,
+                            position_ids=positions,
+                            req_id_per_token=requests,
+                            max_seqlen_q=2,
+                            has_prefix=False,
+                        )
+                    marker.add_(1)
+                # Reject before a host sync or invalid pool read poisons capture.
+                marker.zero_()
+                graph.replay()
+                torch.cuda.synchronize()
+                torch.testing.assert_close(marker, torch.ones_like(marker))
+
     def test_full_csa_metadata_and_indexer_gather_capture_and_replay(self):
         device = torch.device("cuda", torch.cuda.current_device())
         cache = _CsaPrefillCache(device)

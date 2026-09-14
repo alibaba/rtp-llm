@@ -16,6 +16,7 @@ import torch.nn.functional as F
 
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
+from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
@@ -483,8 +484,12 @@ class V4Transformer(nn.Module):
             input_ids_2d = input_ids
         h = self.embed(input_ids_2d)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
-        for layer in self.layers:
-            h = layer.forward_decode(h, attn_metadata, input_ids_2d, kv_cache=kv_cache)
+        layer_forward_range = _profiler.make_layer_forward_range()
+        for layer_idx, layer in enumerate(self.layers):
+            with layer_forward_range(layer_idx):
+                h = layer.forward_decode(
+                    h, attn_metadata, input_ids_2d, kv_cache=kv_cache
+                )
         h = self._hc_head_reduce(h)  # [B, q_len, dim]
         # Framework RMSNorm wants 2D — flatten to [T_total, dim] and
         # return that directly (the next reshape would no-op anyway).
@@ -599,18 +604,20 @@ class V4Transformer(nn.Module):
         cu_seqlens = torch.tensor(
             [0, S], dtype=torch.int64, device=input_ids.device
         )  # [2]
+        layer_forward_range = _profiler.make_layer_forward_range()
         with synchronized_moe_chunk_plan(self.layers, S, input_ids.device):
             for li, layer in enumerate(self.layers):
-                h_flat = layer(
-                    h_flat,
-                    input_ids_flat,
-                    positions,
-                    cu_seqlens,
-                    kv_cache=kv_cache,
-                    block_tables_by_type=block_tables_by_type,
-                )
-                if _rt_on:
-                    _rt.record(f"layer{li:02d}_out", h_flat)
+                with layer_forward_range(li):
+                    h_flat = layer(
+                        h_flat,
+                        input_ids_flat,
+                        positions,
+                        cu_seqlens,
+                        kv_cache=kv_cache,
+                        block_tables_by_type=block_tables_by_type,
+                    )
+                    if _rt_on:
+                        _rt.record(f"layer{li:02d}_out", h_flat)
         h = h_flat.unsqueeze(0)  # [1, S, hc, d]
         h = self._hc_head_reduce(h)  # [B, S, d]
         if _rt_on:

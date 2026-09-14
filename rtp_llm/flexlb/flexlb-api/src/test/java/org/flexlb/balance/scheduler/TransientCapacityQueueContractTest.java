@@ -56,7 +56,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
+import java.util.function.Predicate;
 import java.util.stream.LongStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -491,17 +493,58 @@ class TransientCapacityQueueContractTest {
 
             assertTrue(waiting.stream().noneMatch(CompletableFuture::isDone));
             int publicationCredits = batchPublicationCredits(config);
-            awaitCondition(() -> fixture.decodeEndpoint.layeredAdmissionView()
-                    .queuedCount() == publicationCredits, 2_000L);
+            QueuePublicationSnapshot observed = awaitPublicationSnapshot(
+                    fixture, fixture.decodeEndpoint,
+                    snapshot -> snapshot.decodeQueued() == publicationCredits
+                            && snapshot.prefillQueued() == publicationCredits
+                            && snapshot.globallyQueued()
+                                    == waiting.size() - publicationCredits
+                            && snapshot.submittedRequestIds().isEmpty());
             assertEquals(publicationCredits,
-                    fixture.decodeEndpoint.layeredAdmissionView().queuedCount(),
+                    observed.decodeQueued(),
                     "only dispatcher-owned credits may leave the global queue");
+            assertEquals(publicationCredits,
+                    observed.prefillQueued(),
+                    "every admitted credit must be published to the Prefill queue");
             assertEquals(waiting.size() - publicationCredits,
+                    observed.globallyQueued(),
+                    "work beyond the delivery budget must remain globally queued");
+            assertEquals(List.of(), observed.submittedRequestIds());
+        }
+    }
+
+    private record QueuePublicationSnapshot(
+            long decodeQueued,
+            int selectedDecodeReservations,
+            int primaryDecodeReservations,
+            int prefillQueued,
+            int globallyQueued,
+            List<Long> submittedRequestIds) {
+    }
+
+    private static QueuePublicationSnapshot awaitPublicationSnapshot(
+            Fixture fixture,
+            DecodeEndpoint selectedDecode,
+            Predicate<QueuePublicationSnapshot> complete) throws InterruptedException {
+        AtomicReference<QueuePublicationSnapshot> observed = new AtomicReference<>();
+        // Decode reservations precede Prefill publication and global removal.
+        // A later attempt can reserve again, then roll back on a full Prefill
+        // queue. Preserve one complete observation for all exact assertions;
+        // a temporary reservation is not a committed publication credit.
+        awaitCondition(() -> {
+            var decode = selectedDecode.layeredAdmissionView();
+            QueuePublicationSnapshot snapshot = new QueuePublicationSnapshot(
+                    decode.queuedCount(),
+                    decode.reserved().size(),
+                    fixture.decodeEndpoint.layeredAdmissionView().reserved().size(),
+                    fixture.prefillEndpoint.queuedRequestCount(),
                     fixture.runtime.scheduler().getQueuedRequestCount()
                             - fixture.prefillEndpoint.queuedRequestCount(),
-                    "work beyond the delivery budget must remain globally queued");
-            assertEquals(List.of(), fixture.submission.requestIds());
-        }
+                    fixture.submission.requestIds());
+            observed.set(snapshot);
+            return complete.test(snapshot);
+        }, 2_000L);
+        return observed.get();
     }
 
     private static void awaitCondition(
@@ -555,17 +598,22 @@ class TransientCapacityQueueContractTest {
 
             assertTrue(waiting.stream().noneMatch(CompletableFuture::isDone));
             int publicationCredits = batchPublicationCredits(config);
-            awaitCondition(() -> spareEndpoint.layeredAdmissionView()
-                    .reserved().size() == publicationCredits, 2_000L);
+            // Prefill may already deliver to the spare Decode, so its local
+            // queue is not required to retain the committed requests.
+            QueuePublicationSnapshot observed = awaitPublicationSnapshot(
+                    fixture, spareEndpoint,
+                    snapshot -> snapshot.primaryDecodeReservations() == 0
+                            && snapshot.selectedDecodeReservations() == publicationCredits
+                            && snapshot.globallyQueued()
+                                    == waiting.size() - publicationCredits);
             assertEquals(0,
-                    fixture.decodeEndpoint.layeredAdmissionView().reserved().size(),
+                    observed.primaryDecodeReservations(),
                     "the incident's full Decode must not own a Prefill queue head");
             assertEquals(publicationCredits,
-                    spareEndpoint.layeredAdmissionView().reserved().size(),
+                    observed.selectedDecodeReservations(),
                     "only deliverable work should pin the dispatchable tier");
             assertEquals(waiting.size() - publicationCredits,
-                    fixture.runtime.scheduler().getQueuedRequestCount()
-                            - fixture.prefillEndpoint.queuedRequestCount(),
+                    observed.globallyQueued(),
                     "backpressured overflow must remain globally queued");
         }
     }

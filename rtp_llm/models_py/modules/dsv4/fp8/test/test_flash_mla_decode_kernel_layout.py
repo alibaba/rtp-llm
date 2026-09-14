@@ -212,10 +212,8 @@ def _call_flash_mla(
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class FlashMlaDecodeKernelLayoutTest(unittest.TestCase):
     def setUp(self) -> None:
-        try:
-            import flash_mla  # noqa: F401
-        except Exception as e:  # noqa: BLE001
-            self.skipTest(f"flash_mla not importable: {e}")
+        import flash_mla  # noqa: F401
+
         torch.manual_seed(20240527)
 
     def test_swa_padded_stride_entries(self) -> None:

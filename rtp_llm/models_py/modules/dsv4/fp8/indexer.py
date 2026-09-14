@@ -36,6 +36,9 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
     build_cp_full_prefill_positions,
 )
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_gather_triton import (
+    try_gather_indexer_k_to_padded,
+)
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
     indexer_q_fp8_quant_fold,
     indexer_q_rope_fp8_quant_fold,
@@ -459,41 +462,53 @@ class IndexerFP8(PoolBackedModule):
         actual_cu = attention_inputs.indexer_cp_local_cu
         assert plan is not None, "CP-sharded indexer gather requires prebuilt plan"
         assert actual_cu is not None, "CP-sharded indexer gather requires local cu"
-        local_q = torch.zeros(
+        local_q = torch.empty(
             (plan.total_local_T, k_quant_flat.shape[-1]),
             dtype=k_quant_flat.dtype,
             device=k_quant_flat.device,
         )
-        local_s = torch.zeros(
+        local_s = torch.empty(
             (plan.total_local_T, k_scale_buf.shape[-1]),
             dtype=k_scale_buf.dtype,
             device=k_scale_buf.device,
         )
-        if plan.total_actual_local_T > 0:
-            actual_q = torch.empty(
-                (plan.total_actual_local_T, k_quant_flat.shape[-1]),
-                dtype=k_quant_flat.dtype,
-                device=k_quant_flat.device,
-            )
-            actual_s = torch.empty(
-                (plan.total_actual_local_T, k_scale_buf.shape[-1]),
-                dtype=k_scale_buf.dtype,
-                device=k_scale_buf.device,
-            )
-            rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-                self._kv_pool_view,
-                actual_q,
-                actual_s,
-                attention_inputs.block_table_i32,
-                actual_cu,
-            )
-            asm.copy_actual_indexer_k_to_padded(
-                plan=plan,
-                actual_k_quant=actual_q,
-                actual_k_scale=actual_s,
-                padded_k_quant=local_q,
-                padded_k_scale=local_s,
-            )
+        fused_gather = try_gather_indexer_k_to_padded(
+            self._kv_pool_view,
+            attention_inputs.block_table_i32,
+            plan.per_req_local_kv_lens,
+            plan.per_req_actual_local_kv_lens,
+            local_q,
+            local_s,
+            total_actual_tokens=plan.total_actual_local_T,
+        )
+        if not fused_gather:
+            local_q.zero_()
+            local_s.zero_()
+            if plan.total_actual_local_T > 0:
+                actual_q = torch.empty(
+                    (plan.total_actual_local_T, k_quant_flat.shape[-1]),
+                    dtype=k_quant_flat.dtype,
+                    device=k_quant_flat.device,
+                )
+                actual_s = torch.empty(
+                    (plan.total_actual_local_T, k_scale_buf.shape[-1]),
+                    dtype=k_scale_buf.dtype,
+                    device=k_scale_buf.device,
+                )
+                rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+                    self._kv_pool_view,
+                    actual_q,
+                    actual_s,
+                    attention_inputs.block_table_i32,
+                    actual_cu,
+                )
+                asm.copy_actual_indexer_k_to_padded(
+                    plan=plan,
+                    actual_k_quant=actual_q,
+                    actual_k_scale=actual_s,
+                    padded_k_quant=local_q,
+                    padded_k_scale=local_s,
+                )
         if cp_gather_stream is not None and post_gather_stream is not None:
             pending = asm.start_assemble_indexer_k_async(
                 plan=plan,
@@ -762,9 +777,19 @@ class IndexerFP8(PoolBackedModule):
         # positions on each rank-local token.
         cp_ctx = getattr(self, "_cp_ctx", None)
         cp_active = cp_ctx is not None and cp_ctx.cp_size > 1
+        capturing = device.type == "cuda" and torch.cuda.is_current_stream_capturing()
+        if capturing and cp_active and bool(getattr(cp_ctx, "kv_cache_sharded", False)):
+            # CP gather plans require actual host lengths, while graph replay
+            # needs fixed capacities and device-updated owned-length masks.
+            # Production CP prefill runs eagerly until that plan is supported.
+            raise RuntimeError(
+                "CUDA Graph capture is not supported for CP-sharded indexer "
+                "prefill metadata; run CP prefill eagerly"
+            )
         eff_input_lengths = input_lengths
         if cp_active and cp_ctx.input_lengths_global is not None:
             eff_input_lengths = cp_ctx.input_lengths_global
+        host_seq_total_per_req: Optional[tuple[int, ...]] = None
         if use_varlen:
             assert cu_seqlens is not None
             assert eff_input_lengths is not None
@@ -803,16 +828,28 @@ class IndexerFP8(PoolBackedModule):
                 cu_kv_seqlens[1:] = torch.cumsum(T_per_req.to(torch.int64), dim=0).to(
                     torch.int32
                 )
-                capturing = (
-                    device.type == "cuda" and torch.cuda.is_current_stream_capturing()
-                )
                 # Graph shapes must not depend on request lengths. The score
                 # and gather kernels mask using device-side cu_kv_seqlens/ks/ke.
-                T = (
-                    self._kv_cache_t * batch_size
-                    if capturing
-                    else int(cu_kv_seqlens[-1].item())
-                )
+                host_input_lengths = getattr(cp_ctx, "input_lengths_global_host", None)
+                host_prefix_lengths = getattr(cp_ctx, "prefix_lengths_host", None)
+                if capturing:
+                    T = self._kv_cache_t * batch_size
+                elif (
+                    cp_active
+                    and host_input_lengths is not None
+                    and host_prefix_lengths is not None
+                    and len(host_input_lengths) == batch_size
+                    and len(host_prefix_lengths) == batch_size
+                ):
+                    host_seq_total_per_req = tuple(
+                        int(prefix) + int(length)
+                        for prefix, length in zip(
+                            host_prefix_lengths, host_input_lengths
+                        )
+                    )
+                    T = sum(total // ratio for total in host_seq_total_per_req)
+                else:
+                    T = int(cu_kv_seqlens[-1].item())
                 M = int(position_ids.numel())  # T_total
 
                 positions_d = position_ids.to(
@@ -877,7 +914,12 @@ class IndexerFP8(PoolBackedModule):
             # is ignored there because ``meta.is_batched=True``. Keep the
             # request-0 value for eager diagnostics / B==1 equivalence; graph
             # capture uses an unused sentinel without synchronizing the device.
-            end_pos = 0 if capturing else int(seq_total_per_req[0].item())
+            if capturing:
+                end_pos = 0
+            elif host_seq_total_per_req is not None:
+                end_pos = host_seq_total_per_req[0]
+            else:
+                end_pos = int(seq_total_per_req[0].item())
             is_fresh_prefill = sp_int == 0
         else:
             # Legacy B == 1 scalar path — unchanged, bit-equal to pre-Phase-3a.
@@ -945,6 +987,7 @@ class IndexerFP8(PoolBackedModule):
                     block_size=kv_eb,
                     device=device,
                     owner_block_size=owner_block_size,
+                    total_kv_len=T,
                 )
                 indexer_cp_local_cu = asm.build_actual_local_cu_kv_seqlens(
                     indexer_cp_plan

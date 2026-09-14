@@ -170,11 +170,39 @@ def test_force_radix_sort():
     _assert_equiv(out, logits, rs, re, K=64, tag="force radix")
 
 
+def test_strided_nonzero_windows():
+    """Both selection paths honor column strides and relative window indices."""
+    starts = [1, 7, 23, 61, 127, 255]
+    lengths = [1024, 65, 64, 7, 1, 0]
+    row_starts = torch.tensor(starts, dtype=torch.int32, device="cuda")
+    row_ends = row_starts + torch.tensor(lengths, dtype=torch.int32, device="cuda")
+    storage = torch.full((len(starts), 4096), 1e6, device="cuda")
+    logits = storage[:, ::2]
+    assert logits.stride(1) == 2
+    g = torch.Generator(device="cuda").manual_seed(43)
+    # Larger values outside every window and in skipped columns expose bad offsets.
+    for row, (start, length) in enumerate(zip(starts, lengths)):
+        logits[row, start : start + length] = torch.randn(
+            length, device="cuda", generator=g
+        )
+
+    for force_radix_sort in (False, True):
+        out = _run(
+            logits, row_starts, row_ends, K=64, force_radix_sort=force_radix_sort
+        )
+        _assert_equiv(
+            out,
+            logits,
+            row_starts,
+            row_ends,
+            K=64,
+            tag=f"strided nonzero windows force_radix_sort={force_radix_sort}",
+        )
+
+
 def test_fast_topk_v2_short_inputs_topk_512_1024():
     """Short prefill policy uses fast_topk_v2_variable for K=512/1024."""
-    if not _HAS_FAST_TOPK:
-        print("SKIP: rtp_llm_ops.fast_topk_v2_variable not built")
-        return
+    assert _HAS_FAST_TOPK, "rtp_llm_ops.fast_topk_v2_variable must be built"
 
     starts = torch.tensor([0, 17, 256, 2048], dtype=torch.int32, device="cuda")
     lens = torch.tensor([1536, 1200, 2048, 64], dtype=torch.int32, device="cuda")
@@ -269,6 +297,7 @@ if __name__ == "__main__":
     test_long_T_radix_inside_block()
     test_radix_branch_above_threshold()
     test_force_radix_sort()
+    test_strided_nonzero_windows()
     test_fast_topk_v2_short_inputs_topk_512_1024()
     test_zero_length_row()
     print("\n== Benchmark ==")

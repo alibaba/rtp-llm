@@ -441,6 +441,7 @@ class PreStopDrainSecondsTest(TestCase):
             clear=True,
         ):
             handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+            self.assertTrue(app.wait_for_signal_dispatch())
             self.assertTrue(app._shutdown_manager.is_unavailable())
             self.assertFalse(app._shutdown_manager.is_draining())
             self.assertEqual(app._shutdown_manager.drain_reason(), "signal 10")
@@ -481,6 +482,7 @@ class PreStopDrainSecondsTest(TestCase):
             os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "10"}, clear=True
         ):
             handlers[signal.SIGTERM](signal.SIGTERM, None)
+            self.assertTrue(app.wait_for_signal_dispatch())
 
         self.assertFalse(app._shutdown_manager.try_begin_request())
         self.assertFalse(app._shutdown_manager.is_draining())
@@ -515,10 +517,12 @@ class PreStopDrainSecondsTest(TestCase):
             os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "10"}, clear=True
         ):
             handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+            self.assertTrue(app.wait_for_signal_dispatch())
             watchdog = app._pre_stop_timer
             self.assertIsNotNone(watchdog)
             with patch.object(watchdog, "cancel", wraps=watchdog.cancel) as cancel:
                 handlers[signal.SIGTERM](signal.SIGTERM, None)
+                self.assertTrue(app.wait_for_signal_dispatch())
 
         cancel.assert_called_once()
         self.assertTrue(app._shutdown_requested)

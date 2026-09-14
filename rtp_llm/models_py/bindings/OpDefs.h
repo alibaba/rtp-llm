@@ -274,6 +274,7 @@ struct PyContextParallelParams {
     torch::Tensor prefill_qkv_restore_indice;
     torch::Tensor prefill_qkv_padding_mask;
     torch::Tensor prefill_actual_input_lengths_cpu;
+    torch::Tensor prefill_prefix_lengths_cpu;
 };
 
 // Naming convention: the host (pinned CPU) tensor uses the bare name; its device (CUDA)

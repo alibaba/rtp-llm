@@ -1,8 +1,4 @@
-_CUDA13_ONLY = select({
-    "@//:using_cuda13_x86": [],
-    "@//:using_cuda13_arm": [],
-    "//conditions:default": ["@platforms//:incompatible"],
-})
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test")
 
 py_test(
     name = "test_config_resolver",
@@ -53,12 +49,11 @@ py_test(
     exec_properties = {'gpu':'H20'},
 )
 
-py_test(
+dsv4_py_test(
     name = "test_strategy_select",
-    srcs = ["test_strategy_select.py"],
     deps = [
         "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
     ],
-    target_compatible_with = _CUDA13_ONLY,
+    visibility = ["//visibility:public"],
 )

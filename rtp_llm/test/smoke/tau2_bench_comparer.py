@@ -32,7 +32,18 @@ TAU2_BENCH_HOME_ENV = "TAU2_BENCH_HOME"
 # failures of this job before it scored anything.
 TAU2_BENCH_DATA_DIR_ENV = "TAU2_BENCH_DATA_DIR"
 
-DEFAULT_THRESHOLD = 0.76
+# tau2-bench runs greedy (temperature 0, pass@1), but the DeepEP MoE ep_scatter
+# uses atomic slot allocation whose ordering is nondeterministic run-to-run,
+# which perturbs the bf16 logits enough to flip borderline tasks. Measured
+# OVERALL scores across 6 healthy CI runs: 0.70, 0.75, 0.80, 0.8095, 0.8095,
+# 0.85 — mean ~0.79 with a 0.15 spread, i.e. 14/20 .. 17/21 tasks, so a single
+# task flip moves the score ~0.05 and a run can legitimately land three flips
+# apart. This gate therefore cannot resolve quality at 1% granularity; it only
+# catches gross capability breakage (a broken model scores near zero on
+# multi-turn tool use). Sit two task flips below the observed floor so a normal
+# low run cannot fail: earlier values of 0.76 and 0.70 both landed inside the
+# noise band (0.76 failed a 0.75 run; 0.70 passed a 0.70 run only by exact tie).
+DEFAULT_THRESHOLD = 0.60
 DEFAULT_MODEL_ARG = "Qwen3-30B"
 DEFAULT_TASK_IDS_FILE = "passing_tasks.json"
 DEFAULT_SCRIPT_FILE = "run_tau2_bench.py"
@@ -414,7 +425,9 @@ class Tau2BenchComparer(BaseComparer):
         return None
 
     @staticmethod
-    def _normalize_report_schema(data: dict) -> tuple[Optional[float], list[dict[str, Any]]]:
+    def _normalize_report_schema(
+        data: dict,
+    ) -> tuple[Optional[float], list[dict[str, Any]]]:
         score = Tau2BenchComparer._to_float(data.get("score"))
         metrics = []
         for raw_metric in data.get("metrics", []) or []:
