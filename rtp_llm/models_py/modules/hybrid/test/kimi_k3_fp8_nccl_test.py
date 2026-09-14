@@ -1,7 +1,7 @@
 import sys
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, PropertyMock, patch
 
 import torch
 import torch.distributed._symmetric_memory as symm
@@ -119,6 +119,71 @@ class KimiK3Fp8NcclTest(unittest.TestCase):
                         backend.GemmRSBuffer.assert_not_called()
                         capability.assert_not_called()
                         all_reduce.assert_not_called()
+
+    def test_tp16_initialization_shares_fp8_and_bf16_state(self):
+        group = Mock(size=Mock(return_value=16))
+        for order in ((True, False), (False, True)):
+            with self.subTest(order=order), patch.dict(
+                rs._STATES, {}, clear=True
+            ), patch.dict(sys.modules, {"deep_gemm": None}):
+                for fp8 in order:
+                    self.assertTrue(
+                        rs.configure_gemm_reduce_scatter(
+                            group, "cuda:0", max_m=32, n=128, fp8=fp8
+                        )
+                    )
+                self.assertEqual(len(rs._STATES), 1)
+                state = rs._STATES[(group, 0)]
+                self.assertIsNone(state.workspace)
+                self.assertTrue(state.fp8)
+                with self.assertRaisesRegex(RuntimeError, "different shape"):
+                    rs.configure_gemm_reduce_scatter(group, "cuda:0", max_m=64, n=128)
+
+    def test_bf16_tp16_gemm_precedes_nccl_with_padding(self):
+        group, k, n = object(), 8, 4
+        weight = (torch.arange(k * n).view(k, n) % 3 / 16).to(torch.bfloat16)
+        for m, pad_rows in ((0, True), (1, True), (16, False), (17, True), (177, True)):
+            with self.subTest(rows=m, pad_rows=pad_rows):
+                # Real CPU BF16 math; only CUDA eligibility and NCCL are mocked.
+                x = (torch.arange(m * k * 2).view(m, k * 2) % 7 - 3).to(torch.bfloat16)[
+                    :, ::2
+                ]
+                physical_m = (m + 15) // 16 * 16
+                expected = torch.nn.functional.pad(
+                    (x.float() @ weight.float()).to(torch.bfloat16),
+                    (0, 0, 0, physical_m - m),
+                )
+                state = rs._GemmReduceScatterState(
+                    group, x.device, 16, max(16, physical_m), n, fp8=True
+                )
+
+                def scatter(output, partial, *, op, group):
+                    self.assertIs(group, state.group)
+                    self.assertIs(op, rs.dist.ReduceOp.SUM)
+                    self.assertTrue(partial.is_contiguous())
+                    torch.testing.assert_close(partial, expected, rtol=0, atol=0)
+                    output.fill_(7)
+
+                with patch.object(
+                    torch.Tensor,
+                    "is_cuda",
+                    new_callable=PropertyMock,
+                    return_value=True,
+                ), patch.object(
+                    rs, "collective_gemm_state_key", return_value=(group, 0)
+                ), patch.dict(
+                    rs._STATES, {(group, 0): state}
+                ), patch.object(
+                    rs.dist, "reduce_scatter_tensor", side_effect=scatter
+                ) as nccl:
+                    result = rs.gemm_reduce_scatter(x, weight, group, pad_rows=pad_rows)
+                self.assertEqual(tuple(result.shape), (physical_m // 16, n))
+                self.assertEqual(result.dtype, torch.bfloat16)
+                if m:
+                    nccl.assert_called_once()
+                    torch.testing.assert_close(result, torch.full_like(result, 7))
+                else:
+                    nccl.assert_not_called()
 
     def test_fp8_dispatch_keeps_ag_fused_and_selects_rs_backend(self):
         device = torch.device("cuda:0")

@@ -1,4 +1,4 @@
-"""Fused GEMM/ReduceScatter, with independent NCCL communication for FP8 TP16."""
+"""Fused GEMM/ReduceScatter, with independent NCCL communication for TP16."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def _validate_fp8_workspace(deep_gemm: Any, workspace: Any) -> None:
 
 
 def configure_gemm_reduce_scatter(group, device, *, max_m, n, fp8=False) -> bool:
-    """Create fused workspace; FP8 TP16 uses ordinary NCCL buffers instead."""
+    """Create fused workspace; TP16 shares NCCL buffers across FP8 and BF16."""
     key = collective_gemm_state_key(group, device)
     device = torch.device("cuda", key[1])
     existing = _STATES.get(key)
@@ -52,22 +52,20 @@ def configure_gemm_reduce_scatter(group, device, *, max_m, n, fp8=False) -> bool
             raise RuntimeError(
                 "K3 GEMM/RS was already configured with a different shape"
             )
-        if existing.world_size == 16 and existing.fp8:
-            if not fp8:
-                raise RuntimeError("FP8 TP16 NCCL state cannot serve BF16 GEMM/RS")
-        elif fp8:
+        if fp8 and existing.world_size != 16:
             _validate_fp8_workspace(existing.deep_gemm, existing.workspace)
         return True
     world_size = int(group.size())
-    if world_size not in _SUPPORTED_WORLD_SIZES and not (fp8 and world_size == 16):
+    if world_size not in _SUPPORTED_WORLD_SIZES and world_size != 16:
         raise RuntimeError(
-            f"DeepGEMM GEMM/RS supports TP{_SUPPORTED_WORLD_SIZES}, got TP{world_size}"
+            f"GEMM/RS supports TP{(*_SUPPORTED_WORLD_SIZES, 16)}, got TP{world_size}"
         )
     if max_m <= 0 or max_m % world_size or n <= 0:
         raise ValueError(
             "GEMM/RS capacity must be positive with max_m divisible by TP size"
         )
-    if fp8 and world_size == 16:
+    if world_size == 16:
+        # No fused workspace: both GEMM dtypes share this NCCL state.
         _STATES[key] = _GemmReduceScatterState(
             group, device, world_size, max_m, n, fp8=True
         )
@@ -124,7 +122,7 @@ def gemm_reduce_scatter(
     *,
     pad_rows: bool,
 ) -> torch.Tensor:
-    """Run fused GEMM/RS, or independent NCCL for FP8 TP16, including padding."""
+    """Run fused GEMM/RS, or independent NCCL for TP16, including padding."""
     if not x.is_cuda:
         raise TypeError("K3 GEMM/RS requires CUDA input")
     state = _STATES.get(collective_gemm_state_key(group, x.device))
@@ -188,6 +186,15 @@ def gemm_reduce_scatter(
 
     output = x.new_empty((physical_m // state.world_size, state.n))
     if physical_m == 0:
+        return output
+    if state.world_size == 16:
+        with torch.profiler.record_function(
+            "RTP::kimi_k3.gemm_reduce_scatter.bf16_nccl"
+        ):
+            partial = torch.mm(x, weight)
+            dist.reduce_scatter_tensor(
+                output, partial, op=dist.ReduceOp.SUM, group=state.group
+            )
         return output
     assert state.deep_gemm is not None and state.workspace is not None
     with torch.profiler.record_function("RTP::kimi_k3.gemm_reduce_scatter.fused"):
