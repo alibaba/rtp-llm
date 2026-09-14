@@ -176,6 +176,65 @@ TEST_F(K3CacheGeometryManagerTest, TargetFp8AndMtpBf16UseSeparatePhysicalPools) 
     }
 }
 
+TEST_F(K3CacheGeometryManagerTest, SplitPagesPreserveEagleAndMtpPhysicalPoolGeometry) {
+    for (const int page_tokens : {256, 1024, 8192}) {
+        for (const bool eagle : {false, true}) {
+            for (const bool sharded : {false, true}) {
+                SCOPED_TRACE(::testing::Message()
+                             << "P=" << page_tokens << " eagle=" << eagle << " page_rr=" << sharded);
+                ParallelismConfig parallelism;
+                parallelism.tp_size = parallelism.ep_size            = sharded ? 8 : 1;
+                parallelism.prefill_cp_config.kv_cache_sharded       = sharded;
+                auto target                                          = makeK3ModelConfig(page_tokens, false);
+                target.attn_config.mla_fp8_compute                   = true;
+                target.attn_config.kv_cache_dtype                    = KvCacheDataType::FP8;
+                auto draft                                           = makeK3ModelConfig(page_tokens, true);
+                draft.num_layers                                     = 1;
+                draft.attn_config.sliding_window                     = eagle ? 128 : 0;
+                draft.hybrid_attention_config.hybrid_attention_types = {eagle ? HybridAttentionType::SLIDING_WINDOW :
+                                                                                HybridAttentionType::NONE};
+                KVCacheConfig kv;
+                kv.test_block_num            = 3;
+                kv.seq_size_per_block        = page_tokens;
+                kv.kernel_seq_size_per_block = 128;
+                SpeculativeExecutionConfig sp;
+                sp.type              = eagle ? SP_TYPE_EAGLE3 : SP_TYPE_MTP;
+                sp.model_type        = eagle ? "kimi_k3_eagle3" : "kimi_k3_mtp";
+                sp.gen_num_per_cycle = 3;
+                const auto config    = CacheConfigCreator::createSpConfig(
+                    target, draft, parallelism, RuntimeConfig{}, kv, sp, std::nullopt, true, eagle);
+                const auto draft_type = eagle ? CacheGroupType::SWA : CacheGroupType::FULL;
+                ASSERT_EQ(config.group_types,
+                          (std::vector<CacheGroupType>{CacheGroupType::FULL, CacheGroupType::LINEAR, draft_type}));
+                EXPECT_EQ(config.group_kv_block_stride_bytes[2], page_tokens * 576u * 2u);
+                KVCacheResource resource;
+                resource.initGroups(config.groupNums(),
+                                    config.layer_all_num,
+                                    config.layer_to_group_id,
+                                    config.kernelBlocksPerKvBlock(),
+                                    config.group_types,
+                                    config.layer_region_to_group_id);
+                resource.mutableBlockIds(2).add({1});
+                EXPECT_EQ(resource.kernelBlocks(2).size(), page_tokens / 128);
+                EXPECT_EQ(resource.kernelBlocks(2).front(), page_tokens / 128);
+                EXPECT_EQ(resource.kernelBlocks(2).back(), 2 * page_tokens / 128 - 1);
+                EXPECT_EQ(resource.blocks(2), (BlockIndicesType{1}));
+                EXPECT_EQ(resource.mutableBlockIds(1).kernelBlocksPerKvBlock(), 1u);
+
+                // This single-process geometry test allocates real GPU pools
+                // but must not enter TP collectives without a process group.
+                KVCacheManager manager(config, true, nullptr, kv, parallelism);
+                ASSERT_TRUE(manager.init());
+                const auto layout = manager.getMTPModuleCacheLayerLayout(0);
+                ASSERT_EQ(layout.layers_to_kv_buffer_ptrs.size(), 1u);
+                const auto& physical = layout.layers_to_kv_buffer_ptrs[0];
+                EXPECT_EQ(physical.stride(0) * physical.element_size(), page_tokens * 576u * 2u);
+                EXPECT_EQ(physical[1].data_ptr(), manager.convertIndexToAddr(1, 4).kv_addr);
+            }
+        }
+    }
+}
+
 TEST_F(K3CacheGeometryManagerTest, ExportRejectsInconsistentPhysicalSpecs) {
     ParallelismConfig parallelism;
     parallelism.tp_size                            = 8;
