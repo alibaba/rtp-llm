@@ -18,7 +18,7 @@ public:
         NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
         propose_step_(sp_config.gen_num_per_cycle),
         vocab_size_(model_config.vocab_size),
-        is_dspark_(sp_config.type == SP_TYPE_DSPARK),
+        is_block_draft_(isBlockDraftType(sp_config.type)),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
         dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {}
 
@@ -186,7 +186,7 @@ protected:
 
     int     propose_step_;
     size_t  vocab_size_                   = 0;
-    bool    is_dspark_                    = false;
+    bool    is_block_draft_                = false;
     int32_t dspark_mask_token_id_         = -1;
     bool    dspark_sample_from_anchor_     = true;
 

@@ -413,7 +413,9 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     auto      config = createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     if (draft_model_config != nullptr) {
         auto draft = createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
-        int  num_mtp_modules = is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK ? gen_num_per_cycle : 1;
+        // DSpARK/DFlash are single multi-layer block-draft models; gamma is
+        // the proposal width, not a count of independent one-layer modules.
+        int  num_mtp_modules = is_mtp && !is_eagle && !isBlockDraftType(sp_config->type) ? gen_num_per_cycle : 1;
         RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
         config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));
         for (int module = 0; module < num_mtp_modules; ++module) {
