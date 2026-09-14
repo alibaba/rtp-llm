@@ -5,7 +5,8 @@ import json
 import os
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncGenerator, Callable, List
-from unittest import IsolatedAsyncioTestCase, main
+from unittest import IsolatedAsyncioTestCase, TestCase, main
+from unittest.mock import Mock, patch
 
 import torch
 from typing_extensions import override
@@ -3204,6 +3205,89 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             [expected_raw_output],
             f"raw_output_collected mismatch\nFull raw_output_collected: {raw_output_collected}\nAll debug_info_chunks: {debug_info_chunks}",
         )
+
+class BatchChatConstraintsTest(TestCase):
+    """批量入口必须与单请求入口共享 renderer 约束：tool_choice 强制的结构化
+    约束不能只在普通 chat 链路生效，否则批量请求会退化为无约束解码。"""
+
+    def _make_endpoint(self):
+        endpoint = object.__new__(OpenaiEndpoint)
+        renderer = Mock()
+        renderer.apply_chat_completion_constraints = Mock(
+            side_effect=lambda request, config: config.structural_tag.update(
+                {"type": "structural_tag"}
+            )
+        )
+        endpoint.chat_renderer = renderer
+        endpoint.template_renderer = renderer
+        endpoint.tokenizer = Mock()
+        endpoint.tokenizer.encode = Mock(return_value=[1, 2, 3])
+        rendered = Mock()
+        rendered.input_ids = [1, 2, 3]
+        rendered.multimodal_inputs = None
+        endpoint.render_chat = Mock(return_value=rendered)
+        config = GenerateConfig()
+        config.structural_tag = {"format": {"type": "tag"}}
+        endpoint._extract_generation_config = Mock(return_value=config)
+        endpoint._prepare_chat_input = OpenaiEndpoint._prepare_chat_input.__get__(
+            endpoint
+        )
+        return endpoint, renderer, config
+
+    def _make_request(self):
+        tool = GPTToolDefinition(
+            type="function",
+            function=GPTFunctionDefinition(
+                name="get_weather",
+                description="Get weather",
+                parameters={"type": "object"},
+            ),
+        )
+        return ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hi")],
+            tools=[tool],
+            tool_choice="required",
+        )
+
+    def test_prepare_chat_input_applies_renderer_constraints(self):
+        endpoint, renderer, config = self._make_endpoint()
+        request = self._make_request()
+
+        gen_input, generate_config = endpoint._prepare_chat_input(7, request)
+
+        renderer.apply_chat_completion_constraints.assert_called_once_with(
+            request, config
+        )
+        self.assertIs(generate_config, config)
+        self.assertEqual(generate_config.structural_tag["type"], "structural_tag")
+        self.assertEqual(gen_input.request_id, 7)
+
+
+class EnabledWithoutAnchorWarningTest(TestCase):
+    """ENABLED 且模板无锚点是合法配置（R1 风格）：告警不能逐请求刷日志。"""
+
+    def _make_endpoint(self):
+        endpoint = object.__new__(OpenaiEndpoint)
+        endpoint.generate_env_config = GenerateEnvConfig()
+        endpoint.generate_env_config.think_start_tag = "<think>"
+        endpoint.tokenizer = Mock()
+        endpoint.tokenizer.encode = Mock(return_value=[])
+        endpoint._reasoning_format_for_prompt = (
+            OpenaiEndpoint._reasoning_format_for_prompt.__get__(endpoint)
+        )
+        renderer = Mock()
+        renderer.get_reasoning_format = Mock(return_value=Mock())
+        return endpoint, renderer
+
+    def test_warning_is_emitted_once_per_tag(self):
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            for _ in range(3):
+                endpoint._reasoning_format_for_prompt(config, renderer, [1, 2, 3])
+
+        self.assertEqual(mock_logging.warning.call_count, 1)
 
 
 if __name__ == "__main__":

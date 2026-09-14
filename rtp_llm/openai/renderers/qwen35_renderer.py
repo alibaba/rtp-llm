@@ -32,6 +32,7 @@ class Qwen35Renderer(Qwen3CoderRenderer, Qwen2VLRenderer):
             request.extra_configs.add_vision_id if request.extra_configs else True,
         )
         input_ids = self.tokenizer.encode(prompt_and_mm_input.prompt)
+        self._record_prompt_think_anchor(request, prompt_and_mm_input.prompt)
         return RenderedInputs(
             input_ids=input_ids,
             input_urls=prompt_and_mm_input.urls,

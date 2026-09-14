@@ -26,7 +26,7 @@ class Qwen3CoderRenderer(ReasoningToolBaseRenderer):
         self, request: ChatCompletionRequest
     ) -> Optional[BaseFormatDetector]:
         """创建Qwen3Coder检测器"""
-        if request.tools:
+        if self._effective_tools(request):
             return Qwen3CoderDetector()
         else:
             return None

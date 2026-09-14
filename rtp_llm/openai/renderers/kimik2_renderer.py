@@ -38,7 +38,7 @@ class KimiK2Renderer(ReasoningToolBaseRenderer):
     def _create_detector(
         self, request: ChatCompletionRequest
     ) -> Optional[BaseFormatDetector]:
-        if request.tools:
+        if self._effective_tools(request):
             return KimiK2Detector()
         else:
             return None

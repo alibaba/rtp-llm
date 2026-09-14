@@ -24,8 +24,12 @@ def prompt_ends_with_think_anchor(rendered_prompt: str, think_start_tag: str) ->
     value. Comparing with trailing newlines stripped keeps one predicate usable
     for every family, and keeps the endpoint and the renderers from disagreeing
     about whether a given prompt is anchored.
+
+    The tag is normalized here so a caller holding the raw ``THINK_START_TAG``
+    (with literal ``\\n`` escapes) cannot disagree with a caller holding the
+    normalized form.
     """
-    anchor = think_start_tag.rstrip("\n")
+    anchor = normalize_think_tag(think_start_tag).rstrip("\n")
     if not anchor:
         return False
     return rendered_prompt.rstrip("\n").endswith(anchor)

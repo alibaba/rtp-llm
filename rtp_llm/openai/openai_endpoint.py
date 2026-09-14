@@ -222,7 +222,13 @@ class OpenaiEndpoint(object):
             anchored = prompt_has_begin
             if request is not None and request.prompt_has_think_anchor() is not None:
                 anchored = request.prompt_has_think_anchor()
-            if not anchored:
+            # 无锚点在 R1 风格模型上是合法配置，逐请求告警会刷屏：按 renderer
+            # （即模板/配置组合）只提醒一次。
+            if not anchored and (
+                getattr(renderer, "_enabled_without_anchor_warned_tag", None)
+                != think_start_tag
+            ):
+                renderer._enabled_without_anchor_warned_tag = think_start_tag
                 logging.warning(
                     "thinking_mode=ENABLED but the rendered prompt does not end with "
                     "the think start tag %r, so the model may never emit the think end "
@@ -743,6 +749,8 @@ class OpenaiEndpoint(object):
         generate_config = self._extract_generation_config(
             chat_request, rendered_input.input_ids, renderer
         )
+        # 与单请求入口共享同一契约：tool_choice 强制的结构化约束必须落到批量链路。
+        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
 
         if generate_config.return_prompt_logits and rendered_input.multimodal_inputs:
             raise FtRuntimeException(

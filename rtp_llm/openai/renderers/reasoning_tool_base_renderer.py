@@ -8,7 +8,6 @@ from typing import List, Optional, Tuple
 from jinja2 import BaseLoader, Environment
 from typing_extensions import override
 
-from rtp_llm.config.response_format import prompt_ends_with_think_anchor
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
@@ -101,15 +100,14 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         """创建Resoning解析器，子类可选实现"""
         return None
 
-    def _prompt_ends_with_think_anchor(self, rendered_prompt: str) -> bool:
-        return prompt_ends_with_think_anchor(rendered_prompt, self.think_start_tag)
-
     def _resolve_think_anchor(self, request: ChatCompletionRequest) -> bool:
         """Whether the template injected a think anchor at the end of the prompt.
 
-        The endpoint records this while rendering, so the common path costs
-        nothing. Paths that never rendered through the endpoint fall back to
-        rendering here, which is why this stays tolerant of render failures.
+        Both the endpoint and render_chat record this while rendering, so the
+        common path costs nothing. Requests that reach this point unrecorded
+        (constructed by a caller that renders elsewhere) fall back to rendering
+        here, which is why this stays tolerant of render failures; the probed
+        value is cached on the request so sibling renderers reuse it.
         """
         recorded = request.prompt_has_think_anchor()
         if recorded is not None:
@@ -119,12 +117,9 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         except Exception as e:
             logging.error(f"Failed to render chat while resolving think anchor: {e}")
             return False
-        return self._prompt_ends_with_think_anchor(rendered_result.rendered_prompt)
-
-    def _effective_tools(
-        self, request: ChatCompletionRequest
-    ) -> Optional[List[GPTToolDefinition]]:
-        return request.tools
+        anchor = self._prompt_ends_with_think_anchor(rendered_result.rendered_prompt)
+        request.set_prompt_has_think_anchor(anchor)
+        return anchor
 
     @override
     def should_process_think(self, request: ChatCompletionRequest):
@@ -154,6 +149,8 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         """渲染聊天请求"""
         prompt: str = self._build_prompt(request)
         input_ids: List[int] = self.tokenizer.encode(prompt)
+        # 渲染即记录锚点：响应侧的门控只认这个标记，非 endpoint 链路也必须填。
+        self._record_prompt_think_anchor(request, prompt)
         return RenderedInputs(input_ids=input_ids, rendered_prompt=prompt)
 
     def _build_prompt(self, request: ChatCompletionRequest) -> str:
@@ -165,6 +162,10 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             str: 格式化后的提示文本
         """
         context = request.model_dump(exclude_none=True, mode="json")
+
+        # tool_choice=none 时工具对模型不可见：与不带 tools 的请求渲染同一份模板。
+        if not self._effective_tools(request):
+            context.pop("tools", None)
 
         # 默认添加生成提示
         context["add_generation_prompt"] = True

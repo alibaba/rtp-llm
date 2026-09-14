@@ -16,7 +16,10 @@ from rtp_llm.config.generate_config import (
     thinking_mode_from_value,
 )
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
-from rtp_llm.config.response_format import normalize_think_tag
+from rtp_llm.config.response_format import (
+    normalize_think_tag,
+    prompt_ends_with_think_anchor,
+)
 from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -32,6 +35,7 @@ from rtp_llm.openai.api_datatype import (
     CompletionTokensDetails,
     DeltaMessage,
     FinisheReason,
+    GPTToolDefinition,
     PromptTokensDetails,
     RendererInfo,
     RoleEnum,
@@ -1148,17 +1152,47 @@ class CustomChatRenderer:
         # 留出方法给子类重写, 避免重复的think处理
         return self.in_think_mode(request)
 
+    def _prompt_ends_with_think_anchor(self, rendered_prompt: str) -> bool:
+        return prompt_ends_with_think_anchor(rendered_prompt, self.think_start_tag)
+
+    def _record_prompt_think_anchor(
+        self, request: ChatCompletionRequest, rendered_prompt: str
+    ) -> None:
+        """Record whether the rendered prompt ends with the think anchor.
+
+        The endpoint records this too, but it appends prefill after rendering
+        and re-records afterwards. Here only requests that have never been
+        inspected are filled in, so render paths outside the endpoint
+        (raw/dash_sc style callers) still reach the same gate decision.
+        """
+        if request.prompt_has_think_anchor() is None:
+            request.set_prompt_has_think_anchor(
+                self._prompt_ends_with_think_anchor(rendered_prompt)
+            )
+
+    def _effective_tools(
+        self, request: ChatCompletionRequest
+    ) -> Optional[List[GPTToolDefinition]]:
+        # 工具列表按请求语义收敛：tool_choice=none 时模型不得调用任何工具。
+        if getattr(request, "tool_choice", None) == "none":
+            return None
+        return request.tools
+
     def needs_reasoning_tool_status(self, request: ChatCompletionRequest) -> bool:
         """Whether the response path needs the tool/reasoning-aware status object.
 
         The anchor term is what stops a template-injected think block from
         leaking: with thinking_mode DISABLED and no tools the request config
         alone says "nothing to parse", while the model is in fact going to
-        think. Only the flag recorded during rendering is consulted here --
-        resolving the anchor would render every request a second time.
+        think. Only the flag recorded during rendering is consulted here, and
+        every render path fills it in (see _record_prompt_think_anchor), so the
+        gate never renders the prompt itself. A request that no code path has
+        rendered yet keeps the gate shut, which is also why
+        _resolve_think_anchor's fallback render is a safety net for other
+        callers rather than the gate's decision path.
         """
         return bool(
-            request.tools
+            self._effective_tools(request)
             or self.in_think_mode(request)
             or request.prompt_has_think_anchor() is True
         )

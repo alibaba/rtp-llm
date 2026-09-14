@@ -1915,6 +1915,32 @@ class MaxThinkingTokensClampTest(TestCase):
 
         self.assertEqual(generate_input.generate_config.max_thinking_tokens, 1)
 
+    def _make_config_stub(self, **fields):
+        """未经 pydantic 校验的最小配置对象：字段可能缺席，也可能为 None。"""
+        return type("_ConfigStub", (), fields)()
+
+    def test_missing_think_fields_are_treated_as_unconfigured(self):
+        # 服务端测试里用的最小 fake config 就没有这两个字段；clamp 必须容忍缺席，
+        # 否则每个请求都会在 _validate_input 里抛 AttributeError。
+        config = self._make_config_stub(max_new_tokens=36000)
+        generate_input = Mock(prompt_length=40, generate_config=config)
+
+        self.visitor._validate_input(generate_input)
+
+        self.assertFalse(hasattr(config, "max_thinking_tokens"))
+
+    def test_none_think_fields_are_treated_as_unconfigured(self):
+        config = self._make_config_stub(
+            max_new_tokens=36000,
+            max_thinking_tokens=None,
+            end_think_token_ids=None,
+        )
+        generate_input = Mock(prompt_length=40, generate_config=config)
+
+        self.visitor._validate_input(generate_input)
+
+        self.assertIsNone(config.max_thinking_tokens)
+
 
 class ThinkAnchorPredicateTest(TestCase):
     """endpoint 与 renderer 必须共用同一个锚点判据。
@@ -1954,6 +1980,23 @@ class ThinkAnchorPredicateTest(TestCase):
         for tag in ("", "\n", "\n\n"):
             with self.subTest(tag=tag):
                 self.assertFalse(prompt_ends_with_think_anchor("anything", tag))
+
+    def test_raw_config_tag_with_literal_escape_matches(self):
+        # THINK_START_TAG 写的是字面 \n 时，判据内部先归一化再比较：否则持有原始值
+        # 的调用方会与持有归一化值的调用方对同一个 prompt 得出相反结论。
+        self.assertTrue(
+            prompt_ends_with_think_anchor("user hi\n<think>\n", r"<think>\n")
+        )
+
+    def test_open_anchor_with_trailing_blank_lines_is_anchored(self):
+        # 开放锚点（无结束标记）后跟空行仍应判为锚定：模型确实会从这里开始思考。
+        # 与闭合空块的区别在于结束标记是否出现，而不是尾部有几个换行。
+        self.assertTrue(
+            prompt_ends_with_think_anchor("user hi\n<think>\n\n", "<think>\n")
+        )
+        self.assertFalse(
+            prompt_ends_with_think_anchor("user hi\n<think></think>\n\n", "<think>\n")
+        )
 
 
 if __name__ == "__main__":

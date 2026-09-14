@@ -155,7 +155,7 @@ class DeepseekV31Renderer(ReasoningToolBaseRenderer):
             context["bos_token"] = self.tokenizer.bos_token
 
         # 带有tools的情况默认不开启thinking
-        if request.tools:
+        if self._effective_tools(request):
             context["thinking"] = False
 
         # 创建Jinja2环境
@@ -176,7 +176,7 @@ class DeepseekV31Renderer(ReasoningToolBaseRenderer):
     def _create_detector(
         self, request: ChatCompletionRequest
     ) -> Optional[BaseFormatDetector]:
-        if request.tools:
+        if self._effective_tools(request):
             return DeepSeekV31Detector()
         else:
             return None

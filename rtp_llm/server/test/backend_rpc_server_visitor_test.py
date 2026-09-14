@@ -455,6 +455,21 @@ class _AlwaysFailingModelRpcClient:
         raise self.error
 
 
+class _FailingBeforeOutputModelRpcClient:
+    """Raises without yielding anything, so retry eligibility is decided by the
+    error alone (a yield would suppress retries regardless of the error)."""
+
+    def __init__(self, error):
+        self.error = error
+        self.attempts = 0
+
+    async def enqueue(self, _input):
+        self.attempts += 1
+        if False:
+            yield None
+        raise self.error
+
+
 class _EscalatingErrorModelRpcClient:
     """Raises a CAPACITY FtRuntimeException on the first attempt, then a
     non-retryable RuntimeError on the second attempt.
@@ -765,6 +780,60 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
             ExceptionType.PRIORITY_PREEMPTED,
         )
         self.assertEqual(client.attempts, 2)
+
+    async def test_cancellation_and_permanent_request_errors_are_not_retried(self):
+        """8xxx 里的取消/永久性请求错误不是瞬态故障：重试会换新 request id，
+        违背取消语义，或把注定失败的请求再提交一遍。"""
+        for exception_type in (
+            ExceptionType.CANCELLED,
+            ExceptionType.ROUTER_REQUEST_CANCELLED,
+            ExceptionType.MASTER_INVALID_REQUEST,
+        ):
+            with self.subTest(exception_type=exception_type):
+                client = _FailingBeforeOutputModelRpcClient(
+                    FtRuntimeException(exception_type, "terminal request error")
+                )
+                visitor = self._visitor(client)
+                request_id_factory = Mock(return_value=456)
+                visitor.set_request_id_factory(request_id_factory)
+
+                stream = await visitor.enqueue(_FakeInput(_FakeGenerateConfig(False)))
+                with self.assertRaises(FtRuntimeException) as ctx:
+                    [output async for output in stream]
+
+                self.assertEqual(exception_type, ctx.exception.exception_type)
+                self.assertEqual(1, client.attempts)
+                request_id_factory.assert_not_called()
+
+    async def test_transient_route_error_is_still_retried(self):
+        """对照组：白名单内的瞬态错误（如取消/永久错误之外的路由容量错误）
+        仍按原语义重试，上面的收敛没有误伤可重试路径。"""
+
+        class _RetryThenSucceed:
+            def __init__(self):
+                self.attempts = 0
+                self.request_ids = []
+
+            async def enqueue(self, input):
+                self.attempts += 1
+                self.request_ids.append(input.request_id)
+                if self.attempts == 1:
+                    raise FtRuntimeException(
+                        ExceptionType.MASTER_NO_AVAILABLE_WORKER,
+                        "no available worker",
+                    )
+                yield "ok"
+
+        client = _RetryThenSucceed()
+        visitor = self._visitor(client)
+        visitor.set_request_id_factory(lambda: 456)
+
+        stream = await visitor.enqueue(_FakeInput(_FakeGenerateConfig(False)))
+        outputs = [output async for output in stream]
+
+        self.assertEqual(["ok"], outputs)
+        self.assertEqual(2, client.attempts)
+        self.assertEqual([123, 456], client.request_ids)
 
 
 if __name__ == "__main__":
