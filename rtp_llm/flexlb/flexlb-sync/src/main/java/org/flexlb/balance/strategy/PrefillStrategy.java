@@ -321,10 +321,16 @@ public abstract class PrefillStrategy {
                 candidates.size() == 0 ? 0 : candidates.maximumCacheHit,
                 choice.getOutlierRejection().getMaxPendingVsAverageMultiplier(),
                 choice.getOutlierRejection().getMaxProjectedDrainVsAverageMultiplier());
-        context.recordRoutingDecision(new RoutingDecision(role, group, "CostBasedPrefill", reason,
+        context.recordRoutingDecision(new RoutingDecision(role, group, strategyName(), reason,
                 System.currentTimeMillis(), context.routingAttempt(role),
                 selectedIndex < 0 ? null : candidates.endpointAddress(selectedIndex),
-                totalWorkers, candidates.size(), candidates.size() > snapshot.size(), rejections, snapshot, policy));
+                totalWorkers, candidates.size(), candidates.size() > snapshot.size(), rejections, snapshot, policy,
+                context.globalPlanning(role)));
+    }
+
+    /** Identifies the concrete selector implementation in an immutable routing snapshot. */
+    protected String strategyName() {
+        return "CostBasedPrefill";
     }
 
     private RoutingDecision.Candidate snapshotCandidate(PrefillCandidateSet candidates, int index, boolean selected) {

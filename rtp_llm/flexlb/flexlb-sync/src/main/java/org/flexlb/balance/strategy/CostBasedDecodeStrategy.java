@@ -155,7 +155,7 @@ public class CostBasedDecodeStrategy {
                         "RESOURCE_UNAVAILABLE", candidates.availabilityRejected,
                         "CAPACITY", candidates.capacityRejected,
                         "HOTSPOT", candidates.hotspotRejected,
-                        "IMBALANCE", candidates.imbalanceRejected), snapshot, null));
+                        "IMBALANCE", candidates.imbalanceRejected), snapshot, null, null));
     }
 
     private RoutingDecision.Candidate snapshotCandidate(DecodeRoutingView candidate,

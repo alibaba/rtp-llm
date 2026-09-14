@@ -59,7 +59,8 @@ class PvLogDataTest {
         RoutingDecision.PrefillPolicy policy = new RoutingDecision.PrefillPolicy(100, "BEST_ONLY", 10L,
                 0.2, 20, 1, 0L, 15.0, 0.0, 50000L, 0, 50, 3.0, 3.0);
         context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default", "CostBasedPrefill",
-                "BEST_ONLY", 1234, 1, "10.0.0.1:8080", 1, 1, false, java.util.Map.of(), List.of(), policy));
+                "BEST_ONLY", 1234, 1, "10.0.0.1:8080", 1, 1, false, java.util.Map.of(), List.of(), policy,
+                null));
         var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
         var json = mapper.readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
         assertEquals("compact", json.path("requestId").asText());
@@ -68,7 +69,9 @@ class PvLogDataTest {
         assertFalse(json.path("response").path("server_status").get(0).has("debug_info"));
         assertEquals("compact", mapper.readTree(JsonUtils.toStringOrEmpty(response))
                 .path("server_status").get(0).path("request_id").asText());
-        assertFalse(json.path("routingDecisions").get(0).has("prefillPolicy"));
+        assertEquals("BEST_ONLY", json.path("routingDecisions").get(0)
+                .path("prefillPolicy").path("candidateChoice").asText());
+        assertFalse(json.path("routingDecisions").get(0).has("globalPlanning"));
         var group = json.path("decisionGroup");
         assertEquals(5, group.size());
         assertEquals("group", group.path("id").asText());
@@ -76,6 +79,38 @@ class PvLogDataTest {
         assertEquals("batch_full", group.path("reason").asText());
         assertEquals(1234, group.path("committedAtMs").asLong());
         assertEquals(10, group.path("requestWaitMs").asLong());
+    }
+
+    @Test
+    void keepsGlobalBatchPlanningSeparateFromPrefillPolicyAndSelectionReason() throws Exception {
+        BalanceContext context = new BalanceContext();
+        RoutingDecision.GlobalPlanning planning = new RoutingDecision.GlobalPlanning(
+                "global-42", 8, 7, 8, 3,
+                new RoutingDecision.CompletionSearch(true, 4096, true, 1, 2),
+                new RoutingDecision.Optimization(true, 21, false, 1, 1, 2, -30L, 0L),
+                new RoutingDecision.Optimization(true, 17, false, 1, 0, 1, 5L, 1024L),
+                List.of(RoutingDecision.RequestChange.COMPLETION_REPAIR,
+                        RoutingDecision.RequestChange.CACHE_AFFINITY_MOVE));
+        RoutingDecision.PrefillPolicy policy = new RoutingDecision.PrefillPolicy(2_000, "BEST_ONLY",
+                10L, 0.2, 20, 1, 0L, 15.0, 0.0, 50_000L, 0, 50, 3.0, 3.0);
+        context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default",
+                "CostBasedBatchedPrefill", "GLOBAL_BATCH", 1234L, 1,
+                "10.0.0.1:8080", 2, 2, false, java.util.Map.of(), List.of(), policy, planning));
+
+        var decision = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)))
+                .path("routingDecisions").get(0);
+
+        assertEquals("CostBasedBatchedPrefill", decision.path("strategy").asText());
+        assertEquals("GLOBAL_BATCH", decision.path("selectionReason").asText());
+        assertEquals("BEST_ONLY", decision.path("prefillPolicy").path("candidateChoice").asText());
+        assertEquals("global-42", decision.path("globalPlanning").path("decisionId").asText());
+        assertEquals(8, decision.path("globalPlanning").path("requestCount").asInt());
+        assertEquals(3, decision.path("globalPlanning").path("finalChangedFromGreedyCount").asInt());
+        assertTrue(decision.path("globalPlanning").path("completionSearch")
+                .path("budgetExhausted").asBoolean());
+        assertEquals("CACHE_AFFINITY_MOVE", decision.path("globalPlanning")
+                .path("requestChanges").get(1).asText());
     }
 
     @Test
@@ -125,7 +160,8 @@ class PvLogDataTest {
         context.recordSelectionReason(RoleType.PREFILL, "CACHE_LEADER");
         context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default", "CostBasedPrefill",
                 "CACHE_LEADER", 1600L, 1, "10.0.0.2:8080", 2, 1, false, java.util.Map.of(), List.of(
-                        new RoutingDecision.Candidate("10.0.0.2:8080", true, 90L, 20L, 70L, 512L, 512L, 1L, null, null, null, "MODELED", 1L)), null));
+                        new RoutingDecision.Candidate("10.0.0.2:8080", true, 90L, 20L, 70L, 512L, 512L, 1L, null, null, null, "MODELED", 1L)), null,
+                null));
         context.finishRequestTiming();
 
         PvLogData data = new PvLogData(context);
@@ -216,7 +252,7 @@ class PvLogDataTest {
                     context.recordCacheQuery("LOCAL_SYNC", 2);
                     context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default",
                             "CostBasedPrefill", "attempt-" + attempt, attempt, attempt + 1, "worker:8080",
-                            1, 0, false, java.util.Map.of(), List.of(), null));
+                            1, 0, false, java.util.Map.of(), List.of(), null, null));
                     if (attempt == 0) {
                         published.countDown();
                         if (!resume.await(5, java.util.concurrent.TimeUnit.SECONDS)) {

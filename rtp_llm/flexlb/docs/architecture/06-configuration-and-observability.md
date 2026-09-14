@@ -234,6 +234,16 @@ Engine 的 `batchId` 标识交付批次。
 Prefill 包含选中、最短 TTFT、最高有效缓存命中候选。`projectedTtftMs`、`projectedDrainMs`、
 `incomingPrefillMs` 的单位为毫秒；无法建模的估计省略。Prefill 记录候选的预测耗时、缓存命中、pending 和 ownershipVersion；Decode 记录 KV 用量、可用量与采样 logWeight。
 
+Prefill 的 `prefillPolicy` 同时输出本次候选策略配置和输入 token 数，因此 `candidateChoice=BEST_ONLY`
+不再复用 `selectionReason` 表达。普通单请求 `selectionReason` 继续说明本地选择分支，例如
+`CACHE_LEADER`、`OVER_CAP`；全局联合规划的 modeled 请求使用 `GLOBAL_BATCH`，并在
+`globalPlanning` 输出可按 `decisionId` 关联的组级 trace。trace 的 `requestCount` 是全局规划层大小，
+不是 worker-local `decisionGroup.committedSize`；`finalChangedFromGreedyCount` 统计所有被 completion、
+TTFT 或 cache-affinity 阶段改变的请求，单条记录的 `requestChanges` 才说明该请求具体经历了
+repair/reassignment/move/swap 的哪个阶段。每个优化 phase 都独立记录 evaluation 数和是否耗尽
+`maxPlanEvaluations`，其 `virtualTtftDeltaMs` 和 `cacheHitTokenDelta` 是该 phase 前后 aggregate
+objective 的有符号差值。`globalPlanning` 只是快照规划证据，不能证明 reservation 或引擎执行顺序。
+
 缓存反馈以请求 ID、角色和 Worker 实例代次关联路由预测，`worker` 使用完整的
 `ip:port@engineIndex` 逻辑身份；`prefill_worker_status` 同时记录 `workerIp` 和 `engineIndex`。
 Engine 的 `prefixLengthValid`
@@ -250,8 +260,9 @@ Top5 展示 `shortestTtftDecisions` 的 token-work 估计。预测耗时与 Engi
 空值表示未记录，零表示已记录且数值为零。HTML 回放通过工作簿读取这些数据，按请求展示候选
 及缓存对照。回归测试验证原始 PV 到工作簿、HTML 的字段传递、单位、角色和实例隔离。
 
-PV 不输出 `inputIdsCount`、`requestMessageBytes`、`hashWaitUs`、`hashUs`、
-`realMasterHost` 和 `prefillPolicy`。请求长度由 `seqLen` 表达，策略配置通过配置入口查询。
+PV 不输出 `inputIdsCount`、`requestMessageBytes`、`hashWaitUs`、`hashUs` 和
+`realMasterHost`。请求长度由 `seqLen` 表达；Prefill 的实际策略配置由同一条
+`routingDecisions[].prefillPolicy` 保留，避免在事后把 `BEST_ONLY` 与本地或全局选择 reason 混为一谈。
 角色选择原因和缓存选择以 `routingDecisions` 为准；外层 `selectionReasons` 和
 `cacheMatchSelections` 仅记录候选快照未覆盖或值不同的信息。回放支持顶层终态字段和嵌套终态字段，
 并从选中候选读取缓存匹配与选择原因。Schedule 协议响应保留请求 ID，不包含 Master 地址；`/rtp_llm/master/info` 提供 Master 地址供客户端心跳识别。

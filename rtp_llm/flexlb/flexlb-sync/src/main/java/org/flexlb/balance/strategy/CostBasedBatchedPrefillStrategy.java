@@ -2,6 +2,7 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.strategy.batch.BatchCandidate;
+import org.flexlb.balance.strategy.batch.BatchPlan;
 import org.flexlb.balance.strategy.batch.BatchPlanner;
 import org.flexlb.balance.strategy.batch.BatchPlanningRequest;
 import org.flexlb.cache.domain.CacheMatchResult;
@@ -10,17 +11,20 @@ import org.flexlb.config.GlobalDecisionConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.pv.RoutingDecision;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.util.Logger;
+import org.springframework.lang.NonNull;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.OptionalLong;
+import java.util.UUID;
 
 /**
  * Jointly places the Prefill requests collected in one global decision window.
@@ -100,36 +104,32 @@ public final class CostBasedBatchedPrefillStrategy extends PrefillStrategy {
      * request is represented by a blocked result
      */
     @Override
-    public List<PlacementResult<SelectedRole, RoleType>> selectBatch(List<BatchRequest> requests) {
-        Objects.requireNonNull(requests, "requests");
+    public List<PlacementResult<SelectedRole, RoleType>> selectBatch(@NonNull List<BatchRequest> requests) {
+        if (requests.isEmpty()) {
+            return List.of();
+        }
         if (requests.size() == 1) {
             BatchRequest request = requests.getFirst();
-            return List.of(selectOne(
-                    request.context(), request.roleType(), request.group()));
+            return List.of(selectOne(request.context(), request.roleType(), request.group()));
         }
         List<BatchCandidates> snapshots = new ArrayList<>();
         List<BatchPlanningRequest> demands = new ArrayList<>();
         for (BatchRequest request : requests) {
             BalanceContext context = request.context();
             context.beginRoutingAttempt(request.roleType());
-            EndpointDiscovery discovery = discoverAliveEndpoints(
-                    request.roleType(), request.group());
-            CacheMatchResult cacheMatch = getCacheMatchResult(
-                    context, request.roleType(), request.group());
+            EndpointDiscovery discovery = discoverAliveEndpoints(request.roleType(), request.group());
+            CacheMatchResult cacheMatch = getCacheMatchResult(context, request.roleType(), request.group());
             Map<String, Integer> rejections = new HashMap<>();
             Map<RoleType, Integer> blockers = new EnumMap<>(RoleType.class);
-            PrefillCandidateSet candidates = evaluateCandidates(
-                    discovery,
+            PrefillCandidateSet candidates = evaluateCandidates(discovery,
                     context,
                     context.getConfig(),
                     cacheMatch,
                     rejections,
                     blockers,
                     new PrefillCandidateSet.Scratch());
-            RoleType blocker = provenPoolWideBlocker(
-                    blockers, discovery.registeredCount());
-            snapshots.add(new BatchCandidates(
-                    request,
+            RoleType blocker = provenPoolWideBlocker(blockers, discovery.registeredCount());
+            snapshots.add(new BatchCandidates(request,
                     discovery,
                     candidates,
                     cacheMatch,
@@ -137,8 +137,7 @@ public final class CostBasedBatchedPrefillStrategy extends PrefillStrategy {
                     blocker == null ? request.roleType() : blocker));
             List<BatchCandidate> choices = new ArrayList<>();
             for (int i = 0; i < candidates.size() && candidates.selectable(i); i++) {
-                choices.add(new BatchCandidate(
-                        candidates.endpointAddress(i),
+                choices.add(new BatchCandidate(candidates.endpointAddress(i),
                         candidates.projectedTtftMs(i),
                         candidates.prefillMs(i),
                         candidates.cacheHit(i),
@@ -152,8 +151,7 @@ public final class CostBasedBatchedPrefillStrategy extends PrefillStrategy {
                     .getRoles()
                     .getPrefill()
                     .getCacheAffinity();
-            demands.add(new BatchPlanningRequest(
-                    choices,
+            demands.add(new BatchPlanningRequest(choices,
                     affinity == null
                             ? 0L : Math.max(0L, affinity.getMaxExtraTtftMs()),
                     affinity == null
@@ -161,8 +159,11 @@ public final class CostBasedBatchedPrefillStrategy extends PrefillStrategy {
                     context.getRequest().getSeqLen(),
                     affinity != null));
         }
-        List<Integer> plan = BatchPlanner.plan(
-                List.copyOf(demands), maxPlanEvaluations(requests));
+        BatchPlan plan = BatchPlanner.planWithTrace(List.copyOf(demands), maxPlanEvaluations(requests));
+        String globalDecisionId = UUID.randomUUID().toString();
+        if (Logger.isDebugEnabled()) {
+            Logger.debug("global_prefill_batch_plan id={} {}", globalDecisionId, globalPlanSummary(plan));
+        }
         List<PlacementResult<SelectedRole, RoleType>> results = new ArrayList<>();
         Map<String, Long> precedingWork = new HashMap<>();
         try {
@@ -170,23 +171,25 @@ public final class CostBasedBatchedPrefillStrategy extends PrefillStrategy {
                 BatchCandidates snapshot = snapshots.get(i);
                 BatchRequest request = snapshot.request();
                 PrefillCandidateSet candidates = snapshot.candidates();
-                int selected = plan.get(i);
+                int selected = plan.selections().get(i);
                 boolean unmodeled = candidates.size() > 0
                         && !candidates.selectable(0);
                 if (unmodeled) {
                     selected = selectUnmodeledCandidate(candidates);
+                } else {
+                    request.context().recordGlobalPlanning(request.roleType(),
+                            globalPlanning(globalDecisionId, plan, i));
                 }
                 if (selected < 0) {
-                    request.context().recordSelectionReason(
-                            request.roleType(), "BATCH_NO_AVAILABLE_CANDIDATE");
-                    recordDecision(
-                            request.context(),
+                    request.context().recordSelectionReason(request.roleType(),
+                            "GLOBAL_BATCH_NO_AVAILABLE_CANDIDATE");
+                    recordDecision(request.context(),
                             request.roleType(),
                             request.group(),
                             snapshot.discovery().registeredCount(),
                             candidates,
                             -1,
-                            "BATCH_NO_AVAILABLE_CANDIDATE",
+                            "GLOBAL_BATCH_NO_AVAILABLE_CANDIDATE",
                             snapshot.rejections());
                     results.add(PlacementResult.blocked(snapshot.blocker()));
                     continue;
@@ -195,18 +198,12 @@ public final class CostBasedBatchedPrefillStrategy extends PrefillStrategy {
                 if (!unmodeled) {
                     String worker = candidates.endpointAddress(selected);
                     long earlier = precedingWork.getOrDefault(worker, 0L);
-                    ttft = OptionalLong.of(saturatingAdd(
-                            candidates.projectedTtftMs(selected), earlier));
-                    precedingWork.put(worker, saturatingAdd(
-                            earlier, candidates.prefillMs(selected)));
+                    ttft = OptionalLong.of(saturatingAdd(candidates.projectedTtftMs(selected), earlier));
+                    precedingWork.put(worker, saturatingAdd(earlier, candidates.prefillMs(selected)));
                 }
-                String reason = unmodeled ? "UNMODELED_PENDING_LRU"
-                        : demands.get(i).affinity()
-                        ? "BATCH_BEST_ONLY/CACHE_AFFINITY"
-                        : "BATCH_BEST_ONLY";
+                String reason = unmodeled ? "UNMODELED_PENDING_LRU" : "GLOBAL_BATCH";
                 request.context().recordSelectionReason(request.roleType(), reason);
-                results.add(materialize(
-                        request.context(),
+                results.add(materialize(request.context(),
                         request.roleType(),
                         request.group(),
                         snapshot.discovery(),
@@ -223,6 +220,55 @@ public final class CostBasedBatchedPrefillStrategy extends PrefillStrategy {
                     .forEach(result -> result.value().close());
             throw failure;
         }
+    }
+
+    @Override
+    protected String strategyName() {
+        return "CostBasedBatchedPrefill";
+    }
+
+    /**
+     * Converts a pure planner trace into the common PV schema for one request.
+     *
+     * <p>The shared summary deliberately reports group-level work on every
+     * request record, while {@code requestChanges} identifies only the phases
+     * that moved or repaired this request. This keeps one PV record useful on
+     * its own and makes all records from a decision joinable by id.</p>
+     */
+    private static RoutingDecision.GlobalPlanning globalPlanning(String decisionId, BatchPlan plan, int requestIndex) {
+        BatchPlan.CompletionSearch completion = plan.completionSearch();
+        BatchPlan.Optimization ttft = plan.ttftOptimization();
+        BatchPlan.Optimization cacheAffinity = plan.cacheAffinityOptimization();
+        return new RoutingDecision.GlobalPlanning(decisionId,
+                plan.selections().size(),
+                plan.greedyPlacedCount(),
+                plan.finalPlacedCount(),
+                plan.finalChangedFromGreedyCount(),
+                new RoutingDecision.CompletionSearch(completion.invoked(),
+                        completion.evaluations(), completion.budgetExhausted(),
+                        completion.recoveredPlacements(), completion.reassignedRequests()),
+                optimization(ttft),
+                optimization(cacheAffinity),
+                plan.requestChanges().get(requestIndex).stream()
+                        .map(change -> RoutingDecision.RequestChange.valueOf(change.name()))
+                        .toList());
+    }
+
+    private static RoutingDecision.Optimization optimization(BatchPlan.Optimization optimization) {
+        return new RoutingDecision.Optimization(optimization.invoked(),
+                optimization.evaluations(), optimization.budgetExhausted(),
+                optimization.moveCount(), optimization.swapCount(), optimization.changedRequestCount(),
+                optimization.virtualTtftDeltaMs(), optimization.cacheHitTokenDelta());
+    }
+
+    private static String globalPlanSummary(BatchPlan plan) {
+        return "request_count=" + plan.selections().size()
+                + " greedy_placed=" + plan.greedyPlacedCount()
+                + " final_placed=" + plan.finalPlacedCount()
+                + " changed_requests=" + plan.finalChangedFromGreedyCount()
+                + " completion=" + plan.completionSearch()
+                + " ttft=" + plan.ttftOptimization()
+                + " cache_affinity=" + plan.cacheAffinityOptimization();
     }
 
     /**

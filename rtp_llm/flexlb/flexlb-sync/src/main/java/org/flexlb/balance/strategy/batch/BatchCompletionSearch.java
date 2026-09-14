@@ -1,10 +1,11 @@
 package org.flexlb.balance.strategy.batch;
 
+import org.springframework.lang.NonNull;
+
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Objects;
 
 /**
  * Bounded depth-first repair for an incomplete greedy global Prefill plan.
@@ -49,7 +50,7 @@ final class BatchCompletionSearch {
      * Immutable result of one bounded search, including the work consumed by
      * its evaluation budget. The plan accessor returns a defensive copy.
      */
-    record SearchResult(int[] plan, int evaluations) {
+    record SearchResult(int[] plan, int evaluations, boolean budgetExhausted) {
         SearchResult {
             plan = plan.clone();
         }
@@ -67,6 +68,7 @@ final class BatchCompletionSearch {
     private int bestPlaced;
     private long bestCost;
     private int evaluations;
+    private boolean budgetExhausted;
 
     private BatchCompletionSearch(List<BatchPlanningRequest> requests,
                                   int[] greedy,
@@ -106,23 +108,20 @@ final class BatchCompletionSearch {
      * @throws IllegalArgumentException when vector lengths differ or the
      *                                  evaluation budget is not positive
      */
-    static SearchResult search(List<BatchPlanningRequest> requests,
-                               int[] greedy,
+    static SearchResult search(@NonNull List<BatchPlanningRequest> requests,
+                               @NonNull int[] greedy,
                                int maxEvaluations) {
-        Objects.requireNonNull(requests, "requests");
-        Objects.requireNonNull(greedy, "greedy");
         if (requests.size() != greedy.length) {
             throw new IllegalArgumentException("requests and greedy must have equal size");
         }
         if (maxEvaluations <= 0) {
             throw new IllegalArgumentException("maxEvaluations must be positive");
         }
-        BatchCompletionSearch search = new BatchCompletionSearch(
-                requests, greedy, maxEvaluations);
+        BatchCompletionSearch search = new BatchCompletionSearch(requests, greedy, maxEvaluations);
         int[] trial = new int[requests.size()];
         Arrays.fill(trial, -1);
         search.search(0, trial, 0);
-        return new SearchResult(search.best, search.evaluations);
+        return new SearchResult(search.best, search.evaluations, search.budgetExhausted);
     }
 
     /**
@@ -133,8 +132,11 @@ final class BatchCompletionSearch {
      * for later pruning.</p>
      */
     private void search(int depth, int[] trial, int placed) {
-        if (evaluations >= maxEvaluations
-                || placed + order.size() - depth < bestPlaced) {
+        if (evaluations >= maxEvaluations) {
+            budgetExhausted = true;
+            return;
+        }
+        if (placed + order.size() - depth < bestPlaced) {
             return;
         }
         if (depth == order.size()) {

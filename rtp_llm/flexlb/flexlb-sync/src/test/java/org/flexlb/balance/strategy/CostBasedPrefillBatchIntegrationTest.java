@@ -14,6 +14,7 @@ import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.pv.RoutingDecision;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
@@ -24,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.mockito.ArgumentMatchers.any;
@@ -97,6 +99,42 @@ class CostBasedPrefillBatchIntegrationTest {
             try {
                 assertEquals(PlacementResult.Status.SUCCESS, results.get(0).status());
                 assertEquals(PlacementResult.Status.BLOCKED, results.get(1).status());
+            } finally {
+                results.stream()
+                        .filter(result -> result.value() != null)
+                        .forEach(result -> result.value().close());
+            }
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void recordsJointGlobalPlanningSeparatelyFromBestOnlyPolicy() {
+        FlexlbConfig config = config("0");
+        EndpointRegistry registry = registryWithWorkers(config, "10.0.0.1", "10.0.0.2");
+        try {
+            CostBasedBatchedPrefillStrategy strategy = new CostBasedBatchedPrefillStrategy(
+                    new WorkerDirectory(registry), emptyCache(), mock(EngineHealthReporter.class));
+            BalanceContext first = context(config, "trace-a");
+            BalanceContext second = context(config, "trace-b");
+            first.getRequest().setSeqLen(60L);
+            second.getRequest().setSeqLen(60L);
+            var results = strategy.selectBatch(List.of(
+                    new PrefillStrategy.BatchRequest(first, RoleType.PREFILL, null),
+                    new PrefillStrategy.BatchRequest(second, RoleType.PREFILL, null)));
+            try {
+                RoutingDecision firstDecision = first.getRoutingTelemetry()
+                        .routingDecisions().get(RoleType.PREFILL);
+                RoutingDecision secondDecision = second.getRoutingTelemetry()
+                        .routingDecisions().get(RoleType.PREFILL);
+                assertEquals("CostBasedBatchedPrefill", firstDecision.strategy());
+                assertEquals("GLOBAL_BATCH", firstDecision.selectionReason());
+                assertEquals("BEST_ONLY", firstDecision.prefillPolicy().candidateChoice());
+                assertNotNull(firstDecision.globalPlanning());
+                assertEquals(2, firstDecision.globalPlanning().requestCount());
+                assertEquals(firstDecision.globalPlanning().decisionId(),
+                        secondDecision.globalPlanning().decisionId());
             } finally {
                 results.stream()
                         .filter(result -> result.value() != null)

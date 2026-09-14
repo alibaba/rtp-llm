@@ -12,6 +12,8 @@ import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 /** One completed FlexLB scheduling decision written to {@code pv.log}. */
 @Data
@@ -47,7 +49,6 @@ public class PvLogData {
     @JsonIgnoreProperties({"policy", "dispatcher", "worker"})
     private DecisionGroup decisionGroup;
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
-    @JsonIgnoreProperties("prefillPolicy")
     private List<RoutingDecision> routingDecisions;
     private String cacheMatchSource;
     private long cacheMatchUs;
@@ -115,9 +116,9 @@ public class PvLogData {
         this.selectionReasons = telemetry.selectionReasons().entrySet().stream()
                 .filter(entry -> {
                     RoutingDecision decision = telemetry.routingDecisions().get(entry.getKey());
-                    return decision == null || !java.util.Objects.equals(decision.selectionReason(), entry.getValue());
+                    return decision == null || !Objects.equals(decision.selectionReason(), entry.getValue());
                 })
-                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
     }
 
     private boolean hasRecordedCacheSelection(BalanceContext.CacheMatchSelection selection) {

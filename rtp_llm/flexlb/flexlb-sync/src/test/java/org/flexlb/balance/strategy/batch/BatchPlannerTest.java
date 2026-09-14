@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BatchPlannerTest {
 
@@ -115,6 +116,57 @@ class BatchPlannerTest {
                         new BatchCandidate("w1", 10, 0, 0),
                         new BatchCandidate("w2", 15, 0, 9)),
                         10, 10, 100, true))));
+    }
+
+    @Test
+    @DisplayName("Planner trace identifies the completion repair that recovers a greedy miss")
+    void traceIdentifiesCompletionRepair() {
+        List<BatchPlanningRequest> requests = List.of(
+                request(new BatchCandidate("w3", 1, 0, 0, 0, 0, 1),
+                        new BatchCandidate("w2", 3, 0, 0, 0, 0, 1),
+                        new BatchCandidate("w1", 4, 0, 0, 0, 0, 1)),
+                request(new BatchCandidate("w2", 7, 0, 0, 0, 0, 1),
+                        new BatchCandidate("w3", 3, 0, 0, 0, 0, 1),
+                        new BatchCandidate("w1", 1, 0, 0, 0, 0, 1)),
+                request(new BatchCandidate("w1", 3, 0, 0, 0, 0, 1),
+                        new BatchCandidate("w3", 4, 0, 0, 0, 0, 1)));
+
+        BatchPlan plan = BatchPlanner.planWithTrace(requests, 4096);
+
+        assertEquals(2, plan.greedyPlacedCount());
+        assertEquals(3, plan.finalPlacedCount());
+        assertTrue(plan.completionSearch().invoked());
+        assertEquals(1, plan.completionSearch().recoveredPlacements());
+        assertTrue(plan.requestChanges().stream()
+                .flatMap(List::stream)
+                .anyMatch(change -> change == BatchPlan.RequestChange.COMPLETION_REPAIR));
+    }
+
+    @Test
+    @DisplayName("Planner trace distinguishes a TTFT swap from a cache-affinity relocation")
+    void traceDistinguishesOptimizationOperations() {
+        BatchPlan ttftPlan = BatchPlanner.planWithTrace(List.of(
+                request(new BatchCandidate("w1", 80, 90, 0),
+                        new BatchCandidate("w2", 140, 80, 0)),
+                request(new BatchCandidate("w1", 80, 90, 0),
+                        new BatchCandidate("w2", 140, 40, 0)),
+                request(new BatchCandidate("w1", 30, 90, 0),
+                        new BatchCandidate("w2", 80, 30, 0))), 4096);
+        BatchPlan cachePlan = BatchPlanner.planWithTrace(List.of(
+                new BatchPlanningRequest(List.of(
+                        new BatchCandidate("w1", 10, 10, 0),
+                        new BatchCandidate("w2", 25, 10, 80)),
+                        20, 5, 100, true)), 4096);
+
+        assertEquals(1, ttftPlan.ttftOptimization().swapCount());
+        assertTrue(ttftPlan.requestChanges().get(1)
+                .contains(BatchPlan.RequestChange.TTFT_SWAP));
+        assertTrue(ttftPlan.requestChanges().get(2)
+                .contains(BatchPlan.RequestChange.TTFT_SWAP));
+        assertEquals(1, cachePlan.cacheAffinityOptimization().moveCount());
+        assertTrue(cachePlan.requestChanges().getFirst()
+                .contains(BatchPlan.RequestChange.CACHE_AFFINITY_MOVE));
+        assertEquals(1, cachePlan.finalChangedFromGreedyCount());
     }
 
     private static BatchPlanningRequest request(BatchCandidate... candidates) {

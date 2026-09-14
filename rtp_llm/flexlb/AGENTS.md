@@ -107,6 +107,11 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
 - Mock 外部依赖（gRPC 客户端、cache manager、config service）。
 - 重点覆盖：路由逻辑、策略选择、错误处理、回滚行为。
 
+## Java Wrapping Style
+
+- Keep a method or constructor opening parenthesis and its first parameter or argument on one physical line: `methodName(firstArgument)`.
+- Wrap only before the second or later parameter when there are more than four parameters or a parameter name makes a one-line form hard to read; do not put an immediate line break after `(`.
+
 ## Important Reminders
 
 1. Do what is asked; no more, no less.

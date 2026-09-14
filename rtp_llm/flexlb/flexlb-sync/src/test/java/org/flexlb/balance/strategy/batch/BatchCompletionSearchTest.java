@@ -38,6 +38,7 @@ class BatchCompletionSearchTest {
                 requests, new int[] {0, 0, 1, 2, 3, 4, 5, -1}, 4096);
 
         assertEquals(4096, result.evaluations());
+        assertTrue(result.budgetExhausted());
         assertEquals(7L, Arrays.stream(result.plan())
                 .filter(candidate -> candidate >= 0)
                 .count());

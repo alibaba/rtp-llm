@@ -72,6 +72,20 @@ delivery capacity。每条请求仍保留独立的
 `AdmissionMutation`、generation pin、精确发布事务、取消和 blocker 语义。PRIORITY 不允许跨层
 联合优化；提交前的更高优先级重检、priority rescue 与抢占规则保持原样。
 
+当一次联合规划包含两条或更多请求时，策略以同一个 `globalPlanning.decisionId` 把计划摘要写入每条
+可建模请求的 PV `routingDecisions[].globalPlanning`：其中有 greedy 与最终放置数、completion search
+是否调用/耗尽预算/修复数、TTFT 和 cache-affinity 阶段的 evaluation、move、swap 及目标差值；该请求的
+`requestChanges` 只列出真正改变过它的阶段。`selectionReason=GLOBAL_BATCH` 只表示该落点由联合计划
+确定，`prefillPolicy.candidateChoice=BEST_ONLY` 仍单独表达策略约束；它不等价于普通单请求策略的
+`CACHE_LEADER` 或 `OVER_CAP` reason。若联合计划没有可行落点，reason 为
+`GLOBAL_BATCH_NO_AVAILABLE_CANDIDATE`；无法建模 engine work 的 LRU fallback 保持
+`UNMODELED_PENDING_LRU`，不伪造全局计划证据。
+
+`WorkerBatcher` 随后写入的 `decisionGroup` 仍是 worker-local 的交付组，不能用其 size 推断全局
+收集或联合规划大小；请使用 `globalPlanning.requestCount` 和 `globalPlanning.decisionId`。单请求进入 batched
+strategy 时复用普通选择流程，因而保留普通 reason，且没有 `globalPlanning`。debug 级 application log
+会同步输出 `global_prefill_batch_plan id=<globalPlanning.decisionId>` 的阶段摘要，便于先按 id 定位同一计划。
+
 ## 取消、过期与状态查询
 
 - `cancelRequest(requestId, expectedBatchId, reason)` 由 scheduler 作为生命周期和资源的

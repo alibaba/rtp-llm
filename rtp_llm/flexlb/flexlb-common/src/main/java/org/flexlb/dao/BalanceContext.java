@@ -12,6 +12,8 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.pv.DecisionGroup;
 import org.flexlb.dao.pv.RoutingDecision;
 import org.flexlb.dao.route.RoleType;
+import org.springframework.lang.NonNull;
+import org.springframework.lang.Nullable;
 
 import java.util.EnumMap;
 import java.util.Map;
@@ -199,6 +201,7 @@ public class BalanceContext {
         routingTelemetryState.cacheSelections.remove(role);
         routingTelemetryState.selectionReasons.remove(role);
         routingTelemetryState.routingDecisions.remove(role);
+        routingTelemetryState.globalPlanning.remove(role);
     }
 
     public void recordRoutingDecision(RoutingDecision decision) {
@@ -211,6 +214,23 @@ public class BalanceContext {
     public void recordSelectionReason(RoleType role, String selectionReason) {
         Objects.requireNonNull(selectionReason, "selectionReason");
         routingTelemetryState.selectionReasons.put(role, selectionReason);
+    }
+
+    /**
+     * Attaches the one global planner trace that applies to this routing attempt.
+     *
+     * <p>The trace is recorded before the ordinary strategy materializes the
+     * selected endpoint, then folded into its immutable {@link RoutingDecision}.
+     * A retry starts a new attempt and clears this value.</p>
+     */
+    public void recordGlobalPlanning(@NonNull RoleType role,
+                                     @NonNull RoutingDecision.GlobalPlanning globalPlanning) {
+        routingTelemetryState.globalPlanning.put(role, globalPlanning);
+    }
+
+    @Nullable
+    public RoutingDecision.GlobalPlanning globalPlanning(RoleType role) {
+        return routingTelemetryState.globalPlanning.get(role);
     }
 
     public int routingAttempt(RoleType role) {
@@ -239,6 +259,8 @@ public class BalanceContext {
         private final EnumMap<RoleType, CacheMatchSelection> cacheSelections = new EnumMap<>(RoleType.class);
         private final EnumMap<RoleType, String> selectionReasons = new EnumMap<>(RoleType.class);
         private final EnumMap<RoleType, RoutingDecision> routingDecisions = new EnumMap<>(RoleType.class);
+        private final EnumMap<RoleType, RoutingDecision.GlobalPlanning> globalPlanning =
+                new EnumMap<>(RoleType.class);
         private final EnumMap<RoleType, Integer> routingAttempts = new EnumMap<>(RoleType.class);
     }
 

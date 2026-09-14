@@ -1,14 +1,15 @@
 package org.flexlb.balance.strategy.batch;
 
 import org.flexlb.config.GlobalDecisionConfig;
+import org.springframework.lang.NonNull;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 
 /**
  * Produces a feasible candidate-index plan for one global Prefill decision tier.
@@ -44,8 +45,9 @@ public final class BatchPlanner {
     /**
      * Produces a plan with the default global completion and improvement budget.
      */
-    public static List<Integer> plan(List<BatchPlanningRequest> requests) {
-        return plan(requests, GlobalDecisionConfig.DEFAULT_MAX_PLAN_EVALUATIONS);
+    public static List<Integer> plan(@NonNull List<BatchPlanningRequest> requests) {
+        return planWithTrace(requests, GlobalDecisionConfig.DEFAULT_MAX_PLAN_EVALUATIONS)
+                .selections();
     }
 
     /**
@@ -56,9 +58,20 @@ public final class BatchPlanner {
      *                           local-improvement phase
      * @return one candidate index or {@code -1} for every input request
      */
-    public static List<Integer> plan(List<BatchPlanningRequest> requests,
+    public static List<Integer> plan(@NonNull List<BatchPlanningRequest> requests,
                                      int maxPlanEvaluations) {
-        Objects.requireNonNull(requests, "requests");
+        return planWithTrace(requests, maxPlanEvaluations).selections();
+    }
+
+    /**
+     * Produces the final assignments and a phase-by-phase trace of changes from greedy.
+     *
+     * <p>The trace is intentionally derived from the same candidate snapshots and bounded
+     * operations as the returned assignments. It therefore reports planner work without
+     * introducing extra selection or reservation side effects.</p>
+     */
+    public static BatchPlan planWithTrace(@NonNull List<BatchPlanningRequest> requests,
+                                          int maxPlanEvaluations) {
         int[] selected = new int[requests.size()];
         Arrays.fill(selected, -1);
         List<Integer> order = new ArrayList<>();
@@ -82,15 +95,45 @@ public final class BatchPlanner {
             }
             selected[index] = choice;
         }
+        int[] greedy = selected.clone();
+        List<EnumSet<BatchPlan.RequestChange>> requestChanges = requestChanges(requests.size());
+        BatchPlan.CompletionSearch completion = new BatchPlan.CompletionSearch(false, 0, false, 0, 0);
         if (Arrays.stream(selected).anyMatch(candidate -> candidate < 0)) {
-            selected = BatchCompletionSearch.complete(
-                    requests, selected, maxPlanEvaluations);
+            BatchCompletionSearch.SearchResult result = BatchCompletionSearch.search(requests,
+                    selected, maxPlanEvaluations);
+            selected = result.plan();
+            int recovered = 0;
+            int reassigned = 0;
+            for (int i = 0; i < selected.length; i++) {
+                if (greedy[i] < 0 && selected[i] >= 0) {
+                    requestChanges.get(i).add(BatchPlan.RequestChange.COMPLETION_REPAIR);
+                    recovered++;
+                } else if (greedy[i] >= 0 && selected[i] >= 0 && greedy[i] != selected[i]) {
+                    requestChanges.get(i).add(BatchPlan.RequestChange.COMPLETION_REASSIGNMENT);
+                    reassigned++;
+                }
+            }
+            completion = new BatchPlan.CompletionSearch(true,
+                    result.evaluations(), result.budgetExhausted(), recovered, reassigned);
         }
-        improve(requests, selected, null, maxPlanEvaluations);
+        BatchPlan.Optimization ttft = improve(requests,
+                selected, null, maxPlanEvaluations, requestChanges,
+                BatchPlan.RequestChange.TTFT_MOVE, BatchPlan.RequestChange.TTFT_SWAP);
+        BatchPlan.Optimization cacheAffinity = BatchPlan.Optimization.notInvoked();
         if (requests.stream().anyMatch(BatchPlanningRequest::affinity)) {
-            improve(requests, selected, selected.clone(), maxPlanEvaluations);
+            cacheAffinity = improve(requests,
+                    selected, selected.clone(), maxPlanEvaluations, requestChanges,
+                    BatchPlan.RequestChange.CACHE_AFFINITY_MOVE,
+                    BatchPlan.RequestChange.CACHE_AFFINITY_SWAP);
         }
-        return Arrays.stream(selected).boxed().toList();
+        return new BatchPlan(Arrays.stream(selected).boxed().toList(),
+                placedCount(greedy),
+                placedCount(selected),
+                changedRequestCount(greedy, selected),
+                completion,
+                ttft,
+                cacheAffinity,
+                requestChanges.stream().map(changes -> List.copyOf(changes)).toList());
     }
 
     /**
@@ -102,11 +145,17 @@ public final class BatchPlanner {
      * tokens and uses aggregate virtual TTFT to break a cache-hit tie. Each
      * invocation receives a separate bounded evaluation budget.</p>
      */
-    private static void improve(List<BatchPlanningRequest> requests,
-                                int[] selected,
-                                int[] baseline,
-                                int maxPlanEvaluations) {
-        int remaining = maxPlanEvaluations;
+    private static BatchPlan.Optimization improve(List<BatchPlanningRequest> requests,
+            int[] selected,
+            int[] baseline,
+            int maxPlanEvaluations,
+            List<EnumSet<BatchPlan.RequestChange>> requestChanges,
+            BatchPlan.RequestChange moveChange,
+            BatchPlan.RequestChange swapChange) {
+        int[] before = selected.clone();
+        int evaluations = 0;
+        int moves = 0;
+        int swaps = 0;
         for (int pass = 0; pass < 2; pass++) {
             boolean changed = false;
             for (int i = 0; i < selected.length; i++) {
@@ -114,39 +163,95 @@ public final class BatchPlanner {
                     continue;
                 }
                 for (int c = 0; c < requests.get(i).candidates().size(); c++) {
-                    if (--remaining < 0) {
-                        return;
+                    if (evaluations >= maxPlanEvaluations) {
+                        return optimization(requests, before, selected, true, evaluations, moves, swaps);
                     }
+                    evaluations++;
                     int[] trial = selected.clone();
                     trial[i] = c;
                     if (better(requests, trial, selected, baseline)) {
                         System.arraycopy(trial, 0, selected, 0, selected.length);
                         changed = true;
+                        moves++;
+                        requestChanges.get(i).add(moveChange);
                     }
                 }
                 for (int j = i + 1; j < selected.length; j++) {
                     if (selected[j] < 0) {
                         continue;
                     }
-                    if (--remaining < 0) {
-                        return;
+                    if (evaluations >= maxPlanEvaluations) {
+                        return optimization(requests, before, selected, true, evaluations, moves, swaps);
                     }
+                    evaluations++;
                     int[] trial = selected.clone();
                     trial[i] = onWorker(requests.get(i), requests.get(j).candidates()
                             .get(selected[j]).worker());
                     trial[j] = onWorker(requests.get(j), requests.get(i).candidates()
                             .get(selected[i]).worker());
-                    if (trial[i] >= 0 && trial[j] >= 0 && better(
-                            requests, trial, selected, baseline)) {
+                    if (trial[i] >= 0 && trial[j] >= 0 && better(requests, trial, selected, baseline)) {
                         System.arraycopy(trial, 0, selected, 0, selected.length);
                         changed = true;
+                        swaps++;
+                        requestChanges.get(i).add(swapChange);
+                        requestChanges.get(j).add(swapChange);
                     }
                 }
             }
             if (!changed) {
-                return;
+                return optimization(requests, before, selected, false, evaluations, moves, swaps);
             }
         }
+        return optimization(requests, before, selected, false, evaluations, moves, swaps);
+    }
+
+    private static BatchPlan.Optimization optimization(List<BatchPlanningRequest> requests,
+                                                        int[] before,
+                                                        int[] after,
+                                                        boolean budgetExhausted,
+                                                        int evaluations,
+                                                        int moves,
+                                                        int swaps) {
+        return new BatchPlan.Optimization(true,
+                evaluations,
+                budgetExhausted,
+                moves,
+                swaps,
+                changedRequestCount(before, after),
+                signedDelta(total(ttfts(requests, before)), total(ttfts(requests, after))),
+                signedDelta(hits(requests, after), hits(requests, before)));
+    }
+
+    private static List<EnumSet<BatchPlan.RequestChange>> requestChanges(int size) {
+        List<EnumSet<BatchPlan.RequestChange>> result = new ArrayList<>(size);
+        for (int i = 0; i < size; i++) {
+            result.add(EnumSet.noneOf(BatchPlan.RequestChange.class));
+        }
+        return result;
+    }
+
+    private static int placedCount(int[] selected) {
+        int count = 0;
+        for (int candidate : selected) {
+            if (candidate >= 0) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static int changedRequestCount(int[] before, int[] after) {
+        int changed = 0;
+        for (int i = 0; i < before.length; i++) {
+            if (before[i] != after[i]) {
+                changed++;
+            }
+        }
+        return changed;
+    }
+
+    private static long signedDelta(long later, long earlier) {
+        return later - earlier;
     }
 
     private static int onWorker(BatchPlanningRequest request, String worker) {

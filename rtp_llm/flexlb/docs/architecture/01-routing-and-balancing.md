@@ -150,6 +150,9 @@ PDFUSION 的 cost-based 路径也遵循 [04-worker-sync-and-cache](04-worker-syn
 批内虚拟工作按原提交顺序累积，并共享 worker 状态快照中的可用 KV 与 delivery request 容量。
 规划不预留真实容量，逐请求发布仍执行现有精确容量检查与回滚。批量入口只有一条请求时直接复用
 单请求选择流程和公平游标，保持精确平局、reason 与遥测副作用一致。
+真正的多请求入口以 `CostBasedBatchedPrefill` 标记 routing decision；`BEST_ONLY` 保存在
+`prefillPolicy`，而不是作为 batch reason 的前缀。其余 `GLOBAL_BATCH` 与 phase trace 的观测语义见
+[02-queue-scheduling](02-queue-scheduling.md) 和 [06-configuration-and-observability](06-configuration-and-observability.md)。
 FlexLB 的规划和提交顺序不代表引擎执行顺序。
 
 ### WeightedCacheLoadBalancer（DECODE 默认）
