@@ -4031,7 +4031,7 @@ public final class JavaMockEngineCluster {
                 return;
             }
             if (queue != null && (session.decode != null || session.remoteDecode)
-                    && (!whaleRemote || session.shape.outputLen() > 1)) {
+                    && (!streamsTokenPayloads() || session.shape.outputLen() > 1)) {
                 queue.offer(buildOutput(session.shape, false));
             }
             if (!session.isClosed() && !cancelledRequests.containsKey(id)) {
@@ -4348,7 +4348,7 @@ public final class JavaMockEngineCluster {
                     if (stream.remainingSteps <= 0) {
                         it.remove();
                         finished.add(stream);
-                    } else if (whaleRemote && stream.responseQueue != null) {
+                    } else if (streamsTokenPayloads() && stream.responseQueue != null) {
                         // P already emitted token one. Publish D progress while
                         // it runs so Fetch sees activity before its idle timeout.
                         int previous = Math.max(1, stream.emittedOutputTokens);
@@ -4565,7 +4565,7 @@ public final class JavaMockEngineCluster {
             // Completion does not depend on a client Fetch in auto-fetch mode;
             // strict mode reaches this point only after the client attached.
             if (stream.responseQueue != null && !alreadyCancelled) {
-                if (whaleRemote) {
+                if (streamsTokenPayloads()) {
                     int previous = shape.outputLen() > 1
                             ? Math.max(1, stream.emittedOutputTokens) : 0;
                     stream.responseQueue.offer(buildOutput(
@@ -4845,13 +4845,17 @@ public final class JavaMockEngineCluster {
             }
         }
 
+        private boolean streamsTokenPayloads() {
+            return whaleRemote || whaleBundle;
+        }
+
         private EngineRpcService.GenerateOutputsPB buildOutput(MockPerformanceModel.RequestShape shape,
                                                                boolean finished) {
-            int outputLen = whaleRemote && !finished ? Math.min(1, shape.outputLen()) : shape.outputLen();
+            int outputLen = streamsTokenPayloads() && !finished ? Math.min(1, shape.outputLen()) : shape.outputLen();
             // Frontend concatenates frames. P already sent the first token, so
             // a remote D terminal carries only the remaining tokens. A one-token
             // request has no preliminary frame: Python rejects an empty tensor.
-            int stepOutputLen = whaleRemote && finished
+            int stepOutputLen = streamsTokenPayloads() && finished
                     && roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE && outputLen > 1
                     ? outputLen - 1 : outputLen;
             return buildOutput(shape, finished, outputLen, stepOutputLen);
@@ -4869,7 +4873,7 @@ public final class JavaMockEngineCluster {
                             .setIterCount(1)
                             .setStepOutputLen(stepOutputLen)
                             .build());
-            if (whaleRemote) {
+            if (streamsTokenPayloads()) {
                 // QueryConverter / Python trans_output require [outputs, beams, tokens]
                 // and little-endian INT32 bytes. Repeat an input token, not model inference.
                 int tokenCount = shape.input().getTokenIdsCount();

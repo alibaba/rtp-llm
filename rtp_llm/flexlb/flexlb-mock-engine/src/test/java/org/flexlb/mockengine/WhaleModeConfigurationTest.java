@@ -93,16 +93,22 @@ class WhaleModeConfigurationTest {
     @Test
     @org.junit.jupiter.api.Timeout(15)
     void bundleCompletesWithoutFetchWithOneSharedNetworkWorker() throws Exception {
-        assertBundleCompletion(false);
+        assertBundleCompletion(false, false);
     }
 
     @Test
     @org.junit.jupiter.api.Timeout(15)
     void eosCompletesHugeOutputCapAndReleasesBothPoolsWithoutFetch() throws Exception {
-        assertBundleCompletion(true);
+        assertBundleCompletion(true, false);
     }
 
-    private void assertBundleCompletion(boolean eos) throws Exception {
+    @Test
+    @org.junit.jupiter.api.Timeout(15)
+    void bundleNonBatchStreamsTokensBeforeDecodeCompletesWithoutFetch() throws Exception {
+        assertBundleCompletion(false, true);
+    }
+
+    private void assertBundleCompletion(boolean eos, boolean direct) throws Exception {
         var cfg = config("--whale", "true", "--whale-bundle", "true", "--auto-fetch", "true",
                 "--host", "10.1.2.3", "--n-prefill", "1", "--n-decode", "1",
                 "--prefill-block-size", "512", "--decode-block-size", "64",
@@ -119,6 +125,7 @@ class WhaleModeConfigurationTest {
                     mapper.readTree("{\"enabled\":true,\"distribution\":\"geometric\",\"mean_tokens\":1,\"seed\":42}"));
             mapper.writeValue(perf.toFile(), tree);
         }
+        if (direct) Files.writeString(perf, Files.readString(perf).replace("[[1,2]]", "[[1,30]]"));
         MockMasterConfig.writeWithPrefillExpression(master, "2");
         var model = MockPerformanceModel.load(perf.toString(), master.toString());
         var boss = new io.netty.channel.nio.NioEventLoopGroup(1);
@@ -158,10 +165,36 @@ class WhaleModeConfigurationTest {
                     .setBatchId(42).addDpSlots(org.flexlb.engine.grpc.EngineRpcService.EnqueueBatchDpSlotPB.newBuilder()
                             .setDpRank(0).addRequests(org.flexlb.engine.grpc.EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
                                     .setInput(input))).build();
-            var ack = org.flexlb.engine.grpc.RpcServiceGrpc.newBlockingStub(channel)
-                    .withDeadlineAfter(2, TimeUnit.SECONDS).enqueueBatch(batch);
-            assertEquals(0, ack.getErrorsCount());
-            assertEquals(1, ack.getSuccessesCount());
+            var stub = org.flexlb.engine.grpc.RpcServiceGrpc.newBlockingStub(channel)
+                    .withDeadlineAfter(3, TimeUnit.SECONDS);
+            if (direct) {
+                var frames = stub.generateStreamCall(input.build());
+                assertTrue(frames.hasNext());
+                var first = frames.next().getFlattenOutput();
+                assertFalse(first.getFinished(0));
+                assertEquals(1, first.getAuxInfo(0).getOutputLen());
+                assertEquals(4, first.getOutputIds().getInt32Data().size());
+                assertEquals(0, d.getCompletedCount(), "P first frame must precede D completion");
+                int tokens = 1;
+                int count = 1;
+                boolean terminal = false;
+                while (frames.hasNext()) {
+                    var frame = frames.next().getFlattenOutput();
+                    assertFalse(terminal, "nothing follows the terminal frame");
+                    tokens += frame.getOutputIds().getInt32Data().size() / Integer.BYTES;
+                    terminal = frame.getFinished(0);
+                    count++;
+                }
+                assertTrue(terminal);
+                assertTrue(count > 2, "D progress must stream before terminal for TPOT");
+                assertEquals(8, tokens, "first/progress/terminal must not duplicate tokens");
+                assertEquals(0, ((Number) ((java.util.Map<?, ?>) p.getSnapshot().get("rpc_counts"))
+                        .get("fetch_response")).intValue());
+            } else {
+                var ack = stub.enqueueBatch(batch);
+                assertEquals(0, ack.getErrorsCount());
+                assertEquals(1, ack.getSuccessesCount());
+            }
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
             while ((d.getCompletedCount() != 1 || d.whaleMetrics().get("mock_generate_tokens_total").longValue() != 8)
                     && System.nanoTime() < deadline) Thread.sleep(10);
@@ -176,7 +209,7 @@ class WhaleModeConfigurationTest {
             var dForwards = decodeEvents.stream().filter(m -> m.containsKey("rtp_llm_model_forward_us"))
                     .map(m -> m.get("rtp_llm_model_forward_us").doubleValue()).toList();
             assertEquals(List.of(2000.0), pForwards, "P reports one sample per batch, in microseconds");
-            assertEquals(java.util.Collections.nCopies(8, 2000.0), dForwards,
+            assertEquals(java.util.Collections.nCopies(8, direct ? 30000.0 : 2000.0), dForwards,
                     "D reports each forward step, not full request latency");
 
             assertEquals(0, d.getRunningCount());
