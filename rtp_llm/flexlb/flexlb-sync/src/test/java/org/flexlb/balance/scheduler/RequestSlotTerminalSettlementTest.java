@@ -17,6 +17,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -31,9 +33,9 @@ class RequestSlotTerminalSettlementTest {
     void decodeTerminalIsAProofOfAlreadyCommittedEndpointSettlement() {
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         DeferredTerminal terminal = DeferredTerminal.worker(
-                WorkerTerminalSource.DECODE_ENDPOINT_SETTLED, true, 0L);
+                WorkerTerminalSource.DECODE_ENDPOINT, true, 0L);
 
-        assertTrue(RequestSlot.terminalOwnsDecodeSettlement(
+        assertTrue(RequestSlot.tryReconcileDecodeTerminal(
                 terminal, decode, 4L, RESERVATION));
         verifyNoInteractions(decode);
     }
@@ -42,11 +44,11 @@ class RequestSlotTerminalSettlementTest {
     void prefillBackedTerminalDelegatesToTheExactDecodeClaimTransaction() {
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         DeferredTerminal terminal = DeferredTerminal.worker(
-                WorkerTerminalSource.PREFILL_BACKED, false, 9L);
+                WorkerTerminalSource.PREFILL_ENDPOINT, false, 9L);
         when(decode.reconcilePriorityVictimFinished(4L, RESERVATION))
                 .thenReturn(false);
 
-        assertFalse(RequestSlot.terminalOwnsDecodeSettlement(
+        assertFalse(RequestSlot.tryReconcileDecodeTerminal(
                 terminal, decode, 4L, RESERVATION));
         verify(decode).reconcilePriorityVictimFinished(4L, RESERVATION);
     }
@@ -72,31 +74,31 @@ class RequestSlotTerminalSettlementTest {
             RequestLifecycleTestSupport.recordCancellation(slot, CancelReason.CLIENT_CANCELLED, "original client cancellation");
             assertTrue(slot.installInactivityDeadline(inactivity));
 
-            TerminalAction action = slot.beginTerminalizing(true, false, false, null,
+            TerminalAction action = slot.beginTerminalizing(
                     TerminalOutcome.cancel("original client cancellation; request inactive"), null);
             assertNotNull(action);
             assertSame(claim, action.preemption());
-            assertTrue(claim.isSettled());
+            assertTrue(claim.isFinished());
             assertEquals(CancelReason.CLIENT_CANCELLED, slot.requireCancellationFirstCause());
             assertEquals(RequestSlot.RequestEffect.Status.STALE,
                     RequestLifecycleTestSupport.acknowledge(slot, 7L).status());
             assertEquals(RequestSlot.RequestEffect.Status.STALE,
-                    slot.applyPreemptionTombstone(claim, "late Cancel ACK").status());
+                    slot.applyPreemptionCompleted(claim, "late Cancel ACK").status());
             assertEquals(RequestSlot.RequestEffect.Status.STALE,
                     slot.reduceWorkerTerminal(fixture.item(), DeferredTerminal.worker(
-                            WorkerTerminalSource.DECODE_ENDPOINT_SETTLED, true, 0L)).status());
+                            WorkerTerminalSource.DECODE_ENDPOINT, true, 0L)).status());
             assertFalse(slot.consumeInactivityDeadline(inactivity));
             action.terminalResources().release(timer);
             action.terminalResources().release(timer);
             verify(timer).cancel(inactivity);
 
-            TombstoneResult settled = slot.finishTombstone(action);
+            TerminationResult settled = slot.finishTermination(action);
             assertEquals(RequestState.Phase.CANCELLED, settled.terminal().state());
             assertNull(settled.transitionFailure());
-            assertTrue(slot.isTombstone());
+            assertTrue(slot.isTerminalRecord());
             assertNull(slot.activeItem());
             assertFalse(slot.hasCancellationFirstCause());
-            assertNull(slot.beginTerminalizing(true, false, false, null,
+            assertNull(slot.beginTerminalizing(
                     TerminalOutcome.timeout("duplicate expiry"), null));
         }
     }
@@ -112,15 +114,15 @@ class RequestSlotTerminalSettlementTest {
             delivered.setSuccess(true);
             assertTrue(slot.future().completeOwned(delivered));
 
-            TerminalAction action = slot.beginTerminalizing(true, false, false, null,
+            TerminalAction action = slot.beginTerminalizing(
                     TerminalOutcome.timeout("request inactive"), new Response());
             assertNotNull(action);
             assertNull(action.publication());
             assertNull(action.response());
             assertEquals(RequestState.Phase.TIMED_OUT,
-                    slot.finishTombstone(action).terminal().state());
+                    slot.finishTermination(action).terminal().state());
             assertSame(delivered, slot.future().join());
-            assertTrue(slot.isTombstone());
+            assertTrue(slot.isTerminalRecord());
         }
     }
 
@@ -129,7 +131,7 @@ class RequestSlotTerminalSettlementTest {
         Fixture fixture = fixture(false);
         RequestSlot slot = fixture.slot();
         DeferredTerminal workerTerminal = DeferredTerminal.worker(
-                WorkerTerminalSource.DECODE_ENDPOINT_SETTLED, true, 0L);
+                WorkerTerminalSource.DECODE_ENDPOINT, true, 0L);
         synchronized (slot) {
             assertTrue(RequestLifecycleTestSupport.recordCancellation(slot,
                     CancelReason.CLIENT_CANCELLED, "first client cancellation"));
@@ -144,11 +146,11 @@ class RequestSlotTerminalSettlementTest {
             assertEquals(CancelReason.CLIENT_CANCELLED, slot.requireCancellationFirstCause());
             assertEquals(RequestState.Phase.CANCEL_REQUESTED, slot.snapshot().state());
 
-            TerminalAction action = slot.beginTerminalizing(false, false, false, null,
+            TerminalAction action = slot.beginTerminalizing(
                     TerminalOutcome.cancel("first client cancellation; worker completed"), null);
             assertNotNull(action);
             assertEquals(RequestState.Phase.CANCELLED,
-                    slot.finishTombstone(action).terminal().state());
+                    slot.finishTermination(action).terminal().state());
         }
     }
 
@@ -157,10 +159,11 @@ class RequestSlotTerminalSettlementTest {
     void workerProofClaimsTerminalBeforeCleanupWithOrWithoutPreemption(boolean preempting) {
         Fixture fixture = fixture();
         RequestSlot slot = fixture.slot();
+        TerminalAction action;
+        Response acknowledged = new Response();
         synchronized (slot) {
             RequestLifecycleTestSupport.startBatchDelivery(slot, 7L);
             RequestLifecycleTestSupport.markAcknowledged(slot);
-            Response acknowledged = new Response();
             acknowledged.setSuccess(true);
             slot.future().completeOwned(acknowledged);
             PreemptionRegistration claim = preempting
@@ -171,16 +174,23 @@ class RequestSlotTerminalSettlementTest {
             }
 
             RequestSlot.RequestEffect effect = slot.reduceWorkerTerminal(fixture.item(),
-                    DeferredTerminal.worker(WorkerTerminalSource.DECODE_ENDPOINT_SETTLED, false, 42L));
+                    DeferredTerminal.worker(WorkerTerminalSource.DECODE_ENDPOINT, false, 42L));
             assertEquals(RequestSlot.RequestEffect.Status.READY, effect.status());
             assertNotNull(effect.terminal());
             assertSame(fixture.item(), effect.terminal().item());
             assertSame(claim, effect.signal());
-            assertFalse(slot.isTombstone(), "cleanup must precede tombstone commitment");
+            assertFalse(slot.isTerminalRecord(), "cleanup must precede terminal record commitment");
             assertEquals(RequestSlot.RequestEffect.Status.STALE, RequestLifecycleTestSupport.acknowledge(slot, 7L).status(),
                     "terminal ownership must exclude late ACK before cleanup runs");
             verifyNoInteractions(fixture.item().decodeEp());
-            assertEquals(RequestState.Phase.FAILED, slot.finishTombstone(effect.terminal()).terminal().state());
+            action = effect.terminal();
+        }
+        slot.releaseTerminalEndpoints(action);
+        // Decode completion settles this request, not the Prefill-owned batch group.
+        verify(fixture.item().prefillEp(), never()).releaseCommittedItem(any());
+        verify(fixture.item().prefillEp(), never()).expireCommittedItem(any());
+        synchronized (slot) {
+            assertEquals(RequestState.Phase.FAILED, slot.finishTermination(action).terminal().state());
             assertSame(acknowledged, slot.future().join(), "worker termination cannot replace a published response");
         }
     }

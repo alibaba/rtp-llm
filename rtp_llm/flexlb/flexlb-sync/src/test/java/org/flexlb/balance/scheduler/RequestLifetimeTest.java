@@ -484,10 +484,10 @@ class RequestLifetimeTest {
     }
 
     private static void finishInactivity(RequestSlot slot) {
-        TerminalAction terminal = slot.beginTerminalizing(false, false, false, null,
+        TerminalAction terminal = slot.beginTerminalizing(
                 TerminalOutcome.timeout("request inactive"), null);
         assertNotNull(terminal);
-        assertNotNull(slot.finishTombstone(terminal).terminal());
+        assertNotNull(slot.finishTermination(terminal).terminal());
     }
 
     private static WorkSnapshot emptyWork(long capturedAtMs) {

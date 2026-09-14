@@ -668,7 +668,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Reserve placement before Engine-facing delivery, or report that this request id
      * is still fenced by the exact endpoint generation. The fence is a
      * transient placement blocker: WorkerStatus cannot distinguish a reused
-     * request id until its settlement tombstone expires.
+     * request id until its settlement terminal record expires.
      */
     public ReservationHandle tryReservePlacementPinned(
             GenerationPin pin,
@@ -845,7 +845,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Expire one exact local request lease without asserting an Engine terminal.
      * The last physical KV sample remains unchanged; only local reservations,
      * dispatch permits, and priority protocol ownership are released. A bounded
-     * tombstone prevents delayed request-id-only WorkerStatus from recreating the
+     * terminal record prevents delayed request-id-only WorkerStatus from recreating the
      * expired generation. Duplicate and stale handles are total no-ops.
      */
     public boolean expireReservationExact(ReservationHandle reservation) {
@@ -1110,7 +1110,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /** Caller holds {@link #admissionLock}. */
     private boolean settleAuthoritativeTerminalLocked(
             ReservationHandle reservation,
-            boolean retainTombstone,
+            boolean retainTerminalRecord,
             long settledAtMs) {
         long requestId = reservation.requestId();
         DecodeRequestState state = requestState(requestId);
@@ -1148,7 +1148,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 changed = true;
             }
         }
-        if (!decodeRequests.containsKey(requestId) && retainTombstone) {
+        if (!decodeRequests.containsKey(requestId) && retainTerminalRecord) {
             changed = rememberSettledLocked(requestId, settledAtMs) || changed;
         }
 
@@ -1187,7 +1187,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /**
      * WorkerStatus identifies work only by request id. Reuse is therefore
      * forbidden while this endpoint generation still owns that id or retains
-     * an ambiguity tombstone for it.
+     * an ambiguity terminal record for it.
      */
     private boolean requestIdAvailableForReservationLocked(long requestId) {
         if (decodeRequests.containsKey(requestId)) {
@@ -1820,20 +1820,20 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Settle an engine {@code TOMBSTONED} acknowledgement.
+     * Settle an engine {@code REQUEST_FENCED} acknowledgement.
      *
-     * <p>TOMBSTONED is stronger than NOT_FOUND: the addressed request was
+     * <p>REQUEST_FENCED is stronger than NOT_FOUND: the addressed request was
      * absent and the engine atomically installed a late-enqueue fence. It is
      * therefore an authoritative terminal proof and may release the same
      * accounting as typed CANCELED without waiting for WorkerStatus.</p>
      */
-    public boolean settlePriorityTombstoned(
+    public boolean settlePriorityRequestFenced(
             long attemptToken,
             ReservationHandle reservation) {
         return settlePriorityClaimTerminal(
                 attemptToken,
                 reservation,
-                claim -> claim.phase.acceptsTombstone());
+                claim -> claim.phase.acceptsRequestFenced());
     }
 
     private boolean settlePriorityClaimTerminal(
@@ -2551,16 +2551,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 confirmedEngineOwnedCount = Math.max(
                         0, confirmedEngineOwnedCount - trackedPurged);
             }
-            boolean settledTombstonesPurged = decodeRequests.entrySet()
+            boolean settledTerminalRecordsPurged = decodeRequests.entrySet()
                     .removeIf(entry -> !entry.getValue().ownsRequest()
                             && !entry.getValue().hasProtocolOwner()
                             && entry.getValue().settledAtMs != 0L
                             && entry.getValue().settledAtMs < cutoff);
-            if (evicted > 0 || trackedPurged > 0 || settledTombstonesPurged) {
+            if (evicted > 0 || trackedPurged > 0 || settledTerminalRecordsPurged) {
                 admissionVersion.incrementAndGet();
             }
             capacityChanged = evicted > 0 || trackedPurged > 0
-                    || settledTombstonesPurged;
+                    || settledTerminalRecordsPurged;
         } finally {
             admissionLock.unlock();
         }

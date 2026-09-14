@@ -14,11 +14,11 @@ import java.util.concurrent.CompletableFuture;
  * request is removed and a CANCELLED completion surfaces in the next
  * WorkerStatus finished list, exactly like a real engine would report.
  * Mirrors the production engine contract (C++ Prefill Cancel): a live
- * request and its accepted-cancel tombstone return ACCEPTED; a request the
+ * request and its accepted-cancel terminal record return ACCEPTED; a request the
  * addressed Prefill has seen but already finished returns NOT_FOUND
  * (seen-but-terminal; the completion record stays deliverable from the
- * retain window); a rid the Prefill NEVER saw returns TOMBSTONED with the
- * ABSENT_FENCE tombstone installed (racing later Enqueues of that rid are
+ * retain window); a rid the Prefill NEVER saw returns REQUEST_FENCED with the
+ * ABSENT_FENCE record installed (racing later Enqueues of that rid are
  * rejected with 8429); Decode rejects this RPC as unsupported.
  *
  * <p><b>Fault injection:</b> an armed cancel fault
@@ -63,7 +63,7 @@ public final class MockEngineCancelChannel implements EngineCancelChannel {
         // gRPC Cancel handler and the HTTP /cancel_request surface: an armed
         // fault short-circuits BEFORE cancelRequest so the engine cancel
         // state machine is never touched (production semantics "RPC failed =
-        // engine state unchanged": no fences, no tombstones, no census
+        // engine state unchanged": no fences, no terminal records, no census
         // branch) while the arrival stays counted.
         JavaMockEngineCluster.CancelFaultKind fault = service.arriveCancelRpc();
         if (fault == JavaMockEngineCluster.CancelFaultKind.NO_RESPOND) {
@@ -96,11 +96,11 @@ public final class MockEngineCancelChannel implements EngineCancelChannel {
             // Production-faithful mapping (C++ Cancel handler): a request
             // this engine has seen but already finished answers NOT_FOUND
             // (the completion record stays deliverable from the retain
-            // window); a never-seen rid answers TOMBSTONED — cancelRequest
-            // installed the ABSENT_FENCE tombstone that rejects any racing
+            // window); a never-seen rid answers REQUEST_FENCED — cancelRequest
+            // installed the ABSENT_FENCE record that rejects any racing
             // later Enqueue of that rid with the typed 8429.
             return CompletableFuture.completedFuture(
-                    result.alreadyFinished() ? CancelAck.NOT_FOUND : CancelAck.TOMBSTONED);
+                    result.alreadyFinished() ? CancelAck.NOT_FOUND : CancelAck.REQUEST_FENCED);
         } catch (UnsupportedOperationException e) {
             return CompletableFuture.completedFuture(CancelAck.FAILED);
         } catch (Exception e) {

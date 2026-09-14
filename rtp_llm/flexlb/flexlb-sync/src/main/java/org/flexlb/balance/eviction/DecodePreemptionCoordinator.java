@@ -273,12 +273,12 @@ public final class DecodePreemptionCoordinator {
                         hasNotFound = true;
                     }
                 }
-                case TOMBSTONED -> {
-                    // Unlike NOT_FOUND, TOMBSTONED atomically proves absence
+                case REQUEST_FENCED -> {
+                    // Unlike NOT_FOUND, REQUEST_FENCED atomically proves absence
                     // and prevents every racing late Enqueue. It is therefore
                     // a terminal victim proof and contributes freed capacity
                     // to this same transaction.
-                    settleTombstoned(capability, owned);
+                    settleRequestFenced(capability, owned);
                 }
                 case FAILED, UNSUPPORTED -> {
                     capability.transferUnknown(owned);
@@ -322,7 +322,7 @@ public final class DecodePreemptionCoordinator {
                 });
     }
 
-    private static boolean settleTombstoned(
+    private static boolean settleRequestFenced(
             AttemptCapability capability,
             ClaimedVictim owned) {
         PreemptionCommand command = capability.command;
@@ -331,10 +331,10 @@ public final class DecodePreemptionCoordinator {
         // Endpoint accounting remains the resource-owning CAS. The remaining
         // transitions are exact-token followers, but no WorkerStatus future
         // is required for this stronger proof.
-        boolean endpointSettled = command.endpoint().settlePriorityTombstoned(
+        boolean endpointSettled = command.endpoint().settlePriorityRequestFenced(
                 capability.token, reservation(command.endpoint(), victim));
         boolean inflightSettled = endpointSettled
-                && owned.claim().settleTerminal(command.detail());
+                && owned.claim().completePreemption(command.detail());
         boolean attemptSettled = inflightSettled
                 && capability.recordTerminal(owned);
         return endpointSettled && inflightSettled && attemptSettled;

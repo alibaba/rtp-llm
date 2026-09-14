@@ -21,11 +21,11 @@ cases predicted to fail carry a finding note in their docstring):
 
 HA family (2026-09, task #26 — assertions pin the audited production
 ground truth: EngineFenceCoordinator is one-shot and owns no timer; a
-TOMBSTONED ack settles immediately via resumeTombstoned while FAILED /
+REQUEST_FENCED ack settles immediately via resumeRequestFenced while FAILED /
 exception acks park in awaitAuthoritativeTerminal):
 
-    cancel_engine_restarted_tombstoned_settle  true-crash restart → fresh
-                                   instance never saw the rid → TOMBSTONED
+    cancel_engine_restarted_request_fenced_settle  true-crash restart → fresh
+                                   instance never saw the rid → REQUEST_FENCED
                                    + ABSENT_FENCE + immediate typed settle
     cancel_prefill_dead_await_terminal   cancel vs dead prefill: decode
                                    WorkerStatus terminal is the authority
@@ -940,7 +940,7 @@ def cancel_schedule_drop_delivered(ctx: CaseContext):
     the engine-side cancelled_rids / lifecycle record is no longer a
     required artifact of this path — under the CancelAck typed semantics
     the late cancel lands either before the delayed enqueue has tracked
-    the request (TOMBSTONED / absent-fence branch) or after the terminal
+    the request (REQUEST_FENCED / absent-fence branch) or after the terminal
     (NOT_FOUND branch), and neither branch records cancelled_rids; the
     run showed delta=1 with an empty cancelled set, which is the new
     protocol behaving correctly.  (c) the master inflight ledger settles
@@ -981,7 +981,7 @@ def cancel_schedule_drop_delivered(ctx: CaseContext):
 
         engine_cancel_rpc = wait_for(cancel_reached, 15.0, 0.2)
         # Diagnostic only (NOT gated): under the CancelAck typed semantics
-        # the cancel may answer TOMBSTONED/NOT_FOUND without recording a
+        # the cancel may answer REQUEST_FENCED/NOT_FOUND without recording a
         # cancelled_rid — see the docstring contract note (b).
         engine_cancelled, cancel_detail = ops.verify_engine_cancelled(rid)
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
@@ -1035,8 +1035,8 @@ def cancel_engine_notfound_settle(ctx: CaseContext):
     Prediction: passes (cancel_after_terminal already covers the
     master-idempotent half; the engine branch is the mock's
     production-faithful three-branch cancel semantics: ACCEPTED (live
-    or active-cancel tombstone) / NOT_FOUND (seen but already terminal
-    — this case) / TOMBSTONED (never-seen rid, absent fence installed).
+    or active-cancel terminal record) / NOT_FOUND (seen but already terminal
+    — this case) / REQUEST_FENCED (never-seen rid, absent fence installed).
     The production 10-minute recently-seen TTL is simplified away in
     the mock: every cancel in these cases is a sub-second race, far
     inside that window).
@@ -1069,7 +1069,7 @@ def cancel_engine_notfound_settle(ctx: CaseContext):
         # Direct engine probe (bypass the master): the fence arriving at
         # the engine AFTER the terminal must read NOT_FOUND (the
         # seen-and-terminal branch of the production three-branch cancel
-        # map; TOMBSTONED is reserved for never-seen rids whose absent
+        # map; REQUEST_FENCED is reserved for never-seen rids whose absent
         # fence blocks later Enqueues).
         engine_status_ok, engine_status_detail = False, "no probe"
         try:
@@ -1459,19 +1459,19 @@ def cancel_stream_break_decode_autonomous(ctx: CaseContext):
 # restarts, dead-prefill windows, decode retirement and transport-layer
 # faults.  Production ground truth (code-audited):
 #   * the master cancel is ONE-SHOT — EngineFenceCoordinator "never
-#     retries and never owns a timer"; a TOMBSTONED ack settles the slot
-#     immediately (resumeTombstoned) while ACCEPTED / NOT_FOUND / FAILED /
+#     retries and never owns a timer"; a REQUEST_FENCED ack settles the slot
+#     immediately (resumeRequestFenced) while ACCEPTED / NOT_FOUND / FAILED /
 #     exceptions park in awaitAuthoritativeTerminal;
 #   * a TRUE engine crash (crash_after) wipes all per-engine memory — a
 #     restarted instance has NEVER SEEN pre-restart rids, so the master's
-#     cancel answers TOMBSTONED and installs the ABSENT_FENCE tombstone
+#     cancel answers REQUEST_FENCED and installs the ABSENT_FENCE terminal record
 #     (later same-rid enqueues are 8429-rejected pre-admission);
 #   * decode WorkerStatus terminals and decode generation retire close
 #     open cancellation fences; prefill retire never closes fenced slots;
 #     there is no fallback sweeper for cancellation first-cause slots (a
 #     known production gap — the windows below are sized to the REAL
 #     settle paths instead of relying on a nonexistent safety net);
-#   * fencing is in-engine memory only: a second crash drops the tombstone
+#   * fencing is in-engine memory only: a second crash drops the terminal record
 #     and a late Enqueue of the settled rid is ACCEPTED by the fresh
 #     instance (documented design trade-off: the master ledger stays
 #     settled — no resurrection — and the engine-side orphan computation
@@ -1482,7 +1482,7 @@ def cancel_stream_break_decode_autonomous(ctx: CaseContext):
 MASTER_EVICT_S = 30.0
 # Engine restart channel-reconnect settle window (engine_fault precedent).
 ENGINE_RECOVERY_WAIT_S = 3.0
-# A TOMBSTONED cancel settles the slot immediately — the client stream must
+# A REQUEST_FENCED cancel settles the slot immediately — the client stream must
 # close well inside this bound, far away from the 95s TTL drain net.
 CANCEL_SETTLE_BOUND_S = 5.0
 
@@ -1531,7 +1531,7 @@ def _crash_and_restart(ops, engine_name: str) -> tuple:
     The sacrificial request's own fate is the empty-ack uncertain path and
     is deliberately not asserted (engine_fault_crash_after precedent);
     what matters here is that ALL per-engine memory — running tasks,
-    cancel tombstones, absent-fence records, RPC counters — is wiped, so
+    cancel terminal records, absent-fence records, RPC counters — is wiped, so
     the restarted instance has never seen any pre-restart rid.  Returns
     (alive_dropped, alive_restored).
     """
@@ -1589,9 +1589,9 @@ def _ha_env(ctx: CaseContext, label_suffix: str) -> tuple:
     return ctx.engine_ops(env), env
 
 
-@case("cancel_engine_restarted_tombstoned_settle", requires=["enqueue_batch"])
-def cancel_engine_restarted_tombstoned_settle(ctx: CaseContext):
-    """Engine restart + pre-restart cancel: TOMBSTONED settles immediately.
+@case("cancel_engine_restarted_request_fenced_settle", requires=["enqueue_batch"])
+def cancel_engine_restarted_request_fenced_settle(ctx: CaseContext):
+    """Engine restart + pre-restart cancel: REQUEST_FENCED settles immediately.
 
     Scenario (BATCH): R1 is handed to decode (first output received, so
     the slot lives on the decode side and survives the prefill generation
@@ -1599,10 +1599,10 @@ def cancel_engine_restarted_tombstoned_settle(ctx: CaseContext):
     original prefill TRUE-CRASHES (crash_after: memory wipe + port kill)
     and is restarted.  The master's cancel for R1 then reaches the FRESH
     instance, which has never seen the rid: the three-branch contract
-    answers TOMBSTONED and installs the ABSENT_FENCE tombstone.
+    answers REQUEST_FENCED and installs the ABSENT_FENCE terminal record.
 
     Expected (contract, EngineFenceCoordinator ground truth):
-      * resumeTombstoned settles the slot IMMEDIATELY — the client stream
+      * resumeRequestFenced settles the slot IMMEDIATELY — the client stream
         closes as a typed cancelled well inside 5s, never via the 95s TTL
         drain net (settle-latency bound asserted);
       * the master really sent the cancel: the engine's Cancel RPC counter
@@ -1654,14 +1654,14 @@ def cancel_engine_restarted_tombstoned_settle(ctx: CaseContext):
         # (observed ~8-10s under load) — poll the snapshot until the Cancel
         # RPC count grows instead of sampling a stale value (the coordinator
         # is one-shot, so the counter moves exactly once, late).  The poll
-        # must also land BEFORE the fence probe below: the tombstone is
+        # must also land BEFORE the fence probe below: the terminal record is
         # installed engine-side only when the Cancel RPC is processed.
         cancel_reached = wait_for(
             lambda: _cancel_rpc_total(ops) > baseline_cancel, 15.0, 0.5
         )
         cancel_delta = _cancel_rpc_total(ops) - baseline_cancel
 
-        # The ABSENT_FENCE tombstone from the TOMBSTONED cancel rejects a
+        # The ABSENT_FENCE terminal record from the REQUEST_FENCED cancel rejects a
         # direct late Enqueue of the same rid with the typed 8429.
         fence_ok, fence_detail = False, "no probe"
         try:
@@ -1688,7 +1688,7 @@ def cancel_engine_restarted_tombstoned_settle(ctx: CaseContext):
             and recovery_ok
         )
         return passed, (
-            f"tombstoned_settle: settled_fast={settled_fast}"
+            f"request_fenced_settle: settled_fast={settled_fast}"
             f"({settle_latency:.3f}s <= {CANCEL_SETTLE_BOUND_S:.0f}s, "
             f"completed={handle.snap.completed}), "
             f"cancel_rpc_delta={cancel_delta} (>=1), "
@@ -1869,13 +1869,13 @@ def cancel_decode_retire_closes_fence(ctx: CaseContext):
 def cancel_fencing_lost_on_engine_restart(ctx: CaseContext):
     """Design boundary: fencing is engine memory — a second crash drops it.
 
-    Scenario (BATCH): stage 1 replays the tombstoned-settle contract — R1
+    Scenario (BATCH): stage 1 replays the request_fenced-settle contract — R1
     (decode-owned, decode still running) survives its prefill's TRUE
-    crash + restart; the master cancel answers TOMBSTONED on the fresh
-    instance (never-seen rid), installs the ABSENT_FENCE tombstone (the
+    crash + restart; the master cancel answers REQUEST_FENCED on the fresh
+    instance (never-seen rid), installs the ABSENT_FENCE terminal record (the
     direct late-Enqueue probe is 8429-rejected — the fence WORKS at this
     point) and settles the slot.  Stage 2 crashes the prefill AGAIN: the
-    tombstone lived only in engine memory, so the second restart comes
+    terminal record lived only in engine memory, so the second restart comes
     up fence-less and the SAME late Enqueue is now ACCEPTED by the fresh
     instance.
 
@@ -1911,7 +1911,7 @@ def cancel_fencing_lost_on_engine_restart(ctx: CaseContext):
         if not handle.wait_first_output():
             return False, "no output before the first crash window"
 
-        # Stage 1: crash + restart; the cancel lands TOMBSTONED on the
+        # Stage 1: crash + restart; the cancel lands REQUEST_FENCED on the
         # fresh instance and settles the slot (typed cancelled, fast).
         dropped1, restored1 = _crash_and_restart(ops, "prefill-0")
         if not (dropped1 and restored1):
@@ -1921,16 +1921,16 @@ def cancel_fencing_lost_on_engine_restart(ctx: CaseContext):
         ops.cancel(rid, response)
         settled_fast = handle.wait_end(CANCEL_SETTLE_BOUND_S)
         settle_latency = time.monotonic() - settle_t0
-        # The ABSENT_FENCE tombstone is installed engine-side only when the
+        # The ABSENT_FENCE terminal record is installed engine-side only when the
         # Cancel RPC is PROCESSED — which the census records asynchronously
         # (observed ~8-10s under load) — so wait for the RPC to register
-        # BEFORE probing the fence: a probe racing ahead of the tombstone
+        # BEFORE probing the fence: a probe racing ahead of the terminal record
         # would be admitted and masquerade as a lost fence.
         cancel_reached = wait_for(
             lambda: _cancel_rpc_total(ops) > baseline_cancel, 15.0, 0.5
         )
 
-        # Control: the ABSENT_FENCE tombstone IS armed — a direct probe of
+        # Control: the ABSENT_FENCE terminal record IS armed — a direct probe of
         # the settled rid is 8429-rejected.
         fence_armed = False
         fence_detail = "no probe"
@@ -1942,7 +1942,7 @@ def cancel_fencing_lost_on_engine_restart(ctx: CaseContext):
         except Exception as exc:
             fence_detail = repr(exc)
 
-        # Stage 2: crash AGAIN — the tombstone dies with the memory.
+        # Stage 2: crash AGAIN — the terminal record dies with the memory.
         dropped2, restored2 = _crash_and_restart(ops, "prefill-0")
         if not (dropped2 and restored2):
             return False, (f"second crash/restart failed: {dropped2}/{restored2}")
@@ -2017,7 +2017,7 @@ def cancel_transport_failure_one_shot(ctx: CaseContext):
     Scenario (BATCH): R1 is handed to decode (first output received) when
     its prefill is armed with cancel_no_respond — the engine's Cancel RPC
     handler counts the arrival and HANGS (an RPC-layer fault injected
-    BEFORE the engine cancel state machine: no fence, no tombstone, the
+    BEFORE the engine cancel state machine: no fence, no terminal record, the
     request keeps running untouched).  The client cancel is issued; the
     master's short cancel-ack timeout (50ms) fails the future and the
     fence parks in awaitAuthoritativeTerminal.
@@ -2101,7 +2101,7 @@ def cancel_unexpected_status_await_terminal(ctx: CaseContext):
     its prefill is armed with cancel_unexpected_status — the Cancel RPC
     "succeeds" but answers a status outside the cancel contract
     (CANCEL_STATUS_UNSPECIFIED).  The fault is injected before the engine
-    cancel state machine, so no fence and no tombstone are installed; the
+    cancel state machine, so no fence and no terminal record are installed; the
     master's response mapping must FAIL this ack (never accept it as
     success) and the fence parks in awaitAuthoritativeTerminal — the
     same one-shot, no-retry, no-timer contract as a transport failure.
