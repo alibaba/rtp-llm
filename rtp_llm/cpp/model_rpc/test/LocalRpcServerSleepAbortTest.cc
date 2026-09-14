@@ -102,7 +102,9 @@ TEST(LocalRpcServerSleepAbortTest, HealthReportsUnavailableWhileSleepingAndOkAft
 }
 
 TEST(LocalRpcServerSleepAbortTest, AbortRegistryCancelsOnlyNonStreamingStreams) {
+    SleepLifecycleController controller(true);
     LocalRpcServer server;
+    server.admission_gate_ = std::make_shared<AdmissionGate>(&controller, "test_instance");
 
     auto streaming     = makeStream(1, true);
     auto non_streaming = makeStream(2, false);
@@ -120,6 +122,15 @@ TEST(LocalRpcServerSleepAbortTest, AbortRegistryCancelsOnlyNonStreamingStreams) 
 
     non_streaming_guard.reset();
     EXPECT_EQ(server.cancelAbortableStreams(), 0u);
+}
+
+TEST(LocalRpcServerSleepAbortTest, DisabledSleepDoesNotRegisterAbortableStreams) {
+    LocalRpcServer server;
+    auto stream = makeStream(4, false);
+    // No sleep admission gate is installed when the startup switch is OFF.
+    EXPECT_EQ(server.registerAbortableStreamForScope(stream), nullptr);
+    EXPECT_TRUE(server.abortable_streams_.empty());
+    EXPECT_FALSE(stream->hasError());
 }
 
 TEST(LocalRpcServerSleepAbortTest, LegacyControlsCannotBypassSleepAdmission) {

@@ -176,8 +176,7 @@ bool SleepLifecycleController::isLegalTransition(SleepState from, SleepState to)
 }
 
 bool SleepLifecycleController::transitionLocked(SleepState expected_from, SleepState to) {
-    std::lock_guard<std::mutex> admission_lock(admission_mutex_);
-    const SleepState            current = state_.load(std::memory_order_acquire);
+    const SleepState current = state();
     if (current != expected_from || !isLegalTransition(expected_from, to)) {
         setLastError("illegal transition: " + sleepStateToString(current) + " -> " + sleepStateToString(to));
         return false;
@@ -185,7 +184,14 @@ bool SleepLifecycleController::transitionLocked(SleepState expected_from, SleepS
     if (expected_from == SleepState::RUNNING && to == SleepState::DRAINING) {
         sleep_epoch_.fetch_add(1, std::memory_order_acq_rel);
     }
-    state_.store(to, std::memory_order_release);
+    auto word = admission_state_.load(std::memory_order_acquire);
+    // Control transitions are serialized. Only admission/release may change
+    // the count while this CAS retries; preserve every pre-drain lease.
+    while (!admission_state_.compare_exchange_weak(
+        word,
+        (word & kAdmissionCountMask) | (static_cast<uint64_t>(to) << kAdmissionStateShift),
+        std::memory_order_acq_rel,
+        std::memory_order_acquire)) {}
     RTP_LLM_LOG_INFO("sleep state transition: %s -> %s (epoch=%ld)",
                      sleepStateToString(expected_from).c_str(),
                      sleepStateToString(to).c_str(),
@@ -307,7 +313,7 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
         return SleepResult::invalidArgument("sleep rejected: timeout_ms must be non-negative");
     }
 
-    const SleepState current = state_.load(std::memory_order_acquire);
+    const SleepState current = state();
     if (!opt.quiesce_token.empty()) {
         if (current == SleepState::RUNNING) {
             if (!opt.drain_only || opt.expected_incarnation != worker_incarnation_
@@ -461,7 +467,7 @@ SleepResult SleepLifecycleController::quiesce(const SleepQuiesceOptions& opt, ui
     if (opt.timeout_ms < 0 || opt.token.empty()) {
         return SleepResult::invalidArgument("quiesce requires a token and non-negative timeout");
     }
-    if (state_.load(std::memory_order_acquire) != SleepState::DRAINING || !drain_prepared_
+    if (state() != SleepState::DRAINING || !drain_prepared_
         || opt.token != quiesce_token_) {
         return SleepResult::failedPrecondition("quiesce requires the matching prepared drain");
     }
@@ -515,7 +521,7 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
         return SleepResult::invalidArgument("wake_up rejected: prepare_only and commit_only cannot both be true");
     }
 
-    const SleepState current = state_.load(std::memory_order_acquire);
+    const SleepState current = state();
     // Idempotency: already running.
     if (current == SleepState::RUNNING) {
         if (!opt.cancel_quiesce_token.empty() && opt.cancel_quiesce_token != last_cancelled_quiesce_token_) {
@@ -669,7 +675,7 @@ SleepStatus SleepLifecycleController::status() const {
     s.supported_levels             = s.effective ? std::vector<int32_t>{configured_level} : std::vector<int32_t>{};
     s.supported_modes       = s.effective ? std::vector<std::string>{"wait", "abort"} : std::vector<std::string>{};
     s.disabled_reason       = s.effective ? "" : disabledReason();
-    s.state                 = state_.load(std::memory_order_acquire);
+    s.state                 = state();
     s.sleep_epoch           = sleep_epoch_.load(std::memory_order_acquire);
     s.kv_memory_state       = kvMemoryStateToString(kv_memory_state_.load(std::memory_order_acquire));
     s.device_kv_cache_valid = device_kv_cache_valid_.load(std::memory_order_acquire);
@@ -709,35 +715,40 @@ SleepStatus SleepLifecycleController::status() const {
 }
 
 bool SleepLifecycleController::admit() const {
-    return state_.load(std::memory_order_acquire) == SleepState::RUNNING;
+    return state() == SleepState::RUNNING;
 }
 
 ControllerAdmissionResult SleepLifecycleController::acquireAdmission() {
-    std::lock_guard<std::mutex> lock(admission_mutex_);
-    ControllerAdmissionResult   result;
-    result.state       = state_.load(std::memory_order_acquire);
-    result.sleep_epoch = sleep_epoch_.load(std::memory_order_acquire);
-    if (result.state == SleepState::RUNNING) {
-        ++active_admissions_;
-        result.lease = AdmissionLease(this);
+    ControllerAdmissionResult result;
+    if (!enabled()) {
+        return result;  // OFF requests have no tracking or lease release work.
     }
+    auto word = admission_state_.load(std::memory_order_acquire);
+    while ((word >> kAdmissionStateShift) == static_cast<uint64_t>(SleepState::RUNNING)) {
+        // Unreachable in practice, but never let count overflow reopen the gate.
+        if ((word & kAdmissionCountMask) == kAdmissionCountMask) {
+            result.state = SleepState::ERROR;
+            result.sleep_epoch = sleepEpoch();
+            return result;
+        }
+        if (admission_state_.compare_exchange_weak(word, word + 1, std::memory_order_acq_rel,
+                                                 std::memory_order_acquire)) {
+            result.lease = AdmissionLease(this);
+            return result;
+        }
+    }
+    result.state = static_cast<SleepState>(word >> kAdmissionStateShift);
+    result.sleep_epoch = sleepEpoch();
     return result;
 }
 
 void SleepLifecycleController::releaseAdmission() {
-    {
-        std::lock_guard<std::mutex> lock(admission_mutex_);
-        if (active_admissions_ <= 0) {
-            RTP_LLM_LOG_ERROR("sleep lifecycle admission lease released with no active admission");
-            return;
-        }
-        --active_admissions_;
-    }
+    // Only a move-only lease created by successful acquire may release.
+    admission_state_.fetch_sub(1, std::memory_order_acq_rel);
 }
 
 int64_t SleepLifecycleController::activeAdmissionCount() const {
-    std::lock_guard<std::mutex> lock(admission_mutex_);
-    return active_admissions_;
+    return static_cast<int64_t>(admission_state_.load(std::memory_order_acquire) & kAdmissionCountMask);
 }
 
 int64_t SleepLifecycleController::sleepEpoch() const {
@@ -745,7 +756,7 @@ int64_t SleepLifecycleController::sleepEpoch() const {
 }
 
 SleepState SleepLifecycleController::state() const {
-    return state_.load(std::memory_order_acquire);
+    return static_cast<SleepState>(admission_state_.load(std::memory_order_acquire) >> kAdmissionStateShift);
 }
 
 }  // namespace rtp_llm

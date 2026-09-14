@@ -138,14 +138,15 @@ TEST_F(NormalCacheStoreTest, testStore_emptyCache) {
     mutex.unlock();
 }
 
-TEST_F(NormalCacheStoreTest, testMarkRequestEndClearsPendingStoreTransferCount) {
+TEST(NormalCacheStoreSleepCpuTest, testMarkRequestEndClearsPendingStoreTransferCount) {
     // No readiness worker: store() deterministically remains queued. Waiting
     // on an unrecorded CUDA event would not block and races markRequestEnd().
     NormalCacheStore store;
-    store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    store.params_.enable_sleep_mode = true;
+    store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
     const std::string requestid       = "test-pending-store-request-id";
     auto              buffer          = std::make_shared<RequestBlockBuffer>(requestid);
-    buffer->addBlock(block_buffer_util_->makeBlockBuffer("a", 16, '0', false));
+    buffer->addBlock("a", std::make_shared<char>('0'), 1, false, false);
     int calls = 0;
     store.store(buffer, [&calls, &store](bool ok, CacheStoreErrorCode ec) {
         ++calls;
@@ -165,9 +166,10 @@ TEST_F(NormalCacheStoreTest, testMarkRequestEndClearsPendingStoreTransferCount) 
     EXPECT_TRUE(store.store_tasks_.empty());
 }
 
-TEST_F(NormalCacheStoreTest, testCountTransferInvokesCallbackOnlyOnce) {
+TEST(NormalCacheStoreSleepCpuTest, testCountTransferInvokesCallbackOnlyOnce) {
     NormalCacheStore store;
-    store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    store.params_.enable_sleep_mode = true;
+    store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
     std::atomic<int>            calls{0};
     CacheStoreStoreDoneCallback callback = [&calls](bool, CacheStoreErrorCode) { ++calls; };
     auto                        counted  = store.countTransfer(callback);
@@ -178,6 +180,45 @@ TEST_F(NormalCacheStoreTest, testCountTransferInvokesCallbackOnlyOnce) {
     second.join();
     EXPECT_EQ(calls.load(), 1);
     EXPECT_EQ(store.activeTransferCount(), 0);
+}
+
+TEST(NormalCacheStoreSleepCpuTest, testDisabledSleepDoesNotCountTransfers) {
+    NormalCacheStore store;
+    store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
+    int calls = 0;
+    CacheStoreStoreDoneCallback callback = [&](bool, CacheStoreErrorCode) { ++calls; };
+    auto untracked = store.countTransfer(callback);
+    EXPECT_EQ(store.activeTransferCount(), 0);
+    untracked(true, CacheStoreErrorCode::None);
+    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(store.activeTransferCount(), 0);
+}
+
+TEST(NormalCacheStoreSleepCpuTest, testRequestEndOnlyRemovesItsOwnBucket) {
+    NormalCacheStore store;
+    store.params_.enable_sleep_mode = true;
+    store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
+    int completed = 0;
+    int unrelated = 0;
+    for (const auto& id : {"request-a", "request-a", "request-b"}) {
+        auto buffer = std::make_shared<RequestBlockBuffer>(id);
+        buffer->addBlock("a", std::make_shared<char>('0'), 1, false, false);
+        store.store(buffer, [&, own = std::string(id) == "request-a"](bool, CacheStoreErrorCode) {
+            ++(own ? completed : unrelated);
+        });
+    }
+    EXPECT_EQ(store.store_tasks_.size(), 2);
+    EXPECT_EQ(store.activeTransferCount(), 3);
+    store.markRequestEnd("request-a");
+    EXPECT_EQ(completed, 2);
+    EXPECT_EQ(unrelated, 0);
+    EXPECT_EQ(store.store_tasks_.size(), 1);
+    EXPECT_EQ(store.store_tasks_.count("request-b"), 1);
+    EXPECT_EQ(store.activeTransferCount(), 1);
+    store.markRequestEnd("request-b");
+    EXPECT_EQ(unrelated, 1);
+    EXPECT_EQ(store.activeTransferCount(), 0);
+    EXPECT_TRUE(store.store_tasks_.empty());
 }
 
 TEST_F(NormalCacheStoreTest, testRemoteStoreIgnoresUnrelatedAndDuplicateBlocks) {

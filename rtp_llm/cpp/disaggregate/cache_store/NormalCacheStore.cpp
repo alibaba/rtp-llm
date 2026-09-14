@@ -76,15 +76,22 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
             for (auto it = this->store_tasks_.begin(); it != this->store_tasks_.end();) {
-                auto& [buffer, item]   = *it;
-                auto& [callback, task] = item;
-                auto event             = buffer->getEvent();
-                if ((event && event->query()) || event == nullptr) {
-                    if (this->thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
-                        RTP_LLM_LOG_WARNING("normal cache store push store task to thread pool failed");
-                        callback(false, CacheStoreErrorCode::PushWorkerItemFailed);
+                auto& tasks = it->second;
+                for (auto pending = tasks.begin(); pending != tasks.end();) {
+                    auto& [buffer, item]   = *pending;
+                    auto& [callback, task] = item;
+                    auto event            = buffer->getEvent();
+                    if ((event && event->query()) || event == nullptr) {
+                        if (this->thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
+                            RTP_LLM_LOG_WARNING("normal cache store push store task to thread pool failed");
+                            callback(false, CacheStoreErrorCode::PushWorkerItemFailed);
+                        }
+                        pending = tasks.erase(pending);
+                    } else {
+                        ++pending;
                     }
-
+                }
+                if (tasks.empty()) {
                     it = store_tasks_.erase(it);
                 } else {
                     ++it;
@@ -124,11 +131,19 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
         try {
             this->runStoreTask(request_block_buffer, counted_callback, collector);
         } catch (const std::exception& e) {
+            // Only counted callbacks are safe to complete again after a throw.
+            // Sleep OFF preserves the original callback/exception semantics.
+            if (!params_.enable_sleep_mode) {
+                throw;
+            }
             RTP_LLM_LOG_ERROR("normal cache store run store task exception, request id is %s, error is %s",
                               request_block_buffer->getRequestId().c_str(),
                               e.what());
             counted_callback(false, CacheStoreErrorCode::StoreFailed);
         } catch (...) {
+            if (!params_.enable_sleep_mode) {
+                throw;
+            }
             RTP_LLM_LOG_ERROR("normal cache store run store task unknown exception, request id is %s",
                               request_block_buffer->getRequestId().c_str());
             counted_callback(false, CacheStoreErrorCode::StoreFailed);
@@ -136,7 +151,7 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
     };
 
     std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
-    store_tasks_[request_block_buffer] = {counted_callback, task};
+    store_tasks_[request_block_buffer->getRequestId()][request_block_buffer] = {counted_callback, task};
 }
 
 std::shared_ptr<StoreContext>
@@ -223,11 +238,17 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
                               partition_count,
                               partition_id);
         } catch (const std::exception& e) {
+            if (!params_.enable_sleep_mode) {
+                throw;
+            }
             RTP_LLM_LOG_ERROR("normal cache store run load task exception, request id is %s, error is %s",
                               request_block_buffer->getRequestId().c_str(),
                               e.what());
             counted_callback(false, CacheStoreErrorCode::LoadErrorUnknown);
         } catch (...) {
+            if (!params_.enable_sleep_mode) {
+                throw;
+            }
             RTP_LLM_LOG_ERROR("normal cache store run load task unknown exception, request id is %s",
                               request_block_buffer->getRequestId().c_str());
             counted_callback(false, CacheStoreErrorCode::LoadErrorUnknown);
@@ -338,20 +359,17 @@ void NormalCacheStore::releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreT
 }
 
 void NormalCacheStore::markRequestEnd(const std::string& requestid) {
-    std::vector<CacheStoreStoreDoneCallback> pending_store_callbacks;
+    StoreTasks pending_store_tasks;
     {
         std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
-        for (auto it = store_tasks_.begin(); it != store_tasks_.end();) {
-            auto& buffer = it->first;
-            if (buffer && buffer->getRequestId() == requestid) {
-                pending_store_callbacks.emplace_back(std::move(it->second.first));
-                it = store_tasks_.erase(it);
-            } else {
-                ++it;
-            }
+        auto it = store_tasks_.find(requestid);
+        if (it != store_tasks_.end()) {
+            pending_store_tasks = std::move(it->second);
+            store_tasks_.erase(it);
         }
     }
-    for (auto& callback : pending_store_callbacks) {
+    for (auto& [buffer, pending] : pending_store_tasks) {
+        auto& callback = pending.first;
         if (callback) {
             callback(false, CacheStoreErrorCode::StoreFailed);
         }

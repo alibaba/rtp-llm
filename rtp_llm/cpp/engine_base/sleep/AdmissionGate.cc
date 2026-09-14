@@ -69,11 +69,13 @@ AdmissionCheckResult AdmissionGate::checkDetail() const {
 AdmissionAcquireResult AdmissionGate::acquire() const {
     AdmissionAcquireResult result;
     if (controller_ == nullptr) {
-        result.detail = makeCheckResult(instance_id_, SleepState::RUNNING, 0);
         return result;
     }
     auto controller_result = controller_->acquireAdmission();
-    result.detail          = makeCheckResult(instance_id_, controller_result.state, controller_result.sleep_epoch);
+    // Normal requests need only the lease, not copies of instance/state strings.
+    if (!controller_result.admitted()) {
+        result.detail = makeCheckResult(instance_id_, controller_result.state, controller_result.sleep_epoch);
+    }
     result.lease           = std::move(controller_result.lease);
     return result;
 }

@@ -59,7 +59,7 @@ struct ControllerAdmissionResult {
     int64_t        sleep_epoch = 0;
 
     bool admitted() const {
-        return static_cast<bool>(lease);
+        return state == SleepState::RUNNING;
     }
 };
 
@@ -217,8 +217,8 @@ struct SleepHooks {
 // Thread-safe sleep/wake_up lifecycle state machine. Owns the authoritative
 // SleepState, sleep_epoch, kv_memory_state, device_kv_cache_valid and
 // last_error. State transitions are serialized through transition_mutex_.
-// Admission acquisition and RUNNING-boundary transitions are linearized by
-// admission_mutex_; long-running lifecycle hooks never hold that mutex.
+// Admission count and state share one atomic word. Admission and closing the
+// gate are linearized by CAS; serving requests never acquire a lifecycle mutex.
 class SleepLifecycleController {
 public:
     explicit SleepLifecycleController(bool enabled = false);
@@ -231,8 +231,8 @@ public:
     // default behavior. Must be called before sleep()/wakeUp() are triggered.
     void setHooks(const SleepHooks& hooks);
 
-    // Runtime feature gate. Server startup config keeps this disabled by
-    // default; tests may enable it explicitly.
+    // Startup-only feature gate; configure before accepting requests. Switching
+    // it on while untracked requests are running cannot provide safe draining.
     void setEnabled(bool enabled);
     bool enabled() const;
 
@@ -308,7 +308,10 @@ private:
     std::string lastError() const;
     std::string disabledReason() const;
 
-    std::atomic<SleepState> state_{SleepState::RUNNING};
+    static constexpr uint64_t kAdmissionStateShift = 61;
+    static constexpr uint64_t kAdmissionCountMask = (uint64_t{1} << kAdmissionStateShift) - 1;
+    // RUNNING is zero: lower bits count leases, upper bits encode SleepState.
+    std::atomic<uint64_t> admission_state_{0};
     std::atomic<int64_t>    sleep_epoch_{0};
     std::atomic<bool>       enabled_{false};
     std::atomic<bool>       runtime_supported_{true};
@@ -318,12 +321,10 @@ private:
     std::atomic<int32_t> configured_level_{1};
     // Level of the in-progress/last sleep, captured at RUNNING->DRAINING.
     std::atomic<int32_t> active_sleep_level_{0};
-    // Lock ordering: transition_mutex_ -> admission_mutex_ -> hooks_mutex_ ->
+    // Lock ordering: transition_mutex_ -> hooks_mutex_ ->
     // status_mutex_.
     // Never acquire in reverse.
     std::mutex         transition_mutex_;  // serializes sleep/wake_up + idempotency
-    mutable std::mutex admission_mutex_;
-    int64_t            active_admissions_ = 0;
 
     std::atomic<KvMemoryState> kv_memory_state_{KvMemoryState::ACTIVE};
     std::atomic<bool>          device_kv_cache_valid_{true};

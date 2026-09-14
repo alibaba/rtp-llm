@@ -121,7 +121,9 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
                                 "running engine init with gil held may cause program hang, please check");
         engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
     }
-    admission_gate_ = std::make_shared<AdmissionGate>(&engine_->sleepController(), resolveInstanceId());
+    if (maga_init_params.runtime_config.enable_sleep_mode) {
+        admission_gate_ = std::make_shared<AdmissionGate>(&engine_->sleepController(), resolveInstanceId());
+    }
     installSleepHooks();
     if (!mm_process_engine.is_none()) {
         auto vit_separation = maga_init_params.vit_config.vit_separation;
@@ -544,7 +546,7 @@ void LocalRpcServer::installSleepHooks() {
 }
 
 std::shared_ptr<void> LocalRpcServer::registerAbortableStreamForScope(const std::shared_ptr<GenerateStream>& stream) {
-    if (!stream || stream->isStreaming()) {
+    if (!admission_gate_ || !stream || stream->isStreaming()) {
         return nullptr;
     }
     const auto request_id = stream->streamId();

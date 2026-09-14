@@ -50,6 +50,27 @@ TEST_F(AdmissionGateTest, LeaseMoveTransfersOwnershipAndReleasesOnce) {
     EXPECT_EQ(controller_.activeAdmissionCount(), 0);
 }
 
+TEST_F(AdmissionGateTest, SuccessfulAcquireDoesNotBuildStatusStrings) {
+    auto acquired = gate_.acquire();
+    ASSERT_TRUE(acquired.detail.admitted);
+    EXPECT_TRUE(acquired.detail.instance_id.empty());
+    EXPECT_TRUE(acquired.detail.state.empty());
+    EXPECT_TRUE(acquired.detail.message.empty());
+    EXPECT_TRUE(acquired.detail.error_code_str.empty());
+    EXPECT_TRUE(static_cast<bool>(acquired.lease));
+}
+
+TEST(AdmissionGateDisabledTest, DisabledAdmissionHasNoLeaseOrCounter) {
+    SleepLifecycleController controller(false);
+    AdmissionGate gate(&controller, "long-instance-id-that-would-require-a-string-allocation");
+    auto acquired = gate.acquire();
+    EXPECT_TRUE(acquired.detail.admitted);
+    EXPECT_FALSE(static_cast<bool>(acquired.lease));
+    EXPECT_EQ(controller.activeAdmissionCount(), 0);
+    EXPECT_TRUE(acquired.detail.instance_id.empty());
+    EXPECT_TRUE(controller.acquireAdmission().admitted());
+}
+
 TEST_F(AdmissionGateTest, NullControllerAdmits) {
     AdmissionGate null_gate(nullptr, "no_controller");
     EXPECT_TRUE(null_gate.check().ok());

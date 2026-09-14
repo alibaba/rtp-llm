@@ -71,6 +71,9 @@ private:
     // incremented now and decremented exactly once when the callback fires.
     template<typename Callback>
     Callback countTransfer(Callback callback) {
+        if (!params_.enable_sleep_mode) {
+            return callback;
+        }
         active_transfer_count_.fetch_add(1, std::memory_order_relaxed);
         auto done = std::make_shared<std::atomic<bool>>(false);
         return [this, callback = std::move(callback), done](auto&&... args) {
@@ -109,9 +112,10 @@ private:
     std::unordered_map<std::string, std::list<std::shared_ptr<RemoteStoreTaskImpl>>> remote_store_tasks_;
     std::atomic<size_t>                                                              active_transfer_count_{0};
     mutable std::shared_mutex                                                        store_tasks_mutex_;
-    std::unordered_map<std::shared_ptr<RequestBlockBuffer>,
-                       std::pair<CacheStoreStoreDoneCallback, std::function<void()>>>
-        store_tasks_;
+    using StoreTasks = std::unordered_map<std::shared_ptr<RequestBlockBuffer>,
+                                         std::pair<CacheStoreStoreDoneCallback, std::function<void()>>>;
+    // One lookup on request completion, then only that request's queued tasks.
+    std::unordered_map<std::string, StoreTasks> store_tasks_;
 };
 
 }  // namespace rtp_llm

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -8,6 +9,59 @@
 #include "rtp_llm/cpp/engine_base/sleep/SleepLifecycleController.h"
 
 namespace rtp_llm {
+
+TEST(SleepLifecycleControllerConcurrencyTest, ConcurrentAdmissionCannotEscapeClosedGate) {
+    SleepLifecycleController controller(true);
+    std::atomic<bool> stop{false};
+    std::atomic<int> accepted{0};
+    SleepHooks hooks;
+    hooks.drain = [&](const SleepOptions&) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (controller.activeAdmissionCount() != 0) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                return false;
+            }
+            std::this_thread::yield();
+        }
+        return true;
+    };
+    hooks.releaseKvMemoryBacking = [&](const SleepOptions&) {
+        EXPECT_EQ(controller.activeAdmissionCount(), 0);
+        EXPECT_FALSE(controller.acquireAdmission().admitted());
+        return true;
+    };
+    controller.setHooks(hooks);
+    std::vector<std::thread> workers;
+    for (int i = 0; i < 8; ++i) {
+        workers.emplace_back([&] {
+            while (!stop.load()) {
+                auto result = controller.acquireAdmission();
+                if (result.admitted()) {
+                    accepted.fetch_add(1);
+                    // Let close race with requests holding actual leases.
+                    std::this_thread::yield();
+                }
+            }
+        });
+    }
+    while (accepted.load() == 0) {
+        std::this_thread::yield();
+    }
+    for (int cycle = 0; cycle < 50; ++cycle) {
+        EXPECT_TRUE(controller.sleep(SleepOptions{}).ok);
+        EXPECT_EQ(controller.state(), SleepState::SLEEPING);
+        EXPECT_EQ(controller.activeAdmissionCount(), 0);
+        for (int check = 0; check < 20; ++check) {
+            EXPECT_FALSE(controller.acquireAdmission().admitted());
+        }
+        EXPECT_TRUE(controller.wakeUp().ok);
+    }
+    stop.store(true);
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    EXPECT_EQ(controller.activeAdmissionCount(), 0);
+}
 
 namespace {
 
