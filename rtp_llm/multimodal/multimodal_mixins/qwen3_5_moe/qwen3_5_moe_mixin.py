@@ -28,6 +28,7 @@ from rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin import (
     Qwen3_VLMixin,
 )
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
+from rtp_llm.multimodal.qwen3_vl_video import resolve_video_size
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.database import CkptDatabase
@@ -90,6 +91,11 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
                 item.mm_preprocess_config,
                 processor.video_processor,
                 factor,
+                size=resolve_video_size(
+                    processor.video_processor,
+                    vit_config.mm_video_total_min_pixels,
+                    vit_config.mm_video_total_max_pixels,
+                ),
             )
         return Qwen3_VLImageEmbedding.preprocess_input(
             mm_inputs, vit_config, processor, factor

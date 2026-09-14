@@ -8,6 +8,52 @@ import subprocess
 from pathlib import Path
 
 
+def check_gpu_idle(out):
+    """Read driver telemetry only; never initialize CUDA or clean up processes."""
+    gpu = subprocess.check_output(
+        [
+            "nvidia-smi",
+            "--query-compute-apps=gpu_uuid,pid,process_name",
+            "--format=csv,noheader",
+        ],
+        text=True,
+        timeout=15,
+    )
+    memory = subprocess.check_output(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,memory.used,utilization.gpu",
+            "--format=csv,noheader,nounits",
+        ],
+        text=True,
+        timeout=15,
+    )
+    (out / "gpu-precheck.txt").write_text(gpu)
+    (out / "gpu-memory-precheck.txt").write_text(memory)
+    if gpu.strip():
+        raise SystemExit("GPU processes exist; benchmark was not launched.")
+    try:
+        rows = [
+            tuple(int(value.strip()) for value in line.split(","))
+            for line in memory.splitlines()
+            if line.strip()
+        ]
+        if sorted(row[0] for row in rows) != list(range(8)) or any(
+            len(row) != 3 for row in rows
+        ):
+            raise ValueError("expected telemetry for all eight GPUs")
+    except (ValueError, IndexError) as error:
+        raise SystemExit("Cannot verify GPU idleness: " + str(error)) from error
+    # Compute-process visibility may be restricted by the container's PID namespace.
+    busy = [row for row in rows if row[1] > 1024 or row[2] > 0]
+    if busy:
+        raise SystemExit(
+            "GPUs are not idle (index, used MiB, utilization %): "
+            + str(busy)
+            + "; benchmark was not launched. Idle guard allows at most 1024 MiB per GPU."
+        )
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model-dir", type=Path, required=True)
@@ -17,8 +63,16 @@ def main():
     p.add_argument("--bazel", default="bazelisk")
     p.add_argument("--bazel-option", action="append", default=[])
     p.add_argument("--mode", choices=["smoke", "benchmark"], default="smoke")
+    p.add_argument(
+        "--e-batch",
+        type=int,
+        default=os.environ.get("VIT_GPU_MAX_BATCH_SIZE"),
+        help="Override the smoke target batch argument; also accepts VIT_GPU_MAX_BATCH_SIZE",
+    )
     p.add_argument("--execute", action="store_true")
     a = p.parse_args()
+    if a.e_batch is not None and a.e_batch <= 0:
+        p.error("--e-batch / VIT_GPU_MAX_BATCH_SIZE must be positive")
     data = Path(__file__).resolve().parent
     repo = data.parents[3]
     out = a.output.resolve()
@@ -50,7 +104,6 @@ def main():
         "--output=" + str(out / "gpu-preflight"),
         "--reserve-mb=24576",
         "--p-token-budget=20000",
-        "--e-batch=1",
         "--d-reserve-mb=8192",
         "--d-kv-mb=49152",
         "--d-seq-limit=96",
@@ -59,6 +112,8 @@ def main():
         "--max-seconds=900",
         "--long-repeats=3",
     ]
+    if a.e_batch is not None:
+        flags.append("--e-batch=" + str(a.e_batch))
     if a.mode == "benchmark":
         flags.append("--benchmark")
     command += ["--test_arg=" + x for x in flags]
@@ -93,17 +148,7 @@ def main():
         subprocess.run(
             check, cwd=repo, stdout=log, stderr=subprocess.STDOUT, check=True
         )
-    gpu = subprocess.check_output(
-        [
-            "nvidia-smi",
-            "--query-compute-apps=gpu_uuid,pid,process_name",
-            "--format=csv,noheader",
-        ],
-        text=True,
-    )
-    (out / "gpu-precheck.txt").write_text(gpu)
-    if gpu.strip():
-        raise SystemExit("GPU processes exist; benchmark was not launched.")
+    check_gpu_idle(out)
     env = dict(os.environ, CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7", PYTHONNOUSERSITE="1")
     with (out / "bazel.log").open("w") as log:
         result = subprocess.run(

@@ -11,11 +11,11 @@ from typing import Tuple
 
 import _imp
 import torch
-from torchvision.transforms import InterpolationMode
-from torchvision.transforms.functional import resize
 
-from rtp_llm.multimodal.multimodal_mixins.qwen2_5_vl.qwen2_5_vl_mixin import (
-    smart_nframes,
+from rtp_llm.multimodal.qwen3_vl_video import (
+    resize_video_to_shape,
+    resolve_video_size,
+    sample_frame_indices,
     video_resize_shape,
 )
 
@@ -55,7 +55,7 @@ class GpuVideoInput:
         )
 
 
-def prepare_gpu_video(encoded, configs, processor, factor):
+def prepare_gpu_video(encoded, configs, processor, factor, size=None):
     """Determine the same frame/grid policy without creating a CUDA context."""
     import av
 
@@ -81,15 +81,15 @@ def prepare_gpu_video(encoded, configs, processor, factor):
             "NVDEC video preprocessing requires an indexed video with a frame "
             "count and average frame rate; use the cpu video backend for this input"
         )
-    count = smart_nframes(configs, total_frames, fps)
-    indices = tuple(torch.linspace(0, total_frames - 1, count).round().long().tolist())
+    indices = tuple(sample_frame_indices(total_frames, fps, configs))
+    count = len(indices)
     out_h, out_w = video_resize_shape(
         configs,
         count,
         height,
         width,
-        factor,
-        processor.size.get("longest_edge"),
+        processor,
+        size if size is not None else resolve_video_size(processor),
     )
     data = GpuVideoInput(
         encoded,
@@ -274,13 +274,10 @@ def _decode_on_stream(data, device, nvc, stream, consumer_stream):
 def preprocess_video_cuda(data: GpuVideoInput, processor, device):
     video = decode_video_cuda(data, device)
     with torch.profiler.record_function("video_resize"):
-        # Match the CPU path: resize uint8 with antialias, then convert to FP32.
-        video = resize(
-            video,
-            [data.resized_height, data.resized_width],
-            interpolation=InterpolationMode.BICUBIC,
-            antialias=True,
-        ).float()
+        # Use the same HF resize backend and uint8 rounding as the CPU path.
+        video = resize_video_to_shape(
+            video, processor, data.resized_height, data.resized_width
+        )
     with torch.profiler.record_function("video_processor"):
         result = processor(
             video,

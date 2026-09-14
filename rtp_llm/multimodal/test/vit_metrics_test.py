@@ -27,62 +27,79 @@ class VitMetricsTest(TestCase):
     def test_video_resized_pixel_count_includes_all_frames(self):
         self.assertEqual(video_resized_pixel_count(8, 336, 448), 8 * 336 * 448)
 
-    def test_qwen3_video_preprocess_passes_metrics_tags_to_loader(self):
+    def test_qwen3_video_preprocess_records_decode_resize_and_processor_metrics(self):
         import torch
 
         from rtp_llm.multimodal.multimodal_mixins import qwen3_vl_mixin
         from rtp_llm.utils.base_model_datatypes import MMUrlType
 
-        mm_input = SimpleNamespace(
+        item = SimpleNamespace(
             mm_type=MMUrlType.VIDEO,
             url="memory://video",
             mm_preprocess_config=SimpleNamespace(),
         )
-        vit_config = SimpleNamespace(
+        config = SimpleNamespace(
             download_headers={},
-            mm_image_max_file_size_kb=1024,
             mm_video_max_file_size_kb=2048,
+            mm_video_total_min_pixels=0,
+            mm_video_total_max_pixels=0,
         )
+        video = torch.zeros((3, 3, 10, 12))
         processor = SimpleNamespace(
             video_processor=MagicMock(
                 return_value={
                     "pixel_values_videos": torch.zeros((1, 3, 10, 12)),
-                    "video_grid_thw": torch.tensor([[1, 1, 1]]),
+                    "video_grid_thw": torch.tensor([[2, 1, 1]]),
                 }
             )
         )
-        processor.video_processor.size = {"longest_edge": 25165824}
-        video = torch.zeros((2, 3, 10, 12))
-
-        with patch.object(
-            qwen3_vl_mixin, "get_bytes_io_from_url", return_value=b"video"
-        ) as get_bytes, patch.object(
-            qwen3_vl_mixin.Qwen3_VLImageEmbedding,
-            "load_video",
-            return_value=video,
-        ) as load_video:
-            pixel_values, video_grid_thw = (
-                qwen3_vl_mixin.Qwen3_VLImageEmbedding.preprocess_input(
-                    [mm_input], vit_config, processor
+        processor.video_processor.size = {
+            "shortest_edge": 4096,
+            "longest_edge": 25165824,
+        }
+        with (
+            patch.object(
+                qwen3_vl_mixin, "get_bytes_io_from_url", return_value=b"video"
+            ) as fetch,
+            patch.object(
+                qwen3_vl_mixin, "decode_video", return_value=(video, None)
+            ) as decode,
+            patch.object(qwen3_vl_mixin, "resize_video", return_value=video) as resize,
+        ):
+            with collect_vit_preprocess_metrics() as metrics:
+                pixels, grid = qwen3_vl_mixin.Qwen3_VLImageEmbedding.preprocess_input(
+                    [item], config, processor
                 )
-            )
-
-        self.assertEqual(tuple(pixel_values.shape), (1, 3, 10, 12))
-        self.assertEqual(video_grid_thw.tolist(), [[1, 1, 1]])
-        get_bytes.assert_called_once_with(
-            "memory://video",
-            {},
-            max_file_size_kb=vit_config.mm_video_max_file_size_kb,
-        )
-        load_video.assert_called_once_with(
-            b"video",
-            mm_input.mm_preprocess_config,
-            vit_metrics_tags={"model": "qwen3_vl", "mm_type": "video"},
-            factor=32,
-            max_total_pixels=25165824,
+        self.assertEqual(grid.tolist(), [[2, 1, 1]])
+        fetch.assert_called_once_with("memory://video", {}, max_file_size_kb=2048)
+        decode.assert_called_once_with(b"video", item.mm_preprocess_config)
+        resize.assert_called_once_with(
+            video,
+            item.mm_preprocess_config,
+            processor.video_processor,
+            {"shortest_edge": 4096, "longest_edge": 25165824},
         )
         processor.video_processor.assert_called_once_with(
-            video, return_tensors="pt", do_resize=False, do_sample_frames=False
+            video,
+            return_tensors="pt",
+            do_resize=False,
+            do_sample_frames=False,
+            video_metadata=None,
+        )
+        samples = {sample.metric: sample for sample in metrics.samples}
+        for name in (
+            GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC,
+            GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC,
+            GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC,
+            GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC,
+            GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC,
+        ):
+            self.assertIn(name, samples)
+            self.assertEqual(
+                samples[name].tags, {"model": "qwen3_vl", "mm_type": "video"}
+            )
+        self.assertEqual(
+            samples[GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC].value, 3 * 10 * 12
         )
 
     def test_qwen3_image_preprocess_uses_image_media_tag(self):
@@ -113,9 +130,12 @@ class VitMetricsTest(TestCase):
             )
         )
 
-        with patch.object(
-            qwen3_vl_mixin, "get_bytes_io_from_url", return_value=b"image"
-        ) as get_bytes, patch.object(qwen3_vl_mixin.Image, "open", return_value=image):
+        with (
+            patch.object(
+                qwen3_vl_mixin, "get_bytes_io_from_url", return_value=b"image"
+            ) as get_bytes,
+            patch.object(qwen3_vl_mixin.Image, "open", return_value=image),
+        ):
             with collect_vit_preprocess_metrics() as metrics:
                 qwen3_vl_mixin.Qwen3_VLImageEmbedding.preprocess_input(
                     [mm_input], vit_config, processor
@@ -164,13 +184,16 @@ class VitMetricsTest(TestCase):
             }
         )
 
-        with patch.object(
-            qwen2_vl_mixin, "get_bytes_io_from_url", return_value=b"image"
-        ) as get_bytes, patch.object(
-            qwen2_vl_mixin.Qwen2_VLImageEmbedding,
-            "load_image",
-            return_value=image,
-        ) as load_image:
+        with (
+            patch.object(
+                qwen2_vl_mixin, "get_bytes_io_from_url", return_value=b"image"
+            ) as get_bytes,
+            patch.object(
+                qwen2_vl_mixin.Qwen2_VLImageEmbedding,
+                "load_image",
+                return_value=image,
+            ) as load_image,
+        ):
             with collect_vit_preprocess_metrics() as metrics:
                 qwen2_vl_mixin.Qwen2_VLImageEmbedding.preprocess_input(
                     [mm_input], vit_config, processor
@@ -218,13 +241,16 @@ class VitMetricsTest(TestCase):
             }
         )
 
-        with patch.object(
-            qwen2_5_vl_mixin, "get_bytes_io_from_url", return_value=b"image"
-        ) as get_bytes, patch.object(
-            qwen2_5_vl_mixin.Qwen2_VLImageEmbedding,
-            "load_image",
-            return_value=image,
-        ) as load_image:
+        with (
+            patch.object(
+                qwen2_5_vl_mixin, "get_bytes_io_from_url", return_value=b"image"
+            ) as get_bytes,
+            patch.object(
+                qwen2_5_vl_mixin.Qwen2_VLImageEmbedding,
+                "load_image",
+                return_value=image,
+            ) as load_image,
+        ):
             pixel_values, image_grid_thw = (
                 qwen2_5_vl_mixin.Qwen2_5_VLImageEmbedding.preprocess_input(
                     [mm_input], vit_config, processor
@@ -271,13 +297,16 @@ class VitMetricsTest(TestCase):
             }
         )
 
-        with patch.object(
-            qwen2_5_vl_mixin, "get_bytes_io_from_url", return_value=b"video"
-        ) as get_bytes, patch.object(
-            qwen2_5_vl_mixin.Qwen2_5_VLImageEmbedding,
-            "load_video",
-            return_value=video,
-        ) as load_video:
+        with (
+            patch.object(
+                qwen2_5_vl_mixin, "get_bytes_io_from_url", return_value=b"video"
+            ) as get_bytes,
+            patch.object(
+                qwen2_5_vl_mixin.Qwen2_5_VLImageEmbedding,
+                "load_video",
+                return_value=video,
+            ) as load_video,
+        ):
             pixel_values, video_grid_thw = (
                 qwen2_5_vl_mixin.Qwen2_5_VLImageEmbedding.preprocess_input(
                     [mm_input], vit_config, processor
@@ -348,14 +377,15 @@ class VitMetricsTest(TestCase):
         def fake_resize(video, size, interpolation=None, antialias=None):
             return torch.zeros((video.shape[0], 3, size[0], size[1]))
 
-        with patch.object(qwen2_vl_mixin, "VideoReader", FakeVideoReader), patch.object(
-            qwen2_vl_mixin, "cpu", lambda _: "cpu"
-        ), patch.object(
-            qwen2_vl_mixin, "smart_resize", return_value=(10, 12)
-        ), patch.object(
-            qwen2_vl_mixin.transforms.functional,
-            "resize",
-            side_effect=fake_resize,
+        with (
+            patch.object(qwen2_vl_mixin, "VideoReader", FakeVideoReader),
+            patch.object(qwen2_vl_mixin, "cpu", lambda _: "cpu"),
+            patch.object(qwen2_vl_mixin, "smart_resize", return_value=(10, 12)),
+            patch.object(
+                qwen2_vl_mixin.transforms.functional,
+                "resize",
+                side_effect=fake_resize,
+            ),
         ):
             with collect_vit_preprocess_metrics() as metrics:
                 video = Qwen2_VLImageEmbedding.load_video(b"video", Config())
@@ -419,14 +449,15 @@ class VitMetricsTest(TestCase):
         def fake_resize(video, size, interpolation=None, antialias=None):
             return torch.zeros((video.shape[0], 3, size[0], size[1]))
 
-        with patch.object(
-            qwen2_5_vl_mixin, "VideoReader", FakeVideoReader
-        ), patch.object(qwen2_5_vl_mixin, "cpu", lambda _: "cpu"), patch.object(
-            qwen2_5_vl_mixin, "smart_resize", return_value=(10, 12)
-        ), patch.object(
-            qwen2_5_vl_mixin.transforms.functional,
-            "resize",
-            side_effect=fake_resize,
+        with (
+            patch.object(qwen2_5_vl_mixin, "VideoReader", FakeVideoReader),
+            patch.object(qwen2_5_vl_mixin, "cpu", lambda _: "cpu"),
+            patch.object(qwen2_5_vl_mixin, "smart_resize", return_value=(10, 12)),
+            patch.object(
+                qwen2_5_vl_mixin.transforms.functional,
+                "resize",
+                side_effect=fake_resize,
+            ),
         ):
             with collect_vit_preprocess_metrics() as metrics:
                 video = Qwen2_5_VLImageEmbedding.load_video(

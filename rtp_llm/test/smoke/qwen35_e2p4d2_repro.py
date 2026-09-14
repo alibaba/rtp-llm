@@ -97,12 +97,19 @@ def main():
     parser.add_argument("--reserve-mb", type=int, default=24576)
     parser.add_argument("--p-token-budget", type=int, default=20000)
     parser.add_argument("--d-seq-limit", type=int, default=96)
-    parser.add_argument("--e-batch", type=int, default=1)
+    parser.add_argument(
+        "--e-batch",
+        type=int,
+        default=os.environ.get("VIT_GPU_MAX_BATCH_SIZE", "1"),
+        help="E batch request limit; overrides VIT_GPU_MAX_BATCH_SIZE (default: 1)",
+    )
     parser.add_argument("--fixed-tasks", type=int, default=0)
     parser.add_argument("--d-kv-mb", type=int, default=49152)
     parser.add_argument("--d-reserve-mb", type=int, default=8192)
     parser.add_argument("--long-repeats", type=int, default=3)
     a = parser.parse_args()
+    if a.e_batch <= 0:
+        parser.error("--e-batch / VIT_GPU_MAX_BATCH_SIZE must be positive")
     a.graph_diagnostic = False
     a.runtime_diagnostic = False
     from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
@@ -125,7 +132,7 @@ def main():
     os.environ["TEST_UNDECLARED_OUTPUTS_DIR"] = str(O)
     os.environ["OMP_NUM_THREADS"] = "8"
     assert sorted(get_gpu_ids()) == [0, 1, 2, 3, 4, 5, 6, 7], get_gpu_ids()
-    max_seq = (30720, max_seq)
+    max_seq = 30720
     roles = [
         ("vit0", [5], "VIT"),
         ("vit1", [0], "VIT"),
@@ -183,8 +190,8 @@ def main():
             "ROLE_TYPE": role,
             "VIT_SEPARATION": "1" if role == "VIT" else "2",
             "MODEL_SERVICE_CONFIG": route,
-            "QWEN35_BENCH_NATIVE_VIDEO": "1",
-            "QWEN35_BENCH_VIDEO_AUDIT": str(O / (name + "-video-audit.jsonl")),
+            "MM_VIDEO_TOTAL_MIN_PIXELS": "2500000",
+            "MM_VIDEO_TOTAL_MAX_PIXELS": "73728000",
             "MM_CACHE_ITEM_NUM": "0",
             "URL_CACHE_ITEM_NUM": "0",
             "REUSE_CACHE": "0",
@@ -200,10 +207,12 @@ def main():
                 ),
             )
         if role == "VIT":
-            args = (
-                "--use_local 1 --role_type VIT --vit_separation 1 --vit_server_count 1 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --act_type BF16 --warm_up 0 --concurrency_limit 96 --mm_cache_item_num 0 --url_cache_item_num 0 --gpu_max_batch_size "
-                + str(a.e_batch)
+            env.update(
+                QWEN35_VIDEO_BACKEND="nvdec",
+                QWEN35_VIT_ATTN_BACKEND="fa4",
+                VIT_GPU_MAX_BATCH_SIZE=str(a.e_batch),
             )
+            args = "--use_local 1 --role_type VIT --vit_separation 1 --vit_server_count 1 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --act_type BF16 --warm_up 0 --concurrency_limit 96 --mm_cache_item_num 0 --url_cache_item_num 0"
         else:
             args = (
                 common
@@ -250,6 +259,11 @@ def main():
         for item in message.get("content", []):
             if item.get("type") == "video_url":
                 item["video_url"]["url"] = str(data / "video.mp4")
+                item["preprocess_config"] = {
+                    "fps": 6,
+                    "min_frames": 4,
+                    "max_frames": 180,
+                }
     payload = {
         "model": "qwen35",
         "messages": messages,
