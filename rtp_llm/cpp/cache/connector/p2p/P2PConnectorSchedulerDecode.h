@@ -86,11 +86,10 @@ private:
     /// logical_count 恒取全序列 cache_keys 数量；block_range 只作为额外的窗口裁剪叠加在
     /// resolveKeys 结果之上 —— prefill 侧不知道 block_range，若两侧用不同的 count，
     /// include_final_key 与 tail_count 会算出不同的键。
-    P2PBroadcastClient::RankRoutes buildDecodeRankRoutes(const TransferPlan&        plan,
-                                                        KVCacheResource&           resource,
-                                                        const std::pair<int, int>& block_range,
-                                                        size_t                     worker_num,
-                                                        ErrorInfo*                 error_info = nullptr) const;
+    ErrorResult<P2PBroadcastClient::RankRoutes> buildDecodeRankRoutes(const TransferPlan&        plan,
+                                                                      KVCacheResource&           resource,
+                                                                      const std::pair<int, int>& block_range,
+                                                                      size_t                     worker_num) const;
 
 private:
     const P2PConnectorSchedulerConfig                    config_;

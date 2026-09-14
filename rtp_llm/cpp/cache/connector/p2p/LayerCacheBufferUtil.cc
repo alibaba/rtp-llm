@@ -1,333 +1,268 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
-#include "rtp_llm/cpp/utils/Logger.h"
 #include <algorithm>
+#include <exception>
+#include <utility>
 
 namespace rtp_llm {
-
 namespace {
-
-void setConversionError(ErrorInfo* error_info, const std::string& message) {
-    if (error_info == nullptr || error_info->hasError()) {
-        return;
-    }
-    *error_info = ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
-                            "LayerCacheBuffer conversion failed: " + message);
+ErrorInfo conversionError(const std::string& message) {
+    return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                     "LayerCacheBuffer conversion failed: " + message);
 }
 
-std::string bufferContext(const LayerCacheBuffer& layer_cache_buffer, int64_t cache_key, int32_t block_id) {
-    return "layer=" + std::to_string(layer_cache_buffer.getLayerId()) + " tag=" + layer_cache_buffer.cacheTag()
-           + " cache_key=" + std::to_string(cache_key) + " block_id=" + std::to_string(block_id);
+std::string bufferContext(const LayerCacheBuffer& buffer, int64_t key, int32_t block_id) {
+    return "layer=" + std::to_string(buffer.getLayerId()) + " tag=" + buffer.cacheTag()
+           + " cache_key=" + std::to_string(key) + " block_id=" + std::to_string(block_id);
 }
-
 }  // namespace
 
-std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(KVCacheResource&     resource,
-                                                                             const CacheTopology& topology,
-                                                                             int                  start_block_idx,
-                                                                             int                  block_count,
-                                                                             int                  cp_rank,
-                                                                             int                  cp_size) {
+ErrorResult<std::vector<std::shared_ptr<LayerCacheBuffer>>> LayerCacheBufferUtil::convert(KVCacheResource&     resource,
+                                                                                          const CacheTopology& topology,
+                                                                                          int start_block_idx,
+                                                                                          int block_count,
+                                                                                          int cp_rank,
+                                                                                          int cp_size) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> result;
     for (const auto& layer : topology.layers()) {
-        auto layer_buffers =
-            convertLayer(resource, topology, layer.layer_id, start_block_idx, block_count, cp_rank, cp_size);
-        result.insert(result.end(), layer_buffers.begin(), layer_buffers.end());
-    }
-    return result;
-}
-
-std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convertLayer(
-    KVCacheResource& resource,
-    const CacheTopology& topology,
-    int layer_id,
-    int start_block_idx,
-    int block_count,
-    int cp_rank,
-    int cp_size) {
-    std::vector<std::shared_ptr<LayerCacheBuffer>> result;
-    for (const auto& group_ref : topology.groupsForLayer(layer_id)) {
-        auto buffer =
-            convertLayerTag(resource, group_ref.get(), layer_id, start_block_idx, block_count, cp_rank, cp_size);
-        if (buffer) {
+        auto buffers = convertLayer(resource, topology, layer.layer_id, start_block_idx, block_count, cp_rank, cp_size);
+        if (!buffers.ok()) {
+            return buffers.status();
+        }
+        for (auto& buffer : buffers.value()) {
             result.push_back(std::move(buffer));
         }
     }
-    return result;
+    return std::move(result);
 }
 
-std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayerTag(KVCacheResource& resource,
-                                                                        const GroupBase&  group,
-                                                                        int               layer_id,
-                                                                        int               start_block_idx,
-                                                                        int               block_count,
-                                                                        int               cp_rank,
-                                                                        int               cp_size) {
-    const auto& cache_keys = resource.cacheKeys();
-    if (start_block_idx < 0 || block_count == 0 || block_count < -1
-        || static_cast<size_t>(start_block_idx) >= cache_keys.size()) {
-        return nullptr;
+ErrorResult<std::vector<std::shared_ptr<LayerCacheBuffer>>>
+LayerCacheBufferUtil::convertLayer(KVCacheResource&     resource,
+                                   const CacheTopology& topology,
+                                   int                  layer_id,
+                                   int                  start_block_idx,
+                                   int                  block_count,
+                                   int                  cp_rank,
+                                   int                  cp_size) {
+    std::vector<std::shared_ptr<LayerCacheBuffer>> result;
+    if (layer_id < 0 || static_cast<size_t>(layer_id) >= topology.layers().size()) {
+        return conversionError("layer=" + std::to_string(layer_id) + ": invalid layer");
     }
-
-    size_t       logical_begin = static_cast<size_t>(start_block_idx);
-    const size_t logical_end   = block_count > 0 ?
-                                     std::min(cache_keys.size(), logical_begin + static_cast<size_t>(block_count)) :
-                                     cache_keys.size();
-    if (group.policy.active_tail_blocks > 0) {
-        const size_t tail_count = static_cast<size_t>(group.policy.active_tail_blocks);
-        logical_begin           = std::max(logical_begin, logical_end > tail_count ? logical_end - tail_count : 0);
-    }
-    const auto& block_ids = resource.blocksForLayer(layer_id, group.tag);
-    auto buffer = std::make_shared<LayerCacheBuffer>(layer_id, group.tag);
-    for (size_t logical_pos = logical_begin; logical_pos < logical_end; ++logical_pos) {
-        const auto physical_pos =
-            CPSlotMapper::physicalBlockPosition(group.policy, logical_pos, cache_keys.size(), cp_rank, cp_size);
-        if (!physical_pos || *physical_pos >= block_ids.size() || isNullBlockIdx(block_ids[*physical_pos])) {
-            continue;
+    for (const auto& group : topology.groupsForLayer(layer_id)) {
+        auto buffer = convertLayerTag(resource, group.get(), layer_id, start_block_idx, block_count, cp_rank, cp_size);
+        if (!buffer.ok()) {
+            return buffer.status();
         }
-        buffer->addBlockId(cache_keys[logical_pos], block_ids[*physical_pos]);
+        if (buffer.value()) {
+            result.push_back(std::move(buffer.value()));
+        }
     }
-    return buffer->blockIdMap().empty() ? nullptr : buffer;
+    return std::move(result);
 }
 
-std::shared_ptr<LayerCacheBuffer>
+ErrorResult<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convertLayerTag(KVCacheResource& resource,
+                                                                                     const GroupBase& group,
+                                                                                     int              layer_id,
+                                                                                     int              start_block_idx,
+                                                                                     int              block_count,
+                                                                                     int              cp_rank,
+                                                                                     int              cp_size) {
+    const size_t      count   = resource.cacheKeys().size();
+    const std::string context = "layer=" + std::to_string(layer_id) + " tag=" + group.tag;
+    if (cp_size <= 0 || cp_rank < 0 || cp_rank >= cp_size || start_block_idx < 0 || block_count < -1
+        || static_cast<size_t>(start_block_idx) > count) {
+        return conversionError(context + ": invalid range or CP rank/size");
+    }
+    size_t begin = static_cast<size_t>(start_block_idx);
+    if (block_count > 0 && static_cast<size_t>(block_count) > count - begin) {
+        return conversionError(context + ": requested block range exceeds cache keys");
+    }
+    const size_t end = block_count >= 0 ? begin + static_cast<size_t>(block_count) : count;
+    if (group.policy.active_tail_blocks > 0) {
+        const size_t tail = static_cast<size_t>(group.policy.active_tail_blocks);
+        begin             = std::max(begin, end > tail ? end - tail : 0);
+    }
+    std::vector<size_t> positions;
+    for (size_t pos = begin; pos < end; ++pos) {
+        // Select ownership first. A block outside this CP projection is not missing.
+        if (CPSlotMapper::physicalBlockPosition(group.policy, pos, count, cp_rank, cp_size)) {
+            positions.push_back(pos);
+        }
+    }
+    return convertLayerTagForRoute(resource, group, layer_id, positions, cp_rank, cp_size);
+}
+
+ErrorResult<std::shared_ptr<LayerCacheBuffer>>
 LayerCacheBufferUtil::convertLayerTagForRoute(KVCacheResource&           resource,
                                               const GroupBase&           group,
                                               int                        layer_id,
                                               const std::vector<size_t>& logical_positions,
                                               int                        cp_rank,
-                                              int                        cp_size,
-                                              ErrorInfo*                 error_info) {
-    const auto& cache_keys = resource.cacheKeys();
-    if (logical_positions.empty() || cache_keys.empty()) {
-        return nullptr;
+                                              int                        cp_size) {
+    const std::string context = "layer=" + std::to_string(layer_id) + " tag=" + group.tag;
+    if (cp_size <= 0 || cp_rank < 0 || cp_rank >= cp_size) {
+        return conversionError(context + ": invalid CP rank/size");
     }
-    const auto& block_ids = resource.blocksForLayer(layer_id, group.tag);
-    auto        buffer    = std::make_shared<LayerCacheBuffer>(layer_id, group.tag);
-
-    // 注意：这里**不**施加 group.policy.active_tail_blocks —— logical_positions 已由
-    // KVCacheTransferPlanner::resolveKeys 按编排层统一算出的 tail_count 裁剪过。
-    for (size_t logical_pos : logical_positions) {
-        if (logical_pos >= cache_keys.size()) {
-            setConversionError(error_info,
-                               "layer=" + std::to_string(layer_id) + " tag=" + group.tag
-                                   + " logical_pos=" + std::to_string(logical_pos)
-                                   + " cache_key=<missing> block_id=<missing>: logical position is out of range");
-            return nullptr;
-        }
-        const auto physical_pos =
-            CPSlotMapper::physicalBlockPosition(group.policy, logical_pos, cache_keys.size(), cp_rank, cp_size);
-        if (!physical_pos) {
-            setConversionError(error_info,
-                               "layer=" + std::to_string(layer_id) + " tag=" + group.tag
-                                   + " logical_pos=" + std::to_string(logical_pos)
-                                   + " cache_key=" + std::to_string(cache_keys[logical_pos])
-                                   + " block_id=<missing>: route has no local physical position");
-            return nullptr;
-        }
-        if (*physical_pos >= block_ids.size()) {
-            setConversionError(error_info,
-                               "layer=" + std::to_string(layer_id) + " tag=" + group.tag
-                                   + " logical_pos=" + std::to_string(logical_pos)
-                                   + " cache_key=" + std::to_string(cache_keys[logical_pos])
-                                   + " block_id=<missing>: physical position=" + std::to_string(*physical_pos)
-                                   + " exceeds block count=" + std::to_string(block_ids.size()));
-            return nullptr;
-        }
-        if (isNullBlockIdx(block_ids[*physical_pos])) {
-            setConversionError(error_info,
-                               "layer=" + std::to_string(layer_id) + " tag=" + group.tag
-                                   + " logical_pos=" + std::to_string(logical_pos)
-                                   + " cache_key=" + std::to_string(cache_keys[logical_pos])
-                                   + " block_id=" + std::to_string(block_ids[*physical_pos])
-                                   + ": route resolved to a null block");
-            return nullptr;
-        }
-        buffer->addBlockId(cache_keys[logical_pos], block_ids[*physical_pos]);
+    if (logical_positions.empty()) {
+        return std::shared_ptr<LayerCacheBuffer>{};
     }
-    if (buffer->blockIdMap().empty()) {
-        setConversionError(error_info,
-                           "layer=" + std::to_string(layer_id) + " tag=" + group.tag
-                               + ": non-empty route resolved to an empty block set");
-        return nullptr;
+    try {
+        const auto& keys   = resource.cacheKeys();
+        const auto& blocks = resource.blocksForLayer(layer_id, group.tag);
+        auto        buffer = std::make_shared<LayerCacheBuffer>(layer_id, group.tag);
+        // Route positions already include planner tail/window filtering. Never filter again here.
+        for (size_t pos : logical_positions) {
+            const std::string pos_context = context + " logical_pos=" + std::to_string(pos);
+            if (pos >= keys.size()) {
+                return conversionError(pos_context
+                                       + " cache_key=<missing> block_id=<missing>: logical position out of range");
+            }
+            const auto physical = CPSlotMapper::physicalBlockPosition(group.policy, pos, keys.size(), cp_rank, cp_size);
+            const std::string key_context = pos_context + " cache_key=" + std::to_string(keys[pos]);
+            if (!physical || *physical >= blocks.size()) {
+                return conversionError(key_context + " block_id=<missing> physical_pos="
+                                       + (physical ? std::to_string(*physical) : "<missing>")
+                                       + ": required physical block is missing");
+            }
+            if (isNullBlockIdx(blocks[*physical]) || blocks[*physical] < 0) {
+                return conversionError(key_context + " block_id=" + std::to_string(blocks[*physical])
+                                       + ": null/invalid block");
+            }
+            if (buffer->blockIdMap().count(keys[pos])) {
+                return conversionError(bufferContext(*buffer, keys[pos], blocks[*physical]) + ": duplicate cache key");
+            }
+            buffer->addBlockId(keys[pos], blocks[*physical]);
+        }
+        if (buffer->blockIdMap().size() != logical_positions.size()) {
+            return conversionError(context + ": incomplete route key set");
+        }
+        return std::move(buffer);
+    } catch (const std::exception& error) {
+        return conversionError(context + ": " + error.what());
     }
-    return buffer;
 }
 
-std::vector<std::shared_ptr<LayerCacheBuffer>>
+ErrorResult<std::vector<std::shared_ptr<LayerCacheBuffer>>>
 LayerCacheBufferUtil::convertTagForRoute(KVCacheResource&           resource,
                                          const CacheTopology&       topology,
                                          const std::string&         cache_tag,
-                                         const std::vector<size_t>& logical_positions,
+                                         const std::vector<size_t>& positions,
                                          int                        cp_rank,
-                                         int                        cp_size,
-                                         ErrorInfo*                 error_info) {
+                                         int                        cp_size) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> result;
-    if (logical_positions.empty()) {
-        return result;
+    if (positions.empty()) {
+        return std::move(result);
     }
-    const auto& group = topology.group(cache_tag);
-    for (int layer_id : group.layer_ids) {
-        auto buffer =
-            convertLayerTagForRoute(resource, group, layer_id, logical_positions, cp_rank, cp_size, error_info);
-        if (error_info != nullptr && error_info->hasError()) {
-            return {};
-        }
-        if (buffer) {
-            result.push_back(std::move(buffer));
-        } else {
-            setConversionError(error_info,
-                               "layer=" + std::to_string(layer_id) + " tag=" + cache_tag
-                                   + ": non-empty route resolved to an empty block set");
-            return {};
-        }
+    const auto group = std::find_if(
+        topology.groups().begin(), topology.groups().end(), [&](const auto& entry) { return entry.tag == cache_tag; });
+    if (group == topology.groups().end() || group->layer_ids.empty()) {
+        return conversionError("tag=" + cache_tag + ": non-empty route has no topology layers");
     }
-    return result;
+    for (int layer_id : group->layer_ids) {
+        auto buffer = convertLayerTagForRoute(resource, *group, layer_id, positions, cp_rank, cp_size);
+        if (!buffer.ok()) {
+            return buffer.status();
+        }
+        result.push_back(std::move(buffer.value()));
+    }
+    return std::move(result);
 }
 
-transfer::KeyBlockInfoMap
+ErrorResult<transfer::KeyBlockInfoMap>
 LayerCacheBufferUtil::buildKeyBlockInfos(const std::shared_ptr<LayerBlockConverter>& converter,
-                                         const std::shared_ptr<LayerCacheBuffer>&    layer_cache_buffer,
+                                         const std::shared_ptr<LayerCacheBuffer>&    buffer,
                                          int                                         partition_count,
-                                         int                                         partition_id,
-                                         ErrorInfo*                                  error_info) {
-    transfer::KeyBlockInfoMap key_block_infos;
-    if (!converter || !layer_cache_buffer) {
-        setConversionError(error_info, "layer buffer converter or buffer is null");
-        return key_block_infos;
+                                         int                                         partition_id) {
+    if (!converter || !buffer) {
+        return conversionError("layer/tag/cache_key/block_id=<missing>: null converter or layer buffer");
     }
-    if (layer_cache_buffer->blockIdMap().empty()) {
-        setConversionError(error_info,
-                           "layer=" + std::to_string(layer_cache_buffer->getLayerId())
-                               + " tag=" + layer_cache_buffer->cacheTag() + ": empty block map");
-        return key_block_infos;
+    const std::string context = "layer=" + std::to_string(buffer->getLayerId()) + " tag=" + buffer->cacheTag();
+    if (partition_count <= 0 || partition_id < 0 || partition_id >= partition_count) {
+        return conversionError(context + ": invalid head partition count=" + std::to_string(partition_count)
+                               + " id=" + std::to_string(partition_id));
     }
-    int                       layer_id = layer_cache_buffer->getLayerId();
-
-    for (const auto& [cache_key, block_id] : layer_cache_buffer->blockIdMap()) {
-        auto block_infos = converter->convertIndexToBuffer(
-            layer_id, layer_cache_buffer->cacheTag(), block_id, partition_count, partition_id);
-        if (block_infos.empty()) {
-            setConversionError(error_info,
-                               bufferContext(*layer_cache_buffer, cache_key, block_id)
-                                   + ": converter returned no block info");
-            return {};
+    if (buffer->blockIdMap().empty()) {
+        return conversionError(context + ": empty required block map");
+    }
+    transfer::KeyBlockInfoMap result;
+    for (const auto& [key, block_id] : buffer->blockIdMap()) {
+        const auto key_context = bufferContext(*buffer, key, block_id);
+        if (block_id < 0 || isNullBlockIdx(block_id)) {
+            return conversionError(key_context + ": null/invalid block");
         }
-        for (const auto& block : block_infos) {
-            if (block.addr == nullptr || block.size_bytes == 0) {
-                setConversionError(error_info,
-                                   bufferContext(*layer_cache_buffer, cache_key, block_id)
-                                       + ": converter returned an invalid block info");
-                return {};
+        std::vector<BlockInfo> parts;
+        try {
+            parts = converter->convertIndexToBuffer(
+                buffer->getLayerId(), buffer->cacheTag(), block_id, partition_count, partition_id);
+        } catch (const std::exception& error) {
+            return conversionError(key_context + ": " + error.what());
+        }
+        if (parts.empty()) {
+            return conversionError(key_context + ": converter returned no block info");
+        }
+        for (const auto& part : parts) {
+            if (!part.addr || part.size_bytes == 0) {
+                return conversionError(key_context + ": converter returned an invalid block info");
             }
         }
-
-        transfer::KeyBlockInfo kbi;
-        kbi.cache_key              = cache_key;
-        kbi.blocks                 = std::move(block_infos);
-        key_block_infos[cache_key] = std::make_shared<const transfer::KeyBlockInfo>(std::move(kbi));
+        transfer::KeyBlockInfo info;
+        info.cache_key = key;
+        info.blocks    = std::move(parts);
+        result.emplace(key, std::make_shared<const transfer::KeyBlockInfo>(std::move(info)));
     }
-    if (key_block_infos.size() != layer_cache_buffer->blockIdMap().size()) {
-        setConversionError(error_info,
-                           "layer=" + std::to_string(layer_id) + " tag=" + layer_cache_buffer->cacheTag()
-                               + ": converted key count=" + std::to_string(key_block_infos.size())
-                               + " differs from source key count="
-                               + std::to_string(layer_cache_buffer->blockIdMap().size()));
-        return {};
-    }
-    return key_block_infos;
+    return std::move(result);
 }
 
-transfer::KeyBlockInfoMap
+ErrorResult<transfer::KeyBlockInfoMap>
 LayerCacheBufferUtil::buildKeyBlockInfosSliced(const std::shared_ptr<LayerBlockConverter>& converter,
-                                               const std::shared_ptr<LayerCacheBuffer>&    layer_cache_buffer,
+                                               const std::shared_ptr<LayerCacheBuffer>&    buffer,
                                                int                                         partition_count,
                                                int                                         partition_id,
                                                const SliceSpec&                            slice,
-                                               size_t                                      k_block_payload_bytes,
-                                               ErrorInfo*                                  error_info) {
-    if (slice.mode == CpBlockSliceMode::NONE || slice.count <= 1) {
-        return buildKeyBlockInfos(converter, layer_cache_buffer, partition_count, partition_id, error_info);
+                                               size_t                                      payload_bytes) {
+    const std::string context =
+        buffer ? "layer=" + std::to_string(buffer->getLayerId()) + " tag=" + buffer->cacheTag() : "layer/tag=<missing>";
+    if (slice.count <= 0 || slice.index < 0 || slice.index >= slice.count
+        || (slice.mode != CpBlockSliceMode::NONE && slice.mode != CpBlockSliceMode::EQUAL_BYTES
+            && slice.mode != CpBlockSliceMode::PAYLOAD_BYTES)
+        || (slice.mode == CpBlockSliceMode::NONE && slice.count != 1) || (slice.count > 1 && partition_count != 1)) {
+        return conversionError(context
+                               + ": invalid/incompatible slice mode=" + std::to_string(static_cast<int>(slice.mode))
+                               + " count=" + std::to_string(slice.count) + " index=" + std::to_string(slice.index)
+                               + " partition_count=" + std::to_string(partition_count));
     }
-
-    transfer::KeyBlockInfoMap key_block_infos;
-    if (!converter || !layer_cache_buffer) {
-        setConversionError(error_info, "layer buffer converter or buffer is null");
-        return key_block_infos;
+    auto blocks = buildKeyBlockInfos(converter, buffer, partition_count, partition_id);
+    if (!blocks.ok() || slice.mode == CpBlockSliceMode::NONE || slice.count == 1) {
+        return blocks;
     }
-    if (layer_cache_buffer->blockIdMap().empty()) {
-        setConversionError(error_info,
-                           "layer=" + std::to_string(layer_cache_buffer->getLayerId())
-                               + " tag=" + layer_cache_buffer->cacheTag() + ": empty block map");
-        return key_block_infos;
-    }
-    const int                 layer_id    = layer_cache_buffer->getLayerId();
-    const size_t              slice_count = static_cast<size_t>(slice.count);
-    const size_t              slice_index = static_cast<size_t>(std::max(0, slice.index));
-
-    for (const auto& [cache_key, block_id] : layer_cache_buffer->blockIdMap()) {
-        auto block_infos = converter->convertIndexToBuffer(
-            layer_id, layer_cache_buffer->cacheTag(), block_id, partition_count, partition_id);
-        // sliceBlockForPeer 的前提：被切的 block 必须是单一 BlockInfo。planner 的 Step 1
-        // 已用「cp_slice 与 head 分片互斥」保证了这一点；不满足直接失败，不能以缺 key
-        // 的请求继续注册传输任务。
-        if (block_infos.size() != 1) {
-            setConversionError(error_info,
-                               bufferContext(*layer_cache_buffer, cache_key, block_id)
-                                   + ": expected one block part for CP slice, got "
-                                   + std::to_string(block_infos.size()));
-            return {};
+    const size_t              count = static_cast<size_t>(slice.count);
+    const size_t              index = static_cast<size_t>(slice.index);
+    transfer::KeyBlockInfoMap result;
+    for (const auto& [key, info] : blocks.value()) {
+        const auto key_context = bufferContext(*buffer, key, buffer->getBlockId(key));
+        if (info->blocks.size() != 1) {
+            return conversionError(key_context + ": expected one block part for CP slice");
         }
-        auto& block = block_infos[0];
-
-        // 分母必须与 CPSlotMapper::sliceBlockForPeer 一致。
-        size_t slice_bytes = 0;
-        if (slice.mode == CpBlockSliceMode::PAYLOAD_BYTES) {
-            if (k_block_payload_bytes == 0 || k_block_payload_bytes % slice_count != 0) {
-                setConversionError(error_info,
-                                   bufferContext(*layer_cache_buffer, cache_key, block_id)
-                                       + ": payload bytes=" + std::to_string(k_block_payload_bytes)
-                                       + " is not divisible by slice count=" + std::to_string(slice_count));
-                return {};
-            }
-            slice_bytes = k_block_payload_bytes / slice_count;
-        } else {
-            if (block.size_bytes % slice_count != 0) {
-                setConversionError(error_info,
-                                   bufferContext(*layer_cache_buffer, cache_key, block_id)
-                                       + ": block bytes=" + std::to_string(block.size_bytes)
-                                       + " is not divisible by slice count=" + std::to_string(slice_count));
-                return {};
-            }
-            slice_bytes = block.size_bytes / slice_count;
+        auto         part  = info->blocks.front();
+        const size_t bytes = slice.mode == CpBlockSliceMode::PAYLOAD_BYTES ? payload_bytes : part.size_bytes;
+        if (bytes == 0 || bytes > part.size_bytes || bytes % count != 0) {
+            return conversionError(key_context + ": invalid slice bytes=" + std::to_string(bytes) + " block_bytes="
+                                   + std::to_string(part.size_bytes) + " count=" + std::to_string(count));
         }
-        const size_t slice_offset = slice_bytes * slice_index;
-        if (block.addr == nullptr || slice_offset + slice_bytes > block.size_bytes) {
-            setConversionError(error_info,
-                               bufferContext(*layer_cache_buffer, cache_key, block_id)
-                                   + ": slice [" + std::to_string(slice_offset) + ",+"
-                                   + std::to_string(slice_bytes) + ") exceeds block bytes="
-                                   + std::to_string(block.size_bytes));
-            return {};
+        const size_t size = bytes / count;
+        // index < count and bytes <= block size guarantee both operations cannot overflow.
+        const size_t offset = size * index;
+        if (offset > part.size_bytes || size > part.size_bytes - offset) {
+            return conversionError(key_context + ": slice out of bounds");
         }
-        block.addr       = static_cast<char*>(block.addr) + slice_offset;
-        block.size_bytes = slice_bytes;
-
-        transfer::KeyBlockInfo kbi;
-        kbi.cache_key              = cache_key;
-        kbi.blocks                 = std::move(block_infos);
-        key_block_infos[cache_key] = std::make_shared<const transfer::KeyBlockInfo>(std::move(kbi));
+        part.addr       = static_cast<char*>(part.addr) + offset;
+        part.size_bytes = size;
+        transfer::KeyBlockInfo sliced;
+        sliced.cache_key = key;
+        sliced.blocks.push_back(part);
+        result.emplace(key, std::make_shared<const transfer::KeyBlockInfo>(std::move(sliced)));
     }
-    if (key_block_infos.size() != layer_cache_buffer->blockIdMap().size()) {
-        setConversionError(error_info,
-                           "layer=" + std::to_string(layer_id) + " tag=" + layer_cache_buffer->cacheTag()
-                               + ": converted key count=" + std::to_string(key_block_infos.size())
-                               + " differs from source key count="
-                               + std::to_string(layer_cache_buffer->blockIdMap().size()));
-        return {};
-    }
-    return key_block_infos;
+    return std::move(result);
 }
-
 }  // namespace rtp_llm

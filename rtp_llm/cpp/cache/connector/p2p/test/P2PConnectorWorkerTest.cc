@@ -1776,34 +1776,42 @@ protected:
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_StartIdxEqualActualCount) {
     auto resource = createResource(2, 3);
     // start_block_idx == actual_block_count (3) -> out of range
-    auto buffers = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, 3, -1);
+    auto converted = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, 3, -1);
+    ASSERT_TRUE(converted.ok()) << converted.status().ToString();
+    const auto& buffers = converted.value();
     EXPECT_TRUE(buffers.empty());
 }
 
-TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_StartIdxGreaterThanActualCount) {
+TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnError_StartIdxGreaterThanActualCount) {
     auto resource = createResource(2, 3);
     // start_block_idx > actual_block_count
     auto buffers = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, 10, -1);
-    EXPECT_TRUE(buffers.empty());
+    EXPECT_FALSE(buffers.ok());
+    EXPECT_TRUE(buffers.value().empty());
 }
 
-TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_BlockCountLessThanNegativeOne) {
+TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnError_BlockCountLessThanNegativeOne) {
     auto resource = createResource(2, 3);
     // block_count < -1 is undefined/illegal
     auto buffers = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, 0, -2);
-    EXPECT_TRUE(buffers.empty());
+    EXPECT_FALSE(buffers.ok());
+    EXPECT_TRUE(buffers.value().empty());
 }
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_BlockCountZero) {
     auto resource = createResource(2, 3);
-    auto buffers = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, 0, 0);
+    auto converted = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, 0, 0);
+    ASSERT_TRUE(converted.ok()) << converted.status().ToString();
+    const auto& buffers = converted.value();
     EXPECT_TRUE(buffers.empty());
 }
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnPartial_BlockCountLimitsResult) {
     auto resource = createResource(2, 4);
     // start=1, count=2 -> should return 2 blocks
-    auto buffers = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, 1, 2);
+    auto converted = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, 1, 2);
+    ASSERT_TRUE(converted.ok()) << converted.status().ToString();
+    const auto& buffers = converted.value();
     ASSERT_EQ(buffers.size(), 1u);
     auto buf = buffers.front();
     EXPECT_EQ(static_cast<int>(buf->blockIdMap().size()), 2);
@@ -1812,16 +1820,19 @@ TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnPartial_BlockCountLimitsResu
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnAll_BlockCountNegativeOne) {
     auto resource = createResource(2, 3);
     // block_count=-1 means "all remaining"
-    auto buffers = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, 0, -1);
+    auto converted = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, 0, -1);
+    ASSERT_TRUE(converted.ok()) << converted.status().ToString();
+    const auto& buffers = converted.value();
     ASSERT_EQ(buffers.size(), 1u);
     auto buf = buffers.front();
     EXPECT_EQ(static_cast<int>(buf->blockIdMap().size()), 3);
 }
 
-TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_StartIdxNegative) {
+TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnError_StartIdxNegative) {
     auto resource = createResource(2, 3);
     auto buffers = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, -1, -1);
-    EXPECT_TRUE(buffers.empty());
+    EXPECT_FALSE(buffers.ok());
+    EXPECT_TRUE(buffers.value().empty());
 }
 
 }  // namespace test

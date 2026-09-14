@@ -332,7 +332,9 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_FiltersLinearLayersByAttentionType)
     resource->mutableBlockIds(1).assign({NULL_BLOCK_IDX, 21, NULL_BLOCK_IDX, 25});
     resource->cacheKeys() = {1000, 1001, 1002, 1003};
 
-    const auto layer_buffers = LayerCacheBufferUtil::convert(*resource, *topology);
+    auto converted = LayerCacheBufferUtil::convert(*resource, *topology);
+    ASSERT_TRUE(converted.ok()) << converted.status().ToString();
+    const auto& layer_buffers = converted.value();
     ASSERT_EQ(layer_buffers.size(), 2);
     EXPECT_EQ(layer_buffers[0]->blockIdMap().size(), 4);
     ASSERT_EQ(layer_buffers[1]->blockIdMap().size(), 1);

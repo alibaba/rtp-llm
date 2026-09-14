@@ -1,7 +1,9 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <atomic>
+#include <functional>
 #include <condition_variable>
 #include <map>
 #include <mutex>
@@ -29,6 +31,10 @@ public:
     /// @brief 阻塞等待层数变化，直到超过 last_layer_num 或 timeout_ms 超时
     void waitChange(int last_layer_num, int timeout_ms);
 
+    void      setError(const ErrorInfo& error);
+    ErrorInfo error() const;
+    void      setErrorHandler(std::function<void(const ErrorInfo&)> handler);
+
     int64_t deadlineMs() const {
         return deadline_ms_.load(std::memory_order_relaxed);
     }
@@ -38,7 +44,9 @@ private:
     std::map<std::string, std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers_;
     std::atomic<int64_t>                             deadline_ms_;
 
-    std::mutex              mutex_;
+    std::function<void(const ErrorInfo&)> error_handler_;
+    ErrorInfo                             error_;
+    mutable std::mutex                    mutex_;
     std::condition_variable condition_variable_;
 };
 

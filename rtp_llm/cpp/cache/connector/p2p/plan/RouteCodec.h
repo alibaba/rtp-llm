@@ -57,21 +57,20 @@ public:
         out.route_id    = pb.route_id();
         out.cache_tag   = pb.cache_tag();
         out.peer_index  = pb.peer_index();
-        out.partition   = PartitionSpec{pb.partition_count() > 0 ? pb.partition_count() : 1, pb.partition_id()};
-        out.slice       = SliceSpec{toSliceMode(pb.slice_mode()),
-                                    pb.slice_count() > 0 ? pb.slice_count() : 1,
-                                    pb.slice_index()};
+        out.partition   = PartitionSpec{pb.partition_count(), pb.partition_id()};
+        out.slice       = SliceSpec{toSliceMode(pb.slice_mode()), pb.slice_count(), pb.slice_index()};
         return out;
     }
 
     static CpBlockSliceMode toSliceMode(int32_t raw) {
+        // CpBlockSliceMode is int8_t: narrowing an unknown int32 could produce a valid mode.
         switch (raw) {
+            case static_cast<int32_t>(CpBlockSliceMode::NONE):
             case static_cast<int32_t>(CpBlockSliceMode::EQUAL_BYTES):
-                return CpBlockSliceMode::EQUAL_BYTES;
             case static_cast<int32_t>(CpBlockSliceMode::PAYLOAD_BYTES):
-                return CpBlockSliceMode::PAYLOAD_BYTES;
+                return static_cast<CpBlockSliceMode>(raw);
             default:
-                return CpBlockSliceMode::NONE;
+                return static_cast<CpBlockSliceMode>(-1);
         }
     }
 };

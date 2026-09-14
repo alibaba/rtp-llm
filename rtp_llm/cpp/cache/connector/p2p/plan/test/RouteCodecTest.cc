@@ -56,7 +56,7 @@ TEST(RouteCodec, DecodeDirectionCarriesOnlyDstHalf) {
     EXPECT_EQ(local.slice, route.dst_slice);
 }
 
-// slice_mode 走的是裸 int32，必须能无损往返，且非法值收敛到 NONE。
+// slice_mode 走的是裸 int32，必须能无损往返，非法值保留给 worker 校验。
 TEST(RouteCodec, SliceModeRoundTrip) {
     for (auto mode : {CpBlockSliceMode::NONE, CpBlockSliceMode::EQUAL_BYTES, CpBlockSliceMode::PAYLOAD_BYTES}) {
         auto route      = makeRoute();
@@ -65,17 +65,18 @@ TEST(RouteCodec, SliceModeRoundTrip) {
         RouteCodec::encodeForDecode(route, &pb);
         EXPECT_EQ(RouteCodec::decode(pb).slice.mode, mode);
     }
-    EXPECT_EQ(RouteCodec::toSliceMode(99), CpBlockSliceMode::NONE);
-    EXPECT_EQ(RouteCodec::toSliceMode(-1), CpBlockSliceMode::NONE);
+    EXPECT_EQ(static_cast<int>(RouteCodec::toSliceMode(99)), -1);
+    EXPECT_EQ(static_cast<int>(RouteCodec::toSliceMode(256)), -1);
+    EXPECT_EQ(static_cast<int>(RouteCodec::toSliceMode(-1)), -1);
 }
 
-// count 为 0（proto 默认值 / 老对端）时必须收敛到 1，不能产生除零。
-TEST(RouteCodec, ZeroCountsDefaultToOne) {
+// 非法 count 不做修正，由 worker 在注册任务前报错。
+TEST(RouteCodec, ZeroCountsRemainInvalid) {
     TransferRoutePB pb;
     pb.set_route_id(0);
     const auto local = RouteCodec::decode(pb);
-    EXPECT_EQ(local.partition.count, 1);
-    EXPECT_EQ(local.slice.count, 1);
+    EXPECT_EQ(local.partition.count, 0);
+    EXPECT_EQ(local.slice.count, 0);
     EXPECT_EQ(local.slice.mode, CpBlockSliceMode::NONE);
 }
 

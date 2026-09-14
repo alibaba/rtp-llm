@@ -68,6 +68,8 @@ public:
 
 
 private:
+    bool rejectLayer(int64_t request_id, int64_t request_deadline_ms, const ErrorInfo& error);
+
     bool scheduleLayerCacheBuffers(int                                                           layer_id,
                                    int64_t                                                       request_id,
                                    const std::shared_ptr<torch::Event>&                          event,

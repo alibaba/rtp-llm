@@ -49,12 +49,17 @@ ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&    
                                                    int64_t                               deadline_ms,
                                                    const std::shared_ptr<ReadTaskGroup>& task_group,
                                                    int&                                  total_block_count) {
+    auto fail_registration = [&](const std::string& message) {
+        cleanupRecvTaskStore(task_group, /*cancel_pending_tasks=*/true);
+        RTP_LLM_LOG_WARNING("%s", message.c_str());
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, message);
+    };
+    struct PreparedReceive {
+        transfer::RecvRequest request;
+        std::string           context;
+    };
+    std::vector<PreparedReceive> prepared;
     for (const auto& route : worker_plan.routes) {
-        auto fail_registration = [&](const std::string& message) {
-            cleanupRecvTaskStore(task_group, /*cancel_pending_tasks=*/true);
-            RTP_LLM_LOG_WARNING("%s", message.c_str());
-            return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, message);
-        };
         if (route.layer_buffers.empty()) {
             return fail_registration("read: route=" + std::to_string(route.route_id) + " tag=" + route.cache_tag
                                      + " has no layer buffers, unique_key=" + unique_key);
@@ -68,6 +73,11 @@ ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&    
                                          + " has a null layer buffer, unique_key=" + unique_key);
             }
             const int layer_id = layer_cache_buffer->getLayerId();
+            if (route.cache_tag != layer_cache_buffer->cacheTag()) {
+                return fail_registration("read: route=" + std::to_string(route.route_id) + " tag=" + route.cache_tag
+                                         + " layer=" + std::to_string(layer_id)
+                                         + ": layer buffer tag does not match route");
+            }
             if (layer_cache_buffer->blockIdMap().empty()) {
                 return fail_registration("read: route=" + std::to_string(route.route_id) + " layer="
                                          + std::to_string(layer_id) + " tag=" + layer_cache_buffer->cacheTag()
@@ -75,20 +85,19 @@ ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&    
             }
 
             // partition / slice 均来自 route（本侧那一半），worker 不再自行推导。
-            ErrorInfo conversion_error;
             auto key_block_infos = LayerCacheBufferUtil::buildKeyBlockInfosSliced(layer_block_converter_,
-                                                                                 layer_cache_buffer,
-                                                                                 route.partition.count,
-                                                                                 route.partition.id,
-                                                                                 route.slice,
-                                                                                 payload_bytes,
-                                                                                 &conversion_error);
-            if (conversion_error.hasError()
-                || key_block_infos.empty()
-                || key_block_infos.size() != layer_cache_buffer->blockIdMap().size()) {
-                const std::string conversion_message = conversion_error.hasError() ? conversion_error.ToString() :
-                    "converted key count=" + std::to_string(key_block_infos.size()) + " differs from source key count="
-                        + std::to_string(layer_cache_buffer->blockIdMap().size());
+                                                                                  layer_cache_buffer,
+                                                                                  route.partition.count,
+                                                                                  route.partition.id,
+                                                                                  route.slice,
+                                                                                  payload_bytes);
+            if (!key_block_infos.ok() || key_block_infos.value().empty()
+                || key_block_infos.value().size() != layer_cache_buffer->blockIdMap().size()) {
+                const std::string conversion_message =
+                    !key_block_infos.ok() ? key_block_infos.status().ToString() :
+                                            "converted key count=" + std::to_string(key_block_infos.value().size())
+                                                + " differs from source key count="
+                                                + std::to_string(layer_cache_buffer->blockIdMap().size());
                 return fail_registration("read: route=" + std::to_string(route.route_id) + " layer="
                                          + std::to_string(layer_id) + " tag=" + layer_cache_buffer->cacheTag()
                                          + " task registration failed, unique_key=" + unique_key + ": "
@@ -101,22 +110,25 @@ ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&    
 
             transfer::RecvRequest recv_req;
             recv_req.unique_key  = partition_layer_key;
-            recv_req.block_info  = std::move(key_block_infos);
+            recv_req.block_info  = std::move(key_block_infos.value());
             recv_req.deadline_ms = deadline_ms;
 
-            auto task = receiver_->recv(recv_req);
-            if (!task) {
-                const std::string error_msg = "read: create recv task failed for layer=" + std::to_string(layer_id)
-                                              + " tag=" + layer_cache_buffer->cacheTag()
-                                              + " route=" + std::to_string(route.route_id) + " unique_key=" + unique_key;
-                return fail_registration(error_msg);
-            }
-            task_group->lease->onTransferStarted();
-            task_group->partition_keys.push_back(partition_layer_key);
-            task_group->tasks.push_back(task);
-            registerTaskCompletionCallback(task, unique_key, task_group);
-            total_block_count += static_cast<int>(layer_cache_buffer->blockIdMap().size());
+            prepared.push_back({std::move(recv_req),
+                                "read: layer=" + std::to_string(layer_id) + " tag=" + route.cache_tag
+                                    + " route=" + std::to_string(route.route_id) + " unique_key=" + unique_key});
         }
+    }
+    // No receiver task is registered until every route/layer has valid metadata.
+    for (const auto& receive : prepared) {
+        auto task = receiver_->recv(receive.request);
+        if (!task) {
+            return fail_registration(receive.context + ": create recv task failed");
+        }
+        task_group->lease->onTransferStarted();
+        task_group->partition_keys.push_back(receive.request.unique_key);
+        task_group->tasks.push_back(task);
+        registerTaskCompletionCallback(task, unique_key, task_group);
+        total_block_count += static_cast<int>(receive.request.block_info.size());
     }
     return ErrorInfo::OkStatus();
 }

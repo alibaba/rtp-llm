@@ -53,13 +53,46 @@ ComputedLayerCacheBuffer::getBuffers(const std::set<std::string>& buffer_keys) {
     return {static_cast<int>(layer_cache_buffers_.size()), layer_cache_buffers};
 }
 
+void ComputedLayerCacheBuffer::setError(const ErrorInfo& error) {
+    std::function<void(const ErrorInfo&)> handler;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (error_.hasError()) {
+            return;
+        }
+        error_  = error;
+        handler = error_handler_;
+    }
+    condition_variable_.notify_all();
+    if (handler) {
+        handler(error);
+    }
+}
+
+void ComputedLayerCacheBuffer::setErrorHandler(std::function<void(const ErrorInfo&)> handler) {
+    ErrorInfo error;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        error_handler_ = handler;
+        error          = error_;
+    }
+    if (error.hasError() && handler) {
+        handler(error);
+    }
+}
+
+ErrorInfo ComputedLayerCacheBuffer::error() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return error_;
+}
+
 void ComputedLayerCacheBuffer::waitChange(int last_layer_num, int timeout_ms) {
     std::unique_lock<std::mutex> lock(mutex_);
-    if (static_cast<int>(layer_cache_buffers_.size()) != last_layer_num) {
+    if (error_.hasError() || static_cast<int>(layer_cache_buffers_.size()) != last_layer_num) {
         return;
     }
     condition_variable_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this, last_layer_num] {
-        return static_cast<int>(layer_cache_buffers_.size()) > last_layer_num;
+        return error_.hasError() || static_cast<int>(layer_cache_buffers_.size()) > last_layer_num;
     });
 }
 

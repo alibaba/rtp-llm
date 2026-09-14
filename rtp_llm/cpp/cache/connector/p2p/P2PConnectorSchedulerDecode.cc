@@ -110,19 +110,24 @@ std::shared_ptr<const PlanResult> P2PConnectorSchedulerDecode::planFor(int prefi
     return it->second;
 }
 
-P2PBroadcastClient::RankRoutes
+ErrorResult<P2PBroadcastClient::RankRoutes>
 P2PConnectorSchedulerDecode::buildDecodeRankRoutes(const TransferPlan&        plan,
                                                    KVCacheResource&           resource,
                                                    const std::pair<int, int>& block_range,
-                                                   size_t                     worker_num,
-                                                   ErrorInfo*                 error_info) const {
+                                                   size_t                     worker_num) const {
     P2PBroadcastClient::RankRoutes rank_routes(worker_num);
 
     // logical_count 必须是**全序列**的 cache_keys 数量，不是 block_range 窗口长度：
     // prefill 侧不知道 decode 的 block_range（prefix 部分命中的结果），两侧若用不同的
     // count，include_final_key 与 tail_count 会算出不同的键，破坏键集包含契约。
     const size_t logical_count = resource.cacheKeys().size();
-    const size_t window_begin  = static_cast<size_t>(std::max(0, block_range.first));
+    if (block_range.first < 0 || block_range.second < -1 || static_cast<size_t>(block_range.first) > logical_count
+        || (block_range.second > 0
+            && static_cast<size_t>(block_range.second) > logical_count - static_cast<size_t>(block_range.first))) {
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                         "decode route projection: requested block window is out of range");
+    }
+    const size_t window_begin  = static_cast<size_t>(block_range.first);
     const size_t window_end    = block_range.second > 0 ?
                                      std::min(logical_count, window_begin + static_cast<size_t>(block_range.second)) :
                                      logical_count;
@@ -147,32 +152,16 @@ P2PConnectorSchedulerDecode::buildDecodeRankRoutes(const TransferPlan&        pl
                 // 该 route 在本请求长度 / 窗口下解析为空是预期行为（两侧规则相同故一致判空）。
                 continue;
             }
-            auto layer_buffers = LayerCacheBufferUtil::convertTagForRoute(resource,
-                                                                         *config_.topology,
-                                                                         route->cache_tag,
-                                                                         positions,
-                                                                         worker_cp_rank,
-                                                                         cp_size,
-                                                                         error_info);
-            if (error_info != nullptr && error_info->hasError()) {
-                *error_info = ErrorInfo(error_info->code(),
-                                        "decode route=" + std::to_string(route->route_id) + " worker_rank="
-                                            + std::to_string(worker_rank) + ": " + error_info->ToString());
-                return {};
-            }
-            if (layer_buffers.empty()) {
-                if (error_info != nullptr) {
-                    *error_info = ErrorInfo(
-                        ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
-                        "decode route=" + std::to_string(route->route_id) + " worker_rank="
-                            + std::to_string(worker_rank) + " tag=" + route->cache_tag
-                            + ": non-empty key projection converted to no layer buffers");
-                }
-                return {};
+            auto layer_buffers = LayerCacheBufferUtil::convertTagForRoute(
+                resource, *config_.topology, route->cache_tag, positions, worker_cp_rank, cp_size);
+            if (!layer_buffers.ok()) {
+                return ErrorInfo(layer_buffers.status().code(),
+                                 "decode route=" + std::to_string(route->route_id) + " worker_rank="
+                                     + std::to_string(worker_rank) + ": " + layer_buffers.status().ToString());
             }
             TransferRoutePB pb;
             RouteCodec::encodeForDecode(*route, &pb);
-            for (const auto& buffer : layer_buffers) {
+            for (const auto& buffer : layer_buffers.value()) {
                 auto* layer_block = pb.add_layer_blocks();
                 layer_block->set_layer_id(buffer->getLayerId());
                 layer_block->set_cache_tag(buffer->cacheTag());
@@ -184,7 +173,7 @@ P2PConnectorSchedulerDecode::buildDecodeRankRoutes(const TransferPlan&        pl
             rank_routes[worker_rank].push_back(std::move(pb));
         }
     }
-    return rank_routes;
+    return std::move(rank_routes);
 }
 
 void P2PConnectorSchedulerDecode::stopChecker() {
@@ -285,15 +274,15 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
             return {nullptr, plan->error};
         }
         plan_digest = plan->plan.digest();
-        ErrorInfo route_error;
-        rank_routes = buildDecodeRankRoutes(plan->plan, *resource, block_range, worker_num, &route_error);
-        if (route_error.hasError()) {
+        auto routes = buildDecodeRankRoutes(plan->plan, *resource, block_range, worker_num);
+        if (!routes.ok()) {
             RTP_LLM_LOG_WARNING("asyncRead: route projection failed, unique_key=%s, error=%s",
                                 unique_key.c_str(),
-                                route_error.ToString().c_str());
+                                routes.status().ToString().c_str());
             collector->success = false;
-            return {nullptr, route_error};
+            return {nullptr, routes.status()};
         }
+        rank_routes = std::move(routes.value());
 
         const bool all_routes_empty =
             std::all_of(rank_routes.begin(), rank_routes.end(), [](const auto& routes) { return routes.empty(); });
