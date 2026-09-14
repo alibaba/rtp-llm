@@ -33,6 +33,49 @@ from rtp_llm.pipeline.pipeline import Pipeline
 
 
 class GenerateConfigTest(TestCase):
+    def _qwen_tokenizer(self):
+        return QWenTokenizer(
+            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
+        )
+
+
+    def test_select_tokens_preserves_order_and_multiplicity(self):
+        tokenizer = self._qwen_tokenizer()
+        self.assertEqual(tokenizer.encode("1"), [16])
+        self.assertEqual(tokenizer.encode("what's your name"), [12555, 594, 697, 829])
+
+        config = GenerateConfig(
+            select_tokens_id=[16],
+            select_tokens_str=["1", "1", "what's your name"],
+        )
+        config.convert_select_tokens(vocab_size=200000, tokenizer=tokenizer)
+
+        self.assertEqual(config.select_tokens_id, [16, 16, 16, 12555, 594, 697, 829])
+
+
+    def test_select_tokens_validation_failure_leaves_state_unchanged(self):
+        tokenizer = self._qwen_tokenizer()
+        config = GenerateConfig(select_tokens_str=["1"], select_tokens_id=[0])
+        config.convert_select_tokens(vocab_size=200000, tokenizer=tokenizer)
+        self.assertEqual(config.select_tokens_id, [0, 16])
+
+        # A failed retry must not append another encoded token to visible state.
+        with self.assertRaisesRegex(
+            FtRuntimeException, "should be less than vocab_size"
+        ):
+            config.convert_select_tokens(vocab_size=16, tokenizer=tokenizer)
+        self.assertEqual(config.select_tokens_id, [0, 16])
+
+        negative_config = GenerateConfig(select_tokens_id=[-1])
+        with self.assertRaisesRegex(
+            FtRuntimeException, "should be less than vocab_size"
+        ):
+            negative_config.convert_select_tokens(
+                vocab_size=200000, tokenizer=tokenizer
+            )
+        self.assertEqual(negative_config.select_tokens_id, [-1])
+
+
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.test_data_path = os.path.join(os.getcwd(), "rtp_llm/test")
@@ -269,6 +312,59 @@ class GenerateConfigTest(TestCase):
 
 
 class OpenaiGenerateConfigTest(TestCase):
+    def _extract_openai_generation_config(
+        self,
+        request: ChatCompletionRequest,
+        generate_env_config: Optional[GenerateEnvConfig] = None,
+    ):
+        model_config = ModelConfig()
+        model_config.generate_env_config = generate_env_config or GenerateEnvConfig()
+        model_config.render_config = RenderConfig()
+        model_config.special_tokens = SpecialTokens()
+        model_config.max_seq_len = 1024
+        model_config.template_type = None
+        model_config.model_name = ""
+        model_config.ckpt_path = ""
+
+        openai_endpoint = OpenaiEndpoint(
+            model_config=model_config,
+            misc_config=PyMiscellaneousConfig(),
+            vit_config=VitConfig(),
+            tokenizer=self.tokenizer,
+            backend_rpc_server_visitor=None,
+        )
+        return openai_endpoint._extract_generation_config(request)
+
+
+    def test_select_tokens_preserves_order_and_multiplicity(self):
+        request = ChatCompletionRequest(
+            messages=[],
+            extra_configs=GenerateConfig(
+                select_tokens_id=[16],
+                select_tokens_str=["1", "1", "what's your name"],
+            ),
+        )
+
+        config = self._extract_openai_generation_config(request)
+
+        self.assertEqual(config.select_tokens_id, [16, 16, 16, 12555, 594, 697, 829])
+
+
+    def test_select_tokens_validation_failure_leaves_state_unchanged(self):
+        invalid_id = len(self.tokenizer)
+        extra_configs = GenerateConfig(
+            select_tokens_id=[invalid_id], select_tokens_str=["1"]
+        )
+        request = ChatCompletionRequest(messages=[], extra_configs=extra_configs)
+
+        with self.assertRaisesRegex(
+            FtRuntimeException, "should be less than vocab_size"
+        ):
+            self._extract_openai_generation_config(request)
+
+        self.assertEqual(extra_configs.select_tokens_id, [invalid_id])
+
+
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.test_data_path = os.path.join(
