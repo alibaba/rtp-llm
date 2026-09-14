@@ -47,6 +47,11 @@ public:
         return allocator_ != nullptr;
     }
 
+    // TP0 owns request block allocation; other ranks only receive the block IDs.
+    bool isAllocatorOwner() const {
+        return parallelism_config_.tp_rank == 0;
+    }
+
     const CacheConfig& cacheConfig() const;
     const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
 
@@ -164,10 +169,10 @@ public:
     }
 
 private:
-    void                              allocateAndSync();
-    void                              reportMetricsLoop();
+    void allocateAndSync();
+    void reportMetricsLoop();
     bool collectCacheHitRates(std::chrono::steady_clock::time_point now, RtpLLMCacheReuseMetricsCollector& metrics);
-    void                              reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
+    void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
 
     // 成员变量
