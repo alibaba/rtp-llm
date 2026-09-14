@@ -5,6 +5,7 @@
 #include <memory>
 #include <torch/torch.h>
 #include <vector>
+#include "rtp_llm/models_py/bindings/MemoryCopyRegion.h"
 
 namespace rtp_llm {
 
@@ -125,6 +126,11 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams&    
 // Same tile/sub-batch contract, using cudaMemcpy3DBatchAsync with one {bytes, 1, 1}
 // operation per tile. Completion and fallback semantics match execBatchedMemoryCopy.
 BatchedMemoryCopyStatus execBatched3DMemoryCopy(const BatchedMemoryCopyParams& params,
+                                                const DeviceHostCopyExecutionContext& context);
+
+// One independent width/height/pitch operation per region, depth=1.
+// Caller guarantees same-device, independent operations; completion is synchronous.
+BatchedMemoryCopyStatus execBatched3DMemoryCopy(const Batched3DMemoryCopyParams& params,
                                                 const DeviceHostCopyExecutionContext& context);
 
 // Stages compact host payload in GPU memory, then uses one SM gather/scatter kernel.

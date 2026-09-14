@@ -4,6 +4,7 @@
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -363,13 +364,34 @@ void execNoBlockCopy(const MultiCopyParams& params, const DeviceHostCopyExecutio
     execNoBlockCopyImpl(params, &context);
 }
 
-static BatchedMemoryCopyStatus execBatchedMemoryCopyImpl(const BatchedMemoryCopyParams&        params,
-                                                       const DeviceHostCopyExecutionContext& context,
-                                                       bool                                 use_3d) {
+static bool validCopyRegion(const MemoryCopyRegion& region) {
+    if (region.width == 0) {
+        return true;
+    }
+    if (region.src == nullptr || region.dst == nullptr || region.height == 0
+        || region.src_pitch < region.width || region.dst_pitch < region.width) {
+        return false;
+    }
+    const auto fits = [&](const void* ptr, size_t pitch) {
+        const uintptr_t address = reinterpret_cast<uintptr_t>(ptr);
+        return region.width <= UINTPTR_MAX - address
+               && region.height - 1 <= (UINTPTR_MAX - address - region.width) / pitch;
+    };
+    return fits(region.src, region.src_pitch) && fits(region.dst, region.dst_pitch);
+}
+
+static BatchedMemoryCopyStatus execBatchedMemoryCopyImpl(
+    const BatchedMemoryCopyParams& params, const DeviceHostCopyExecutionContext& context,
+    const std::vector<MemoryCopyRegion>* regions = nullptr) {
     if (!validCopyContext(context, params.device_index, params.direction)) {
         return BatchedMemoryCopyStatus::EXECUTION_FAILED;
     }
-    if (params.tiles.empty()) {
+    const bool use_3d = regions != nullptr;
+    if (use_3d && !std::all_of(regions->begin(), regions->end(), validCopyRegion)) {
+        RTP_LLM_LOG_WARNING("invalid CUDA 3D copy region");
+        return BatchedMemoryCopyStatus::EXECUTION_FAILED;
+    }
+    if (use_3d ? regions->empty() : params.tiles.empty()) {
         return BatchedMemoryCopyStatus::SUCCESS;
     }
     if (params.device_index < 0) {
@@ -423,7 +445,7 @@ static BatchedMemoryCopyStatus execBatchedMemoryCopyImpl(const BatchedMemoryCopy
     c10::cuda::CUDAGuard device_guard(params.device_index);
     auto                 stream = reinterpret_cast<cudaStream_t>(context.stream());
 
-    const size_t             tile_num = params.tiles.size();
+    const size_t             tile_num = use_3d ? regions->size() : params.tiles.size();
     std::vector<void*>       dsts;
     std::vector<const void*> srcs;
     std::vector<size_t>      sizes;
@@ -435,25 +457,29 @@ static BatchedMemoryCopyStatus execBatchedMemoryCopyImpl(const BatchedMemoryCopy
         srcs.reserve(tile_num);
         sizes.reserve(tile_num);
     }
-    for (const auto& tile : params.tiles) {
-        if (tile.dst == nullptr || tile.src == nullptr || tile.bytes == 0) {
-            continue;
-        }
-        if (use_3d) {
-            // Preserve the caller's sub-batch and tiles: no row/layer/descriptor coalescing.
+    if (use_3d) {
+        for (const auto& region : *regions) {
+            if (region.width == 0) {
+                continue;
+            }
             cudaMemcpy3DBatchOp op{};
             op.src.type               = cudaMemcpyOperandTypePointer;
-            op.src.op.ptr.ptr         = const_cast<void*>(tile.src);
-            op.src.op.ptr.rowLength   = tile.bytes;
-            op.src.op.ptr.layerHeight = 1;
+            op.src.op.ptr.ptr         = const_cast<void*>(region.src);
+            op.src.op.ptr.rowLength   = region.src_pitch;
+            op.src.op.ptr.layerHeight = region.height;
             op.dst.type               = cudaMemcpyOperandTypePointer;
-            op.dst.op.ptr.ptr         = tile.dst;
-            op.dst.op.ptr.rowLength   = tile.bytes;
-            op.dst.op.ptr.layerHeight = 1;
-            op.extent                 = {tile.bytes, 1, 1};
+            op.dst.op.ptr.ptr         = region.dst;
+            op.dst.op.ptr.rowLength   = region.dst_pitch;
+            op.dst.op.ptr.layerHeight = region.height;
+            op.extent                 = {region.width, region.height, 1};
             op.srcAccessOrder         = cudaMemcpySrcAccessOrderStream;
             ops.push_back(op);
-        } else {
+        }
+    } else {
+        for (const auto& tile : params.tiles) {
+            if (tile.dst == nullptr || tile.src == nullptr || tile.bytes == 0) {
+                continue;
+            }
             dsts.push_back(tile.dst);
             srcs.push_back(tile.src);
             sizes.push_back(tile.bytes);
@@ -539,14 +565,31 @@ static BatchedMemoryCopyStatus execBatchedMemoryCopyImpl(const BatchedMemoryCopy
 #endif
 }
 
-BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams&        params,
+BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& params,
                                               const DeviceHostCopyExecutionContext& context) {
-    return execBatchedMemoryCopyImpl(params, context, false);
+    return execBatchedMemoryCopyImpl(params, context);
 }
 
-BatchedMemoryCopyStatus execBatched3DMemoryCopy(const BatchedMemoryCopyParams&        params,
+BatchedMemoryCopyStatus execBatched3DMemoryCopy(const BatchedMemoryCopyParams& params,
                                                 const DeviceHostCopyExecutionContext& context) {
-    return execBatchedMemoryCopyImpl(params, context, true);
+    if (!validCopyContext(context, params.device_index, params.direction)) {
+        return BatchedMemoryCopyStatus::EXECUTION_FAILED;
+    }
+    Batched3DMemoryCopyParams unmerged;
+    unmerged.device_index = params.device_index;
+    unmerged.regions.reserve(params.tiles.size());
+    for (const auto& tile : params.tiles) {
+        unmerged.regions.push_back({tile.src, tile.dst, tile.bytes, 1, tile.bytes, tile.bytes});
+    }
+    return execBatched3DMemoryCopy(unmerged, context);
+}
+
+BatchedMemoryCopyStatus execBatched3DMemoryCopy(const Batched3DMemoryCopyParams& params,
+                                                const DeviceHostCopyExecutionContext& context) {
+    BatchedMemoryCopyParams common;
+    common.device_index = params.device_index;
+    common.direction = context.direction;
+    return execBatchedMemoryCopyImpl(common, context, &params.regions);
 }
 
 bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch* scratch) {

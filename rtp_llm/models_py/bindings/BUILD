@@ -48,7 +48,7 @@ cc_library(
 
 cc_library(
     name = "no_block_copy_hdr",
-    hdrs = ["NoBlockCopy.h"],
+    hdrs = ["NoBlockCopy.h", "MemoryCopyRegion.h"],
     deps = torch_deps(),
     copts = copts(),
     visibility = ["//visibility:public"],

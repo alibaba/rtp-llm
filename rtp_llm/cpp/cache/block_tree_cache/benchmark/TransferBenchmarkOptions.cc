@@ -69,7 +69,7 @@ void TransferOptions::printHelp() {
         << "  --descriptors-per-business=N Same-direction descriptors owned by each business request\n"
         << "  --transfer-worker-count=N    Lower transfer workers (default: 1)\n"
         << "  --transfer-descriptor-batch-size=N  Descriptors per engine submit (0 = concurrency)\n"
-        << "  --copy-strategy=STRATEGY     auto | 3d-batch | batch | staged-sm (default: auto)\n"
+        << "  --copy-strategy=STRATEGY     auto | 3d-batch | 3d-batch-unmerged | batch | staged-sm (default: auto)\n"
         << "  --min-measured-seconds=N     Measured phase duration floor; pilot run scales op count (default: 30)\n"
         << "  --disk-path=PATH             Disk directory for disk transfers\n"
         << "  --disk-io-mode=MODE          direct | buffered (default: direct)\n"
