@@ -14,11 +14,24 @@ from rtp_llm.models_py.distributed.collective_torch import Group
 _INTEGER_DTYPES = (torch.int32, torch.int64)
 
 
-def _validate_geometry(page_tokens: int, shard_size: int, shard_rank: int) -> None:
+def _validate_geometry(
+    page_tokens: int,
+    shard_size: int,
+    shard_rank: int,
+    kernel_page_tokens: Optional[int] = None,
+) -> int:
     if page_tokens <= 0 or shard_size <= 0:
         raise ValueError("page_tokens and shard_size must be positive")
     if not 0 <= shard_rank < shard_size:
         raise ValueError(f"shard_rank must be in [0, {shard_size}), got {shard_rank}")
+    kernel_page_tokens = (
+        page_tokens if kernel_page_tokens is None else kernel_page_tokens
+    )
+    if kernel_page_tokens <= 0 or page_tokens % kernel_page_tokens:
+        raise ValueError(
+            "page_tokens must be a positive multiple of kernel_page_tokens"
+        )
+    return kernel_page_tokens
 
 
 def _validate_slot_mapping_inputs(
@@ -74,20 +87,25 @@ def build_mla_page_rr_slot_mapping(
     page_tokens: int,
     shard_size: int,
     shard_rank: int,
+    *,
+    kernel_page_tokens: Optional[int] = None,
 ) -> torch.Tensor:
     """Build owner-only MLA cache slots for a page-round-robin shard.
 
     ``positions`` are absolute positions within each request. Global page
-    ``g`` belongs to rank ``g % shard_size`` and maps to local block-table
-    column ``g // shard_size``. Non-owner rows receive ``-1``, which the
-    existing MLA cache-write kernel treats as a no-op.
+    ``g`` of ``page_tokens`` tokens belongs to rank ``g % shard_size``.
+    The table and raw cache use ``kernel_page_tokens``-sized subpages; all
+    subpages of one physical page stay on the same owner. Non-owner rows
+    receive ``-1``, which the cache-write kernel treats as a no-op.
 
     The returned tensor is int64 because that is the cache-write kernel ABI.
     Runtime value checks use device-side asynchronous assertions so the valid
     CUDA path does not introduce host synchronization.
     """
 
-    _validate_geometry(page_tokens, shard_size, shard_rank)
+    kernel_page_tokens = _validate_geometry(
+        page_tokens, shard_size, shard_rank, kernel_page_tokens
+    )
     _validate_slot_mapping_inputs(positions, batch_indices, local_block_table)
 
     positions_i64 = positions.to(torch.int64)
@@ -108,6 +126,11 @@ def build_mla_page_rr_slot_mapping(
     global_pages = torch.div(positions_i64, page_tokens, rounding_mode="floor")
     owner_rows = torch.remainder(global_pages, shard_size) == shard_rank
     local_pages = torch.div(global_pages, shard_size, rounding_mode="floor")
+    local_pages = local_pages * (page_tokens // kernel_page_tokens) + torch.div(
+        torch.remainder(positions_i64, page_tokens),
+        kernel_page_tokens,
+        rounding_mode="floor",
+    )
 
     table_width = int(local_block_table.shape[1])
     if table_width == 0:
@@ -130,7 +153,9 @@ def build_mla_page_rr_slot_mapping(
     )
 
     valid_owner_rows = owner_rows & batch_in_range & page_in_range & (block_ids > 0)
-    slots = block_ids * page_tokens + torch.remainder(positions_i64, page_tokens)
+    slots = block_ids * kernel_page_tokens + torch.remainder(
+        positions_i64, kernel_page_tokens
+    )
     return torch.where(valid_owner_rows, slots, skipped)
 
 
@@ -265,17 +290,21 @@ def _restore_mla_page_rr_prefix(
 
 @dataclass(frozen=True)
 class MlaPageRRCacheAdapter:
-    """Translate between rank-local page-RR storage and canonical MLA rows."""
+    """Use physical pages for ownership and kernel pages for table/cache views."""
 
     page_tokens: int
     shard_size: int
     shard_rank: int
+    kernel_page_tokens: Optional[int] = None
     _prefix_descriptor: Optional[MlaPageRRBatchDescriptor] = field(
         default=None, init=False, repr=False, compare=False
     )
 
     def __post_init__(self) -> None:
-        _validate_geometry(self.page_tokens, self.shard_size, self.shard_rank)
+        kernel_page_tokens = _validate_geometry(
+            self.page_tokens, self.shard_size, self.shard_rank, self.kernel_page_tokens
+        )
+        object.__setattr__(self, "kernel_page_tokens", kernel_page_tokens)
 
     def slot_mapping(
         self,
@@ -292,6 +321,7 @@ class MlaPageRRCacheAdapter:
             self.page_tokens,
             self.shard_size,
             self.shard_rank,
+            kernel_page_tokens=self.kernel_page_tokens,
         )
 
     def validate_block_table_capacity(
@@ -318,10 +348,13 @@ class MlaPageRRCacheAdapter:
         required_local_pages = (
             max_pages + self.shard_size - 1 - self.shard_rank
         ) // self.shard_size
-        if required_local_pages > table_width:
+        required_kernel_pages = required_local_pages * (
+            self.page_tokens // self.kernel_page_tokens
+        )
+        if required_kernel_pages > table_width:
             raise RuntimeError(
                 "MLA page-RR sequence exceeds the rank-local block table: "
-                f"required={required_local_pages} width={table_width} "
+                f"required_kernel_pages={required_kernel_pages} width={table_width} "
                 f"shard_size={self.shard_size} shard_rank={self.shard_rank}"
             )
 
@@ -348,7 +381,7 @@ class MlaPageRRCacheAdapter:
     ) -> torch.Tensor:
         # The request's attention wrapper reuses this adapter across MLA layers.
         # Retain only the latest batch, without any process-global metadata cache.
-        _validate_raw_cache(raw_cache, self.page_tokens)
+        _validate_raw_cache(raw_cache, self.kernel_page_tokens)
         prefix_values = _host_int_values("prefix_lens", prefix_lens)
         descriptor = self._prefix_descriptor
         if (

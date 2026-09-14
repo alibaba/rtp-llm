@@ -40,8 +40,10 @@ def prefix_fixture(prefix_lens, page_tokens, shard_size, rank, features=576):
     return cache, table, torch.cat(canonical)
 
 
-def pack(cache, table, lengths, page_tokens, shards, rank):
-    adapter = MlaPageRRCacheAdapter(page_tokens, shards, rank)
+def pack(cache, table, lengths, page_tokens, shards, rank, *, kernel_page_tokens=None):
+    adapter = MlaPageRRCacheAdapter(
+        page_tokens, shards, rank, kernel_page_tokens=kernel_page_tokens
+    )
     payload = adapter._pack_prefix(cache, table, lengths)
     return payload, adapter._prefix_descriptor
 
@@ -57,6 +59,108 @@ def expected_payload(canonical, lengths, page_tokens, shards, rank):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
 class MlaPageRRPrefixKernelTest(unittest.TestCase):
+    def test_split_pages_preserve_padded_kernel_block_and_feature_strides(self):
+        lengths = (3079, 382)
+        for dtype in (torch.bfloat16, torch.float8_e4m3fn):
+            with self.subTest(dtype=dtype):
+                payloads = []
+                for rank in range(2):
+                    cache, physical_table, canonical = prefix_fixture(
+                        lengths, 1024, 2, rank, 6
+                    )
+                    kernel_cache = cache.to(dtype).view(-1, 128, 6)
+                    storage = torch.empty(
+                        (kernel_cache.shape[0] * 2, 128, 12), device="cuda", dtype=dtype
+                    )
+                    raw = storage[::2, :, ::2]
+                    raw.copy_(kernel_cache)
+                    ids = (physical_table[..., None] * 8 + torch.arange(8)).flatten(1)
+                    ids[physical_table.repeat_interleave(8, dim=1) < 0] = -1
+                    table_storage = torch.empty(
+                        (ids.shape[0], ids.shape[1] * 2), device="cuda", dtype=ids.dtype
+                    )
+                    table = table_storage[:, ::2]
+                    table.copy_(ids)
+                    actual, descriptor = pack(
+                        raw, table, lengths, 1024, 2, rank, kernel_page_tokens=128
+                    )
+                    payloads.append(actual)
+                restored = _restore_mla_page_rr_prefix(
+                    torch.stack(payloads), descriptor
+                )
+                torch.testing.assert_close(
+                    restored.to(torch.bfloat16).cpu(),
+                    canonical.to(dtype).to(torch.bfloat16),
+                    rtol=0,
+                    atol=0,
+                )
+
+    def test_split_physical_pages_restore_every_kernel_subpage(self):
+        for page_tokens, shards in (
+            (page_tokens, shards)
+            for page_tokens in (128, 256, 512, 1024, 2048, 4096, 8192)
+            for shards in (8, 16)
+        ):
+            subpages = page_tokens // 128
+            # Keep full MLA features in the original reproducer; smaller rows
+            # let the wider page/shard matrix cover large stripes cheaply.
+            features = 576 if page_tokens == 1024 else 6
+            lengths = (
+                0,
+                127,
+                128,
+                129,
+                382,
+                page_tokens - 1,
+                page_tokens,
+                page_tokens + 1,
+                shards * page_tokens + 129,
+            )
+            for dtype in (torch.bfloat16, torch.float8_e4m3fn):
+                with self.subTest(page_tokens=page_tokens, shards=shards, dtype=dtype):
+                    payloads = []
+                    for rank in range(shards):
+                        cache, physical_table, canonical = prefix_fixture(
+                            lengths, page_tokens, shards, rank, features
+                        )
+                        # Keep the real allocator contract: one physical ID names
+                        # P/K consecutive kernel IDs, including unused padding.
+                        table = (
+                            physical_table[..., None] * subpages
+                            + torch.arange(subpages)
+                        ).flatten(1)
+                        table[physical_table.repeat_interleave(subpages, dim=1) < 0] = (
+                            -1
+                        )
+                        table = table.cuda()
+                        raw = cache.to(device="cuda", dtype=dtype).view(
+                            -1, 128, features
+                        )
+                        adapter = MlaPageRRCacheAdapter(
+                            page_tokens, shards, rank, kernel_page_tokens=128
+                        )
+                        actual = adapter._pack_prefix(raw, table, lengths)
+                        reference = expected_payload(
+                            canonical.to(dtype).to(torch.bfloat16),
+                            lengths,
+                            page_tokens,
+                            shards,
+                            rank,
+                        )
+                        torch.testing.assert_close(
+                            actual.to(torch.bfloat16).cpu(), reference, rtol=0, atol=0
+                        )
+                        payloads.append(actual)
+                    restored = _restore_mla_page_rr_prefix(
+                        torch.stack(payloads), adapter._prefix_descriptor
+                    )
+                    torch.testing.assert_close(
+                        restored.to(torch.bfloat16).cpu(),
+                        canonical.to(dtype).to(torch.bfloat16),
+                        rtol=0,
+                        atol=0,
+                    )
+
     def test_size_one_token_dimension_allows_large_stride(self):
         # Run in a child because a regression aborts its CUDA context even though
         # the underlying cache storage is only four bytes.
@@ -225,20 +329,33 @@ class MlaPageRRPrefixKernelTest(unittest.TestCase):
             self.assertEqual(torch.count_nonzero(payload).item(), 0)
 
     def test_current_stream_and_graph_replay_observe_updated_cache(self):
-        lengths = (13, 3)
-        cache, table, _ = prefix_fixture(lengths, 4, 2, 0, 3)
-        cache, table = cache.cuda(), table.cuda()
+        for page, kernel, lengths in ((4, 4, (13, 3)), (1024, 128, (3079, 382))):
+            with self.subTest(page=page, kernel=kernel):
+                self._check_graph_replay(page, kernel, lengths)
+
+    def _check_graph_replay(self, page, kernel, lengths):
+        cache, physical_table, _ = prefix_fixture(lengths, page, 2, 0, 3)
+        subpages = page // kernel
+        table = (physical_table[..., None] * subpages + torch.arange(subpages)).flatten(
+            1
+        )
+        table[physical_table.repeat_interleave(subpages, dim=1) < 0] = -1
+        cache, table = cache.cuda().view(-1, kernel, 3), table.cuda()
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
             # Warm the compiler before capture. The graph must contain no host sync.
-            payload, warm_descriptor = pack(cache, table, lengths, 4, 2, 0)
+            payload, warm_descriptor = pack(
+                cache, table, lengths, page, 2, 0, kernel_page_tokens=kernel
+            )
             gathered = torch.stack([payload] * 2)
             _restore_mla_page_rr_prefix(gathered, warm_descriptor)
         stream.synchronize()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
-            captured, descriptor = pack(cache, table, lengths, 4, 2, 0)
+            captured, descriptor = pack(
+                cache, table, lengths, page, 2, 0, kernel_page_tokens=kernel
+            )
             gathered = torch.stack([captured] * 2)
             restored = _restore_mla_page_rr_prefix(gathered, descriptor)
         with torch.cuda.stream(stream):

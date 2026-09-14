@@ -31,7 +31,6 @@ _WORLD_SIZE = 2
 _PAGE_TOKENS = 128
 _KV_LORA_RANK = 512
 _ROPE_HEAD_DIM = 64
-_PREFIX_LENS = (385, 257)
 _FP8_KV_SCALE = 0.5
 
 
@@ -49,8 +48,10 @@ class _CanonicalPrefixCapture:
         return canonical_prefix_kv
 
 
-def _canonical_rows(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-    token_count = sum(_PREFIX_LENS)
+def _canonical_rows(
+    device: torch.device, prefix_lens
+) -> tuple[torch.Tensor, torch.Tensor]:
+    token_count = sum(prefix_lens)
     token_ids = torch.arange(token_count, dtype=torch.int64, device=device).unsqueeze(1)
     compressed_columns = torch.arange(
         _KV_LORA_RANK, dtype=torch.int64, device=device
@@ -73,7 +74,7 @@ def _local_block_table(rank: int, device: torch.device) -> torch.Tensor:
     return torch.tensor(tables[rank], dtype=torch.int32, device=device)
 
 
-def _tp2_page_rr_worker(rank: int, init_port: int) -> None:
+def _tp2_page_rr_worker(rank: int, init_port: int, physical_page_tokens: int) -> None:
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
     parallelism = ParallelismConfig()
@@ -97,24 +98,38 @@ def _tp2_page_rr_worker(rank: int, init_port: int) -> None:
         timeout=60,
     )
     try:
+        prefix_lens = (3 * physical_page_tokens + 1, 2 * physical_page_tokens + 1)
+        subpages = physical_page_tokens // _PAGE_TOKENS
         adapter = MlaPageRRCacheAdapter(
-            page_tokens=_PAGE_TOKENS,
+            page_tokens=physical_page_tokens,
+            kernel_page_tokens=_PAGE_TOKENS,
             shard_size=_WORLD_SIZE,
             shard_rank=rank,
         )
-        block_table = _local_block_table(rank, device)
-        adapter.validate_block_table_capacity(block_table, _PREFIX_LENS)
+        physical_table = _local_block_table(rank, device)
+        block_table = (
+            (
+                physical_table[..., None] * subpages
+                + torch.arange(subpages, device=device)
+            )
+            .flatten(1)
+            .to(torch.int32)
+        )
+        block_table.masked_fill_(
+            physical_table.repeat_interleave(subpages, dim=1) < 0, -1
+        )
+        adapter.validate_block_table_capacity(block_table, prefix_lens)
 
         positions = torch.cat(
             [
                 torch.arange(prefix_len, dtype=torch.int32, device=device)
-                for prefix_len in _PREFIX_LENS
+                for prefix_len in prefix_lens
             ]
         )
         batch_indices = torch.cat(
             [
                 torch.full((prefix_len,), request_idx, dtype=torch.int32, device=device)
-                for request_idx, prefix_len in enumerate(_PREFIX_LENS)
+                for request_idx, prefix_len in enumerate(prefix_lens)
             ]
         )
         slot_mapping = adapter.slot_mapping(
@@ -124,19 +139,19 @@ def _tp2_page_rr_worker(rank: int, init_port: int) -> None:
         )
         expected_owned = sum(
             min(
-                _PAGE_TOKENS,
-                max(0, prefix_len - global_page * _PAGE_TOKENS),
+                physical_page_tokens,
+                max(0, prefix_len - global_page * physical_page_tokens),
             )
-            for prefix_len in _PREFIX_LENS
+            for prefix_len in prefix_lens
             for global_page in range(
                 rank,
-                (prefix_len + _PAGE_TOKENS - 1) // _PAGE_TOKENS,
+                (prefix_len + physical_page_tokens - 1) // physical_page_tokens,
                 _WORLD_SIZE,
             )
         )
         assert int((slot_mapping >= 0).sum().item()) == expected_owned
 
-        compressed_kv, k_pe = _canonical_rows(device)
+        compressed_kv, k_pe = _canonical_rows(device, prefix_lens)
         expected = torch.cat((compressed_kv, k_pe), dim=1)
         payload_features = _KV_LORA_RANK + _ROPE_HEAD_DIM
         for raw_dtype, cache_dtype, fp8_compute, kv_scale in (
@@ -144,7 +159,7 @@ def _tp2_page_rr_worker(rank: int, init_port: int) -> None:
             (torch.float8_e4m3fn, KvCacheDataType.FP8, True, _FP8_KV_SCALE),
         ):
             raw_cache = torch.full(
-                (10, _PAGE_TOKENS, payload_features),
+                (10 * subpages, _PAGE_TOKENS, payload_features),
                 -123.0,
                 dtype=raw_dtype,
                 device=device,
@@ -174,7 +189,7 @@ def _tp2_page_rr_worker(rank: int, init_port: int) -> None:
 
                 impl = object.__new__(MlaFlashMLAPrefillImpl)
                 impl.fmha_impl = _CanonicalPrefixCapture()
-                impl.fmha_params = SimpleNamespace(prefix_lens_host=_PREFIX_LENS)
+                impl.fmha_params = SimpleNamespace(prefix_lens_host=prefix_lens)
                 impl.page_rr_cache_adapter = adapter
                 impl.attn_inputs = SimpleNamespace(
                     kv_cache_kernel_block_id_device=block_table
@@ -214,7 +229,7 @@ def _tp2_page_rr_worker(rank: int, init_port: int) -> None:
         # real page plus a padded local tail slot; pack/restore must never read
         # the -1 block-table entry.
         if rank == 1:
-            assert int(block_table[1, 1].item()) == -1
+            assert int(block_table[1, subpages].item()) == -1
         torch.distributed.barrier()
         torch.cuda.synchronize(device)
     finally:
@@ -223,6 +238,20 @@ def _tp2_page_rr_worker(rank: int, init_port: int) -> None:
 
 class MlaPageRRNCCLTest(unittest.TestCase):
     def test_tp2_bf16_and_fp8_owner_write_gather_and_canonical_restore(self) -> None:
+        self._run_topology(128)
+
+    def test_tp2_split_pages_bf16_and_fp8_write_gather_and_restore(self) -> None:
+        self._run_topology(1024)
+
+    def test_tp2_512_physical_pages_bf16_and_fp8_write_gather_and_restore(self) -> None:
+        self._run_topology(512)
+
+    def test_tp2_8192_physical_pages_bf16_and_fp8_write_gather_and_restore(
+        self,
+    ) -> None:
+        self._run_topology(8192)
+
+    def _run_topology(self, physical_page_tokens: int) -> None:
         if not torch.cuda.is_available() or torch.cuda.device_count() < _WORLD_SIZE:
             raise RuntimeError(
                 "mla_page_rr_nccl_test is a mandatory two-GPU CUDA/NCCL gate"
@@ -235,7 +264,7 @@ class MlaPageRRNCCLTest(unittest.TestCase):
             processes = [
                 mp.Process(
                     target=_tp2_page_rr_worker,
-                    args=(rank, ports[0]),
+                    args=(rank, ports[0], physical_page_tokens),
                     name=f"mla-page-rr-rank-{rank}",
                 )
                 for rank in range(_WORLD_SIZE)

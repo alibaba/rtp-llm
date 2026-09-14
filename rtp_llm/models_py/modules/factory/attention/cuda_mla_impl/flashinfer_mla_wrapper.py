@@ -487,7 +487,8 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
         )
         self.page_rr_cache_adapter = (
             MlaPageRRCacheAdapter(
-                page_tokens=attn_configs.kernel_tokens_per_block,
+                page_tokens=attn_configs.tokens_per_block,
+                kernel_page_tokens=attn_configs.kernel_tokens_per_block,
                 shard_size=int(parallelism_config.tp_size),
                 shard_rank=int(parallelism_config.tp_rank),
             )
@@ -641,7 +642,7 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
                 raise RuntimeError(
                     "MLA page-RR Prefill raw cache does not match the configured "
                     f"precision; expected dtype={expected_cache_dtype} "
-                    f"[blocks,{adapter.page_tokens},{expected_width}], got "
+                    f"[kernel_blocks,kernel_page_tokens,{expected_width}], got "
                     f"shape={tuple(raw_cache.shape)} dtype={raw_cache.dtype} "
                     f"device={raw_cache.device}"
                 )

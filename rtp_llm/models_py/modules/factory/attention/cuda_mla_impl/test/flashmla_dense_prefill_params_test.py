@@ -126,12 +126,70 @@ class FlashMlaCanonicalPrefixQuantizedActivationTest(TestCase):
 
 
 class FlashMlaDensePrefillConfigForwardingTest(TestCase):
+    def test_physical_page_owners_do_not_follow_kernel_subpages(self):
+        configs = AttentionConfigs()
+        configs.head_num = 8
+        configs.kv_lora_rank = 512
+        configs.rope_head_dim = 64
+        configs.nope_head_dim = configs.v_head_dim = 128
+        configs.tokens_per_block = 1024
+        configs.kernel_tokens_per_block = 128
+        configs.use_mla = True
+        positions = torch.tensor([0, 127, 128, 381, 1023, 1024, 8192, 8321])
+        # Physical IDs [2, 5] expanded exactly as the allocator's kernel view.
+        table = torch.tensor([list(range(16, 24)) + list(range(40, 48))])
+        inputs = SimpleNamespace(
+            is_prefill=True,
+            cache_store_inputs=None,
+            kv_cache_kernel_block_id_device=table,
+        )
+        for sharded, rank, expected in (
+            (True, 0, [2048, 2175, 2176, 2429, 3071, -1, 5120, 5249]),
+            (True, 1, [-1, -1, -1, -1, -1, 2048, -1, -1]),
+            (True, 7, [-1] * 8),
+            (False, 0, [2048, 2175, 2176, 2429, 3071, 5120]),
+        ):
+            with self.subTest(sharded=sharded, rank=rank):
+                parallel = ParallelismConfig()
+                parallel.tp_size, parallel.tp_rank = 8, rank
+                parallel.prefill_cp_config.kv_cache_sharded = sharded
+                with (
+                    patch.object(
+                        flashmla_dense_prefill,
+                        "MlaFlashMLAPrefillOp",
+                        return_value=SimpleNamespace(),
+                    ),
+                    patch.object(
+                        MlaFlashMLAPrefillImpl, "create_params", return_value=None
+                    ),
+                    patch("torch.full", return_value=torch.tensor(1.0)),
+                ):
+                    impl = MlaFlashMLAPrefillImpl(
+                        configs,
+                        inputs,
+                        [],
+                        torch.empty(0),
+                        parallelism_config=parallel,
+                    )
+                query_positions = positions if sharded else positions[:6]
+                impl.fmha_params = SimpleNamespace(
+                    positions_d=query_positions,
+                    batch_indice_d=torch.zeros_like(query_positions),
+                )
+                with (
+                    patch("torch.cuda.current_stream", return_value=None),
+                    patch.object(torch.Tensor, "record_stream", return_value=None),
+                ):
+                    slots = impl._device_slot_mapping()
+                self.assertEqual(slots.tolist(), expected)
+
     def test_swa_maps_both_pages_on_each_rank_while_full_keeps_page_owners(self):
         configs = AttentionConfigs()
         configs.head_num = 8
         configs.kv_lora_rank = 512
         configs.rope_head_dim = 64
         configs.nope_head_dim = configs.v_head_dim = 128
+        configs.tokens_per_block = 128
         configs.kernel_tokens_per_block = 128
         configs.use_mla = True
         positions = torch.tensor([0, 127, 128, 255], dtype=torch.int64)
