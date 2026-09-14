@@ -8,10 +8,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 
-/**
- * Relay end-to-end headers, excluding framing, Connection-nominated fields and caller routing
- * credentials.
- */
+/** Relay end-to-end headers, excluding framing, hop-by-hop fields and caller routing credentials. */
 final class DispatcherHeaders {
 
     static final String TRUSTED_ROUTING_HEADER = "X-Rtp-Llm-Dispatcher-Routing-Token";
@@ -32,10 +29,7 @@ final class DispatcherHeaders {
     static final Set<String> FANOUT_SKIP = caseInsensitiveSet(
             TO_FE_SKIP, "content-type", "accept-encoding");
 
-    /**
-     * Copy end-to-end headers while also honoring fields dynamically nominated by {@code Connection},
-     * which are hop-by-hop even when absent from the fixed standard list.
-     */
+    /** Also exclude headers nominated by Connection, beyond the fixed hop-by-hop list. */
     static void copyEndToEnd(HttpHeaders source, HttpHeaders sink, Set<String> skip) {
         Set<String> effectiveSkip = skip;
         List<String> connectionValues = source.get(HttpHeaders.CONNECTION);

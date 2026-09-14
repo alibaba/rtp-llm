@@ -23,10 +23,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.TimeoutException;
 
-/**
- * Allocate locally on the elected master or forward once to it. Failed forwarding never falls back to
- * local allocation.
- */
+/** Allocate on the elected master or forward once; failed forwarding never allocates locally. */
 @Component
 public class BatchScheduleCoordinator {
 

@@ -26,7 +26,6 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/** HTTP batch validation, allocation, fanout and response accounting. */
 @Component
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
 public class BatchHandler {
@@ -101,7 +100,6 @@ public class BatchHandler {
         if (body == null) {
             return badRequest("expected a JSON object body");
         }
-        // Validate routing even for bodies that will be forwarded whole.
         String generateConfigError = spec.validateRequest(body);
         if (generateConfigError != null) {
             return badRequest(generateConfigError);
@@ -206,7 +204,6 @@ public class BatchHandler {
         return DispatcherResponses.jsonBytes(merged.errorStatus(), BatchBodyParser.serialize(body));
     }
 
-    /** Resolves only the allocation dimensions the request will consume. */
     private Mono<BatchScheduleResponse> resolveTargets(
             int chunkCount, boolean assignBe, boolean assignFe) {
         if (!assignBe && !assignFe) {

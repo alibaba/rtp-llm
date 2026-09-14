@@ -7,10 +7,7 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.List;
 
-/**
- * Request full unsorted child results, then apply global sorting and top_k once. Partial failures fail
- * the request.
- */
+/** Merge full child scores before global sorting/top_k; partial failures fail the request. */
 public final class RerankerMerger {
 
     private RerankerMerger() {}
@@ -30,7 +27,6 @@ public final class RerankerMerger {
     }
 
     public static void prepare(JSONObject chunkBody) {
-        // Restore global sorting and top-k only after all scores arrive.
         chunkBody.put("sorted", false);
         chunkBody.remove("top_k");
     }
@@ -38,8 +34,7 @@ public final class RerankerMerger {
     public static void merge(JSONObject mergedBody, List<SubBatchResult> subs, List<Integer> failedIndices,
                              JSONObject originalRequest) {
         BatchEndpointSpec spec = BatchEndpointSpec.RERANKER;
-        // BatchHandler fails closed for this endpoint. Do not attempt to sort the generic null
-        // placeholders: this body is discarded in favor of a 500 response.
+        // Partial failures return an error; never sort the placeholder nulls.
         if (!failedIndices.isEmpty()) {
             return;
         }
@@ -89,8 +84,7 @@ public final class RerankerMerger {
         boolean sorted = !originalRequest.containsKey("sorted")
                 || originalRequest.getBooleanValue("sorted");
         if (sorted && results.size() > 1) {
-            // List.sort is stable, so equal scores retain original document order just like
-            // Python's stable list.sort in RerankerRenderer.
+            // Stable sorting preserves document order on ties, as Python's sort does.
             results.sort((left, right) -> compareScores((JSONObject) left, (JSONObject) right));
         }
 

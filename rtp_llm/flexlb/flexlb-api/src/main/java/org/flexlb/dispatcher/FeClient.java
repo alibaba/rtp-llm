@@ -54,10 +54,7 @@ public class FeClient {
         this.trustedRoutingToken = cfg.isPreAssignBe() ? cfg.getTrustedRoutingToken() : "";
     }
 
-    /**
-     * Reads the FE body incrementally, reserving the shared response budget before each network buffer
-     * is copied.
-     */
+    /** Reserve the shared response budget before copying each network buffer. */
     Mono<byte[]> postBytes(String feBaseUrl, String fePath, byte[] body,
                            HttpHeaders inboundHeaders, String rawQuery,
                            AtomicByteBudget.Reservation reservation) {
@@ -126,7 +123,6 @@ public class FeClient {
                 .then(Mono.fromSupplier(output::toByteArray));
     }
 
-    /** Query-less calls (the overwhelmingly common case) hit the memo. */
     private URI resolveUri(String feBaseUrl, String fePath, String rawQuery) {
         if (rawQuery != null && !rawQuery.isEmpty()) {
             return URI.create(feBaseUrl + fePath + "?" + rawQuery);

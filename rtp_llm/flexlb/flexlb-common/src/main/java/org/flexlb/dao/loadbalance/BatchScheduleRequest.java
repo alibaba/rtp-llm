@@ -19,9 +19,7 @@ public class BatchScheduleRequest {
     /** Number of master forwards; omitted by existing callers and therefore initially zero. */
     private int forwardHop;
 
-    /** Whether the response must contain backend worker fields. */
     private boolean assignBe = true;
 
-    /** Whether the elected master should stamp {@code fe_url}. */
     private boolean assignFe = true;
 }

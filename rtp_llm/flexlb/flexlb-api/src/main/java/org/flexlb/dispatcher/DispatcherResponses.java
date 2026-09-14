@@ -5,7 +5,6 @@ import org.springframework.http.MediaType;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
-/** Shared response/error helpers for the dispatcher handlers. */
 final class DispatcherResponses {
 
     private DispatcherResponses() {}

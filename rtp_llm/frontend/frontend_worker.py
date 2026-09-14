@@ -151,9 +151,7 @@ class FrontendWorker:
         if not prompts:
             return BatchPipelineResponse(response_batch=[])
 
-        # Keep /batch_infer on the same topology-aware path as root prompt_batch.
-        # PDFUSION retains its single BatchGenerateCall, while PD/multi-stage deployments and
-        # explicit force_batch=false use the established per-item handoff path.
+        # Route /batch_infer through the same topology-aware path as prompt_batch.
         effective_config = dict(generate_config)
         effective_config.setdefault("force_batch", True)
         effective_config["is_streaming"] = False

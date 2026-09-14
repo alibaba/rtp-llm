@@ -5,7 +5,6 @@ import com.alibaba.fastjson2.JSONObject;
 
 import java.util.List;
 
-/** Rebase embedding indices and add per-chunk usage after the ordered merge. */
 public final class EmbeddingMerger {
 
     private EmbeddingMerger() {}

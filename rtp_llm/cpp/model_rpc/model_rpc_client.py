@@ -1264,8 +1264,7 @@ class ModelRpcClient(object):
             name = ErrorCodePB.Name(error_code)
         except ValueError:
             return ExceptionType.UNKNOWN_ERROR
-        # The protobuf keeps the historical US spelling while ExceptionType uses the
-        # spelling already exposed by the Python API.
+        # Keep the public ExceptionType spelling for the protobuf's CANCELED value.
         if name == "P2P_CONNECTOR_WORKER_READ_CANCELED":
             name = "P2P_CONNECTOR_WORKER_READ_CANCELLED"
         return ExceptionType.__members__.get(name, ExceptionType.UNKNOWN_ERROR)
@@ -1283,8 +1282,7 @@ class ModelRpcClient(object):
         batch_input_pb = BatchGenerateInputPB()
         for inp, timeout_ms in zip(inputs, effective_timeout_ms):
             input_pb = trans_input(inp)
-            # A batch has one outer deadline, but every backend item keeps its own effective
-            # timeout. Do not normalize by mutating the caller's GenerateInput.
+            # Preserve each item's deadline without changing caller-owned inputs.
             input_pb.generate_config.timeout_ms = timeout_ms or 0
             batch_input_pb.inputs.append(input_pb)
 

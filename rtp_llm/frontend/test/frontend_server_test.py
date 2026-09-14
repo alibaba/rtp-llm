@@ -1,8 +1,9 @@
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest import TestCase, main
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import torch
 from pydantic import BaseModel
@@ -17,6 +18,7 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.frontend_worker import BatchPipelineResponse, FrontendWorker
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, FinisheReason
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import RoleType
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_constants import request_id_field_name
@@ -74,6 +76,40 @@ class FakeFrontendWorker(object):
 
 
 class ForceBatchFrontendWorkerTest(TestCase):
+    def test_chat_batch_preserves_master_scheduling_and_static_batch_rpc(self):
+        for available in (False, True):
+            with self.subTest(master_available=available):
+                second_finished = asyncio.Event()
+
+                async def generate(item):
+                    yield "intermediate"
+                    if item == 700:
+                        await second_finished.wait()
+                    else:
+                        second_finished.set()
+                    yield item
+
+                endpoint = OpenaiEndpoint.__new__(OpenaiEndpoint)
+                endpoint._prepare_chat_input = lambda rid, _: (rid, GenerateConfig())
+                endpoint._render_single_output = AsyncMock(
+                    side_effect=lambda out, *_: out
+                )
+                visitor = endpoint.backend_rpc_server_visitor = MagicMock()
+                visitor.host_service.service_available = available
+                visitor.enqueue = AsyncMock(side_effect=generate)
+                visitor.batch_enqueue = AsyncMock(return_value=[700, 701])
+                request = SimpleNamespace(
+                    requests=[SimpleNamespace(stream=False) for _ in range(2)]
+                )
+                result = asyncio.run(
+                    asyncio.wait_for(endpoint.batch_chat_completion(700, request), 1)
+                )
+                self.assertEqual([700, 701], result)
+                self.assertEqual(2 if available else 0, visitor.enqueue.await_count)
+                self.assertEqual(
+                    0 if available else 1, visitor.batch_enqueue.await_count
+                )
+
     def test_batch_endpoint_preserves_config_identity_and_headers(self):
         for force in (True, False):
             with self.subTest(force=force):
@@ -158,8 +194,6 @@ class ForceBatchFrontendWorkerTest(TestCase):
                     )
 
     def test_prepared_batch_invokes_backend_once_with_group_identity(self):
-        from unittest.mock import AsyncMock
-
         pipeline = Pipeline.__new__(Pipeline)
         pipeline.tokenizer = MagicMock()
         pipeline.tokenizer.encode.return_value = [1, 2]

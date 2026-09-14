@@ -713,8 +713,7 @@ class BackendRPCServerVisitor:
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)
 
-        # The master owns per-request admission. A direct batch must already have
-        # one backend, or use the local/static PDFUSION deployment path.
+        # Atomic RPC needs a preassigned backend when master admission is enabled.
         if self.host_service.service_available and any(
             not input.generate_config.role_addrs for input in inputs
         ):

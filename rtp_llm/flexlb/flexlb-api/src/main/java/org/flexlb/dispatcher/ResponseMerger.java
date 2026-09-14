@@ -57,10 +57,7 @@ public final class ResponseMerger {
                 failedIndices, failedReasons, 500);
     }
 
-    /**
-     * HTTP status for the all-failed case: the shared FE 4xx when every sub-batch that reached an FE
-     * failed with that same client error, otherwise 500.
-     */
+    /** On total failure, use the shared FE 4xx if all contacted FEs return it; otherwise 500. */
     private static int commonErrorStatus(List<SubBatchResult> subs) {
         int common = -1;
         for (SubBatchResult s : subs) {

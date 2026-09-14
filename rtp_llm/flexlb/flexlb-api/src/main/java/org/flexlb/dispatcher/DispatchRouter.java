@@ -8,7 +8,6 @@ import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.RouterFunctions;
 import org.springframework.web.reactive.function.server.ServerResponse;
 
-/** Dispatcher HTTP routes on the existing FlexLB listener. */
 @Component
 @RequiredArgsConstructor
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")

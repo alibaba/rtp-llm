@@ -15,7 +15,6 @@ import reactor.core.scheduler.Schedulers;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Sends chunks concurrently to their assigned FEs and preserves explicit JSON nulls. */
 @Component
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
 public class FanoutService {
@@ -56,7 +55,6 @@ public class FanoutService {
             start += chunkSize;
         }
         return Mono.defer(() -> {
-            // Each subscription owns its budgets.
             AtomicByteBudget responseBudget = new AtomicByteBudget(maxAggregateResponseBytes);
             AtomicByteBudget requestBudget = new AtomicByteBudget(maxAggregateRequestBytes);
             return Flux.fromIterable(plans)
@@ -138,7 +136,6 @@ public class FanoutService {
         return DispatcherMetricsReporter.CHUNK_TRANSPORT;
     }
 
-    /** A chunk's request body plus its absolute offset and item count in the batch. */
     private record ChunkPlan(JSONObject body, int startIndex, int chunkSize, String feUrl) {
     }
 }
