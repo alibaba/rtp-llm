@@ -151,7 +151,15 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
     };
 
     std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
-    store_tasks_[request_block_buffer->getRequestId()][request_block_buffer] = {counted_callback, task};
+    auto& pending = store_tasks_[request_block_buffer->getRequestId()];
+    if (params_.enable_sleep_mode && pending.count(request_block_buffer) != 0) {
+        // Replacing a queued callback would strand its transfer count and make
+        // every later sleep drain time out. Keep the first submission intact.
+        lock.unlock();
+        counted_callback(false, CacheStoreErrorCode::InvalidParams);
+        return;
+    }
+    pending[request_block_buffer] = {counted_callback, task};
 }
 
 std::shared_ptr<StoreContext>

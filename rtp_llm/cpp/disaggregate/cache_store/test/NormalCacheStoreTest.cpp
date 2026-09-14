@@ -182,6 +182,38 @@ TEST(NormalCacheStoreSleepCpuTest, testCountTransferInvokesCallbackOnlyOnce) {
     EXPECT_EQ(store.activeTransferCount(), 0);
 }
 
+TEST(NormalCacheStoreSleepCpuTest, testDuplicatePendingStoreDoesNotStrandTransferCount) {
+    NormalCacheStore store;
+    store.params_.enable_sleep_mode = true;
+    store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
+    auto buffer = std::make_shared<RequestBlockBuffer>("duplicate-pending-store");
+    buffer->addBlock("a", std::make_shared<char>('0'), 1, false, false);
+    int first_calls = 0;
+    int duplicate_calls = 0;
+    store.store(buffer, [&](bool ok, CacheStoreErrorCode ec) {
+        ++first_calls;
+        EXPECT_FALSE(ok);
+        EXPECT_EQ(CacheStoreErrorCode::StoreFailed, ec);
+    });
+    store.store(buffer, [&](bool ok, CacheStoreErrorCode ec) {
+        ++duplicate_calls;
+        EXPECT_FALSE(ok);
+        EXPECT_EQ(CacheStoreErrorCode::InvalidParams, ec);
+        std::unique_lock<std::shared_mutex> lock(store.store_tasks_mutex_, std::try_to_lock);
+        EXPECT_TRUE(lock.owns_lock());
+    });
+    EXPECT_EQ(first_calls, 0);
+    EXPECT_EQ(duplicate_calls, 1);
+    EXPECT_EQ(store.activeTransferCount(), 1);
+    ASSERT_EQ(store.store_tasks_.at(buffer->getRequestId()).size(), 1);
+    store.markRequestEnd(buffer->getRequestId());
+    store.markRequestEnd(buffer->getRequestId());
+    EXPECT_EQ(first_calls, 1);
+    EXPECT_EQ(duplicate_calls, 1);
+    EXPECT_EQ(store.activeTransferCount(), 0);
+    EXPECT_TRUE(store.store_tasks_.empty());
+}
+
 TEST(NormalCacheStoreSleepCpuTest, testDisabledSleepDoesNotCountTransfers) {
     NormalCacheStore store;
     store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
@@ -191,6 +223,24 @@ TEST(NormalCacheStoreSleepCpuTest, testDisabledSleepDoesNotCountTransfers) {
     EXPECT_EQ(store.activeTransferCount(), 0);
     untracked(true, CacheStoreErrorCode::None);
     EXPECT_EQ(calls, 1);
+    EXPECT_EQ(store.activeTransferCount(), 0);
+}
+
+TEST(NormalCacheStoreSleepCpuTest, testDisabledSleepKeepsDuplicatePendingStoreBehavior) {
+    NormalCacheStore store;
+    store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
+    auto buffer = std::make_shared<RequestBlockBuffer>("duplicate-sleep-disabled");
+    buffer->addBlock("a", std::make_shared<char>('0'), 1, false, false);
+    int first_calls = 0;
+    int second_calls = 0;
+    store.store(buffer, [&](bool, CacheStoreErrorCode) { ++first_calls; });
+    store.store(buffer, [&](bool, CacheStoreErrorCode) { ++second_calls; });
+    EXPECT_EQ(first_calls, 0);
+    EXPECT_EQ(second_calls, 0);
+    EXPECT_EQ(store.activeTransferCount(), 0);
+    store.markRequestEnd(buffer->getRequestId());
+    EXPECT_EQ(first_calls, 0);
+    EXPECT_EQ(second_calls, 1);
     EXPECT_EQ(store.activeTransferCount(), 0);
 }
 
