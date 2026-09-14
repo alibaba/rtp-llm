@@ -5,6 +5,8 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
+import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeMode;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
@@ -72,21 +74,20 @@ class DefaultRouterTest {
         configService = mock(ConfigService.class);
         modelMeta = mock(ModelMetaConfig.class);
         requests = mock(RequestRegistry.class);
-        when(requests.claimAdmissionMutation(anyLong(), any())).thenReturn(mock(AdmissionMutation.class));
+        when(requests.claimAdmissionHandle(anyLong(), any())).thenReturn(mock(AdmissionHandle.class));
         when(requests.register(any())).thenReturn(new CompletableFuture<>());
         when(requests.commitRoute(any(), any())).thenAnswer(call ->
                 ((java.util.function.BooleanSupplier) call.getArgument(1)).getAsBoolean()
                         ? PlacementResult.Status.SUCCESS : PlacementResult.Status.BLOCKED);
-        when(requests.tryClaimRouteDelivery(any(), any())).thenAnswer(call -> {
-            ((java.util.function.BooleanSupplier) call.getArgument(1)).getAsBoolean();
+        when(requests.claimRouteDelivery(any(), any())).thenAnswer(call -> {
+            call.getArgument(1, PrefillAdmissionResources.CommittedAdmissionOwner.class).transferToEndpoint(call.getArgument(0));
             DeliveryClaim claim = mock(DeliveryClaim.class);
-            when(claim.item()).thenReturn(call.getArgument(0));
+            ScheduledRequest item = call.getArgument(0);
             lastDelivery = claim;
             doAnswer(inv -> {
-                ScheduledRequest item = claim.item();
                 item.future().complete(item.routeResponse());
                 return null;
-            }).when(claim).publishRoute(any(), anyLong());
+            }).when(requests).publishRoute(eq(claim), any(), anyLong());
             return claim;
         });
         when(requests.publishDecisionResponseAsync(anyLong(), any(), any())).thenAnswer(call ->
@@ -196,7 +197,7 @@ class DefaultRouterTest {
         assertTrue(scheduler(router(), context).submit(context).join().isSuccess());
 
         var precedingWork = org.mockito.ArgumentCaptor.forClass(org.flexlb.balance.projection.WorkSnapshot.class);
-        verify(lastDelivery).publishRoute(precedingWork.capture(), eq(0L));
+        verify(requests).publishRoute(eq(lastDelivery), precedingWork.capture(), eq(0L));
         assertEquals(unknown ? java.util.OptionalLong.empty() : java.util.OptionalLong.of(0L),
                 precedingWork.getValue().totalRemainingWorkMs());
         verify(registration).close();

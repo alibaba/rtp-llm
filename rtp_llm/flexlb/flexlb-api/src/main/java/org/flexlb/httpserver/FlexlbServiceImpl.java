@@ -790,7 +790,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             String selectedDecode = "";
             if (ctx.getResponse() != null && ctx.getResponse().getServerStatus() != null) {
                 for (ServerStatus ss : ctx.getResponse().getServerStatus()) {
-                    if (ss.getRole() == RoleType.PREFILL || ss.getRole() == RoleType.PDFUSION) {
+                    if (ss.getRole() != null && ss.getRole().supportsPrefill()) {
                         selectedPrefill = ss.getServerIp() != null ? ss.getServerIp() : "";
                     } else if (ss.getRole() == RoleType.DECODE) {
                         selectedDecode = ss.getServerIp() != null ? ss.getServerIp() : "";

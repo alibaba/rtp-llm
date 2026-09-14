@@ -2,6 +2,8 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
+import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -22,6 +24,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Shared lifecycle primitives for scheduler contract tests. */
 final class RequestLifecycleTestSupport {
+    /** Seed cancellation in state-only fixtures without exposing an internal production operation. */
+    static boolean recordCancellation(RequestSlot slot, CancelReason reason, String message) {
+        return Boolean.TRUE.equals(ReflectionTestUtils.invokeMethod(slot, "recordCancellationLocked", reason, message));
+    }
 
     private RequestLifecycleTestSupport() {
     }
@@ -40,8 +46,8 @@ final class RequestLifecycleTestSupport {
 
     static void bind(
             RequestRegistry lifecycle, Registered registered) {
-        try (AdmissionMutation admission =
-                     lifecycle.claimAdmissionMutation(
+        try (AdmissionHandle admission =
+                     lifecycle.claimAdmissionHandle(
                              registered.item().requestId(), registered.future())) {
             assertNotNull(admission);
             assertTrue(lifecycle.commitItemForPublication(
@@ -56,31 +62,70 @@ final class RequestLifecycleTestSupport {
 
     static PlacementResult.Status commitRoute(
             RequestRegistry lifecycle, Registered registered) {
-        try (AdmissionMutation admission = lifecycle.claimAdmissionMutation(
+        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(
                 registered.item().requestId(), registered.future())) {
             assertNotNull(admission);
             return lifecycle.commitRoute(registered.item(), () -> true);
         }
     }
 
-    static DeliveryClaim claimRoute(RequestRegistry lifecycle,
-                                                     ScheduledRequest item,
-                                                     BooleanSupplier endpointHandoff) {
-        DeliveryClaim claim = lifecycle.tryClaimRouteDelivery(item, endpointHandoff);
-        if (claim != null) {
-            claim.begin(new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
-        }
+    static DeliveryClaim claimRoute(RequestRegistry registry, ScheduledRequest item, BooleanSupplier handoff) {
+        DeliveryClaim claim = claimRouteWithoutPrediction(registry, item, handoff);
+        if (claim != null) { registry.setDeliveryPrediction(claim, emptyWork(), 30_000L); }
         return claim;
     }
 
-    static DeliveryClaim claimBatch(RequestRegistry lifecycle,
-                                                     ScheduledRequest item, long batchId,
-                                                     BooleanSupplier endpointHandoff) {
-        DeliveryClaim claim = lifecycle.tryClaimBatchDelivery(item, batchId, endpointHandoff);
-        if (claim != null) {
-            claim.begin(new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
-        }
+    static DeliveryClaim claimBatch(RequestRegistry registry, ScheduledRequest item, long batchId, BooleanSupplier handoff) {
+        DeliveryClaim claim = claimBatchWithoutPrediction(registry, item, batchId, handoff);
+        if (claim != null) { registry.setDeliveryPrediction(claim, emptyWork(), 30_000L); }
         return claim;
+    }
+
+    static DeliveryClaim claimRouteWithoutPrediction(RequestRegistry registry, ScheduledRequest item, BooleanSupplier handoff) {
+        var admission = org.mockito.Mockito.mock(PrefillAdmissionResources.CommittedAdmissionOwner.class);
+        org.mockito.Mockito.when(admission.transferToEndpoint(item)).thenAnswer(call -> handoff.getAsBoolean());
+        return registry.claimRouteDelivery(item, admission);
+    }
+
+    static DeliveryClaim claimBatchWithoutPrediction(RequestRegistry registry, ScheduledRequest item, long batchId,
+            BooleanSupplier handoff) {
+        var transaction = org.mockito.Mockito.mock(BatchDeliveryStrategy.BatchTransaction.class);
+        org.mockito.Mockito.when(transaction.batchId()).thenReturn(batchId);
+        org.mockito.Mockito.when(transaction.transferToEndpoint(item)).thenAnswer(call -> handoff.getAsBoolean());
+        return registry.claimBatchDelivery(item, transaction);
+    }
+
+    private static WorkSnapshot emptyWork() {
+        return new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L);
+    }
+
+    // State-only fixtures deliberately seed a phase without executing publication or timers.
+    static void startRouteDelivery(RequestSlot slot) {
+        var admission = org.mockito.Mockito.mock(PrefillAdmissionResources.CommittedAdmissionOwner.class);
+        org.mockito.Mockito.when(admission.transferToEndpoint(slot.activeItem())).thenReturn(true);
+        org.junit.jupiter.api.Assertions.assertNotNull(slot.claimRouteDelivery(slot.activeItem(), admission));
+    }
+
+    static void startBatchDelivery(RequestSlot slot, long batchId) {
+        var transaction = org.mockito.Mockito.mock(BatchDeliveryStrategy.BatchTransaction.class);
+        org.mockito.Mockito.when(transaction.batchId()).thenReturn(batchId);
+        org.mockito.Mockito.when(transaction.transferToEndpoint(slot.activeItem())).thenReturn(true);
+        org.junit.jupiter.api.Assertions.assertNotNull(slot.claimBatchDelivery(slot.activeItem(), transaction));
+    }
+
+    static void markAcknowledged(RequestSlot slot) {
+        ReflectionTestUtils.invokeMethod(slot, "transition", RequestState.Phase.ACKNOWLEDGED, "test acknowledgement");
+    }
+
+    static RequestSlot.RequestEffect acknowledge(RequestSlot slot, long batchId) {
+        return ReflectionTestUtils.invokeMethod(slot, "acknowledgeDeliveryLocked", batchId, null);
+    }
+
+    static boolean prepareMember(RequestRegistry registry, ScheduledRequest item) {
+        var transaction = org.mockito.Mockito.mock(BatchDeliveryStrategy.BatchTransaction.class);
+        org.mockito.Mockito.when(transaction.append(item))
+                .thenReturn(org.flexlb.balance.delivery.CapacityBoundary.Attempt.accepted(item));
+        return registry.prepareBatchMember(item, transaction).accepted();
     }
 
     static void awaitGlobalCapacityWaiters(RequestScheduler scheduler, int expected)

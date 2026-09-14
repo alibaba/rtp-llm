@@ -12,21 +12,22 @@ import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.dao.route.RoleType;
 import org.mockito.Mockito;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 
 /** Exact-capability fakes for final delivery-strategy tests. */
-final class DeliveryStrategyTestSupport {
+public final class DeliveryStrategyTestSupport {
 
     static final PrefillTimePredictor.Evaluator EVALUATOR =
             new PrefillTimePredictor.Evaluator() {
@@ -42,6 +43,25 @@ final class DeliveryStrategyTestSupport {
                             .sum();
                 }
             };
+
+    public static void stubRouteDelivery(RequestRegistry requests,
+            java.util.function.BiConsumer<DeliveryClaim, DeliveryResult> completed) {
+        Mockito.doAnswer(invocation ->
+                invocation.getArgument(1, RouteDeliveryStrategy.RouteTransaction.class)
+                        .append(invocation.getArgument(0), invocation.getArgument(2)))
+                .when(requests).prepareRouteMember(Mockito.any(), Mockito.any(), Mockito.any());
+        Mockito.doAnswer(invocation -> {
+            if (!invocation.getArgument(1, PrefillAdmissionResources.CommittedAdmissionOwner.class)
+                    .transferToEndpoint(invocation.getArgument(0))) { return null; }
+            DeliveryClaim claim = Mockito.mock(DeliveryClaim.class);
+            ReflectionTestUtils.setField(claim, "item", invocation.getArgument(0));
+            Mockito.doAnswer(inv -> { completed.accept(claim, inv.getArgument(0)); return null; })
+                    .when(claim).complete(Mockito.any());
+            Mockito.doAnswer(inv -> { claim.complete(DeliveryResult.delivered()); return null; })
+                    .when(requests).publishRoute(Mockito.eq(claim), Mockito.any(), Mockito.anyLong());
+            return claim;
+        }).when(requests).claimRouteDelivery(Mockito.any(), Mockito.any());
+    }
 
     private DeliveryStrategyTestSupport() {
     }
@@ -278,38 +298,37 @@ final class DeliveryStrategyTestSupport {
         private Runnable beforeCompletion = () -> { };
 
         TestRequestRegistry() {
-            Mockito.doAnswer(invocation -> prepareIfOwned(
-                    invocation.getArgument(0), invocation.getArgument(1)))
-                    .when(requests).prepareIfOwned(
-                            Mockito.any(), Mockito.any());
-            Mockito.doAnswer(invocation -> claim(
-                    invocation.getArgument(0),
-                    DeliveryClaimKind.ROUTE_DECISION,
-                    0L,
-                    invocation.getArgument(1)))
-                    .when(requests).tryClaimRouteDelivery(
-                            Mockito.any(), Mockito.any());
-            Mockito.doAnswer(invocation -> claim(
-                    invocation.getArgument(0),
-                    DeliveryClaimKind.BATCH_ENQUEUE,
-                    invocation.getArgument(1),
-                    invocation.getArgument(2)))
-                    .when(requests).tryClaimBatchDelivery(
-                            Mockito.any(), Mockito.anyLong(), Mockito.any());
             Mockito.doAnswer(invocation -> {
-                failPrepared(invocation.getArgument(0), invocation.getArgument(1));
+                ScheduledRequest item = invocation.getArgument(0);
+                if (item == preparationLostFor) { return CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST); }
+                prepared.add(item);
+                return invocation.getArgument(1, BatchDeliveryStrategy.class).prepareAdmission(item);
+            }).when(requests).prepareBatchDelivery(Mockito.any(), Mockito.any());
+            Mockito.doAnswer(invocation -> {
+                ScheduledRequest item = invocation.getArgument(0);
+                if (item == preparationLostFor) { return CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST); }
+                prepared.add(item);
+                return invocation.getArgument(1, BatchDeliveryStrategy.BatchTransaction.class).append(item);
+            }).when(requests).prepareBatchMember(Mockito.any(), Mockito.any());
+            Mockito.doAnswer(invocation -> {
+                ScheduledRequest item = invocation.getArgument(0);
+                if (item == preparationLostFor) { return CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST); }
+                prepared.add(item);
+                return invocation.getArgument(1, RouteDeliveryStrategy.RouteTransaction.class).append(item, invocation.getArgument(2));
+            }).when(requests).prepareRouteMember(Mockito.any(), Mockito.any(), Mockito.any());
+            Mockito.doAnswer(invocation -> claim(invocation.getArgument(0), DeliveryClaimKind.ROUTE_DECISION, 0L,
+                    () -> invocation.getArgument(1, PrefillAdmissionResources.CommittedAdmissionOwner.class)
+                            .transferToEndpoint(invocation.getArgument(0))))
+                    .when(requests).claimRouteDelivery(Mockito.any(), Mockito.any());
+            Mockito.doAnswer(invocation -> {
+                var batch = invocation.getArgument(1, BatchDeliveryStrategy.BatchTransaction.class);
+                return claim(invocation.getArgument(0), DeliveryClaimKind.BATCH_ENQUEUE, batch.batchId(),
+                        () -> batch.transferToEndpoint(invocation.getArgument(0)));
+            }).when(requests).claimBatchDelivery(Mockito.any(), Mockito.any());
+            Mockito.doAnswer(invocation -> {
+                failDeliveryPreparation(invocation.getArgument(0), invocation.getArgument(1));
                 return null;
-            }).when(requests).failPrepared(Mockito.any(), Mockito.any());
-        }
-
-        private <T> Optional<T> prepareIfOwned(
-                ScheduledRequest exactItem,
-                java.util.function.Supplier<T> preparation) {
-            if (exactItem == preparationLostFor) {
-                return Optional.empty();
-            }
-            prepared.add(exactItem);
-            return Optional.of(preparation.get());
+            }).when(requests).failDeliveryPreparation(Mockito.any(), Mockito.any());
         }
 
         private DeliveryClaim claim(
@@ -333,36 +352,37 @@ final class DeliveryStrategyTestSupport {
             events.add("point-of-no-return-" + exactItem.requestId());
             DeliveryClaim claim =
                     Mockito.mock(DeliveryClaim.class);
-            Mockito.when(claim.item()).thenReturn(exactItem);
+            ReflectionTestUtils.setField(claim, "item", exactItem);
             Mockito.doAnswer(inv -> { complete(claim, inv.getArgument(0)); return null; })
                     .when(claim).complete(Mockito.any());
             Mockito.doAnswer(inv -> {
-                precedingWork.put(claim.item(), inv.getArgument(0));
-                unstartedWorkMs.put(claim.item(), inv.getArgument(1));
+                precedingWork.put(exactItem, inv.getArgument(1));
+                unstartedWorkMs.put(exactItem, inv.getArgument(2));
                 return null;
-            }).when(claim).begin(Mockito.any(), Mockito.anyLong());
+            }).when(requests).setDeliveryPrediction(Mockito.eq(claim), Mockito.any(), Mockito.anyLong());
             Mockito.doAnswer(inv -> {
-                claim.begin(inv.getArgument(0), inv.getArgument(1));
+                requests.setDeliveryPrediction(claim, inv.getArgument(1), inv.getArgument(2));
                 complete(claim, DeliveryResult.delivered());
                 return null;
-            }).when(claim).publishRoute(Mockito.any(), Mockito.anyLong());
+            }).when(requests).publishRoute(Mockito.eq(claim), Mockito.any(), Mockito.anyLong());
             return claim;
         }
 
         private void complete(
                 DeliveryClaim exactClaim,
                 DeliveryResult completion) {
+            ScheduledRequest item = (ScheduledRequest) ReflectionTestUtils.getField(exactClaim, "item");
             beforeCompletion.run();
-            completions.add(new CompletionEvent(exactClaim.item(), completion));
-            events.add("complete-" + exactClaim.item().requestId());
-            if (exactClaim.item() == throwCompletionFor) {
+            completions.add(new CompletionEvent(item, completion));
+            events.add("complete-" + item.requestId());
+            if (item == throwCompletionFor) {
                 throw new IllegalStateException(
                         "synthetic completion failure "
-                                + exactClaim.item().requestId());
+                                + item.requestId());
             }
         }
 
-        private void failPrepared(ScheduledRequest exactItem, Throwable cause) {
+        private void failDeliveryPreparation(ScheduledRequest exactItem, Throwable cause) {
             failedPrepared.add(exactItem);
             preparedFailures.add(cause);
         }
@@ -553,16 +573,16 @@ final class DeliveryStrategyTestSupport {
         private final List<List<ScheduledRequest>> routes = new ArrayList<>();
         private final List<BatchTelemetry> batches = new ArrayList<>();
         private final DeliveryMetrics metrics =
-                org.mockito.Mockito.mock(DeliveryMetrics.class);
+                Mockito.mock(DeliveryMetrics.class);
 
         TestTelemetry() {
-            org.mockito.Mockito.doAnswer(invocation -> {
+            Mockito.doAnswer(invocation -> {
                 routesDelivered(invocation.getArgument(0), invocation.getArgument(1));
                 return null;
             }).when(metrics).routesDelivered(
                     org.mockito.ArgumentMatchers.anyInt(),
                     org.mockito.ArgumentMatchers.anyList());
-            org.mockito.Mockito.doAnswer(invocation -> {
+            Mockito.doAnswer(invocation -> {
                 batchDispatched(
                         invocation.getArgument(0), invocation.getArgument(1),
                         invocation.getArgument(2), invocation.getArgument(3),

@@ -80,7 +80,7 @@ class PrefillCompletionProjectionTest {
             ScheduledRequest item = new ScheduledRequest(context, future, new Response(), null, null,
                     prefill, decode, reservation, System.currentTimeMillis());
             AtomicReference<PrefillState.RouteReservation> routeReservation = new AtomicReference<>();
-            try (var mutation = requests.claimAdmissionMutation(101L, future);
+            try (var mutation = requests.claimAdmissionHandle(101L, future);
                  var pin = prefill.tryPinGeneration()) {
                 assertNotNull(mutation);
                 assertNotNull(pin);
@@ -93,13 +93,13 @@ class PrefillCompletionProjectionTest {
             }
             try (var routeCommit = prefill.tryBeginRouteCommitAdmission()) {
                 assertNotNull(routeCommit);
-                var claim = requests.tryClaimRouteDelivery(item, () -> {
+                var claim = RequestLifecycleTestSupport.claimRouteWithoutPrediction(requests, item, () -> {
                     try (var handoff = routeCommit.commit(List.of(item), List.of(routeReservation.get()))) {
                         return true;
                     }
                 });
                 assertNotNull(claim);
-                claim.publishRoute(new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
+                requests.publishRoute(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
             }
             assertTrue(future.get(2L, TimeUnit.SECONDS).isSuccess());
             assertEquals(1L, prefill.observedRequestCount());

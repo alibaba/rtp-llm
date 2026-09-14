@@ -138,7 +138,8 @@ class WorkerBatcherRequestCapacityTest {
             assertTrue(replacementSelected.await(5, TimeUnit.SECONDS));
             assertEquals(List.of(incoming), fixture.endpoint.captureQueueSnapshot().items());
             assertEquals(1L, fixture.endpoint.observedRequestCount());
-            verify(fixture.runtime.requests(), times(0)).tryClaimRouteDelivery(any(), any());
+            assertTrue(org.mockito.Mockito.mockingDetails(fixture.runtime.requests()).getInvocations().stream()
+                    .noneMatch(call -> call.getMethod().getName().equals("claimRouteDelivery")));
             verify(fixture.runtime.events()).onQueuedItemPreempted(victim, incoming);
         }
     }

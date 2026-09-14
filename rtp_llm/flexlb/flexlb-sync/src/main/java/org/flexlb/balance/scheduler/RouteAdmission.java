@@ -7,6 +7,8 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
+import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.dao.BalanceContext;
@@ -71,7 +73,7 @@ public final class RouteAdmission implements AutoCloseable {
                 WorkerEndpoint.GenerationPin pin =
                         selected.takeGenerationPin();
                 WorkerEndpoint endpoint = pin.endpoint();
-                if (role == RoleType.PREFILL || role == RoleType.PDFUSION) {
+                if (role != null && role.supportsPrefill()) {
                     if (prefillPin != null
                             || !(endpoint instanceof PrefillEndpoint prefill)) {
                         pin.close();
@@ -237,7 +239,7 @@ public final class RouteAdmission implements AutoCloseable {
             throw new IllegalArgumentException("admission cannot build another request");
         }
         return new ScheduledRequest(context, future, response,
-                RequestResponses.copyOf(prefillStatus()), RequestResponses.copyOf(decodeStatus()),
+                ServerStatus.copyOf(prefillStatus()), ServerStatus.copyOf(decodeStatus()),
                 prefillEndpoint(), decodeEndpoint(), decodeBinding.reservation(), enqueuedAtMs, decodeBinding);
     }
 
@@ -252,8 +254,8 @@ public final class RouteAdmission implements AutoCloseable {
     PlacementResult<RouteDelivery, PlacementKey> tryCommitDirectRoute(
             BalanceContext context, RequestRegistry lifecycle) {
         requireProvisional();
-        try (AdmissionMutation mutation = lifecycle.claimAdmissionMutation(requestId, context.getFuture())) {
-            if (mutation == null) { return PlacementResult.closed(); }
+        try (AdmissionHandle handle = lifecycle.claimAdmissionHandle(requestId, context.getFuture())) {
+            if (handle == null) { return PlacementResult.closed(); }
             if (!reserveDecode()) {
                 return PlacementResult.blocked(decodePlacementKey());
             }
@@ -294,7 +296,7 @@ public final class RouteAdmission implements AutoCloseable {
                 }
                 var handoff = routeCommit.commit(List.of(item), List.of(reservationAttempt.reservation()));
                 admission.bindPrefillHandoff(handoff);
-                var claim = lifecycle.tryClaimRouteDelivery(item, () -> admission.transferToEndpoint(item));
+                var claim = lifecycle.claimRouteDelivery(item, admission);
                 if (claim == null) { return PlacementResult.closed(); }
                 markCommitted();
                 return PlacementResult.success(new RouteDelivery(claim, handoff.precedingWork(), selection.prefillWorkMs()));
