@@ -81,10 +81,12 @@ TEST(BenchmarkCliTest, AcceptsThreeDBatchStrategy) {
     const std::string path =
         std::string(runfiles) + "/" + workspace
         + "/rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles/deepseek_v4_pro_fp8_tp1_cp1.json";
-    const auto result = invoke({"transfer", "--model-profile", path, "--copy-strategy=3d-batch"});
-    EXPECT_EQ(result.code, 0);
-    EXPECT_TRUE(result.ran);
-    EXPECT_TRUE(result.error.empty());
+    for (const std::string mode : {"3d-batch", "3d-batch-unmerged"}) {
+        const auto result = invoke({"transfer", "--model-profile", path, "--copy-strategy=" + mode});
+        EXPECT_EQ(result.code, 0) << mode;
+        EXPECT_TRUE(result.ran) << mode;
+        EXPECT_TRUE(result.error.empty()) << mode;
+    }
     const auto invalid = invoke({"transfer", "--model-profile", path, "--copy-strategy=unknown"});
     EXPECT_EQ(invalid.code, 1);
     EXPECT_FALSE(invalid.ran);

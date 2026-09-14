@@ -1607,6 +1607,80 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupporte
     releasePoolBlock(*host_pool_, host_block);
 }
 
+TEST(Cuda3DBatchTileIntegrationTest, PreservesPaddingAndDescriptorBoundariesInBothDirections) {
+    constexpr size_t layers = 4, width = 32, host_pitch = 64, device_pitch = 96;
+    constexpr size_t host_bytes = layers * host_pitch, device_bytes = layers * device_pitch;
+    constexpr uint8_t sentinel = 0xCD;
+    int device_index = -1;
+    ASSERT_EQ(cudaGetDevice(&device_index), cudaSuccess);
+    void* host = nullptr;
+    ASSERT_EQ(cudaMallocHost(&host, host_bytes), cudaSuccess);
+    const auto free_host = [](void* ptr) { cudaFreeHost(ptr); };
+    std::unique_ptr<void, decltype(free_host)> host_guard(host, free_host);
+    void* device = nullptr;
+    ASSERT_EQ(cudaMalloc(&device, device_bytes), cudaSuccess);
+    const auto free_device = [](void* ptr) { cudaFree(ptr); };
+    std::unique_ptr<void, decltype(free_device)> device_guard(device, free_device);
+    auto* host_data = static_cast<uint8_t*>(host);
+    auto* device_data = static_cast<uint8_t*>(device);
+    DeviceHostCopyOptions options;
+    options.cuda_3d_batch_copy_enabled = true;
+    for (bool device_to_host : {false, true}) {
+        for (bool split_descriptors : {false, true}) {
+            for (bool coalesce : {false, true}) {
+                SCOPED_TRACE("d2h=" + std::to_string(device_to_host)
+                             + " split=" + std::to_string(split_descriptors)
+                             + " coalesce=" + std::to_string(coalesce));
+                std::vector<uint8_t> device_contents(device_bytes, sentinel);
+                std::memset(host, sentinel, host_bytes);
+                for (size_t layer = 0; layer < layers; ++layer) {
+                    const uint8_t value = static_cast<uint8_t>(0x11 + layer);
+                    if (device_to_host) {
+                        std::fill_n(device_contents.begin() + layer * device_pitch, width, value);
+                    } else {
+                        std::memset(host_data + layer * host_pitch, value, width);
+                    }
+                }
+                ASSERT_EQ(cudaMemcpy(device, device_contents.data(), device_bytes, cudaMemcpyHostToDevice),
+                          cudaSuccess);
+                DeviceHostCopyPlan plan;
+                plan.device_to_host = device_to_host;
+                for (size_t layer = 0; layer < layers; ++layer) {
+                    DeviceHostCopyTile tile;
+                    tile.host_addr = host_data + layer * host_pitch;
+                    tile.device_addr = device_data + layer * device_pitch;
+                    tile.bytes = width;
+                    tile.device_index = device_index;
+                    tile.member_group_id = 0;
+                    tile.local_layer_index = layer;
+                    tile.descriptor_index = split_descriptors ? layer / 2 : 0;
+                    tile.layout_index = 0;
+                    tile.component_index = 0;
+                    plan.copy_tiles.push_back(tile);
+                }
+                Cuda3DBatchDeviceHostCopyStrategy strategy(coalesce);
+                const auto result = strategy.tryExecute(plan, options);
+                if (result.status == StrategyStatus::NOT_APPLICABLE) {
+                    GTEST_SKIP() << "CUDA 3D batch unsupported by this runtime/driver";
+                }
+                ASSERT_EQ(result.status, StrategyStatus::DONE);
+                EXPECT_EQ(result.copy_operation_count, coalesce ? (split_descriptors ? 2u : 1u) : layers);
+                const size_t pitch = device_to_host ? host_pitch : device_pitch;
+                if (!device_to_host) {
+                    ASSERT_EQ(cudaMemcpy(device_contents.data(), device, device_bytes, cudaMemcpyDeviceToHost),
+                              cudaSuccess);
+                }
+                const uint8_t* actual = device_to_host ? host_data : device_contents.data();
+                for (size_t offset = 0; offset < layers * pitch; ++offset) {
+                    const uint8_t expected = offset % pitch < width ?
+                                                 static_cast<uint8_t>(0x11 + offset / pitch) : sentinel;
+                    ASSERT_EQ(actual[offset], expected) << "offset=" << offset;
+                }
+            }
+        }
+    }
+}
+
 TEST_F(PerRankBlockTransferEngineStrategyTest, ThreeDBatchRoundTripPreservesTiles) {
     DeviceHostCopyOptions options;
     options.cuda_3d_batch_copy_enabled = true;

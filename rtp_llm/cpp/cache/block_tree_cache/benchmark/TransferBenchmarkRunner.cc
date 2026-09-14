@@ -67,6 +67,11 @@ public:
             completed_->fetch_add(1, std::memory_order_relaxed);
             stats_->lowest_api_ns.fetch_add(elapsed, std::memory_order_relaxed);
             stats_->lowest_api_calls.fetch_add(1, std::memory_order_relaxed);
+            if (completed_ == &stats_->cuda_3d_batch) {
+                stats_->cuda_3d_input_tiles.fetch_add(plan.copy_tiles.size(), std::memory_order_relaxed);
+                stats_->cuda_3d_copy_operations.fetch_add(result.copy_operation_count,
+                                                          std::memory_order_relaxed);
+            }
         }
         return result;
     }
@@ -78,7 +83,8 @@ private:
 };
 
 void installStrategyRecorders(PerRankBlockTransferEngine&                          engine,
-                              const std::shared_ptr<BenchmarkDeviceHostCopyStats>& stats) {
+                              const std::shared_ptr<BenchmarkDeviceHostCopyStats>& stats,
+                              bool coalesce_3d_tiles) {
     auto& strategies = engine.device_host_executor_->strategies_;
     RTP_LLM_CHECK(strategies.size() == 4);
     for (auto& strategy : strategies) {
@@ -87,6 +93,9 @@ void installStrategyRecorders(PerRankBlockTransferEngine&                       
             completed = &stats->staged_sm;
         } else if (dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get()) != nullptr) {
             completed = &stats->cuda_3d_batch;
+            if (!coalesce_3d_tiles) {
+                strategy = std::make_unique<Cuda3DBatchDeviceHostCopyStrategy>(false);
+            }
         } else if (dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(strategy.get()) != nullptr) {
             completed = &stats->cuda_batch;
         } else if (dynamic_cast<GenericMultiCopyDeviceHostCopyStrategy*>(strategy.get()) != nullptr) {
@@ -359,7 +368,7 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
         copy_options.staged_sm_min_tile_count = 0;
         copy_options.staged_sm_min_bytes      = 0;
         copy_options.cuda_batch_copy_enabled  = false;
-    } else if (options_.copy_strategy == "3d-batch") {
+    } else if (options_.copy_strategy == "3d-batch" || options_.copy_strategy == "3d-batch-unmerged") {
         copy_options.cuda_3d_batch_copy_enabled = true;
         copy_options.cuda_batch_copy_enabled = false;
         copy_options.staged_sm_copy_enabled = false;
@@ -377,7 +386,7 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
                                                                 options_.device_disk_staging_block_count,
                                                                 max_descriptors_per_task,
                                                                 options_.transfer_worker_count);
-    installStrategyRecorders(*setup.engine, setup.copy_stats);
+    installStrategyRecorders(*setup.engine, setup.copy_stats, options_.copy_strategy != "3d-batch-unmerged");
     writer_.addResolvedConfigInt("transfer_worker_count", options_.transfer_worker_count);
     writer_.addResolvedConfigInt("shared_transfer_worker_count",
                                  static_cast<int64_t>(setup.engine->transferWorkerCount()));
@@ -678,7 +687,7 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
 
     std::vector<std::string> actual_strategies;
     if (setup.copy_stats->cuda_3d_batch.load(std::memory_order_relaxed) > 0)
-        actual_strategies.push_back("3d-batch");
+        actual_strategies.push_back(options_.copy_strategy == "3d-batch-unmerged" ? "3d-batch-unmerged" : "3d-batch");
     if (setup.copy_stats->staged_sm.load(std::memory_order_relaxed) > 0)
         actual_strategies.push_back("staged-sm");
     if (setup.copy_stats->cuda_batch.load(std::memory_order_relaxed) > 0)
@@ -689,6 +698,10 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
                                         actual_strategies.size() == 1 ? actual_strategies.front() :
                                                                         "mixed";
     writer_.addResolvedConfig("actual_copy_strategy", actual_strategy);
+    writer_.addMetric("cuda_3d_input_tiles",
+                      static_cast<double>(setup.copy_stats->cuda_3d_input_tiles.load(std::memory_order_relaxed)));
+    writer_.addMetric("cuda_3d_copy_operations",
+                      static_cast<double>(setup.copy_stats->cuda_3d_copy_operations.load(std::memory_order_relaxed)));
 
     writer_.setWorkload(seed_, final_operations, attempted, succeeded, failed);
     writer_.setTransferWorkload(

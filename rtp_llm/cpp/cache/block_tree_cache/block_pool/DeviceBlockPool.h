@@ -53,6 +53,11 @@ public:
     // Stable CUDA device index of the backing buffer. Returns -1 for non-CUDA builds.
     int deviceIndex() const;
 
+    // Physical layout boundary for a pool-local layer; does not expose layout internals.
+    int layoutIndexForLayer(int layer_id) const {
+        return mapGlobalLayerIdToLocal(layer_id).first;
+    }
+
     MemoryType                 where() const;
     std::vector<torch::Tensor> allLayerCacheBase() const;
     std::vector<torch::Tensor> allLayerScaleCacheBase() const;

@@ -22,6 +22,10 @@ BatchedMemoryCopyStatus execBatched3DMemoryCopy(const BatchedMemoryCopyParams& p
     return params.tiles.empty() ? BatchedMemoryCopyStatus::SUCCESS : BatchedMemoryCopyStatus::NOT_SUPPORTED;
 }
 
+BatchedMemoryCopyStatus execBatched3DMemoryCopy(const Batched3DMemoryCopyParams& params) {
+    return params.regions.empty() ? BatchedMemoryCopyStatus::SUCCESS : BatchedMemoryCopyStatus::NOT_SUPPORTED;
+}
+
 bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch*) {
     return params.tiles.empty();
 }

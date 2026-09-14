@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <string_view>
 #include <utility>
@@ -88,9 +89,15 @@ std::pair<TransferStatus, std::vector<DeviceHostCopyPlan>>
 DeviceHostTransferExecutor::generatePlan(const std::vector<HostBufferView>&     hosts,
                                          const std::vector<TransferDescriptor>& descriptors,
                                          const std::vector<const GroupSet*>&    group_sets) const {
+    if (descriptors.empty() || hosts.size() != descriptors.size() || group_sets.size() != descriptors.size()) {
+        return {TransferStatus::INVALID_ARGS, {}};
+    }
     const bool                        device_to_host = descriptors.front().target_tier != Tier::DEVICE;
     std::map<int, DeviceHostCopyPlan> plans_by_device;
     for (size_t descriptor_index = 0; descriptor_index < descriptors.size(); ++descriptor_index) {
+        if (group_sets[descriptor_index] == nullptr) {
+            return {TransferStatus::INVALID_ARGS, {}};
+        }
         const auto&  descriptor          = descriptors[descriptor_index];
         const auto&  group_set           = *group_sets[descriptor_index];
         const auto&  host                = hosts[descriptor_index];
@@ -103,17 +110,40 @@ DeviceHostTransferExecutor::generatePlan(const std::vector<HostBufferView>&     
 
         const std::vector<BlockIdxType>& device_blocks = descriptor.blocksAt(Tier::DEVICE);
         const auto&                      device_pools  = group_set.devicePools();
+        if (device_blocks.size() != group_set.groupIds().size() || device_pools.size() != device_blocks.size()) {
+            return {TransferStatus::INVALID_ARGS, {}};
+        }
         size_t                           host_offset   = 0;
         for (size_t member_group_id = 0; member_group_id < group_set.groupIds().size(); ++member_group_id) {
+            if (!device_pools[member_group_id]) {
+                return {TransferStatus::INVALID_ARGS, {}};
+            }
             const auto& group_base  = group_set.groupAt(member_group_id);
             auto&       device_pool = *device_pools[member_group_id];
             for (size_t local_layer_index = 0; local_layer_index < group_base.layer_ids.size(); ++local_layer_index) {
                 const size_t kv_bytes        = group_base.kv_block_stride_bytes;
                 const size_t scale_bytes     = group_base.kv_scale_stride_bytes;
+                if (scale_bytes > std::numeric_limits<size_t>::max() - kv_bytes) {
+                    return {TransferStatus::INVALID_ARGS, {}};
+                }
                 const size_t layer_bytes     = kv_bytes + scale_bytes;
+                if (host_offset > host.payload_bytes || layer_bytes > host.payload_bytes - host_offset
+                    || reinterpret_cast<uintptr_t>(host.base) > UINTPTR_MAX - host_offset
+                    || reinterpret_cast<uintptr_t>(host.base) + host_offset > UINTPTR_MAX - layer_bytes) {
+                    return {TransferStatus::INVALID_ARGS, {}};
+                }
                 auto*        layer_host_addr = static_cast<uint8_t*>(host.base) + host_offset;
+                const int layout_index = device_pool.layoutIndexForLayer(static_cast<int>(local_layer_index));
+                if (layout_index < 0) {
+                    return {TransferStatus::INVALID_ARGS, {}};
+                }
                 const auto   buffers         = device_pool.convertIndexToBuffer(static_cast<int>(local_layer_index),
                                                                       device_blocks[member_group_id]);
+                if ((kv_bytes > 0 && (buffers.empty() || buffers[0].addr == nullptr || kv_bytes > buffers[0].size_bytes))
+                    || (scale_bytes > 0 && (buffers.size() < 2 || buffers[1].addr == nullptr
+                                           || scale_bytes > buffers[1].size_bytes))) {
+                    return {TransferStatus::INVALID_ARGS, {}};
+                }
                 const auto   append_tile     = [&](size_t buffer_index, size_t logical_bytes, size_t layer_offset) {
                     if (logical_bytes == 0) {
                         return;
@@ -130,7 +160,10 @@ DeviceHostTransferExecutor::generatePlan(const std::vector<HostBufferView>&     
                                                                  logical_bytes,
                                                                  device_pool.deviceIndex(),
                                                                  member_group_id,
-                                                                 local_layer_index});
+                                                                 local_layer_index,
+                                                                 descriptor_index,
+                                                                 static_cast<size_t>(layout_index),
+                                                                 buffer_index});
                 };
                 append_tile(0, kv_bytes, 0);
                 append_tile(1, scale_bytes, kv_bytes);
