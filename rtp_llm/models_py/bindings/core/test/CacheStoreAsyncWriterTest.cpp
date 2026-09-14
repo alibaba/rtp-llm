@@ -486,12 +486,19 @@ TEST_F(CacheStoreAsyncWriterTest, TimeoutRetainsAllocatorBlockUntilLatePublicati
     const auto initial_free_blocks = allocator->freeBlocksNum();
     ASSERT_GT(initial_free_blocks, 0u);
 
+    auto pool      = allocator->getDeviceBlockPool();
+    auto allocated = pool->malloc(1);
+    ASSERT_TRUE(allocated.has_value());
+    const auto request_blocks = allocated.value();
+    pool->incRef(request_blocks);
+
     KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
     resource.setCacheKeys({42});
-    resource.mutableBlockIds(0).assign({1});
+    resource.mutableBlockIds(0).assign(request_blocks);
     auto publication_lease = allocator->incrKVCacheRef(resource, {42}, /*is_connector=*/true);
     ASSERT_NE(publication_lease, nullptr);
+    pool->decRef(request_blocks);  // Request ends; the store still owns its lease.
     ASSERT_EQ(allocator->freeBlocksNum() + 1, initial_free_blocks);
 
     CacheStoreAsyncWriter writer(
@@ -512,13 +519,19 @@ TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCa
     auto config        = makeWriterTestCacheConfig("default", /*kv_stride=*/16, /*block_num=*/3);
     auto cache_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
+    const auto initial_free_blocks = cache_manager->freeBlocksNum();
+    auto       pool                = cache_manager->allocator_->getDeviceBlockPool();
+    auto       allocated           = pool->malloc(1);
+    ASSERT_TRUE(allocated.has_value());
+    const auto request_blocks = allocated.value();
+    pool->incRef(request_blocks);
     auto cache_store = std::make_shared<DelayedCacheStore>();
     cache_manager->setCacheStore(cache_store);
 
     torch_ext::PyCacheStoreInputs inputs;
     inputs.input_lengths_host    = torch::tensor({1}, torch::kInt32);
     inputs.prefix_lengths_host   = torch::tensor({0}, torch::kInt32);
-    inputs.host_kv_cache_offset  = torch::tensor({1}, torch::kInt32).reshape({1, 1});
+    inputs.host_kv_cache_offset  = torch::tensor({request_blocks.front()}, torch::kInt32).reshape({1, 1});
     inputs.request_id            = torch::tensor({int64_t{42}}, torch::kInt64);
     inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
     inputs.cache_keys            = torch::tensor({int64_t{7001}}, torch::kInt64).reshape({1, 1});
@@ -531,11 +544,11 @@ TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCa
     layer_cache.group_id           = 0;
     layer_cache.tag                = "default";
 
-    const auto initial_free_blocks = cache_manager->freeBlocksNum();
     CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager, /*cache_model_id=*/0);
     writer.init(/*track_store_completions=*/false);
     writer.write(inputs, layer_cache);
     writer.waitAllDone();
+    pool->decRef(request_blocks);  // Only the pending store may keep the block alive.
 
     ASSERT_TRUE(cache_store->hasPendingStore());
     EXPECT_EQ(cache_manager->freeBlocksNum() + 1, initial_free_blocks)

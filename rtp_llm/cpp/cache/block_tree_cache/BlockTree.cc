@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <stdexcept>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -281,6 +282,7 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
         if (collect_path) {
             result.path.push_back(current);
         }
+        refreshPublishedState(current);
         inserted_prefix_length = i + 1;
     }
 
@@ -302,6 +304,7 @@ bool BlockTree::isRemovable(TreeNode* node) const {
 void BlockTree::removeNode(TreeNode* node) {
     RTP_LLM_LOG_DEBUG("removing node key=%ld, pool_size=%zu", node->cache_key, node_pool_.size());
 
+    removePublishedKey(node->cache_key);
     node->parent->children.erase(node->cache_key);
     const size_t index      = node->index;
     const size_t last_index = node_pool_.size() - 1;
@@ -325,6 +328,64 @@ TreeNode* BlockTree::removeNodeAndEmptyAncestors(TreeNode* node) {
         RTP_LLM_LOG_DEBUG("removed %zu nodes", removed_count);
     }
     return current;
+}
+
+void BlockTree::setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<int>& required_group_ids) {
+    std::vector<ReusableGroupLocation> locations;
+    if (publisher) {
+        if (required_group_ids.empty()) {
+            throw std::invalid_argument("cache event publication requires reusable groups");
+        }
+        for (int group_id : required_group_ids) {
+            const auto* location = group_id < 0 ? nullptr : reusableGroupLocation(static_cast<size_t>(group_id));
+            if (!location) {
+                throw std::invalid_argument("cache event publication group is absent from BlockTree");
+            }
+            locations.push_back(*location);
+        }
+    }
+    event_publisher_    = std::move(publisher);
+    publication_groups_ = std::move(locations);
+    published_keys_.clear();
+    // Initialization only. Normal mutations update a single affected key.
+    // The publisher starts after attachment and reconciles this initial snapshot.
+    for (const auto& node : node_pool_) {
+        refreshPublishedState(node.get());
+    }
+}
+
+KVCacheSnapshot BlockTree::logicalCacheSnapshot() const {
+    KVCacheSnapshot snapshot;
+    snapshot.version = publication_version_;
+    snapshot.block_keys.assign(published_keys_.begin(), published_keys_.end());
+    std::sort(snapshot.block_keys.begin(), snapshot.block_keys.end());
+    return snapshot;
+}
+
+void BlockTree::removePublishedKey(CacheKeyType key) {
+    if (event_publisher_ && published_keys_.erase(key)) {
+        ++publication_version_;
+        (void)event_publisher_->tryPublish({KVCacheEventType::BLOCK_DELETE, static_cast<int64_t>(key), 0});
+    }
+}
+
+void BlockTree::refreshPublishedState(const TreeNode* node) {
+    if (!event_publisher_ || node == root_.get()) {
+        return;
+    }
+    for (const auto& location : publication_groups_) {
+        const auto& resource = node->group_set_resources.at(location.group_set_id);
+        if (resource.transfer_detached || resource.transfer_state != GroupSetTransferState::IDLE
+            || resource.device_blocks.size() != group_sets_[location.group_set_id]->groupIds().size()
+            || !resource.hasCompleteDeviceValue()) {
+            removePublishedKey(node->cache_key);
+            return;
+        }
+    }
+    if (published_keys_.insert(node->cache_key).second) {
+        ++publication_version_;
+        (void)event_publisher_->tryPublish({KVCacheEventType::BLOCK_ADD, static_cast<int64_t>(node->cache_key), 0});
+    }
 }
 
 }  // namespace rtp_llm

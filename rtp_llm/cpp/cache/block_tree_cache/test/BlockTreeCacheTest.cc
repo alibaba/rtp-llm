@@ -2730,5 +2730,167 @@ TEST_F(BlockTreeCacheTest, EmptyMatchYieldsNoAsyncContext) {
     EXPECT_EQ(result.async_context, nullptr);
 }
 
+class RecordingCachePublisher final: public KVCacheEventPublisher {
+public:
+    bool start() noexcept override {
+        return true;
+    }
+    void            stop() noexcept override {}
+    PublisherStatus status() const noexcept override {
+        return {};
+    }
+    PublishResult tryPublish(KVCacheEvent event) noexcept override {
+        std::lock_guard<std::mutex> lock(mutex);
+        events.push_back(event);
+        return result;
+    }
+    std::mutex                mutex;
+    std::vector<KVCacheEvent> events;
+    PublishResult             result{PublishResult::ACCEPTED};
+};
+
+TEST_F(BlockTreeCacheTest, EventPublicationAddsOnlyAfterHostLoadCompletes) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    DeviceBlockPoolPtr device_pool = makeDevicePool({{1, 0}}, 1, "event_load_commit");
+    ASSERT_NE(device_pool, nullptr);
+    std::unique_ptr<BlockTreeCache> cache = makeHostOnlyLoadCache({device_pool});
+
+    auto publisher = std::make_shared<RecordingCachePublisher>();
+    cache->setEventPublisher(publisher, {0});
+    EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
+
+    BlockTreeMatchResult              result       = cache->match({200});
+    std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
+    ASSERT_NE(load_context, nullptr);
+    EXPECT_EQ(load_context->matchedBlocks(), 1u);
+    EXPECT_EQ(result.matched_device_blocks, 0u);
+    EXPECT_TRUE(result.matched_device_resources.empty());
+
+    const BlockIdList request_targets = device_pool->malloc(1).value();
+    ASSERT_EQ(request_targets.size(), 1u);
+    device_pool->incRef(request_targets);
+    const BlockIdxType request_target = request_targets.front();
+    EXPECT_EQ(device_pool->refCount(request_target), 1u);
+    ASSERT_EQ(load_context->loadDescs().size(), 1u);
+    load_context->setTargetBlocks(0, {request_target});
+
+    EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
+    EXPECT_TRUE(publisher->events.empty());
+    EXPECT_TRUE(load_context->commit());
+
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, result.matched_device_resources);
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+    ASSERT_TRUE(load_context->done());
+    EXPECT_TRUE(load_context->success());
+    EXPECT_EQ(cache->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{200}));
+    ASSERT_EQ(publisher->events.size(), 1u);
+    EXPECT_EQ(publisher->events[0].type, KVCacheEventType::BLOCK_ADD);
+    device_pool->decRef(request_targets);
+}
+
+TEST_F(BlockTreeCacheTest, EventPublicationTracksInsertDuplicateAndRealEviction) {
+    auto publisher = std::make_shared<RecordingCachePublisher>();
+    cache_->setEventPublisher(publisher, {0});
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    resources[1][0].device_blocks = {43};
+    cache_->insert({100, 200}, resources, Tier::DEVICE);
+    EXPECT_EQ(cache_->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100, 200}));
+    const auto version = cache_->logicalCacheSnapshot().version;
+    cache_->insert({100, 200}, resources, Tier::DEVICE);
+    EXPECT_EQ(cache_->logicalCacheSnapshot().version, version);
+    ASSERT_EQ(publisher->events.size(), 2u);
+    EXPECT_EQ(publisher->events[0].type, KVCacheEventType::BLOCK_ADD);
+    EXPECT_EQ(cache_->evictForGroup(0, 2), 2);
+    EXPECT_TRUE(cache_->logicalCacheSnapshot().block_keys.empty());
+    ASSERT_EQ(publisher->events.size(), 4u);
+    EXPECT_EQ(publisher->events[2].type, KVCacheEventType::BLOCK_DELETE);
+    EXPECT_EQ(publisher->events[3].type, KVCacheEventType::BLOCK_DELETE);
+}
+
+TEST_F(BlockTreeCacheTest, EventPublicationRequiresEveryReusableGroup) {
+    auto pools = std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0), makeStructuralDevicePool(1)};
+    std::vector<GroupSetPtr> groups;
+    for (const auto& pool : pools) {
+        groups.push_back(std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool}, nullptr, nullptr));
+    }
+    initializeSingleMemberGroupSets(groups, pools);
+    auto cache     = makeBlockTreeCacheForTest(std::move(groups));
+    auto publisher = std::make_shared<RecordingCachePublisher>();
+    cache->setEventPublisher(publisher, {0, 1});
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
+    resources[0][0].device_blocks = {42};
+    cache->insert({100}, resources, Tier::DEVICE);
+    EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
+    EXPECT_TRUE(publisher->events.empty());
+    resources[0][1].device_blocks = {43};
+    cache->insert({100}, resources, Tier::DEVICE);
+    EXPECT_EQ(cache->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
+    ASSERT_EQ(publisher->events.size(), 1u);
+    EXPECT_THROW(cache->setEventPublisher(publisher, {99}), std::invalid_argument);
+    EXPECT_EQ(cache->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
+}
+
+TEST_F(BlockTreeCacheTest, EventPublicationWithdrawsDuringDemotionAndRestoresAfterFailure) {
+    auto publisher = std::make_shared<RecordingCachePublisher>();
+    cache_->setEventPublisher(publisher, {0});
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    cache_->insert({100}, resources, Tier::DEVICE);
+    TreeNode*                node = cache_->tree()->findNode({100}).front();
+    const TransferDescriptor desc(node, 0, 0, Tier::DEVICE, Tier::HOST, {42});
+    {
+        std::lock_guard<std::mutex> lock(cache_->mutex_);
+        cache_->evictor_.reserveSource({desc});
+    }
+    EXPECT_TRUE(cache_->logicalCacheSnapshot().block_keys.empty());
+    {
+        std::lock_guard<std::mutex> lock(cache_->mutex_);
+        cache_->evictor_.restoreSource({desc});
+    }
+    EXPECT_EQ(cache_->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
+    ASSERT_EQ(publisher->events.size(), 3u);
+    EXPECT_EQ(publisher->events[1].type, KVCacheEventType::BLOCK_DELETE);
+    EXPECT_EQ(publisher->events[2].type, KVCacheEventType::BLOCK_ADD);
+}
+
+TEST_F(BlockTreeCacheTest, EventSnapshotRemainsAuthoritativeWhenTransportQueueIsFull) {
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    cache_->insert({100}, resources, Tier::DEVICE);
+    auto publisher    = std::make_shared<RecordingCachePublisher>();
+    publisher->result = PublishResult::QUEUE_FULL;
+    cache_->setEventPublisher(publisher, {0});
+    EXPECT_EQ(cache_->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
+    const auto version = cache_->logicalCacheSnapshot().version;
+    cache_->evictForGroup(0, 1);
+    EXPECT_TRUE(cache_->logicalCacheSnapshot().block_keys.empty());
+    EXPECT_GT(cache_->logicalCacheSnapshot().version, version);
+    cache_->setEventPublisher(nullptr, {});
+    const auto count = publisher->events.size();
+    resources[0][0].device_blocks = {43};  // Block 42 was released by the eviction.
+    cache_->insert({200}, resources, Tier::DEVICE);
+    EXPECT_EQ(publisher->events.size(), count);
+}
+
+TEST_F(BlockTreeCacheTest, EventPublicationExcludesHostAndCancelledLoad) {
+    auto cache     = makeHostOnlyLoadCache(makeStructuralDevicePools(1, "event_host"));
+    auto publisher = std::make_shared<RecordingCachePublisher>();
+    cache->setEventPublisher(publisher, {0});
+    EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{200}));
+    EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
+    auto result  = cache->match({200});
+    auto context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
+    context.reset();
+    releaseRequestRefsForTest(*cache, result.matched_device_resources);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+    EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
+    EXPECT_TRUE(publisher->events.empty());
+}
+
 }  // namespace
 }  // namespace rtp_llm

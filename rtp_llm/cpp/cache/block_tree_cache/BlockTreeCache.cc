@@ -247,6 +247,16 @@ void BlockTreeCache::reportMetrics() const {
     metrics_reporter_->reportQueueBacklog(transfer_dispatcher_->queueSizes(), "transfer");
 }
 
+void BlockTreeCache::setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<int>& required_group_ids) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    tree_->setEventPublisher(std::move(publisher), required_group_ids);
+}
+
+KVCacheSnapshot BlockTreeCache::logicalCacheSnapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return tree_->logicalCacheSnapshot();
+}
+
 BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
     BlockTreeKeySnapshot        snapshot;
