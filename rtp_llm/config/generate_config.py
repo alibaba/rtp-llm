@@ -223,8 +223,8 @@ class GenerateConfig(BaseModel):
     sp_advice_prompt: str = ""
     sp_advice_prompt_token_ids: List[int] = []
     sp_edit: bool = False
-    # Frontend-only dispatcher hint: submit a prompt_batch as one BatchGenerateCall.
-    # It is intentionally opt-in so direct FE callers keep the historical per-item path.
+    # Use one BatchGenerateCall when topology permits; false keeps per-item scheduling.
+    # Direct prompt_batch defaults off; /batch_infer defaults on.
     force_batch: bool = False
     force_disable_sp_run: bool = False
     force_sp_accept: bool = False

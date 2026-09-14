@@ -1301,10 +1301,6 @@ class ModelRpcClient(object):
             )
 
             if len(response.results) != len(inputs):
-                # C++ BatchGenerateCall is contractually 1:1 (one result per input). A shorter
-                # result vector would otherwise make the loop below return a silently-truncated
-                # list (dropping trailing inputs with no error); a longer one would IndexError on
-                # inputs[i]. Fail typed instead so a server-side contract break surfaces loudly.
                 raise FtRuntimeException(
                     ExceptionType.UNKNOWN_ERROR,
                     f"batch request: [{len(inputs)} items] got {len(response.results)} result(s); "
@@ -1335,4 +1331,6 @@ class ModelRpcClient(object):
             return results
 
         except grpc.RpcError as e:
-            self._handle_grpc_error(e, f"batch request: [{len(inputs)} items]")
+            self._handle_grpc_error(
+                e, f"batch request: [{len(inputs)} items]", target_address
+            )
