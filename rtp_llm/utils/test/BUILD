@@ -208,3 +208,39 @@ py_test(
     srcs = ["scr_kmonitor_lifecycle_test.py"],
     deps = ["//rtp_llm:utils", "//rtp_llm/aios/kmonitor:kmonitor_py"],
 )
+
+py_test(
+    name = "scr_runtime_fixup_test",
+    srcs = ["scr_runtime_fixup_test.py"],
+    deps = ["//rtp_llm:utils", "//rtp_llm/aios/kmonitor:kmonitor_py"],
+)
+
+py_test(
+    name = "scr_restore_env_file_test",
+    srcs = ["scr_restore_env_file_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
+    name = "scr_advertise_ip_test",
+    srcs = ["scr_advertise_ip_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
+    name = "scr_pd_advertisement_test",
+    srcs = ["scr_pd_advertisement_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:config_ops",
+        "//rtp_llm:utils",
+        "//rtp_llm/distribute:distribute",
+    ],
+)
+
+py_test(
+    name = "scr_native_logger_test",
+    srcs = ["scr_native_logger_test.py"],
+    data = ["//rtp_llm/cpp/utils:scr_logger_test_sources"],
+)

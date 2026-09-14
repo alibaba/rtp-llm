@@ -21,7 +21,9 @@ namespace rtp_llm {
 
 class NormalEngine: public EngineBase {
 public:
-    NormalEngine(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams> propose_params);
+    NormalEngine(const EngineInitParams& params,
+                 std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                 bool defer_loop_start = false);
     ~NormalEngine();
 
     std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input) override;
@@ -35,7 +37,7 @@ public:
 
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
-    absl::Status startLoop();
+    absl::Status startLoop() override;
     int64_t      getLastScheduleTime() override;
     void         reportMetrics(RtpLLMEngineMetricsCollector collector) {
         if (metrics_reporter_) {

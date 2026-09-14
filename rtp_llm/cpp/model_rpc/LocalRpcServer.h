@@ -35,7 +35,10 @@ public:
 
     virtual void startDeferredServices();
     virtual void updateRuntimeEndpoints(const RuntimeConfig& runtime_config);
-    void setDeferServiceStart(bool defer) { defer_tp_broadcaster_ = defer; }
+    void setDeferServiceStart(bool defer) {
+        defer_tp_broadcaster_ = defer;
+        defer_engine_loop_ = defer;
+    }
 
     grpc::Status
     GetWorkerStatus(grpc::ServerContext* context, const ::StatusVersionPB* request, ::WorkerStatusPB* response);
@@ -133,6 +136,7 @@ protected:
     py::object                            weight_manager_;
     std::shared_ptr<BroadcastManager>     tp_broadcaster_;
     bool                                  defer_tp_broadcaster_{false};
+    bool                                  defer_engine_loop_{false};
 };
 
 }  // namespace rtp_llm

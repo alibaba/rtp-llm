@@ -27,12 +27,17 @@ class HippoHelper:
     def refresh_runtime_identity() -> Dict[str, str]:
         """Refresh Hippo identity after SCR restores into a new Pod."""
 
+        from rtp_llm.utils.scr_runtime_fixup import get_restore_runtime_identity
+
+        identity = get_restore_runtime_identity()
         HippoHelper.host_ip = os.environ.get("HIPPO_SLAVE_IP", "")
         try:
             hostname = socket.gethostname()
-            HippoHelper.container_ip = socket.gethostbyname(hostname)
+            HippoHelper.container_ip = (
+                identity.pod_ip if identity is not None else socket.gethostbyname(hostname)
+            )
             logging.info(
-                "refreshed container_ip from socket:%s", HippoHelper.container_ip
+                "refreshed container_ip:%s", HippoHelper.container_ip
             )
         except Exception:
             HippoHelper.container_ip = os.environ.get(

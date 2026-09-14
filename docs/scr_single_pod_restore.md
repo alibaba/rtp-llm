@@ -12,11 +12,26 @@ The mode rejects multiple nodes, incomplete rank sets and mixed member addresses
 After restore, the saved `self.ip` may differ from newly resolved member addresses;
 that difference alone must not invalidate the topology.
 
+Loopback is only a control-channel address. Cache-store endpoints sent to a
+remote PD peer use the current Pod IP, resolved again during restore fixup;
+otherwise Decode would connect to its own loopback when fetching Prefill KV.
+Explicit non-loopback endpoint-manifest addresses remain unchanged. Failure to
+resolve a usable Pod IPv4 address rejects fixup instead of advertising the seed
+IP. The frontend request identity is refreshed at the same boundary. Acceptance
+must include a real cross-Pod KV transfer after the Pod IP changes; readiness
+and successful CRIU restore alone do not establish that this route works.
+
 Local health polling uses numeric loopback to avoid transient resolver netlink
 sockets during checkpoint. Grammar workers participate in the upstream template lifecycle; their sandbox
 pool is quiesced before the barrier and recreated when the template is released.
 The public integration switch is `RTPLLM_ENABLE_SCR=1`; the external controller
 selects `SCR_PHASE`.
+
+Process-local identity repair now runs through `fixup_runtime_after_restore`
+before component fixups and release. See [runtime fixup and audit](scr_runtime_fixup.md)
+for Logger repair, the future restore-environment provider contract, and remaining
+host/routing/transport risks. Rereading the restored process environment alone
+does not establish that host identity is fresh.
 
 The internal entrypoint sets `NCCL_SOCKET_IFNAME=lo` in this mode and preloads the
 SCR-injected NCCL interposer for the checkpoint phase. The interposer and the

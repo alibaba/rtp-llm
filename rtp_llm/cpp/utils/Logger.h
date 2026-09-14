@@ -68,6 +68,10 @@ public:
 
     void setBaseLevel(const uint32_t base_level);
 
+    // Update all existing and future loggers in this process after SCR restore.
+    // Publication is atomic with respect to concurrent prefix readers.
+    static void refreshRuntimeIdentity(const std::string& ip);
+
     template<typename... Args>
     void log(uint32_t          level,
              const std::string file,
@@ -134,13 +138,15 @@ private:
 
     uint32_t getLevelfromstr(const char* s);
 
+    std::string runtimeIp() const;
+
     inline const std::string getPrefix(const std::string& file, int line, const std::string& func) {
-        return "[RANK " + std::to_string(rank_) + "][" + ip_ + "][" + file + ":" + std::to_string(line) + "][" + func
+        return "[RANK " + std::to_string(rank_) + "][" + runtimeIp() + "][" + file + ":" + std::to_string(line) + "][" + func
                + "] ";
     }
 
     inline const std::string getTracePrefix() {
-        return "[RANK " + std::to_string(rank_) + "][" + ip_ + "] ";
+        return "[RANK " + std::to_string(rank_) + "][" + runtimeIp() + "] ";
     }
 
     inline const std::string getLevelName(const uint32_t level) {

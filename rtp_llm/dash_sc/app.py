@@ -43,7 +43,10 @@ from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.ops import TaskType
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
-from rtp_llm.utils.scr_template_utils import register_backend_visitor_template_hook
+from rtp_llm.utils.scr_template_utils import (
+    register_backend_visitor_template_hook,
+    register_server_config_template_hook,
+)
 
 _PROXY_MODE_ENV_KEY = "DASH_SC_GRPC_PROXY_MODE"
 _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
@@ -601,6 +604,8 @@ class DashScApp:
                     model_config=model_config,
                     source_role="dash",
                 )
+                # Refresh ServerConfig.ip before the visitor hook reads it during fixup.
+                register_server_config_template_hook(self.py_env_configs)
                 register_backend_visitor_template_hook(backend_visitor, self.py_env_configs)
 
                 base_tok = TokenizerFactory.create(
