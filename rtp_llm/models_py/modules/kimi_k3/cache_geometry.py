@@ -94,13 +94,23 @@ def validate_kimi_k3_page_rr_target(
         )
     if int(kv_cache.linear_step) != 1:
         raise ValueError("Kimi K3 compact LINEAR cache requires linear_step=1")
-    pages = (
-        ((128, 128), (256, 256), (256, 128))
-        if is_decode_role
-        else ((128, 128), (256, 256))
-    )
-    if (page_tokens, int(kv_cache.kernel_seq_size_per_block)) not in pages:
-        raise ValueError("Unsupported Kimi K3 PageRR page/shard layout")
+    kernel_page_tokens = int(kv_cache.kernel_seq_size_per_block)
+    if (
+        kernel_page_tokens != 128
+        or page_tokens <= 0
+        or page_tokens % kernel_page_tokens
+    ):
+        raise ValueError(
+            "Kimi K3 PageRR requires kernel_seq_size_per_block=128 and a positive "
+            "seq_size_per_block divisible by kernel_seq_size_per_block; "
+            f"got physical={page_tokens}, kernel={kernel_page_tokens}"
+        )
+    subpages = page_tokens // kernel_page_tokens
+    if subpages & (subpages - 1):
+        raise ValueError(
+            "Kimi K3 PageRR requires physical/kernel page ratio to be a power of two; "
+            f"got ratio={subpages}"
+        )
     attention = model_config.attn_config
     mla_fp8_compute = bool(getattr(attention, "mla_fp8_compute", False))
     bf16_cache = (

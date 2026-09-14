@@ -78,6 +78,7 @@ def _pack_prefix_kernel(
     Output,
     REQUESTS: tl.constexpr,
     PAGE_TOKENS: tl.constexpr,
+    KERNEL_PAGE_TOKENS: tl.constexpr,
     SHARDS: tl.constexpr,
     RANK: tl.constexpr,
     FEATURES: tl.constexpr,
@@ -96,10 +97,18 @@ def _pack_prefix_kernel(
     local_page = packed_page - tl.load(offsets + request)
     prefix_len = tl.load(Metadata + request)
     global_start = (local_page * SHARDS + RANK) * PAGE_TOKENS
-    owned = global_start < prefix_len
-    in_table = local_page < TABLE_WIDTH
+    # Ownership/payloads use physical pages; the live cache and table expose
+    # kernel subpages. Mask the partial terminal page before reading its IDs.
+    elements = tl.program_id(1).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
+    token = elements // FEATURES
+    feature = elements % FEATURES
+    owned = (token < PAGE_TOKENS) & (global_start + token < prefix_len)
+    kernel_page = (
+        local_page * (PAGE_TOKENS // KERNEL_PAGE_TOKENS) + token // KERNEL_PAGE_TOKENS
+    )
+    in_table = kernel_page < TABLE_WIDTH
     block_id = tl.load(
-        Table + request * TABLE_REQUEST_STRIDE + local_page * TABLE_PAGE_STRIDE,
+        Table + request * TABLE_REQUEST_STRIDE + kernel_page * TABLE_PAGE_STRIDE,
         mask=owned & in_table,
         other=0,
     ).to(tl.int64)
@@ -109,16 +118,11 @@ def _pack_prefix_kernel(
         (~owned) | valid_block,
         "packed owner page points to a null, reserved, or out-of-range block",
     )
-    # Widen before multiplication: even masked lanes can overflow int32 when a
-    # legal strided view has a large token or payload stride.
-    elements = tl.program_id(1).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
-    token = elements // FEATURES
-    feature = elements % FEATURES
-    live = (token < PAGE_TOKENS) & (global_start + token < prefix_len) & valid_block
+    live = owned & valid_block
     values = tl.load(
         Cache
         + block_id * CACHE_BLOCK_STRIDE
-        + token * CACHE_TOKEN_STRIDE
+        + (token % KERNEL_PAGE_TOKENS) * CACHE_TOKEN_STRIDE
         + feature * CACHE_FEATURE_STRIDE,
         mask=live,
         other=0.0,
@@ -177,6 +181,7 @@ def pack_prefix_cuda(cache, table, descriptor, rank, output):
             output,
             descriptor.batch_size,
             descriptor.page_tokens,
+            cache.shape[1],
             descriptor.shard_size,
             rank,
             features,

@@ -14,6 +14,58 @@ class MlaPageRRSlotMappingTest(unittest.TestCase):
     PAGE_TOKENS = 128
     SHARD_SIZE = 8
 
+    def test_split_page_mapping_matches_physical_page_fan_in(self):
+        # Independent physical-page transfer oracle: each owner publishes a
+        # whole allocator page, not one kernel subpage from every TP rank.
+        for page_tokens in (128, 256, 512, 1024, 2048, 4096, 8192):
+            subpages = page_tokens // 128
+            for shards in (8, 16):
+                for length in (
+                    127,
+                    128,
+                    129,
+                    256,
+                    382,
+                    page_tokens - 1,
+                    page_tokens,
+                    page_tokens + 1,
+                    shards * page_tokens + 129,
+                ):
+                    with self.subTest(
+                        page_tokens=page_tokens, shards=shards, length=length
+                    ):
+                        positions = torch.arange(length)
+                        requests = torch.zeros_like(positions)
+                        table = (
+                            torch.tensor([2, 5])[:, None] * subpages
+                            + torch.arange(subpages)
+                        ).reshape(1, -1)
+                        stores = []
+                        for rank in range(shards):
+                            adapter = MlaPageRRCacheAdapter(
+                                page_tokens, shards, rank, kernel_page_tokens=128
+                            )
+                            slots = adapter.slot_mapping(positions, requests, table)
+                            store = torch.full(
+                                (6 * page_tokens,), -1, dtype=torch.int64
+                            )
+                            valid = slots >= 0
+                            store[slots[valid]] = positions[valid]
+                            stores.append(store)
+                        pages = []
+                        for page in range((length + page_tokens - 1) // page_tokens):
+                            physical_id = (2, 5)[page // shards]
+                            pages.append(
+                                stores[page % shards][
+                                    physical_id
+                                    * page_tokens : (physical_id + 1)
+                                    * page_tokens
+                                ]
+                            )
+                        torch.testing.assert_close(
+                            torch.cat(pages)[:length], positions, rtol=0, atol=0
+                        )
+
     def _block_table(self, rank: int, *, dtype: torch.dtype) -> torch.Tensor:
         return torch.tensor(
             [
@@ -302,6 +354,22 @@ class MlaPageRRSlotMappingTest(unittest.TestCase):
 
 
 class MlaPageRRCapacityTest(unittest.TestCase):
+    def test_split_page_capacity_counts_kernel_columns(self):
+        adapter = MlaPageRRCacheAdapter(1024, 8, 0, kernel_page_tokens=128)
+        adapter.validate_block_table_capacity(torch.empty((1, 8)), (8192,))
+        with self.assertRaisesRegex(RuntimeError, "rank-local block table"):
+            adapter.validate_block_table_capacity(torch.empty((1, 8)), (8193,))
+        adapter.validate_block_table_capacity(torch.empty((1, 16)), (8193,))
+        non_owner = MlaPageRRCacheAdapter(1024, 8, 7, kernel_page_tokens=128)
+        non_owner.validate_block_table_capacity(torch.empty((1, 0)), (1024,))
+
+    def test_split_page_geometry_rejects_invalid_kernel_granularity(self):
+        for physical, kernel in ((1024, 0), (1024, -1), (128, 256), (1024, 192)):
+            with self.subTest(physical=physical, kernel=kernel), self.assertRaises(
+                ValueError
+            ):
+                MlaPageRRCacheAdapter(physical, 8, 0, kernel_page_tokens=kernel)
+
     def test_adapter_validates_rank_local_capacity(self) -> None:
         adapter = MlaPageRRCacheAdapter(
             page_tokens=4,

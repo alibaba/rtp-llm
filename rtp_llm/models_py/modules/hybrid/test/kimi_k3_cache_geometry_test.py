@@ -19,14 +19,15 @@ class KimiK3CacheGeometryTest(unittest.TestCase):
         decode=False,
         tp_size=8,
         upstream_shards=8,
+        page_tokens=128,
         spans=None,
         kinds=None,
         local_shards=None,
     ):
         if spans is None:
-            spans = (128, 128 * upstream_shards)
+            spans = (page_tokens, page_tokens * upstream_shards)
         cache = SimpleNamespace(
-            seq_size_per_block=128,
+            seq_size_per_block=page_tokens,
             local_shard_count=(
                 (1 if decode else tp_size) if local_shards is None else local_shards
             ),
@@ -81,6 +82,28 @@ class KimiK3CacheGeometryTest(unittest.TestCase):
     def test_manager_and_model_local_shards_must_agree(self):
         with self.assertRaisesRegex(ValueError, "local shard"):
             self._bind(decode=True, local_shards=8)
+
+    def test_large_pages_bind_checkpoint_span_from_upstream_not_local_tp(self):
+        for page_tokens, shards, checkpoint_tokens in (
+            (512, 8, 4096),
+            (8192, 8, 65536),
+            (8192, 16, 131072),
+        ):
+            for decode, tp_size in ((False, shards), (True, shards), (True, 1)):
+                with self.subTest(page_tokens=page_tokens, decode=decode, tp=tp_size):
+                    self.assertEqual(
+                        self._bind(
+                            page_tokens=page_tokens,
+                            decode=decode,
+                            tp_size=tp_size,
+                            upstream_shards=shards,
+                        ),
+                        (page_tokens, checkpoint_tokens),
+                    )
+
+    def test_rejects_overflowing_checkpoint_span(self):
+        with self.assertRaisesRegex(ValueError, "overflowing"):
+            self._bind(page_tokens=1 << 28, upstream_shards=16, tp_size=16)
 
 
 class KimiK3PageRRTargetTest(unittest.TestCase):
@@ -159,6 +182,81 @@ class KimiK3PageRRTargetTest(unittest.TestCase):
                     local_page_rr=True,
                 )
                 self.assertEqual(target.checkpoint_tokens, 128 * shards)
+
+    def test_accepts_power_of_two_physical_pages_with_128_kernel_pages(self):
+        for page_tokens in (128, 256, 512, 1024, 2048, 4096, 8192, 16384):
+            for shards in (2, 4, 8, 16):
+                for decode, tp_size in ((False, shards), (True, shards), (True, 1)):
+                    for fp8 in (False, True):
+                        with self.subTest(
+                            page_tokens=page_tokens,
+                            shards=shards,
+                            decode=decode,
+                            tp_size=tp_size,
+                            fp8=fp8,
+                        ):
+                            self._validate(
+                                tp_size=tp_size,
+                                ep_size=shards,
+                                upstream_shards=shards,
+                                is_decode_role=decode,
+                                page_tokens=page_tokens,
+                                kernel_page_tokens=128,
+                                cache_dtype=(
+                                    KvCacheDataType.FP8 if fp8 else KvCacheDataType.BASE
+                                ),
+                                mla_fp8_compute=fp8,
+                            )
+
+    def test_rejects_invalid_physical_kernel_page_ratios_in_both_roles(self):
+        for page_tokens, kernel_page_tokens in (
+            (0, 128),
+            (-128, 128),
+            (64, 128),
+            (129, 128),
+            (255, 128),
+            (384, 128),
+            (640, 128),
+            (768, 128),
+            (128, 0),
+            (128, -128),
+            (128, 64),
+            (256, 256),
+            (1024, 256),
+            (1024, 1024),
+        ):
+            for decode, tp_size in ((False, 8), (True, 8), (True, 1)):
+                with self.subTest(
+                    page_tokens=page_tokens,
+                    kernel_page_tokens=kernel_page_tokens,
+                    decode=decode,
+                    tp_size=tp_size,
+                ), self.assertRaises(ValueError):
+                    self._validate(
+                        tp_size=tp_size,
+                        ep_size=8,
+                        upstream_shards=8,
+                        is_decode_role=decode,
+                        page_tokens=page_tokens,
+                        kernel_page_tokens=kernel_page_tokens,
+                    )
+
+    def test_large_page_chunk_budget_must_reach_upstream_checkpoint(self):
+        for decode, tp_size in ((False, 16), (True, 16), (True, 1)):
+            target = self._target(
+                tp_size=tp_size,
+                ep_size=16,
+                upstream_shards=16,
+                is_decode_role=decode,
+                page_tokens=8192,
+                kernel_page_tokens=128,
+                query_budget_tokens=131072,
+            )
+            with self.subTest(decode=decode, tp_size=tp_size):
+                validate_kimi_k3_page_rr_target(**vars(target))
+                target.whole_model_query_budget_tokens = 65536
+                with self.assertRaisesRegex(ValueError, "query budget"):
+                    validate_kimi_k3_page_rr_target(**vars(target))
 
     def test_accepts_equal_tp_and_replicated_decode_geometry(self):
         self._validate(

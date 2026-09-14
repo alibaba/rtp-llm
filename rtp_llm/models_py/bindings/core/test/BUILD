@@ -33,10 +33,25 @@ cc_test(
     name = "layer_kv_cache_view_test",
     srcs = ["LayerKVCacheViewTest.cc"],
     deps = [
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/models_py/bindings:op_defs",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + cuda13_torch_link_deps,
     copts = test_copts,
+)
+
+cc_test(
+    name = "mla_kernel_page_cache_test",
+    srcs = ["MlaKernelPageCacheTest.cc"],
+    deps = [
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/models_py/bindings:op_defs",
+        "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
+        "@local_config_cuda//cuda:cuda_driver",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    copts = test_copts,
+    tags = ["requires-gpu"],
 )
 
 cc_test(

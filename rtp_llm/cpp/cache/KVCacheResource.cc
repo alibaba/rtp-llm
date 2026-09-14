@@ -140,11 +140,25 @@ void KVCacheResource::initGroups(int                                  group_num,
                                 group_num);
     }
 
+    // Only DEFAULT-region SWA uses the dense kernel view. Typed SWA/state
+    // pools keep physical IDs, including pools with no mapped layers.
+    std::vector<bool> default_region_groups(static_cast<size_t>(group_num), layer_region_to_group_id.empty());
+    for (const auto& regions : layer_region_to_group_id) {
+        const size_t region = static_cast<size_t>(KVCacheRegionName::DEFAULT);
+        if (region < regions.size() && regions[region] >= 0 && regions[region] < group_num) {
+            default_region_groups[static_cast<size_t>(regions[region])] = true;
+        }
+    }
+
     group_block_ids.reserve(static_cast<size_t>(group_num));
     for (int i = 0; i < group_num; i++) {
-        const bool   is_full_group = group_types.empty() || group_types[static_cast<size_t>(i)] == CacheGroupType::FULL;
-        const size_t bpk           = is_full_group ? std::max<size_t>(1, kernel_blocks_per_kv_block) : 1;
-        auto         bid           = std::make_shared<BlockIds>(bpk);
+        const auto type = group_types.empty() ? CacheGroupType::FULL : group_types[static_cast<size_t>(i)];
+        // DEFAULT SWA (Eagle3) shares the dense kernel view, not FULL's
+        // Page-RR storage/transfer policy. LINEAR remains one ID per state.
+        const bool uses_kernel_pages = type == CacheGroupType::FULL
+                                       || (type == CacheGroupType::SWA && default_region_groups[static_cast<size_t>(i)]);
+        const size_t bpk = uses_kernel_pages ? std::max<size_t>(1, kernel_blocks_per_kv_block) : 1;
+        auto         bid = std::make_shared<BlockIds>(bpk);
         group_block_ids.push_back(std::move(bid));
     }
 
