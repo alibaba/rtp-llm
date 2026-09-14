@@ -24,6 +24,9 @@ class TaggedBlockTableModel:
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
         attention_inputs = inputs.attention_inputs
+        # The native runner must preserve this flag across pybind calls; a
+        # mutation of the Python prepare() argument does not update C++ storage.
+        assert all(group.is_cuda_graph for group in attention_inputs.values())
         full_id = attention_inputs["full"].kv_cache_kernel_block_id_device[0, 0]
         aux_id = attention_inputs["aux"].kv_cache_kernel_block_id_device[0, 0]
         signature = (full_id + 16 * aux_id).to(inputs.input_hiddens.dtype)

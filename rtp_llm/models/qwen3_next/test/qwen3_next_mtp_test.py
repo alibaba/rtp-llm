@@ -6,6 +6,7 @@ from pathlib import Path
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.model_loader.ffn_weight import FfnWeight, MoeWeight
+from rtp_llm.models.qwen3_next.qwen3_next import Qwen35Dense
 from rtp_llm.models.qwen3_next.qwen3_next_mtp import (
     Qwen35DenseMTP,
     Qwen35DenseMTPWeight,
@@ -23,6 +24,23 @@ from rtp_llm.ops import (
 
 
 class Qwen35DenseMTPTest(unittest.TestCase):
+    def test_dense_target_uses_native_hybrid_cache_pools(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "config.json").write_text(json.dumps(self._config()))
+            config = Qwen35Dense.create_config(temp_dir)
+
+        self.assertTrue(
+            config.hybrid_attention_config.enable_independent_kv_cache_pools
+        )
+        self.assertEqual(config.num_layers, 64)
+        self.assertEqual(len(config.kv_cache_spec_descs), 64)
+        self.assertEqual(
+            list(config.hybrid_attention_config.hybrid_attention_types).count(
+                HybridAttentionType.LINEAR
+            ),
+            48,
+        )
+
     def test_dense_mtp_config_and_registration(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             Path(temp_dir, "config.json").write_text(json.dumps(self._config()))

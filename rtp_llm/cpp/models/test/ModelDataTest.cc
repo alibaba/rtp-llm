@@ -127,4 +127,22 @@ TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) 
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(0, 1), RTPException);
 }
 
+TEST_F(ModelDataTest, testPositionIdsShapeHintsPreserveDevice) {
+    GptModelInputs inputs;
+    // Ordinary prefill publishes CPU positions; DSpARK proposal preparation
+    // publishes three MRoPE coordinates per token on CUDA. TP peers must use
+    // the same broadcast lane as the producer in both cases.
+    for (auto device : {torch::kCPU, torch::kCUDA}) {
+        inputs.combo_position_ids = torch::arange(24, torch::TensorOptions().dtype(torch::kInt32).device(device));
+        const auto hints = getModelInputShapeHints(inputs);
+        EXPECT_EQ(hints[GptModelInputIndex::comboPositionIds], 24);
+        EXPECT_EQ(bool(hints[GptModelInputIndex::tensorDeviceMap] & kDeviceBitComboPositionIds),
+                  device == torch::kCUDA);
+    }
+    inputs.combo_position_ids = torch::Tensor();
+    const auto hints = getModelInputShapeHints(inputs);
+    EXPECT_EQ(hints[GptModelInputIndex::comboPositionIds], 0);
+    EXPECT_EQ(hints[GptModelInputIndex::tensorDeviceMap] & kDeviceBitComboPositionIds, 0);
+}
+
 }  // namespace rtp_llm

@@ -74,9 +74,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::mtpHiddenStatesRows] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
 
-    // encode root-side tensor device for fields that may live on GPU on the
-    // PDFUSION fast path, so non-root ranks can allocate matching GPU buffers
-    // and tpSync's pack/unpack stays in lockstep.
+    // Encode variable tensor placement so peers select the same CPU/GPU
+    // broadcast lane as the producer.
     uint32_t device_bits = 0;
     if (inputs.combo_tokens.defined() && inputs.combo_tokens.is_cuda()) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitComboTokens;
@@ -95,6 +94,9 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     }
     if (inputs.kv_cache_kernel_block_id.defined() && inputs.kv_cache_kernel_block_id.is_cuda()) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitKernelBlockId;
+    }
+    if (inputs.combo_position_ids.defined() && inputs.combo_position_ids.is_cuda()) {
+        device_bits |= GptModelInputDeviceBit::kDeviceBitComboPositionIds;
     }
     shape_hints[GptModelInputIndex::tensorDeviceMap] = static_cast<int64_t>(device_bits);
     return shape_hints;
@@ -293,7 +295,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                                 {checkedHint(GptModelInputIndex::lmOutputIndexes, "lmOutputIndexes")},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
         if (combo_position_ids_size) {
-            inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {combo_position_ids_size});
+            inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                 {combo_position_ids_size},
+                                                 pickAlloc(GptModelInputDeviceBit::kDeviceBitComboPositionIds));
         } else {
             // An in-place CP remap from the previous forward leaves a rank-local
             // vector here; the root publishing none means this pass has no position
