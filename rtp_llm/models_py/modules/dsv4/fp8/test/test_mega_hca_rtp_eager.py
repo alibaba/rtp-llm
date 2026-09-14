@@ -662,7 +662,11 @@ class MegaHCARTPEagerTest(unittest.TestCase):
         )
 
     def test_cuda_graph_capture_and_replay(self) -> None:
-        check_dynamic_graph_replays(self, _make_pools, _fill_random_context)
+        def fill_history(pools: _Pools, device: torch.device, seed: int) -> None:
+            _fill_random_context(pools, device, seed)
+            _fill_random_state(pools, device, seed)
+
+        check_dynamic_graph_replays(self, _make_pools, fill_history)
 
 
 if __name__ == "__main__":

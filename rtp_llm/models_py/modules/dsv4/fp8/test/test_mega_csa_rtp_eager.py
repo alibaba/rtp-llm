@@ -717,8 +717,11 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             self.assertLess(value_diff, 1.0e-4, msg=name)
 
     def test_matches_original_rtp_at_nontrivial_topk_context(self) -> None:
-        _fill_random_context(self.mega_pools, self.device, seed=31415)
-        _fill_random_context(self.reference_pools, self.device, seed=31415)
+        # Exercise Pro TopK-1024 selection from 2048 compressed entries.
+        mega_pools = _make_pools(self.device, batch_size=1, max_seq_len=8192)
+        reference_pools = _make_pools(self.device, batch_size=1, max_seq_len=8192)
+        _fill_random_context(mega_pools, self.device, seed=31415)
+        _fill_random_context(reference_pools, self.device, seed=31415)
         generator = torch.Generator(device=self.device).manual_seed(27182)
         hidden = torch.randn(
             (1, 1, HC, DIM),
@@ -728,14 +731,14 @@ class MegaCSARTPEagerTest(unittest.TestCase):
         ).mul_(0.05)
 
         reference_output, reference_metadata = self._run_reference_step(
-            self.reference_pools.max_seq_len - 1,
+            reference_pools.max_seq_len - 1,
             hidden.clone(),
-            self.reference_pools,
+            reference_pools,
         )
         mega_output, mega_metadata = self._run_mega_step(
-            self.mega_pools.max_seq_len - 1,
+            mega_pools.max_seq_len - 1,
             hidden.clone(),
-            self.mega_pools,
+            mega_pools,
         )
         output_diff = calc_diff(mega_output.float(), reference_output.float())
         mega_topk = {
@@ -756,6 +759,7 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             f"valid TopK overlap: {overlap}/{valid_topk}"
         )
         self.assertLess(output_diff, 1.0e-3)
+        self.assertEqual(valid_topk, PRO_GEOMETRY.index_topk)
         self.assertEqual(len(mega_topk), valid_topk)
         self.assertGreaterEqual(overlap, int(0.97 * valid_topk))
 
