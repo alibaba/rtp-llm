@@ -468,16 +468,12 @@ def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     # weight_key, scale_key) triple — feed it a one-shot dict so the
     # factory plumbing is unchanged.
     local = {"_w": w, "_s": s}
-    linear = LinearFactory.create_linear_from_weights(
+    return LinearFactory.create_linear_from_weights(
         local,
         "_w",
         "_s",
         quant_config=_V4_FP8_BLOCK_CFG,
     )
-    from rtp_llm.models_py.modules.dsv4.utils import (
-        _enable_sm120_cached_weight_scale,
-    )
-    return _enable_sm120_cached_weight_scale(linear)
 
 
 def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
