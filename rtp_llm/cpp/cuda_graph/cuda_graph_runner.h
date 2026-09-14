@@ -39,6 +39,7 @@ public:
         model_data_type_(graph_params.model_data_type),
         kv_cache_layer_to_group_(graph_params.kv_cache_layer_to_group),
         kv_cache_group_num_(graph_params.kv_cache_group_num),
+        linear_replay_group_num_(graph_params.linear_replay_group_num),
         position_id_len_factor_(graph_params.position_id_len_factor) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
@@ -159,6 +160,7 @@ private:
 
     std::vector<int32_t> kv_cache_layer_to_group_;
     int32_t              kv_cache_group_num_     = 0;
+    int32_t              linear_replay_group_num_ = 0;
     int                  position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
 
     // event to record forward done

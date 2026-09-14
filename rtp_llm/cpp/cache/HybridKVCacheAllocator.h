@@ -49,6 +49,8 @@ protected:
     virtual bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
     bool         skipReuseCacheGroup(int gid) const;
     bool         groupUsesVirtualBlockCacheLayout(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const;
+    bool         isMutableLinearReplayGroup(const KVCacheResource& resource, int gid) const;
+    int          linearReplayTailNeedBlocks(const KVCacheResource& resource, int gid, int seq_len) const;
     void         rollbackBlockIdsToSize(int gid, BlockIds& block_ids, size_t original_size);
     void         rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
                                     const std::vector<BlockIndicesType>& referenced_blocks,

@@ -7,6 +7,17 @@
 using namespace std;
 
 namespace rtp_llm {
+namespace {
+
+int asyncAllocationSeqLength(GenerateStream* stream) {
+    if (!stream) {
+        return -1;
+    }
+    const int normal_length = stream->getNormalAsyncDeviceState().next_real_seq_len;
+    return normal_length > 0 ? normal_length : stream->getMtpAsyncDeviceState().next_real_seq_len;
+}
+
+}  // namespace
 // ============================================================================
 // GenerateStateMachine method implementations
 // ============================================================================
@@ -55,6 +66,9 @@ void GenerateStateMachine::handleWaiting() {
         }
         auto result = stream_cache_resource_->initKVBlock(reserve_step_);
         if (!result.ok()) {
+            if (absl::IsResourceExhausted(result)) {
+                return;
+            }
             error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
             status.store(StreamState::FINISHED, std::memory_order_release);
             releaseResource();
@@ -96,8 +110,12 @@ void GenerateStateMachine::handleWaiting() {
 
     // Decode streams, including PREFILL-role streams after fallback, must keep
     // cache block tables aligned with the growing sequence length.
-    auto result = stream_cache_resource_->incrKVBlock(reserve_step_);
+    auto result =
+        stream_cache_resource_->incrKVBlock(reserve_step_, asyncAllocationSeqLength(stream_cache_resource_->stream()));
     if (!result.ok()) {
+        if (absl::IsResourceExhausted(result)) {
+            return;
+        }
         error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
         status.store(StreamState::FINISHED, std::memory_order_release);
         releaseResource();
@@ -135,22 +153,13 @@ void GenerateStateMachine::handleRunning() {
     // Use the publish-time seqLength so incrKVBlock doesn't race the async
     // worker's update() — a stale read skips the block-boundary allocation.
     // Prefer Normal state; fall back to MTP state if the stream is MTP.
-    int             seq_len_override = -1;
-    GenerateStream* stream           = stream_cache_resource_->stream();
-    if (stream != nullptr) {
-        const int normal_override = stream->getNormalAsyncDeviceState().next_real_seq_len;
-        if (normal_override > 0) {
-            seq_len_override = normal_override;
-        } else {
-            const auto& mtp_state = stream->getMtpAsyncDeviceState();
-            const int   mtp_override = mtp_state.next_real_seq_len;
-            if (mtp_override > 0) {
-                seq_len_override = mtp_override;
-            }
-        }
-    }
+    const int seq_len_override = asyncAllocationSeqLength(stream_cache_resource_->stream());
     auto result = stream_cache_resource_->incrKVBlock(reserve_step_, seq_len_override);
     if (!result.ok()) {
+        if (absl::IsResourceExhausted(result)) {
+            status.store(StreamState::WAITING, std::memory_order_release);
+            return;
+        }
         // Report Error event so moveToNext() won't be called again on this stream
         reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "incrKVBlock failed: LACK MEM");
         status.store(StreamState::FINISHED, std::memory_order_release);

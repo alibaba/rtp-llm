@@ -635,17 +635,29 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
                                                 CacheGroupType::FULL;
         const int  group_common_seq       = cpEffectiveSeqLenForReserve(cp_mapper, group_type, raw_common_seq_len);
         const int  group_seq_len          = cpEffectiveSeqLenForReserve(cp_mapper, group_type, raw_seq_len);
-        int        group_reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0;
-        bool       group_reuse_enabled    = reuse_enabled;
-        if (malloc_info.linear_prefix_load_tokens > 0 && group_type == CacheGroupType::LINEAR) {
-            const int prefix_slots =
-                kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(malloc_info.linear_prefix_load_tokens, 0);
-            group_reuse_blocks_len = std::max(group_reuse_blocks_len, prefix_slots - 1);
-            group_reuse_enabled    = true;
+        int        need_blocks            = 0;
+        if (isMutableLinearReplayGroup(malloc_info.batch_kv_cache_resource->cacheResource(0), gid)) {
+            for (int b = 0; b < batch_size; ++b) {
+                need_blocks += linearReplayTailNeedBlocks(
+                    malloc_info.batch_kv_cache_resource->cacheResource(b), gid, group_seq_len);
+            }
+        } else {
+            int  group_reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0;
+            bool group_reuse_enabled    = reuse_enabled;
+            if (malloc_info.linear_prefix_load_tokens > 0 && group_type == CacheGroupType::LINEAR) {
+                const int prefix_slots =
+                    kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(malloc_info.linear_prefix_load_tokens, 0);
+                group_reuse_blocks_len = std::max(group_reuse_blocks_len, prefix_slots - 1);
+                group_reuse_enabled    = true;
+            }
+            const auto need = kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(
+                group_common_seq,
+                group_seq_len,
+                config_.effectiveReserveStep(gid, reserve_step),
+                group_reuse_blocks_len,
+                group_reuse_enabled);
+            need_blocks = need.common_blocks + batch_size * need.extra_blocks;
         }
-        const auto need = kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(
-            group_common_seq, group_seq_len, reserve_step, group_reuse_blocks_len, group_reuse_enabled);
-        const int need_blocks = need.common_blocks + batch_size * need.extra_blocks;
         if (need_blocks <= 0) {
             continue;
         }

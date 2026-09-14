@@ -137,33 +137,103 @@ int inferTotalTokensNoSync(const PyModelInputs& inputs) {
     return 0;
 }
 
+bool stridedCopyFits(const torch::Tensor& src, const torch::Tensor& dst) {
+    if (!src.defined() || !dst.defined() || src.scalar_type() != dst.scalar_type()
+        || src.device() != dst.device() || src.dim() != dst.dim()) {
+        return false;
+    }
+    if (src.dim() == 1) {
+        return src.is_contiguous() && dst.is_contiguous() && src.numel() <= dst.numel();
+    }
+    return src.dim() == 2 && src.stride(1) == 1 && dst.stride(1) == 1 && src.stride(0) >= src.size(1)
+           && dst.stride(0) >= dst.size(1) && src.size(0) <= dst.size(0) && src.size(1) <= dst.size(1);
+}
+
 bool targetVerifyMetadataFitsCapture(const PyModelInputs& inputs,
+                                     const PyModelInputs& captured,
                                      int                  batch_size,
                                      int                  max_seq_len,
-                                     int                  captured_query_length) {
-    const auto& prefix_lengths_host = inputs.attention_inputs.prefix_lengths_host;
-    if (!prefix_lengths_host.defined() || prefix_lengths_host.is_cuda()
-        || prefix_lengths_host.scalar_type() != torch::kInt32 || !prefix_lengths_host.is_contiguous()
-        || prefix_lengths_host.numel() < batch_size) {
-        RTP_LLM_LOG_WARNING("target-verify CUDA graph requires a contiguous int32 CPU prefix-length mirror "
-                            "with at least %d entries (defined=%d, cuda=%d, numel=%ld); "
-                            "fallback to eager execution",
-                            batch_size,
-                            prefix_lengths_host.defined(),
-                            prefix_lengths_host.defined() && prefix_lengths_host.is_cuda(),
-                            prefix_lengths_host.defined() ? prefix_lengths_host.numel() : 0);
+                                     size_t               kernel_tokens_per_block) {
+    const auto& source = inputs.attention_inputs;
+    const auto& target = captured.attention_inputs;
+    // CP may allocate only local KV pages for global sequence lengths.
+    if (source.context_parallel_info || kernel_tokens_per_block == 0) {
         return false;
     }
 
-    const auto* prefix_lengths = prefix_lengths_host.data_ptr<int32_t>();
-    for (int batch = 0; batch < batch_size; ++batch) {
-        const int64_t kv_length = prefix_lengths[batch] + captured_query_length;
-        if (kv_length > max_seq_len) {
-            RTP_LLM_LOG_WARNING("target-verify CUDA graph metadata exceeds capture capacity at batch %d: "
-                                "kv_length=%ld (max=%d); fallback to eager execution",
-                                batch,
-                                kv_length,
-                                max_seq_len);
+    const auto input_copy_fits = [](const torch::Tensor& src, const torch::Tensor& dst) {
+        return !src.defined() || src.numel() == 0
+               || (dst.defined() && src.device() == dst.device() && src.scalar_type() == dst.scalar_type()
+                   && src.is_contiguous() && dst.is_contiguous() && src.numel() <= dst.numel());
+    };
+    if (!input_copy_fits(inputs.input_ids, captured.input_ids)
+        || !input_copy_fits(inputs.input_hiddens, captured.input_hiddens)) {
+        return false;
+    }
+
+    const auto device_vector_fits = [](const torch::Tensor& src,
+                                      const torch::Tensor& dst,
+                                      int64_t              count,
+                                      bool                 required = true) {
+        if (!src.defined() || src.numel() == 0) {
+            return !required;
+        }
+        return src.is_cuda() && src.scalar_type() == torch::kInt32 && src.dim() == 1
+               && src.numel() >= count && stridedCopyFits(src, dst);
+    };
+    if (!device_vector_fits(source.input_lengths, target.input_lengths, batch_size)
+        || !device_vector_fits(source.prefix_lengths, target.prefix_lengths, batch_size)
+        || !device_vector_fits(source.sequence_lengths, target.sequence_lengths, batch_size, false)
+        || !device_vector_fits(source.sequence_lengths_plus_1_d, target.sequence_lengths_plus_1_d, batch_size)
+        || !device_vector_fits(source.cu_seqlens, target.cu_seqlens, batch_size + 1)
+        || !device_vector_fits(source.cu_kv_seqlens, target.cu_kv_seqlens, batch_size + 1)
+        || !device_vector_fits(source.decode_cu_seqlens_d, target.decode_cu_seqlens_d, batch_size + 1, false)) {
+        return false;
+    }
+
+    const auto host_copy_fits = [](const torch::Tensor& src, const torch::Tensor& dst, int64_t count) {
+        return !src.defined() || src.numel() == 0
+               || (!src.is_cuda() && src.scalar_type() == torch::kInt32 && src.dim() == 1 && src.numel() >= count
+                   && stridedCopyFits(src, dst));
+    };
+    if (!host_copy_fits(source.input_lengths_host, target.input_lengths_host, batch_size)
+        || !host_copy_fits(source.cu_seqlens_host, target.cu_seqlens_host, batch_size + 1)
+        || !host_copy_fits(source.kv_cache_layer_to_group,
+                          target.kv_cache_layer_to_group,
+                          source.kv_cache_layer_to_group.defined() ? source.kv_cache_layer_to_group.numel() : 0)) {
+        return false;
+    }
+    const auto& host_table = source.kv_cache_kernel_block_id_host;
+    if (host_table.defined() && host_table.numel() > 0
+        && (host_table.is_cuda() || host_table.dim() != 2 || host_table.size(0) != batch_size
+            || !stridedCopyFits(host_table, target.kv_cache_kernel_block_id_host))) {
+        return false;
+    }
+
+    // The gatherer publishes [group, batch, max_allocated_blocks] using the
+    // maximum over all cache groups, including FULL/MLA speculative reserve.
+    // Every group view therefore bounds prefix + query, even for a LINEAR
+    // group whose live state keeps only two tail blocks. Use the incoming
+    // tables, never the graph's padded tables or dynamic host length mirrors.
+    const auto table_fits = [&](const torch::Tensor& src, const torch::Tensor& dst) {
+        return src.defined() && src.is_cuda() && src.scalar_type() == torch::kInt32 && src.dim() == 2
+               && src.size(0) == batch_size && src.size(1) > 0 && stridedCopyFits(src, dst)
+               && static_cast<uint64_t>(src.size(1)) <= static_cast<uint64_t>(max_seq_len) / kernel_tokens_per_block;
+    };
+    if (!table_fits(source.kv_cache_kernel_block_id_device, target.kv_cache_kernel_block_id_device)) {
+        return false;
+    }
+    const auto& source_groups = source.kv_cache_kernel_block_id_device_by_group;
+    const auto& target_groups = target.kv_cache_kernel_block_id_device_by_group;
+    if (!target_groups.empty() && source_groups.size() != target_groups.size()) {
+        return false;
+    }
+    if (target_groups.empty() && source_groups.size() > 1) {
+        return false;
+    }
+    for (size_t group = 0; group < source_groups.size(); ++group) {
+        const auto& dst = target_groups.empty() ? target.kv_cache_kernel_block_id_device : target_groups[group];
+        if (!table_fits(source_groups[group], dst)) {
             return false;
         }
     }
@@ -293,7 +363,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     auto  attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
-    // Worst case here is ~8 contiguous + (1 + group_count) strided copies,
+    // Replay adds 8 contiguous metadata and 2 group-strided copies, still below 64 entries.
+    // Worst case here is ~16 contiguous + (3 + group_count) strided copies,
     // batched into one launch each. If new copies are added below — or if the
     // hybrid KV-cache group_count grows materially — re-check MAX_FUSED_*_COPIES.
     FusedD2DCopyParams     d2d_copies;
@@ -308,6 +379,15 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(fused_fill)");
         CudaGraphPrepareFillParams fill_params;
+        if (py_model_inputs_.attention_inputs.linear_replay) {
+            auto& replay = *py_model_inputs_.attention_inputs.linear_replay;
+            addCudaGraphPrepareFillRegion(fill_params, replay.slot_ids, 0, replay.slot_ids.numel(), -1);
+            addCudaGraphPrepareFillRegion(
+                fill_params, replay.history_valid_lengths, 0, replay.history_valid_lengths.numel(), 0);
+            addCudaGraphPrepareFillRegion(fill_params, replay.init_kinds, 0, replay.init_kinds.numel(), 0);
+            addCudaGraphPrepareFillRegion(
+                fill_params, replay.prev_accept_lengths, 0, replay.prev_accept_lengths.numel(), 0);
+        }
         addCudaGraphPrepareFillRegion(fill_params,
                                       py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device,
                                       0,
@@ -452,6 +532,31 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         }
     }
 
+    RTP_LLM_CHECK_WITH_INFO(inputs.attention_inputs.linear_replay.has_value()
+                                == py_model_inputs_.attention_inputs.linear_replay.has_value(),
+                            "LINEAR replay graph metadata does not match the target cache layout");
+    if (inputs.attention_inputs.linear_replay) {
+        auto source              = *inputs.attention_inputs.linear_replay;
+        auto source_tensors      = source.tensors();
+        auto destination_tensors = py_model_inputs_.attention_inputs.linear_replay->tensors();
+        RTP_LLM_CHECK_WITH_INFO(source.slot_ids.numel() == state.current_batch_size,
+                                "LINEAR replay request count does not match CUDA graph batch");
+        for (size_t i = 0; i < source_tensors.size(); ++i) {
+            const auto& src = *source_tensors[i];
+            auto&       dst = *destination_tensors[i];
+            RTP_LLM_CHECK_WITH_INFO(src.is_cuda() && src.scalar_type() == dst.scalar_type() && src.dim() == dst.dim()
+                                        && src.stride(src.dim() - 1) == 1,
+                                    "LINEAR replay graph input has invalid dtype, device or stride");
+            if (src.dim() == 2) {
+                RTP_LLM_CHECK_WITH_INFO(src.size(0) == dst.size(0) && src.size(1) <= dst.size(1),
+                                        "LINEAR replay group table exceeds graph capacity");
+            } else {
+                RTP_LLM_CHECK_WITH_INFO(src.numel() <= dst.numel(), "LINEAR replay input exceeds graph capacity");
+            }
+            addStridedD2DCopy(strided_d2d_copies, d2d_copies, src, dst);
+        }
+    }
+
     // Launch ALL D2D copies (contiguous + strided) in two fused kernels
     {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(fused_d2d_copy)");
@@ -473,37 +578,39 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 
         optimizedCopyAsync(inputs.attention_inputs.kv_cache_layer_to_group,
                            py_model_inputs_.attention_inputs.kv_cache_layer_to_group,
-                           inputs.attention_inputs.kv_cache_layer_to_group.numel() * sizeof(int32_t));
+                           inputs.attention_inputs.kv_cache_layer_to_group.defined() ?
+                               inputs.attention_inputs.kv_cache_layer_to_group.numel() * sizeof(int32_t) :
+                               0);
 
-        // TokenSpeed MLA builds its replay plan from pinned host metadata.  The
-        // capture tensors contain only dummy maximum-length descriptors, so the
-        // live values must be mirrored on every replay just like cu_seqlens.
-        // Both copies are H2H; no device synchronization or D2H copy is added.
+        // Legacy decode/prefill planners consume live host mirrors. Target
+        // verification retains only its fixed query-width host descriptor.
         if (inputs.attention_inputs.input_lengths_host.defined()
             && py_model_inputs_.attention_inputs.input_lengths_host.defined()) {
             optimizedCopyAsync(inputs.attention_inputs.input_lengths_host,
                                py_model_inputs_.attention_inputs.input_lengths_host,
                                state.current_batch_size * sizeof(int));
         }
-        if (inputs.attention_inputs.prefix_lengths_host.defined()
-            && py_model_inputs_.attention_inputs.prefix_lengths_host.defined()) {
-            optimizedCopyAsync(inputs.attention_inputs.prefix_lengths_host,
-                               py_model_inputs_.attention_inputs.prefix_lengths_host,
-                               state.current_batch_size * sizeof(int));
-        }
-        if (inputs.attention_inputs.sequence_lengths_host.defined()
-            && py_model_inputs_.attention_inputs.sequence_lengths_host.defined()) {
-            optimizedCopyAsync(inputs.attention_inputs.sequence_lengths_host,
-                               py_model_inputs_.attention_inputs.sequence_lengths_host,
-                               state.current_batch_size * sizeof(int));
-            if (!is_prefill_cuda_graph_mode_ && !is_target_verify_
-                && state.current_batch_size < state.current_real_graph_bs) {
-                fillHostInt32(py_model_inputs_.attention_inputs.sequence_lengths_host,
-                              state.current_batch_size,
-                              state.current_real_graph_bs,
-                              0);
+        const auto copy_dynamic_host_lengths = [&](const torch::Tensor& source, torch::Tensor& target) {
+            if (is_target_verify_ || !source.defined() || source.numel() == 0) {
+                // Missing live mirrors invalidate capture descriptors, also
+                // for ordinary MTP draft decode after async dispatch.
+                target = torch::Tensor();
+                return;
             }
-        }
+            const int64_t capacity = py_model_inputs_.attention_inputs.input_lengths.numel();
+            RTP_LLM_CHECK_WITH_INFO(!source.is_cuda() && source.scalar_type() == torch::kInt32
+                                        && source.is_contiguous() && source.numel() >= state.current_batch_size,
+                                    "CUDA graph host length mirror has invalid dtype, device or size");
+            if (!target.defined()) {
+                target = torch::zeros({capacity}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+            }
+            optimizedCopyAsync(source, target, state.current_batch_size * sizeof(int));
+            fillHostInt32(target, state.current_batch_size, capacity, 0);
+        };
+        copy_dynamic_host_lengths(inputs.attention_inputs.prefix_lengths_host,
+                                  py_model_inputs_.attention_inputs.prefix_lengths_host);
+        copy_dynamic_host_lengths(inputs.attention_inputs.sequence_lengths_host,
+                                  py_model_inputs_.attention_inputs.sequence_lengths_host);
 
         if (!is_prefill_cuda_graph_mode_) {
             optimizedCopyAsync(inputs.attention_inputs.sequence_lengths,
@@ -745,7 +852,14 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
                 return false;
             }
             // Replay-time attention planning cannot grow the captured context.
-            return targetVerifyMetadataFitsCapture(inputs, state.current_batch_size, max_seq_len_, num_tokens_per_bs_);
+            const auto& captured = graph_instances_[state.current_real_graph_bs].mem_hold_.py_model_inputs_;
+            const bool fits = targetVerifyMetadataFitsCapture(
+                inputs, captured, state.current_batch_size, max_seq_len_, kernel_seq_size_per_block_);
+            if (!fits) {
+                RTP_LLM_LOG_WARNING("target-verify CUDA graph metadata or allocated KV pages exceed capture capacity; "
+                                    "fallback to eager execution");
+            }
+            return fits;
         }
         return false;
     }
@@ -810,6 +924,17 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.is_prefill          = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
     inputs.attention_inputs.total_tokens        = max_bs * num_tokens_per_bs;
     inputs.ktp_valid_row_mask                   = torch::ones({int(max_num_token_)}, options_cuda_int32_);
+    if (is_target_verify_ && linear_replay_group_num_ > 0) {
+        inputs.attention_inputs.linear_replay = LinearReplayInputs::allocate(max_bs_, linear_replay_group_num_);
+        auto& replay                          = *inputs.attention_inputs.linear_replay;
+        for (auto* tensor : replay.tensors()) {
+            tensor->zero_();
+        }
+        // Capture with masked rows in the real pools; never overwrite request state at physical block 0.
+        replay.slot_ids.fill_(-1);
+        replay.active_block_ids.fill_(-1);
+        replay.state_read_block_ids.fill_(-1);
+    }
 
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
     inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
@@ -1238,6 +1363,9 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d.slice(0, 0, batch_size);
 
     const auto& cap_attn = capture_mem_hold_.py_model_inputs_.attention_inputs;
+    if (cap_attn.linear_replay) {
+        inputs.attention_inputs.linear_replay = cap_attn.linear_replay->slice(0, batch_size);
+    }
     inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.clear();
     if (!cap_attn.kv_cache_kernel_block_id_device_by_group.empty()) {
         const size_t group = cap_attn.kv_cache_kernel_block_id_device_by_group.size();

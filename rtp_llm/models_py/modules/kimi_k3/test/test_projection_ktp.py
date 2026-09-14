@@ -6,7 +6,7 @@ import torch
 import rtp_llm.models_py.modules.kimi_k3.ktp_step as ktp_step
 import rtp_llm.models_py.modules.kimi_k3.projection_ktp as projection_ktp
 
-from rtp_llm.ops.compute_ops import PyAttentionInputs
+from rtp_llm.ops.compute_ops import LinearReplayInputs, PyAttentionInputs
 from rtp_llm.model_loader.linear_attn_weight import (
     LinearAttnConfig,
     split_kda_dim1_parallel,
@@ -242,6 +242,82 @@ class KtpStepPlanTest(unittest.TestCase):
         )
         self.assertEqual(inputs.ktp_local_real_batch, 4)
         self.assertEqual(inputs.ktp_common_physical_batch, 2)
+
+    def test_target_verify_replay_padding_preserves_logical_inputs(self):
+        for local_batch, remote_batch, graph, bucket, physical in (
+            (1, 2, True, 4, 4),
+            (1, 2, False, 4, 2),
+            (0, 2, True, 2, 2),
+            (1, 1, True, 4, 4),
+            (1, 1, True, 1, 1),
+        ):
+            with self.subTest(local_batch=local_batch, graph=graph, physical=physical):
+                source = LinearReplayInputs()
+                values = {
+                    "slot_ids": ([7 if local_batch else -1], torch.int32),
+                    "slot_generations": ([1 << 40], torch.int64),
+                    "active_block_ids": ([[11], [21]], torch.int32),
+                    "prev_accept_lengths": ([3], torch.int32),
+                    "history_valid_lengths": ([4], torch.int32),
+                    "history_epochs": ([(1 << 40) + 1], torch.int64),
+                    "verify_epochs": ([(1 << 40) + 2], torch.int64),
+                    "init_kinds": ([0], torch.int32),
+                    "state_read_block_ids": ([[10], [20]], torch.int32),
+                    "anchor_processed_lengths": ([127], torch.int32),
+                }
+                original_tensors = {}
+                for name, (data, dtype) in values.items():
+                    original_tensors[name] = torch.tensor(data, dtype=dtype)
+                    setattr(source, name, original_tensors[name])
+                attention = PyAttentionInputs()
+                attention.input_lengths = torch.tensor([4], dtype=torch.int32)
+                attention.sequence_lengths = torch.tensor([7], dtype=torch.int32)
+                attention.cu_seqlens_host = torch.tensor([0, 4], dtype=torch.int32)
+                attention.linear_replay = source
+                inputs = SimpleNamespace(
+                    input_ids=torch.arange(4, dtype=torch.int32),
+                    attention_inputs=attention,
+                )
+                plan = build_ktp_step_plan(
+                    [[local_batch, int(graph), 2, 4], [remote_batch, int(graph), 2, 4]],
+                    [bucket],
+                )
+
+                pad_ktp_decode_inputs(inputs, plan, ktp_rank=0)
+
+                replay = attention.linear_replay
+                self.assertEqual(replay.slot_ids.numel(), physical)
+                self.assertEqual(inputs.input_ids.numel() // replay.slot_ids.numel(), 4)
+                for name, original in original_tensors.items():
+                    with self.subTest(field=name):
+                        padded = getattr(replay, name)
+                        dim = 1 if original.dim() == 2 else 0
+                        expected_shape = list(original.shape)
+                        expected_shape[dim] = physical
+                        self.assertEqual(list(padded.shape), expected_shape)
+                        self.assertEqual(padded.dtype, original.dtype)
+                        self.assertEqual(padded.device, original.device)
+                        torch.testing.assert_close(padded.narrow(dim, 0, 1), original)
+                        fill = (
+                            -1
+                            if name
+                            in (
+                                "slot_ids",
+                                "active_block_ids",
+                                "state_read_block_ids",
+                            )
+                            else 0
+                        )
+                        tail = padded.narrow(dim, 1, physical - 1)
+                        torch.testing.assert_close(tail, torch.full_like(tail, fill))
+                        retained = getattr(source, name)
+                        self.assertEqual(retained.data_ptr(), original.data_ptr())
+                        torch.testing.assert_close(
+                            retained,
+                            torch.tensor(values[name][0], dtype=values[name][1]),
+                        )
+                        if physical == 1:
+                            self.assertEqual(padded.data_ptr(), original.data_ptr())
 
 
 class KtpProjectionLayoutTest(unittest.TestCase):

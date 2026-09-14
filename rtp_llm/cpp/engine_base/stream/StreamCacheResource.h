@@ -47,6 +47,21 @@ public:
     // Commit accepted speculative states using each LINEAR group's token span.
     void updateLinearBlocks(int32_t batch_id, int cur_cached_len, int nxt_cached_len);
 
+    const std::shared_ptr<LinearReplayLease>& linearReplayLease() const {
+        return linear_replay_lease_;
+    }
+    std::shared_ptr<LinearReplayBlockHold> holdLinearReplayBlocks();
+    const std::vector<int32_t>&            linearReplayInitialBlockIds() const {
+        return linear_replay_initial_block_ids_;
+    }
+    const std::shared_ptr<LinearReplayBlockHold>& linearReplayInitialBlockHold() const {
+        return linear_replay_initial_block_hold_;
+    }
+    void clearLinearReplayInitialState() {
+        linear_replay_initial_block_hold_.reset();
+        linear_replay_initial_block_ids_.clear();
+    }
+
     // TODO, remove this after remove fallback
     int singleBatchNeedBlocks(int seq_len, int reserve_step) const;
 
@@ -129,6 +144,7 @@ public:
     }
 
 private:
+    absl::Status prepareLinearReplayResources(bool prepare_tails = true);
     void loadCacheSync();
     void waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
     void updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context);
@@ -154,6 +170,9 @@ private:
 
     // Connector reference counting for PD separation (RAII auto-release)
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;
+    std::shared_ptr<LinearReplayLease>     linear_replay_lease_;
+    std::vector<int32_t>                   linear_replay_initial_block_ids_;
+    std::shared_ptr<LinearReplayBlockHold> linear_replay_initial_block_hold_;
     /// Async connector load is gated to once per cache lifecycle: duplicate `initKVBlock` must
     /// not re-issue async read (see tests). Reset in `releaseResource()` when blocks are cleared
     /// so any future reuse of this resource can load again. Concurrent callers use `exchange`.

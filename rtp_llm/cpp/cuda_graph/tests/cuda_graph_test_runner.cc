@@ -69,7 +69,8 @@ public:
                      bool             is_target_verify,
                      int64_t          max_context_batch_size,
                      std::vector<int> kv_cache_layer_to_group,
-                     int64_t          kv_cache_group_num) {
+                     int64_t          kv_cache_group_num,
+                     int64_t          linear_replay_group_num) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = false;
@@ -85,6 +86,7 @@ public:
         params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
         params.kv_cache_layer_to_group      = std::move(kv_cache_layer_to_group);
         params.kv_cache_group_num           = static_cast<int>(kv_cache_group_num);
+        params.linear_replay_group_num      = static_cast<int>(linear_replay_group_num);
 
         runner_ = CudaGraphRunner::createForDecode(std::move(py_instance), std::move(params));
     }
@@ -149,7 +151,8 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("is_target_verify")        = false,
              py::arg("max_context_batch_size")  = 128,
              py::arg("kv_cache_layer_to_group") = std::vector<int>{},
-             py::arg("kv_cache_group_num")      = 0)
+             py::arg("kv_cache_group_num")      = 0,
+             py::arg("linear_replay_group_num") = 0)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
         .def("prepareAttentionInputs", &CudaGraphTestRunner::prepareAttentionInputs)

@@ -35,6 +35,7 @@ struct GraphParams {
     std::vector<int>     decode_capture_batch_sizes;
     std::vector<int32_t> kv_cache_layer_to_group;  // layer index -> group id for hybrid kv cache
     int32_t              kv_cache_group_num = 0;   // number of kv cache groups
+    int32_t              linear_replay_group_num = 0;
     // DSv4 head-channel residual multiplier (default 1, no expansion).
     // CudaGraphRunner allocates input_hiddens with hidden_size * hc_mult so
     // the DSv4 MTP draft graph captures with the [T, hc*dim] residual shape

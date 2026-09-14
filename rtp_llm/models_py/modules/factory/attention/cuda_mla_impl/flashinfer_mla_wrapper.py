@@ -110,19 +110,6 @@ class MlaFlashInferImplBase(MlaImplBase):
             warmup_flashinfer_python()
         self.seq_size_per_block = seq_size_per_block
         self.fmha_impl: Any = fmha_impl
-        if self.fmha_impl is not None:
-            input_host = getattr(attn_inputs, "input_lengths_host", None)
-            prefix_host = getattr(attn_inputs, "prefix_lengths_host", None)
-            if input_host is not None and input_host.numel():
-                input_values = [int(value) for value in input_host.tolist()]
-                prefix_values = (
-                    [int(value) for value in prefix_host.tolist()]
-                    if prefix_host is not None and prefix_host.numel()
-                    else [0] * len(input_values)
-                )
-                self.fmha_impl.total_kv_lens_hint = sum(input_values) + sum(
-                    prefix_values
-                )
         self.fmha_params = None
         self.rope_params = None
         self.rope_impl = rope_impl

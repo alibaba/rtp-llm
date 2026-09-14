@@ -146,6 +146,32 @@ def _pad_optional_tensor_attr(obj, name: str, rows: int, value: int = 0) -> None
         setattr(obj, name, _pad_dim0(tensor, rows, value))
 
 
+def _pad_linear_replay(attention, rows: int) -> None:
+    replay = getattr(attention, "linear_replay", None)
+    if replay is None or replay.slot_ids.numel() == rows:
+        return
+    # Preserve the logical metadata used by PyWrappedModel to finalize real slots.
+    padded = type(replay)()
+    for name in (
+        "slot_ids",
+        "slot_generations",
+        "prev_accept_lengths",
+        "history_valid_lengths",
+        "history_epochs",
+        "verify_epochs",
+        "init_kinds",
+        "anchor_processed_lengths",
+    ):
+        setattr(
+            padded,
+            name,
+            _pad_dim0(getattr(replay, name), rows, -1 if name == "slot_ids" else 0),
+        )
+    for name in ("active_block_ids", "state_read_block_ids"):
+        setattr(padded, name, _pad_dim(getattr(replay, name), rows, dim=1, value=-1))
+    attention.linear_replay = padded
+
+
 def _pad_block_table_attr(obj, name: str, rows: int) -> None:
     """Pad either ``[batch, blocks]`` or ``[group, batch, blocks]`` tables."""
 
@@ -244,6 +270,7 @@ def pad_ktp_decode_inputs(inputs, plan: KtpStepPlan, *, ktp_rank: int) -> None:
     attention.sequence_lengths = _pad_dim0(attention.sequence_lengths, physical, 0)
     _pad_optional_tensor_attr(attention, "sequence_lengths_host", physical, 0)
     _pad_optional_tensor_attr(attention, "sequence_lengths_plus_1_d", physical, 1)
+    _pad_linear_replay(attention, physical)
     _pad_block_table_attr(attention, "kv_cache_kernel_block_id_device", physical)
     _pad_block_table_attr(attention, "kv_cache_kernel_block_id_host", physical)
     _pad_block_table_attr(attention, "kv_cache_block_id_device", physical)

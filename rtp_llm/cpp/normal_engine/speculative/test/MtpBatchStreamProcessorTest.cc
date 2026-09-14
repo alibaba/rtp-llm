@@ -238,9 +238,34 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
 
     GptModelInputs  model_input;
     GptModelOutputs model_output;
-    model_output.logits = torch::zeros({3, 16}, torch::kFloat32);
+    model_output.logits = torch::zeros({3, 16}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
 
-    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_input, model_output);
+    // Stateful processors supply verify masks through the executor's runner;
+    // score-batch gathering intentionally skips their ordinary process().
+    SpecLogitsVerifyRunner             verify_runner;
+    SpecLogitsVerifyRunner::LaunchTask verify_task;
+    verify_task.total_streams = 1;
+    verify_task.propose_step  = sp_config.gen_num_per_cycle;
+    verify_task.vocab_size    = model_config.vocab_size;
+    verify_task.draft_tokens  = torch::tensor({{1, 2}}, torch::kInt32);
+    size_t processor_idx = 0;
+    for (const auto& logits_processor : stream->getAllLogitsProcessorPtr()) {
+        if (auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(logits_processor)) {
+            verify_task.active.push_back({spec_processor,
+                                          0,
+                                          processor_idx,
+                                          static_cast<uint64_t>(stream->streamId()),
+                                          static_cast<int64_t>(stream->seqLength()),
+                                          static_cast<int64_t>(stream->outputTokenLen())});
+        }
+        ++processor_idx;
+    }
+    auto verify_result = verify_runner.buildInline(verify_task);
+    ASSERT_TRUE(verify_result.has_active_processor);
+    ASSERT_TRUE(verify_result.spec_vocab_mask_gpu.defined());
+
+    auto sampler_inputs_status =
+        processor.gatherSpecSamplerInput(stream_groups, model_input, model_output, verify_result);
     ASSERT_TRUE(sampler_inputs_status.ok());
     auto sampler_inputs = sampler_inputs_status.value();
 
@@ -253,6 +278,70 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
         EXPECT_EQ(neg_inf, sampler_inputs.logits[i][8].item<float>());
         EXPECT_EQ(0, sampler_inputs.logits[i][9].item<float>());
     }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testLinearReplayUsesPerGroupPhysicalBlockSize) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 128;
+    model_config.num_layers  = 6;
+    RuntimeConfig              runtime_config;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.gen_num_per_cycle = 3;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    auto                        cache_config = test::makeSimpleHybridMhaCacheConfig(6, 64, 16, DataType::TYPE_FP16, 2);
+    cache_config.kernel_seq_size_per_block   = 4;
+    cache_config.linear_replay_group_ids     = {0, 1};
+    cache_config.group_types[1]              = CacheGroupType::LINEAR;
+    auto first_spec                 = std::dynamic_pointer_cast<LinearKVCacheSpec>(cache_config.cache_specs[0]);
+    first_spec->seq_size_per_block  = 8;
+    auto second_spec                = std::make_shared<LinearKVCacheSpec>(*first_spec);
+    second_spec->seq_size_per_block = 4;
+    cache_config.cache_specs[1]     = second_spec;
+
+    ResourceContext resource_context;
+    // This test supplies a published lease and page snapshot; it only executes metadata gathering.
+    resource_context.cache_manager = std::make_shared<KVCacheManager>(
+        test::makeSimpleMhaCacheConfig(1, 64, 16, DataType::TYPE_FP16), /*warmup=*/true);
+    auto stream = createContextStream(model_config, runtime_config, resource_context, std::vector<int>(17, 1), 1);
+    stream->setIsContextStream(false);
+    auto lease                                                       = std::make_shared<LinearReplayLease>();
+    lease->slot_id                                                   = 0;
+    lease->generation                                                = 1;
+    stream->stream_cache_resource_->linear_replay_lease_             = lease;
+    stream->stream_cache_resource_->linear_replay_initial_block_ids_ = {12, 24, -1};
+
+    BatchKVCacheResource pages;
+    pages.resetBatchSize(1);
+    pages.initGroups(3, 3, {0, 1, 2}, cache_config.kernelBlocksPerKvBlock(), cache_config.group_types);
+    pages.setBatchBlocks(0, 0, {11, 12, 13});
+    pages.setBatchBlocks(0, 1, {21, 22, 23, 24, 25});
+    pages.setBatchBlocks(0, 2, {31, 32});
+    EXPECT_EQ(pages.kernelBlocks(0, 0), pages.blocks(0, 0));
+    EXPECT_EQ(pages.kernelBlocks(0, 1), pages.blocks(0, 1));
+    EXPECT_EQ(pages.kernelBlocks(0, 2).size(), 8u);
+    stream->setKVCache(pages);
+
+    GptModelInputs inputs;
+    inputs.kv_cache_kernel_block_id =
+        torch::full({3, 1, 8}, -1, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+    for (int group = 0; group < 3; ++group) {
+        const auto& kernel_blocks = pages.kernelBlocks(0, group);
+        std::memcpy(inputs.kv_cache_kernel_block_id.data_ptr<int32_t>() + group * 8,
+                    kernel_blocks.data(),
+                    kernel_blocks.size() * sizeof(int32_t));
+    }
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    TensorHolder                                   host_holder;
+    std::vector<GenerateStream::LinearReplayRound> rounds;
+    ASSERT_TRUE(
+        processor.gatherLinearReplayInputs(StreamGroups({stream}), cache_config, inputs, host_holder, rounds).ok());
+    ASSERT_TRUE(inputs.linear_replay.has_value());
+    EXPECT_EQ(toVec<int32_t>(inputs.linear_replay->active_block_ids), (std::vector<int32_t>{13, 25, -1}));
+    EXPECT_EQ(toVec<int32_t>(inputs.linear_replay->state_read_block_ids), (std::vector<int32_t>{12, 24, -1}));
+    EXPECT_EQ(toVec<int32_t>(inputs.linear_replay->anchor_processed_lengths), (std::vector<int32_t>{16}));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
@@ -402,10 +491,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().last_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().next_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().last_real_seq_len, stream2->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().next_real_seq_len, stream2->seqLength());
+    // MtpExecutor publishes the next device state after this processor commits
+    // stream output; dispatchDecode alone does not own that publication.
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
@@ -621,14 +708,12 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
                      torch::Tensor(),
                      torch::Tensor()});
 
-    const auto cuda_i32   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    const auto pinned_i32 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
 
     GenerateStream::MtpAsyncDeviceState state1;
     state1.accept_len_gpu     = torch::tensor({2}, torch::kInt32).to(torch::kCUDA);
     state1.accept_tokens_gpu  = torch::tensor({{2, 3}}, torch::kInt32).to(torch::kCUDA);
     state1.next_seq_len_gpu   = torch::full({1}, 7, cuda_i32);
-    state1.next_seq_len_host  = torch::tensor({7}, pinned_i32);
     state1.propose_tokens_gpu = torch::tensor({{1}}, torch::kInt32).to(torch::kCUDA);
     stream1->setMtpAsyncDeviceState(std::move(state1));
 
@@ -636,7 +721,6 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
     state2.accept_len_gpu     = torch::tensor({1}, torch::kInt32).to(torch::kCUDA);
     state2.accept_tokens_gpu  = torch::tensor({{1, 0}}, torch::kInt32).to(torch::kCUDA);
     state2.next_seq_len_gpu   = torch::full({1}, 4, cuda_i32);
-    state2.next_seq_len_host  = torch::tensor({4}, pinned_i32);
     state2.propose_tokens_gpu = torch::tensor({{2}}, torch::kInt32).to(torch::kCUDA);
     stream2->setMtpAsyncDeviceState(std::move(state2));
 
@@ -655,6 +739,8 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
     // the device path must not republish this mirror.
     model_input.sequence_lengths_host_for_log =
         torch::tensor({98, 98}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+    model_input.prefix_lengths_host_for_log = model_input.sequence_lengths_host_for_log;
+    model_input.sequence_lengths_plus_1     = torch::full({2}, 100, cuda_i32);
 
     processor.prepareOneStepSpecDecodeModelInput(stream_groups, model_input, holder);
 
@@ -673,9 +759,20 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
     EXPECT_EQ(expect_input_lengths, toVec<int>(model_input.input_lengths));
     ASSERT_TRUE(model_input.input_lengths_host_for_log.defined());
     EXPECT_EQ(expect_input_lengths, toVec<int>(model_input.input_lengths_host_for_log));
-    ASSERT_TRUE(model_input.prefix_lengths_host_for_log.defined());
-    EXPECT_TRUE(model_input.prefix_lengths_host_for_log.is_pinned());
-    EXPECT_EQ(expect_prefix_lengths, toVec<int>(model_input.prefix_lengths_host_for_log));
+    EXPECT_FALSE(model_input.prefix_lengths_host_for_log.defined());
+    EXPECT_FALSE(model_input.sequence_lengths_host_for_log.defined());
+    EXPECT_FALSE(model_input.sequence_lengths_plus_1.defined());
+
+    // The next round must observe device updates without a host length mirror
+    // or a stream bookkeeping update.
+    auto next_seq_len_1 = stream1->getNextSeqLenGpu();
+    auto next_seq_len_2 = stream2->getNextSeqLenGpu();
+    next_seq_len_1.add_(2);
+    next_seq_len_2.add_(1);
+    processor.prepareOneStepSpecDecodeModelInput(stream_groups, model_input, holder);
+    EXPECT_EQ(std::vector<int>({8, 4}), toVec<int>(model_input.prefix_lengths));
+    EXPECT_EQ(expect_combo_tokens, toVec<int>(model_input.combo_tokens));
+    EXPECT_FALSE(model_input.prefix_lengths_host_for_log.defined());
     EXPECT_FALSE(model_input.sequence_lengths_host_for_log.defined());
 }
 
@@ -772,7 +869,8 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
 
     auto expect_positions = [](const GptModelInputs& input,
                                const vector<int>&    expected_prefix,
-                               const vector<int>&    expected_sequence) {
+                               const vector<int>&    expected_sequence,
+                               bool                  has_host_mirror = true) {
         EXPECT_TRUE(input.prefix_lengths.is_cuda());
         EXPECT_TRUE(input.sequence_lengths.is_cuda());
         EXPECT_EQ(torch::kInt32, input.prefix_lengths.scalar_type());
@@ -780,10 +878,15 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
         EXPECT_EQ(expected_prefix, toVec<int>(input.prefix_lengths));
         EXPECT_EQ(expected_sequence, toVec<int>(input.sequence_lengths));
         EXPECT_EQ(expected_sequence, toVec<int>(input.prefix_lengths + 1));
-        EXPECT_EQ(expected_prefix, toVec<int>(input.prefix_lengths_host_for_log));
-        EXPECT_EQ(expected_sequence, toVec<int>(input.sequence_lengths_host_for_log));
-        EXPECT_TRUE(input.prefix_lengths_host_for_log.is_pinned());
-        EXPECT_TRUE(input.sequence_lengths_host_for_log.is_pinned());
+        if (has_host_mirror) {
+            EXPECT_EQ(expected_prefix, toVec<int>(input.prefix_lengths_host_for_log));
+            EXPECT_EQ(expected_sequence, toVec<int>(input.sequence_lengths_host_for_log));
+            EXPECT_TRUE(input.prefix_lengths_host_for_log.is_pinned());
+            EXPECT_TRUE(input.sequence_lengths_host_for_log.is_pinned());
+        } else {
+            EXPECT_FALSE(input.prefix_lengths_host_for_log.defined());
+            EXPECT_FALSE(input.sequence_lengths_host_for_log.defined());
+        }
     };
     expect_positions(model_input, {1, 2}, {2, 3});
 
@@ -829,20 +932,29 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     GenerateStream::MtpAsyncDeviceState state1;
     state1.propose_tokens_gpu = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
     state1.next_seq_len_gpu   = torch::tensor({7}, torch::kInt32).to(torch::kCUDA);
-    state1.next_seq_len_host  = torch::tensor({7}, torch::kInt32).pin_memory();
     stream1->setMtpAsyncDeviceState(std::move(state1));
 
     GenerateStream::MtpAsyncDeviceState state2;
     state2.propose_tokens_gpu = torch::tensor({{1}}, torch::kInt32).to(torch::kCUDA);
     state2.next_seq_len_gpu   = torch::tensor({4}, torch::kInt32).to(torch::kCUDA);
-    state2.next_seq_len_host  = torch::tensor({4}, torch::kInt32).pin_memory();
     stream2->setMtpAsyncDeviceState(std::move(state2));
 
     model_input.sequence_lengths              = torch::tensor({99, 99}, torch::kInt32);
-    model_input.sequence_lengths_host_for_log = torch::tensor({6, 3}, torch::kInt32).pin_memory();
+    model_input.sequence_lengths_host_for_log = torch::tensor({98, 98}, torch::kInt32).pin_memory();
+    model_input.prefix_lengths_host_for_log   = model_input.sequence_lengths_host_for_log;
+    model_input.sequence_lengths_plus_1       = torch::tensor({100, 100}, torch::kInt32).to(torch::kCUDA);
     processor.prepareDecodeDraftModelInput(stream_groups, model_input, holder);
 
-    expect_positions(model_input, {6, 3}, {7, 4});
+    expect_positions(model_input, {6, 3}, {7, 4}, false);
+    EXPECT_FALSE(model_input.sequence_lengths_plus_1.defined());
+
+    processor.updateDecodeDraftModelInput(
+        model_input, model_output, torch::tensor({1, 2}, torch::kInt32).to(torch::kCUDA), holder);
+    EXPECT_EQ(std::vector<int>({6, 3}), toVec<int>(model_input.prefix_lengths));
+    EXPECT_EQ(std::vector<int>({8, 5}), toVec<int>(model_input.sequence_lengths));
+    EXPECT_FALSE(model_input.prefix_lengths_host_for_log.defined());
+    EXPECT_FALSE(model_input.sequence_lengths_host_for_log.defined());
+    EXPECT_FALSE(model_input.sequence_lengths_plus_1.defined());
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {

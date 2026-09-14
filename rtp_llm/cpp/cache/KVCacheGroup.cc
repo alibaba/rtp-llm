@@ -20,18 +20,23 @@ bool KVCacheGroup::init() {
 
     for (int i = 0; i < static_cast<int>(layer_ids_.size()); ++i) {
         const int global_layer_id = layer_ids_[i];
+        const int physical_slot   = physical_layer_slots_.empty() ? i : physical_layer_slots_.at(i);
+        RTP_LLM_CHECK_WITH_INFO(physical_slot >= 0 && static_cast<size_t>(physical_slot) < layer_tensors.size(),
+                                "invalid physical cache layer slot %d for layer %d",
+                                physical_slot,
+                                global_layer_id);
         // - For non-hybrid (single-model) layout, BlockPool exposes per-layer tensors indexed by global layer id,
         //   and typically global_layer_id == i.
         // - For hybrid layout, BlockPool exposes per-group "physical layer slot" tensors sized by
         //   CacheConfig.group_layer_num, while layer_ids_ still stores global model layer ids.
         //   In that case, we must bind global_layer_id -> layer_tensors[local_slot=i].
 
-        global_layer_to_kv_tensors[global_layer_id] = layer_tensors[static_cast<size_t>(i)];
+        global_layer_to_kv_tensors[global_layer_id] = layer_tensors[static_cast<size_t>(physical_slot)];
 
         if (!scale_tensors.empty()) {
-            global_layer_to_kv_scale_tensors[global_layer_id] = scale_tensors[static_cast<size_t>(i)];
+            global_layer_to_kv_scale_tensors[global_layer_id] = scale_tensors[static_cast<size_t>(physical_slot)];
         }
-        global_layer_to_local_layer[layer_ids_[i]] = i;
+        global_layer_to_local_layer[layer_ids_[i]] = physical_slot;
     }
 
     return true;

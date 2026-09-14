@@ -7,6 +7,7 @@ from torch import nn
 
 import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.device.device_type import is_cuda
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
@@ -37,6 +38,7 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+from rtp_llm.models_py.triton_kernels.linear_replay import linear_serial_replay
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
@@ -410,6 +412,32 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             kv_cache.kv_cache_base.shape[0], -1
         )
         is_target_verify = attn_meta.is_target_verify
+        if is_target_verify and mixed_qkv.is_cuda and is_cuda():
+            query, key, value = torch.split(
+                mixed_qkv,
+                [
+                    self.local_num_k_heads * self.head_k_dim,
+                    self.local_num_k_heads * self.head_k_dim,
+                    self.local_num_v_heads * self.head_v_dim,
+                ],
+                dim=-1,
+            )
+            return linear_serial_replay(
+                query,
+                key,
+                value,
+                a,
+                b,
+                self.conv_weights,
+                self.alog,
+                self.dt_bias,
+                self._get_ssm_states(kv_cache_tensor),
+                self._get_conv_states(kv_cache_tensor),
+                getattr(kv_cache, "linear_replay", None),
+                getattr(attn_inputs, "linear_replay", None),
+                group_id=kv_cache.group_id,
+                vector_gate=False,
+            )
         mixed_qkv = self._conv1d(
             mixed_qkv,
             kv_cache_tensor,

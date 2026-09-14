@@ -89,6 +89,11 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
 
     for (int gid = 0; gid < source.groupNums(); ++gid) {
         const auto&      src_blocks = source.blocks(gid);
+        const auto       publishable_block = [&](size_t position) {
+            return position < src_blocks.size() && source.canPublishLinearReplayBlock(gid, position) ?
+                             src_blocks[position] :
+                             NULL_BLOCK_IDX;
+        };
         BlockIndicesType dst_blocks;
         dst_blocks.reserve(selected_keys.size());
 
@@ -96,7 +101,7 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
             // A virtual-block LINEAR/SWA row spans one complete page-RR stripe,
             // so its compact block list already uses canonical stripe-end keys.
             for (size_t i = 0; i < selected_keys.size(); ++i) {
-                dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
+                dst_blocks.push_back(publishable_block(i));
             }
         } else if (group_types[static_cast<size_t>(gid)] == CacheGroupType::FULL) {
             // Prefill rank-local FULL blocks are compact already. Decode-side
@@ -104,12 +109,12 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
             // logical positions.
             if (isCompactFullBlockList(source, src_blocks, selected_keys)) {
                 for (size_t i = 0; i < selected_keys.size(); ++i) {
-                    dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
+                    dst_blocks.push_back(publishable_block(i));
                 }
             } else {
                 for (size_t logical_pos = static_cast<size_t>(cp_size - 1); dst_blocks.size() < selected_keys.size();
                      logical_pos += static_cast<size_t>(cp_size)) {
-                    dst_blocks.push_back(logical_pos < src_blocks.size() ? src_blocks[logical_pos] : NULL_BLOCK_IDX);
+                    dst_blocks.push_back(publishable_block(logical_pos));
                 }
             }
         } else {
@@ -118,7 +123,7 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
             // reinterpreting the group as rank-local compact storage.
             for (size_t logical_pos = static_cast<size_t>(cp_size - 1); dst_blocks.size() < selected_keys.size();
                  logical_pos += static_cast<size_t>(cp_size)) {
-                dst_blocks.push_back(logical_pos < src_blocks.size() ? src_blocks[logical_pos] : NULL_BLOCK_IDX);
+                dst_blocks.push_back(publishable_block(logical_pos));
             }
         }
 

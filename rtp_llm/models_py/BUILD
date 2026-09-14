@@ -54,6 +54,7 @@ py_library(
         ":utils",
         ":tile_kernels_mhc",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
+        "//rtp_llm/models_py/triton_kernels:linear_replay",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:collective_torch",
         "//rtp_llm/models_py/distributed:sequence_parallel",
@@ -159,6 +160,7 @@ py_library(
         ":kernels",
         ":configs",
         "//rtp_llm/model_loader:loader",
+        "//rtp_llm/models_py/triton_kernels:linear_replay",
         "//rtp_llm/models_py/distributed:collective_torch",
         "//rtp_llm/models_py/distributed:sequence_parallel",
     ] + select({
