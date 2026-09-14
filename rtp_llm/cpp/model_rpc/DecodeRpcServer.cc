@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/StagePeerGroups.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/LockFreeThreadPool.h"
@@ -159,6 +160,16 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     for (auto& addr : allocate_request.peer_addrs()) {
         decode_context.peer_addrs.push_back(addr);
     }
+    for (const auto& group_pb : allocate_request.stage_peer_groups()) {
+        StagePeerGroup group;
+        group.range.begin = group_pb.layer_begin();
+        group.range.size  = group_pb.layer_count();
+        group.peer_addrs.assign(group_pb.peer_addrs().begin(), group_pb.peer_addrs().end());
+        decode_context.remote_stage_peer_groups.push_back(std::move(group));
+    }
+    if (!decode_context.remote_stage_peer_groups.empty()) {
+        validateStagePeerGroups(decode_context.remote_stage_peer_groups, maga_init_params_.model_config_.num_layers);
+    }
     if (maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded
         && maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
         const auto configured_prefill_cp_size = maga_init_params_.parallelism_config.prefill_cp_config.prefill_cp_size;
@@ -293,7 +304,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         // device-state tensors on the wrong GPU.
         c10::DeviceGuard device_guard(torch::Device(
             torch::kCUDA, static_cast<c10::DeviceIndex>(maga_init_params_.parallelism_config.local_rank)));
-        const size_t propose_step = propose_maga_init_params_->gen_num_per_circle;
+        const size_t     propose_step = propose_maga_init_params_->gen_num_per_circle;
         RTP_LLM_CHECK_WITH_INFO(propose_step > 0, "decode rpc propose_step should be positive");
         if (maga_init_params_.sp_config.gen_num_per_cycle > 0) {
             RTP_LLM_CHECK_WITH_INFO(propose_step == static_cast<size_t>(maga_init_params_.sp_config.gen_num_per_cycle),

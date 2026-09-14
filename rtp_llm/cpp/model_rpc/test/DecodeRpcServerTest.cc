@@ -68,6 +68,20 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
     EXPECT_EQ(remote->FindFieldByName("group_tags")->number(), 6);
 }
 
+TEST(ModelRpcProtoTest, GenerateRequestCarriesPpTopologyFields) {
+    const auto* request = GenerateRequestPB::descriptor();
+    ASSERT_NE(request, nullptr);
+    EXPECT_EQ(request->FindFieldByName("peer_addrs")->number(), 7);
+    ASSERT_NE(request->FindFieldByName("stage_peer_groups"), nullptr);
+    EXPECT_EQ(request->FindFieldByName("stage_peer_groups")->number(), 12);
+
+    const auto* group = StagePeerGroupPB::descriptor();
+    ASSERT_NE(group, nullptr);
+    EXPECT_EQ(group->FindFieldByName("layer_begin")->number(), 1);
+    EXPECT_EQ(group->FindFieldByName("layer_count")->number(), 2);
+    EXPECT_EQ(group->FindFieldByName("peer_addrs")->number(), 3);
+}
+
 TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};

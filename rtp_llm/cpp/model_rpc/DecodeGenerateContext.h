@@ -2,6 +2,7 @@
 
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
+#include "rtp_llm/cpp/model_rpc/StagePeerGroups.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
@@ -66,10 +67,13 @@ public:
 public:
     DecodeRpcContext&        rpc_context;
     std::vector<std::string> peer_addrs;  // prefill worker addrs
-    GenerateRequestPB        allocate_request;
-    DecodeStatInfo           stat_info;
-    int64_t                  loading_cache_requests = 0;
-    int32_t                  prefill_cp_size        = 1;  // CP size used by prefill; >1 means sharded KV cache
+    // Prefill-side PP partition reported by the allocate request; empty means
+    // pp_P=1 and the flat peer_addrs routing applies.
+    std::vector<StagePeerGroup> remote_stage_peer_groups;
+    GenerateRequestPB           allocate_request;
+    DecodeStatInfo              stat_info;
+    int64_t                     loading_cache_requests = 0;
+    int32_t                     prefill_cp_size        = 1;  // CP size used by prefill; >1 means sharded KV cache
     // Guards meta_->finishTask() early-failure reporting: at most once per request.
     bool early_finish_reported = false;
 
