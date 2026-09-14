@@ -310,7 +310,7 @@ ViT 与 LLM 进程必须使用相同 KVCM 身份和 transfer 配置：
 | 环境变量 | 默认值 | 说明 |
 |---|---:|---|
 | `MM_TRANSPORT_MODE` | `grpc` | 启用时设为 `kvcm` |
-| `MM_KVCM_ADDRESSES` | 空 | 逗号分隔 KVMeta endpoints |
+| `MM_KVCM_ADDRESSES` | 空 | 逗号分隔 KVCM 主 gRPC endpoints，与固定 block MetaService 同端口 |
 | `MM_KVCM_INSTANCE_ID` | 空 | 两端一致的 instance id |
 | `MM_KVCM_INSTANCE_GROUP` | 空 | KVMeta 专用 Instance Group |
 | `MM_KVCM_USER_DATA` | 空 | 注册透传数据 |
@@ -345,7 +345,10 @@ ViT writer 和 LLM reader，否则可能在一端写入后被另一端按不同�
 - LLM 必须使用导出 `KvMetaObjectClient` 和 `kv_meta_{client,object_client,transfer_client}.h` 的 KVCM client RPM；
 - 启用 build flag 时，RTP 依赖解析所选的 KVCM RPM 必须包含上述 headers 和 client library；缺失时应在构建期
   失败。未启用 flag 的普通 LLM 构建始终选择无依赖 stub；
-- KVCM server 必须启用独立 `kvcm.kv_meta.rpc_port`；
+- KVCM server 必须设置 `kvcm.kv_meta.enabled=true`；KVMeta 与固定 block MetaService 共用
+  `kvcm.service.rpc_port`，通过 protobuf service 全名区分路由；
+- 遗留非零 `kvcm.kv_meta.rpc_port` 会被新版 KVCM fail closed；升级时必须同时迁移服务端 flag 和
+  `MM_KVCM_ADDRESSES`，不能继续指向旧的独立端口；
 - Instance Group 必须专供 KVMeta，不能与固定 block KV cache 混用；
 - KVMeta V1 不会在 native data-plane drain 期间自动续约 write/read lease；backend 的硬 I/O 上限必须小于配置的
   write lease，ViT GC timeout 也必须覆盖最慢 LLM Load；
@@ -356,7 +359,8 @@ ViT writer 和 LLM reader，否则可能在一端写入后被另一端按不同�
 
 ### 10.1 推荐部署顺序
 
-1. 在 KVCM 配置中设置独立 `kvcm.kv_meta.rpc_port`，并预先创建只包含 KVMeta instance 的 Instance Group；
+1. 在 KVCM 配置中设置 `kvcm.kv_meta.enabled=true`，把 `MM_KVCM_ADDRESSES` 指向
+   `kvcm.service.rpc_port`，并预先创建只包含 KVMeta instance 的 Instance Group；
 2. 准备与 KVCM server 协议匹配、包含 object API 的 client RPM 和 `kvcm_py_client` wheel；
 3. 在 ViT Python 环境安装 wheel，并用 `--define=use_kvcm_emb_storage=true` 构建包含 native reader 的 LLM；
 4. 在 ViT 和 LLM 两端设置相同的 `MM_KVCM_*` 身份、上限和 transfer JSON，再设置

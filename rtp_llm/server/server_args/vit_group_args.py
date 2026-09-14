@@ -391,7 +391,8 @@ def init_vit_group_args(parser, vit_config):
         bind_to=(kvcm_config, "addresses"),
         type=_kvcm_addresses,
         default=[],
-        help="独立 KVMeta 服务地址，多个地址用逗号分隔；仅 mm_transport_mode=kvcm 时使用",
+        help="KVCM 主 gRPC 服务地址（与固定 block MetaService 同端口），多个地址用逗号分隔；"
+        "仅 mm_transport_mode=kvcm 时使用",
     )
     vit_group.add_argument(
         "--mm_kvcm_instance_id",

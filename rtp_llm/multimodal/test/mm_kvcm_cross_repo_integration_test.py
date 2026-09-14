@@ -158,11 +158,11 @@ def _require_kvcm_dependencies() -> None:
 
 def _start_kvmeta(tmp_path: Path, startup_path: Path):
     ports = []
-    while len(ports) < 5:
+    while len(ports) < 4:
         candidate = _free_port()
         if candidate not in ports:
             ports.append(candidate)
-    rpc_port, http_port, admin_rpc_port, admin_http_port, kvmeta_port = ports
+    rpc_port, http_port, admin_rpc_port, admin_http_port = ports
     (tmp_path / "logs").mkdir(exist_ok=True)
     command = [
         str(_KVCM_BIN),
@@ -181,7 +181,7 @@ def _start_kvmeta(tmp_path: Path, startup_path: Path):
         "-e",
         f"kvcm.service.admin_http_port={admin_http_port}",
         "-e",
-        f"kvcm.kv_meta.rpc_port={kvmeta_port}",
+        "kvcm.kv_meta.enabled=true",
         "-e",
         f"kvcm.startup_config={startup_path}",
     ]
@@ -199,7 +199,6 @@ def _start_kvmeta(tmp_path: Path, startup_path: Path):
         http_port: "meta HTTP",
         admin_rpc_port: "admin RPC",
         admin_http_port: "admin HTTP",
-        kvmeta_port: "KVMeta RPC",
     }
     listening_ports = set()
     deadline = time.monotonic() + 30
@@ -225,7 +224,7 @@ def _start_kvmeta(tmp_path: Path, startup_path: Path):
             in _read_log_tail(server_log)
         )
         if all_listening and kvmeta_ready:
-            return process, f"127.0.0.1:{kvmeta_port}", server_log
+            return process, f"127.0.0.1:{rpc_port}", server_log
         time.sleep(0.1)
 
     missing_listeners = ", ".join(
