@@ -133,7 +133,7 @@ final class WhaleMockMonitor implements AutoCloseable {
         tags.put("hippo_group", environment.getOrDefault("HIPPO_SERVICE_NAME", ""));
         tags.put("host_ip", environment.getOrDefault("HIPPO_SLAVE_IP", host));
         tags.put("container_ip", host);
-        tags.put("dp_rank", "0"); // Whale mode enforces one engine per Pod.
+        tags.put("dp_rank", "0"); // Each mock engine is single-DP; engine identity is a separate tag.
         tags.put("priority", "0"); // Aggregate mock series, not a per-priority breakdown.
         tags.put("mtp_model_type", "main");
         tags.put("pool", "0"); // The mock has one physical KV pool, matching C++ gid=0.

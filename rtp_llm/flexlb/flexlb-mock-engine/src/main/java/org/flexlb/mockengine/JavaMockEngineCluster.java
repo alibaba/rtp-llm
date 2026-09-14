@@ -1278,7 +1278,10 @@ public final class JavaMockEngineCluster {
             this.services = services;
             this.scheduler = scheduler;
             this.performance = performance.forEngine();
-            this.cache = new MockLruBlockCache(totalBlocks);
+            this.cache = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
+                    && performance.decodeReserveBlockRatio != null
+                    ? new MockLruBlockCache(totalBlocks, performance.decodeReserveBlockRatio / 100.0, true)
+                    : new MockLruBlockCache(totalBlocks);
             this.responseExecutor = Executors.newCachedThreadPool(r -> {
                 // Whale keeps a Fetch waiter for each in-flight request. Under
                 // replicated traffic those waits must not consume native threads.
@@ -3534,6 +3537,8 @@ public final class JavaMockEngineCluster {
                 if (crashEpoch.get() != epoch) {
                     return; // crashed mid-flight: this batch died with the process
                 }
+                // One modeled forward per P batch; excludes waiting and injected delay.
+                reportMetricEvent(Map.of("rtp_llm_model_forward_us", executionMs * 1000.0));
                 int activeCount = 0;
                 // ── prefill_async_partial_fail (execution-phase partial
                 // failure): snapshot the volatile config ONCE for the whole
@@ -4287,6 +4292,7 @@ public final class JavaMockEngineCluster {
          * completion callback's split.
          */
         private void runDecodeStep() {
+            long forwardMs = -1;
             List<DecodeStream> finished = new ArrayList<>();
             List<DecodeStream> kvFailed = new ArrayList<>();
             synchronized (decodeQueueLock) {
@@ -4313,6 +4319,7 @@ public final class JavaMockEngineCluster {
                     // One step = tokensPerStep tokens (MTP fold): the step budget
                     // was pre-computed as ceil(outputLen / tokensPerStep) at
                     // admission, so the tick only decrements whole steps.
+                    forwardMs = stepDelayMs;
                     stream.remainingSteps--;
                     stream.accumulatedExecMs += stepDelayMs;
                     // Per-step KV growth (production incrMalloc): extend the
@@ -4365,6 +4372,9 @@ public final class JavaMockEngineCluster {
                 }
                 topUpDecodeRunningLocked();
                 scheduleDecodeStepLocked();
+            }
+            if (forwardMs >= 0) {
+                reportMetricEvent(Map.of("rtp_llm_model_forward_us", forwardMs * 1000.0));
             }
             for (DecodeStream stream : finished) {
                 if (stream.owned) {
@@ -5004,7 +5014,8 @@ public final class JavaMockEngineCluster {
             }
             int totalDemand = decodeDemandBlocks(shape.inputLen());
             MockLruBlockCache.AllocationOutcome outcome =
-                    cache.acquireWithReuseDetailed(totalDemand, shape.blockKeys());
+                    cache.acquireWithReuseDetailed(totalDemand,
+                            performance.decodeReuseCache ? shape.blockKeys() : List.of());
             if (!outcome.success()) {
                 return outcome;
             }
@@ -5123,6 +5134,10 @@ public final class JavaMockEngineCluster {
         private boolean admitBlockLease(long requestId, MockPerformanceModel.RequestShape shape) {
             MockLruBlockCache.BlockLease lease = activeBlockLeases.remove(requestId);
             if (lease == null) {
+                return false;
+            }
+            if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE && !performance.decodeReuseCache) {
+                cache.release(lease);
                 return false;
             }
             boolean changed = cache.admit(lease, shape.blockKeys());
@@ -5679,7 +5694,6 @@ public final class JavaMockEngineCluster {
             if (whaleBundle) {
                 // One physical Pod, distinct logical engines. Preserve the real
                 // container address and role; never impersonate a separate Pod.
-                tags.put("dp_rank", Integer.toString(grpcPort));
                 tags.put("engine_port", Integer.toString(grpcPort));
                 tags.put("engine_ip", host);
             }

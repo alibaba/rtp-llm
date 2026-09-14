@@ -141,6 +141,11 @@ class WhaleModeConfigurationTest {
             var reporter = p.getClass().getDeclaredField("eventMetricReporter");
             reporter.setAccessible(true);
             reporter.set(p, (java.util.function.Consumer<java.util.Map<String, Number>>) eventMetrics::add);
+            var decodeEvents = new java.util.concurrent.CopyOnWriteArrayList<java.util.Map<String, Number>>();
+            reporter.set(d, (java.util.function.Consumer<java.util.Map<String, Number>>) decodeEvents::add);
+            assertEquals("0", p.whaleMetricTags().get("dp_rank"));
+            assertEquals("0", d.whaleMetricTags().get("dp_rank"));
+            assertNotEquals(p.whaleMetricTags().get("engine_port"), d.whaleMetricTags().get("engine_port"));
             channel = io.grpc.ManagedChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build();
             var input = org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
                     .setRequestId(42).addAllTokenIds(java.util.Collections.nCopies(513, 123))
@@ -166,6 +171,13 @@ class WhaleModeConfigurationTest {
             assertEquals(8, ((Number) d.getSnapshot().get("cache_keys")).intValue(),
                     "D must cache its eight 64-token blocks, not one P 512-token key");
             assertEquals(1, eventMetrics.stream().filter(m -> m.containsKey("rtp_llm_first_token_latency_us")).count());
+            var pForwards = eventMetrics.stream().filter(m -> m.containsKey("rtp_llm_model_forward_us"))
+                    .map(m -> m.get("rtp_llm_model_forward_us").doubleValue()).toList();
+            var dForwards = decodeEvents.stream().filter(m -> m.containsKey("rtp_llm_model_forward_us"))
+                    .map(m -> m.get("rtp_llm_model_forward_us").doubleValue()).toList();
+            assertEquals(List.of(2000.0), pForwards, "P reports one sample per batch, in microseconds");
+            assertEquals(java.util.Collections.nCopies(8, 2000.0), dForwards,
+                    "D reports each forward step, not full request latency");
 
             assertEquals(0, d.getRunningCount());
             assertEquals(8, d.whaleMetrics().get("mock_generate_tokens_total").longValue());

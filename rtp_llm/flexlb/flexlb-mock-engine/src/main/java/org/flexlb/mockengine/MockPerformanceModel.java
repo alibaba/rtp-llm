@@ -190,6 +190,8 @@ final class MockPerformanceModel {
     // default DEFAULT_DECODE_RESERVE_STEP = 0 = disabled): see the constant's
     // javadoc for the production speculative-decode anchor.
     private final int decodeReserveStep;
+    boolean decodeReuseCache = true;
+    Double decodeReserveBlockRatio; // Explicit percentage; null preserves legacy case rounding.
     private final double decodeScale;
     // Opt-in accepted-layer visibility window, JSON
     // "decode.report_queued_as_kv_allocated" (default false = current
@@ -268,6 +270,8 @@ final class MockPerformanceModel {
                 tokensPerStep, decodeReserveStep, decodeScale, reportQueuedAsKvAllocated, jitterPct);
         // Explicit overrides installed before startup are part of that engine's initial settings.
         copy.eosModel = eosModel;
+        copy.decodeReuseCache = decodeReuseCache;
+        copy.decodeReserveBlockRatio = decodeReserveBlockRatio;
         copy.prefillBatchPolicy = prefillBatchPolicy;
         copy.nativeTokenCacheKeys = nativeTokenCacheKeys;
         copy.overrideFixedPrefillMs = overrideFixedPrefillMs;
@@ -359,6 +363,20 @@ final class MockPerformanceModel {
                 decodeReserveStep,
                 decode.path("scale").asDouble(1.0),
                 reportQueuedAsKvAllocated, jitterPct);
+        if (decode.has("reuse_cache")) {
+            if (!decode.get("reuse_cache").isBoolean()) {
+                throw new IllegalStateException("decode.reuse_cache must be boolean");
+            }
+            model.decodeReuseCache = decode.get("reuse_cache").booleanValue();
+        }
+        if (decode.has("reserve_block_ratio")) {
+            JsonNode ratio = decode.get("reserve_block_ratio");
+            double value = ratio.asDouble(Double.NaN);
+            if (!ratio.isNumber() || !Double.isFinite(value) || value < 0 || value > 50) {
+                throw new IllegalStateException("decode.reserve_block_ratio must be a percentage in [0, 50]");
+            }
+            model.decodeReserveBlockRatio = value;
+        }
         model.eosModel = MockEosModel.load(decode.path("eos"));
         model.prefillBatchPolicy = MockPrefillBatchPolicy.load(prefill.path("fifo"));
         return model;

@@ -58,6 +58,7 @@ final class MockLruBlockCache {
     // Updated under the cache monitor on 0 <-> 1 reference transitions.
     private int referencedBlocks;
     private final double reserveRatio;
+    private final boolean floorReserve;
     /**
      * cache key → reference count. ref == 0: pure LRU block (evictable);
      * ref > 0: referenced by in-flight requests (matchable, NOT evictable).
@@ -88,6 +89,11 @@ final class MockLruBlockCache {
     }
 
     MockLruBlockCache(int totalBlocks, double reserveRatio) {
+        this(totalBlocks, reserveRatio, false);
+    }
+
+    MockLruBlockCache(int totalBlocks, double reserveRatio, boolean floorReserve) {
+        this.floorReserve = floorReserve;
         this.totalBlocks = Math.max(0, totalBlocks);
         this.retentionBlocks = this.totalBlocks;
         this.reserveRatio = Math.max(0, Math.min(0.5, reserveRatio));
@@ -498,7 +504,7 @@ final class MockLruBlockCache {
 
     /** Reserve watermark in blocks: ceil(reserveRatio x totalBlocks). */
     synchronized int reserveBlocks() {
-        return (int) Math.ceil(totalBlocks * reserveRatio);
+        return (int) (floorReserve ? Math.floor(totalBlocks * reserveRatio) : Math.ceil(totalBlocks * reserveRatio));
     }
 
     // ─────────────────────────── failure classification ───────────────────────────
