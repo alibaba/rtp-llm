@@ -13,6 +13,7 @@ from base_attention_test import BaseAttentionTest
 from rtp_llm.models_py.modules.factory.attention.cuda_impl import py_flashinfer_mha
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,
+    PyFlashinferDecodeImpl,
 )
 from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import (
@@ -424,6 +425,38 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
     These tests exercise the Python prepare/replay boundary. End-to-end CUDA
     graph capture and replay remains covered by the model smoke test.
     """
+
+    def test_prepare_cuda_graph_supports_legacy_rope_binding(self):
+        class FakeFmhaImpl:
+            def __init__(self):
+                self.prepare_calls = 0
+
+            def prepare_for_cuda_graph_replay(self, attn_inputs):
+                self.prepare_calls += 1
+
+        class LegacyRopeImpl:
+            def __init__(self, kv_cache_offset):
+                self.kv_cache_offset = kv_cache_offset
+                self.prepare_calls = 0
+
+            def prepare(self, attn_inputs):
+                self.prepare_calls += 1
+                return SimpleNamespace(kv_cache_offset=self.kv_cache_offset)
+
+        old_offset = torch.zeros((2, 2), dtype=torch.int32)
+        new_offset = torch.arange(4, dtype=torch.int32).reshape(2, 2)
+        impl = PyFlashinferDecodeImpl.__new__(PyFlashinferDecodeImpl)
+        impl.need_rope_kv_cache = True
+        impl.fmha_impl = FakeFmhaImpl()
+        impl.rope_impl = LegacyRopeImpl(new_offset)
+        impl.rope_params = SimpleNamespace(kv_cache_offset=old_offset)
+
+        impl.prepare_cuda_graph(PyAttentionInputs())
+
+        self.assertEqual(impl.fmha_impl.prepare_calls, 1)
+        self.assertEqual(impl.rope_impl.prepare_calls, 1)
+        self.assertTrue(torch.equal(impl.rope_params.kv_cache_offset, new_offset))
+        self.assertFalse(hasattr(impl.rope_params, "sequence_lengths"))
 
     def _create_cuda_graph_inputs(
         self,
