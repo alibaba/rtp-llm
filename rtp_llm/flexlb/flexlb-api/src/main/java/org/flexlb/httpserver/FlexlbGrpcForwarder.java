@@ -86,8 +86,9 @@ public class FlexlbGrpcForwarder {
         try {
             // The forward RPC inherits the inbound gRPC Context deadline. Do
             // not replace the request TTL with a load-balancer timeout.
-            rpcFuture = withTraceHeaders(FlexlbServiceGrpc.newFutureStub(masterChannel(masterHostIpPort)), trace.context)
-                    .schedule(forwardedRequest);
+            FlexlbServiceGrpc.FlexlbServiceFutureStub stub =
+                    withTraceHeaders(FlexlbServiceGrpc.newFutureStub(masterChannel(masterHostIpPort)), trace.context);
+            rpcFuture = stub.schedule(forwardedRequest);
         } catch (RuntimeException error) {
             trace.finish(error);
             return CompletableFuture.completedFuture(forwardFailure(
@@ -429,8 +430,8 @@ public class FlexlbGrpcForwarder {
             context = FlexlbTrace.withSpan(span, parent);
             FlexlbTrace.setRequestAttributes(span, requestId);
             try {
-                FlexlbTrace.setAttribute(span, "server.address", ipOf(masterHost));
-                FlexlbTrace.setAttribute(span, "server.port", resolveGrpcPort(masterHost));
+                FlexlbTrace.setAttribute(span, FlexlbTrace.SERVER_ADDRESS, ipOf(masterHost));
+                FlexlbTrace.setAttribute(span, FlexlbTrace.SERVER_PORT, (long) resolveGrpcPort(masterHost));
             } catch (Throwable ignored) {
                 // Endpoint parsing for telemetry must not change RPC behavior.
             }

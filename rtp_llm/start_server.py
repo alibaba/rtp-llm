@@ -633,11 +633,10 @@ def start_server(py_env_configs: PyEnvConfigs):
     except RuntimeError as e:
         logging.warning(str(e))
 
-    # Resolve region-mapped OTLP env vars BEFORE spawning children so both the
-    # Python frontend and the C++ backend (env-only reader) inherit them.
-    from rtp_llm.telemetry import resolve_region_env
+    # 仅补全进程身份；各子进程独立解析继承的 JSON Trace 配置。
+    from rtp_llm.telemetry import resolve_pod_ip
 
-    resolve_region_env()
+    resolve_pod_ip()
 
     logging.info(
         f"dp_size:  parallelism_config={py_env_configs.parallelism_config.dp_size}"

@@ -793,7 +793,6 @@ class _RealChannelPool:
 
 
 class ModelRpcClientGrpcMetadataTest(TestCase):
-    @unittest.skipUnless(tracing.OTEL_AVAILABLE, "opentelemetry SDK not available")
     def test_trans_input_carries_distinct_w3c_context_per_request(self):
         self.addCleanup(tracing.reset_telemetry_for_test)
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
@@ -900,7 +899,6 @@ class ModelRpcClientGrpcMetadataTest(TestCase):
 
         asyncio.run(run())
 
-    @unittest.skipUnless(tracing.OTEL_AVAILABLE, "opentelemetry SDK not available")
     def test_traceparent_crosses_real_grpc_boundary(self):
         self.addCleanup(tracing.reset_telemetry_for_test)
 
@@ -956,7 +954,6 @@ class ModelRpcClientGrpcMetadataTest(TestCase):
 
         asyncio.run(run())
 
-    @unittest.skipUnless(tracing.OTEL_AVAILABLE, "opentelemetry SDK not available")
     def test_fetch_traceparent_name_usage_and_status_cross_real_grpc_boundary(self):
         self.addCleanup(tracing.reset_telemetry_for_test)
 

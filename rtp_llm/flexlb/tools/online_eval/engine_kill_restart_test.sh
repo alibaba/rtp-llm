@@ -289,8 +289,6 @@ start_master() {
     "DOMAIN_ADDRESS:mock.decode.hosts.address=${DECODE_DOMAIN_ADDR}" \
     "FLEXLB_CONFIG=${flexlb_config}" \
     "FLEXLB_EXPECT_FETCH_RESPONSE=true" \
-    "OTEL_TRACE_SKIP_PATTERN=.*" \
-    "OTEL_EXPORTER_OTLP_ENDPOINT=none" \
     "HIPPO_ROLE=flexlb_engine_kill_test" \
     java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
     --server.port="${FLEXLB_HTTP_PORT}" \

@@ -60,7 +60,8 @@ class FlexlbGrpcForwarderAsyncTest {
     @Timeout(value = 20, unit = TimeUnit.SECONDS)
     void asyncScheduleTracesActualGrpcSuccessRejectionAndTransportError() throws Exception {
         for (int outcome = 0; outcome < 5; outcome++) {
-            AtomicReference<StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB>> response = new AtomicReference<>();
+            AtomicReference<StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB>> response =
+                    new AtomicReference<>();
             AtomicReference<SpanContext> serverContext = new AtomicReference<>();
             CountDownLatch received = new CountDownLatch(1);
             try (TraceCapture capture = new TraceCapture();
@@ -99,15 +100,16 @@ class FlexlbGrpcForwarderAsyncTest {
                 assertEquals("1111111111111111", client.getParentSpanId());
                 assertEquals(client.getSpanId(), server.getParentSpanId());
                 assertEquals("11111111111111111111111111111111", server.getTraceId());
-                assertEquals("901", client.getAttributes().get(io.opentelemetry.api.common.AttributeKey.stringKey("request_id")));
-                assertEquals(outcome == 0 ? io.opentelemetry.api.trace.StatusCode.OK : io.opentelemetry.api.trace.StatusCode.ERROR,
+                assertEquals("901", client.getAttributes().get(
+                        io.opentelemetry.api.common.AttributeKey.stringKey("request_id")));
+                assertEquals(outcome == 0 ? io.opentelemetry.api.trace.StatusCode.OK
+                                : io.opentelemetry.api.trace.StatusCode.ERROR,
                         client.getStatus().getStatusCode());
-                assertEquals(outcome == 2 ? "UNAVAILABLE" : "OK", client.getAttributes().get(
-                        io.opentelemetry.api.common.AttributeKey.stringKey(FlexlbTrace.RPC_RESPONSE_STATUS_CODE)));
+                assertEquals(outcome == 2 ? "UNAVAILABLE" : "OK",
+                        client.getAttributes().get(FlexlbTrace.RPC_RESPONSE_STATUS_CODE));
                 String[] errorTypes = {null, "FLEXLB_BUSINESS_REJECTED", "UNAVAILABLE",
                         "FLEXLB_INTERNAL_ERROR", "FLEXLB_SCHEDULE_FAILED"};
-                assertEquals(errorTypes[outcome], client.getAttributes().get(
-                        io.opentelemetry.api.common.AttributeKey.stringKey(FlexlbTrace.ERROR_TYPE)));
+                assertEquals(errorTypes[outcome], client.getAttributes().get(FlexlbTrace.ERROR_TYPE));
                 forwarder.shutdown();
             }
         }
@@ -129,8 +131,8 @@ class FlexlbGrpcForwarderAsyncTest {
             pending.toCompletableFuture().cancel(true);
             assertTrue(capture.ended.await(3, TimeUnit.SECONDS));
             assertEquals(2, capture.spans.size());
-            assertEquals("CANCELLED", capture.client().getAttributes().get(
-                    io.opentelemetry.api.common.AttributeKey.stringKey(FlexlbTrace.RPC_RESPONSE_STATUS_CODE)));
+            assertEquals("CANCELLED",
+                    capture.client().getAttributes().get(FlexlbTrace.RPC_RESPONSE_STATUS_CODE));
             forwarder.shutdown();
         }
     }
@@ -141,7 +143,8 @@ class FlexlbGrpcForwarderAsyncTest {
         try (TraceCapture capture = new TraceCapture();
              RpcFixture fixture = RpcFixture.startCancel((request, observer) -> {
                  assertFalse(Context.current().isCancelled());
-                 assertEquals("one", FlexlbTrace.spanContext(GrpcTraceInterceptor.getOtelContext()).getTraceState().get("vendor"));
+                 assertEquals("one", FlexlbTrace.spanContext(GrpcTraceInterceptor.getOtelContext())
+                         .getTraceState().get("vendor"));
                  observer.onNext(FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder().setFound(true).build());
                  observer.onCompleted();
              })) {
@@ -172,11 +175,11 @@ class FlexlbGrpcForwarderAsyncTest {
         final OpenTelemetrySdk sdk;
 
         TraceCapture() {
-            FlexlbTrace.configureEnabled(true);
             GlobalOpenTelemetry.resetForTest();
             sdk = OpenTelemetrySdk.builder().setTracerProvider(SdkTracerProvider.builder()
                     .addSpanProcessor(SimpleSpanProcessor.create(this)).build()).build();
             GlobalOpenTelemetry.set(sdk);
+            FlexlbTrace.configure(sdk, "");
         }
 
         SpanData client() {
@@ -192,7 +195,7 @@ class FlexlbGrpcForwarderAsyncTest {
         public CompletableResultCode flush() { return CompletableResultCode.ofSuccess(); }
         public CompletableResultCode shutdown() { return CompletableResultCode.ofSuccess(); }
         public void close() {
-            FlexlbTrace.configureEnabled(false);
+            FlexlbTrace.configure(null, "");
             sdk.close();
             GlobalOpenTelemetry.resetForTest();
         }

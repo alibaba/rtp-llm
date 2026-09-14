@@ -859,7 +859,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         ctx.setTraceContext(entryTraceContext());
         Span span = Span.fromContext(ctx.getTraceContext());
         FlexlbTrace.setRequestAttributes(span, pb.getRequestId());
-        FlexlbTrace.setAttribute(span, "flexlb.schedule.priority", pb.getPriority());
+        FlexlbTrace.setAttribute(span, FlexlbTrace.SCHEDULE_PRIORITY, (long) pb.getPriority());
 
         Request request = new Request();
         request.setRequestId(pb.getRequestId());
@@ -981,7 +981,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             // response is the result actually delivered to this caller.
             io.opentelemetry.context.Context traceContext = ctx == null
                     ? entryTraceContext() : ctx.getTraceContext();
-            FlexlbTrace.setScheduleAttribute(traceContext, FlexlbTrace.SCHEDULE_CODE, response.getCode());
+            FlexlbTrace.setScheduleAttribute(traceContext, FlexlbTrace.SCHEDULE_CODE,
+                    (long) response.getCode());
             FlexlbTrace.setScheduleAttribute(traceContext, FlexlbTrace.ENQUEUED_BY_MASTER,
                     response.getEnqueuedByMaster());
             if (response.getSuccess()) {

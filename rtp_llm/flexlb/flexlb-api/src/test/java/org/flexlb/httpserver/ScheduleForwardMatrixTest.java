@@ -178,7 +178,8 @@ class ScheduleForwardMatrixTest {
                 CompletableFuture.completedFuture(
                         FlexlbGrpcForwarder.MasterForwardResult.failed(
                                 "UNAVAILABLE", DEAD_MASTER)));
-        when(grpcForwarder.forwardCompensatingCancelToMaster(any(), any(), any(io.opentelemetry.context.Context.class))).thenReturn(
+        when(grpcForwarder.forwardCompensatingCancelToMaster(any(), any(),
+                any(io.opentelemetry.context.Context.class))).thenReturn(
                 CompletableFuture.completedFuture(
                         FlexlbGrpcForwarder.CancelForwardResult.noMaster()));
 

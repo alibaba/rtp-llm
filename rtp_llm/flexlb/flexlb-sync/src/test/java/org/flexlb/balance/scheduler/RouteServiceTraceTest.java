@@ -32,12 +32,12 @@ import static org.mockito.Mockito.when;
 class RouteServiceTraceTest {
     @BeforeEach
     void setUp() {
-        FlexlbTrace.configureEnabled(true);
+        FlexlbTrace.configure(io.opentelemetry.api.OpenTelemetry.noop(), "");
     }
 
     @AfterEach
     void tearDown() {
-        FlexlbTrace.configureEnabled(false);
+        FlexlbTrace.configure(null, "");
     }
 
     @Test

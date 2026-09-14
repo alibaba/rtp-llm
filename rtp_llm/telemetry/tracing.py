@@ -3,9 +3,7 @@
 Design constraints:
 - Degradable import: opentelemetry packages are NOT in requirements/lock yet;
   when missing, every API here becomes a safe no-op and telemetry is DISABLED.
-- Master switch off unless set: RTP_LLM_OTEL_TRACE_ENABLE.
-- Endpoint priority: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT >
-  OTEL_EXPORTER_OTLP_ENDPOINT (+ /v1/traces) > disabled with warning.
+- 唯一启动入口为 RTP_LLM_TRACE_CONFIG；校验失败只关闭 Trace。
 - BSP uses bounded conservative defaults, fail-open on queue full; export
   failure never blocks inference.
 - Explicit W3C TraceContext-only global propagator; Baggage not forwarded.
@@ -14,43 +12,55 @@ Design constraints:
 """
 
 import ipaddress
-import json
 import logging
-import math
 import os
 import socket
 import threading
 import time
+from contextlib import contextmanager
 from contextvars import ContextVar
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from rtp_llm.telemetry import attributes as trace_attrs
+from rtp_llm.telemetry.config import (
+    TraceConfig,
+    load_trace_config,
+    package_scope_version,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Degradable import (D2): missing opentelemetry packages disable telemetry.
-# ---------------------------------------------------------------------------
-try:
-    from opentelemetry import baggage as otel_baggage
-    from opentelemetry import context as otel_context
-    from opentelemetry import propagate, trace
-    from opentelemetry.baggage.propagation import W3CBaggagePropagator
-    from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
-    from opentelemetry.trace.propagation.tracecontext import (
-        TraceContextTextMapPropagator,
-    )
+# SDK symbols are loaded only after JSON has enabled tracing, inside the
+# environment-isolation context below.
+OTEL_AVAILABLE = False
+_OTEL_IMPORT_ERROR: Optional[BaseException] = None
 
+
+def _load_otel_sdk() -> None:
+    global OTEL_AVAILABLE, _OTEL_IMPORT_ERROR
+    global otel_baggage, otel_context, propagate, trace, W3CBaggagePropagator
+    global Resource, SpanLimits, TracerProvider, BatchSpanProcessor
+    global ParentBased, TraceIdRatioBased, TraceContextTextMapPropagator
+    try:
+        from opentelemetry import baggage as otel_baggage
+        from opentelemetry import context as otel_context
+        from opentelemetry import propagate, trace
+        from opentelemetry.baggage.propagation import W3CBaggagePropagator
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import SpanLimits, TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
+        from opentelemetry.trace.propagation.tracecontext import (
+            TraceContextTextMapPropagator,
+        )
+    except Exception as error:  # SDK import must never block inference startup
+        OTEL_AVAILABLE = False
+        _OTEL_IMPORT_ERROR = error
+        raise
     OTEL_AVAILABLE = True
-    _OTEL_IMPORT_ERROR: Optional[ImportError] = None
-except ImportError as import_error:  # pragma: no cover - exercised via tests
-    OTEL_AVAILABLE = False
-    _OTEL_IMPORT_ERROR = import_error
+    _OTEL_IMPORT_ERROR = None
 
 
 class TelemetryState(Enum):
@@ -66,63 +76,38 @@ _state: TelemetryState = TelemetryState.UNINITIALIZED
 _provider = None  # TracerProvider when ACTIVE
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.environ.get(name, "")
-    if not value:
-        return default
-    return value in ("1", "true", "TRUE", "True", "on", "ON")
+_sdk_environment_lock = threading.Lock()
+_active_scope_version = ""
 
 
-def _env_positive_int(name: str, default: int) -> int:
-    value = os.environ.get(name, "")
-    if not value:
-        return default
-    try:
-        parsed = int(value)
-    except ValueError:
-        _LOGGER.warning(
-            "telemetry env %s=%s parse failed, fallback %d", name, value, default
-        )
-        return default
-    if parsed <= 0:
-        _LOGGER.warning(
-            "telemetry env %s=%s invalid (must be > 0), fallback %d",
-            name,
-            value,
-            default,
-        )
-        return default
-    return parsed
+@contextmanager
+def _isolated_sdk_environment():
+    """仅启动期屏蔽 SDK 的隐式 Trace 配置，异常时也恢复原环境。
 
-
-def _env_ratio(name: str, default: float) -> float:
-    value = os.environ.get(name, "")
-    if not value:
-        return default
-    try:
-        parsed = float(value)
-    except ValueError:
-        _LOGGER.warning(
-            "telemetry env %s=%s parse failed, fallback %f", name, value, default
-        )
-        return default
-    if not math.isfinite(parsed) or parsed < 0.0 or parsed > 1.0:
-        _LOGGER.warning(
-            "telemetry env %s=%s out of [0,1], fallback %f", name, value, default
-        )
-        return default
-    return parsed
-
-
-def resolve_endpoint() -> str:
-    """OTLP/HTTP endpoint resolution, same semantics as the C++ runtime."""
-    signal_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
-    if signal_endpoint:
-        return signal_endpoint
-    generic_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-    if generic_endpoint:
-        return generic_endpoint.rstrip("/") + "/v1/traces"
-    return ""
+    该锁只串行化本模块的构造；调用方必须在接收业务请求之前初始化。
+    """
+    with _sdk_environment_lock:
+        keys = [
+            key
+            for key in os.environ
+            if key.startswith(
+                (
+                    "OTEL_EXPORTER_OTLP",
+                    "OTEL_BSP_",
+                    "OTEL_SPAN_",
+                    "OTEL_ATTRIBUTE_",
+                    "OTEL_TRACES_",
+                    "OTEL_PYTHON_",
+                )
+            )
+            or key
+            in ("OTEL_SDK_DISABLED", "OTEL_RESOURCE_ATTRIBUTES", "OTEL_SERVICE_NAME")
+        ]
+        saved = {key: os.environ.pop(key) for key in keys}
+        try:
+            yield
+        finally:
+            os.environ.update(saved)
 
 
 def _endpoint_log_target(endpoint: str) -> str:
@@ -140,151 +125,8 @@ def _endpoint_log_target(endpoint: str) -> str:
         return "configured"
 
 
-def _resolve_region_config() -> None:
-    """Resolve endpoint/headers/CA from a region config file.
-
-    Priority: an explicit endpoint/headers/certificate carrier always wins as
-    a whole.  When RTP_LLM_OTEL_REGION is set and no explicit carrier exists,
-    the region is looked up in a JSON config file and its complete carrier is
-    written back to os.environ.  When region is unset or no config file is
-    found, this function is a pure no-op and the caller proceeds with whatever
-    env vars (if any) are already present.
-
-    Config file search order:
-      1. RTP_LLM_OTEL_REGION_CONFIG_FILE env var
-      2. /etc/rtp_llm/trace_regions.json (operator-mounted secret)
-      3. A development-local region config discovered alongside the workspace.
-    """
-    region = os.environ.get("RTP_LLM_OTEL_REGION", "")
-    if not region:
-        return
-
-    config_path = os.environ.get("RTP_LLM_OTEL_REGION_CONFIG_FILE", "")
-    if not config_path or not os.path.isfile(config_path):
-        candidates = ["/etc/rtp_llm/trace_regions.json"]
-        # Development fallback: search upward for a workspace-provided config.
-        _parent = os.path.dirname(os.path.abspath(__file__))
-        for _ in range(5):
-            _c = os.path.join(
-                _parent, "internal_source", "rtp_llm", "telemetry", "trace_regions.json"
-            )
-            if os.path.isfile(_c):
-                candidates.append(_c)
-                break
-            _parent = os.path.dirname(_parent)
-        for c in candidates:
-            if os.path.isfile(c):
-                config_path = c
-                break
-    if not config_path or not os.path.isfile(config_path):
-        return  # no config file — fall back to env-var mode silently
-
-    try:
-        with open(config_path) as f:
-            config = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        _LOGGER.warning("trace region config %s parse failed: %s", config_path, e)
-        return
-
-    if not isinstance(config, dict):
-        raise TypeError("trace region config must be an object")
-
-    regions_map = config.get("regions", {})
-    fallbacks = config.get("fallbacks", {})
-    if not isinstance(regions_map, dict) or not isinstance(fallbacks, dict):
-        raise TypeError("trace region config regions and fallbacks must be objects")
-
-    entry = regions_map.get(region)
-    if entry is None:
-        for prefix, fallback_region in fallbacks.items():
-            if not isinstance(prefix, str) or not isinstance(fallback_region, str):
-                raise TypeError("trace region config fallback entries must be strings")
-            if region.startswith(prefix):
-                entry = regions_map.get(fallback_region)
-                break
-    if not entry:
-        _LOGGER.warning("RTP_LLM_OTEL_REGION=%s not in config %s", region, config_path)
-        return
-
-    if not isinstance(entry, dict):
-        raise TypeError("trace region config region entry must be an object")
-
-    region_values: Dict[str, str] = {}
-    for field in ("endpoint", "headers", "certificate"):
-        value = entry.get(field, "")
-        if not isinstance(value, str):
-            raise TypeError(f"trace region config {field} must be a string")
-        region_values[field] = value
-
-    if not region_values["endpoint"]:
-        _LOGGER.warning(
-            "RTP_LLM_OTEL_REGION=%s has no endpoint in config %s", region, config_path
-        )
-        return
-
-    # Endpoint and credentials are one carrier. Any explicit carrier field
-    # selects explicit configuration, even when that configuration is incomplete.
-    explicit_carrier_envs = (
-        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-        "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
-        "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
-        "OTEL_EXPORTER_OTLP_ENDPOINT",
-        "OTEL_EXPORTER_OTLP_HEADERS",
-        "OTEL_EXPORTER_OTLP_CERTIFICATE",
-    )
-    if any(os.environ.get(env_name) for env_name in explicit_carrier_envs):
-        return
-
-    resolved_env: Dict[str, str] = {
-        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": region_values["endpoint"]
-    }
-    if region_values["headers"]:
-        resolved_env["OTEL_EXPORTER_OTLP_TRACES_HEADERS"] = region_values["headers"]
-    if region_values["certificate"]:
-        resolved_env["OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE"] = region_values[
-            "certificate"
-        ]
-
-    # Commit only after the complete entry has been validated.
-    if not resolved_env.get("OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE"):
-        for cand in (
-            "/etc/pki/tls/certs/ca-bundle.crt",
-            "/etc/ssl/certs/ca-certificates.crt",
-            "/etc/ssl/certs/ca-bundle.crt",
-            "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
-        ):
-            if os.path.isfile(cand):
-                resolved_env["OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE"] = cand
-                break
-    os.environ.update(resolved_env)
-    _LOGGER.info(
-        "trace region resolved: region=%s endpoint=%s",
-        region,
-        _endpoint_log_target(resolve_endpoint()),
-    )
-
-
-def resolve_region_env() -> None:
-    """Resolve launcher-inherited telemetry env vars and POD_IP.
-
-    Must run in the top-level launcher BEFORE child processes spawn: the C++
-    backend reads OTEL_EXPORTER_OTLP_TRACES_* strictly from its inherited
-    environment (TelemetryRuntime::init), and both runtimes read POD_IP for the
-    rtp_llm.pod_ip resource attribute. Disabled tracing is a pure no-op.
-    Idempotent (only fills unset keys) and fail-open.
-    """
-    if not _env_bool("RTP_LLM_OTEL_TRACE_ENABLE", False):
-        return
-    try:
-        _resolve_region_config()
-        # Scope version rides the same launcher->child env inheritance: the
-        # C++ GetTracer reads RTP_LLM_OTEL_SCOPE_VERSION from its environment.
-        if not os.environ.get("RTP_LLM_OTEL_SCOPE_VERSION"):
-            _v = _scope_version()
-            if _v:
-                os.environ["RTP_LLM_OTEL_SCOPE_VERSION"] = _v
-    except Exception as e:  # noqa: BLE001 - fail-open by contract
-        _LOGGER.warning("telemetry region env resolution failed: %s", e)
+def resolve_pod_ip() -> None:
+    """启动器补全进程身份，不解析 Trace 配置、不回写 OTEL 环境变量。"""
 
     if os.environ.get("POD_IP"):
         return
@@ -338,7 +180,7 @@ class _DiagnosticExporter:
         try:
             result = self._inner.export(spans)
         except Exception as e:  # noqa: BLE001 - never break the BSP thread
-            self._record(len(spans), failed=True, reason=repr(e))
+            self._record(len(spans), failed=True, reason=type(e).__name__)
             return SpanExportResult.FAILURE
         self._record(
             len(spans),
@@ -408,67 +250,61 @@ def init_telemetry(role: str, tp_rank: int = 0) -> bool:
             return False
         if _state == TelemetryState.ACTIVE:
             return True
-        if not _env_bool("RTP_LLM_OTEL_TRACE_ENABLE", False):
+        if _state != TelemetryState.UNINITIALIZED:
+            return False
+        config = load_trace_config(role, tp_rank)
+        if not config.enabled:
             _state = TelemetryState.DISABLED
             return False
-        if not OTEL_AVAILABLE:
-            _state = TelemetryState.DISABLED
-            _LOGGER.error(
-                "telemetry enabled but opentelemetry packages unavailable, telemetry disabled: %s",
-                _OTEL_IMPORT_ERROR,
-            )
-            return False
-        if tp_rank != 0:
-            _state = TelemetryState.DISABLED
-            _LOGGER.info(
-                "telemetry disabled on tp_rank %d (only rank0 produces spans)", tp_rank
-            )
-            return False
+        exporter = None
+        session = None
         try:
-            # Idempotent: the launcher usually resolved this before spawning.
-            # Keep process-local initialization fail-open when an operator-mounted
-            # internal config has a valid JSON encoding but an invalid shape.
-            _resolve_region_config()
-        except Exception as e:  # noqa: BLE001 - fail-open by contract
-            _LOGGER.warning(
-                "telemetry region config resolution failed; using explicit env only: %s",
-                type(e).__name__,
-            )
-        endpoint = resolve_endpoint()
-        if not endpoint:
-            _state = TelemetryState.DISABLED
-            _LOGGER.error(
-                "telemetry enabled but no OTLP endpoint configured "
-                "(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / OTEL_EXPORTER_OTLP_ENDPOINT), telemetry disabled"
-            )
-            return False
-        try:
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-                OTLPSpanExporter,
-            )
-        except ImportError as e:
-            _state = TelemetryState.DISABLED
-            _LOGGER.error(
-                "telemetry OTLP http exporter unavailable, telemetry disabled: %s", e
-            )
-            return False
-        try:
-            timeout_ms = _env_positive_int("RTP_LLM_OTEL_HTTP_TIMEOUT_MS", 3000)
-            exporter = _DiagnosticExporter(
-                OTLPSpanExporter(endpoint=endpoint, timeout=timeout_ms / 1000.0)
-            )
-            return _init_with_exporter_locked(exporter, role, tp_rank)
-        except Exception as e:  # noqa: BLE001 - fail-open by contract
+            with _isolated_sdk_environment():
+                _load_otel_sdk()
+                import ssl
+
+                import requests
+                from opentelemetry.exporter.otlp.proto.http import Compression
+                from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+                    OTLPSpanExporter,
+                )
+
+                session = requests.Session()
+                session.trust_env = False
+                certificate = (
+                    config.certificate or ssl.get_default_verify_paths().cafile or True
+                )
+                exporter = _DiagnosticExporter(
+                    OTLPSpanExporter(
+                        endpoint=config.endpoint,
+                        headers=dict(config.headers),
+                        certificate_file=certificate,
+                        timeout=config.http_timeout_ms / 1000.0,
+                        compression=Compression.NoCompression,
+                        session=session,
+                    )
+                )
+                return _init_with_exporter_locked(exporter, role, tp_rank, config)
+        except Exception:  # noqa: BLE001 - 不回显可能包含凭证的 SDK 异常
             _state = TelemetryState.INIT_FAILURE
-            _LOGGER.error(
-                "telemetry init failed (telemetry disabled, inference unaffected): %s",
-                type(e).__name__,
+            if exporter is not None:
+                try:
+                    exporter.shutdown()
+                except Exception:
+                    pass
+            if session is not None:
+                session.close()
+            _LOGGER.warning(
+                "Trace 已关闭 role=%s field=sdk reason=initialization_failed", role
             )
             return False
 
 
 def init_telemetry_for_test(
-    exporter: Any, role: str = "test", tp_rank: int = 0
+    exporter: Any,
+    role: str = "test",
+    tp_rank: int = 0,
+    config: Optional[TraceConfig] = None,
 ) -> bool:
     """Test-only: initialize with an injected span exporter, bypassing env switch."""
     global _state
@@ -483,25 +319,26 @@ def init_telemetry_for_test(
                 "telemetry init_for_test called while ACTIVE, call shutdown first"
             )
             return False
-        if not OTEL_AVAILABLE:
-            _state = TelemetryState.DISABLED
-            return False
         try:
-            return _init_with_exporter_locked(exporter, role, tp_rank)
-        except Exception as e:  # noqa: BLE001
+            with _isolated_sdk_environment():
+                _load_otel_sdk()
+                return _init_with_exporter_locked(
+                    exporter, role, tp_rank, config or TraceConfig()
+                )
+        except Exception:  # noqa: BLE001 - do not expose config or SDK values
             _state = TelemetryState.INIT_FAILURE
-            _LOGGER.error("telemetry test init failed: %s", e)
+            _LOGGER.warning(
+                "Trace 已关闭 role=%s field=sdk reason=initialization_failed", role
+            )
             return False
 
 
-def _init_with_exporter_locked(exporter: Any, role: str, tp_rank: int) -> bool:
+def _init_with_exporter_locked(
+    exporter: Any, role: str, tp_rank: int, config: TraceConfig
+) -> bool:
     """Init order: Resource -> Sampler -> BSP -> Provider -> global propagator."""
-    global _state, _provider
-    # Role-split components: default service.name derives from the deployment
-    # role (rtp_llm_frontend / rtp_llm_prefill / rtp_llm_decode / ...) so the
-    # Unitrace topology shows each role as its own component; an explicit
-    # RTP_LLM_OTEL_SERVICE_NAME still overrides globally.
-    service_name = os.environ.get("RTP_LLM_OTEL_SERVICE_NAME") or f"rtp_llm_{role}"
+    global _state, _provider, _active_scope_version
+    service_name = config.service_name or f"rtp_llm_{role}"
     # Resolved once so service.instance.id, host.name and host.ip can never
     # disagree about which host this process runs on.
     hostname = socket.gethostname()
@@ -533,49 +370,57 @@ def _init_with_exporter_locked(exporter: Any, role: str, tp_rank: int) -> bool:
     pod_ip = os.environ.get("POD_IP", "")
     if pod_ip:
         resource_attributes["rtp_llm.pod_ip"] = pod_ip
-    resource = Resource.create(resource_attributes)
-    root_sampler = TraceIdRatioBased(
-        _env_ratio("RTP_LLM_OTEL_TRACE_SAMPLER_RATIO", 1.0)
+    from opentelemetry.sdk.version import __version__ as sdk_version
+
+    resource_attributes.update(
+        {
+            "telemetry.sdk.name": "opentelemetry",
+            "telemetry.sdk.language": "python",
+            "telemetry.sdk.version": sdk_version,
+        }
     )
-    if _env_bool("RTP_LLM_OTEL_TRUST_REMOTE_SAMPLING", False):
-        sampler = ParentBased(root_sampler)
-    else:
-        # HTTP headers are caller-controlled. Preserve the remote trace/parent
-        # identity, but apply the local ratio instead of letting sampled=1
-        # bypass deployment sampling limits. Local children still follow this
-        # SERVER span's decision through ParentBased's default local delegates.
-        sampler = ParentBased(
-            root_sampler,
-            remote_parent_sampled=root_sampler,
-            remote_parent_not_sampled=root_sampler,
-        )
-    max_queue_size = _env_positive_int("RTP_LLM_OTEL_BSP_MAX_QUEUE_SIZE", 2048)
-    max_export_batch_size = _env_positive_int(
-        "RTP_LLM_OTEL_BSP_MAX_EXPORT_BATCH_SIZE", 512
-    )
-    if max_export_batch_size > max_queue_size:
-        _LOGGER.warning(
-            "telemetry max_export_batch_size %d > max_queue_size %d, clamp",
-            max_export_batch_size,
-            max_queue_size,
-        )
-        max_export_batch_size = max_queue_size
-    processor = BatchSpanProcessor(
-        exporter,
-        max_queue_size=max_queue_size,
-        schedule_delay_millis=_env_positive_int(
-            "RTP_LLM_OTEL_BSP_SCHEDULE_DELAY_MS", 5000
+    resource = Resource(resource_attributes)
+    sampler = ParentBased(TraceIdRatioBased(config.sampler_ratio))
+    provider = TracerProvider(
+        resource=resource,
+        sampler=sampler,
+        span_limits=SpanLimits(
+            max_attributes=128,
+            max_events=128,
+            max_links=128,
+            max_span_attributes=128,
+            max_event_attributes=128,
+            max_link_attributes=128,
         ),
-        max_export_batch_size=max_export_batch_size,
+        shutdown_on_exit=False,
     )
-    provider = TracerProvider(resource=resource, sampler=sampler)
-    provider.add_span_processor(processor)
-    trace.set_tracer_provider(provider)
-    # W3C TraceContext only; Baggage intentionally not forwarded.
-    propagate.set_global_textmap(TraceContextTextMapPropagator())
+    processor = None
+    try:
+        processor = BatchSpanProcessor(
+            exporter,
+            max_queue_size=config.max_queue_size,
+            schedule_delay_millis=config.schedule_delay_ms,
+            max_export_batch_size=config.max_export_batch_size,
+            export_timeout_millis=config.http_timeout_ms,
+        )
+        provider.add_span_processor(processor)
+        propagate.set_global_textmap(TraceContextTextMapPropagator())
+    except Exception:
+        if processor is not None:
+            processor.shutdown()
+        provider.shutdown()
+        raise
+    # 使用自有 Provider，避免已安装的全局 Provider 接管手工 span。
     _provider = provider
+    _active_scope_version = config.scope_version or package_scope_version()
     _state = TelemetryState.ACTIVE
-    _LOGGER.info("telemetry runtime active: role=%s tp_rank=%d", role, tp_rank)
+    _LOGGER.info(
+        "Trace 已启用 role=%s source=%s root_ratio=%s parent_based=true endpoint=%s",
+        role,
+        config.source,
+        config.sampler_ratio,
+        _endpoint_log_target(config.endpoint),
+    )
     return True
 
 
@@ -624,26 +469,9 @@ def telemetry_state() -> TelemetryState:
         return _state
 
 
-_scope_version_cache: Optional[str] = None
-
-
 def _scope_version() -> str:
-    """Instrumentation scope version: env override first (shared with the C++
-    side via inherited env), else the installed rtp_llm wheel version, else
-    empty (OTel treats scope version as optional)."""
-    global _scope_version_cache
-    if _scope_version_cache is not None:
-        return _scope_version_cache
-    version = os.environ.get("RTP_LLM_OTEL_SCOPE_VERSION", "")
-    if not version:
-        try:
-            import importlib.metadata
-
-            version = importlib.metadata.version("rtp_llm")
-        except Exception:  # noqa: BLE001 - dev tree without wheel metadata
-            version = ""
-    _scope_version_cache = version
-    return version
+    """仅返回启动时确定的 scope 版本，不再读取旧环境变量。"""
+    return _active_scope_version
 
 
 def get_tracer():

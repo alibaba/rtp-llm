@@ -1307,13 +1307,11 @@ def flexlb_config_for_profile(profile: str, **overrides) -> str:
 # Master env that is actually consumed by the v2 code:
 #   FLEXLB_CONFIG          — set per spec from the profile generator below
 #   HIPPO_ROLE             — flexlb-sync (zookeeper elect / LB status)
-#   OTEL_TRACE_SKIP_PATTERN — flexlb-api application.yml (spring tracing)
-#   OTEL_EXPORTER_OTLP_ENDPOINT — OpenTelemetry SDK exporter ("none" disables)
+#   RTP_LLM_TRACE_CONFIG — JSON Trace switch (disabled for evaluation harness)
 # Every other legacy v1 var previously exported here had zero consumers in
 # the v2 Java code and was removed (task #54 dead-env sweep).
 BASE_MASTER_ENV = {
-    "OTEL_TRACE_SKIP_PATTERN": ".*",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "none",
+    "RTP_LLM_TRACE_CONFIG": '{"enabled":false}',
 }
 
 

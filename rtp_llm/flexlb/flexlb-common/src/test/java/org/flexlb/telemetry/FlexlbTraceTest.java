@@ -44,7 +44,6 @@ class FlexlbTraceTest {
 
     @BeforeEach
     void setUp() {
-        FlexlbTrace.configureEnabled(true);
         GlobalOpenTelemetry.resetForTest();
         exporter = new RecordingExporter();
         SdkTracerProvider provider = SdkTracerProvider.builder()
@@ -57,18 +56,19 @@ class FlexlbTraceTest {
                         W3CTraceContextPropagator.getInstance()))
                 .build();
         GlobalOpenTelemetry.set(sdk);
+        FlexlbTrace.configure(sdk, "");
     }
 
     @AfterEach
     void tearDown() {
-        FlexlbTrace.configureEnabled(false);
+        FlexlbTrace.configure(null, "");
         sdk.close();
         GlobalOpenTelemetry.resetForTest();
     }
 
     @Test
     void disabledManualTracingPreservesPropagationWithoutTouchingExternalSpan() {
-        FlexlbTrace.configureEnabled(false);
+        FlexlbTrace.configure(null, "");
         Span owner = sdk.getTracer("external").spanBuilder("owner").startSpan();
         try {
             Context context = Context.root().with(owner);
@@ -77,8 +77,8 @@ class FlexlbTraceTest {
             assertNull(FlexlbTrace.startInternal("internal", context));
             assertEquals(context, FlexlbTrace.withSpan(Span.getInvalid(), context));
             FlexlbTrace.setRequestAttributes(owner, 42L);
-            FlexlbTrace.setScheduleAttribute(context, "mode", "BATCH");
-            FlexlbTrace.setScheduleAttribute(context, "batch", true);
+            FlexlbTrace.setScheduleAttribute(context, AttributeKey.stringKey("mode"), "BATCH");
+            FlexlbTrace.setScheduleAttribute(context, AttributeKey.booleanKey("batch"), true);
             FlexlbTrace.markBusinessError(context, 500, "FLEXLB_INTERNAL_ERROR");
             FlexlbTrace.finish(owner, new IllegalStateException("ignored"));
             FlexlbTrace.finishWithGrpcStatus(owner, "INTERNAL", 13, false);
@@ -148,16 +148,11 @@ class FlexlbTraceTest {
         assertEquals(1, exporter.spans.size());
         SpanData rootData = exporter.spans.get(0);
         assertEquals(SpanKind.SERVER, rootData.getKind());
-        assertNotNull(rootData.getAttributes().get(
-                AttributeKey.stringKey(FlexlbTrace.SCHEDULE_MODE)));
-        assertEquals("BATCH", rootData.getAttributes().get(
-                AttributeKey.stringKey(FlexlbTrace.SCHEDULE_MODE)));
-        assertEquals(42L, rootData.getAttributes().get(
-                AttributeKey.longKey(FlexlbTrace.BATCH_ID)));
-        assertEquals(true, rootData.getAttributes().get(
-                AttributeKey.booleanKey(FlexlbTrace.ENQUEUED_BY_MASTER)));
-        assertEquals(7L, rootData.getAttributes().get(
-                AttributeKey.longKey(FlexlbTrace.BATCH_WAIT_MS)));
+        assertNotNull(rootData.getAttributes().get(FlexlbTrace.SCHEDULE_MODE));
+        assertEquals("BATCH", rootData.getAttributes().get(FlexlbTrace.SCHEDULE_MODE));
+        assertEquals(42L, rootData.getAttributes().get(FlexlbTrace.BATCH_ID));
+        assertEquals(true, rootData.getAttributes().get(FlexlbTrace.ENQUEUED_BY_MASTER));
+        assertEquals(7L, rootData.getAttributes().get(FlexlbTrace.BATCH_WAIT_MS));
     }
 
     /**
@@ -176,9 +171,8 @@ class FlexlbTraceTest {
 
         assertEquals(1, exporter.spans.size());
         SpanData span = exporter.spans.get(0);
-        assertEquals("request_id", FlexlbTrace.REQUEST_ID);
-        assertEquals("3540218608800727041",
-                span.getAttributes().get(AttributeKey.stringKey(FlexlbTrace.REQUEST_ID)));
+        assertEquals("request_id", FlexlbTrace.REQUEST_ID.getKey());
+        assertEquals("3540218608800727041", span.getAttributes().get(FlexlbTrace.REQUEST_ID));
         assertFalse(span.getAttributes().asMap().keySet().stream()
                 .anyMatch(key -> key.getKey().equals("rtp_llm.request_id")));
     }
