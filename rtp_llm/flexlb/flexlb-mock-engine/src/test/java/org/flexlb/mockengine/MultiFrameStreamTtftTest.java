@@ -114,7 +114,9 @@ class MultiFrameStreamTtftTest {
     void decodeStepReportsTpotWithoutCountingPrefillToken() throws Exception {
         startCluster("10", 50.0);
         var events = new java.util.concurrent.CopyOnWriteArrayList<Map<String, Number>>();
-        decode.eventMetricReporter = events::add;
+        var reporter = decode.getClass().getDeclaredField("eventMetricReporter");
+        reporter.setAccessible(true);
+        reporter.set(decode, (java.util.function.Consumer<Map<String, Number>>) events::add);
         CollectedStream stream = generate(prefill, inputWithDecode(998, 10, decode.getGrpcPort()), 10000);
         assertNull(stream.error.get());
         var accepted = events.stream().filter(e -> e.containsKey("rtp_llm_sp_total_accepted_token_num")).toList();

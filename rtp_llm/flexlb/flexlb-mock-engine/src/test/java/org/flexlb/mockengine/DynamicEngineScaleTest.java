@@ -140,13 +140,14 @@ class DynamicEngineScaleTest {
         startCluster(model("10", 1), 1, 1);
         clusterConfig.whale = true;
         clusterConfig.whaleBundle = true;
-        clusterConfig.engineInitializer = service -> service.eventMetricReporter = values -> { };
+        var initialized = new AtomicInteger();
+        clusterConfig.engineInitializer = service -> initialized.incrementAndGet();
         var added = engineManager.addEngine("decode", null);
-        assertNotNull(services.get(added.grpcPort()).eventMetricReporter);
+        assertEquals(1, initialized.get());
         assertTrue(Files.readString(discoveryFile).contains(":" + (added.grpcPort() - 1)));
         // The actual one-engine-per-pod mode remains platform-managed.
         clusterConfig.whaleBundle = false;
-        assertThrows(DynamicEngineManager.EngineOperationException.class,
+        org.junit.jupiter.api.Assertions.assertThrows(DynamicEngineManager.EngineOperationException.class,
                 () -> engineManager.addEngine("decode", null));
     }
 
