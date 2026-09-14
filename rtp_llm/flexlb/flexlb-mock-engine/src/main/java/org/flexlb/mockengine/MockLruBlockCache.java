@@ -71,6 +71,10 @@ final class MockLruBlockCache {
     private final TreeSet<Leaf> leaves = new TreeSet<>(
             Comparator.comparingLong(Leaf::sequence).thenComparingLong(Leaf::key));
     private long accessSequence;
+    private boolean prefixTreeEnabled = true;
+
+    synchronized void setPrefixTreeEnabled(boolean enabled) { prefixTreeEnabled = enabled; }
+    synchronized boolean prefixTreeEnabled() { return prefixTreeEnabled; }
     private Consumer<EvictionEvent> evictionListener = event -> {};
     /** Blocks held by in-flight requests that carry no cache key (growth/empty-bh). */
     private int heldBlocks;
@@ -611,6 +615,8 @@ final class MockLruBlockCache {
     }
 
     private void refreshLeaf(Long key) {
+        // In flat mode structural maintenance must not refresh a parent's LRU age.
+        if (!prefixTreeEnabled) return;
         TreeNode node = tree.get(key);
         if (node == null) return;
         if (node.leaf != null) leaves.remove(node.leaf);
@@ -644,6 +650,7 @@ final class MockLruBlockCache {
 
     /** Oldest eligible leaf, then its unbranched ancestors; whole-chain rounding. */
     private int evictChains(int minBlocks, String reason) {
+        if (!prefixTreeEnabled) return evictFlatLru(minBlocks, reason);
         int freed = 0;
         while (freed < minBlocks && !leaves.isEmpty()) {
             Long leaf = leaves.first().key();
@@ -672,6 +679,26 @@ final class MockLruBlockCache {
             evictionListener.accept(new EvictionEvent(leaf, List.copyOf(chain), removed, reason));
         }
         return freed;
+    }
+
+    /** Plain access-order LRU: skip referenced blocks and stop at the requested size. */
+    private int evictFlatLru(int minBlocks, String reason) {
+        if (minBlocks <= 0) return 0;
+        List<Long> victims = new ArrayList<>();
+        for (var entry : blocks.entrySet()) {
+            if (entry.getValue() == 0) victims.add(entry.getKey());
+            if (victims.size() >= minBlocks) break;
+        }
+        // Tree maintenance can touch the access-order map; finish iteration first.
+        for (Long key : victims) {
+            blocks.remove(key);
+            reportEvictionLifetime(key);
+            removeNode(key);
+        }
+        evictions += victims.size();
+        if (!victims.isEmpty())
+            evictionListener.accept(new EvictionEvent(victims.get(0), List.copyOf(victims), victims.size(), reason));
+        return victims.size();
     }
 
     /**

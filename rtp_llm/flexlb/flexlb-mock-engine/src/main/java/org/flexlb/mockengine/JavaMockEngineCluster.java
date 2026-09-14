@@ -1319,6 +1319,8 @@ public final class JavaMockEngineCluster {
                     && performance.decodeReserveBlockRatio != null
                     ? new MockLruBlockCache(totalBlocks, performance.decodeReserveBlockRatio / 100.0, true)
                     : new MockLruBlockCache(totalBlocks);
+            this.cache.setPrefixTreeEnabled(roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
+                    ? performance.decodeGpuPrefixTree : performance.prefillGpuPrefixTree);
             this.responseExecutor = Executors.newCachedThreadPool(r -> {
                 // Whale keeps a Fetch waiter for each in-flight request. Under
                 // replicated traffic those waits must not consume native threads.
@@ -6345,6 +6347,7 @@ public final class JavaMockEngineCluster {
             snap.put("total_kv_tokens", totalKvTokens);
             snap.put("block_size", seqSizePerBlock);
             snap.put("cache_blocks", cache.totalBlocks());
+            snap.put("gpu_prefix_tree_enabled", cache.prefixTreeEnabled());
             snap.put("cache_retention_blocks", cache.retentionBlocks());
             snap.put("cache_retention_evictions", cache.retentionEvictions());
             snap.put("available_blocks", cache.availableBlocks());

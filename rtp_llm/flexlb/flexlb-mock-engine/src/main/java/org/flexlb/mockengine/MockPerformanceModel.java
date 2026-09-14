@@ -191,6 +191,8 @@ final class MockPerformanceModel {
     // javadoc for the production speculative-decode anchor.
     private final int decodeReserveStep;
     boolean decodeReuseCache = true;
+    boolean prefillGpuPrefixTree = true;
+    boolean decodeGpuPrefixTree = true;
     Double decodeReserveBlockRatio; // Explicit percentage; null preserves legacy case rounding.
     private final double decodeScale;
     // Opt-in accepted-layer visibility window, JSON
@@ -271,6 +273,8 @@ final class MockPerformanceModel {
         // Explicit overrides installed before startup are part of that engine's initial settings.
         copy.eosModel = eosModel;
         copy.decodeReuseCache = decodeReuseCache;
+        copy.prefillGpuPrefixTree = prefillGpuPrefixTree;
+        copy.decodeGpuPrefixTree = decodeGpuPrefixTree;
         copy.memoryCacheBlocks = memoryCacheBlocks;
         copy.memoryReadMsPerBlock = memoryReadMsPerBlock;
         copy.decodeReserveBlockRatio = decodeReserveBlockRatio;
@@ -365,6 +369,12 @@ final class MockPerformanceModel {
                 decodeReserveStep,
                 decode.path("scale").asDouble(1.0),
                 reportQueuedAsKvAllocated, jitterPct);
+        for (var role : List.of(prefill, decode)) {
+            if (role.has("enable_gpu_prefix_tree") && !role.get("enable_gpu_prefix_tree").isBoolean())
+                throw new IllegalStateException("enable_gpu_prefix_tree must be boolean");
+        }
+        model.prefillGpuPrefixTree = prefill.path("enable_gpu_prefix_tree").asBoolean(true);
+        model.decodeGpuPrefixTree = decode.path("enable_gpu_prefix_tree").asBoolean(true);
         if (decode.has("reuse_cache")) {
             if (!decode.get("reuse_cache").isBoolean()) {
                 throw new IllegalStateException("decode.reuse_cache must be boolean");

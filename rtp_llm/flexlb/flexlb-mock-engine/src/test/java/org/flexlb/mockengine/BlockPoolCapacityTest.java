@@ -46,6 +46,49 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class BlockPoolCapacityTest {
 
     @Test
+    void flatLruEvictsOnlyNeededBlocksAndDoesNotTouchSurvivingParents() {
+        var cache = new MockLruBlockCache(5, 0);
+        cache.setPrefixTreeEnabled(false);
+        cache.admit(List.of(1L, 2L, 3L, 4L, 5L));
+        var first = cache.acquire(1, List.of());
+        assertNotNull(first);
+        assertEquals(java.util.Set.of(2L, 3L, 4L, 5L), cache.snapshotKeys());
+        assertEquals(1, cache.evictions());
+        var next = cache.acquire(1, List.of());
+        assertNotNull(next);
+        assertEquals(java.util.Set.of(3L, 4L, 5L), cache.snapshotKeys());
+        cache.release(first);
+        cache.release(next);
+    }
+
+    @Test
+    void flatLruProtectsReferencesAndHonorsCacheReads() {
+        var cache = new MockLruBlockCache(5, 0);
+        cache.setPrefixTreeEnabled(false);
+        cache.admit(List.of(1L, 2L, 3L));
+        cache.admit(List.of(4L, 5L));
+        assertEquals(1, cache.prefixHitBlocks(List.of(1L)));
+        var pinned = cache.acquire(1, List.of(2L));
+        assertNotNull(pinned);
+        var incoming = cache.acquire(2, List.of());
+        assertNotNull(incoming);
+        assertEquals(java.util.Set.of(1L, 2L, 5L), cache.snapshotKeys());
+        assertEquals(2, cache.evictions());
+        cache.release(incoming);
+        cache.release(pinned);
+        assertEquals(5, cache.availableBlocks());
+    }
+
+    @Test
+    void treeEvictionRemainsDefault() {
+        var cache = new MockLruBlockCache(5, 0);
+        assertTrue(cache.prefixTreeEnabled());
+        cache.admit(List.of(1L, 2L, 3L, 4L, 5L));
+        assertNotNull(cache.acquire(1, List.of()));
+        assertEquals(5, cache.evictions());
+    }
+
+    @Test
     void prefillAdmissionChargesOnlyNewBlocksAndPreservesWatermark() {
         var cache = new MockLruBlockCache(10, .1);
         var keys = List.of(1L, 2L, 3L, 4L, 5L, 6L);

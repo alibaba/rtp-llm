@@ -1,5 +1,16 @@
 # Optional prefill memory cache
 
+GPU eviction is configured independently at startup with
+`prefill.enable_gpu_prefix_tree` and `decode.enable_gpu_prefix_tree` in the
+performance JSON. Both default to `true` (existing leaf-LRU chain eviction).
+Set the relevant role to boolean `false` for ordinary access-order LRU: referenced
+blocks remain protected and eviction stops once enough blocks have been freed.
+For Whale, set `MOCK_PERFORMANCE_CONFIG_JSON` to include
+`{"prefill":{"enable_gpu_prefix_tree":false}}` alongside the existing settings.
+Merge this field into the full configuration; do not replace other performance
+settings with this fragment. `/snapshot` reports `gpu_prefix_tree_enabled` per
+engine. A restart is required. This does not change the memory-cache policy.
+
 The mock keeps GPU execution capacity and host prefix retention separate. Enable
 `prefill.memory_cache` in the performance JSON; it is disabled when absent and
 never creates a decode memory cache.

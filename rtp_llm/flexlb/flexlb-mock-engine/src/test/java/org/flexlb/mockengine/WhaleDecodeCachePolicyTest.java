@@ -11,6 +11,26 @@ import static org.junit.jupiter.api.Assertions.*;
 class WhaleDecodeCachePolicyTest {
     @TempDir Path dir;
 
+    @Test void gpuEvictionModeIsRoleSpecificAndCopiedToEngines() throws Exception {
+        Path performance = dir.resolve("flat.json");
+        Path master = dir.resolve("master.json");
+        Files.writeString(master, "{}");
+        Files.writeString(performance,
+                "{\"block_size\":64,\"prefill\":{\"formula\":\"1\",\"enable_gpu_prefix_tree\":false},\"decode\":{}}");
+        var model = MockPerformanceModel.load(performance.toString(), master.toString());
+        assertFalse(model.forEngine().prefillGpuPrefixTree);
+        assertTrue(model.forEngine().decodeGpuPrefixTree);
+        try (var cluster = MockEngineTestCluster.create(model, 62000, 1, 1)) {
+            assertFalse(cache(cluster.prefills().get(0)).prefixTreeEnabled());
+            assertTrue(cache(cluster.decodes().get(0)).prefixTreeEnabled());
+            assertEquals(false, cluster.prefills().get(0).getSnapshot().get("gpu_prefix_tree_enabled"));
+        }
+        Files.writeString(performance,
+                "{\"prefill\":{\"formula\":\"1\",\"enable_gpu_prefix_tree\":\"false\"},\"decode\":{}}");
+        assertThrows(IllegalStateException.class,
+                () -> MockPerformanceModel.load(performance.toString(), master.toString()));
+    }
+
     private MockPerformanceModel model(String decode) throws Exception {
         Path path = dir.resolve("performance.json");
         Files.writeString(path, "{\"block_size\":64,\"prefill\":{\"formula\":\"1\"},\"decode\":" + decode + "}");
