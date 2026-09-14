@@ -80,14 +80,13 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
             suite="all",
             result_endpoint=None,
         )
-        for weight in ("none", "fp8_per_block"):
+        for weight in ("0", "1"):
             for mla in ("0", "1"):
                 for budget in ("0", "268435456"):
                     settings = {
-                        "KIMI_K3_ATTENTION_QUANTIZATION": weight,
-                        "KIMI_K3_MLA_FP8": mla,
-                        "KIMI_K3_MLA_FP8_Q_SCALE": "0.5",
-                        "KIMI_K3_MLA_FP8_KV_SCALE": "0.5",
+                        "FP8_GEMM": weight,
+                        "FP8_KV_CACHE": mla,
+                        "FP8_MLA": mla,
                         "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES": budget,
                         "LOAD_METHOD": "fastsafetensors",
                     }
@@ -329,6 +328,34 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             _, _, _, command = driver.role_launch_parts(args, "decode")
         self.assertIn("SP_CHECKPOINT_PATH=/decode/mtp", command)
+
+    def test_role_command_preserves_long_prefix_overrides_for_both_hosts(self):
+        args = argparse.Namespace(
+            prefill_repo_root="/prefill/repo",
+            decode_repo_root="/decode/repo",
+            prefill_checkpoint_path="/prefill/checkpoint",
+            decode_checkpoint_path="/decode/checkpoint",
+            prefill_sp_checkpoint_path="/prefill/mtp",
+            decode_sp_checkpoint_path="/decode/mtp",
+            prefill_endpoint="10.0.0.1:27188",
+            decode_endpoint="10.0.0.2:28188",
+            run_id="long-prefix-overrides",
+            suite="all",
+            result_endpoint=None,
+            container="lhc_GPU",
+            prefill_container_runtime="docker",
+            decode_container_runtime="docker",
+        )
+        settings = {
+            "SMOKE_LONG_PREFIX_TARGET_TOKENS": "960000",
+            "SMOKE_LONG_PREFIX_TP_SIZE": "1",
+        }
+        with mock.patch.dict(os.environ, settings, clear=True):
+            for role in ("prefill", "decode"):
+                with self.subTest(role=role):
+                    _, _, _, command = driver.role_launch_parts(args, role)
+                    for key, value in settings.items():
+                        self.assertIn(f"{key}={value}", command)
 
     def test_role_command_forwards_core_dump_diagnostic_override(self):
         args = argparse.Namespace(

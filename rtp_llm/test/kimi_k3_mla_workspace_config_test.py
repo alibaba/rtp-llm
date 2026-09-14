@@ -59,80 +59,88 @@ class KimiK3MLAWorkspaceConfigTest(unittest.TestCase):
 
 class KimiK3MLAFp8ConfigTest(unittest.TestCase):
     def _config(self, model_type="kimi_k3", **env):
-        from rtp_llm.config.model_config import ModelConfig
-        from rtp_llm.ops import KvCacheDataType
+        import tempfile
+
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
+
         config = KimiK3ModelConfig()
         config.model_type = model_type
-        config.data_type = "bf16"
         config.config_dtype = "bfloat16"
-        config.quant_config = None
         config.attn_config.use_mla = True
-        config.attn_config.kv_cache_dtype = KvCacheDataType.BASE
-        with mock.patch.dict(os.environ, env, clear=True):
-            with mock.patch.object(ModelConfig, "init_precision_config", return_value=None):
-                config.init_precision_config(None, None)
+        cache = KVCacheConfig()
+        cache.fp8_kv_cache = int(env.get("FP8_KV_CACHE", "0"))
+        with tempfile.TemporaryDirectory() as checkpoint:
+            config.ckpt_path = checkpoint
+            with mock.patch.dict(os.environ, env, clear=True):
+                config.init_precision_config(cache, "BF16")
         return config
 
     def test_default_and_draft_are_unchanged(self):
         from rtp_llm.ops import KvCacheDataType
-        for config in (self._config(), self._config("kimi_k3_mla_swa_eagle3", KIMI_K3_MLA_FP8="1")):
+
+        for config in (
+            self._config(),
+            self._config("kimi_k3_mtp", FP8_GEMM="1", FP8_KV_CACHE="1", FP8_MLA="1"),
+        ):
             self.assertFalse(config.attn_config.mla_fp8_compute)
+            self.assertIsNone(config.k3_attention_quant_config)
             self.assertEqual(config.attn_config.kv_cache_dtype, KvCacheDataType.BASE)
 
-    def test_weight_and_mla_quantization_are_independent(self):
-        from rtp_llm.ops import KvCacheDataType
-        for method in ("none", "fp8_per_block"):
-            config = self._config(KIMI_K3_MLA_FP8="1", KIMI_K3_ATTENTION_QUANTIZATION=method,
-                                  KIMI_K3_MLA_FP8_Q_SCALE="0.5", KIMI_K3_MLA_FP8_KV_SCALE="0.25")
-            self.assertTrue(config.attn_config.mla_fp8_compute)
-            self.assertEqual(config.attn_config.kv_cache_dtype, KvCacheDataType.FP8)
-            self.assertEqual(config.attn_config.mla_fp8_q_scale, 0.5)
-            self.assertEqual(config.attn_config.mla_fp8_kv_scale, 0.25)
-            self.assertEqual(config.k3_attention_quant_config is not None, method != "none")
-            self.assertIsNone(config.quant_config)
+    def test_all_eight_combinations_and_draft_isolation(self):
+        import itertools
 
-    def test_all_four_switch_combinations_and_draft_isolation(self):
         from rtp_llm.ops import KvCacheDataType
-        for weight in ("none", "fp8_per_block"):
-            for mla in ("0", "1"):
-                for model in ("kimi_k3", "kimi_k3_mtp", "kimi_k3_mla_swa_eagle3"):
-                    with self.subTest(weight=weight, mla=mla, model=model):
-                        config = self._config(model, KIMI_K3_ATTENTION_QUANTIZATION=weight,
-                                              KIMI_K3_MLA_FP8=mla)
-                        target = model == "kimi_k3"
-                        self.assertEqual(config.k3_attention_quant_config is not None,
-                                         target and weight == "fp8_per_block")
-                        enabled = target and mla == "1"
-                        self.assertEqual(config.attn_config.mla_fp8_compute, enabled)
-                        self.assertEqual(config.attn_config.kv_cache_dtype,
-                                         KvCacheDataType.FP8 if enabled else KvCacheDataType.BASE)
-                        self.assertIsNone(config.quant_config)
+
+        for gemm, cache, mla, model in itertools.product(
+            ("0", "1"), ("0", "1"), ("0", "1"),
+            ("kimi_k3", "kimi_k3_mtp", "kimi_k3_mla_swa_eagle3"),
+        ):
+            with self.subTest(gemm=gemm, cache=cache, mla=mla, model=model):
+                env = dict(FP8_GEMM=gemm, FP8_KV_CACHE=cache, FP8_MLA=mla)
+                if model == "kimi_k3" and cache != mla:
+                    with self.assertRaisesRegex(ValueError, "requires matching"):
+                        self._config(model, **env)
+                    continue
+                config = self._config(model, **env)
+                target = model == "kimi_k3"
+                self.assertEqual(
+                    config.k3_attention_quant_config is not None,
+                    target and gemm == "1",
+                )
+                self.assertEqual(config.attn_config.mla_fp8_compute, target and mla == "1")
+                expected_cache = (
+                    KvCacheDataType.FP8
+                    if cache == "1" and model != "kimi_k3_mtp"
+                    else KvCacheDataType.BASE
+                )
+                self.assertEqual(config.attn_config.kv_cache_dtype, expected_cache)
+                self.assertEqual(config.attn_config.mla_fp8_q_scale, 1.0)
+                self.assertEqual(config.attn_config.mla_fp8_kv_scale, 1.0)
+                self.assertIsNone(config.quant_config)
 
     def test_real_common_initialization_isolates_mtp_and_shared_cache(self):
         import itertools
         import tempfile
-        from rtp_llm.config.kv_cache_config import KVCacheConfig
-        from rtp_llm.ops import KvCacheDataType
-        from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+
         import torch
 
-        # Exercise the production base initializer, including checkpoint lookup,
-        # target ACT_TYPE and global KV flags. The objects share one KV config.
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
+        from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+        from rtp_llm.ops import KvCacheDataType
+
         models = ("kimi_k3", "kimi_k3_mtp", "kimi_k3_mla_swa_eagle3")
         with tempfile.TemporaryDirectory() as checkpoint:
-            for method, mla, cache_flags, order in itertools.product(
-                ("none", "fp8_per_block"), ("0", "1"),
+            for gemm, mla, cache_flags, order in itertools.product(
+                ("0", "1"), ("0", "1"),
                 ((False, False), (True, False), (False, True), (True, True)),
                 itertools.permutations(models),
             ):
-                with self.subTest(method=method, mla=mla, cache=cache_flags, order=order):
+                with self.subTest(gemm=gemm, mla=mla, cache=cache_flags, order=order):
                     cache = KVCacheConfig()
                     cache.fp8_kv_cache, cache.int8_kv_cache = cache_flags
-                    configs = {}
-                    with mock.patch.dict(os.environ, {
-                        "KIMI_K3_ATTENTION_QUANTIZATION": method,
-                        "KIMI_K3_MLA_FP8": mla,
-                    }, clear=True):
+                    with mock.patch.dict(
+                        os.environ, {"FP8_GEMM": gemm, "FP8_MLA": mla}, clear=True
+                    ):
                         for model in order:
                             config = KimiK3ModelConfig()
                             config.model_type = model
@@ -140,37 +148,56 @@ class KimiK3MLAFp8ConfigTest(unittest.TestCase):
                             config.ckpt_path = checkpoint
                             config.attn_config.use_mla = True
                             if model == "kimi_k3_mtp":
-                                # Simulate stale state from an earlier setup.
                                 config.k3_attention_quant_config = Fp8BlockWiseQuantConfig()
                                 config.quant_config = Fp8BlockWiseQuantConfig()
                                 config.quant_algo.setQuantAlgo("fp8", 8, 128)
                                 config.attn_config.mla_fp8_compute = True
                                 config.attn_config.kv_cache_dtype = KvCacheDataType.INT8
-                            if model == "kimi_k3" and mla == "1" and cache.int8_kv_cache:
-                                with self.assertRaisesRegex(ValueError, "incompatible with INT8"):
-                                    config.init_precision_config(cache, "BF16")
-                                continue
+                                config.attn_config.mla_fp8_q_scale = 0.5
+                                config.attn_config.mla_fp8_kv_scale = 0.25
+                            if model == "kimi_k3":
+                                if mla == "1" and cache.int8_kv_cache:
+                                    with self.assertRaisesRegex(ValueError, "incompatible with INT8"):
+                                        config.init_precision_config(cache, "BF16")
+                                    continue
+                                effective_fp8 = cache.fp8_kv_cache and not cache.int8_kv_cache
+                                if (mla == "1") != effective_fp8:
+                                    with self.assertRaisesRegex(ValueError, "requires matching"):
+                                        config.init_precision_config(cache, "BF16")
+                                    continue
                             for _ in range(2):
-                                config.init_precision_config(cache, "FP16" if model == "kimi_k3_mtp" else "BF16")
+                                config.init_precision_config(
+                                    cache, "FP16" if model == "kimi_k3_mtp" else "BF16"
+                                )
+                                self.assertEqual(config.compute_dtype, torch.bfloat16)
+                                self.assertEqual(config.attn_config.mla_fp8_q_scale, 1.0)
+                                self.assertEqual(config.attn_config.mla_fp8_kv_scale, 1.0)
+                                expected = KvCacheDataType.BASE
+                                if model != "kimi_k3_mtp":
+                                    if cache.int8_kv_cache:
+                                        expected = KvCacheDataType.INT8
+                                    elif cache.fp8_kv_cache:
+                                        expected = KvCacheDataType.FP8
+                                self.assertEqual(config.attn_config.kv_cache_dtype, expected)
+                                self.assertEqual(
+                                    config.k3_attention_quant_config is not None,
+                                    model == "kimi_k3" and gemm == "1",
+                                )
+                                self.assertEqual(
+                                    config.attn_config.mla_fp8_compute,
+                                    model == "kimi_k3" and mla == "1",
+                                )
                                 if model == "kimi_k3_mtp":
-                                    self.assertEqual(config.compute_dtype, torch.bfloat16)
                                     self.assertIsNone(config.quant_config)
                                     self.assertFalse(config.quant_algo.isQuant())
-                                    self.assertIsNone(config.k3_attention_quant_config)
-                                    self.assertFalse(config.attn_config.mla_fp8_compute)
-                                    self.assertEqual(config.attn_config.kv_cache_dtype, KvCacheDataType.BASE)
-                            configs[model] = config
-                        for model, config in configs.items():
-                            expected = KvCacheDataType.BASE
-                            if model != "kimi_k3_mtp":
-                                if cache.int8_kv_cache:
-                                    expected = KvCacheDataType.INT8
-                                elif cache.fp8_kv_cache or (model == "kimi_k3" and mla == "1"):
-                                    expected = KvCacheDataType.FP8
-                            self.assertEqual(config.attn_config.kv_cache_dtype, expected)
-                            self.assertEqual(config.k3_attention_quant_config is not None,
-                                             model == "kimi_k3" and method == "fp8_per_block")
                     self.assertEqual((cache.fp8_kv_cache, cache.int8_kv_cache), cache_flags)
+
+    def test_invalid_switches_fail_at_initialization(self):
+        for flag in ("FP8_GEMM", "FP8_MLA"):
+            for value in ("true", "2", "-1", ""):
+                with self.subTest(flag=flag, value=value):
+                    with self.assertRaisesRegex(ValueError, flag + " must be 0 or 1"):
+                        self._config(**{flag: value})
 
     def test_mtp_rejects_non_native_dtype_and_runtime_quantization(self):
         import tempfile
@@ -191,13 +218,6 @@ class KimiK3MLAFp8ConfigTest(unittest.TestCase):
             config.init_precision_config(KVCacheConfig(), None)
             self.assertFalse(config.quant_algo.isQuant())
             self.assertIsNone(config.quant_config)
-
-    def test_invalid_scales_and_switch_fail_at_initialization(self):
-        for value in ("0", "-1", "nan", "inf", "1e-100", "1e100"):
-            with self.subTest(scale=value), self.assertRaises(ValueError):
-                self._config(KIMI_K3_MLA_FP8="1", KIMI_K3_MLA_FP8_KV_SCALE=value)
-        with self.assertRaises(ValueError):
-            self._config(KIMI_K3_MLA_FP8="true")
 
 
 if __name__ == "__main__":

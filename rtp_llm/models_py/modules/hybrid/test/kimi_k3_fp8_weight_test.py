@@ -262,11 +262,16 @@ class KimiK3Fp8WeightTest(unittest.TestCase):
             config.config_dtype = "bfloat16"
             config.attn_config.use_mla = True
             config.quant_config = None
+            from rtp_llm.ops import KvCacheDataType
+
+            # Model the cache result of the mocked common initializer.
+            config.attn_config.kv_cache_dtype = KvCacheDataType.FP8
             with patch.dict(
                 os.environ,
                 {
-                    "KIMI_K3_ATTENTION_QUANTIZATION": "fp8_per_block",
-                    "KIMI_K3_MLA_FP8": "1",
+                    "FP8_GEMM": "1",
+                    "FP8_KV_CACHE": "1",
+                    "FP8_MLA": "1",
                 },
             ):
                 with patch.object(

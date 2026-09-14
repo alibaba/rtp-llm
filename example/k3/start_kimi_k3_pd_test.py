@@ -100,6 +100,22 @@ class StartKimiK3PdDryRunTest(unittest.TestCase):
     def _dry_run(self, role: str, topology: str, **kwargs) -> str:
         return self._run(role, topology, **kwargs).stdout
 
+    def test_fp8_switches_reach_launcher(self):
+        for role in ("prefill", "decode"):
+            for gemm in ("0", "1"):
+                for cache_mla in ("0", "1"):
+                    with self.subTest(role=role, gemm=gemm, cache_mla=cache_mla):
+                        output = self.run_dry_run(
+                            role,
+                            FP8_GEMM=gemm,
+                            FP8_KV_CACHE=cache_mla,
+                            FP8_MLA=cache_mla,
+                        )
+                        self.assertIn(f"--fp8_kv_cache {cache_mla}", output)
+                        self.assertIn(f"FP8 GEMM:        {gemm}", output)
+                        self.assertIn(f"FP8 KV cache:    {cache_mla}", output)
+                        self.assertIn(f"FP8 MLA:         {cache_mla}", output)
+
     def test_configurable_parallelism_reaches_launcher(self):
         for tp in (1, 2, 4, 8, 16):
             for role in ("prefill", "decode"):

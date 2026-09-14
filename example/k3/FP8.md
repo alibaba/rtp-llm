@@ -1,11 +1,12 @@
 # Kimi K3 attention block FP8
 
-Enable with `KIMI_K3_ATTENTION_QUANTIZATION=fp8_per_block` alongside the existing
-K3 launcher and explicit `LOAD_METHOD=fastsafetensors`. The default is `none`.
+Enable with `FP8_GEMM=1` alongside the existing
+K3 launcher and explicit `LOAD_METHOD=fastsafetensors`. The default is `0` (BF16 projection weights and GEMM).
 The setting is target-attention-only: global quantization remains disabled,
 native MoE and Eagle3 draft retain their existing precision policies. This is
-128 x 128 block E4M3, not MXFP8. KV caches, attention cores and KDA states are
-unchanged.
+128 x 128 block E4M3, not MXFP8. `FP8_KV_CACHE` separately controls target MLA cache storage;
+`FP8_MLA` controls MLA attention computation. Neither is enabled implicitly
+by `FP8_GEMM`. KDA states retain their existing precision.
 
 ## Weight and execution contract
 
@@ -44,10 +45,10 @@ derivation and weight padding; retain them with each run.
 
 ## Communication
 
-The existing `KIMI_K3_GEMM_REDUCE_SCATTER_BACKEND` control remains available.
-`KIMI_K3_FP8_COLLECTIVE_GEMM=0` selects explicit AG/RS for the FP8 correctness
-reference; the default `1` enables both fused paths above the existing 32K
-physical-token threshold. Precision never silently falls back to BF16 weights.
+TP > 1 uses the shared TPSP AllGather/ReduceScatter path in every model phase.
+`FP8_GEMM` selects projection weight and GEMM precision; it does not select
+a different parallel layout. Collective implementation selection stays internal.
+Precision never silently falls back to BF16 weights.
 
 FP8 AllGather/GEMM uses PyTorch's pipelined BF16 shard consumer and shares input
 quantization between compatible projections. Each consumer owns its temporary

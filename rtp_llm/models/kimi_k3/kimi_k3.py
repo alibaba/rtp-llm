@@ -1,6 +1,5 @@
 import json
 import logging
-import math
 import os
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Optional, Set
@@ -100,34 +99,39 @@ class KimiK3ModelConfig(ModelConfig):
                 "Kimi K3 currently supports only BF16 compute, got "
                 f"{self.compute_dtype}"
             )
-        method = (
-            os.environ.get("KIMI_K3_ATTENTION_QUANTIZATION", "none").strip().lower()
-        )
-        if method not in ("none", "fp8_per_block"):
-            raise ValueError(
-                "KIMI_K3_ATTENTION_QUANTIZATION must be none or fp8_per_block"
-            )
-        # Online attention quantization is a target-only K3 policy.
-        enabled = method == "fp8_per_block" and is_target
+
+        def fp8_switch(name: str) -> bool:
+            value = os.environ.get(name, "0").strip()
+            if value not in ("0", "1"):
+                raise ValueError(f"{name} must be 0 or 1, got {value!r}")
+            return value == "1"
+
+        # GEMM controls online target projection weight/activation quantization.
+        # KV storage remains owned by the framework's FP8_KV_CACHE setting.
+        enabled = fp8_switch("FP8_GEMM") and is_target
+        mla_fp8 = fp8_switch("FP8_MLA") and is_target
         self.k3_attention_quant_config = Fp8BlockWiseQuantConfig() if enabled else None
-        mla_fp8 = os.environ.get("KIMI_K3_MLA_FP8", "0").strip()
-        if mla_fp8 not in ("0", "1"):
-            raise ValueError("KIMI_K3_MLA_FP8 must be 0 or 1")
-        self.attn_config.mla_fp8_compute = mla_fp8 == "1" and is_target
-        if self.attn_config.mla_fp8_compute:
-            if not self.attn_config.use_mla or self.attn_config.is_sparse:
+        self.attn_config.mla_fp8_compute = mla_fp8
+        self.attn_config.mla_fp8_q_scale = 1.0
+        self.attn_config.mla_fp8_kv_scale = 1.0
+        if is_target:
+            if mla_fp8 and (
+                not self.attn_config.use_mla or self.attn_config.is_sparse
+            ):
                 raise ValueError("K3 FP8 MLA requires dense MLA")
-            if self.attn_config.kv_cache_dtype == KvCacheDataType.INT8:
+            if mla_fp8 and self.attn_config.kv_cache_dtype == KvCacheDataType.INT8:
                 raise ValueError("K3 FP8 MLA is incompatible with INT8 cache")
-            self.attn_config.kv_cache_dtype = KvCacheDataType.FP8
-            for field, env in (("mla_fp8_q_scale", "KIMI_K3_MLA_FP8_Q_SCALE"),
-                               ("mla_fp8_kv_scale", "KIMI_K3_MLA_FP8_KV_SCALE")):
-                scale = float(os.environ.get(env, "1"))
-                if not math.isfinite(scale) or not 1e-20 <= scale <= 1e20:
-                    raise ValueError(f"{env} must be a finite positive FP32 scale in [1e-20, 1e20]")
-                setattr(self.attn_config, field, scale)
-            logging.info("K3 MLA FP8: dense_e4m3_v1, Q scale=%s, KV scale=%s; BF16 output",
-                         self.attn_config.mla_fp8_q_scale, self.attn_config.mla_fp8_kv_scale)
+            fp8_cache = self.attn_config.kv_cache_dtype == KvCacheDataType.FP8
+            if mla_fp8 != fp8_cache:
+                raise ValueError(
+                    "K3 currently requires matching FP8_MLA and FP8_KV_CACHE "
+                    "settings; mixed BF16/FP8 cache and MLA compute are not "
+                    "implemented. Neither switch implicitly enables the other."
+                )
+        if mla_fp8:
+            logging.info(
+                "K3 MLA FP8: dense_e4m3_v1, Q scale=1, KV scale=1; BF16 output"
+            )
         if self.quant_config is not None:
             raise ValueError(
                 "Kimi K3 does not support runtime weight quantization; its "

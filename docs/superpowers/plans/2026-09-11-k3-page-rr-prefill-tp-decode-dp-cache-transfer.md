@@ -686,11 +686,11 @@ Expected:
 分别启动两次现有 two-host smoke：
 
 ```text
-SMOKE_PAGE_RR=1, SP_TYPE=eagle3, KIMI_K3_MLA_FP8=1, SMOKE_SUITE=all
-SMOKE_PAGE_RR=1, SP_TYPE=mtp,    KIMI_K3_MLA_FP8=1, SMOKE_SUITE=all
+SMOKE_PAGE_RR=1, SP_TYPE=eagle3, FP8_KV_CACHE=1 FP8_MLA=1, SMOKE_SUITE=all
+SMOKE_PAGE_RR=1, SP_TYPE=mtp,    FP8_KV_CACHE=1 FP8_MLA=1, SMOKE_SUITE=all
 ```
 
-再把 `KIMI_K3_MLA_FP8=0` 各跑一次。验收日志必须出现 Page-RR source shard 数8、KDA 8 partitions、Eagle3 单副本或 MTP FULL page-owner 传输，并完成 cold/prefix-hit/long-prefix/concurrent cases。该拓扑是传输回归，不替代 DP16 生产验收。
+再把 `FP8_KV_CACHE=0 FP8_MLA=0` 各跑一次。验收日志必须出现 Page-RR source shard 数8、KDA 8 partitions、Eagle3 单副本或 MTP FULL page-owner 传输，并完成 cold/prefix-hit/long-prefix/concurrent cases。该拓扑是传输回归，不替代 DP16 生产验收。
 
 - [ ] **Step 4: 跑生产矩阵**
 
@@ -701,7 +701,7 @@ Prefill TP8/EP8  Page-RR -> Decode TP1/DP16/KTP16/EP16
 Prefill TP16/EP16 Page-RR -> Decode TP1/DP16/KTP16/EP16
 ```
 
-每个拓扑依次验证无推测、Eagle3、MTP，并对 BF16 与 `KIMI_K3_MLA_FP8=1` 各运行一次。每个配置执行 cold request、prefix seed/hit、跨至少两个 Page-RR stripe 的长 prefix，以及路由到不同 Decode owners 的并发请求。
+每个拓扑依次验证无推测、Eagle3、MTP，并对 BF16 与 `FP8_KV_CACHE=1 FP8_MLA=1` 各运行一次。每个配置执行 cold request、prefix seed/hit、跨至少两个 Page-RR stripe 的长 prefix，以及路由到不同 Decode owners 的并发请求。
 
 验收必须同时满足：
 

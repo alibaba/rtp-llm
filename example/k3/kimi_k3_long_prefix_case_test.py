@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import pathlib
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
+from example.k3.kimi_k3_full_model_pd_cases import parse_args
 from example.k3.kimi_k3_long_prefix_case import (
     EXPECTED,
     LongPrefixCase,
@@ -16,6 +18,48 @@ from example.k3.kimi_k3_long_prefix_case import (
 
 
 class LongPrefixCaseTest(unittest.TestCase):
+    def test_default_target_leaves_cache_reserve_headroom(self):
+        case = LongPrefixCase(
+            "http://prefill",
+            pathlib.Path("unused"),
+            "test",
+            timeout=900,
+            budget=6442450944,
+            page_size=4096,
+            bytes_per_token=61440,
+        )
+        self.assertEqual(case.target_tokens, 960000)
+        argv = [
+            "cases",
+            "--base-url", "http://prefill",
+            "--decode-health-url", "http://decode",
+            "--output", "unused",
+            "--namespace", "test",
+        ]
+        for rank in range(8):
+            argv.extend(["--decode-role-addr", f"127.0.0.1:{8000 + rank}:{9000 + rank}"])
+        with mock.patch("sys.argv", argv):
+            self.assertEqual(parse_args().long_prefix_target_tokens, 960000)
+        script = pathlib.Path(__file__).with_name(
+            "kimi_k3_full_model_two_host_pd_smoke.sh"
+        ).read_text()
+        assignment = next(
+            line
+            for line in script.splitlines()
+            if line.startswith("smoke_long_prefix_target_tokens=")
+        )
+        result = subprocess.run(
+            [
+                "bash", "-c",
+                "unset SMOKE_LONG_PREFIX_TARGET_TOKENS\n" + assignment
+                + '\nprintf "%s" "$smoke_long_prefix_target_tokens"',
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(result.stdout, "960000")
+
     def test_default_budget_forces_two_historical_blocks(self):
         self.assertEqual(
             prefix_blocks(

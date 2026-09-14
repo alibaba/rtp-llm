@@ -18,9 +18,17 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 try:
-    from .kimi_k3_long_prefix_case import LongPrefixCase, expanded_bytes_per_token
+    from .kimi_k3_long_prefix_case import (
+        DEFAULT_TARGET_TOKENS,
+        LongPrefixCase,
+        expanded_bytes_per_token,
+    )
 except ImportError:  # Direct script entry from the role launcher.
-    from kimi_k3_long_prefix_case import LongPrefixCase, expanded_bytes_per_token
+    from kimi_k3_long_prefix_case import (
+        DEFAULT_TARGET_TOKENS,
+        LongPrefixCase,
+        expanded_bytes_per_token,
+    )
 
 
 @dataclass(frozen=True)
@@ -143,7 +151,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rdma-prewarm-settle-s", type=float, default=2.0)
     parser.add_argument("--long-prefix-checkpoint", type=pathlib.Path)
     parser.add_argument("--long-prefix-tp-size", type=int, default=8)
-    parser.add_argument("--long-prefix-target-tokens", type=int, default=1000000)
+    parser.add_argument(
+        "--long-prefix-target-tokens", type=int, default=DEFAULT_TARGET_TOKENS
+    )
     parser.add_argument("--long-prefix-kernel-page-size", type=int, default=128)
     parser.add_argument("--expanded-kv-budget-bytes", type=int, default=6442450944)
     parser.add_argument("--timeout", type=int, default=900)

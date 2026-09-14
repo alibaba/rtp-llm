@@ -94,7 +94,7 @@ remain native BF16. Use the same precision configuration and scales on both role
 Only native K3 MTP is supported: SP_TYPE=mtp and SP_MODEL_TYPE=kimi_k3_mtp.
 Other speculative modes are rejected before either role starts.
 See example/k3/FP8_MLA.md for FP8 examples.
-The all suite also seeds a configurable long conversation (default ~100k tokens), then appends a retrieval
+The all suite also seeds a configurable long conversation (default ~960K tokens), then appends a retrieval
 question. It checks the answer, PD metadata and a historical prefix larger than
 one expanded-KV budget. This correctness case runs by default without profiling;
 its request, token IDs and results are saved under prefill/long-prefix/.
@@ -148,7 +148,7 @@ Important optional variables:
   SMOKE_KERNEL_BLOCK_SIZE   attention kernel page size; defaults to 128
   SMOKE_CHUNK_TOKENS        whole-model chunk budget; defaults to 65536
   SMOKE_DECODE_KV_CACHE_MEM_MB
-                            Decode hybrid-cache budget; defaults to 29000 MiB for the 1M case.
+                            Decode hybrid-cache budget; defaults to 29000 MiB for the 960K case.
                             Projection-KTP replicates DP-local KDA/O-proj
                             weights, so the older 42000 MiB budget can OOM
                             before CUDA Graph capture on a 93-layer model.
@@ -166,17 +166,16 @@ Important optional variables:
   SMOKE_LINEAR_STEP         KDA materialization step; defaults to 1
   SMOKE_CHUNKWISE_RDMA      1 (default) enables Layer x Chunk publication;
                             0 retains compute-all-then-transfer behavior
-  KIMI_K3_ATTENTION_QUANTIZATION
-                            fp8_per_block (default) or none for target weights
-  KIMI_K3_MLA_FP8           1 (default) or 0 for target MLA FP8
-  KIMI_K3_MLA_FP8_Q_SCALE   fixed Q scale; defaults to 1
-  KIMI_K3_MLA_FP8_KV_SCALE  fixed cache scale; defaults to 1
-  KIMI_K3_FP8_COLLECTIVE_GEMM
-                            1 (default) enables FP8 collective GEMM
+  FP8_GEMM                 1 (default) quantizes target projection weights
+                            and uses FP8 GEMM; 0 uses BF16 projections
+  FP8_KV_CACHE             1 (default) stores target MLA cache in FP8
+  FP8_MLA                  1 (default) uses FP8 MLA attention
+                            Currently FP8_KV_CACHE and FP8_MLA must match.
   KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES
                             defaults to 6442450944 (6 GiB) per rank;
                             0 disables historical KV expansion limits.
                             Current-chunk KV and FP8 temporaries are not capped.
+  SMOKE_KEEP_SERVICES        1 retains model services after success or failure
   SMOKE_KEEP_CLUSTER_ON_SUCCESS
                             1 keeps both role runners, services and GPU locks
                             alive after PASS; TERM the role runners to clean up
@@ -354,10 +353,11 @@ smoke_proposal_tokens="${GEN_NUM_PER_CIRCLE:-3}"
 smoke_shared_expert_shard=$((smoke_tp_size % 2 == 0))
 smoke_decode_kv_cache_mem_mb="${SMOKE_DECODE_KV_CACHE_MEM_MB:-29000}"
 smoke_decode_kda_pool_blocks="${SMOKE_DECODE_KDA_POOL_BLOCKS:-32}"
-smoke_long_prefix_target_tokens="${SMOKE_LONG_PREFIX_TARGET_TOKENS:-1000000}"
+smoke_long_prefix_target_tokens="${SMOKE_LONG_PREFIX_TARGET_TOKENS:-960000}"
 smoke_long_prefix_tp_size="${SMOKE_LONG_PREFIX_TP_SIZE:-1}"
 smoke_linear_step="${SMOKE_LINEAR_STEP:-1}"
 smoke_chunkwise_rdma="${SMOKE_CHUNKWISE_RDMA:-1}"
+smoke_keep_services="${SMOKE_KEEP_SERVICES:-0}"
 smoke_keep_cluster_on_success="${SMOKE_KEEP_CLUSTER_ON_SUCCESS:-0}"
 smoke_rdma_prewarm_attempts="${SMOKE_RDMA_PREWARM_ATTEMPTS:-3}"
 smoke_rdma_prewarm_timeout_s="${SMOKE_RDMA_PREWARM_TIMEOUT_S:-300}"
@@ -384,6 +384,8 @@ smoke_mega_tokens=$(( (smoke_chunk_tokens + smoke_tp_size - 1) / smoke_tp_size )
     || die "SMOKE_BLOCK_SIZE must be divisible by the cuLA checkpoint step 64"
 [[ "${smoke_chunkwise_rdma}" == "0" || "${smoke_chunkwise_rdma}" == "1" ]] \
     || die "SMOKE_CHUNKWISE_RDMA must be 0 or 1"
+[[ "${smoke_keep_services}" == "0" || "${smoke_keep_services}" == "1" ]] \
+    || die "SMOKE_KEEP_SERVICES must be 0 or 1"
 [[ "${smoke_keep_cluster_on_success}" == "0" || "${smoke_keep_cluster_on_success}" == "1" ]] \
     || die "SMOKE_KEEP_CLUSTER_ON_SUCCESS must be 0 or 1"
 [[ "${smoke_rdma_prewarm_attempts}" =~ ^[0-9]+$ ]] \
@@ -467,7 +469,11 @@ cleanup() {
     if [[ "${role}" == "prefill" && "${notified}" == "0" ]]; then
         notify_decode FAIL "prefill-exit-${rc}" || true
     fi
-    stop_owned_process "${service_pid}"
+    if [[ "${smoke_keep_services}" == "1" && -n "${service_pid}" ]] && kill -0 "${service_pid}" 2>/dev/null; then
+        echo "RETAINED: ${role} service pid=${service_pid}; smoke status=${rc}; artifacts=${role_dir}"
+    else
+        stop_owned_process "${service_pid}"
+    fi
     stop_owned_process "${listener_pid}"
     printf 'role=%s\nstatus=%s\ncheckpoint=%s\nartifacts=%s\n' \
         "${role}" "${rc}" "${checkpoint_real}" "${role_dir}" >"${summary_file}"
@@ -785,8 +791,7 @@ else:
         "MEMORY_CACHE_SIZE_MB",
     ])
 
-for key in ("KIMI_K3_ATTENTION_QUANTIZATION",
-            "KIMI_K3_MLA_FP8", "KIMI_K3_MLA_FP8_Q_SCALE", "KIMI_K3_MLA_FP8_KV_SCALE",
+for key in ("FP8_GEMM", "FP8_KV_CACHE", "FP8_MLA",
             "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES",
             "KIMI_K3_MLA_FP8_DIAGNOSTICS", "RTP_LLM_MTP_ACCEPTANCE_DIAGNOSTICS"):
     if key in os.environ:
@@ -808,17 +813,26 @@ PY
 # Operator versions are supplied by the Bazel server target. Precision defaults
 # apply only to this smoke; explicit overrides remain available for comparisons.
 apply_validated_common_profile() {
-    local run_hash
+    local run_hash flag
     run_hash="$(printf '%s' "${SMOKE_RUN_ID}" | sha256sum)"
     run_hash="${run_hash%% *}"
     export CHECKPOINT_PATH="${checkpoint_real}"
     export TOKENIZER_PATH="${checkpoint_real}"
     export PREFILL_ENDPOINT DECODE_ENDPOINT
     export LOAD_METHOD=fastsafetensors
-    export KIMI_K3_ATTENTION_QUANTIZATION="${KIMI_K3_ATTENTION_QUANTIZATION:-fp8_per_block}"
-    export KIMI_K3_MLA_FP8="${KIMI_K3_MLA_FP8:-1}"
-    export KIMI_K3_MLA_FP8_Q_SCALE="${KIMI_K3_MLA_FP8_Q_SCALE:-1}"
-    export KIMI_K3_MLA_FP8_KV_SCALE="${KIMI_K3_MLA_FP8_KV_SCALE:-1}"
+    export FP8_GEMM="${FP8_GEMM:-1}"
+    export FP8_KV_CACHE="${FP8_KV_CACHE:-1}"
+    export FP8_MLA="${FP8_MLA:-1}"
+    for flag in FP8_GEMM FP8_KV_CACHE FP8_MLA; do
+        if [[ "${!flag}" != 0 && "${!flag}" != 1 ]]; then
+            echo "${flag} must be 0 or 1" >&2
+            return 1
+        fi
+    done
+    if [[ "${FP8_KV_CACHE}" != "${FP8_MLA}" ]]; then
+        echo "K3 currently requires matching FP8_KV_CACHE and FP8_MLA" >&2
+        return 1
+    fi
     export KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES="${KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES:-6442450944}"
     export SEQ_SIZE_PER_BLOCK="${smoke_block_size}"
     export KERNEL_SEQ_SIZE_PER_BLOCK="${smoke_kernel_block_size}"
@@ -898,7 +912,7 @@ apply_validated_decode_profile() {
     export MAX_SEQ_LEN=1468006
     export MAX_BATCH_TOKENS_SIZE=1468006
     export KV_CACHE_MEM_MB="${smoke_decode_kv_cache_mem_mb}"
-    # Bound NCCL connection buffers so the 1M KV pool leaves runtime headroom.
+    # Bound NCCL connection buffers so the 960K case leaves runtime headroom.
     export NCCL_MAX_CTAS=8
     export REUSE_CACHE=0
     export KIMI_K3_KDA_POOL_BLOCKS="${smoke_decode_kda_pool_blocks}"

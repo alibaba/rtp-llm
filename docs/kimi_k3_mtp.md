@@ -16,8 +16,8 @@ the MTP module or its cache. The single nextn layer starts at the draft configâ€
 (93 in the delivered checkpoint); runtime local layer 0 maps to the global cache layer after target.
 
 The two-host smoke defaults to target attention weight FP8
-(`KIMI_K3_ATTENTION_QUANTIZATION=fp8_per_block`) and target dense MLA FP8
-(`KIMI_K3_MLA_FP8=1`). These switches apply only to `kimi_k3`.
+(`FP8_GEMM=1`) and target dense MLA FP8
+(`FP8_KV_CACHE=1 FP8_MLA=1`). The GEMM and MLA switches apply only to `kimi_k3`; the global cache setting is isolated from native MTP.
 K3 MTP attention projections, MLA compute and cache always use the draft
 checkpoint's native BF16 dtype. Global `FP8_KV_CACHE`,
 `BLOCKWISE_USE_FP8_KV_CACHE`, `INT8_KV_CACHE` and target `ACT_TYPE` do not
@@ -43,8 +43,9 @@ and Decode CUDA Graph enabled:
 SP_TYPE=mtp
 SP_MODEL_TYPE=kimi_k3_mtp
 GEN_NUM_PER_CIRCLE=3
-KIMI_K3_ATTENTION_QUANTIZATION=fp8_per_block
-KIMI_K3_MLA_FP8=1
+FP8_GEMM=1
+FP8_KV_CACHE=1
+FP8_MLA=1
 LOAD_METHOD=fastsafetensors
 # Decode:
 ENABLE_CUDA_GRAPH=1

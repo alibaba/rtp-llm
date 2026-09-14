@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -44,6 +45,37 @@ def response_for(runner, content, *, owner=0, reuse=0, input_len=8193):
 
 
 class RegressionTest(unittest.TestCase):
+    def test_keep_services_reaches_both_roles(self):
+        from example.k3.kimi_k3_full_model_two_host_pd_smoke_driver import forwarded_optional_environment
+        with mock.patch.dict(os.environ, {"SMOKE_KEEP_SERVICES": "1"}, clear=True):
+            for role in ("prefill", "decode"):
+                self.assertEqual(forwarded_optional_environment(role)["SMOKE_KEEP_SERVICES"], "1")
+
+    def test_cleanup_retains_service_on_success_and_failure(self):
+        script = pathlib.Path(__file__).with_name("kimi_k3_full_model_two_host_pd_smoke.sh").read_text()
+        cleanup = re.search(r"(?ms)^cleanup\(\) \{\n.*?^\}", script).group(0)
+        for keep in (0, 1):
+            for status in (0, 1):
+                with self.subTest(keep=keep, status=status), tempfile.TemporaryDirectory() as tmp:
+                    command = (
+                        'role=prefill; notified=0; service_pid=$$; listener_pid=listener; '
+                        'checkpoint_real=checkpoint; role_dir=artifacts; summary_file="$1"; '
+                        'smoke_keep_services="$2"; '
+                        'notify_decode() { echo notified; }; '
+                        'stop_owned_process() { echo stopped:"$1"; }; '
+                        + cleanup + '\n(exit "$3"); cleanup'
+                    )
+                    result = subprocess.run(
+                        ["bash", "-c", command, "test", tmp + "/summary", str(keep), str(status)],
+                        capture_output=True, text=True,
+                    )
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    self.assertIn("notified", result.stdout)
+                    self.assertIn("stopped:listener", result.stdout)
+                    self.assertEqual("RETAINED:" in result.stdout, bool(keep))
+                    self.assertEqual(len(re.findall(r"stopped:[0-9]+", result.stdout)), 0 if keep else 1)
+                    self.assertIn(f"status={status}", pathlib.Path(tmp + "/summary").read_text())
+
     def test_profile_admits_actual_concurrent_smoke_batches(self):
         from rtp_llm.utils.concurrency_controller import ConcurrencyController
 

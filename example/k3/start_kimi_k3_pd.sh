@@ -256,7 +256,7 @@ export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-10.3a}"
 mkdir -p "${FLASHINFER_WORKSPACE_BASE}"
 
 # ---------------------------------------------------------------------------
-# Generic cache flags remain off; KIMI_K3_MLA_FP8 controls MLA precision only.
+# FP8_KV_CACHE selects target cache storage; FP8_MLA selects MLA compute.
 # ---------------------------------------------------------------------------
 
 max_seq_len="${MAX_SEQ_LEN:-16384}"
@@ -575,8 +575,9 @@ fi
 echo "  MegaMoE packer:  ${DSV4_MEGA_MOE_INPUT_PACKER}/${DSV4_MEGA_MOE_INPUT_PACKER_IMPL}"
 echo "  MegaMoE tokens:  ${MEGA_MOE_MAX_TOKENS_PER_RANK}/rank"
 echo "  cache blocks:    seq=${seq_size_per_block}, kernel=${kernel_seq_size_per_block}"
-echo "  attention quant: ${KIMI_K3_ATTENTION_QUANTIZATION:-none}"
-echo "  MLA FP8:         ${KIMI_K3_MLA_FP8:-0} (Q scale=${KIMI_K3_MLA_FP8_Q_SCALE:-1}, KV scale=${KIMI_K3_MLA_FP8_KV_SCALE:-1})"
+echo "  FP8 GEMM:        ${FP8_GEMM:-0}"
+echo "  FP8 KV cache:    ${FP8_KV_CACHE:-0}"
+echo "  FP8 MLA:         ${FP8_MLA:-0}"
 echo "  KDA cache:       native state, linear_step=${linear_step}, kda_pool_blocks=${kimi_k3_kda_pool_blocks}"
 echo "  CUDA Graph:      enabled=${enable_cuda_graph}, debug=${enable_cuda_graph_debug_mode}"
 if [[ -n "${decode_capture_config}" ]]; then
@@ -605,7 +606,7 @@ server_args=(
     --kernel_seq_size_per_block "${kernel_seq_size_per_block}"
     --kv_cache_mem_mb "${kv_cache_mem_mb}"
     --int8_kv_cache 0
-    --fp8_kv_cache 0
+    --fp8_kv_cache "${FP8_KV_CACHE:-0}"
     --linear_step "${linear_step}"
     --kimi_k3_kda_pool_blocks "${kimi_k3_kda_pool_blocks}"
     --ssm_state_dtype fp32

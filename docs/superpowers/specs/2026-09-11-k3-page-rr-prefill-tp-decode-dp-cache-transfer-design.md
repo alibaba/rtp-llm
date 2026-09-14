@@ -13,7 +13,7 @@
 - Eagle3
 - Kimi K3 独立 MTP
 - BF16 MLA cache
-- `KIMI_K3_MLA_FP8=1`
+- `FP8_KV_CACHE=1 FP8_MLA=1`
 - cold request 和 `reuse_cache=1` 的 prefix hit
 
 P8 → DP8/KTP8 是可运行的 Kimi K3 全模型参考拓扑。现有
@@ -321,7 +321,7 @@ Load plan 生成期间检查：
 
 - 默认 `SP_TYPE=eagle3`；
 - 使用 `SP_TYPE=mtp` 单独选择 Kimi K3 MTP，两者不在同一次启动中同时开启；
-- 默认 `KIMI_K3_MLA_FP8=1` 并启用 FP8 target weights/collective GEMM；
+- 默认 `FP8_KV_CACHE=1 FP8_MLA=1` 并启用 FP8 target weights/collective GEMM；
 - 要求 draft checkpoint，当前不提供无推测模式；
 - 默认 Prefill cache 为 replicated，因此需扩展一个 Page-RR profile 而不是把原脚本结果当作 Page-RR 验收。
 
@@ -336,7 +336,7 @@ Load plan 生成期间检查：
 
 每种拓扑覆盖以下6种模式，共12个部署配置：
 
-| Speculative mode | BF16 | `KIMI_K3_MLA_FP8=1` |
+| Speculative mode | BF16 | `FP8_KV_CACHE=1 FP8_MLA=1` |
 |---|---:|---:|
 | 无推测 | 必测 | 必测 |
 | Eagle3 | 必测 | 必测 |

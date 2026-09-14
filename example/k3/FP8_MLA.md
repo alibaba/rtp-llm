@@ -4,9 +4,12 @@ This opt-in path uses ordinary E4M3 cache and FP8 attention operands. It is inde
 
 ## Configuration
 
-- `KIMI_K3_MLA_FP8=1`: target MLA cache and attention compute. Default `0`; Eagle3 draft retains its existing policy. K3 MTP attention and KV cache stay native BF16 even when this switch or global FP8/INT8 cache flags are enabled. Native MXFP4 experts and MegaMoE internal FP8 activation compute are unchanged.
-- `KIMI_K3_MLA_FP8_Q_SCALE=1`, `KIMI_K3_MLA_FP8_KV_SCALE=1`: fixed dequantization factors (`real = fp8 * scale`). These are not dynamically calibrated group scales.
-- `KIMI_K3_ATTENTION_QUANTIZATION=fp8_per_block`: separate existing online weight quantization switch.
+- `FP8_GEMM=1`: quantize target KDA/MLA projection weights and activations for FP8 GEMM. Default `0` uses BF16 projections.
+- `FP8_KV_CACHE=1`: store target MLA KV cache in FP8 through the existing framework cache setting. Default `0` uses BF16.
+- `FP8_MLA=1`: use FP8 MLA attention operands and kernels. Default `0` uses BF16 attention.
+- The current K3 backends require matching `FP8_KV_CACHE` and `FP8_MLA`. A mismatch fails at initialization; neither switch enables the other.
+- Q and KV fixed dequantization factors are both `1.0` (`real = fp8 * scale`). They are internal constants, not environment settings or dynamically calibrated group scales.
+- Native K3 MTP attention and KV cache stay BF16. Target switches do not change the Eagle3 draft policy, checkpoint-native MXFP4 experts, or MegaMoE internal FP8 activation compute.
 - Use the existing dense FlashMLA Prefill adapter and TokenSpeed Decode adapter. With MLA FP8 enabled, the Prefill adapter invokes TokenSpeed FP8 Prefill; unsupported backends fail rather than selecting BF16 attention.
 - All model loads require local checkpoint data and `LOAD_METHOD=fastsafetensors`.
 
@@ -29,7 +32,7 @@ Decode query and output buffers are reserved before CUDA Graph capture. Workspac
 Build on 115 inside `lhc_GPU`, as `luohaocheng.lhc`, using `--config=cuda13 --config=sm10x`:
 
 - `//rtp_llm/models_py/modules/factory/attention/cuda_mla_impl/test:mla_fp8_test`: actual GPU conversion, cache writes and reads, causal/noncausal Prefill, Decode/Verify and graph replay.
-- `//rtp_llm/test:kimi_k3_mla_workspace_config_test`: default-off behavior, independent weight/draft policies and scale validation.
+- `//rtp_llm/test:kimi_k3_mla_workspace_config_test`: default-off behavior, all eight switch combinations, mismatch rejection and draft isolation.
 - `//rtp_llm/cpp/cache/test:mla_fp8_cache_spec_test`: physical byte counts for ordinary FP8, mixed FP8 and BF16.
 
 GPU tests require SM100/SM103 and do not pass through skips. Use the host-selection and warmup protocol before performance measurements. The PD benchmark repeats identical input tokens with `reuse_cache=False` and verifies zero reuse in every response.
@@ -38,34 +41,34 @@ Reference source snapshots audited for this implementation: vLLM K3 `38e7f533d8b
 
 `KIMI_K3_MLA_FP8_DIAGNOSTICS=1` emits operand shape, fixed scale, finite absolute maximum, nonfinite counts and clipping fractions for compressed cache input and attention Q/K/V. It synchronizes to the CPU and is strictly for separate diagnostic runs. CUDA Graph capture skips observations and replay does not run Python; use eager target-only requests to inspect real Decode operands. Do not report these diagnostic request latencies as performance samples.
 
-## Independent switches
+## Supported switch combinations
 
-Both model switches default to off. The two-host smoke overrides these defaults
-to enable both. Set the same MLA cache policy on both PD roles.
+All three switches default to off in model configuration. The two-host smoke
+explicitly defaults all three to on. Set the same cache format on both PD roles.
 
-| Mode | `KIMI_K3_ATTENTION_QUANTIZATION` | `KIMI_K3_MLA_FP8` |
-|---|---|---|
-| BF16 attention baseline | `none` | `0` |
-| Weight FP8 only | `fp8_per_block` | `0` |
-| MLA FP8 only | `none` | `1` |
-| Weight FP8 and MLA FP8 | `fp8_per_block` | `1` |
+| Projection GEMM | MLA cache / attention | `FP8_GEMM` | `FP8_KV_CACHE` | `FP8_MLA` |
+|---|---|---|---|---|
+| BF16 | BF16 / BF16 | `0` | `0` | `0` |
+| FP8 | BF16 / BF16 | `1` | `0` | `0` |
+| BF16 | FP8 / FP8 | `0` | `1` | `1` |
+| FP8 | FP8 / FP8 | `1` | `1` | `1` |
 
-Native MoE quantization and the standalone Eagle3 draft precision are unchanged.
+FP8 cache with BF16 MLA computation, and BF16 cache with FP8 MLA computation,
+are not implemented by the current K3 backends. Both are rejected explicitly.
+GEMM precision is independent of the supported cache/attention pair.
 
 ## Two-host PD smoke
 
-The role script defaults to Weight FP8, MLA FP8, unit scales, FP8 collective GEMM
-and a 4 GiB historical KV expansion budget per rank. The controller forwards
+The role script defaults to FP8 GEMM, FP8 cache, FP8 MLA, internal unit scales,
+and a 6 GiB historical KV expansion budget per rank. The controller forwards
 explicit overrides to both roles. After
 configuring the existing host, endpoint, local checkpoint and deployed-launcher
 settings, launch the full suite with:
 
 ```bash
-export KIMI_K3_ATTENTION_QUANTIZATION=fp8_per_block
-export KIMI_K3_MLA_FP8=1
-export KIMI_K3_MLA_FP8_Q_SCALE=1
-export KIMI_K3_MLA_FP8_KV_SCALE=1
-export KIMI_K3_FP8_COLLECTIVE_GEMM=1
+export FP8_GEMM=1
+export FP8_KV_CACHE=1
+export FP8_MLA=1
 export KIMI_K3_MLA_FP8_DIAGNOSTICS=0
 export LOAD_METHOD=fastsafetensors
 export RTP_LLM_SKIP_BUILD=1
@@ -75,9 +78,9 @@ export KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES=6442450944
 python3 example/k3/kimi_k3_full_model_two_host_pd_smoke_driver.py
 ```
 
-Use the independent-switch table above for the other three precision modes.
-Explicitly use `none` and `0` for a BF16 comparison so an earlier shell export
-does not carry over. Add `--dry-run` to inspect both remote launch commands
+Use the table above for the other supported precision modes.
+Set all three switches explicitly to `0` for a BF16 attention comparison so
+an earlier shell export does not carry over. Add `--dry-run` to inspect both remote launch commands
 without starting services. Each role records and checks the supplied settings
 against its service process in `service.env`; these environment checks alone do
 not prove FP8 kernel execution.
