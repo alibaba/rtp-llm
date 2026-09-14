@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
@@ -26,7 +27,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -39,6 +42,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
@@ -73,8 +77,8 @@ class RequestSchedulerTest {
         CompletableFuture<Response> second = new CompletableFuture<>();
         when(lifecycle.register(unavailable)).thenReturn(first);
         when(lifecycle.register(healthy)).thenReturn(second);
-        when(lifecycle.claimAdmissionMutation(910001L, first)).thenReturn(mock(AdmissionMutation.class));
-        when(lifecycle.claimAdmissionMutation(910002L, second)).thenReturn(mock(AdmissionMutation.class));
+        when(lifecycle.claimAdmissionHandle(910001L, first)).thenReturn(mock(AdmissionHandle.class));
+        when(lifecycle.claimAdmissionHandle(910002L, second)).thenReturn(mock(AdmissionHandle.class));
         when(router.resolvePolicyGroup(unavailable)).thenReturn("unavailable-group");
         when(router.resolvePolicyGroup(healthy)).thenReturn(healthyGroup);
         when(router.select(unavailable, "unavailable-group")).thenReturn(PlacementResult.blocked(new PlacementKey(RoleType.DECODE, "unavailable-group")));
@@ -112,8 +116,8 @@ class RequestSchedulerTest {
         BalanceContext context = context(config, 897L, 90);
         CompletableFuture<Response> future = new CompletableFuture<>();
         when(lifecycle.register(context)).thenReturn(future);
-        when(lifecycle.claimAdmissionMutation(897L, future)).thenReturn(
-                mock(AdmissionMutation.class));
+        when(lifecycle.claimAdmissionHandle(897L, future)).thenReturn(
+                mock(AdmissionHandle.class));
 
         DecodeEndpoint selectedEndpoint = mock(DecodeEndpoint.class);
         when(selectedEndpoint.ipPort()).thenReturn("selected-decode:8080");
@@ -165,8 +169,8 @@ class RequestSchedulerTest {
         BalanceContext context = context(config, 899L);
         CompletableFuture<Response> future = new CompletableFuture<>();
         when(lifecycle.register(context)).thenReturn(future);
-        when(lifecycle.claimAdmissionMutation(899L, future)).thenReturn(
-                mock(AdmissionMutation.class));
+        when(lifecycle.claimAdmissionHandle(899L, future)).thenReturn(
+                mock(AdmissionHandle.class));
         RouteAdmission route = mock(RouteAdmission.class);
         PrefillEndpoint endpoint = mockPrefillEndpoint("127.0.0.1", 8000);
         when(route.blockedEndpoint()).thenReturn(endpoint);
@@ -175,7 +179,7 @@ class RequestSchedulerTest {
                         RoleType.PREFILL, "g1", "127.0.0.1:8000")));
         when(router.select(context, null)).thenReturn(
                 PlacementResult.success(route),
-                PlacementResult.rejected(RequestResponses.buildErrorResponse(
+                PlacementResult.rejected(Response.buildErrorResponse(
                         StrategyErrorType.NO_PREFILL_WORKER, null)));
         PlacementAvailability availability = new PlacementAvailability();
         RequestScheduler scheduler = new RequestScheduler(
@@ -216,10 +220,10 @@ class RequestSchedulerTest {
         BalanceContext context = context(config, 900L);
         CompletableFuture<Response> future = new CompletableFuture<>();
         when(lifecycle.register(context)).thenReturn(future);
-        when(lifecycle.claimAdmissionMutation(900L, future)).thenReturn(
-                mock(AdmissionMutation.class));
+        when(lifecycle.claimAdmissionHandle(900L, future)).thenReturn(
+                mock(AdmissionHandle.class));
         when(router.select(context, null)).thenReturn(
-                PlacementResult.rejected(RequestResponses.buildErrorResponse(
+                PlacementResult.rejected(Response.buildErrorResponse(
                         StrategyErrorType.NO_PREFILL_WORKER, null)));
 
         RequestScheduler scheduler = new RequestScheduler(
@@ -255,13 +259,13 @@ class RequestSchedulerTest {
         CountDownLatch gatePlanningStarted = new CountDownLatch(1);
         CountDownLatch releaseGatePlanning = new CountDownLatch(1);
         when(lifecycle.register(gate)).thenReturn(gateFuture);
-        when(lifecycle.claimAdmissionMutation(900L, gateFuture)).thenReturn(
-                mock(AdmissionMutation.class));
+        when(lifecycle.claimAdmissionHandle(900L, gateFuture)).thenReturn(
+                mock(AdmissionHandle.class));
         when(router.select(gate, null)).thenAnswer(invocation -> {
             gatePlanningStarted.countDown();
             releaseGatePlanning.await(5, TimeUnit.SECONDS);
             return PlacementResult.rejected(
-                    RequestResponses.buildErrorResponse(
+                    Response.buildErrorResponse(
                             StrategyErrorType.NO_PREFILL_WORKER, null));
         });
 
@@ -272,8 +276,8 @@ class RequestSchedulerTest {
             CompletableFuture<Response> future = new CompletableFuture<>();
             RouteAdmission route = mock(RouteAdmission.class);
             when(lifecycle.register(context)).thenReturn(future);
-            when(lifecycle.claimAdmissionMutation(requestId, future)).thenReturn(
-                    mock(AdmissionMutation.class));
+            when(lifecycle.claimAdmissionHandle(requestId, future)).thenReturn(
+                    mock(AdmissionHandle.class));
             when(router.select(context, null)).thenAnswer(invocation -> {
                 aggregatePlansStarted.countDown();
                 return PlacementResult.success(route);
@@ -325,15 +329,15 @@ class RequestSchedulerTest {
         CompletableFuture<Response> highFuture = new CompletableFuture<>();
         when(lifecycle.register(lowPriority)).thenReturn(lowFuture);
         when(lifecycle.register(highPriority)).thenReturn(highFuture);
-        when(lifecycle.claimAdmissionMutation(910L, lowFuture)).thenReturn(
-                mock(AdmissionMutation.class));
-        when(lifecycle.claimAdmissionMutation(911L, highFuture)).thenReturn(
-                mock(AdmissionMutation.class));
+        when(lifecycle.claimAdmissionHandle(910L, lowFuture)).thenReturn(
+                mock(AdmissionHandle.class));
+        when(lifecycle.claimAdmissionHandle(911L, highFuture)).thenReturn(
+                mock(AdmissionHandle.class));
         when(router.select(lowPriority, null)).thenReturn(
                 PlacementResult.blocked(
                         PlacementKey.anyGroup(RoleType.PREFILL)));
         when(router.select(highPriority, null)).thenReturn(
-                PlacementResult.rejected(RequestResponses.buildErrorResponse(
+                PlacementResult.rejected(Response.buildErrorResponse(
                         StrategyErrorType.NO_PREFILL_WORKER, null)));
 
         RequestScheduler scheduler = new RequestScheduler(
@@ -379,10 +383,10 @@ class RequestSchedulerTest {
         CompletableFuture<Response> followerFuture = new CompletableFuture<>();
         when(lifecycle.register(expired)).thenReturn(expiredFuture);
         when(lifecycle.register(follower)).thenReturn(followerFuture);
-        when(lifecycle.claimAdmissionMutation(801L, expiredFuture)).thenReturn(
-                mock(AdmissionMutation.class));
-        when(lifecycle.claimAdmissionMutation(802L, followerFuture)).thenReturn(
-                mock(AdmissionMutation.class));
+        when(lifecycle.claimAdmissionHandle(801L, expiredFuture)).thenReturn(
+                mock(AdmissionHandle.class));
+        when(lifecycle.claimAdmissionHandle(802L, followerFuture)).thenReturn(
+                mock(AdmissionHandle.class));
         when(router.select(any())).thenReturn(
                 PlacementResult.blocked(blocker));
 
@@ -433,10 +437,10 @@ class RequestSchedulerTest {
         CompletableFuture<Response> independentFuture = new CompletableFuture<>();
         when(lifecycle.register(blocked)).thenReturn(blockedFuture);
         when(lifecycle.register(independent)).thenReturn(independentFuture);
-        when(lifecycle.claimAdmissionMutation(803L, blockedFuture)).thenReturn(
-                mock(AdmissionMutation.class));
-        when(lifecycle.claimAdmissionMutation(804L, independentFuture)).thenReturn(
-                mock(AdmissionMutation.class));
+        when(lifecycle.claimAdmissionHandle(803L, blockedFuture)).thenReturn(
+                mock(AdmissionHandle.class));
+        when(lifecycle.claimAdmissionHandle(804L, independentFuture)).thenReturn(
+                mock(AdmissionHandle.class));
 
         PrefillEndpoint fullEndpoint = mockPrefillEndpoint("full-prefill", 8080);
         PrefillEndpoint availableEndpoint = mock(PrefillEndpoint.class);
@@ -683,9 +687,9 @@ class RequestSchedulerTest {
         BalanceContext context = context(config, 807L);
         CompletableFuture<Response> future = new CompletableFuture<>();
         when(lifecycle.register(context)).thenReturn(future);
-        when(lifecycle.claimAdmissionMutation(807L, future)).thenReturn(
-                mock(AdmissionMutation.class),
-                mock(AdmissionMutation.class));
+        when(lifecycle.claimAdmissionHandle(807L, future)).thenReturn(
+                mock(AdmissionHandle.class),
+                mock(AdmissionHandle.class));
 
         PrefillEndpoint staleEndpoint = mockPrefillEndpoint("stale-prefill", 8080);
         RouteAdmission staleRoute = mock(RouteAdmission.class);
@@ -839,6 +843,7 @@ class RequestSchedulerTest {
 
     /** Real ordered scheduler with an exact endpoint whose free slots are explicitly controlled. */
     private static final class CapacityFixture implements AutoCloseable {
+        private final ConcurrentMap<Long, CapacityRequest> requestsById = new ConcurrentHashMap<>();
         private final DefaultRouter router = mockRouter();
         private final RequestRegistry lifecycle = mock(RequestRegistry.class);
         private final PlacementAvailability availability = new PlacementAvailability();
@@ -882,6 +887,23 @@ class RequestSchedulerTest {
             when(configService.loadBalanceConfig()).thenReturn(config);
 
             this.config = config;
+            // Configure shared mocks before starting the scheduler. Independent requests
+            // may be added concurrently later, through data rather than new stubbings.
+            when(lifecycle.register(any(BalanceContext.class))).thenAnswer(invocation -> {
+                BalanceContext context = invocation.getArgument(0);
+                return requestsById.get(context.getRequestId()).future;
+            });
+            when(lifecycle.claimAdmissionHandle(anyLong(), any())).thenReturn(mock(AdmissionHandle.class));
+            when(router.select(any(BalanceContext.class), isNull())).thenAnswer(invocation -> {
+                BalanceContext context = invocation.getArgument(0);
+                CapacityRequest request = requestsById.get(context.getRequestId());
+                if (request.plans.incrementAndGet() == 2 && context.getRequestId() == 820L && pauseHeadRetry) {
+                    headRetryStarted.countDown();
+                    assertTrue(allowHeadRetry.await(5, TimeUnit.SECONDS),
+                            "the cancelled active request's planning gate must be released");
+                }
+                return PlacementResult.success(request.route);
+            });
             BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
             doAnswer(invocation -> {
                 CapacityRequest request = pendingReports.remove();
@@ -915,20 +937,8 @@ class RequestSchedulerTest {
             when(prefill.getRole()).thenReturn(RoleType.PREFILL);
             when(item.prefill()).thenReturn(prefill);
             when(item.prefillEp()).thenReturn(target);
-            when(lifecycle.register(request.context)).thenReturn(request.future);
-            when(lifecycle.claimAdmissionMutation(requestId, request.future))
-                    .thenReturn(mock(AdmissionMutation.class));
             when(route.prefillEndpoint()).thenReturn(target);
             when(route.blockedEndpoint()).thenReturn(target);
-            AtomicInteger plans = new AtomicInteger();
-            when(router.select(request.context, null)).thenAnswer(invocation -> {
-                if (plans.incrementAndGet() == 2 && requestId == 820L && pauseHeadRetry) {
-                    headRetryStarted.countDown();
-                    assertTrue(allowHeadRetry.await(5, TimeUnit.SECONDS),
-                            "the cancelled active request's planning gate must be released");
-                }
-                return PlacementResult.success(route);
-            });
             when(route.tryEnqueue(request.context, request.future, lifecycle)).thenAnswer(invocation -> {
                 request.attempts.incrementAndGet();
                 request.beforePublication.call();
@@ -953,6 +963,7 @@ class RequestSchedulerTest {
                 pendingReports.add(request);
                 return PlacementResult.success(item);
             });
+            requestsById.put(requestId, request);
             return request;
         }
 
@@ -990,6 +1001,7 @@ class RequestSchedulerTest {
     }
 
     private static final class CapacityRequest {
+        private final AtomicInteger plans = new AtomicInteger();
         private final BalanceContext context;
         private final CompletableFuture<Response> future;
         private final AtomicInteger attempts = new AtomicInteger();
@@ -1033,8 +1045,8 @@ class RequestSchedulerTest {
             when(context.getRequestId()).thenReturn(requestId);
             when(lifecycle.register(context))
                     .thenReturn(future);
-            when(lifecycle.claimAdmissionMutation(requestId, future)).thenReturn(
-                    mock(AdmissionMutation.class));
+            when(lifecycle.claimAdmissionHandle(requestId, future)).thenReturn(
+                    mock(AdmissionHandle.class));
             when(lifecycle.publishDecisionResponseAsync(
                     anyLong(), any(), any())).thenAnswer(invocation -> {
                         @SuppressWarnings("unchecked")
@@ -1045,7 +1057,7 @@ class RequestSchedulerTest {
                     });
             when(router.select(context, null)).thenReturn(
                     PlacementResult.rejected(
-                            RequestResponses.buildErrorResponse(
+                            Response.buildErrorResponse(
                                     StrategyErrorType.NO_PREFILL_WORKER,
                                     null)));
             scheduler = new RequestScheduler(

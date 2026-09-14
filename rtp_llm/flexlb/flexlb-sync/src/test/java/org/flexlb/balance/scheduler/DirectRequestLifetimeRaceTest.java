@@ -81,27 +81,16 @@ class DirectRequestLifetimeRaceTest {
                     mock(RandomStrategy.class), service, model);
 
             AtomicBoolean lateConfirmation = new AtomicBoolean();
-            doAnswer(factory -> {
-                DeliveryClaim claim = spy((DeliveryClaim) factory.callRealMethod());
-                doAnswer(invocation -> {
-                    invocation.callRealMethod();
-                    RequestSlot slot = requests.requestSlot(101L);
-                    if (reason == CancelReason.CLIENT_CANCELLED) {
-                        requests.cancelRequest(101L, 0L, reason);
-                    }
-                    requests.expireInactiveRequest(slot, slot.createdAtMs()
-                            + config.getRequestLifecycle().getRequest().getTimeoutMs());
-                    assertTrue(requests.getRequestState(101L, 0L).state().isTerminal());
-                    return null;
-                }).when(claim).begin(any(), org.mockito.ArgumentMatchers.anyLong());
-                doAnswer(invocation -> {
-                    assertTrue(requests.getRequestState(101L, 0L).state().isTerminal());
-                    Object result = invocation.callRealMethod();
-                    lateConfirmation.set(true);
-                    return result;
-                }).when(claim).complete(any());
-                return claim;
-            }).when(requests).tryClaimRouteDelivery(any(), any());
+            doAnswer(invocation -> {
+                RequestSlot slot = requests.requestSlot(101L);
+                if (reason == CancelReason.CLIENT_CANCELLED) { requests.cancelRequest(101L, 0L, reason); }
+                requests.expireInactiveRequest(slot, slot.createdAtMs()
+                        + config.getRequestLifecycle().getRequest().getTimeoutMs());
+                assertTrue(requests.getRequestState(101L, 0L).state().isTerminal());
+                Object result = invocation.callRealMethod();
+                lateConfirmation.set(true);
+                return result;
+            }).when(requests).publishRoute(any(), any(), org.mockito.ArgumentMatchers.anyLong());
 
             var scheduler = new RequestScheduler(service, router,
                     mock(org.flexlb.balance.endpoint.EndpointRegistry.class), mock(BatchSchedulerReporter.class),

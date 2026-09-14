@@ -632,7 +632,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         System.out.printf(
                 "FlexLB Master engine-scale E2E: delivery=%s decision=%s "
                         + "prefill=%d decode=%d "
-                        + "target_qps=%d requests=%d client_qps=%.1f master_qps=%.1f "
+                        + "target_qps=%d requests=%d client_qps=%.1f master_qps=%.1f master_avg=%.3fms "
                         + "client_p50=%.3fms client_p90=%.3fms client_p95=%.3fms "
                         + "client_p99=%.3fms "
                         + "master_p50=%s master_p90=%s master_p95=%s "
@@ -650,7 +650,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                         + "ack_response_count=%d ack_response_p99=%s "
                         + "terminal_without_ack_count=%d%n",
                 DELIVERY_MODE, decisionMode, prefillEngineCount, decodeEngineCount, targetQps,
-                requestCount, result.qps(), masterQps,
+                requestCount, result.qps(), masterQps, number(serverLatency, "mean").doubleValue(),
                 result.p50Ms(), result.p90Ms(), result.p95Ms(), result.p99Ms(),
                 latencyBucketLabel(serverLatency, "p50"),
                 latencyBucketLabel(serverLatency, "p90"),
@@ -942,6 +942,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             responses.add(response.response());
         }
         Arrays.sort(latencies);
+        System.out.printf("FlexLB client latency: requests=%d target_qps=%d client_avg=%.3fms%n",
+                requestCount, targetQps, Arrays.stream(latencies).average().orElse(0.0) / 1_000_000.0);
         awaitSimulatedCompletions();
         return new TrafficResult(
                 requestCount * 1_000_000_000.0 / elapsedNanos,

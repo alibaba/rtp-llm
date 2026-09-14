@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.RequestLifecycleTestSupport.Registered;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -58,7 +59,7 @@ class RequestAdmissionResourceLeakTest {
     @Test
     void declinedPublicationLeavesNoCanonicalItem() {
         Registered registered = registerItem(1L);
-        try (AdmissionMutation admission = lifecycle.claimAdmissionMutation(1L, registered.future())) {
+        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(1L, registered.future())) {
             assertNotNull(admission);
             assertEquals(PlacementResult.Status.BLOCKED,
                     lifecycle.commitRoute(registered.item(), () -> false));
@@ -71,7 +72,7 @@ class RequestAdmissionResourceLeakTest {
     @Test
     void throwingPublicationLeavesTheExactRegistrationRetryable() {
         Registered registered = registerItem(2L);
-        try (AdmissionMutation admission = lifecycle.claimAdmissionMutation(2L, registered.future())) {
+        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(2L, registered.future())) {
             assertNotNull(admission);
             assertThrows(IllegalStateException.class, () -> lifecycle.commitRoute(
                     registered.item(), () -> { throw new IllegalStateException("publication failed"); }));
@@ -96,7 +97,7 @@ class RequestAdmissionResourceLeakTest {
     @Test
     void cancellationWaitsForPublicationMutationBeforeReleasingReservation() {
         Registered registered = registerItem(4L);
-        AdmissionMutation admission = lifecycle.claimAdmissionMutation(4L, registered.future());
+        AdmissionHandle admission = lifecycle.claimAdmissionHandle(4L, registered.future());
         assertNotNull(admission);
         assertEquals(PlacementResult.Status.SUCCESS,
                 lifecycle.commitRoute(registered.item(), () -> true));
