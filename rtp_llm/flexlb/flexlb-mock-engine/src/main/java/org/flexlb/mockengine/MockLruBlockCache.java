@@ -142,8 +142,8 @@ final class MockLruBlockCache {
      * requests); prefix-hit blocks are re-referenced instead of re-allocated
      * (production reuseCache reduces need_blocks BEFORE the capacity gate).
      *
-     * <p>Gate (TOTAL_AND_AVAILABLE): {@code need <= available} and
-     * {@code reserve <= available - need}. Allocation first spends free blocks,
+     * <p>Gate (TOTAL_AND_AVAILABLE): {@code netNew <= available} and
+     * {@code reserve <= available - netNew}. Allocation first spends free blocks,
      * then evicts whole unbranched chains ({@code ensureFreeBlocks}). A pinned
      * descendant can structurally protect otherwise available ancestors, so
      * allocation also checks actual free capacity after eviction. Gate rejection
@@ -166,10 +166,13 @@ final class MockLruBlockCache {
             return new AllocationOutcome(new BlockLease(List.of(), 0), null);
         }
         List<Long> hitKeys = matchPrefix(keys);
+        if (hitKeys.size() > needBlocks) {
+            hitKeys = new ArrayList<>(hitKeys.subList(0, needBlocks));
+        }
         int newBlocks = needBlocks - hitKeys.size();
         int avail = availableBlocks();
-        if (needBlocks > avail || avail - needBlocks < reserveBlocks()) {
-            return new AllocationOutcome(null, failureFamily(needBlocks));
+        if (newBlocks > avail || avail - newBlocks < reserveBlocks()) {
+            return new AllocationOutcome(null, failureFamily(newBlocks));
         }
         // Allocation coupling: free first, then whole-chain eviction.
         // Pin hits before selecting an eviction chain: a reused block must

@@ -45,6 +45,37 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class BlockPoolCapacityTest {
 
+    @Test
+    void prefillAdmissionChargesOnlyNewBlocksAndPreservesWatermark() {
+        var cache = new MockLruBlockCache(10, .1);
+        var keys = List.of(1L, 2L, 3L, 4L, 5L, 6L);
+        var seed = cache.acquire(6, keys);
+        assertNotNull(seed);
+        var owner = cache.retainComputed(seed, keys);
+        assertEquals(4, cache.availableBlocks());
+
+        // Six blocks are already pinned by a concurrent request. Only three
+        // additional blocks are needed; one block must remain as reserve.
+        var incoming = cache.acquireDetailed(9, keys);
+        assertNotNull(incoming.lease());
+        assertEquals(3, cache.heldBlocks());
+        assertEquals(1, cache.availableBlocks());
+        assertEquals(0, cache.evictions());
+
+        // Fully shared KV remains admissible at the watermark, but a new
+        // physical block cannot consume the last reserved block.
+        var shared = cache.acquire(6, keys);
+        assertNotNull(shared);
+        assertNull(cache.acquire(7, keys));
+        cache.release(shared);
+        cache.release(incoming.lease());
+        assertEquals(6, cache.referencedKeyBlocks());
+        cache.release(owner);
+        assertEquals(10, cache.availableBlocks());
+        assertEquals(0, cache.heldBlocks());
+        assertEquals(0, cache.referencedKeyBlocks());
+    }
+
     private static final int SPB = 1024;
 
     @TempDir
