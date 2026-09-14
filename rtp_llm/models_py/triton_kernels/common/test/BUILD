@@ -44,3 +44,15 @@ py_test(
     env = {"GPU_COUNT": "1"},
     exec_properties = {'gpu':'A10', 'gpu_count': '1'},
 )
+
+py_test(
+    name = "aiter_verify_attention_test",
+    srcs = ["test_aiter_verify_attention.py"],
+    main = "test_aiter_verify_attention.py",
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7", "gpu_count": "1"},
+)
