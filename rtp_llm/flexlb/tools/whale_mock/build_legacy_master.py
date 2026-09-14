@@ -37,6 +37,13 @@ def build(output, internal):
             subprocess.run(["git", "archive", sha, "rtp_llm/flexlb", "rtp_llm/cpp/model_rpc/proto"], cwd=REPO, stdout=f, check=True)
         run(["tar", "xf", str(archive), "-C", str(work)], REPO)
         project = work / "rtp_llm/flexlb"
+        # Add an opt-in test Bean. Existing production Java files remain byte-for-byte unchanged.
+        adapter = project / "flexlb-common/src/main/java/org/flexlb/mockdiscovery"
+        adapter.mkdir(parents=True)
+        shutil.copyfile(ROOT / "discovery_adapter/WhaleFileDiscovery.java", adapter / "WhaleFileDiscovery.java")
+        adapter_tests = project / "flexlb-common/src/test/java/org/flexlb/mockdiscovery"
+        adapter_tests.mkdir(parents=True)
+        shutil.copyfile(ROOT / "discovery_adapter/WhaleFileDiscoveryTest.java", adapter_tests / "WhaleFileDiscoveryTest.java")
         pom = project / "flexlb-api/pom.xml"
         text = pom.read_text()
         text = text.replace("<profiles>", """<profiles>
@@ -60,15 +67,15 @@ class WhaleLegacyConfigTest {
 """)
         shutil.copyfile(ROOT / "glm53-inner-master.json", project / "flexlb-common/inner-master.json")
         run(["mvn", "-B", "-Popensource,!internal", "-pl", "flexlb-common", "-am", "install",
-             "-Dtest=WhaleLegacyConfigTest", "-Dsurefire.failIfNoSpecifiedTests=false"], project)
+             "-Dtest=WhaleLegacyConfigTest,WhaleFileDiscoveryTest", "-Dsurefire.failIfNoSpecifiedTests=false"], project)
         run(["mvn", "-B", "-pl", "kmonitor", "-am", "install", "-DskipTests"], internal / "java")
         run(["mvn", "-B", "-Popensource,!internal,whale-bundle", "-pl", "flexlb-api", "-am", "package",
-             "-Dtest=WhaleLegacyConfigTest", "-Dsurefire.failIfNoSpecifiedTests=false"], project)
+             "-Dtest=WhaleLegacyConfigTest,WhaleFileDiscoveryTest", "-Dsurefire.failIfNoSpecifiedTests=false"], project)
         output.mkdir(parents=True, exist_ok=True)
         target = output / spec["jar"]
         shutil.copyfile(project / "flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar", target)
         spec["jar_sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
-        spec["packaging"] = "opensource plus KMonitor; production Java sources unchanged"
+        spec["packaging"] = "opensource plus KMonitor and opt-in WhaleFileDiscovery; original production Java sources unchanged"
         (output / "legacy-master-build.json").write_text(json.dumps(spec, indent=2))
 
 

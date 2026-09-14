@@ -109,6 +109,21 @@ class MultiFrameStreamTtftTest {
         assertTtftStrictlyBeforeE2e(stream);
     }
 
+    @Test
+    @Timeout(30)
+    void decodeStepReportsTpotWithoutCountingPrefillToken() throws Exception {
+        startCluster("10", 50.0);
+        var events = new java.util.concurrent.CopyOnWriteArrayList<Map<String, Number>>();
+        decode.eventMetricReporter = events::add;
+        CollectedStream stream = generate(prefill, inputWithDecode(998, 10, decode.getGrpcPort()), 10000);
+        assertNull(stream.error.get());
+        var accepted = events.stream().filter(e -> e.containsKey("rtp_llm_sp_total_accepted_token_num")).toList();
+        assertTrue(!accepted.isEmpty());
+        // Fixture output is 8 tokens, of which P produces one.
+        assertEquals(7, accepted.stream().mapToInt(e -> e.get("rtp_llm_sp_total_accepted_token_num").intValue()).sum());
+        assertTrue(accepted.stream().allMatch(e -> e.get("rtp_llm_sp_estimate_tpot_us").doubleValue() == 50000.0));
+    }
+
     // ==================== timeout semantics ====================
 
     @Test

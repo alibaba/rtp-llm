@@ -27,3 +27,13 @@ class MasterCompatibilityTest(unittest.TestCase):
         self.assertEqual("10.0.0.1:7052", env["DOMAIN_ADDRESS:d"])
         self.assertNotIn("discovery_file", json.loads(env["MODEL_SERVICE_CONFIG"]))
         self.assertIn("discovery_file", json.loads(endpoints["env"]["MODEL_SERVICE_CONFIG"]))
+
+    def test_file_adapter_receives_path_without_changing_old_master_schema(self):
+        endpoints = {"env": {"MODEL_SERVICE_CONFIG": '{"discovery_file":"/tmp/discovery.json"}'},
+                     "prefill_domain":"p", "decode_domain":"d", "engines":[
+                         {"role":"prefill", "http_addr":"127.0.0.1:7050"},
+                         {"role":"decode", "http_addr":"127.0.0.1:7051"}]}
+        env = legacy_discovery(endpoints, True)
+        self.assertEqual("/tmp/discovery.json", env["MOCK_DISCOVERY_FILE"])
+        self.assertNotIn("discovery_file", json.loads(env["MODEL_SERVICE_CONFIG"]))
+        self.assertNotIn("MOCK_DISCOVERY_FILE", legacy_discovery(endpoints))

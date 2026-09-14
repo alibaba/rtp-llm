@@ -51,3 +51,22 @@ must be considered when comparing a production memory-plus-disk deployment.
 Validate a deployment using a stable traffic window after warm-up. Record batch
 size, waiting, forward, GPU/memory reuse separately, and eviction counter deltas.
 A cache with no evictions has no eviction-lifetime observation, not a zero lifetime.
+
+## Bundled master discovery and decode TPOT
+
+The test bundle can opt into file discovery with `MOCK_BUNDLE_FILE_DISCOVERY=1`.
+The pinned legacy master includes an additional `WhaleFileDiscovery` Spring bean;
+its original Java sources and scheduler configuration are unchanged. Only that
+opt-in selects the bean via `MOCK_DISCOVERY_FILE`. The existing master refresh
+loop reads `discovery.json`, maintained by `/add_engine` and `/remove_engine`.
+A failed file read retains the last complete snapshot; an invalid initial file
+fails closed. This controls logical engines inside the bundled Pod; independent
+Whale engine Pods remain platform-managed. Logical changes are runtime state;
+a bundle restart rebuilds its configured initial P/D counts.
+
+Decode reports `rtp_llm_sp_estimate_tpot_us` as modeled step microseconds divided
+by the actual average number of newly produced D tokens among progressing
+streams. It excludes P's first token, mid-step joiners, and failed KV growth.
+It also reports step time and accepted-token counts, including truncated final
+steps. This is an engine estimate, not frontend network/streaming TPOT. Draft
+proposal counts and acceptance ratios are not fabricated.

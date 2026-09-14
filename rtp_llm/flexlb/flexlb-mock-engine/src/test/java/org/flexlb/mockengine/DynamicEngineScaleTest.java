@@ -94,6 +94,7 @@ class DynamicEngineScaleTest {
     private DynamicEngineManager engineManager;
     private DiscoveryFileStore discoveryFileStore;
     private Path discoveryFile;
+    private JavaMockEngineCluster.Config clusterConfig;
 
     @AfterEach
     void tearDown() throws InterruptedException {
@@ -133,6 +134,21 @@ class DynamicEngineScaleTest {
     // ════════════════════════════════════════════════════════════════
     //  Tests
     // ════════════════════════════════════════════════════════════════
+
+    @Test
+    void whaleBundleCanScaleAndNewEngineReceivesMetricHooks() throws Exception {
+        startCluster(model("10", 1), 1, 1);
+        clusterConfig.whale = true;
+        clusterConfig.whaleBundle = true;
+        clusterConfig.engineInitializer = service -> service.eventMetricReporter = values -> { };
+        var added = engineManager.addEngine("decode", null);
+        assertNotNull(services.get(added.grpcPort()).eventMetricReporter);
+        assertTrue(Files.readString(discoveryFile).contains(":" + (added.grpcPort() - 1)));
+        // The actual one-engine-per-pod mode remains platform-managed.
+        clusterConfig.whaleBundle = false;
+        assertThrows(DynamicEngineManager.EngineOperationException.class,
+                () -> engineManager.addEngine("decode", null));
+    }
 
     @Test
     void newAndReplacementEnginesUseStartupPerformance() throws Exception {
@@ -593,6 +609,7 @@ class DynamicEngineScaleTest {
         serversByPort = new ConcurrentHashMap<>();
         JavaMockEngineCluster.ClusterStats stats = new JavaMockEngineCluster.ClusterStats();
         JavaMockEngineCluster.Config config = new JavaMockEngineCluster.Config();
+        clusterConfig = config;
         config.host = "127.0.0.1";
         // This suite pins discovery-file contents with literal 127.0.0.1
         // addresses; disable the unique-IP advertisement so the assertions

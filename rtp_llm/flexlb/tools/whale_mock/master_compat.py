@@ -22,10 +22,14 @@ def mock_formula_config(raw, legacy):
         "prefill": {"executionTimeEstimator": estimator}}}})
 
 
-def legacy_discovery(endpoints):
+def legacy_discovery(endpoints, file_discovery=False):
     env = dict(endpoints["env"])
     service = json.loads(env["MODEL_SERVICE_CONFIG"])
-    service.pop("discovery_file", None)
+    discovery_file = service.pop("discovery_file", None)
+    if file_discovery:
+        if not discovery_file:
+            raise ValueError("file discovery requires the mock discovery path")
+        env["MOCK_DISCOVERY_FILE"] = discovery_file
     env["MODEL_SERVICE_CONFIG"] = json.dumps(service)
     for role in ("prefill", "decode"):
         addresses = [e["http_addr"] for e in endpoints["engines"] if e["role"] == role]
