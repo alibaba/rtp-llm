@@ -472,6 +472,12 @@ final class MockLruBlockCache {
         return evictions;
     }
 
+    synchronized int peekPrefixHitBlocks(List<Long> keys) {
+        int count = 0;
+        while (count < keys.size() && blocks.containsKey(keys.get(count))) count++;
+        return count;
+    }
+
     synchronized Set<Long> snapshotKeys() {
         return Set.copyOf(blocks.keySet());
     }

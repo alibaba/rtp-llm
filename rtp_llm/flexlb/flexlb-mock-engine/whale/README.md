@@ -63,3 +63,24 @@ Whale KMonitor 上报累计 context/generate token、KV tokens、waiting/running
 引擎指标使用无 `whale-lb.` 前缀的 `rtp_llm_*` 名称，兼容现有引擎大盘。标签与 C++ 引擎一致：小写 hippo_app/hippo_role/hippo_group、host_ip（物理宿主）、container_ip（Pod）、dp_rank=0；mock 汇总吞吐使用 priority=0。队列、batch 和 KV 空闲/可用块等从 mock 状态读取，used_ratio 为不可用块占总量的百分比。mock 的 TPS 为采样窗口 token 增量除以墙钟时间，不代表真实 GPU step 的吞吐；不伪造 GPU 指标或优先级拆分。内部适配只复用 master 的 sink 初始化，mock 在自己的进程内创建不带 master 指标前缀的 reporter；生产 master 的监控代码和大盘无需修改。
 
 本地跨进程测试使用不同回环 IP 模拟 Pod，覆盖两个 D 同端口的地址路由、Fetch、显式无 Fetch、P 进程死亡和 D 进程死亡。真实 Whale 验收仍需核对镜像来源、平台注册、KMonitor 数据和 frontend→master→P→D→frontend；单测或镜像编译成功不能代替已部署验收。
+
+### Bounded cache diagnosis (parasitic P cluster)
+
+`POST /cache_diagnostics` with `{"action":"start","seconds":120,"sample_every":100,"max_keys":4000000}`
+starts a default-off shadow observation on the mock control port. `GET /cache_diagnostics`
+returns token sums and the last 128 sampled admission observations, without request content or keys.
+`POST` with `{"action":"stop"}` detaches the observer; the last report remains readable.
+
+Compare `actual_tokens`, `local_no_eviction_tokens`, `best_resident_tokens`, and
+`global_no_eviction_tokens` against the SAME `input_tokens`. Local/global histories are
+seeded with resident GPU+Memory keys and subsequently updated only after successful P
+computation. Shadow entries never evict: duration/key limits stop collection explicitly.
+The key budget counts local plus global set entries, including seed entries.
+
+These are diagnostic counterfactuals, not production verdicts. Observations occur at P
+admission (including requests that later fail); best-resident reads traverse colocated P
+engines without touching their LRU order, but are not an atomic cluster snapshot or a
+check of master candidate eligibility. The global history is a hypothetical shared cache:
+it may combine blocks held on different engines and is not necessarily routable. Seed
+reads and observer attachment are also non-atomic. Use only with a stable, homogeneous,
+colocated P topology; separate-pod mode cannot inspect other processes with this endpoint.

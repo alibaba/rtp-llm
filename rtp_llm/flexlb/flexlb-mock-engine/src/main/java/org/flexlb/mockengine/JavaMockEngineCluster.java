@@ -31,6 +31,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -606,6 +607,31 @@ public final class JavaMockEngineCluster {
     }
 
     static final class FastRpcService extends RpcServiceGrpc.RpcServiceImplBase {
+        volatile MockCacheDiagnostics cacheDiagnostics;
+
+        boolean isDiagnosticPrefill() { return roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL; }
+
+        Set<Long> diagnosticResidentKeys() {
+            Set<Long> keys = new HashSet<>(cache.snapshotKeys());
+            if (memoryCache != null) keys.addAll(memoryCache.keys());
+            return keys;
+        }
+
+        private void observeCacheDiagnostics(MockPerformanceModel.RequestShape shape) {
+            MockCacheDiagnostics diag = cacheDiagnostics;
+            if (diag == null || !isDiagnosticPrefill() || !diag.select()) return;
+            int best = 0;
+            String bestName = "";
+            for (FastRpcService peer : services.values()) {
+                if (!peer.isDiagnosticPrefill() || peer.stopped || peer.seqSizePerBlock != seqSizePerBlock) continue;
+                int hit = peer.cache.peekPrefixHitBlocks(shape.blockKeys());
+                if (peer.memoryCache != null) hit += peer.memoryCache.peekMatch(shape.blockKeys(), hit);
+                if (hit > best) { best = hit; bestName = peer.engineName; }
+            }
+            diag.observe(engineName, shape.blockKeys(), seqSizePerBlock, shape.inputLen(),
+                    shape.hitTokens(), best, bestName);
+        }
+
         private volatile boolean whaleRemote;
         private boolean whaleBundle;
         private MockMemoryBlockCache memoryCache;
@@ -1479,6 +1505,7 @@ public final class JavaMockEngineCluster {
                             continue;
                         }
                         MockPerformanceModel.RequestShape shape = matchPrefillMemory(performance.shape(input.getInput(), cache));
+                        observeCacheDiagnostics(shape);
                         // Key-level cache-hit accounting at the admission hit
                         // computation point (recorded whether or not the request
                         // later admits — a rejected request still observed the
@@ -1923,6 +1950,7 @@ public final class JavaMockEngineCluster {
 
             long requestId = request.getRequestId();
             MockPerformanceModel.RequestShape shape = matchPrefillMemory(performance.shape(request, cache));
+            observeCacheDiagnostics(shape);
             // Key-level cache-hit accounting (direct path, same admission hit
             // computation point as the enqueue-batch path above).
             cacheKeyHits.add(shape.hitBlocks());
@@ -3655,6 +3683,8 @@ public final class JavaMockEngineCluster {
                         // rtp_llm_context_tps_with_cache numerator, the
                         // DeepSeek-style "input tokens/s incl. cache hits").
                         if (memoryCache != null && !asyncFail) memoryCache.write(shape.blockKeys());
+                        MockCacheDiagnostics diag = cacheDiagnostics;
+                        if (!asyncFail && diag != null) diag.completed(engineName, shape.blockKeys());
                         long inputLen = shape.inputLen();
                         long hitTokens = shape.hitTokens();
                         if (memoryCache != null) {

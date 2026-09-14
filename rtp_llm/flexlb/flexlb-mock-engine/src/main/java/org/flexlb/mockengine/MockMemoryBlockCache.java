@@ -31,6 +31,12 @@ final class MockMemoryBlockCache {
         return end - start;
     }
 
+    synchronized int peekMatch(List<Long> keys, int start) {
+        int end = start;
+        while (end < keys.size() && entries.containsKey(keys.get(end))) end++;
+        return end - start;
+    }
+
     synchronized void write(List<Long> keys) {
         for (Long key : keys) {
             // Reuse touches recency but does not reset creation time (MemoryDiskBlockCache::putCommitted).

@@ -85,6 +85,7 @@ final class MockControlServer {
         httpServer.createContext("/clear_inject", this::handleClearInject);
         httpServer.createContext("/health", this::handleHealth);
         httpServer.createContext("/requests", this::handleRequests);
+        httpServer.createContext("/cache_diagnostics", this::handleCacheDiagnostics);
         httpServer.createContext("/set_perf", this::handleSetPerf);
         httpServer.createContext("/set_kv_pressure", this::handleSetKvPressure);
         httpServer.createContext("/set_queue_depth", this::handleSetQueueDepth);
@@ -375,6 +376,42 @@ final class MockControlServer {
                 .allMatch(s -> !s.isStopped() && !s.isShuttingDown());
         if (whale) response.put("status", ready ? "ok" : "unavailable");
         sendJson(exchange, whale && !ready ? 503 : 200, response);
+    }
+
+    private volatile MockCacheDiagnostics cacheDiagnostics;
+
+    private synchronized void handleCacheDiagnostics(HttpExchange exchange) throws IOException {
+        if ("POST".equals(exchange.getRequestMethod())) {
+            try {
+                JsonNode body = MAPPER.readTree(exchange.getRequestBody());
+                if (body == null) throw new IllegalArgumentException("JSON body required");
+                String action = body.path("action").asText("start");
+                if (action.equals("stop")) {
+                    if (cacheDiagnostics != null) cacheDiagnostics.stop();
+                    services.values().forEach(s -> s.cacheDiagnostics = null);
+                } else if (action.equals("start")) {
+                    if (cacheDiagnostics != null && cacheDiagnostics.active()) {
+                        sendJson(exchange, 409, Map.of("error", "diagnostic capture already active"));
+                        return;
+                    }
+                    MockCacheDiagnostics diag = new MockCacheDiagnostics(
+                            body.path("seconds").asInt(120), body.path("max_keys").asInt(4_000_000),
+                            body.path("sample_every").asInt(100), System::currentTimeMillis);
+                    for (var service : services.values()) {
+                        if (service.isDiagnosticPrefill()) diag.completed(service.getEngineName(), service.diagnosticResidentKeys());
+                    }
+                    cacheDiagnostics = diag;
+                    services.values().forEach(s -> s.cacheDiagnostics = s.isDiagnosticPrefill() ? diag : null);
+                } else throw new IllegalArgumentException("action must be start or stop");
+            } catch (IllegalArgumentException error) {
+                sendJson(exchange, 400, Map.of("error", error.getMessage()));
+                return;
+            }
+        } else if (!"GET".equals(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
+            return;
+        }
+        sendJson(exchange, 200, cacheDiagnostics == null ? Map.of("active", false) : cacheDiagnostics.snapshot());
     }
 
     private void handleRequests(HttpExchange exchange) throws IOException {
