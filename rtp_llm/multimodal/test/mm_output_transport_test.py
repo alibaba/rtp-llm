@@ -16,6 +16,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalOutputPB,
 )
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
+from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
 from rtp_llm.multimodal.transport.base import (
     MMOutputTransport,
     MMTransportBackend,
@@ -26,11 +27,7 @@ from rtp_llm.multimodal.transport.grpc.backend import (
     TRANSPORT_BYTES,
     GrpcInlineOutputBackend,
 )
-from rtp_llm.multimodal.transport.rdma.backend import (
-    TRANSPORT_RDMA,
-    RdmaOutputBackend,
-)
-from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
+from rtp_llm.multimodal.transport.rdma.backend import TRANSPORT_RDMA, RdmaOutputBackend
 
 
 def _serialized_desc(handle: str, nbytes: int = 16) -> bytes:
@@ -70,9 +67,13 @@ class MMOutputTransportFactoryTest(TestCase):
         config = MMTransportConfig()
 
         self.assertEqual(config.mode, MM_TRANSPORT_MODE_GRPC)
-        self.assertEqual(MM_TRANSPORT_MODES, (MM_TRANSPORT_MODE_GRPC, MM_TRANSPORT_MODE_RDMA))
+        self.assertEqual(
+            MM_TRANSPORT_MODES, (MM_TRANSPORT_MODE_GRPC, MM_TRANSPORT_MODE_RDMA)
+        )
         self.assertNotIn("auto", MM_TRANSPORT_MODES)
-        self.assertIsInstance(create_mm_output_transport(config)._backend, GrpcInlineOutputBackend)
+        self.assertIsInstance(
+            create_mm_output_transport(config)._backend, GrpcInlineOutputBackend
+        )
 
     @patch(
         "rtp_llm.multimodal.transport.rdma.backend.RdmaOutputBackend.create",
@@ -133,7 +134,10 @@ class RdmaOutputBackendTest(TestCase):
 
         # Descriptor order is what lets the LLM re-concat the chunks.
         self.assertEqual(
-            [slot.rdma_descriptor.lease_id for slot in result.receipt.output_rdma_slots],
+            [
+                slot.rdma_descriptor.lease_id
+                for slot in result.receipt.output_rdma_slots
+            ],
             ["one", "two"],
         )
         # split_size must describe the per-image row counts of the un-concatenated inputs.
@@ -156,14 +160,13 @@ class RdmaOutputBackendTest(TestCase):
         cuda_res = MMEmbeddingRes([_rows(1)])
         with _tensors_look_cuda():
             with self.assertRaisesRegex(RuntimeError, "did not advertise RDMA"):
-                self.backend.transfer(
-                    MultimodalInputsPB(support_rdma=False), cuda_res
-                )
+                self.backend.transfer(MultimodalInputsPB(support_rdma=False), cuda_res)
             with self.assertRaisesRegex(RuntimeError, "no multimodal embeddings"):
                 self.backend.transfer(_rdma_request(), MMEmbeddingRes([]))
         with self.assertRaisesRegex(RuntimeError, "requires CUDA"):
             self.backend.transfer(_rdma_request(), cuda_res)
         self.exporter.export_embedding.assert_not_called()
+
 
 class GrpcInlineOutputBackendTest(TestCase):
     def test_payload_is_encoded_inline(self):
@@ -181,6 +184,37 @@ class GrpcInlineOutputBackendTest(TestCase):
         self.assertEqual(result.transport, TRANSPORT_BYTES)
         self.assertEqual(list(result.receipt.split_size), [2, 3])
         self.assertEqual(len(result.receipt.output_rdma_slots), 0)
+
+    def test_inline_receipt_matches_existing_wire_format(self):
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalOutputPB
+        from rtp_llm.utils.grpc_util import trans_from_tensor
+
+        terminal = GrpcInlineOutputBackend()
+        for dtype in (torch.float32, torch.float16, torch.bfloat16, torch.int32):
+            tensors = [torch.arange(24).reshape(4, 6).t().to(dtype)]
+            for embeddings in (tensors, tensors * 2, [tensors[0][:0]]):
+                positions = [torch.arange(3, dtype=torch.int32)]
+                extras = [torch.ones(4, dtype=dtype)]
+                expected = MultimodalOutputPB(
+                    multimodal_embedding=trans_from_tensor(torch.concat(embeddings)),
+                    split_size=[t.shape[0] for t in embeddings],
+                )
+                expected.multimodal_pos_id.CopyFrom(
+                    trans_from_tensor(torch.concat(positions))
+                )
+                expected.multimodal_extra_input.append(trans_from_tensor(extras[0]))
+                actual = terminal.transfer(
+                    MultimodalInputsPB(),
+                    MMEmbeddingRes(
+                        embeddings, position_ids=positions, extra_input=extras
+                    ),
+                )
+                self.assertEqual(actual.receipt, expected)
+                self.assertEqual(
+                    actual.payload_embedding_bytes,
+                    sum(t.numel() * t.element_size() for t in embeddings),
+                )
+
 
 class _FakeBackend(MMTransportBackend):
     name = "fake"
@@ -227,7 +261,10 @@ class MMOutputTransportTest(TestCase):
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_POS_BYTES_METRIC], 8)
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_DEEPSTACK_BYTES_METRIC], 6)
         self.assertEqual(samples[GaugeMetrics.VIT_OUTPUT_TOKEN_COUNT_METRIC], 2)
-        self.assertEqual(samples[GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC], result.receipt.ByteSize())
+        self.assertEqual(
+            samples[GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC],
+            result.receipt.ByteSize(),
+        )
 
     @patch("rtp_llm.multimodal.transport.base.kmonitor.report")
     def test_rdma_output_metrics_use_descriptor_payload_sizes(self, report):
@@ -246,7 +283,11 @@ class MMOutputTransportTest(TestCase):
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_POS_BYTES_METRIC], 0)
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_DEEPSTACK_BYTES_METRIC], 0)
         self.assertEqual(samples[GaugeMetrics.VIT_OUTPUT_TOKEN_COUNT_METRIC], 2)
-        self.assertEqual(samples[GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC], result.receipt.ByteSize())
+        self.assertEqual(
+            samples[GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC],
+            result.receipt.ByteSize(),
+        )
+
 
 if __name__ == "__main__":
     main()

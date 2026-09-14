@@ -70,10 +70,16 @@ def trans_tensor(t: TensorPB):
     return torch.frombuffer(payload, dtype=dtype).reshape(shape)
 
 
-def trans_from_tensor(t: torch.Tensor):
-    if t is None:
-        return TensorPB()
-    res = TensorPB()
+def trans_from_tensor(t: torch.Tensor, res=None):
+    # Fill an existing protobuf field in place to avoid copying large payloads
+    # through a temporary nested message.
+    if res is None:
+        res = TensorPB()
+    else:
+        res.Clear()
+        res.SetInParent()
+    if t is None or t.numel() == 0:
+        return res
     with cuda_graph_gate.operation():
         t = t.cpu()
     res.shape.extend(list(t.shape))

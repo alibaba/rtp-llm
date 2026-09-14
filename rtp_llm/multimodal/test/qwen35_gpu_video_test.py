@@ -166,6 +166,16 @@ class GpuVideoTest(unittest.TestCase):
             self.assertEqual(payloads, [b"first", b"second"])
             self.assertEqual(first[:, 0, 0, 0].tolist(), [16, 18, 18])
             self.assertEqual(second[:, 0, 0, 0].tolist(), [51, 53, 53])
+            consumer = torch.cuda.Stream(device=device)
+            with torch.cuda.stream(consumer):
+                third = gpu_video.decode_video_cuda(data, device)
+                self.assertEqual(torch.cuda.current_stream(device), consumer)
+                torch.testing.assert_close(third, second, atol=0, rtol=0)
+            consumer.synchronize()
+            self.assertEqual(codec.CreateDecoder.call_count, 1)
+            self.assertNotEqual(
+                codec.CreateDecoder.call_args.kwargs["cudastream"], consumer.cuda_stream
+            )
             decoder.Decode.side_effect = RuntimeError("broken bitstream")
             with self.assertRaisesRegex(RuntimeError, "broken bitstream"):
                 gpu_video.decode_video_cuda(data, device)
