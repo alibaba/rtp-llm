@@ -43,7 +43,10 @@ from rtp_llm.openai.api_datatype import (
     RoleEnum,
     ToolCall,
 )
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.openai.openai_endpoint import (
+    OpenaiEndpoint,
+    _enabled_without_anchor_warn_key,
+)
 from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderers import custom_renderer
 from rtp_llm.openai.renderers.chatglm45_renderer import ChatGlm45Renderer
@@ -3207,12 +3210,14 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             f"raw_output_collected mismatch\nFull raw_output_collected: {raw_output_collected}\nAll debug_info_chunks: {debug_info_chunks}",
         )
 
+
 class BatchChatConstraintsTest(TestCase):
     """批量入口必须与单请求入口共享 renderer 约束：tool_choice 强制的结构化
     约束不能只在普通 chat 链路生效，否则批量请求会退化为无约束解码。"""
 
     def _make_endpoint(self):
         endpoint = object.__new__(OpenaiEndpoint)
+        endpoint.generate_env_config = GenerateEnvConfig()
         renderer = Mock()
         renderer.apply_chat_completion_constraints = Mock(
             side_effect=lambda request, config: config.structural_tag.update(
@@ -3348,6 +3353,47 @@ class EnabledWithoutAnchorWarningTest(TestCase):
                 thread.join()
 
         self.assertEqual(mock_logging.warning.call_count, 1)
+
+    def test_anchored_enabled_request_skips_tokenizer_and_warning_lock(self):
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+        request = self._make_request(user_template="anchored-template")
+        request.set_prompt_has_think_anchor(True)
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            endpoint._reasoning_format_for_prompt(config, renderer, [1], request)
+
+        endpoint.tokenizer.encode.assert_not_called()
+        mock_logging.warning.assert_not_called()
+
+    def test_warning_cache_is_bounded_and_does_not_retain_template_bodies(self):
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+
+        with patch("rtp_llm.openai.openai_endpoint.logging"):
+            for index in range(160):
+                endpoint._reasoning_format_for_prompt(
+                    config,
+                    renderer,
+                    [1],
+                    self._make_request(user_template=f"template-{index}"),
+                )
+
+        cache = renderer._enabled_without_anchor_warned_keys
+        self.assertEqual(len(cache), 128)
+        oldest_key = _enabled_without_anchor_warn_key(
+            self._make_request(user_template="template-0"), "<think>"
+        )
+        newest_key = _enabled_without_anchor_warn_key(
+            self._make_request(user_template="template-159"), "<think>"
+        )
+        self.assertNotIn(oldest_key, cache)
+        self.assertIn(newest_key, cache)
+        for key in cache:
+            for digest in (key[1], key[2], key[5]):
+                self.assertTrue(digest is None or isinstance(digest, bytes))
+                if digest is not None:
+                    self.assertEqual(len(digest), 32)
 
 
 if __name__ == "__main__":

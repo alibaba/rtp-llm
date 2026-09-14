@@ -113,13 +113,15 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         if recorded is not None:
             return recorded
         try:
-            rendered_result = self.render_chat(request)
+            self.render_chat(request)
         except Exception as e:
             logging.error(f"Failed to render chat while resolving think anchor: {e}")
             return False
-        anchor = self._prompt_ends_with_think_anchor(rendered_result.rendered_prompt)
-        request.set_prompt_has_think_anchor(anchor)
-        return anchor
+        # Renderers own prompt construction and record the anchor against the
+        # actual prompt they produced. In particular, multimodal renderers may
+        # not expose that prompt through RenderedInputs, so do not re-derive it
+        # from the optional transport/debug field here.
+        return request.prompt_has_think_anchor() is True
 
     @override
     def should_process_think(self, request: ChatCompletionRequest):
@@ -131,7 +133,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         self, n: int, request: ChatCompletionRequest
     ) -> List[StreamStatus]:
         """创建状态列表"""
-        if self.needs_reasoning_tool_status(request) and not request.logprobs:
+        if self.needs_reasoning_tool_status(request):
             return [
                 ReasoningToolStreamStatus(
                     request,
@@ -140,9 +142,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                 )
                 for _ in range(n)
             ]
-        else:
-            # logprobs模式下使用普通StreamStatus
-            return [StreamStatus(request) for _ in range(n)]
+        return [StreamStatus(request) for _ in range(n)]
 
     @override
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
@@ -163,10 +163,6 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         """
         context = request.model_dump(exclude_none=True, mode="json")
 
-        # tool_choice=none 时工具对模型不可见：与不带 tools 的请求渲染同一份模板。
-        if not self._effective_tools(request):
-            context.pop("tools", None)
-
         # 默认添加生成提示
         context["add_generation_prompt"] = True
 
@@ -183,6 +179,10 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             and isinstance(request.extra_configs.chat_template_kwargs, dict)
         ):
             context.update(request.extra_configs.chat_template_kwargs)
+
+        # Apply after all user-controlled template kwargs so tool_choice=none
+        # cannot reintroduce tools into the model prompt.
+        self._normalize_tools_context(request, context)
 
         # 创建Jinja2环境
         env = Environment(

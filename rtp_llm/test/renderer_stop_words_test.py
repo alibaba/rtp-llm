@@ -1,11 +1,15 @@
+import json
 import os
-from typing import List
+import tempfile
+from pathlib import Path
+from typing import Any, List
 from unittest import IsolatedAsyncioTestCase, TestCase, main
 from unittest.mock import MagicMock, Mock
 
 import torch
 
 from rtp_llm.config.py_config_modules import GenerateEnvConfig
+from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
@@ -23,6 +27,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
 )
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
+    ReasoningToolStreamStatus,
 )
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
 from rtp_llm.utils.word_util import get_stop_word_slices
@@ -658,7 +663,11 @@ class EncodeExtraStopWordsTest(TestCase):
         tokenizer = Mock()
         tokenizer.all_special_tokens = list(special_token_map)
         tokenizer.convert_tokens_to_ids = Mock(
-            side_effect=lambda tokens: [special_token_map[token] for token in tokens]
+            side_effect=lambda tokens: (
+                special_token_map[tokens]
+                if isinstance(tokens, str)
+                else [special_token_map[token] for token in tokens]
+            )
         )
 
         def encode(word, **kwargs):
@@ -689,6 +698,15 @@ class EncodeExtraStopWordsTest(TestCase):
 
         self.assertEqual(
             self.renderer.encode_extra_stop_words(["<|endoftext|>"]), [[2]]
+        )
+
+    def test_fallback_keeps_special_word_between_bos_and_eos(self):
+        self.renderer.tokenizer = self._legacy_tokenizer(
+            [1, 7, 2], {"<s>": 1, "<|endoftext|>": 7, "</s>": 2}
+        )
+
+        self.assertEqual(
+            self.renderer.encode_extra_stop_words(["<|endoftext|>"]), [[7]]
         )
 
     def test_fallback_without_special_token_metadata_is_unchanged(self):
@@ -807,6 +825,106 @@ class RealRendererStopWordRegistrationTest(TestCase):
     def test_registered_ids_decode_back_to_the_intended_word(self):
         for ids in self.renderer.extra_stop_word_ids_list:
             self.assertEqual(self.tokenizer.decode(ids), "<|endoftext|>")
+
+
+class Qwen35RealTokenizerStopWordRegistrationTest(TestCase):
+    @staticmethod
+    def _special_token(content: str, token_id: int) -> dict[str, Any]:
+        return {
+            "id": token_id,
+            "content": content,
+            "single_word": False,
+            "lstrip": False,
+            "rstrip": False,
+            "normalized": False,
+            "special": True,
+        }
+
+    def _create_tokenizer(self, root: Path) -> Path:
+        tokenizer_path = root / "qwen35_tokenizer"
+        tokenizer_path.mkdir()
+        tokenizer_json = {
+            "version": "1.0",
+            "truncation": None,
+            "padding": None,
+            "added_tokens": [
+                self._special_token("<|endoftext|>", 248044),
+                self._special_token("<|im_start|>", 248045),
+                self._special_token("<|im_end|>", 248046),
+            ],
+            "normalizer": None,
+            "pre_tokenizer": {"type": "WhitespaceSplit"},
+            "post_processor": None,
+            "decoder": None,
+            "model": {
+                "type": "WordLevel",
+                "vocab": {
+                    "<unk>": 0,
+                    "Observation:": 7,
+                    "<|endoftext|>": 248044,
+                    "<|im_start|>": 248045,
+                    "<|im_end|>": 248046,
+                },
+                "unk_token": "<unk>",
+            },
+        }
+        (tokenizer_path / "tokenizer.json").write_text(json.dumps(tokenizer_json))
+        tokenizer_config = {
+            "added_tokens_decoder": {
+                str(token_id): {
+                    "content": content,
+                    "lstrip": False,
+                    "normalized": False,
+                    "rstrip": False,
+                    "single_word": False,
+                    "special": True,
+                }
+                for content, token_id in (
+                    ("<|endoftext|>", 248044),
+                    ("<|im_start|>", 248045),
+                    ("<|im_end|>", 248046),
+                )
+            },
+            "additional_special_tokens": ["<|im_start|>", "<|im_end|>"],
+            "chat_template": "{% for message in messages %}{{ message['content'] }}{% endfor %}",
+            "eos_token": "<|im_end|>",
+            "model_max_length": 32768,
+            "pad_token": "<|endoftext|>",
+            "tokenizer_class": "TokenizersBackend",
+            "unk_token": "<unk>",
+        }
+        (tokenizer_path / "tokenizer_config.json").write_text(
+            json.dumps(tokenizer_config)
+        )
+        (tokenizer_path / "config.json").write_text(
+            json.dumps({"model_type": "qwen3_5"})
+        )
+        return tokenizer_path
+
+    def test_qwen35_registers_248k_stop_ids_from_live_tokenizer(self):
+        from rtp_llm.openai.renderers.qwen35_renderer import Qwen35Renderer
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tokenizer_path = self._create_tokenizer(Path(temp_dir))
+            tokenizer = TokenizerFactory.create(
+                str(tokenizer_path), str(tokenizer_path), "qwen35_dense"
+            )
+            renderer = Qwen35Renderer(
+                tokenizer=tokenizer,
+                renderer_params=RendererParams(
+                    model_type="qwen35_dense",
+                    max_seq_len=32768,
+                    eos_token_id=248046,
+                    stop_word_ids_list=[],
+                ),
+                generate_env_config=GenerateEnvConfig(),
+            )
+
+            self.assertIn([7], renderer.extra_stop_word_ids_list)
+            self.assertIn([248044], renderer.extra_stop_word_ids_list)
+            self.assertNotIn([151643], renderer.extra_stop_word_ids_list)
+            self.assertEqual(tokenizer.decode([7]), "Observation:")
+            self.assertEqual(tokenizer.decode([248044]), "<|endoftext|>")
 
 
 class CreateReasoningParserTest(TestCase):
@@ -1046,7 +1164,9 @@ class NeedsReasoningToolStatusTest(TestCase):
     def _make_renderer(self, in_think_mode):
         renderer = Mock(spec=CustomChatRenderer)
         renderer.in_think_mode = Mock(return_value=in_think_mode)
-        renderer._effective_tools = CustomChatRenderer._effective_tools.__get__(renderer)
+        renderer._effective_tools = CustomChatRenderer._effective_tools.__get__(
+            renderer
+        )
         renderer.needs_reasoning_tool_status = (
             CustomChatRenderer.needs_reasoning_tool_status.__get__(renderer)
         )
@@ -1106,6 +1226,25 @@ class NeedsReasoningToolStatusTest(TestCase):
         self.assertFalse(renderer.needs_reasoning_tool_status(request))
 
 
+class ReasoningStatusWithLogprobsTest(IsolatedAsyncioTestCase):
+    async def test_logprobs_keeps_reasoning_aware_status(self):
+        renderer = Mock(spec=ReasoningToolBaseRenderer)
+        renderer.needs_reasoning_tool_status = Mock(return_value=True)
+        renderer._create_detector = Mock(return_value=None)
+        parser = Mock()
+        renderer._create_reasoning_parser = Mock(return_value=parser)
+        renderer._create_status_list = (
+            ReasoningToolBaseRenderer._create_status_list.__get__(renderer)
+        )
+        request = Mock(logprobs=True)
+
+        statuses = await renderer._create_status_list(1, request)
+
+        self.assertEqual(len(statuses), 1)
+        self.assertIsInstance(statuses[0], ReasoningToolStreamStatus)
+        self.assertIs(statuses[0].reasoning_parser, parser)
+
+
 def _weather_tool() -> GPTToolDefinition:
     return GPTToolDefinition(
         type="function",
@@ -1131,9 +1270,7 @@ class RenderChatRecordsThinkAnchorTest(TestCase):
             "_effective_tools",
             "needs_reasoning_tool_status",
         ):
-            setattr(
-                renderer, name, getattr(CustomChatRenderer, name).__get__(renderer)
-            )
+            setattr(renderer, name, getattr(CustomChatRenderer, name).__get__(renderer))
         renderer._build_prompt = Mock(return_value=prompt)
         renderer.tokenizer = Mock()
         renderer.tokenizer.encode = Mock(return_value=[1, 2, 3])
@@ -1192,6 +1329,7 @@ class ToolChoiceNoneTest(TestCase):
         renderer.chat_template = "{% if tools %}HAS_TOOLS{% else %}NO_TOOLS{% endif %}"
         for name in (
             "_effective_tools",
+            "_normalize_tools_context",
             "_preprocess_messages",
             "_customize_jinja_env",
             "_build_prompt",
@@ -1218,9 +1356,7 @@ class ToolChoiceNoneTest(TestCase):
     def test_prompt_context_hides_disabled_tools(self):
         renderer = self._make_prompt_renderer()
 
-        self.assertEqual(
-            renderer._build_prompt(self._make_request("none")), "NO_TOOLS"
-        )
+        self.assertEqual(renderer._build_prompt(self._make_request("none")), "NO_TOOLS")
         self.assertEqual(
             renderer._build_prompt(self._make_request("auto")), "HAS_TOOLS"
         )
@@ -1239,9 +1375,7 @@ class ToolChoiceNoneTest(TestCase):
         renderer = Mock(spec=CustomChatRenderer)
         renderer.in_think_mode = Mock(return_value=False)
         for name in ("_effective_tools", "needs_reasoning_tool_status"):
-            setattr(
-                renderer, name, getattr(CustomChatRenderer, name).__get__(renderer)
-            )
+            setattr(renderer, name, getattr(CustomChatRenderer, name).__get__(renderer))
 
         self.assertTrue(
             renderer.needs_reasoning_tool_status(self._make_request("auto"))
@@ -1249,6 +1383,52 @@ class ToolChoiceNoneTest(TestCase):
         self.assertFalse(
             renderer.needs_reasoning_tool_status(self._make_request("none"))
         )
+
+    def test_deepseek_v31_hides_tools_and_disables_detector(self):
+        from rtp_llm.openai.renderers.deepseekv31_renderer import (
+            DeepseekV31Renderer,
+        )
+
+        renderer = DeepseekV31Renderer.__new__(DeepseekV31Renderer)
+        renderer.tokenizer = Mock()
+        renderer.tokenizer.bos_token = "<bos>"
+        renderer._setup_chat_template()
+        request = self._make_request("none")
+        request.chat_template_kwargs = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "injected_tool"},
+                }
+            ]
+        }
+
+        prompt = renderer._build_prompt(request)
+
+        self.assertNotIn("get_weather", prompt)
+        self.assertNotIn("injected_tool", prompt)
+        self.assertIsNone(renderer._create_detector(request))
+
+    def test_qwen_vl_template_kwargs_cannot_reintroduce_disabled_tools(self):
+        from rtp_llm.openai.renderers.qwen_vl_renderer import Qwen2VLRenderer
+
+        renderer = Qwen2VLRenderer.__new__(Qwen2VLRenderer)
+        renderer.tokenizer = Mock()
+        renderer.tokenizer.apply_chat_template = Mock(return_value="prompt")
+        request = self._make_request("none")
+        request.chat_template_kwargs = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "injected_tool"},
+                }
+            ]
+        }
+
+        renderer._render_messages(request, add_vision_id=False)
+
+        kwargs = renderer.tokenizer.apply_chat_template.call_args.kwargs
+        self.assertEqual(kwargs["tools"], [])
 
 
 class GlmTojsonFilterTest(TestCase):
@@ -1267,6 +1447,7 @@ class GlmTojsonFilterTest(TestCase):
         renderer.chat_template = template
         for name in (
             "_effective_tools",
+            "_normalize_tools_context",
             "_preprocess_messages",
             "_customize_jinja_env",
             "_build_prompt",
@@ -1304,7 +1485,9 @@ class GlmTojsonFilterTest(TestCase):
         # GLM4.5 模板未使用这些 kwargs，故无行为变化；这里锁定基类的透传语义。
         template = "{{ value | tojson(sort_keys=True, separators=(',', ':')) }}"
 
-        self.assertEqual(self._render_value({"b": 1, "a": 2}, template), '{"a":2,"b":1}')
+        self.assertEqual(
+            self._render_value({"b": 1, "a": 2}, template), '{"a":2,"b":1}'
+        )
 
 
 if __name__ == "__main__":

@@ -278,7 +278,32 @@ def prepare_response_format(
     if _uses_reasoning_envelope(config):
         config._reasoning_envelope_applied = True
         config._reasoning_final_constraint = plan.final_constraint
+        config._reasoning_format = reasoning_format
     return plan.final_constraint
+
+
+def recompile_reasoning_envelope(config: Any) -> None:
+    """Rebuild an installed reasoning envelope after its budget changes.
+
+    Prompt length is only known at the backend boundary, after the original
+    request-level grammar has been compiled. Keep the saved final constraint
+    and reasoning syntax as the source for a fresh envelope so the scalar
+    budget and the grammar consumed by the engine cannot diverge.
+    """
+
+    if not config._reasoning_envelope_applied:
+        validate_engine_ready(config)
+        return
+
+    reasoning_format = config._reasoning_format
+    if reasoning_format is None:
+        raise FtRuntimeException(
+            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+            "installed reasoning grammar is missing its reasoning format",
+        )
+    final_constraint = config._reasoning_final_constraint
+    restore_final_constraint(config, final_constraint)
+    prepare_response_format(config, reasoning_format=reasoning_format)
 
 
 def validate_engine_ready(config: Any) -> None:
@@ -307,6 +332,7 @@ def restore_final_constraint(
     config.response_format = None
     config._reasoning_envelope_applied = False
     config._reasoning_final_constraint = None
+    config._reasoning_format = None
     if constraint is None:
         GrammarConstraint.clear_from_config(config)
     else:
