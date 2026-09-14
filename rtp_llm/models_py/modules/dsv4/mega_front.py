@@ -17,7 +17,9 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_weights import (
 )
 
 if TYPE_CHECKING:
-    from .moe_layer import MoE
+    from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+        ChunkedFp8Fp4MoeLayer,
+    )
 
 
 _TOPK = 6
@@ -59,7 +61,7 @@ class MegaMoeFrontAdapter:
 
     def __init__(
         self,
-        moe: "MoE",
+        moe: "ChunkedFp8Fp4MoeLayer",
         ffn_hc,
         ffn_norm,
         *,
@@ -67,12 +69,12 @@ class MegaMoeFrontAdapter:
     ) -> None:
         from rtp_kernel import dsv4_mega
 
-        strategy = moe._strategy
-        if getattr(strategy, "name", "") != "mega_se":
+        if moe.strategy_name != "mega_moe_se":
             raise RuntimeError(
                 "DSV4 MoE front requires the MegaMoE-SE strategy; "
-                f"selected strategy={getattr(strategy, 'name', '<unknown>')!r}"
+                f"selected strategy={moe.strategy_name!r}"
             )
+        strategy = moe.fused_moe.fused_experts
 
         self.layer_id = int(moe.layer_id)
         self.dim = int(moe.dim)
@@ -87,8 +89,8 @@ class MegaMoeFrontAdapter:
             "hidden": self.dim,
             "hc_mult": HC,
             "hc_width": HC_MIX,
-            "experts": int(moe.n_routed_experts),
-            "topk": int(moe.n_activated_experts),
+            "experts": int(self.gate.weight.shape[0]),
+            "topk": int(self.gate.topk),
             "max_m": MAX_BATCH,
         }
         mismatches = {
@@ -130,7 +132,7 @@ class MegaMoeFrontAdapter:
         )
         self.normalized = torch.empty_like(self.collapsed)
         self.router_logits = torch.empty(
-            (MAX_BATCH, int(moe.n_routed_experts)),
+            (MAX_BATCH, expected["experts"]),
             dtype=torch.float32,
             device=device,
         )
@@ -169,7 +171,7 @@ class MegaMoeFrontAdapter:
         if self.layer_id == 0:
             logging.info(
                 "[DSV4 MoE front] enabled: geometry=%s gen_num_per_cycle=%d "
-                "strategy=mega_se",
+                "strategy=mega_moe_se",
                 geometry,
                 self._gen_num_per_cycle,
             )

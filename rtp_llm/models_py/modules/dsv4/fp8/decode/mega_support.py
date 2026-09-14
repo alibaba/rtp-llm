@@ -343,8 +343,8 @@ def mega_decode_unavailable_reason(args: Any, device: torch.device) -> Optional[
         return "FP8 KV cache is required"
     if int(args.tp_size) != 1:
         return f"TP1 is required, got TP{args.tp_size}"
-    if os.environ.get("DSV4_GATE_FP32", "0") == "1":
-        return "DSV4_GATE_FP32=1 requires the ordinary DSV4 path"
+    if os.environ.get("MOE_GATE_FP32", "0") == "1":
+        return "MOE_GATE_FP32=1 requires the ordinary DSV4 path"
     geometry_reason = _model_geometry_reason(args)
     if geometry_reason is not None:
         return geometry_reason

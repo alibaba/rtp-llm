@@ -17,7 +17,6 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules import RMSNorm
-from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, HCA_STATE, SWA_KV
 from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
     dequantize_slots_to_bf16,
 )
@@ -44,11 +43,12 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_hca_weights import (
     HCA_STATE_WIDTH,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.mega_attention_test_utils import (
+    TaggedKVCache,
     check_dynamic_graph_replays,
     slots_from_block_table,
 )
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
-from rtp_llm.ops.compute_ops import CacheGroupType, KVCache, KVCacheRegionName
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import HCA_KV, HCA_STATE, SWA_KV
 from rtp_llm.test.utils.numeric_util import calc_diff
 from rtp_llm.utils.model_weight import W
 
@@ -61,7 +61,6 @@ _SWA_ENTRIES_PER_BLOCK = 128
 _HCA_STATE_ENTRIES_PER_BLOCK = 128
 _KV_ENTRY_BYTES = 584
 _KV_BLOCK_ALIGNMENT_BYTES = 576
-_REGION_COUNT = 8
 _O_LORA_RANK = 1024
 _ROPE_DIM = 64
 
@@ -164,11 +163,11 @@ class _AttentionBlock(torch.nn.Module):
 
 @dataclass
 class _Pools:
-    kv_cache: KVCache
-    tensors: dict[int, torch.Tensor]
-    block_tables: dict[int, torch.Tensor]
-    entries_per_block: dict[int, int]
-    tokens_per_block: dict[int, int]
+    kv_cache: TaggedKVCache
+    tensors: dict[str, torch.Tensor]
+    block_tables: dict[str, torch.Tensor]
+    entries_per_block: dict[str, int]
+    tokens_per_block: dict[str, int]
     max_seq_len: int
 
     def reset(self) -> None:
@@ -183,7 +182,7 @@ class _Pools:
         state[..., HCA_STATE_WIDTH:].fill_(float("-inf"))
 
     def packed_view(
-        self, attn_type: int, entries_per_block: int, entry_bytes: int
+        self, attn_type: str, entries_per_block: int, entry_bytes: int
     ) -> torch.Tensor:
         raw = self.tensors[attn_type]
         return raw.as_strided(
@@ -246,31 +245,7 @@ def _make_pools(
     }
     tokens = {attn_type: _TOKENS_PER_BLOCK for attn_type in entries}
 
-    kv_cache = KVCache()
-    kv_cache.seq_size_per_block = _TOKENS_PER_BLOCK
-    kv_cache.kernel_seq_size_per_block = _TOKENS_PER_BLOCK
-    kv_cache.layer_group_types = [CacheGroupType.FULL]
-    kv_cache.group_region_names = [
-        KVCacheRegionName.CSA_KV,
-        KVCacheRegionName.HCA_KV,
-        KVCacheRegionName.INDEXER_KV,
-        KVCacheRegionName.INDEXER_STATE,
-        KVCacheRegionName.CSA_STATE,
-        KVCacheRegionName.HCA_STATE,
-        KVCacheRegionName.SWA_KV,
-    ]
-    kv_cache.group_seq_size_per_block = [_TOKENS_PER_BLOCK] * 7
-    region_to_group = [-1] * _REGION_COUNT
-    region_to_group[HCA_KV] = 1
-    region_to_group[HCA_STATE] = 5
-    region_to_group[SWA_KV] = 6
-    kv_cache.layer_region_to_group_id = [region_to_group]
-    empty = torch.empty(0, dtype=torch.uint8, device=device)
-    by_region = [empty] * _REGION_COUNT
-    for attn_type, tensor in tensors.items():
-        by_region[attn_type] = tensor
-    kv_cache.kv_cache_base_by_layer_region = [by_region]
-    kv_cache.kv_cache_base_by_layer = [tensors[SWA_KV]]
+    kv_cache = TaggedKVCache(tensors, _TOKENS_PER_BLOCK)
 
     pools = _Pools(kv_cache, tensors, block_tables, entries, tokens, max_seq_len)
     pools.reset()

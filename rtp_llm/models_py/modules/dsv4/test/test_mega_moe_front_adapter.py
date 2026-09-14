@@ -5,7 +5,7 @@ from unittest import mock
 import torch
 
 from rtp_llm.models_py.modules.dsv4.block import Block
-from rtp_llm.models_py.modules.dsv4.moe.mega_front import (
+from rtp_llm.models_py.modules.dsv4.mega_front import (
     MegaMoeFrontAdapter,
     _capture_tokens_for_batches,
 )
@@ -91,14 +91,14 @@ def _fake_adapter(dim: int = 128) -> tuple[MegaMoeFrontAdapter, _FakePlan]:
 class MegaMoeFrontAdapterTest(unittest.TestCase):
     def test_front_is_attached_when_explicitly_enabled_for_mega_se(self) -> None:
         block = SimpleNamespace(
-            ffn=SimpleNamespace(_strategy=SimpleNamespace(name="mega_se")),
+            ffn=SimpleNamespace(strategy_name="mega_moe_se"),
             ffn_hc="hc",
             ffn_norm="norm",
             _mega_front_adapter=None,
         )
         adapter = object()
         with mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.mega_front.MegaMoeFrontAdapter",
+            "rtp_llm.models_py.modules.dsv4.mega_front.MegaMoeFrontAdapter",
             return_value=adapter,
         ) as adapter_cls:
             Block.enable_mega_front(block)
@@ -110,13 +110,13 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
 
     def test_front_is_not_attached_to_non_mega_strategy(self) -> None:
         block = SimpleNamespace(
-            ffn=SimpleNamespace(_strategy=SimpleNamespace(name="local_loop")),
+            ffn=SimpleNamespace(strategy_name="local_loop"),
             ffn_hc="hc",
             ffn_norm="norm",
             _mega_front_adapter=None,
         )
         with mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.mega_front.MegaMoeFrontAdapter"
+            "rtp_llm.models_py.modules.dsv4.mega_front.MegaMoeFrontAdapter"
         ) as adapter_cls:
             Block.enable_mega_front(block)
 
@@ -125,19 +125,21 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
 
     def test_required_front_rejects_non_mega_se_strategy(self) -> None:
         block = SimpleNamespace(
-            ffn=SimpleNamespace(_strategy=SimpleNamespace(name="mega")),
+            ffn=SimpleNamespace(strategy_name="mega_moe"),
             ffn_hc="hc",
             ffn_norm="norm",
             _mega_front_adapter=None,
         )
 
-        with self.assertRaisesRegex(RuntimeError, "requires the mega_se MoE strategy"):
+        with self.assertRaisesRegex(
+            RuntimeError, "requires the mega_moe_se MoE strategy"
+        ):
             Block.enable_mega_front(block, required=True)
 
     def test_front_is_not_attached_for_unsupported_score_func(self) -> None:
         block = SimpleNamespace(
             ffn=SimpleNamespace(
-                _strategy=SimpleNamespace(name="mega_se"),
+                strategy_name="mega_moe_se",
                 gate=SimpleNamespace(score_func="softmax"),
             ),
             ffn_hc="hc",
@@ -145,7 +147,7 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             _mega_front_adapter=None,
         )
         with mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.mega_front.MegaMoeFrontAdapter"
+            "rtp_llm.models_py.modules.dsv4.mega_front.MegaMoeFrontAdapter"
         ) as adapter_cls:
             Block.enable_mega_front(block)
 
@@ -155,7 +157,7 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
     def test_required_front_rejects_unsupported_score_func(self) -> None:
         block = SimpleNamespace(
             ffn=SimpleNamespace(
-                _strategy=SimpleNamespace(name="mega_se"),
+                strategy_name="mega_moe_se",
                 gate=SimpleNamespace(score_func="sigmoid"),
             ),
             ffn_hc="hc",

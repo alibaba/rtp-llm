@@ -274,11 +274,11 @@ class Block(nn.Module):
         self, *, required: bool = False, gen_num_per_cycle: int = 0
     ) -> None:
         """Attach the CUDA-extension MoE front to a MegaMoE-SE decode layer."""
-        strategy_name = getattr(self.ffn._strategy, "name", "")
-        if strategy_name != "mega_se":
+        strategy_name = self.ffn.strategy_name
+        if strategy_name != "mega_moe_se":
             if required:
                 raise RuntimeError(
-                    "DSV4 Mega decode with EP>1 requires the mega_se MoE strategy, "
+                    "DSV4 Mega decode with EP>1 requires the mega_moe_se MoE strategy, "
                     f"got {strategy_name or 'unknown'!r}"
                 )
             return
@@ -297,7 +297,7 @@ class Block(nn.Module):
                 score_func,
             )
             return
-        from rtp_llm.models_py.modules.dsv4.moe.mega_front import MegaMoeFrontAdapter
+        from rtp_llm.models_py.modules.dsv4.mega_front import MegaMoeFrontAdapter
 
         self._mega_front_adapter = MegaMoeFrontAdapter(
             self.ffn,

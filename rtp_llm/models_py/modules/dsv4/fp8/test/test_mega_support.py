@@ -218,12 +218,12 @@ class MegaSupportTest(unittest.TestCase):
             self.assertIn(f"expected {expected}", reason or "")
 
     def test_fp32_gate_requires_the_ordinary_path(self) -> None:
-        with patch.dict(os.environ, {"DSV4_GATE_FP32": "1"}):
+        with patch.dict(os.environ, {"MOE_GATE_FP32": "1"}):
             reason = mega_decode_unavailable_reason(
                 V4Args(ep_size=8), torch.device("cuda:0")
             )
 
-        self.assertEqual(reason, "DSV4_GATE_FP32=1 requires the ordinary DSV4 path")
+        self.assertEqual(reason, "MOE_GATE_FP32=1 requires the ordinary DSV4 path")
 
     def test_incompatible_attention_signature_is_reported_at_startup(self) -> None:
         extension = _supported_extension()

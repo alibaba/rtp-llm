@@ -172,7 +172,7 @@ class MegaCSARuntime:
         return torch.empty(m, width, dtype=torch.float32, device=device)
 
     def slot_mappings(self, metadata: Any, m: int) -> MegaCSASlotMappings:
-        from rtp_llm.models_py.modules.dsv4.attn_type import (
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
             CSA_KV,
             CSA_STATE,
             INDEXER_KV,
@@ -319,7 +319,11 @@ class MegaCSARuntime:
         )
 
     def hca_slot_mappings(self, metadata: Any, m: int) -> MegaHCASlotMappings:
-        from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, HCA_STATE, SWA_KV
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+            HCA_KV,
+            HCA_STATE,
+            SWA_KV,
+        )
 
         if self._metadata_id != id(metadata):
             raise RuntimeError(

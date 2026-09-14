@@ -57,7 +57,7 @@ def _block_stub(adapter: object | None) -> Block:
     block.ffn_hc = MagicMock()
     block.ffn_hc.pre.side_effect = block.attn_hc.pre.side_effect
     block.ffn_hc.post.side_effect = lambda value, *_args: value.unsqueeze(-2)
-    block.ffn = MagicMock(side_effect=lambda value, _input_ids: value)
+    block.ffn = MagicMock(side_effect=lambda value, _input_ids, **_kwargs: value)
     return block
 
 
@@ -650,7 +650,7 @@ class _FakeSource:
 class MegaCSARuntimeTest(unittest.TestCase):
     @staticmethod
     def _metadata(pointer_base: int, is_cuda_graph: bool = False):
-        from rtp_llm.models_py.modules.dsv4.attn_type import (
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
             CSA_KV,
             CSA_STATE,
             INDEXER_KV,

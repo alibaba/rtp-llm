@@ -139,7 +139,7 @@ class MegaCSAAdapter:
         metadata: Any,
         token_count: int,
     ) -> MegaCSAPoolContext:
-        from rtp_llm.models_py.modules.dsv4.attn_type import (
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
             CSA_KV,
             CSA_STATE,
             INDEXER_KV,
@@ -170,7 +170,7 @@ class MegaCSAAdapter:
         assert swa_cache is not None
         batch_size = int(metadata.batch_size)
 
-        def require_block_table(attn_type: int, name: str) -> torch.Tensor:
+        def require_block_table(attn_type: str, name: str) -> torch.Tensor:
             table = metadata.pool_block_tables.get(attn_type)
             if table is None or int(table.shape[0]) < batch_size:
                 raise RuntimeError(f"DSV4 mega metadata is missing {name} block table")
@@ -295,11 +295,11 @@ class MegaCSAAdapter:
     ) -> torch.Tensor:
         g = self._geometry
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import tf32_hc_prenorm_gemm
-        from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
             get_or_build_sched_meta,
         )
         from rtp_llm.models_py.modules.dsv4.fp8.indexer import _get_topk_workspace
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import CSA_KV, SWA_KV
         from rtp_llm.ops.compute_ops import rtp_llm_ops
 
         attn = block.attn

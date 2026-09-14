@@ -162,25 +162,21 @@ test_suite(
     ],
 )
 
-py_test(
+dsv4_sm100_py_test(
     name = "test_mega_csa_rtp_eager",
-    srcs = ["test_mega_csa_rtp_eager.py", "mega_attention_test_utils.py"],
+    extra_srcs = ["mega_attention_test_utils.py"],
     deps = _DSV4_FP8_TEST_DEPS + [
         "//rtp_llm:deep_gemm",
     ],
-    tags = ["SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
     timeout = "long",
 )
 
-py_test(
+dsv4_sm100_py_test(
     name = "test_mega_hca_rtp_eager",
-    srcs = ["test_mega_hca_rtp_eager.py", "mega_attention_test_utils.py"],
+    extra_srcs = ["mega_attention_test_utils.py"],
     deps = _DSV4_FP8_TEST_DEPS + [
         "//rtp_llm:deep_gemm",
     ],
-    tags = ["SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
     timeout = "long",
 )
 

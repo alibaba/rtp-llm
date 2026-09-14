@@ -2,13 +2,34 @@
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
 from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
     allocate_decode_metadata_fp8,
     update_decode_metadata_in_place_fp8,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_weights import HC, MQA_SPLIT_KV
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
+from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.test.utils.numeric_util import calc_diff
+
+
+class TaggedKVCache:
+    """Python-owned test pools exposing the native per-layer tag interface."""
+
+    def __init__(self, tensors: dict[str, torch.Tensor], tokens_per_block: int):
+        self.layers = {
+            tag: LayerKVCache(tensor, tokens_per_block, 0, group_id, tag)
+            for group_id, (tag, tensor) in enumerate(tensors.items())
+        }
+
+    def get_layer_cache(self, layer_id: int, tag: str) -> LayerKVCache:
+        assert layer_id == 0
+        return self.layers[tag]
+
+    def get_seq_size_per_block(self, tag: str) -> int:
+        return self.layers[tag].seq_size_per_block
+
+    def get_kernel_seq_size_per_block(self, tag: str) -> int:
+        return self.get_seq_size_per_block(tag)
 
 
 def slots_from_block_table(block_table: torch.Tensor, entries: int) -> torch.Tensor:

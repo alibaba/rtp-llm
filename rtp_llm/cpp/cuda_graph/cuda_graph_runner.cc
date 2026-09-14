@@ -1779,7 +1779,7 @@ void CudaGraphRunner::initCapture() {
         // does not duplicate capture-config or default-bucket parsing. Draft
         // prefill graphs use sequence buckets but execute a fixed-width decode;
         // convert those buckets back to their corresponding batch sizes.
-        const bool draft_prefill_graph_mode = is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
+        const bool draft_prefill_graph_mode = isMtpDraftPrefillCudaGraph();
         if (!is_prefill_cuda_graph_mode_ || draft_prefill_graph_mode) {
             py::gil_scoped_acquire gil;
             if (py::hasattr(py_instance_, "prepare_mega_capture_plans")) {

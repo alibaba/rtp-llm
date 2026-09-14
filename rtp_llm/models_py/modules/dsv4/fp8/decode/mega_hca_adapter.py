@@ -117,7 +117,11 @@ class MegaHCAAdapter:
         metadata: Any,
         token_count: int,
     ) -> MegaHCAPoolContext:
-        from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, HCA_STATE, SWA_KV
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+            HCA_KV,
+            HCA_STATE,
+            SWA_KV,
+        )
 
         attn = block.attn
         state = attn._pool_view(HCA_STATE)
@@ -232,10 +236,10 @@ class MegaHCAAdapter:
     ) -> torch.Tensor:
         g = self._geometry
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import tf32_hc_prenorm_gemm
-        from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
             get_or_build_sched_meta,
         )
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import HCA_KV, SWA_KV
 
         attn = block.attn
         batch_size, q_len = int(hidden.shape[0]), int(hidden.shape[1])

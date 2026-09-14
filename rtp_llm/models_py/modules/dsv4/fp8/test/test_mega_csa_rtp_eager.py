@@ -2,8 +2,7 @@
 
 This intentionally builds one real AttentionFP8 layer with deterministic
 random weights instead of loading a complete DSV4 checkpoint.  The cache is
-the framework's pybind KVCache object populated with production-shaped typed
-regions.  The reference is the original attention branch in
+backed by native LayerKVCache objects and production-shaped tagged pools.  The reference is the original attention branch in
 ``Block.forward_decode`` (mHC pre, RMSNorm, AttentionFP8, mHC post), with an
 independent but identically initialized cache.
 """
@@ -18,13 +17,6 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules import RMSNorm
-from rtp_llm.models_py.modules.dsv4.attn_type import (
-    CSA_KV,
-    CSA_STATE,
-    INDEXER_KV,
-    INDEXER_STATE,
-    SWA_KV,
-)
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     dequantize_indexer_k,
     quantize_indexer_k,
@@ -53,11 +45,18 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_weights import (
     CSAGeometry,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.mega_attention_test_utils import (
+    TaggedKVCache,
     check_dynamic_graph_replays,
     slots_from_block_table,
 )
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
-from rtp_llm.ops.compute_ops import CacheGroupType, KVCache, KVCacheRegionName
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+    CSA_KV,
+    CSA_STATE,
+    INDEXER_KV,
+    INDEXER_STATE,
+    SWA_KV,
+)
 from rtp_llm.test.utils.numeric_util import calc_diff
 from rtp_llm.utils.model_weight import W
 
@@ -70,7 +69,6 @@ _STATE_ENTRIES_PER_BLOCK = 8
 _KV_ENTRY_BYTES = 584
 _INDEXER_ENTRY_BYTES = 132
 _KV_BLOCK_ALIGNMENT_BYTES = 576
-_REGION_COUNT = 8
 _O_LORA_RANK = 1024
 
 
@@ -187,11 +185,11 @@ class _AttentionBlock(torch.nn.Module):
 
 @dataclass
 class _Pools:
-    kv_cache: KVCache
-    tensors: dict[int, torch.Tensor]
-    block_tables: dict[int, torch.Tensor]
-    entries_per_block: dict[int, int]
-    tokens_per_block: dict[int, int]
+    kv_cache: TaggedKVCache
+    tensors: dict[str, torch.Tensor]
+    block_tables: dict[str, torch.Tensor]
+    entries_per_block: dict[str, int]
+    tokens_per_block: dict[str, int]
     max_seq_len: int
 
     def reset(self) -> None:
@@ -212,7 +210,7 @@ class _Pools:
         indexer[..., 2 * INDEX_HEAD_DIM :].fill_(float("-inf"))
 
     def packed_view(
-        self, attn_type: int, entries_per_block: int, entry_bytes: int
+        self, attn_type: str, entries_per_block: int, entry_bytes: int
     ) -> torch.Tensor:
         raw = self.tensors[attn_type]
         return raw.as_strided(
@@ -291,33 +289,7 @@ def _make_pools(
     }
     tokens = {attn_type: _TOKENS_PER_BLOCK for attn_type in entries}
 
-    kv_cache = KVCache()
-    kv_cache.seq_size_per_block = _TOKENS_PER_BLOCK
-    kv_cache.kernel_seq_size_per_block = _TOKENS_PER_BLOCK
-    kv_cache.layer_group_types = [CacheGroupType.FULL]
-    kv_cache.group_region_names = [
-        KVCacheRegionName.CSA_KV,
-        KVCacheRegionName.HCA_KV,
-        KVCacheRegionName.INDEXER_KV,
-        KVCacheRegionName.INDEXER_STATE,
-        KVCacheRegionName.CSA_STATE,
-        KVCacheRegionName.HCA_STATE,
-        KVCacheRegionName.SWA_KV,
-    ]
-    kv_cache.group_seq_size_per_block = [_TOKENS_PER_BLOCK] * 7
-    region_to_group = [-1] * _REGION_COUNT
-    region_to_group[CSA_KV] = 0
-    region_to_group[INDEXER_KV] = 2
-    region_to_group[INDEXER_STATE] = 3
-    region_to_group[CSA_STATE] = 4
-    region_to_group[SWA_KV] = 6
-    kv_cache.layer_region_to_group_id = [region_to_group]
-    empty = torch.empty(0, dtype=torch.uint8, device=device)
-    by_region = [empty] * _REGION_COUNT
-    for attn_type, tensor in tensors.items():
-        by_region[attn_type] = tensor
-    kv_cache.kv_cache_base_by_layer_region = [by_region]
-    kv_cache.kv_cache_base_by_layer = [tensors[SWA_KV]]
+    kv_cache = TaggedKVCache(tensors, _TOKENS_PER_BLOCK)
 
     pools = _Pools(kv_cache, tensors, block_tables, entries, tokens, max_seq_len)
     pools.reset()
