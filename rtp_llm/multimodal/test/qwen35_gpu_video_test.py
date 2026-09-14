@@ -64,18 +64,22 @@ class GpuVideoTest(unittest.TestCase):
                 ),
             )
         ]
-        with mock.patch("av.open", return_value=container), mock.patch(
-            "torch.cuda.init", side_effect=AssertionError("CPU worker initialized CUDA")
+        with (
+            mock.patch("av.open", return_value=container),
+            mock.patch(
+                "torch.cuda.init",
+                side_effect=AssertionError("CPU worker initialized CUDA"),
+            ),
         ):
             data, grid = prepare_gpu_video(
                 b"compressed", self.configs(), self.processor(), 32
             )
         self.assertEqual(
             data.frame_indices,
-            tuple(torch.linspace(0, 232, 14).round().long().tolist()),
+            (0, 17, 33, 50, 66, 83, 99, 116, 133, 149, 166, 182, 199, 215, 232),
         )
-        self.assertEqual(grid.tolist(), [[7, 36, 64]])
-        self.assertEqual(data.shape, (16128, 1536))
+        self.assertEqual(grid.tolist(), [[8, 44, 80]])
+        self.assertEqual(data.shape, (28160, 1536))
         self.assertEqual(pickle.loads(pickle.dumps(data)), data)
         self.assertEqual(grid.device.type, "cpu")
         self.assertGreater(data.workspace_bytes, 94 * 1024 * 1024)

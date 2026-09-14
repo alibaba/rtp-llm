@@ -341,6 +341,9 @@ class VitConfig:
         self.mm_video_max_file_size_kb: int = (
             VitConfig.DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB
         )
+        # Qwen3-VL/Qwen3.5 total-video pixel budgets; 0 inherits the model.
+        self.mm_video_total_min_pixels: int = 0
+        self.mm_video_total_max_pixels: int = 0
         self.mm_cache_item_num: int = 10
         self.url_cache_item_num: int = 100
         self.use_igraph_cache: bool = True
@@ -417,6 +420,8 @@ class VitConfig:
             f"download_headers: {self.download_headers}\n"
             f"mm_image_max_file_size_kb: {self.mm_image_max_file_size_kb}\n"
             f"mm_video_max_file_size_kb: {self.mm_video_max_file_size_kb}\n"
+            f"mm_video_total_min_pixels: {self.mm_video_total_min_pixels}\n"
+            f"mm_video_total_max_pixels: {self.mm_video_total_max_pixels}\n"
             f"mm_cache_item_num: {self.mm_cache_item_num}\n"
             f"url_cache_item_num: {self.url_cache_item_num}\n"
             f"use_igraph_cache: {self.use_igraph_cache}\n"

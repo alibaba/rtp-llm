@@ -117,6 +117,12 @@ py_test(
 )
 
 py_test(
+    name = "qwen3_video_preprocess_test",
+    srcs = ["qwen3_video_preprocess_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "qwen35_video_batch_test",
     srcs = ["qwen35_video_batch_test.py"],
     deps = ["//rtp_llm:testlib"],

@@ -14,6 +14,31 @@ from rtp_llm.utils.backend_registry import register_backend_hook
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
 
+    def test_qwen3_video_total_pixel_budget_args(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            defaults = server_args.setup_args([]).vit_config
+            self.assertEqual(defaults.mm_video_total_min_pixels, 0)
+            self.assertEqual(defaults.mm_video_total_max_pixels, 0)
+            configured = server_args.setup_args(
+                [
+                    "--mm_video_total_min_pixels",
+                    "2500000",
+                    "--mm_video_total_max_pixels",
+                    "73728000",
+                ]
+            ).vit_config
+            self.assertEqual(configured.mm_video_total_min_pixels, 2500000)
+            self.assertEqual(configured.mm_video_total_max_pixels, 73728000)
+        with patch.dict(
+            os.environ, {"MM_VIDEO_TOTAL_MAX_PIXELS": "73728000"}, clear=True
+        ):
+            self.assertEqual(
+                server_args.setup_args([]).vit_config.mm_video_total_max_pixels,
+                73728000,
+            )
+
     def test_dsv4_mega_moe_public_choices(self):
         from rtp_llm.server.server_args import server_args
 

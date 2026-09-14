@@ -105,15 +105,15 @@ class Qwen35VideoBatchTest(unittest.TestCase):
         with mock.patch(
             module + ".get_bytes_io_from_url", return_value=io.BytesIO(b"video")
         ):
-            with mock.patch.object(
-                Qwen3_VLImageEmbedding, "load_video", return_value=video
+            with mock.patch(
+                module + ".decode_video", return_value=(video, None)
             ) as load:
                 pixels, grid = Qwen3_VLImageEmbedding.preprocess_input(
                     [item], VitConfig(), processor, factor=32
                 )
         self.assertEqual(grid.tolist(), [[7, 4, 4]])
         self.assertEqual(pixels.shape[0], 112)
-        self.assertEqual(load.call_args.kwargs["factor"], 32)
+        self.assertIs(load.call_args.args[1], item.mm_preprocess_config)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_auto_backend_keeps_fp32_on_sdpa(self):

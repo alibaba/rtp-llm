@@ -161,6 +161,22 @@ def init_vit_group_args(parser, vit_config):
         help="视频文件大小上限，单位为KB",
     )
     vit_group.add_argument(
+        "--mm_video_total_min_pixels",
+        env_name="MM_VIDEO_TOTAL_MIN_PIXELS",
+        bind_to=(vit_config, "mm_video_total_min_pixels"),
+        type=_non_negative_int,
+        default=0,
+        help="Qwen3-VL/Qwen3.5 total video pixel min budget (frames*height*width); 0 inherits the model",
+    )
+    vit_group.add_argument(
+        "--mm_video_total_max_pixels",
+        env_name="MM_VIDEO_TOTAL_MAX_PIXELS",
+        bind_to=(vit_config, "mm_video_total_max_pixels"),
+        type=_non_negative_int,
+        default=0,
+        help="Qwen3-VL/Qwen3.5 total video pixel max budget (frames*height*width); 0 inherits the model",
+    )
+    vit_group.add_argument(
         "--mm_cache_item_num",
         env_name="MM_CACHE_ITEM_NUM",
         bind_to=(vit_config, "mm_cache_item_num"),
