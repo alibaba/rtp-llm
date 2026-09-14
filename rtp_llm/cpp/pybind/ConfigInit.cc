@@ -552,7 +552,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      6,
+                                      7,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -623,9 +623,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 const py::tuple event_state = t;
-                const bool has_event_fields = t.size() == 69;
+                const bool has_event_fields = t.size() == 69 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 7;
                 if (has_event_fields) {
                     t = t[py::slice(0, 64, 1)].cast<py::tuple>();
+                    t[1] = py::int_(6);
                 }
                 constexpr size_t kLegacyFieldCount               = 55;
                 constexpr size_t kQueueConfigFieldCount          = 64;

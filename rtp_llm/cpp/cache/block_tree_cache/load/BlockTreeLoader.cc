@@ -567,6 +567,7 @@ bool BlockTreeLoader::changeTransferState(TreeNode*             node,
         return false;
     }
     resource.transfer_state = target_state;
+    tree_->refreshPublishedState(node);
     return true;
 }
 
