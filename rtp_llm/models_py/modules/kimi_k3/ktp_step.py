@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 from dataclasses import dataclass
 from enum import IntEnum
-import logging
 from typing import Iterable, Sequence
 
 import torch
@@ -14,6 +16,7 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 
 logger = logging.getLogger(__name__)
 _LOGGED_STEP_PLANS: set[tuple[object, ...]] = set()
+_SMOKE_STEP = 0
 
 
 class KtpForwardMode(IntEnum):
@@ -36,6 +39,33 @@ class KtpStepPlan:
 
 
 def _log_step_plan_once(plan: KtpStepPlan) -> None:
+    global _SMOKE_STEP
+    if (
+        os.environ.get("KIMI_K3_SMOKE_EVIDENCE") == "1"
+        and len(plan.valid_batch_sizes) == 8
+        and any(plan.valid_batch_sizes)
+    ):
+        # Opt-in host-side evidence; no device synchronization or graph changes.
+        # Empty polling steps continue after the suite ends. Excluding them
+        # leaves a stable sequence of request-bearing steps for all-rank checks.
+        logger.info(
+            "[K3_SMOKE_EVENT] %s",
+            json.dumps(
+                {
+                    "kind": "ktp",
+                    "rank": torch.distributed.get_rank(),
+                    "step": _SMOKE_STEP,
+                    "valid": list(plan.valid_batch_sizes),
+                    "physical": plan.common_physical_batch,
+                    "bucket": plan.common_graph_bucket,
+                    "graph": plan.use_cuda_graph,
+                    "mode": plan.forward_mode.name,
+                    "tokens": plan.tokens_per_batch,
+                },
+                sort_keys=True,
+            ),
+        )
+        _SMOKE_STEP += 1
     key = (
         plan.valid_batch_sizes,
         plan.common_physical_batch,

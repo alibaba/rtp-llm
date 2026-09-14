@@ -11,6 +11,7 @@ from example.k3.kimi_k3_full_model_pd_cases import (
     Case,
     Runner,
     SmokeFailure,
+    TransportFailure,
     main,
     numbered_answer_pattern,
     parse_args,
@@ -61,6 +62,8 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
             args.output = pathlib.Path(tmp) / "accuracy.json"
             module = "example.k3.kimi_k3_full_model_pd_cases"
             with (
+                mock.patch.object(Runner, "run_prefix_branches"),
+                mock.patch.object(Runner, "run_padding_boundaries"),
                 mock.patch(module + ".parse_args", return_value=args),
                 mock.patch.object(Runner, "run_stage"),
                 mock.patch.object(Runner, "health", autospec=True),
@@ -156,7 +159,7 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
             mock.patch.object(
                 runner,
                 "request_cases",
-                side_effect=[SmokeFailure("first connect failed"), records],
+                side_effect=[TransportFailure("first connect failed"), records],
             ) as request_cases,
         ):
             runner.prewarm_rdma_pool()
@@ -183,17 +186,26 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
             mock.patch.object(
                 runner,
                 "request_cases",
-                side_effect=SmokeFailure("connect failed"),
+                side_effect=TransportFailure("connect failed"),
             ),
         ):
             with self.assertRaisesRegex(SmokeFailure, "failed after 2 attempts"):
                 runner.prewarm_rdma_pool()
 
     def test_tp_only_owner_count_must_be_explicit_and_match(self) -> None:
-        argv = ["cases", "--base-url", "http://prefill:30188",
-                "--decode-health-url", "http://decode:31188/health",
-                "--output", "/tmp/unused-cases.json", "--namespace", "unit",
-                "--decode-role-addr", "decode:31188:31189"]
+        argv = [
+            "cases",
+            "--base-url",
+            "http://prefill:30188",
+            "--decode-health-url",
+            "http://decode:31188/health",
+            "--output",
+            "/tmp/unused-cases.json",
+            "--namespace",
+            "unit",
+            "--decode-role-addr",
+            "decode:31188:31189",
+        ]
         with mock.patch("sys.argv", argv + ["--decode-dp-size", "1"]):
             self.assertEqual(parse_args().decode_dp_size, 1)
         for suffix in ([], ["--decode-dp-size", "2"], ["--decode-dp-size", "0"]):
@@ -208,20 +220,40 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
         runner = Runner(args)
         stages = {}
         with (
+            mock.patch.object(Runner, "run_prefix_branches"),
+            mock.patch.object(Runner, "run_padding_boundaries"),
             mock.patch.object(runner, "health"),
             mock.patch.object(runner, "request_cases", return_value=[]) as requests,
-            mock.patch.object(runner, "run_stage", side_effect=lambda name, cases, **kw: stages.update({name: cases})),
+            mock.patch.object(
+                runner,
+                "run_stage",
+                side_effect=lambda name, cases, **kw: stages.update({name: cases}),
+            ),
             mock.patch.object(runner, "run_long_prefix_case"),
             mock.patch("time.sleep"),
         ):
             runner.run_all()
         self.assertEqual(len(requests.call_args.args[0]), args.batch_size)
-        self.assertTrue(all(case.decode_owner_rank == 0 for case in requests.call_args.args[0]))
+        self.assertTrue(
+            all(case.decode_owner_rank == 0 for case in requests.call_args.args[0])
+        )
         self.assertIn("single_owner_concurrent_batch", stages)
         self.assertEqual(len(stages["single_owner_concurrent_batch"]), 10)
         self.assertEqual(len(stages["cuda_graph_bucket_8"]), 8)
-        self.assertTrue(all(case.decode_owner_rank == 0 for cases in stages.values() for case in cases))
-        for name in ("batch_all_miss", "batch_all_hit", "whole_chunk_batch_miss", "whole_chunk_batch_hit", "multimodal_mtp_chunk_prefill_miss"):
+        self.assertTrue(
+            all(
+                case.decode_owner_rank == 0
+                for cases in stages.values()
+                for case in cases
+            )
+        )
+        for name in (
+            "batch_all_miss",
+            "batch_all_hit",
+            "whole_chunk_batch_miss",
+            "whole_chunk_batch_hit",
+            "multimodal_mtp_chunk_prefill_miss",
+        ):
             self.assertIn(name, stages)
 
     def test_all_suite_defines_dedicated_semantic_and_mtp_budgets(self) -> None:
@@ -237,6 +269,8 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
             stages[name] = cases
 
         with (
+            mock.patch.object(Runner, "run_prefix_branches"),
+            mock.patch.object(Runner, "run_padding_boundaries"),
             mock.patch.object(runner, "run_stage", side_effect=capture_stage),
             mock.patch.object(runner, "run_long_prefix_case") as long_prefix,
         ):
@@ -251,7 +285,8 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
         self.assertEqual(single_exact_seed.max_tokens, 128)
         self.assertEqual(single_exact_hit.max_tokens, 128)
 
-        mtp_chunk = stages["mtp_chunk_prefill_miss"][0]
+        self.assertNotIn("mtp_chunk_prefill_miss", stages)
+        mtp_chunk = stages["whole_chunk_single_miss"][0]
         self.assertEqual(mtp_chunk.max_tokens, 128)
         self.assertTrue(mtp_chunk.require_chunk)
         self.assertTrue(mtp_chunk.require_mtp)
@@ -276,7 +311,6 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
             "batch_all_miss",
             "batch_all_hit",
             "batch_mixed_hit_miss",
-            "whole_chunk_single_miss",
             "whole_chunk_batch_miss",
         ):
             self.assertTrue(

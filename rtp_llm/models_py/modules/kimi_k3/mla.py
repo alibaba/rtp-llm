@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence
 
 import torch
 
-from rtp_llm.models_py.distributed.collective_torch import Group, get_process_group
-from rtp_llm.models_py.distributed.sequence_parallel import TokenShardLayout
+from rtp_llm.models_py.distributed.sequence_parallel import SequenceParallelLayout
 from rtp_llm.models_py.modules.base import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
-from rtp_llm.models_py.modules.factory.linear.parallel import row_parallel_linear
 from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
-from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import all_gather_gemm
-from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import gemm_reduce_scatter
+from rtp_llm.models_py.modules.kimi_k3.parallel_mode import (
+    KimiK3ParallelMode,
+    resolve_kimi_k3_parallel_mode,
+)
 from rtp_llm.ops import ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
@@ -63,6 +63,7 @@ class KimiK3MLA(MlaAttention):
         self._perf_accepts_strided_latent = False
         tp_size = int(parallelism_config.get_attn_tp_size())
         self.attn_tp_size = tp_size
+        self.parallel_mode = resolve_kimi_k3_parallel_mode(parallelism_config)
         total_heads = int(config.attn_config.head_num)
         if total_heads % tp_size:
             raise ValueError(
@@ -121,43 +122,50 @@ class KimiK3MLA(MlaAttention):
                     self._kv_a_norm, latent_norm_eps, retain_bf16=True
                 )
         self.output_gate_op = Fp8SigmoidGate() if self._fp8_enabled else SigmoidGate()
-        self._sp_active_for_forward = False
-        self._sp_padded_for_forward = False
-        self._sp_prefill_input_is_sharded = False
-        self._sp_prefill_layout_for_forward: Optional[TokenShardLayout] = None
+        self._sp_layout_for_forward: Optional[SequenceParallelLayout] = None
+        self._projected_qkv_a_for_forward: Optional[Sequence[torch.Tensor]] = None
+
+    def tp_input_projection_weights(self) -> list:
+        """Return local packed MLA projection shards for outer TP orchestration."""
+
+        if self.parallel_mode is not KimiK3ParallelMode.TP_SP:
+            raise RuntimeError("MLA TP projection weights require TP-SP mode")
+        if self._fp8_enabled:
+            return [self.fused_qkv_a_proj, self._fp8_gate]
+        return [self._packed_qkv_gate_w]
+
+    def output_projection_weight(self):
+        """Return the local row-parallel MLA output projection."""
+
+        return self._o_w
 
     def _project_qkv_a_input(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        prefill_layout = getattr(self, "_sp_prefill_layout_for_forward", None)
-        if getattr(self, "_fp8_enabled", False):
-            if self._sp_prefill_input_is_sharded:
-                logical_tokens = (
-                    hidden_states.shape[0] * self.attn_tp_size
-                    if prefill_layout is None
-                    else prefill_layout.logical_tokens
+        sp_layout = self._sp_layout_for_forward
+        if self.parallel_mode is KimiK3ParallelMode.TP_SP:
+            assert sp_layout is not None
+            projected = self._projected_qkv_a_for_forward
+            if projected is None:
+                raise RuntimeError(
+                    "K3 TP-SP MLA requires its input projection from the decoder "
+                    "parallel orchestrator"
                 )
-                qkv, gate = all_gather_gemm(
-                    hidden_states,
-                    [self.fused_qkv_a_proj, self._fp8_gate],
-                    logical_m=logical_tokens,
+            expected = 2 if getattr(self, "_fp8_enabled", False) else 1
+            if len(projected) != expected:
+                raise ValueError(
+                    f"K3 MLA expected {expected} projected tensors, got {len(projected)}"
                 )
-            else:
-                quantized = self.fused_qkv_a_proj.quantize_input(hidden_states)
-                qkv = self.fused_qkv_a_proj.forward_quantized(*quantized)
-                gate = self._fp8_gate.forward_quantized(*quantized)
-            return qkv, gate
-        if self._sp_prefill_input_is_sharded:
-            logical_tokens = (
-                hidden_states.shape[0] * self.attn_tp_size
-                if prefill_layout is None
-                else prefill_layout.logical_tokens
-            )
-            packed = all_gather_gemm(
-                hidden_states,
-                [self._packed_qkv_gate_w],
-                logical_m=logical_tokens,
-            )[0]
+            if any(
+                int(tensor.shape[0]) != sp_layout.tokens.physical_tokens
+                for tensor in projected
+            ):
+                raise ValueError(
+                    "K3 MLA projected rows do not match the physical token layout"
+                )
+            if getattr(self, "_fp8_enabled", False):
+                return projected[0], projected[1]
+            packed = projected[0]
             return torch.split(
                 packed,
                 [
@@ -166,6 +174,12 @@ class KimiK3MLA(MlaAttention):
                 ],
                 dim=-1,
             )
+
+        if getattr(self, "_fp8_enabled", False):
+            quantized = self.fused_qkv_a_proj.quantize_input(hidden_states)
+            qkv = self.fused_qkv_a_proj.forward_quantized(*quantized)
+            gate = self._fp8_gate.forward_quantized(*quantized)
+            return qkv, gate
         packed = self.fused_qkv_a_proj(hidden_states)
         return torch.split(
             packed,
@@ -187,8 +201,8 @@ class KimiK3MLA(MlaAttention):
         ``[tokens, local_heads * v_head_dim]`` (head-major), matching the flat
         layout of the rank-local gate projection, so the gate multiplies element
         wise per (head, value) exactly as K3 requires before o_proj.
-        This runs before o_proj's TP all_reduce, so each rank gates only its
-        local heads.
+        This runs before the strict TP-SP or local-KTP output projection, so
+        each rank gates only its local heads.
         """
         if not self.use_output_gate:
             return attn_output
@@ -196,28 +210,9 @@ class KimiK3MLA(MlaAttention):
         return self.output_gate_op(attn_output, output_gate)
 
     def _project_output(self, attn_output: torch.Tensor) -> torch.Tensor:
-        if self._sp_active_for_forward:
-            tp_size = self.parallelism_config.get_attn_tp_size()
-            pad_reduce_scatter = self._sp_padded_for_forward or (
-                self._sp_prefill_input_is_sharded
-                and attn_output.shape[0] % tp_size != 0
-            )
-            if self._sp_prefill_input_is_sharded:
-                return gemm_reduce_scatter(
-                    attn_output,
-                    self._o_w,
-                    get_process_group(Group.TP),
-                    pad_rows=pad_reduce_scatter,
-                )
-            return row_parallel_linear(
-                attn_output,
-                self._o_w,
-                tp_size,
-                reduce_scatter_tokens=True,
-                pad_reduce_scatter_tokens=pad_reduce_scatter,
-                use_input_dtype_reduce_scatter=(self._sp_prefill_input_is_sharded),
-            )
-        return super()._project_output(attn_output)
+        # The decoder layer owns the output projection and collective.  The
+        # base MLA forward still calls this hook at the correct semantic point.
+        return attn_output
 
     def forward(
         self,
@@ -225,41 +220,31 @@ class KimiK3MLA(MlaAttention):
         fmha_impl: Any,
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
-        sequence_parallel: bool = False,
-        prefill_sp_layout: Optional[TokenShardLayout] = None,
+        *,
+        sp_layout: SequenceParallelLayout,
+        projected_qkv_a: Optional[Sequence[torch.Tensor]] = None,
     ) -> torch.Tensor:
         attn_inputs = _select_mla_attention_inputs(attention_inputs, fmha_impl)
-        self._sp_active_for_forward = bool(
-            sequence_parallel
-            and self.parallelism_config.get_attn_tp_size() > 1
-            and hidden_states.is_cuda
-            and attn_inputs is not None
-        )
-        self._sp_prefill_input_is_sharded = prefill_sp_layout is not None
-        self._sp_prefill_layout_for_forward = prefill_sp_layout
-        if prefill_sp_layout is not None and (
-            not self._sp_active_for_forward
-            or attn_inputs is None
-            or not attn_inputs.is_prefill
-        ):
+        self._sp_layout_for_forward = sp_layout
+        if attn_inputs is None:
+            raise ValueError("K3 MLA requires physical attention metadata")
+        if int(hidden_states.shape[0]) != sp_layout.tokens.local_tokens:
             raise ValueError(
-                "prefill_sp_layout requires production CUDA MLA Prefill "
-                "Sequence Parallel with TP>1"
+                "K3 MLA requires a hidden-state view matching its physical layout"
             )
-        self._sp_padded_for_forward = bool(
-            self._sp_active_for_forward
-            and attn_inputs is not None
-            and not attn_inputs.is_prefill
-        )
         if not hidden_states.is_cuda:
             raise RuntimeError("Kimi K3 MLA requires CUDA")
+        if (
+            self.parallel_mode is KimiK3ParallelMode.PROJECTION_KTP
+            and projected_qkv_a is not None
+        ):
+            raise ValueError("Projection KTP does not accept a TP MLA projection")
+        self._projected_qkv_a_for_forward = projected_qkv_a
         try:
             return super().forward(hidden_states, fmha_impl, kv_cache)
         finally:
-            self._sp_active_for_forward = False
-            self._sp_padded_for_forward = False
-            self._sp_prefill_input_is_sharded = False
-            self._sp_prefill_layout_for_forward = None
+            self._sp_layout_for_forward = None
+            self._projected_qkv_a_for_forward = None
 
 
 __all__ = [

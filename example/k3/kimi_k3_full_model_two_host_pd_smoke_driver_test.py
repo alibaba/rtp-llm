@@ -17,9 +17,14 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
             ({}, ("mtp", "kimi_k3_mtp")),
             ({"SP_TYPE": "", "SP_MODEL_TYPE": ""}, ("mtp", "kimi_k3_mtp")),
             ({"SP_TYPE": "mtp"}, ("mtp", "kimi_k3_mtp")),
-            ({"SP_TYPE": "eagle3"}, ("eagle3", "kimi_k3_mla_swa_eagle3")),
+            (
+                {"SP_TYPE": "mtp", "SP_MODEL_TYPE": "kimi_k3_mtp"},
+                ("mtp", "kimi_k3_mtp"),
+            ),
         ):
-            with self.subTest(settings=settings), mock.patch.dict(os.environ, settings, clear=True):
+            with self.subTest(settings=settings), mock.patch.dict(
+                os.environ, settings, clear=True
+            ):
                 for role in ("prefill", "decode"):
                     env = driver.forwarded_optional_environment(role)
                     self.assertEqual((env["SP_TYPE"], env["SP_MODEL_TYPE"]), expected)
@@ -27,13 +32,27 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
     def test_invalid_draft_modes_fail_before_remote_launch(self) -> None:
         for settings in (
             {"SP_TYPE": "none"},
+            {"SP_TYPE": "eagle3"},
+            {"SP_TYPE": "eagle3", "SP_MODEL_TYPE": "kimi_k3_mla_swa_eagle3"},
             {"SP_MODEL_TYPE": "kimi_k3_mla_swa_eagle3"},
             {"SP_TYPE": "eagle3", "SP_MODEL_TYPE": "kimi_k3_mtp"},
         ):
-            with self.subTest(settings=settings), mock.patch.dict(os.environ, settings, clear=True):
+            with self.subTest(settings=settings), mock.patch.dict(
+                os.environ, settings, clear=True
+            ):
                 for role in ("prefill", "decode"):
                     with self.assertRaises(ValueError):
                         driver.forwarded_optional_environment(role)
+
+    def test_legacy_aux_layers_are_not_forwarded(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"KIMI_K3_EAGLE3_AUX_LAYER_IDS": "0,44,88"}, clear=True
+        ):
+            for role in ("prefill", "decode"):
+                env = driver.forwarded_optional_environment(role)
+                self.assertEqual(env["SP_TYPE"], "mtp")
+                self.assertEqual(env["SP_MODEL_TYPE"], "kimi_k3_mtp")
+                self.assertNotIn("KIMI_K3_EAGLE3_AUX_LAYER_IDS", env)
 
     def test_forwards_page_rr_profile_to_both_roles(self) -> None:
         with mock.patch.dict(os.environ, {"SMOKE_PAGE_RR": "1"}, clear=True):
@@ -152,6 +171,56 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
 
 
 class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
+    def test_role_script_rejects_non_native_mtp_before_host_validation(self):
+        role_script = pathlib.Path(driver.__file__).with_name(
+            "kimi_k3_full_model_two_host_pd_smoke.sh"
+        )
+        for role in ("prefill", "decode"):
+            for settings, expected in (
+                ({"SP_TYPE": "eagle3"}, "SP_TYPE=mtp"),
+                (
+                    {"SP_TYPE": "eagle3", "SP_MODEL_TYPE": "kimi_k3_mla_swa_eagle3"},
+                    "SP_TYPE=mtp",
+                ),
+                ({"SP_TYPE": "none"}, "SP_TYPE=mtp"),
+                (
+                    {"SP_TYPE": "mtp", "SP_MODEL_TYPE": "kimi_k3_mla_swa_eagle3"},
+                    "SP_MODEL_TYPE=kimi_k3_mtp",
+                ),
+            ):
+                with self.subTest(role=role, settings=settings):
+                    result = subprocess.run(
+                        [role_script, role],
+                        env={"PATH": os.environ["PATH"], **settings},
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        timeout=10,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn(expected, result.stderr)
+
+    def test_role_script_rejects_deployment_profile_drift(self):
+        script = pathlib.Path(driver.__file__).with_name(
+            "kimi_k3_full_model_two_host_pd_smoke.sh"
+        )
+        for settings, message in (
+            ({"TP_SIZE": "16", "EP_SIZE": "16"}, "Prefill TP8/EP8"),
+            ({"SMOKE_CHUNKWISE_RDMA": "0"}, "SMOKE_CHUNKWISE_RDMA=1"),
+        ):
+            for role in ("prefill", "decode"):
+                with self.subTest(settings=settings, role=role):
+                    result = subprocess.run(
+                        [script, role],
+                        env={"PATH": os.environ["PATH"], **settings},
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        timeout=10,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn(message, result.stderr)
+
     def test_role_script_rejects_page_rr_tp16_before_host_validation(self):
         role_script = pathlib.Path(driver.__file__).with_name(
             "kimi_k3_full_model_two_host_pd_smoke.sh"
@@ -193,9 +262,9 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             "--decode-checkpoint-path",
             "/decode/checkpoint",
             "--prefill-sp-checkpoint-path",
-            "/prefill/eagle3",
+            "/prefill/mtp",
             "--decode-sp-checkpoint-path",
-            "/decode/eagle3",
+            "/decode/mtp",
             "--prefill-endpoint",
             "10.0.0.1:27188",
             "--decode-endpoint",
@@ -207,8 +276,8 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             os.environ, {}, clear=True
         ):
             args = driver.parse_args()
-        self.assertEqual(args.prefill_sp_checkpoint_path, "/prefill/eagle3")
-        self.assertEqual(args.decode_sp_checkpoint_path, "/decode/eagle3")
+        self.assertEqual(args.prefill_sp_checkpoint_path, "/prefill/mtp")
+        self.assertEqual(args.decode_sp_checkpoint_path, "/decode/mtp")
 
     def test_parse_args_rejects_missing_decode_sp_checkpoint(self):
         argv = [
@@ -246,8 +315,8 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             decode_repo_root="/decode/repo",
             prefill_checkpoint_path="/prefill/checkpoint",
             decode_checkpoint_path="/decode/checkpoint",
-            prefill_sp_checkpoint_path="/prefill/eagle3",
-            decode_sp_checkpoint_path="/decode/eagle3",
+            prefill_sp_checkpoint_path="/prefill/mtp",
+            decode_sp_checkpoint_path="/decode/mtp",
             prefill_endpoint="10.0.0.1:27188",
             decode_endpoint="10.0.0.2:28188",
             run_id="projection-ktp",
@@ -259,7 +328,7 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
         )
         with mock.patch.dict(os.environ, {}, clear=True):
             _, _, _, command = driver.role_launch_parts(args, "decode")
-        self.assertIn("SP_CHECKPOINT_PATH=/decode/eagle3", command)
+        self.assertIn("SP_CHECKPOINT_PATH=/decode/mtp", command)
 
     def test_role_command_forwards_core_dump_diagnostic_override(self):
         args = argparse.Namespace(
@@ -267,8 +336,8 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             decode_repo_root="/decode/repo",
             prefill_checkpoint_path="/prefill/checkpoint",
             decode_checkpoint_path="/decode/checkpoint",
-            prefill_sp_checkpoint_path="/prefill/eagle3",
-            decode_sp_checkpoint_path="/decode/eagle3",
+            prefill_sp_checkpoint_path="/prefill/mtp",
+            decode_sp_checkpoint_path="/decode/mtp",
             prefill_endpoint="10.0.0.1:27188",
             decode_endpoint="10.0.0.2:28188",
             run_id="projection-ktp",
@@ -292,8 +361,8 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             decode_repo_root="/decode/repo",
             prefill_checkpoint_path="/prefill/checkpoint",
             decode_checkpoint_path="/decode/checkpoint",
-            prefill_sp_checkpoint_path="/prefill/eagle3",
-            decode_sp_checkpoint_path="/decode/eagle3",
+            prefill_sp_checkpoint_path="/prefill/mtp",
+            decode_sp_checkpoint_path="/decode/mtp",
             prefill_endpoint="10.0.0.1:27188",
             decode_endpoint="10.0.0.2:28188",
             run_id="projection-ktp",
@@ -357,8 +426,8 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             decode_repo_root="/decode/repo",
             prefill_checkpoint_path="/prefill/checkpoint",
             decode_checkpoint_path="/decode/checkpoint",
-            prefill_sp_checkpoint_path="/prefill/eagle3",
-            decode_sp_checkpoint_path="/decode/eagle3",
+            prefill_sp_checkpoint_path="/prefill/mtp",
+            decode_sp_checkpoint_path="/decode/mtp",
             prefill_endpoint="10.0.0.1:27188",
             decode_endpoint="10.0.0.2:28188",
             run_id="projection-ktp",
@@ -394,8 +463,8 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             decode_repo_root="/decode/repo",
             prefill_checkpoint_path="/prefill/checkpoint",
             decode_checkpoint_path="/decode/checkpoint",
-            prefill_sp_checkpoint_path="/prefill/eagle3",
-            decode_sp_checkpoint_path="/decode/eagle3",
+            prefill_sp_checkpoint_path="/prefill/mtp",
+            decode_sp_checkpoint_path="/decode/mtp",
             prefill_endpoint="10.0.0.1:27188",
             decode_endpoint="10.0.0.2:28188",
             run_id="projection-ktp",

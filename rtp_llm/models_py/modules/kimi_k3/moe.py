@@ -629,87 +629,27 @@ class KimiK3LatentMoE(nn.Module):
             routing_weights[valid_token_count:] = 0
         return expert_ids, routing_weights
 
-    def _tp_token_slice(
-        self,
-        routed_input: torch.Tensor,
-        expert_ids: torch.Tensor,
-        routing_weights: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-        """Avoid dispatching the same replicated TP tokens more than once."""
-
-        token_count = routed_input.shape[0]
-        tokens_per_tp_rank = (token_count + self.attn_tp_size - 1) // self.attn_tp_size
-        begin = min(tokens_per_tp_rank * self.attn_tp_rank, token_count)
-        size = min(tokens_per_tp_rank, token_count - begin)
-        return (
-            routed_input.narrow(0, begin, size),
-            expert_ids.narrow(0, begin, size),
-            routing_weights.narrow(0, begin, size),
-            tokens_per_tp_rank,
-        )
-
-    def _tp_gather(
-        self,
-        output: torch.Tensor,
-        original_token_count: int,
-        tokens_per_tp_rank: int,
-    ) -> torch.Tensor:
-        if self.attn_tp_size == 1:
-            return output
-        if output.shape[0] < tokens_per_tp_rank:
-            output = torch.cat(
-                (
-                    output,
-                    output.new_zeros(
-                        tokens_per_tp_rank - output.shape[0], output.shape[1]
-                    ),
-                ),
-                dim=0,
-            )
-        gathered = all_gather(output, group=Group.TP).reshape(
-            self.attn_tp_size * tokens_per_tp_rank, -1
-        )
-        return gathered[:original_token_count]
-
     def _mega_expert_sum(
         self,
         routed_input: torch.Tensor,
         expert_ids: torch.Tensor,
         routing_weights: torch.Tensor,
-        *,
-        sequence_parallel: bool = False,
     ) -> torch.Tensor:
-        if sequence_parallel:
-            return self._deep_gemm_mega_expert_sum(
-                routed_input,
-                expert_ids,
-                routing_weights,
-            )
-        sliced_input, sliced_ids, sliced_weights, tokens_per_tp_rank = (
-            self._tp_token_slice(routed_input, expert_ids, routing_weights)
-        )
-        local_output = self._deep_gemm_mega_expert_sum(
-            sliced_input,
-            sliced_ids,
-            sliced_weights,
-        )
-        return self._tp_gather(
-            local_output,
-            routed_input.shape[0],
-            tokens_per_tp_rank,
+        """Execute tokens already owned by this TP-SP or DP/KTP rank."""
+
+        return self._deep_gemm_mega_expert_sum(
+            routed_input,
+            expert_ids,
+            routing_weights,
         )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         *,
-        sequence_parallel: bool = False,
         valid_token_count: Optional[int] = None,
         valid_token_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        sp_active = (
-            sequence_parallel and self.attn_tp_size > 1 and hidden_states.is_cuda
-        )
         expert_ids, routing_weights = self._route(hidden_states)
         expert_ids, routing_weights = self._mask_padding_routes(
             expert_ids,
@@ -723,7 +663,6 @@ class KimiK3LatentMoE(nn.Module):
             routed_input,
             expert_ids,
             routing_weights,
-            sequence_parallel=sp_active,
         )
         if self.routed_norm is not None:
             routed_output = self.routed_norm(routed_output.contiguous())

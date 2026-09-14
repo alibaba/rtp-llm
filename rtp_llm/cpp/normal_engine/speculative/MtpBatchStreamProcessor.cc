@@ -87,6 +87,93 @@ torch::Tensor fullInt32OnCuda(std::initializer_list<int64_t> shape, int64_t valu
     return torch::full(shape, value, cudaInt32Options());
 }
 
+torch::Tensor padTensorDim(const torch::Tensor& tensor, int64_t rows, int64_t dim, int64_t value) {
+    if (!tensor.defined() || tensor.numel() == 0 || tensor.size(dim) == rows) {
+        return tensor;
+    }
+    RTP_LLM_CHECK_WITH_INFO(tensor.size(dim) < rows,
+                            "cannot shrink MTP draft-update tensor dim %ld from %ld to %ld",
+                            dim,
+                            tensor.size(dim),
+                            rows);
+    auto padding_shape = tensor.sizes().vec();
+    padding_shape[dim]  = rows - tensor.size(dim);
+    auto padding        = torch::full(padding_shape, value, tensor.options());
+    auto result         = torch::cat({tensor, padding}, dim);
+    if (!tensor.is_cuda() && tensor.is_pinned() && !result.is_pinned()) {
+        result = result.pin_memory();
+    }
+    return result;
+}
+
+torch::Tensor padBatchTensor(const torch::Tensor& tensor, int64_t rows, int64_t value) {
+    return padTensorDim(tensor, rows, 0, value);
+}
+
+torch::Tensor padBlockTable(const torch::Tensor& tensor, int64_t rows) {
+    if (!tensor.defined() || tensor.numel() == 0) {
+        return tensor;
+    }
+    RTP_LLM_CHECK_WITH_INFO(tensor.dim() == 2 || tensor.dim() == 3,
+                            "MTP draft-update block table must be rank 2 or 3, got %ld",
+                            tensor.dim());
+    return padTensorDim(tensor, rows, tensor.dim() == 2 ? 0 : 1, 0);
+}
+
+void padDraftUpdateMetadata(GptModelInputs& model_input,
+                            int64_t         logical_batch_size,
+                            int64_t         physical_batch_size,
+                            int64_t         tokens_per_request) {
+    if (logical_batch_size == physical_batch_size) {
+        return;
+    }
+
+    model_input.input_lengths =
+        padBatchTensor(model_input.input_lengths, physical_batch_size, tokens_per_request);
+    model_input.sequence_lengths = padBatchTensor(model_input.sequence_lengths, physical_batch_size, 0);
+    model_input.prefix_lengths   = padBatchTensor(model_input.prefix_lengths, physical_batch_size, 0);
+    model_input.sequence_lengths_plus_1 =
+        padBatchTensor(model_input.sequence_lengths_plus_1, physical_batch_size, 1);
+
+    model_input.input_lengths_host_for_log =
+        padBatchTensor(model_input.input_lengths_host_for_log, physical_batch_size, tokens_per_request);
+    model_input.sequence_lengths_host_for_log =
+        padBatchTensor(model_input.sequence_lengths_host_for_log, physical_batch_size, 0);
+    model_input.prefix_lengths_host_for_log =
+        padBatchTensor(model_input.prefix_lengths_host_for_log, physical_batch_size, 0);
+
+    model_input.kv_cache_block_id        = padBlockTable(model_input.kv_cache_block_id, physical_batch_size);
+    model_input.kv_cache_kernel_block_id =
+        padBlockTable(model_input.kv_cache_kernel_block_id, physical_batch_size);
+    model_input.kv_cache_block_id_host =
+        padBlockTable(model_input.kv_cache_block_id_host, physical_batch_size);
+    model_input.kv_cache_kernel_block_id_host =
+        padBlockTable(model_input.kv_cache_kernel_block_id_host, physical_batch_size);
+
+    const int64_t logical_tokens  = logical_batch_size * tokens_per_request;
+    const int64_t physical_tokens = physical_batch_size * tokens_per_request;
+    if (model_input.combo_position_ids.defined() && model_input.combo_position_ids.numel() > 0) {
+        RTP_LLM_CHECK_WITH_INFO(model_input.combo_position_ids.numel() == logical_tokens
+                                    || model_input.combo_position_ids.numel() == physical_tokens,
+                                "MTP draft-update position rows mismatch: rows=%ld logical=%ld physical=%ld",
+                                model_input.combo_position_ids.numel(),
+                                logical_tokens,
+                                physical_tokens);
+        model_input.combo_position_ids =
+            padBatchTensor(model_input.combo_position_ids.reshape({-1}), physical_tokens, 0);
+    }
+    if (model_input.text_tokens_mask.defined() && model_input.text_tokens_mask.numel() > 0) {
+        RTP_LLM_CHECK_WITH_INFO(model_input.text_tokens_mask.numel() == logical_tokens
+                                    || model_input.text_tokens_mask.numel() == physical_tokens,
+                                "MTP draft-update token-mask rows mismatch: rows=%ld logical=%ld physical=%ld",
+                                model_input.text_tokens_mask.numel(),
+                                logical_tokens,
+                                physical_tokens);
+        model_input.text_tokens_mask =
+            padBatchTensor(model_input.text_tokens_mask.reshape({-1}), physical_tokens, 1);
+    }
+}
+
 torch::Tensor toCudaInt32(const torch::Tensor& tensor, TensorHolder& host_holder) {
     if (!tensor.defined()) {
         return tensor;
@@ -585,7 +672,10 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     }
 
-    sampler_inputs.logits = model_output.logits.clone();
+    // Projection-KTP keeps its common physical rows through the target model.
+    // Rejection sampling is owner-local, so it must consume only this rank's
+    // logical prefix; the physical tail exists solely for collective shape.
+    sampler_inputs.logits = model_output.logits.narrow(0, 0, total_batch_size).clone();
 
     // TODO(async): debug formatting is CPU-only. Keep the .cpu() explicit
     // and do not route this through the model-input fast path.
@@ -926,21 +1016,57 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     GptModelInputs&                              model_input,
     const GptModelOutputs&                       model_output,
     const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-    const size_t                                 batch_size,
+    const size_t                                 logical_batch_size,
+    const size_t                                 physical_batch_size,
     torch::Tensor&                               hidden_states_d_t,
     TensorHolder&                                host_holder) {
     // Keep dense accept_tokens for CUDA graph reuse; lm_output_indexes selects
     // only the last accepted position. All outputs stay on CUDA so the next
     // stream-async step can prepare without waiting for worker D2H.
-    int total_tokens = (propose_step_ + 1) * batch_size;
-    model_input.combo_tokens =
-        toCudaInt32(speculative_sampler_output.accept_tokens.reshape({(int64_t)total_tokens}), host_holder);
+    RTP_LLM_CHECK_WITH_INFO(physical_batch_size >= logical_batch_size && logical_batch_size > 0,
+                            "invalid MTP draft-update batch sizes: logical=%zu physical=%zu",
+                            logical_batch_size,
+                            physical_batch_size);
+    const int64_t tokens_per_request = propose_step_ + 1;
+    const int64_t logical_tokens     = tokens_per_request * logical_batch_size;
+    const int64_t physical_tokens    = tokens_per_request * physical_batch_size;
+    auto accept_tokens =
+        toCudaInt32(speculative_sampler_output.accept_tokens.reshape({logical_tokens}), host_holder);
     auto accept_len_d = toCudaInt32(speculative_sampler_output.accept_len, host_holder);
+    RTP_LLM_CHECK_WITH_INFO(accept_len_d.numel() == static_cast<int64_t>(logical_batch_size),
+                            "MTP accept_len rows mismatch: rows=%ld logical_batch=%zu",
+                            accept_len_d.numel(),
+                            logical_batch_size);
+    if (physical_batch_size > logical_batch_size) {
+        accept_tokens = torch::cat(
+            {accept_tokens,
+             torch::zeros({physical_tokens - logical_tokens}, accept_tokens.options())},
+            0);
+        accept_len_d = torch::cat(
+            {accept_len_d,
+             torch::full({static_cast<int64_t>(physical_batch_size - logical_batch_size)},
+                         tokens_per_request,
+                         accept_len_d.options())},
+            0);
+    }
+    model_input.combo_tokens = std::move(accept_tokens);
     model_input.lm_output_indexes =
         torch::arange(
-            0, total_tokens, propose_step_ + 1, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
+            0,
+            physical_tokens,
+            tokens_per_request,
+            torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
         + (accept_len_d - 1);
-    model_input.last_hidden_states = model_output.all_hidden_states;
+    if (physical_batch_size > logical_batch_size) {
+        model_input.last_hidden_states = model_output.all_hidden_states.narrow(0, 0, physical_tokens);
+    } else {
+        // Preserve the historical warmup/empty-stream contract. Those paths
+        // may carry model-specific hidden layouts and do not participate in
+        // Projection-KTP's coordinated physical-batch padding.
+        model_input.last_hidden_states = model_output.all_hidden_states;
+    }
+    padDraftUpdateMetadata(
+        model_input, logical_batch_size, physical_batch_size, tokens_per_request);
     hidden_states_d_t              = model_input.last_hidden_states;
 }
 

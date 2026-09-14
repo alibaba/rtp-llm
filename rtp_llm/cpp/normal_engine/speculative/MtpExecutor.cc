@@ -1900,6 +1900,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     GptModelOutputs draft_prefill_model_output;
+    torch::Tensor   linear_block_ids;
     torch::Tensor   linear_group_types;
     torch::Tensor   linear_valid_block_counts;
     std::vector<GenerateStream::LinearReplayRound> replay_rounds;
@@ -2080,11 +2081,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     auto draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     draft_tokens_ready_event->record(cuda_graph::graphGetCurrentStream());
 
-    // Launch draft-prefill prepare BEFORE target verify forward so it overlaps
-    // with target verify GPU work instead of running serially after it. Sync
-    // on this prepare happens just before draft_model_forward below.
-    launchDraftPrefillPrepareAsync(model_input);
-
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.linear_replay = target_linear_replay;
@@ -2098,6 +2094,31 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_input.linear_replay.reset();
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+
+    const int64_t target_tokens_per_request = static_cast<int64_t>(propose_step_ + 1);
+    const int64_t target_hidden_rows =
+        model_output.all_hidden_states.defined() && model_output.all_hidden_states.dim() >= 1 ?
+            model_output.all_hidden_states.size(0) :
+            -1;
+    if (model_input.is_fake_stream && target_hidden_rows <= 0) {
+        // A coordinated empty Target Verify is represented by one fake input
+        // row, so input_lengths.size(0) is not the logical batch size here.
+        // The fake-stream marker is the authoritative empty-batch signal.
+        // All ranks have already completed the target forward,
+        // and there is no rejection or draft-update work to perform.
+        releaseAllModelBuffers();
+        return absl::OkStatus();
+    }
+    RTP_LLM_CHECK_WITH_INFO(target_hidden_rows >= 0 && target_hidden_rows % target_tokens_per_request == 0,
+                            "MTP target hidden rows do not encode a uniform coordinated batch: rows=%ld width=%ld",
+                            target_hidden_rows,
+                            target_tokens_per_request);
+    const size_t physical_batch_size = static_cast<size_t>(target_hidden_rows / target_tokens_per_request);
+    RTP_LLM_CHECK_WITH_INFO(physical_batch_size >= batch_size,
+                            "MTP coordinated physical batch is smaller than the local logical batch: "
+                            "physical=%zu logical=%zu",
+                            physical_batch_size,
+                            batch_size);
 
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
     if (isTpRank0()) {
@@ -2251,8 +2272,18 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             buffer_holder_.hold_host(model_input.prefix_lengths_host_for_log);
         }
 
+        // Keep the real-request table for async cache bookkeeping. Draft-update
+        // replaces model_input's table with a physical-batch padded copy; its
+        // padding rows have no stream, valid-block count, or accepted length.
+        linear_block_ids = model_input.kv_cache_kernel_block_id;
         batch_stream_processor_->updateDecodePostDraftModelInput(
-            model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
+            model_input,
+            model_output,
+            speculative_sampler_output,
+            batch_size,
+            physical_batch_size,
+            hidden_states_d_t,
+            buffer_holder_);
         if (metrics_reporter_) {
             accept_len_ready_event.record(cuda_graph::graphGetCurrentStream());
         }
@@ -2272,6 +2303,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     broadcastPostRejectionInputs(model_input);
 
+    // Projection-KTP pads target verification to one common batch across its
+    // DP ranks. The following draft-update model is KTP1 but may still use EP,
+    // so it must inherit that exact physical batch before attention metadata is
+    // prepared. Preparing it from each rank's local logical batch would make
+    // EP collectives enter with different row counts (for example 2 vs 1).
+    launchDraftPrefillPrepareAsync(model_input);
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
 
     {
@@ -2283,6 +2320,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         releaseAllModelBuffers();
         return absl::OkStatus();
+    }
+
+    // Draft-update executes the coordinated physical batch. Only real request
+    // rows may reach sampling and per-stream recurrent state bookkeeping.
+    if (physical_batch_size > batch_size) {
+        draft_prefill_model_output.logits = draft_prefill_model_output.logits.narrow(0, 0, batch_size);
+        draft_prefill_model_output.all_hidden_states =
+            draft_prefill_model_output.all_hidden_states.narrow(0, 0, batch_size * target_tokens_per_request);
     }
 
     // draft model sample
@@ -2310,7 +2355,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                 speculative_sampler_output,
                                 std::move(draft_prefill_model_output),
                                 std::move(draft_prefill_sampler_output),
-                                model_input.kv_cache_kernel_block_id,
+                                linear_block_ids,
                                 linear_group_types,
                                 linear_valid_block_counts,
                                 target_linear_replay,

@@ -122,9 +122,20 @@ def gemm_reduce_scatter(
     *,
     pad_rows: bool,
 ) -> torch.Tensor:
-    """Run fused GEMM/RS, or independent NCCL for TP16, including padding."""
+    """Project with TP1 identity, fused GEMM/RS, or TP16 NCCL reduction."""
     if not x.is_cuda:
         raise TypeError("K3 GEMM/RS requires CUDA input")
+    world_size = int(group.size())
+    if world_size == 1:
+        if isinstance(x, QuantizedActivation):
+            if isinstance(weight, torch.Tensor):
+                raise TypeError("quantized TP1 GEMM requires a quantized projection")
+            return weight.forward_quantized(x.values, x.scales)
+        return (
+            weight(x)
+            if not isinstance(weight, torch.Tensor)
+            else torch.matmul(x, weight)
+        )
     state = _STATES.get(collective_gemm_state_key(group, x.device))
     if state is None:
         raise RuntimeError("GEMM/RS must be initialized before execution")

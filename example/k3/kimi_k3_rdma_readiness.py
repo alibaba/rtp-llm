@@ -1,4 +1,4 @@
-"""Require every local TP rank's cache transport before issuing PD requests."""
+"""Require every local rank's cache transport and RPC listener before PD requests."""
 
 import argparse
 import pathlib
@@ -16,6 +16,15 @@ def initialized_rdma_ranks(log: str) -> set[int]:
     }
 
 
+def initialized_rpc_ranks(log: str) -> set[int]:
+    return {
+        int(match.group(1))
+        for match in re.finditer(
+            r"\[RANK (\d+)\][^\n]*\] Server listening on [^:\s]+:\d+\b", log
+        )
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("engine_log", type=pathlib.Path)
@@ -25,7 +34,8 @@ def main() -> int:
         parser.error("--ranks must be positive")
     if not args.engine_log.is_file():
         return 1
-    ready = initialized_rdma_ranks(args.engine_log.read_text(errors="replace"))
+    log = args.engine_log.read_text(errors="replace")
+    ready = initialized_rdma_ranks(log) & initialized_rpc_ranks(log)
     return 0 if set(range(args.ranks)).issubset(ready) else 1
 
 

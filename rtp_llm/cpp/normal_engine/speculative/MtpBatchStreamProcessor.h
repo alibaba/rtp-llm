@@ -76,7 +76,8 @@ public:
     void updateDecodePostDraftModelInput(GptModelInputs&                              model_input,
                                          const GptModelOutputs&                       model_output,
                                          const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                         const size_t                                 batch_size,
+                                         const size_t                                 logical_batch_size,
+                                         const size_t                                 physical_batch_size,
                                          torch::Tensor&                               hidden_states_d_t,
                                          TensorHolder&                                host_holder);
 

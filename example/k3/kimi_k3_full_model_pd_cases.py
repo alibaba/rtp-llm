@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import gzip
+import hashlib
 import json
 import pathlib
 import re
@@ -11,8 +13,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 try:
@@ -33,10 +35,26 @@ class Case:
     max_tokens: int | None = None
     timeout_s: int | None = None
     decode_owner_rank: int = 0
+    expected_json: dict[str, str] | None = None
+    expected_input_len: int | None = None
+    expected_reuse_len: int | None = None
 
 
 class SmokeFailure(RuntimeError):
     pass
+
+
+class TransportFailure(SmokeFailure):
+    """Only connection failures and transient HTTP responses may be retried."""
+
+
+def reject_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON answer key: {key}")
+        result[key] = value
+    return result
 
 
 def parse_decode_role_addr(value: str) -> dict[str, Any]:
@@ -83,7 +101,8 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--decode-dp-size", type=int,
+        "--decode-dp-size",
+        type=int,
         help="number of Decode DP owners; TP-only uses 1",
     )
     parser.add_argument("--output", required=True, type=pathlib.Path)
@@ -103,7 +122,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--require-mtp",
         action="store_true",
-        help="include the Eagle/MTP draft-acceptance case",
+        help="include the native MTP draft-acceptance case",
     )
     parser.add_argument(
         "--rdma-prewarm-attempts",
@@ -156,7 +175,9 @@ def parse_args() -> argparse.Namespace:
         parser.error("--rdma-prewarm-attempts must be non-negative")
     if args.decode_dp_size is not None and args.decode_dp_size <= 0:
         parser.error("--decode-dp-size must be positive")
-    expected_owners = (args.decode_dp_size,) if args.decode_dp_size is not None else (8, 16)
+    expected_owners = (
+        (args.decode_dp_size,) if args.decode_dp_size is not None else (8, 16)
+    )
     if args.suite == "all" and len(args.decode_role_addrs) not in expected_owners:
         parser.error(
             f"--suite=all requires {expected_owners} ordered --decode-role-addr values"
@@ -168,7 +189,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def numbered_answer_pattern(value: int) -> str:
-    return rf"(?<!\d){value}(?!\d)"
+    return rf"\A\s*{value}\s*\Z"
 
 
 def make_cache_prompt(
@@ -252,6 +273,9 @@ class Runner:
         self.stages: list[dict[str, Any]] = []
         self.rdma_prewarm_attempts: list[dict[str, Any]] = []
         self.started_at = time.time()
+        self.failures: list[dict[str, Any]] = []
+        self._record_lock = threading.Lock()
+        self._artifact_counter = 0
 
     def save(self, passed: bool, error: str | None = None) -> None:
         payload = {
@@ -297,6 +321,7 @@ class Runner:
             },
             "stages": self.stages,
             "cases": self.records,
+            "failures": self.failures,
         }
         self.args.output.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -322,8 +347,69 @@ class Runner:
                     f"{role} health check before {stage} failed: {exc}"
                 ) from exc
 
-    def request(
-        self, case: Case, barrier: threading.Barrier | None = None
+    def request(self, case: Case, barrier=None) -> dict[str, Any]:
+        with self._record_lock:
+            self._artifact_counter += 1
+            number = self._artifact_counter
+        artifact = None
+        if self.args.output is not None:
+            directory = self.args.output.parent / "requests"
+            directory.mkdir(parents=True, exist_ok=True)
+            artifact = (
+                directory
+                / f"{number:04d}-{hashlib.sha256(case.name.encode()).hexdigest()[:12]}.json"
+            )
+        audit = {
+            "name": case.name,
+            "owner": case.decode_owner_rank,
+            "passed": False,
+            "phase": "prewarm" if case.name.startswith("rdma_prewarm_") else "formal",
+            "expected": {
+                "regex": case.expected_regex,
+                "json": case.expected_json,
+                "input_len": case.expected_input_len,
+                "reuse_len": case.expected_reuse_len,
+            },
+        }
+
+        def persist():
+            if artifact is not None:
+                artifact.write_text(
+                    json.dumps(audit, ensure_ascii=False, indent=2) + "\n"
+                )
+
+        try:
+            result = self._request(case, barrier, audit=audit, persist=persist)
+            result["phase"] = (
+                "prewarm" if case.name.startswith("rdma_prewarm_") else "formal"
+            )
+            audit.update(passed=True, result=result)
+            with self._record_lock:
+                self.records.append(result)
+            return result
+        except Exception as exc:
+            audit["error"] = f"{type(exc).__name__}: {exc}"
+            with self._record_lock:
+                self.failures.append(
+                    {
+                        "name": case.name,
+                        "error": audit["error"],
+                        "phase": audit["phase"],
+                        "retryable": isinstance(exc, TransportFailure),
+                        "artifact": str(artifact) if artifact else None,
+                    }
+                )
+            raise
+        finally:
+            persist()
+
+    def _request(
+        self,
+        case: Case,
+        barrier: threading.Barrier | None = None,
+        *,
+        audit: dict,
+        persist: Callable,
     ) -> dict[str, Any]:
         if barrier is not None:
             barrier.wait(timeout=30)
@@ -351,10 +437,10 @@ class Runner:
             # process-wide REMOTE_RPC_SERVER_IP and routes every request to the
             # first Decode rank.
             payload["extra_configs"] = {
-                "role_addrs": [
-                    self.decode_role_addrs[case.decode_owner_rank]
-                ]
+                "role_addrs": [self.decode_role_addrs[case.decode_owner_rank]]
             }
+        audit["request"] = payload
+        persist()
         request = urllib.request.Request(
             self.endpoint,
             data=json.dumps(
@@ -371,11 +457,19 @@ class Runner:
                 status = response.status
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise SmokeFailure(
-                f"{case.name}: HTTP {exc.code}: {detail[:1000]}"
-            ) from exc
-        except Exception as exc:
-            raise SmokeFailure(f"{case.name}: request failed: {exc}") from exc
+            audit.update(status=exc.code, response_body=detail)
+            failure = (
+                TransportFailure
+                if exc.code in (408, 429, 502, 503, 504)
+                else SmokeFailure
+            )
+            raise failure(f"{case.name}: HTTP {exc.code}: {detail[:1000]}") from exc
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            raise TransportFailure(f"{case.name}: request failed: {exc}") from exc
+        audit.update(
+            status=status, response_body=body.decode("utf-8", errors="replace")
+        )
+        persist()
         if status != 200:
             raise SmokeFailure(f"{case.name}: HTTP {status}")
         try:
@@ -429,7 +523,20 @@ class Runner:
             and all(isinstance(ids, list) and ids for ids in output_ids)
         ):
             raise SmokeFailure(f"{case.name}: missing output token ids: {output_ids!r}")
-        if re.search(case.expected_regex, answer_text, flags=re.IGNORECASE) is None:
+        if case.expected_json is not None:
+            try:
+                actual = json.loads(
+                    answer_text, object_pairs_hook=reject_duplicate_keys
+                )
+            except ValueError as exc:
+                raise SmokeFailure(
+                    f"{case.name}: invalid exact JSON answer: {answer_text!r}"
+                ) from exc
+            if actual != case.expected_json:
+                raise SmokeFailure(
+                    f"{case.name}: exact JSON mismatch: {actual!r}; expected {case.expected_json!r}"
+                )
+        elif re.search(case.expected_regex, answer_text, flags=re.IGNORECASE) is None:
             raise SmokeFailure(
                 f"{case.name}: answer failed {case.expected_regex!r}: {answer_text!r}"
             )
@@ -440,6 +547,17 @@ class Runner:
         effective_reuse = (
             int(prefill_reuse_value) if prefill_reuse_value is not None else raw_reuse
         )
+        if case.expected_input_len is not None and input_len != case.expected_input_len:
+            raise SmokeFailure(
+                f"{case.name}: tokenized input changed: {input_len} != {case.expected_input_len}"
+            )
+        if (
+            case.expected_reuse_len is not None
+            and effective_reuse != case.expected_reuse_len
+        ):
+            raise SmokeFailure(
+                f"{case.name}: reuse frontier {effective_reuse} != {case.expected_reuse_len}"
+            )
         if input_len <= 0:
             raise SmokeFailure(f"{case.name}: input_len={aux.get('input_len')!r}")
         if effective_reuse < 0 or effective_reuse > input_len:
@@ -490,9 +608,7 @@ class Runner:
         selected_decode_role_addr = None
         observed_decode_role_addrs = aux.get("role_addrs") or []
         if self.decode_role_addrs:
-            selected_decode_role_addr = self.decode_role_addrs[
-                case.decode_owner_rank
-            ]
+            selected_decode_role_addr = self.decode_role_addrs[case.decode_owner_rank]
             if selected_decode_role_addr not in observed_decode_role_addrs:
                 raise SmokeFailure(
                     f"{case.name}: Decode owner route was not preserved: "
@@ -511,6 +627,9 @@ class Runner:
             "iter_count": iter_count,
             "mtp_accepted_tokens": mtp_accepted_tokens,
             "require_mtp": case.require_mtp,
+            "expected_json": case.expected_json,
+            "expected_input_len": case.expected_input_len,
+            "expected_reuse_len": case.expected_reuse_len,
             "require_multimodal": case.require_multimodal,
             "multimodal_lengths": multimodal_lengths,
             "input_urls": input_urls,
@@ -532,7 +651,20 @@ class Runner:
             barrier = threading.Barrier(len(cases))
             with ThreadPoolExecutor(max_workers=len(cases)) as pool:
                 futures = [pool.submit(self.request, case, barrier) for case in cases]
-                return [future.result() for future in futures]
+                results, errors = [], []
+                for future in futures:
+                    try:
+                        results.append(future.result())
+                    except Exception as exc:
+                        errors.append(exc)
+                if errors:
+                    # Never let a transport error hide a sibling semantic error.
+                    fatal = next(
+                        (e for e in errors if not isinstance(e, TransportFailure)),
+                        errors[0],
+                    )
+                    raise fatal
+                return results
         return [self.request(case) for case in cases]
 
     def prewarm_rdma_pool(self) -> None:
@@ -553,9 +685,7 @@ class Runner:
                     numbered_answer_pattern((80 + idx) ** 2),
                     "miss",
                     max_tokens=max(self.args.max_tokens, 128),
-                    timeout_s=min(
-                        self.args.timeout, self.args.rdma_prewarm_timeout
-                    ),
+                    timeout_s=min(self.args.timeout, self.args.rdma_prewarm_timeout),
                     decode_owner_rank=idx % max(1, len(self.decode_role_addrs)),
                 )
                 for idx in range(self.args.batch_size)
@@ -578,6 +708,8 @@ class Runner:
                     f"rdma_prewarm attempt={attempt} passed=false "
                     f"elapsed_s={elapsed_s} error={error}"
                 )
+                if not isinstance(exc, TransportFailure):
+                    raise
                 if attempt == self.args.rdma_prewarm_attempts:
                     raise SmokeFailure(
                         f"RDMA prewarm failed after {attempt} attempts: {exc}"
@@ -606,22 +738,304 @@ class Runner:
     def run_stage(self, name: str, cases: list[Case], concurrent: bool = False) -> None:
         self.health(name)
         started = time.time()
-        records = self.request_cases(cases, concurrent)
-        self.records.extend(records)
-        self.stages.append(
-            {
-                "name": name,
-                "concurrent": concurrent,
-                "case_names": [case.name for case in cases],
-                "decode_owner_ranks": [case.decode_owner_rank for case in cases],
-                "elapsed_s": round(time.time() - started, 3),
-            }
+        stage = {
+            "name": name,
+            "concurrent": concurrent,
+            "passed": False,
+            "case_names": [case.name for case in cases],
+            "decode_owner_ranks": [case.decode_owner_rank for case in cases],
+        }
+        self.stages.append(stage)
+        try:
+            if name == "dp_rolling_refill":
+                self.request_refill(cases)
+            else:
+                self.request_cases(cases, concurrent)
+            stage["passed"] = True
+        except Exception as exc:
+            stage["error"] = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            stage["elapsed_s"] = round(time.time() - started, 3)
+        print(f"stage={name} passed=true owners={stage['decode_owner_ranks']}")
+
+    def tokenize(self, prompt: str) -> list[int]:
+        request = urllib.request.Request(
+            self.args.base_url.rstrip("/") + "/tokenize",
+            data=json.dumps(
+                {"model": "kimi-k3", "messages": [{"role": "user", "content": prompt}]}
+            ).encode(),
+            headers={"Content-Type": "application/json"},
         )
-        print(
-            f"stage={name} concurrent={str(concurrent).lower()} "
-            f"owners={[case.decode_owner_rank for case in cases]} "
-            f"reuse={[record['effective_reuse_len'] for record in records]}"
+        with self.opener.open(request, timeout=self.args.timeout) as response:
+            tokens = json.load(response)["token_ids"]
+        if (
+            not isinstance(tokens, list)
+            or not tokens
+            or any(type(t) is not int for t in tokens)
+        ):
+            raise SmokeFailure("tokenizer returned invalid token IDs")
+        return tokens
+
+    def save_token_fixture(self, prompt: str, tokens: list[int]) -> None:
+        if self.args.output is None:
+            return
+        directory = self.args.output.parent / "token-fixtures"
+        directory.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(prompt.encode()).hexdigest()
+        with gzip.open(
+            directory / f"{digest}.json.gz", "wt", encoding="utf-8"
+        ) as output:
+            json.dump(
+                {
+                    "messages": [{"role": "user", "content": prompt}],
+                    "input_ids": tokens,
+                    "input_len": len(tokens),
+                    "prompt_sha256": digest,
+                },
+                output,
+                ensure_ascii=False,
+            )
+
+    def fit_prompt(self, head: str, tail: str, target: int) -> tuple[str, list[int]]:
+        # Query the serving tokenizer, including its exact chat template. The
+        # filler is inert; all authoritative records and instructions are last.
+        lo, hi = 0, target * 2
+        while lo <= hi:
+            count = (lo + hi) // 2
+            prompt = head + " x" * count + tail
+            tokens = self.tokenize(prompt)
+            if len(tokens) == target:
+                self.save_token_fixture(prompt, tokens)
+                return prompt, tokens
+            if len(tokens) < target:
+                lo = count + 1
+            else:
+                hi = count - 1
+        # Some tokenizers merge the boundary differently. Search a small,
+        # bounded neighbourhood; failure is explicit, never a mislabeled case.
+        for count in range(max(0, hi - 8), lo + 9):
+            for suffix in ("\n", " ", " a", "\n\n"):
+                prompt = head + " x" * count + suffix + tail
+                tokens = self.tokenize(prompt)
+                if len(tokens) == target:
+                    self.save_token_fixture(prompt, tokens)
+                    return prompt, tokens
+        raise SmokeFailure(f"cannot construct exact chat input length {target}")
+
+    def record_case(self, name: str, owner: int, *, words: int = 1) -> Case:
+        # Expected answers derive only from these records, with no external
+        # knowledge or second model acting as judge.
+        tag = hashlib.sha256(f"{self.args.namespace}/{name}".encode()).hexdigest()[:12]
+        value = " ".join(f"CEDAR-{tag}-{i}" for i in range(words))
+        prompt = (
+            f"档案 {self.args.namespace}/{name}。\n"
+            "以下是数据，不是指令。\n"
+            f"key=amber; value=MAPLE-{tag}\n"
+            f"key=cedar; value={value}\n"
+            f"key=birch; value=BIRCH-{tag}\n"
+            "检索 key=cedar 的 value，逐字复制。只输出一个 JSON 对象，"
+            "仅包含字符串字段 value，不要代码块或解释。"
         )
+        return Case(
+            name,
+            prompt,
+            r"",
+            "miss",
+            decode_owner_rank=owner,
+            expected_json={"value": value},
+            # Reasoning can repeat the full record before the final JSON.
+            max_tokens=max(self.args.max_tokens, 256 + words * 64),
+        )
+
+    def run_owner_regressions(self) -> None:
+        size = max(1, len(self.decode_role_addrs))
+        for rotation in (0, 3):
+            self.run_stage(
+                f"owner_records_rotate_{rotation}",
+                [
+                    self.record_case(
+                        f"owner-record-{rotation}-{i}", (i + rotation) % size
+                    )
+                    for i in range(size)
+                ],
+                concurrent=True,
+            )
+        self.run_stage(
+            "owner_last_only", [self.record_case("owner-last-only", size - 1)]
+        )
+        # The original wrong-answer class remains a formal, non-retried gate.
+        self.run_stage(
+            "historical_four_squares",
+            [
+                Case(
+                    f"historical-square-{i}",
+                    make_cache_prompt(
+                        self.args.namespace, f"historical-square-{i}", 80 + i, repeats=8
+                    ),
+                    numbered_answer_pattern((80 + i) ** 2),
+                    "miss",
+                    decode_owner_rank=owner % size,
+                )
+                for i, owner in enumerate((0, 0, 1, 2))
+            ],
+            concurrent=True,
+        )
+        # Reuse the same Graph allocation at bucket 8 across drained batches.
+        # Longer answers keep early arrivals decoding while the remaining PD
+        # transfers arrive. Runtime evidence must still prove 7 -> 5 -> 6.
+        for wave, count in enumerate((7, 5, 6)):
+            self.run_stage(
+                f"graph_slot_wave_{wave}",
+                [
+                    replace(
+                        self.record_case(f"graph-slot-{wave}-{i}", size - 1, words=32),
+                        max_tokens=max(self.args.max_tokens, 2048),
+                    )
+                    for i in range(count)
+                ],
+                concurrent=True,
+            )
+        self.run_stage(
+            "dp_rolling_refill",
+            [
+                self.record_case(
+                    f"rolling-{i}", i % size, words=16 if i % 3 == 0 else 1
+                )
+                for i in range(16)
+            ],
+            concurrent=True,
+        )
+
+    def request_refill(self, cases: list[Case], window: int = 8) -> None:
+        iterator = iter(cases)
+        errors = []
+        with ThreadPoolExecutor(max_workers=window) as pool:
+            pending = {pool.submit(self.request, case) for case in list(cases)[:window]}
+            for _ in range(min(window, len(cases))):
+                next(iterator)
+            while pending:
+                completed, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        errors.append(exc)
+                if not errors:
+                    for _ in completed:
+                        case = next(iterator, None)
+                        if case is not None:
+                            pending.add(pool.submit(self.request, case))
+        if errors:
+            raise next(
+                (e for e in errors if not isinstance(e, TransportFailure)), errors[0]
+            )
+
+    def run_prefix_branches(self) -> None:
+        head = f"档案 {self.args.namespace}/prefix-branches。以下 x 为无关填充。\n"
+        tail_a = '\n唯一有效记录：key=chosen; value=CEDAR-AMBER。只输出 JSON {"value":"CEDAR-AMBER"}，不要解释。'
+        tail_b = '\n唯一有效记录：key=chosen; value=MAPLE-VIOLET。只输出 JSON {"value":"MAPLE-VIOLET"}，不要解释。'
+        prompt_a, tokens_a = self.fit_prompt(
+            head, tail_a, self.args.block_size * 2 + 128
+        )
+        prompt_b = prompt_a[: -len(tail_a)] + tail_b
+        tokens_b = self.tokenize(prompt_b)
+        self.save_token_fixture(prompt_b, tokens_b)
+        common = next(
+            (i for i, pair in enumerate(zip(tokens_a, tokens_b)) if pair[0] != pair[1]),
+            min(len(tokens_a), len(tokens_b)),
+        )
+        common_reuse = common // self.args.block_size * self.args.block_size
+        if common_reuse <= 0:
+            raise SmokeFailure("branch case has no complete common cache page")
+        size = max(1, len(self.decode_role_addrs))
+        a = Case(
+            "prefix-A-seed",
+            prompt_a,
+            r"",
+            "miss",
+            expected_json={"value": "CEDAR-AMBER"},
+            expected_input_len=len(tokens_a),
+            expected_reuse_len=0,
+        )
+        b = Case(
+            "prefix-B-partial",
+            prompt_b,
+            r"",
+            "partial",
+            decode_owner_rank=(size - 1),
+            expected_json={"value": "MAPLE-VIOLET"},
+            expected_input_len=len(tokens_b),
+            expected_reuse_len=common_reuse,
+        )
+        self.run_stage("prefix_A_seed", [a])
+        self.run_stage("prefix_B_partial", [b])
+        a_hit = replace(
+            a,
+            name="prefix-A-return",
+            reuse="hit",
+            decode_owner_rank=(size - 1),
+            expected_reuse_len=(len(tokens_a) - 1)
+            // self.args.block_size
+            * self.args.block_size,
+        )
+        self.run_stage("prefix_A_return", [a_hit])
+        b_hit = replace(
+            b,
+            name="prefix-B-hit",
+            reuse="hit",
+            expected_reuse_len=(len(tokens_b) - 1)
+            // self.args.block_size
+            * self.args.block_size,
+        )
+        self.run_stage(
+            "prefix_AB_mixed",
+            [
+                replace(
+                    case, name=f"prefix-mixed-{i}", decode_owner_rank=(i + 4) % size
+                )
+                for i, case in enumerate((a_hit, b_hit, a_hit, b_hit))
+            ],
+            concurrent=True,
+        )
+
+    def run_padding_boundaries(self) -> None:
+        # Chunk budget is TP8 aligned. A single cold input of C+1/C+7 forces
+        # terminal round padding of 7/1 respectively, regardless of batching.
+        size = max(1, len(self.decode_role_addrs))
+        for tail_tokens in (1, 7):
+            tag = f"PADDING-TAIL-{tail_tokens}"
+            head = f"档案 {self.args.namespace}/padding-{tail_tokens}。以下 x 为无关填充。\n"
+            tail = f'\n记录 value={tag}。只输出 JSON {{"value":"{tag}"}}，不要解释。'
+            target = self.args.chunk_tokens + tail_tokens
+            prompt, tokens = self.fit_prompt(head, tail, target)
+            case = Case(
+                f"padding-tail-{tail_tokens}-cold",
+                prompt,
+                r"",
+                "miss",
+                require_chunk=True,
+                expected_json={"value": tag},
+                expected_input_len=len(tokens),
+                expected_reuse_len=0,
+                decode_owner_rank=(size - 1),
+                max_tokens=max(self.args.max_tokens, 256),
+            )
+            self.run_stage(f"padding_tail_{tail_tokens}_cold", [case])
+            self.run_stage(
+                f"padding_tail_{tail_tokens}_hit",
+                [
+                    replace(
+                        case,
+                        name=f"padding-tail-{tail_tokens}-hit",
+                        reuse="hit",
+                        decode_owner_rank=(tail_tokens + 1) % size,
+                        expected_reuse_len=(target - 1)
+                        // self.args.block_size
+                        * self.args.block_size,
+                    )
+                ],
+            )
 
     def run_flow(self) -> None:
         self.run_stage(
@@ -639,6 +1053,7 @@ class Runner:
 
     def run_all(self) -> None:
         self.prewarm_rdma_pool()
+        self.run_owner_regressions()
         batch_owner_ranks = [
             rank % max(1, len(self.decode_role_addrs))
             for rank in [0, 0] + list(range(1, self.args.batch_size - 1))
@@ -839,7 +1254,11 @@ class Runner:
 
         uneven_owner_ranks = [0] * 4 + [1] * 3 + [2] * 2 + [3]
         self.run_stage(
-            "dp_uneven_local_batch" if len(self.decode_role_addrs) > 1 else "single_owner_concurrent_batch",
+            (
+                "dp_uneven_local_batch"
+                if len(self.decode_role_addrs) > 1
+                else "single_owner_concurrent_batch"
+            ),
             [
                 Case(
                     f"dp_uneven_local_batch_{idx}",
@@ -903,30 +1322,6 @@ class Runner:
             concurrent=True,
         )
 
-        if getattr(self.args, "require_mtp", False):
-            mtp_chunk_prompt = make_whole_chunk_prompt(
-                self.args.namespace,
-                "mtp-chunk-prefill",
-                73,
-            )
-            self.run_stage(
-                "mtp_chunk_prefill_miss",
-                [
-                    Case(
-                        "mtp_chunk_prefill_miss",
-                        mtp_chunk_prompt,
-                        numbered_answer_pattern(5329),
-                        "miss",
-                        require_chunk=True,
-                        require_mtp=True,
-                        max_tokens=max(
-                            self.args.max_tokens,
-                            self.args.mtp_chunk_max_tokens,
-                        ),
-                    )
-                ],
-            )
-
         single_prompt = make_whole_chunk_prompt(
             self.args.namespace, "whole-chunk-single", 61
         )
@@ -939,6 +1334,10 @@ class Runner:
                     numbered_answer_pattern(3721),
                     "miss",
                     require_chunk=True,
+                    require_mtp=getattr(self.args, "require_mtp", False),
+                    max_tokens=max(
+                        self.args.max_tokens, self.args.mtp_chunk_max_tokens
+                    ),
                 )
             ],
         )
@@ -951,6 +1350,10 @@ class Runner:
                     numbered_answer_pattern(3721),
                     "hit",
                     require_chunk=True,
+                    require_mtp=getattr(self.args, "require_mtp", False),
+                    max_tokens=max(
+                        self.args.max_tokens, self.args.mtp_chunk_max_tokens
+                    ),
                 )
             ],
         )
@@ -992,6 +1395,8 @@ class Runner:
             ],
             concurrent=True,
         )
+        self.run_prefix_branches()
+        self.run_padding_boundaries()
         self.run_long_prefix_case()
 
     def run_long_prefix_case(self) -> None:
