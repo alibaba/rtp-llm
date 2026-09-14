@@ -280,16 +280,24 @@ class OpenaiEndpoint(object):
                 )
             return base_format
 
-        begin_ids = config.begin_think_token_ids or self.tokenizer.encode(
-            think_start_tag, add_special_tokens=False
+        anchor_state = (
+            request.prompt_has_think_anchor() if request is not None else None
         )
-        # ADAPTIVE keeps the token-level comparison: it decides from the first
-        # generated token, so it has to agree with what the decoder sees.
-        prompt_has_begin = bool(
-            begin_ids
-            and input_ids is not None
-            and input_ids[-len(begin_ids) :] == begin_ids
-        )
+        if anchor_state is None:
+            begin_ids = config.begin_think_token_ids or self.tokenizer.encode(
+                think_start_tag, add_special_tokens=False
+            )
+            prompt_has_begin = bool(
+                begin_ids
+                and input_ids is not None
+                and input_ids[-len(begin_ids) :] == begin_ids
+            )
+        else:
+            # Use the same rendered-string predicate as ENABLED. In particular,
+            # DeepSeek appends a bare start tag while the configured tag may end
+            # in a newline, so token-level comparison can disagree with the
+            # actual prompt.
+            prompt_has_begin = anchor_state
         if config.thinking_mode == ThinkingMode.ADAPTIVE and prompt_has_begin:
             config.thinking_mode = ThinkingMode.ENABLED
             config.in_think_mode = True
@@ -411,9 +419,11 @@ class OpenaiEndpoint(object):
             and isinstance(request.extra_configs.max_thinking_tokens, int)
         ):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
+            config._max_thinking_tokens_was_explicit = True
         if request.thinking_budget is not None:
             budget = int(request.thinking_budget)
             config.max_thinking_tokens = _INT32_MAX if budget < 0 else budget
+            config._max_thinking_tokens_was_explicit = True
         config.thinking_mode = renderer.resolve_thinking_mode(request)
         config.in_think_mode = config.thinking_mode == ThinkingMode.ENABLED
         if config.thinking_mode == ThinkingMode.DISABLED:

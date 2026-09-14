@@ -141,12 +141,19 @@ def _resolved_thinking_mode(config: Any) -> "ThinkingMode":
 
     from rtp_llm.config.generate_config import ThinkingMode
 
-    if config.thinking_mode == ThinkingMode.ADAPTIVE:
+    if (
+        getattr(config, "thinking_mode", ThinkingMode.UNSPECIFIED)
+        == ThinkingMode.ADAPTIVE
+    ):
         return ThinkingMode.ADAPTIVE
-    return ThinkingMode.ENABLED if config.in_think_mode else ThinkingMode.DISABLED
+    return (
+        ThinkingMode.ENABLED
+        if getattr(config, "in_think_mode", False)
+        else ThinkingMode.DISABLED
+    )
 
 
-def _uses_reasoning_envelope(config: Any) -> bool:
+def uses_reasoning_envelope(config: Any) -> bool:
     from rtp_llm.config.generate_config import ThinkingMode
 
     return _resolved_thinking_mode(config) in (
@@ -267,7 +274,7 @@ def prepare_response_format(
 
     if config._reasoning_envelope_applied:
         final_constraint = config._reasoning_final_constraint
-        if _uses_reasoning_envelope(config):
+        if uses_reasoning_envelope(config):
             validate_engine_ready(config)
             return final_constraint
         restore_final_constraint(config, final_constraint)
@@ -275,7 +282,7 @@ def prepare_response_format(
 
     plan = ResponseFormatPlan.compile(config, reasoning_format=reasoning_format)
     plan.apply_to_config(config)
-    if _uses_reasoning_envelope(config):
+    if uses_reasoning_envelope(config):
         config._reasoning_envelope_applied = True
         config._reasoning_final_constraint = plan.final_constraint
         config._reasoning_format = reasoning_format
@@ -285,10 +292,12 @@ def prepare_response_format(
 def recompile_reasoning_envelope(config: Any) -> None:
     """Rebuild an installed reasoning envelope after its budget changes.
 
-    Prompt length is only known at the backend boundary, after the original
-    request-level grammar has been compiled. Keep the saved final constraint
-    and reasoning syntax as the source for a fresh envelope so the scalar
-    budget and the grammar consumed by the engine cannot diverge.
+    Prompt length is only known at the Python backend boundary, after the
+    request-level grammar has been compiled and before ``trans_input`` creates
+    the protobuf. Keep the saved final constraint and reasoning syntax as the
+    source for a fresh envelope so the scalar budget and the grammar consumed
+    by the engine cannot diverge. These private attributes are intentionally
+    not needed after RPC serialization.
     """
 
     if not config._reasoning_envelope_applied:

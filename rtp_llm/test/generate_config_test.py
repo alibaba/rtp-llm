@@ -564,6 +564,7 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertEqual(config.max_new_tokens, 100)
         self.assertEqual(config.max_thinking_tokens, 10)
         self.assertTrue(config.in_think_mode)
+        self.assertTrue(config._max_thinking_tokens_was_explicit)
 
     def test_openai_max_completion_tokens_respects_max_tokens_total_cap(self):
         generate_env_config = GenerateEnvConfig()
@@ -2023,6 +2024,31 @@ class MaxThinkingTokensClampTest(TestCase):
         # speculative execution is disabled for this individual request.
         self.assertEqual(generate_input.generate_config.max_thinking_tokens, 54)
 
+    def test_explicit_assignment_marker_preserves_clamp_warning(self):
+        config = GenerateConfig()
+        config.in_think_mode = True
+        config.thinking_mode = ThinkingMode.ENABLED
+        config.end_think_token_ids = [101]
+        config.max_thinking_tokens = 100
+        config._max_thinking_tokens_was_explicit = True
+        generate_input = GenerateInput(
+            request_id=0,
+            token_ids=torch.zeros(1, 40, dtype=torch.int),
+            mm_inputs=[],
+            generate_config=config,
+        )
+
+        with patch("rtp_llm.server.backend_rpc_server_visitor.logging") as logging_mock:
+            self.visitor._validate_input(generate_input)
+
+        self.assertEqual(config.max_thinking_tokens, 58)
+        self.assertTrue(
+            any(
+                "exceeds the safe thinking budget" in str(call)
+                for call in logging_mock.warning.call_args_list
+            )
+        )
+
     def test_default_budget_is_clamped_without_warning(self):
         config = GenerateConfig()
         config.in_think_mode = True
@@ -2077,6 +2103,14 @@ class MaxThinkingTokensClampTest(TestCase):
 
         self.assertEqual(generate_input.generate_config.max_thinking_tokens, 32000)
         mock_logging.warning.assert_not_called()
+
+    def test_backend_uses_the_compiler_reasoning_envelope_predicate(self):
+        generate_input = self._make_input(in_think_mode=False, end_think_token_ids=[])
+        generate_input.generate_config.thinking_mode = ThinkingMode.ENABLED
+
+        self.visitor._validate_input(generate_input)
+
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 32000)
 
     def test_in_think_mode_absent_is_treated_as_non_think(self):
         config = self._make_config_stub(
@@ -2146,6 +2180,32 @@ class ThinkAnchorPredicateTest(TestCase):
         self.assertFalse(
             prompt_ends_with_think_anchor("user hi\n<think></think>\n\n", "<think>\n")
         )
+
+    def test_adaptive_mode_uses_the_recorded_string_anchor(self):
+        endpoint = object.__new__(OpenaiEndpoint)
+        endpoint.generate_env_config = GenerateEnvConfig()
+        endpoint.generate_env_config.think_start_tag = "<think>\n"
+        endpoint.tokenizer = Mock()
+        endpoint.tokenizer.encode = Mock(return_value=[10, 11])
+        renderer = Mock()
+        renderer.get_reasoning_format = Mock(
+            return_value=ReasoningFormat(tag_begin="<think>", tag_end="</think>")
+        )
+        request = ChatCompletionRequest(messages=[])
+        request.set_prompt_has_think_anchor(True)
+        config = GenerateConfig(
+            thinking_mode=ThinkingMode.ADAPTIVE,
+            begin_think_token_ids=[10, 11],
+        )
+
+        reasoning_format = endpoint._reasoning_format_for_prompt(
+            config, renderer, [999], request
+        )
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertTrue(config.in_think_mode)
+        self.assertEqual(reasoning_format.tag_begin, "")
+        endpoint.tokenizer.encode.assert_not_called()
 
 
 if __name__ == "__main__":

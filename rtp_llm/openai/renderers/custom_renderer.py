@@ -455,7 +455,7 @@ class CustomChatRenderer:
         return ids_list
 
     def get_all_extra_stop_word_ids_list(self) -> List[List[int]]:
-        ids_list_from_words = self.tokenize_words(self.extra_stop_words)
+        ids_list_from_words = self.encode_extra_stop_words(self.extra_stop_words)
         return self.extra_stop_word_ids_list + ids_list_from_words
 
     def _check_all_finished(self, status_list) -> bool:

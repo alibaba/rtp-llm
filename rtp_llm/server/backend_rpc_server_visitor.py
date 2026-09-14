@@ -12,9 +12,12 @@ from rtp_llm.config.exceptions import (
     ExceptionType,
     FtRuntimeException,
 )
-from rtp_llm.config.generate_config import RoleAddr, RoleType, ThinkingMode
+from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
-from rtp_llm.config.response_format_compiler import recompile_reasoning_envelope
+from rtp_llm.config.response_format_compiler import (
+    recompile_reasoning_envelope,
+    uses_reasoning_envelope,
+)
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
@@ -57,7 +60,13 @@ def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
 def _speculative_reserve_tokens(
     sp_config: Optional[SpeculativeExecutionConfig],
 ) -> int:
-    """Mirror the speculative token reserve in GenerateStream::maxTokenNum()."""
+    """Mirror the speculative reserve used by ``GenerateStream::maxTokenNum``.
+
+    Source mapping: ``NormalEngine.cc`` sets ``reserve_step`` to ``3 * gamma``
+    for DSpARK and ``gamma + 1`` otherwise; ``GenerateStream.cc`` takes its max
+    with the async output-buffer reserve ``2 * gamma + 1``. Keep the branch
+    tests below in sync with those two C++ symbols.
+    """
 
     sp_type = (
         getattr(sp_config, "type", SpeculativeType.NONE)
@@ -644,12 +653,7 @@ class BackendRPCServerVisitor:
             )
 
         config = input.generate_config
-        thinking_mode = getattr(config, "thinking_mode", ThinkingMode.UNSPECIFIED)
-        uses_reasoning_grammar = thinking_mode in (
-            ThinkingMode.ENABLED,
-            ThinkingMode.ADAPTIVE,
-        ) or getattr(config, "in_think_mode", False)
-        if not uses_reasoning_grammar:
+        if not uses_reasoning_envelope(config):
             return
 
         # GenerateStream::maxTokenNum() reserves the current speculative draft
@@ -690,7 +694,7 @@ class BackendRPCServerVisitor:
         if max_thinking_tokens is not None and max_thinking_tokens > think_budget_cap:
             budget_was_explicit = "max_thinking_tokens" in getattr(
                 config, "model_fields_set", set()
-            )
+            ) or getattr(config, "_max_thinking_tokens_was_explicit", False)
             if budget_was_explicit:
                 logging.warning(
                     "max_thinking_tokens %d exceeds the safe thinking budget "

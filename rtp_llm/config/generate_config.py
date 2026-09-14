@@ -121,6 +121,7 @@ class GenerateConfig(BaseModel):
     _reasoning_envelope_applied: bool = PrivateAttr(default=False)
     _reasoning_final_constraint: Any = PrivateAttr(default=None)
     _reasoning_format: Any = PrivateAttr(default=None)
+    _max_thinking_tokens_was_explicit: bool = PrivateAttr(default=False)
 
     max_new_tokens: int = 32000
     # only for qwen agent fncall check max input tokens

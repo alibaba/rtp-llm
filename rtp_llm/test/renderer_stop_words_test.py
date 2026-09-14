@@ -625,6 +625,9 @@ class EncodeExtraStopWordsTest(TestCase):
         self.renderer.encode_extra_stop_words = (
             CustomChatRenderer.encode_extra_stop_words.__get__(self.renderer)
         )
+        self.renderer.get_all_extra_stop_word_ids_list = (
+            CustomChatRenderer.get_all_extra_stop_word_ids_list.__get__(self.renderer)
+        )
 
     def test_ids_come_from_tokenizer_not_hardcoded(self):
         # A 248K-vocab checkpoint maps the legacy 151K ids onto unrelated tokens,
@@ -728,6 +731,18 @@ class EncodeExtraStopWordsTest(TestCase):
         result[0].append(9)
 
         self.assertEqual(shared, [7, 8])
+
+    def test_configured_extra_stop_words_use_full_encoding(self):
+        self.renderer.extra_stop_word_ids_list = [[7]]
+        self.renderer.extra_stop_words = ["multi token stop"]
+        self.renderer.tokenizer.encode = Mock(return_value=[11, 12, 13])
+        self.renderer.tokenize_words = Mock(return_value=[[999]])
+
+        self.assertEqual(
+            self.renderer.get_all_extra_stop_word_ids_list(),
+            [[7], [11, 12, 13]],
+        )
+        self.renderer.tokenize_words.assert_not_called()
 
 
 class RealTokenizerStopWordTest(TestCase):
