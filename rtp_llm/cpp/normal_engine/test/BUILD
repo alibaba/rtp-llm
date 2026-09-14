@@ -44,7 +44,12 @@ cc_library(
         "//rtp_llm/cpp/engine_base:weights_converter",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ] + torch_deps() + device_runtime_deps + cuda13_torch_link_deps,
+    ] + torch_deps() + device_runtime_deps + cuda13_torch_link_deps + select({
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+        ],
+        "//conditions:default": [],
+    }),
     alwayslink = 1,
     visibility = ["//visibility:public"],
 )

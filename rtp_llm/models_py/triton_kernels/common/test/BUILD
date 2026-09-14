@@ -56,3 +56,31 @@ py_test(
     tags = ["rocm"],
     exec_properties = {"gpu": "MI308X-ROCM7", "gpu_count": "1"},
 )
+
+py_test(
+    name = "dflash_attention_cuda_test",
+    srcs = ["dflash_attention_test.py"],
+    main = "dflash_attention_test.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+)
+
+py_test(
+    name = "dflash_attention_rocm_test",
+    srcs = ["dflash_attention_test.py"],
+    main = "dflash_attention_test.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7", "gpu_count": "1"},
+)
+
+py_test(
+    name = "dflash_attention_contract_test",
+    srcs = ["dflash_attention_test.py"],
+    main = "dflash_attention_test.py",
+    args = ["DFlashAttentionContractTest"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)

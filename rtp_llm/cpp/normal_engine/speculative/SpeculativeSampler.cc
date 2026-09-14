@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include <algorithm>
+#include <cmath>
 #include <vector>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -84,6 +85,89 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
     output.token_ids                = torch::stack(token_columns, 1).contiguous();
     output.all_probs                = std::move(all_probabilities);
     output.token_ids_are_point_mass = false;
+    return output;
+}
+
+torch::Tensor dflashDraftProbabilities(const torch::Tensor& logits, const GenerateConfig& config) {
+    TORCH_CHECK(logits.dim() == 2 && logits.size(1) > 0, "DFlash logits must be [tokens,vocab]");
+    TORCH_CHECK(std::isfinite(config.temperature) && config.temperature >= 0.0f,
+                "DFlash temperature must be finite and nonnegative");
+    TORCH_CHECK(config.top_k >= 0 && std::isfinite(config.top_p) && config.top_p > 0.0f && config.top_p <= 1.0f,
+                "DFlash requires top_k >= 0 and 0 < top_p <= 1");
+    auto scores = logits.to(torch::kFloat32);
+    if (!config.stochastic() || config.temperature == 0.0f) {
+        return torch::zeros_like(scores).scatter_(-1, scores.argmax(-1, true), 1.0);
+    }
+    scores = scores / config.temperature;
+    torch::Tensor indices;
+    if (config.top_k > 0 && config.top_k < scores.size(1)) {
+        auto top = scores.topk(config.top_k, -1);
+        scores   = std::get<0>(top);
+        indices  = std::get<1>(top);
+    }
+    auto probabilities = torch::softmax(scores, -1);
+    if (config.top_p < 1.0f) {
+        auto sorted               = probabilities.sort(-1, /*descending=*/true);
+        auto sorted_probabilities = std::get<0>(sorted);
+        // Keep the token crossing the nucleus threshold, as in the reference.
+        auto keep            = sorted_probabilities.cumsum(-1) - sorted_probabilities < config.top_p;
+        sorted_probabilities = sorted_probabilities * keep;
+        probabilities        = torch::zeros_like(probabilities).scatter_(-1, std::get<1>(sorted), sorted_probabilities);
+        probabilities        = probabilities / probabilities.sum(-1, true);
+    }
+    if (indices.defined()) {
+        probabilities = torch::zeros_like(logits, probabilities.options()).scatter_(-1, indices, probabilities);
+    }
+    return probabilities;
+}
+
+SamplerOutput SpeculativeSampler::sampleDFlashDraft(const torch::Tensor&                base_logits,
+                                                    const std::list<GenerateStreamPtr>& streams,
+                                                    size_t                              draft_vocab_size) const {
+    RTP_LLM_PROFILE_SCOPE("speculative_sampler.sample_dflash_draft");
+    const auto batch_size = static_cast<int64_t>(streams.size());
+    TORCH_CHECK(!d2t_map_.defined(), "DFlash samples in the full target vocabulary");
+    TORCH_CHECK(batch_size > 0 && propose_step_ > 0 && base_logits.dim() == 2
+                    && base_logits.size(0) == batch_size * static_cast<int64_t>(propose_step_)
+                    && base_logits.size(1) >= static_cast<int64_t>(draft_vocab_size),
+                "DFlash logits must contain only mask rows: [B*gamma,vocab_padded]");
+    auto logits =
+        base_logits.narrow(1, 0, draft_vocab_size)
+            .reshape({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)});
+    std::vector<torch::Tensor> probability_rows;
+    std::vector<torch::Tensor> token_rows;
+    probability_rows.reserve(batch_size);
+    token_rows.reserve(batch_size);
+    bool    all_greedy = true;
+    int64_t row        = 0;
+    for (const auto& stream : streams) {
+        TORCH_CHECK(stream->maxBatchSize() == 1 && !stream->hasNumBeams(),
+                    "DFlash does not support tiled or beam sampling");
+        const auto& config        = *stream->generateConfig();
+        auto        probabilities = dflashDraftProbabilities(logits[row++], config);
+        const bool  greedy        = !config.stochastic() || config.temperature == 0.0f;
+        all_greedy                = all_greedy && greedy;
+        torch::Tensor tokens;
+        if (greedy) {
+            tokens = probabilities.argmax(-1);
+        } else {
+            auto generator = stream->getGenerator();
+            tokens         = torch::multinomial(probabilities,
+                                        1,
+                                        false,
+                                        generator.defined() ? std::optional<at::Generator>(generator) : std::nullopt)
+                         .squeeze(-1);
+        }
+        token_rows.push_back(tokens.to(torch::kInt32));
+        probability_rows.push_back(std::move(probabilities));
+    }
+    SamplerOutput output;
+    output.token_ids                = torch::stack(token_rows).contiguous();
+    output.token_ids_are_point_mass = all_greedy;
+    if (!all_greedy) {
+        // Mixed batches retain explicit one-hot q for their greedy rows.
+        output.all_probs = torch::stack(probability_rows).contiguous();
+    }
     return output;
 }
 
@@ -185,8 +269,16 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
         auto draft_probs_padding = draft_probs_padding_buffer_.narrow(0, 0, (int64_t)batch_size).narrow(1, 0, num_spec);
         draft_probs_padding.zero_();
-        draft_probs_padding.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), d2t_map_},
-                                       draft_token_probs_d_t);
+        if (d2t_map_.defined()) {
+            draft_probs_padding.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), d2t_map_},
+                                           draft_token_probs_d_t);
+        } else {
+            // Full-vocabulary DFlash omits synthetic lm-head padding from q.
+            // The target sampler retains padded columns, each with zero mass.
+            RTP_LLM_CHECK_WITH_INFO(draft_token_probs_d_t.size(2) <= target_vocab_size,
+                                    "draft vocabulary exceeds target vocabulary without a d2t map");
+            draft_probs_padding.narrow(2, 0, draft_token_probs_d_t.size(2)).copy_(draft_token_probs_d_t);
+        }
         draft_token_probs_d_t = draft_probs_padding;
     }
 
