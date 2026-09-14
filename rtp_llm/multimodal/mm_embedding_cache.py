@@ -6,7 +6,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from itertools import islice
+from itertools import chain, islice
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -175,16 +175,20 @@ class MMEmbeddingCacheEntry:
 
     def wait(self, timeout: Optional[float] = None) -> Any:
         deadline = None if timeout is None else time.monotonic() + timeout
-        if not self._event.wait(timeout=timeout):
-            raise TimeoutError("Waiting for embedding result timed out")
-        if self.error is not None:
-            raise self.error
+        self.wait_ready(timeout)
         if self._on_read is not None:
             remaining = (
                 None if deadline is None else max(0.0, deadline - time.monotonic())
             )
             return self._on_read(self, remaining)
         return self.result
+
+    def wait_ready(self, timeout: Optional[float] = None) -> None:
+        """Wait for completion without promoting an offloaded embedding."""
+        if not self._event.wait(timeout=timeout):
+            raise TimeoutError("Waiting for embedding result timed out")
+        if self.error is not None:
+            raise self.error
 
     def complete(
         self, result: Any, feature_hashes: Optional[List[torch.Tensor]] = None
@@ -366,35 +370,39 @@ class MMHashKeyCache:
     ) -> Dict[str, Any]:
         results = []
         total_rows = 0
+        tiers = embedding_cache.resident_tiers(keys)
         for key in keys:
-            entry = embedding_cache.peek(key)
             with self._lock:
                 value = self._entries.get(key)
-            if (
-                entry is None
-                or not entry.is_done
-                or entry.error is not None
-                or value is None
-                or value[1] != entry.generation
-            ):
-                results.append({"key": key, "hit": False})
+            hash_hit = (
+                value is not None
+                and bool(value[0])
+                and all(tensor.numel() > 0 for tensor in value[0])
+            )
+            result = {
+                "key": key,
+                "hit": hash_hit,
+                "hash_hit": hash_hit,
+                "embedding_hit": key in tiers,
+                "embedding_tier": tiers.get(key),
+            }
+            results.append(result)
+            if not hash_hit:
                 continue
             hashes = value[0]
             split_size = [hash_tensor.numel() for hash_tensor in hashes]
             total_rows += sum(split_size)
             if total_rows > 1048576:
                 raise ValueError("multimodal metadata response exceeds row limit")
-            results.append(
+            result.update(
                 {
-                    "key": key,
-                    "hit": True,
                     "split_size": split_size,
                     "feature_hashes": [
                         value
                         for hash_tensor in hashes
                         for value in hash_tensor.tolist()
                     ],
-                    "entry_generation": entry.generation,
+                    "entry_generation": value[1],
                 }
             )
         return {
@@ -732,6 +740,32 @@ class MMEmbeddingCache:
     def peek(self, cache_key: str) -> Optional[MMEmbeddingCacheEntry]:
         with self._lock:
             return self._entries.get(cache_key)
+
+    def resident_tiers(
+        self, keys: Optional[List[str]] = None, limit: Optional[int] = None
+    ) -> Dict[str, str]:
+        """Snapshot completed residency without touching LRU or moving tensors."""
+        if limit is not None and limit <= 0:
+            return {}
+        with self._lock:
+            candidates = (
+                keys
+                if keys is not None
+                else chain(reversed(self._gpu_lru), reversed(self._cpu_lru))
+            )
+            tiers = {}
+            for key in candidates:
+                entry = self._entries.get(key)
+                if (
+                    entry is not None
+                    and entry._event.is_set()
+                    and entry.error is None
+                    and entry.tier in ("gpu", "cpu")
+                ):
+                    tiers[key] = entry.tier
+                    if limit is not None and len(tiers) >= limit:
+                        break
+            return tiers
 
     def metadata_keys(self) -> List[str]:
         with self._lock:

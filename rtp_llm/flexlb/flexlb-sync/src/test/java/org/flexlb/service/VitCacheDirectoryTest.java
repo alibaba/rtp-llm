@@ -1,5 +1,6 @@
 package org.flexlb.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -98,6 +99,81 @@ class VitCacheDirectoryTest {
         response.setWorkerInstance(epoch);
         response.setKeys(List.of(keys));
         directory.replace(worker, response);
+    }
+
+    private void tierSnapshot(WorkerStatus worker, List<String> hashes, List<String> gpu, List<String> cpu) {
+        var response = new VitCacheDirectory.CacheKeys();
+        response.setFeatureHashVersion(1);
+        response.setWorkerInstance("instance");
+        response.setKeys(hashes);
+        response.setGpuEmbeddingKeys(gpu);
+        response.setCpuEmbeddingKeys(cpu);
+        directory.replace(worker, response);
+    }
+
+    @Test
+    void prefersGpuThenCpuThenHashOnlyAndReplacesResidency() {
+        List<String> keys = List.of("image");
+        tierSnapshot(a, keys, keys, List.of());
+        tierSnapshot(b, keys, List.of(), keys);
+        assertEquals(a.getIp(), directory.select(context("image"), null).getServerIp());
+        tierSnapshot(a, keys, List.of(), List.of());
+        assertEquals(b.getIp(), directory.select(context("image"), null).getServerIp());
+        // A snapshot without the optional tier fields clears previously advertised residency.
+        snapshot(b, "instance", "image");
+        tierSnapshot(a, keys, List.of(), keys);
+        assertEquals(a.getIp(), directory.select(context("image"), null).getServerIp());
+    }
+
+    @Test
+    void hashCoveragePrecedesEmbeddingCoverageAndEmbeddingCoveragePrecedesTier() {
+        List<String> keys = List.of("image1", "image2");
+        tierSnapshot(a, keys, List.of(), List.of());
+        tierSnapshot(b, List.of("image1"), keys, List.of());
+        assertEquals(a.getIp(), directory.select(context("image1", "image2"), null).getServerIp());
+        tierSnapshot(a, keys, List.of(), keys);
+        tierSnapshot(b, keys, List.of("image1"), List.of());
+        assertEquals(a.getIp(), directory.select(context("image1", "image2"), null).getServerIp());
+        tierSnapshot(b, keys, List.of("image1"), List.of("image2"));
+        assertEquals(b.getIp(), directory.select(context("image1", "image2"), null).getServerIp());
+    }
+
+    @Test
+    void embeddingWithoutHashBeatsPendingPlacementButRespectsGroupAndHealth() {
+        String selected = directory.select(context("cold"), null).getServerIp();
+        WorkerStatus other = selected.equals(a.getIp()) ? b : a;
+        WorkerStatus pendingWorker = selected.equals(a.getIp()) ? a : b;
+        tierSnapshot(other, List.of(), List.of(), List.of("cold"));
+        assertEquals(other.getIp(), directory.select(context("cold"), null).getServerIp());
+        assertEquals(pendingWorker.getIp(),
+                directory.select(context("cold"), pendingWorker.getGroup()).getServerIp());
+        other.setAlive(false);
+        assertEquals(pendingWorker.getIp(), directory.select(context("cold"), null).getServerIp());
+    }
+
+    @Test
+    void rejectsInvalidTierSnapshotsWithoutDiscardingKnownResidency() {
+        tierSnapshot(a, List.of(), List.of("image"), List.of());
+        tierSnapshot(b, List.of(), List.of(), List.of("image"));
+        tierSnapshot(a, List.of(), List.of("image"), List.of("image"));
+        assertEquals(a.getIp(), directory.select(context("image"), null).getServerIp());
+        tierSnapshot(a, List.of(), List.of(), List.of(""));
+        assertEquals(a.getIp(), directory.select(context("image"), null).getServerIp());
+        List<String> manyKeys = IntStream.range(0, 100_000).mapToObj(i -> "key" + i).toList();
+        tierSnapshot(a, manyKeys, List.of(), List.of("extra"));
+        assertEquals(a.getIp(), directory.select(context("image"), null).getServerIp());
+    }
+
+    @Test
+    void acceptsTierFieldsFromWorkerJson() throws Exception {
+        var response = new ObjectMapper().readValue("""
+                {"worker_instance":"a1","feature_hash_version":1,"keys":["hash"],
+                 "gpu_embedding_keys":["gpu"],"cpu_embedding_keys":["cpu"]}
+                """, VitCacheDirectory.CacheKeys.class);
+        directory.replace(a, response);
+        for (String key : List.of("hash", "gpu", "cpu")) {
+            assertEquals(a.getIp(), directory.select(context(key), null).getServerIp());
+        }
     }
 
     @Test

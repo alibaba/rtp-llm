@@ -9,6 +9,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+import orjson
+
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.py_config_modules import MasterConfig
@@ -363,7 +365,107 @@ class MasterClient:
         ]
         return FlexlbResponse(role_addrs=role_addrs, result=resp.result)
 
-    async def get_vit_cache_metadata(self, address: RoleAddr, keys: List[str]):
+    async def get_vit_cache_metadata(
+        self, address: RoleAddr, keys: List[str], input: Optional[GenerateInput] = None
+    ):
+        """Probe hashes, then submit only missing media when routing requires them."""
+        started = time.monotonic()
+        unique_keys = list(dict.fromkeys(keys))
+        metadata = await self._post_vit_metadata(
+            address, {"keys": unique_keys}, DEFAULT_REQUEST_TIMEOUT_SEC
+        )
+        if input is None:
+            return metadata
+        entries = {
+            e["key"]: e
+            for e in (metadata or {}).get("entries", [])
+            if isinstance(e, dict) and isinstance(e.get("key"), str)
+        }
+        if not metadata or metadata.get("feature_hash_version") != 1:
+            entries = {}
+        missing = {
+            key
+            for key in unique_keys
+            if not entries.get(key, {}).get(
+                "hash_hit", entries.get(key, {}).get("hit", False)
+            )
+        }
+        if not missing:
+            return metadata
+
+        from google.protobuf.json_format import MessageToDict
+
+        from rtp_llm.cpp.model_rpc.model_rpc_client import iter_multimodal_inputs
+
+        # The cache-hit probe carries no URLs. On a miss serialize each distinct
+        # missing input once, without copying image/video data into embeddings.
+        inputs = []
+        submitted = set()
+        for key, item in zip(
+            keys, iter_multimodal_inputs(input, input.generate_config)
+        ):
+            if key in missing and key not in submitted:
+                inputs.append(MessageToDict(item, preserving_proto_field_name=True))
+                submitted.add(key)
+        if submitted != missing:
+            raise FtRuntimeException(
+                ExceptionType.MM_PROCESS_ERROR, "Missing ViT submission inputs"
+            )
+        configured_timeout = input.generate_config.mm_timeout_ms
+        if not configured_timeout or configured_timeout <= 0:
+            configured_timeout = max(
+                (
+                    i.mm_preprocess_config.mm_timeout_ms
+                    for i in input.mm_inputs
+                    if i.mm_preprocess_config.mm_timeout_ms > 0
+                ),
+                default=120000,
+            )
+        limits = [configured_timeout]
+        for name in ("ttft_timeout_ms", "timeout_ms"):
+            limit = getattr(input.generate_config, name, None)
+            if limit and limit > 0:
+                limits.append(limit)
+        remaining = min(limits) / 1000.0 - (time.monotonic() - started)
+        if remaining <= 0:
+            raise FtRuntimeException(
+                ExceptionType.GENERATE_TIMEOUT, "ViT hash acquisition timed out"
+            )
+        filled = await self._post_vit_metadata(
+            address,
+            {
+                "keys": [key for key in unique_keys if key in missing],
+                "inputs": inputs,
+                "request_id": input.request_id,
+                "timeout_ms": max(1, int(remaining * 1000)),
+            },
+            remaining,
+            required=True,
+        )
+        if metadata and filled.get("worker_instance") != metadata.get(
+            "worker_instance"
+        ):
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR, "ViT restarted during hash acquisition"
+            )
+        if filled.get("feature_hash_version") != 1:
+            raise FtRuntimeException(
+                ExceptionType.MM_PROCESS_ERROR, "Unsupported ViT feature hash version"
+            )
+        entries.update({e["key"]: e for e in filled.get("entries", [])})
+        if any(
+            not entries.get(key, {}).get(
+                "hash_hit", entries.get(key, {}).get("hit", False)
+            )
+            for key in unique_keys
+        ):
+            raise FtRuntimeException(
+                ExceptionType.MM_PROCESS_ERROR, "ViT returned incomplete feature hashes"
+            )
+        filled["entries"] = [entries[key] for key in unique_keys]
+        return filled
+
+    async def _post_vit_metadata(self, address, payload, timeout_sec, required=False):
         import aiohttp
 
         started = time.monotonic()
@@ -371,26 +473,49 @@ class MasterClient:
             session = await self._get_session()
             async with session.post(
                 f"http://{address.ip}:{address.http_port}/mm_cache/metadata",
-                json={"keys": list(dict.fromkeys(keys))},
-                timeout=aiohttp.ClientTimeout(total=DEFAULT_REQUEST_TIMEOUT_SEC),
+                data=orjson.dumps(payload),
+                headers={"Content-Type": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=timeout_sec),
             ) as response:
-                if response.status != SUCCESS_CODE:
-                    return None
-                # Limit the optional optimization's response before JSON decoding.
-                chunks, size = [], 0
+                # One bounded buffer avoids retaining chunks plus a joined copy.
+                body = bytearray()
                 async for chunk in response.content.iter_chunked(65536):
-                    size += len(chunk)
-                    if size > 16 * 1024 * 1024:
+                    if len(body) + len(chunk) > 16 * 1024 * 1024:
+                        raise ValueError("ViT metadata response exceeds byte limit")
+                    body.extend(chunk)
+                data = orjson.loads(body)
+                if response.status != SUCCESS_CODE:
+                    if not required:
                         return None
-                    chunks.append(chunk)
-                return json.loads(b"".join(chunks))
+                    detail = data.get("detail", "ViT hash computation failed")
+                    code = (
+                        ExceptionType.GENERATE_TIMEOUT
+                        if response.status == 504
+                        else ExceptionType.MM_PROCESS_ERROR
+                    )
+                    if isinstance(detail, dict):
+                        code = ExceptionType(detail.get("error_code", int(code)))
+                        detail = detail.get("message", "ViT hash computation failed")
+                    raise FtRuntimeException(code, str(detail))
+                if not isinstance(data, dict):
+                    raise ValueError("Invalid ViT metadata response")
+                return data
         except (
             aiohttp.ClientError,
             asyncio.TimeoutError,
             TimeoutError,
             OSError,
             ValueError,
-        ):
+        ) as error:
+            if required:
+                code = (
+                    ExceptionType.GENERATE_TIMEOUT
+                    if isinstance(error, (TimeoutError, asyncio.TimeoutError))
+                    else ExceptionType.MM_PROCESS_ERROR
+                )
+                raise FtRuntimeException(
+                    code, f"ViT hash acquisition failed: {type(error).__name__}"
+                ) from error
             route_logger.warning(
                 "ViT metadata unavailable, address=%s:%s", address.ip, address.http_port
             )

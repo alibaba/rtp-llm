@@ -1,9 +1,10 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import torch
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     multimodal_cache_keys,
@@ -115,6 +116,42 @@ class MMCacheRoutingTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             multimodal_routing_tokens([1, 99], [[99]], False, ["a"], data, 100)
 
+    def test_hash_only_hit_expands_tokens_and_embedding_only_hit_does_not(self):
+        data = metadata(["a"], [[-10, 11]])
+        data["entries"][0].update(
+            hash_hit=True, embedding_hit=False, embedding_tier=None
+        )
+        self.assertEqual(
+            multimodal_routing_tokens([1, 99, 2], [[99]], False, ["a"], data, 100),
+            ([1, -10, 11, 2], 4),
+        )
+        data["entries"][0].update(
+            hash_hit=False, embedding_hit=True, embedding_tier="cpu"
+        )
+        self.assertEqual(
+            multimodal_routing_tokens([1, 99, 2], [[99]], False, ["a"], data, 100),
+            ([1], None),
+        )
+
+    def test_compact_expansion_produces_identical_prefill_block_hashes(self):
+        from array import array
+
+        from rtp_llm.ops import get_block_cache_keys
+
+        hashes = list(range(-10000, 10000))
+        data = metadata(["a"], [hashes])
+        tokens, length = multimodal_routing_tokens(
+            [1, 99, 2], [[99]], False, ["a"], data, 30000, compact=True
+        )
+        self.assertIsInstance(tokens, array)
+        self.assertEqual(tokens.itemsize, 4)
+        expected = [1] + hashes + [2]
+        self.assertEqual(list(tokens), expected)
+        self.assertEqual(length, len(expected))
+        actual_blocks = get_block_cache_keys(tokens, 16)
+        self.assertTrue(actual_blocks)
+        self.assertEqual(actual_blocks, get_block_cache_keys(expected, 16))
+
 
 class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -187,26 +224,144 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.generate_config.role_addrs, [prefill, vit])
         self.assertEqual(request.token_ids.tolist(), [1, 99, 2])
 
-    async def test_cache_probe_miss_or_invalid_metadata_keeps_inference_route(self):
+    async def test_missing_or_invalid_required_hashes_stop_before_prefill_routing(self):
         for data in (None, {"feature_hash_version": 1, "entries": [{}]}):
             await self.asyncSetUp()
             self.visitor.master_client.get_vit_cache_metadata.return_value = data
-            self.assertIsNone(await self.visitor.get_master_route_addrs(self.request))
+            with self.assertRaises(FtRuntimeException):
+                await self.visitor.get_master_route_addrs(self.request)
             calls = self.visitor.master_client.get_backend_role_addrs.call_args_list
-            self.assertNotIn("seq_len", calls[1].kwargs)
-            self.assertEqual(calls[1].kwargs["selected_vit"], self.status)
-            self.assertEqual(calls[1].kwargs["block_cache_keys"], [])
+            self.assertEqual(len(calls), 1)
             self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
+
+    async def test_required_hash_miss_submits_only_missing_distinct_inputs(self):
+        from google.protobuf.json_format import ParseDict
+
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
+        from rtp_llm.multimodal.multimodal_util import trans_mm_input
+
+        item = self.request.mm_inputs[0]
+        second = MultimodalInput(
+            "https://example/second",
+            item.mm_type,
+            torch.empty(0),
+            item.mm_preprocess_config,
+        )
+        self.request.mm_inputs = [item, second, second]
+        self.request.generate_config.max_pixels = 1024
+        keys = multimodal_cache_keys(self.request)
+        probe = metadata(keys[:1], [[-10, 11]])
+        probe["entries"].append({"key": keys[1], "hash_hit": False})
+        filled = metadata(keys[1:2], [[21, 22, 23]])
+        client = MasterClient()
+        client._post_vit_metadata = AsyncMock(side_effect=[probe, filled])
+        result = await client.get_vit_cache_metadata(self.vit, keys, input=self.request)
+        self.assertEqual(
+            [e["feature_hashes"] for e in result["entries"]], [[-10, 11], [21, 22, 23]]
+        )
+        calls = client._post_vit_metadata.call_args_list
+        self.assertEqual(calls[0].args[1], {"keys": keys[:2]})
+        payload = calls[1].args[1]
+        self.assertEqual(payload["keys"], keys[1:2])
+        self.assertEqual(payload["request_id"], self.request.request_id)
+        self.assertEqual(len(payload["inputs"]), 1)
+        resolved = trans_mm_input(
+            ParseDict({"multimodal_inputs": payload["inputs"]}, MultimodalInputsPB())
+        )
+        self.assertEqual(resolved[0].cache_key(), keys[1])
+        self.assertEqual(resolved[0].mm_preprocess_config.max_pixels, 1024)
+        self.assertTrue(calls[1].kwargs["required"])
+        self.assertGreater(calls[1].args[2], 0.5)
+
+    async def test_hash_hit_sends_no_media_and_failed_submission_is_not_optional(self):
+        client = MasterClient()
+        keys = multimodal_cache_keys(self.request)
+        ready = metadata(keys, [[-10, 11]])
+        client._post_vit_metadata = AsyncMock(return_value=ready)
+        self.assertIs(
+            await client.get_vit_cache_metadata(self.vit, keys, input=self.request),
+            ready,
+        )
+        client._post_vit_metadata.assert_awaited_once()
+        self.assertEqual(client._post_vit_metadata.call_args.args[1], {"keys": keys})
+        client._post_vit_metadata = AsyncMock(
+            side_effect=[
+                {"worker_instance": "epoch", "feature_hash_version": 1, "entries": []},
+                {"worker_instance": "epoch", "feature_hash_version": 1, "entries": []},
+            ]
+        )
+        with self.assertRaisesRegex(FtRuntimeException, "incomplete feature hashes"):
+            await client.get_vit_cache_metadata(self.vit, keys, input=self.request)
+
+    async def test_frontend_drops_metadata_and_expanded_tokens_before_waiting_for_prefill(
+        self,
+    ):
+        class TrackedMetadata(dict):
+            pass
+
+        import weakref
+
+        saved = []
+
+        async def get_metadata(*args, **kwargs):
+            result = TrackedMetadata(
+                metadata(multimodal_cache_keys(self.request), [[-10, 11]])
+            )
+            saved.append(weakref.ref(result))
+            return result
+
+        async def route(*args, **kwargs):
+            if kwargs.get("vit_only"):
+                return FlexlbResponse(
+                    role_addrs=[self.vit], result={"server_status": [self.status]}
+                )
+            self.assertIsNone(saved[0]())
+            self.assertTrue(kwargs["block_cache_keys"])
+            return FlexlbResponse.ok([self.prefill, self.vit])
+
+        self.visitor.master_client.get_vit_cache_metadata = get_metadata
+        self.visitor.master_client.get_backend_role_addrs = route
+        await self.visitor.get_master_route_addrs(self.request)
+
+    async def test_evicted_embedding_still_supplies_prefill_cache_routing_hashes(self):
+        from rtp_llm.multimodal.mm_embedding_cache import (
+            MMEmbeddingCache,
+            MMHashKeyCache,
+        )
+
+        hashes = MMHashKeyCache(max_bytes=8192)
+        embeddings = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=8)
+        key = multimodal_cache_keys(self.request)[0]
+        _, entry = embeddings.try_acquire(key)
+        entry.complete(torch.ones(2))
+        hashes.put(key, [torch.tensor([-10, 11])], entry.generation)
+        embeddings.clear()
+        self.visitor.master_client.get_vit_cache_metadata.return_value = (
+            hashes.metadata([key], embeddings)
+        )
+        await self.visitor.get_master_route_addrs(self.request)
+        route = self.visitor.master_client.get_backend_role_addrs.call_args.kwargs
+        self.assertEqual(route["seq_len"], 4)
+        self.assertTrue(route["block_cache_keys"])
+        self.assertEqual(route["selected_vit"], self.status)
+        self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
 
     async def test_old_master_falls_back_to_ordinary_schedule(self):
         self.visitor.master_client.get_backend_role_addrs.side_effect = [
             FlexlbResponse.error_response(404),
+            FlexlbResponse(
+                role_addrs=[self.prefill, self.vit],
+                result={"server_status": [self.status]},
+            ),
             FlexlbResponse.ok([self.prefill, self.vit]),
         ]
         self.assertIsNone(await self.visitor.get_master_route_addrs(self.request))
         calls = self.visitor.master_client.get_backend_role_addrs.call_args_list
         self.assertNotIn("selected_vit", calls[1].kwargs)
-        self.visitor.master_client.get_vit_cache_metadata.assert_not_awaited()
+        self.visitor.master_client.get_vit_cache_metadata.assert_awaited_once()
+        self.assertEqual(calls[2].kwargs["selected_vit"], self.status)
+        self.assertEqual(calls[2].kwargs["seq_len"], 4)
+        self.assertTrue(calls[2].kwargs["block_cache_keys"])
 
     async def test_master_cannot_change_the_selected_vit(self):
         self.visitor.master_client.get_backend_role_addrs.side_effect = [
@@ -219,20 +374,33 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             await self.visitor.get_master_route_addrs(self.request)
         self.assertFalse(self.request.generate_config.role_addrs)
 
-    async def test_stale_vit_reselection_discards_hash_hints(self):
+    async def test_stale_vit_reselection_acquires_new_hashes_before_prefill(self):
         new_vit = self.vit.model_copy(update={"ip": "127.0.0.3"})
+        new_status = {**self.status, "server_ip": new_vit.ip}
         self.visitor.master_client.get_backend_role_addrs.side_effect = [
             FlexlbResponse(
                 role_addrs=[self.vit], result={"server_status": [self.status]}
             ),
             FlexlbResponse.error_response(VIT_ROUTE_STALE_CODE),
+            FlexlbResponse(
+                role_addrs=[self.prefill, new_vit],
+                result={"server_status": [new_status]},
+            ),
             FlexlbResponse.ok([self.prefill, new_vit]),
+        ]
+        keys = multimodal_cache_keys(self.request)
+        self.visitor.master_client.get_vit_cache_metadata.side_effect = [
+            metadata(keys, [[-10, 11]]),
+            metadata(keys, [[31, 32, 33, 34]]),
         ]
         self.assertIsNone(await self.visitor.get_master_route_addrs(self.request))
         last = self.visitor.master_client.get_backend_role_addrs.call_args.kwargs
-        self.assertNotIn("selected_vit", last)
-        self.assertEqual(last["block_cache_keys"], [])
-        self.assertEqual(last["seq_len"], 4)
+        self.assertEqual(last["selected_vit"], new_status)
+        self.assertTrue(last["block_cache_keys"])
+        self.assertEqual(last["seq_len"], 6)
+        self.assertEqual(
+            self.visitor.master_client.get_vit_cache_metadata.call_args.args[0], new_vit
+        )
         self.assertEqual(
             self.request.generate_config.role_addrs, [self.prefill, new_vit]
         )
@@ -298,8 +466,168 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             await client.close()
             await runner.cleanup()
 
+    async def test_http_cold_hash_waits_for_submit_before_prefill_and_preserves_errors(
+        self,
+    ):
+        import asyncio
+
+        from aiohttp import web
+
+        keys = multimodal_cache_keys(self.request)
+        self.request.generate_config.mm_timeout_ms = 2000
+        payloads = []
+        reject = False
+
+        async def handler(request):
+            body = await request.json()
+            payloads.append(body)
+            if "inputs" not in body:
+                return web.json_response(
+                    {
+                        "worker_instance": "epoch",
+                        "feature_hash_version": 1,
+                        "entries": [{"key": keys[0], "hash_hit": False}],
+                    }
+                )
+            if reject:
+                return web.json_response(
+                    {
+                        "detail": {
+                            "error_code": int(ExceptionType.CONCURRENCY_LIMIT_ERROR),
+                            "message": "full",
+                        }
+                    },
+                    status=503,
+                )
+            await asyncio.sleep(0.6)  # Longer than the 500 ms metadata-probe timeout.
+            return web.json_response(metadata(keys, [[-10, 11]]))
+
+        app = web.Application()
+        app.router.add_post("/mm_cache/metadata", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        vit = self.vit.model_copy(update={"http_port": runner.addresses[0][1]})
+        status = {**self.status, "http_port": vit.http_port}
+        client = MasterClient()
+        client.get_backend_role_addrs = AsyncMock(
+            side_effect=[
+                FlexlbResponse(role_addrs=[vit], result={"server_status": [status]}),
+                FlexlbResponse.ok([self.prefill, vit]),
+            ]
+        )
+        self.visitor.master_client = client
+        try:
+            await self.visitor.get_master_route_addrs(self.request)
+            self.assertEqual(len(payloads), 2)
+            self.assertNotIn("inputs", payloads[0])
+            self.assertEqual(len(payloads[1]["inputs"]), 1)
+            route = client.get_backend_role_addrs.call_args.kwargs
+            self.assertEqual(route["seq_len"], 4)
+            self.assertTrue(route["block_cache_keys"])
+            self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
+            reject = True
+            with self.assertRaises(FtRuntimeException) as raised:
+                await client.get_vit_cache_metadata(vit, keys, input=self.request)
+            self.assertEqual(
+                raised.exception.exception_type, ExceptionType.CONCURRENCY_LIMIT_ERROR
+            )
+        finally:
+            await client.close()
+            await runner.cleanup()
+
 
 class MMCacheApiTest(unittest.TestCase):
+    def test_submit_on_metadata_miss_returns_hashes_even_with_caches_disabled(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from google.protobuf.json_format import MessageToDict
+
+        from rtp_llm.cpp.model_rpc.model_rpc_client import iter_multimodal_inputs
+        from rtp_llm.multimodal.mm_embedding_cache import (
+            MMEmbeddingCache,
+            MMHashKeyCache,
+        )
+        from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
+        from rtp_llm.server.vit_app import register_mm_cache_routes
+
+        item = MultimodalInput(
+            "https://example/image",
+            1,
+            torch.empty(0),
+            MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], -1),
+        )
+        request = GenerateInput(321, torch.tensor([1, 99]), [item], GenerateConfig())
+        key = multimodal_cache_keys(request)[0]
+        payload = {
+            "keys": [key],
+            "request_id": 321,
+            "timeout_ms": 1234,
+            "inputs": [
+                MessageToDict(i, preserving_proto_field_name=True)
+                for i in iter_multimodal_inputs(request, request.generate_config)
+            ],
+        }
+        engine = SimpleNamespace(
+            is_proxy_mode=False,
+            _embedding_cache=MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=0),
+            _hash_key_cache=MMHashKeyCache(max_bytes=0),
+            get_embedding_result=Mock(
+                return_value=[
+                    MMEmbeddingRes(
+                        [], feature_hashes=[torch.tensor([-7, 8], dtype=torch.int32)]
+                    )
+                ]
+            ),
+        )
+        app = FastAPI()
+        register_mm_cache_routes(app, engine)
+        with TestClient(app) as client:
+            response = client.post("/mm_cache/metadata", json=payload)
+            self.assertEqual(response.status_code, 200, response.text)
+            entry = response.json()["entries"][0]
+            self.assertTrue(entry["hash_hit"])
+            self.assertFalse(entry["embedding_hit"])
+            self.assertEqual(entry["feature_hashes"], [-7, 8])
+            self.assertEqual(entry["split_size"], [2])
+            self.assertNotIn("embeddings", entry)
+            call = engine.get_embedding_result.call_args
+            self.assertEqual(call.args[0][0].cache_key(), key)
+            self.assertEqual(
+                call.kwargs,
+                {"request_id": 321, "timeout_ms": 1234, "hashes_only": True},
+            )
+
+            engine.get_embedding_result.reset_mock()
+            response = client.post(
+                "/mm_cache/metadata", json={**payload, "keys": ["wrong-key"]}
+            )
+            self.assertEqual(response.status_code, 400)
+            engine.get_embedding_result.assert_not_called()
+            engine.get_embedding_result.side_effect = TimeoutError("timed out")
+            self.assertEqual(
+                client.post("/mm_cache/metadata", json=payload).status_code, 504
+            )
+            engine.get_embedding_result.side_effect = FtRuntimeException(
+                ExceptionType.CONCURRENCY_LIMIT_ERROR, "full"
+            )
+            response = client.post("/mm_cache/metadata", json=payload)
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(
+                response.json()["detail"]["error_code"],
+                int(ExceptionType.CONCURRENCY_LIMIT_ERROR),
+            )
+
+            # A historical hash hit bypasses submit even when inputs are supplied.
+            engine._hash_key_cache.resize(4096)
+            engine._hash_key_cache.put(key, [torch.tensor([-7, 8], dtype=torch.int32)])
+            engine.get_embedding_result.reset_mock()
+            self.assertEqual(
+                client.post("/mm_cache/metadata", json=payload).status_code, 200
+            )
+            engine.get_embedding_result.assert_not_called()
+
     def test_metadata_endpoint_never_computes_or_waits(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
@@ -332,6 +660,8 @@ class MMCacheApiTest(unittest.TestCase):
         with TestClient(app) as client:
             snapshot = client.get("/mm_cache/keys").json()
             self.assertEqual(snapshot["keys"], ["ready"])
+            self.assertEqual(snapshot["gpu_embedding_keys"], [])
+            self.assertEqual(snapshot["cpu_embedding_keys"], ["ready"])
             result = client.post(
                 "/mm_cache/metadata", json={"keys": ["ready", "pending", "absent"]}
             )
@@ -339,6 +669,11 @@ class MMCacheApiTest(unittest.TestCase):
             entries = result.json()["entries"]
             self.assertEqual(entries[0]["feature_hashes"], [-11, 12])
             self.assertEqual([e["hit"] for e in entries], [True, False, False])
+            self.assertEqual([e["hash_hit"] for e in entries], [True, False, False])
+            self.assertEqual(
+                [e["embedding_hit"] for e in entries], [True, False, False]
+            )
+            self.assertEqual(entries[0]["embedding_tier"], "cpu")
             self.assertFalse(pending.is_done)
             self.assertIsNone(cache.peek("absent"))
             # A byte-bounded index can outgrow the directory response limit.
@@ -349,6 +684,18 @@ class MMCacheApiTest(unittest.TestCase):
             self.assertEqual(snapshot.status_code, 200)
             self.assertEqual(snapshot.json()["keys"], ["recent"])
             self.assertEqual(hash_keys.keys(), ["ready", "recent"])
+            cache.remove("ready")
+            history = client.post(
+                "/mm_cache/metadata", json={"keys": ["ready"]}
+            ).json()["entries"][0]
+            self.assertTrue(history["hash_hit"])
+            self.assertFalse(history["embedding_hit"])
+            self.assertEqual(history["feature_hashes"], [-11, 12])
+            _, embedding_only = cache.try_acquire("embedding-only")
+            embedding_only.complete(torch.ones(1))
+            snapshot = client.get("/mm_cache/keys").json()
+            self.assertEqual(snapshot["keys"], ["ready", "recent"])
+            self.assertEqual(snapshot["cpu_embedding_keys"], ["embedding-only"])
             self.assertEqual(
                 client.post(
                     "/mm_cache/metadata", json={"keys": ["x"] * 257}

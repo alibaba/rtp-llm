@@ -649,7 +649,9 @@ class MMEmbeddingAsyncCacheTest(TestCase):
         third.complete((torch.ones(2, 4), None))
         self.assertIsNone(cache.peek("a"))
         self.assertEqual(hash_cache.keys(), ["a", "b"])
-        self.assertFalse(hash_cache.metadata(["a"], cache)["entries"][0]["hit"])
+        evicted = hash_cache.metadata(["a"], cache)["entries"][0]
+        self.assertTrue(evicted["hash_hit"])
+        self.assertFalse(evicted["embedding_hit"])
         cache.clear()
         self.assertEqual(hash_cache.keys(), ["a", "b"])
 
@@ -689,7 +691,8 @@ class MMEmbeddingAsyncCacheTest(TestCase):
         )
         self.assertEqual(hash_keys.keys(), ["first", "second"])
         metadata = hash_keys.metadata(["first"], cache)
-        self.assertFalse(metadata["entries"][0]["hit"])
+        self.assertTrue(metadata["entries"][0]["hash_hit"])
+        self.assertFalse(metadata["entries"][0]["embedding_hit"])
 
     def test_failed_and_legacy_results_have_no_metadata(self):
         cache = MMEmbeddingAsyncCache(gpu_max_bytes=0, cpu_max_bytes=4096)
@@ -836,6 +839,67 @@ class VitErrorReportingTest(TestCase):
 
 
 class AsyncSubmitGetEmbeddingTest(TestCase):
+    def test_hashes_only_waits_on_shared_submit_and_does_not_read_cached_embeddings(
+        self,
+    ):
+        engine = self._make_engine()
+        inp = self._make_input("fake://hash-only")
+        started, finish = threading.Event(), threading.Event()
+        computations = []
+
+        def compute(mm_inputs, cache_key, entry, request_id=0):
+            computations.append(cache_key)
+            started.set()
+            finish.wait(timeout=5)
+            engine._hash_key_cache.put(
+                cache_key, [torch.tensor([-1, 2], dtype=torch.int32)], entry.generation
+            )
+            entry.complete((torch.ones(2, 4), None))
+
+        engine._async_compute = compute
+        try:
+            engine.async_submit([inp], request_id=100)
+            self.assertTrue(started.wait(timeout=2))
+            entry = engine._embedding_cache.peek(inp.cache_key())
+            with patch.object(
+                entry,
+                "wait",
+                side_effect=AssertionError("must not read/promote embedding"),
+            ):
+                finish.set()
+                results = engine.get_embedding_result(
+                    [inp], request_id=101, hashes_only=True
+                )
+                self.assertEqual(results[0].embeddings, [])
+                self.assertEqual(results[0].feature_hashes[0].tolist(), [-1, 2])
+            self.assertEqual(computations, [inp.cache_key()])
+        finally:
+            finish.set()
+            engine.stop()
+
+    def test_hashes_only_returns_computed_hashes_when_both_caches_are_disabled(self):
+        engine = self._make_engine()
+        engine._embedding_cache.resize(0, 0)
+        engine._hash_key_cache.resize(0)
+        inp = self._make_input("fake://no-cache")
+
+        def compute(mm_inputs, cache_key, entry, request_id=0):
+            entry.complete((torch.ones(2, 4), None))
+
+        engine._async_compute = compute
+        try:
+            with patch(
+                "rtp_llm.multimodal.mm_process_engine._feature_hashes_from_result",
+                return_value=[torch.tensor([-3, 4], dtype=torch.int32)],
+            ):
+                result = engine.get_embedding_result([inp], hashes_only=True)[0]
+            self.assertEqual(result.embeddings, [])
+            self.assertEqual(result.feature_hashes[0].tolist(), [-3, 4])
+            self.assertIsNone(engine._embedding_cache.peek(inp.cache_key()))
+            self.assertEqual(engine._hash_key_cache.keys(), [])
+        finally:
+            engine.stop()
+
     def _make_engine(self, mm_part=None, vit_concurrency=64, vit_max_queue_size=64):
         model = FakeModel(mm_part or FakeMultiModalEmbeddingInterface())
         vit_config = VitConfig()

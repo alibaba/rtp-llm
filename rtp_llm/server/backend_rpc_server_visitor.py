@@ -235,7 +235,7 @@ class BackendRPCServerVisitor:
                         )
                     route_args["selected_vit"] = selected_status
                     metadata = await self.master_client.get_vit_cache_metadata(
-                        selected_vit, keys
+                        selected_vit, keys, input=input
                     )
                 elif not vit_result.connection_failed and vit_result.error_code not in (
                     404,
@@ -251,20 +251,40 @@ class BackendRPCServerVisitor:
                     keys,
                     metadata,
                     self.max_seq_len,
+                    compact=True,
                 )
+                if selected_vit is not None and full_length is None:
+                    raise ValueError(
+                        "ViT did not return complete routing hashes within the sequence limit"
+                    )
                 if full_length is not None:
                     route_args["seq_len"] = full_length - input.prefix_length
-            except (ValueError, KeyError, TypeError, ImportError):
+            except (
+                ValueError,
+                KeyError,
+                TypeError,
+                ImportError,
+                OverflowError,
+            ) as error:
+                if selected_vit is not None:
+                    raise FtRuntimeException(
+                        ExceptionType.MM_PROCESS_ERROR,
+                        f"Cannot expand ViT routing tokens: {error}",
+                    ) from error
                 route_logger.warning(
                     "Invalid ViT routing metadata, request_id=%s", input.request_id
                 )
                 token_ids = []
+            # Only compact token ids survive hash acquisition; HTTP metadata can
+            # contain millions of boxed integers and must not live across routing.
+            metadata = None
         # Keep hash generation at the physical KV block granularity. Page-RR
         # routing samples canonical keys from this full logical-block key list;
         # it must not recompute request hashes with the virtual block size.
         full_block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
+        del token_ids, full_block_cache_keys
 
         try:
             route_result = await self.master_client.get_backend_role_addrs(
@@ -284,6 +304,63 @@ class BackendRPCServerVisitor:
                 selected_vit = None
                 route_result = await self.master_client.get_backend_role_addrs(
                     block_cache_keys=[],
+                    cache_key_block_size=self._cache_key_block_size(),
+                    input=input,
+                    request_id=input.request_id,
+                    **route_args,
+                )
+            if (
+                route_result.is_ok
+                and selected_vit is None
+                and getattr(self, "_mm_cache_routing", False)
+                and getattr(input, "mm_inputs", None)
+            ):
+                # After fallback/reselection, acquire the chosen worker's
+                # hashes before making the final prefill decision.
+                new_vits = [
+                    a for a in route_result.role_addrs if a.role == RoleType.VIT
+                ]
+                statuses = (route_result.result or {}).get("server_status", [])
+                status = next(
+                    (
+                        s
+                        for s in statuses
+                        if isinstance(s, dict) and s.get("role") == RoleType.VIT.name
+                    ),
+                    None,
+                )
+                if len(new_vits) != 1 or status is None:
+                    raise FtRuntimeException(
+                        ExceptionType.ROUTE_ERROR, "Invalid replacement ViT route"
+                    )
+                selected_vit = new_vits[0]
+                metadata = await self.master_client.get_vit_cache_metadata(
+                    selected_vit, keys, input=input
+                )
+                original_tokens = input.token_ids.reshape(-1).tolist()
+                token_ids, full_length = multimodal_routing_tokens(
+                    original_tokens,
+                    self.mm_model_config.mm_sep_tokens,
+                    self.mm_model_config.include_sep_tokens,
+                    keys,
+                    metadata,
+                    self.max_seq_len,
+                    compact=True,
+                )
+                if full_length is None:
+                    raise FtRuntimeException(
+                        ExceptionType.MM_PROCESS_ERROR,
+                        "Incomplete replacement ViT routing hashes",
+                    )
+                block_cache_keys = self._route_cache_keys(
+                    get_block_cache_keys(token_ids, self.seq_size_per_block)
+                )
+                del metadata, original_tokens, token_ids
+                route_args.update(
+                    selected_vit=status, seq_len=full_length - input.prefix_length
+                )
+                route_result = await self.master_client.get_backend_role_addrs(
+                    block_cache_keys=block_cache_keys,
                     cache_key_block_size=self._cache_key_block_size(),
                     input=input,
                     request_id=input.request_id,

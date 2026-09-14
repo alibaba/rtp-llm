@@ -258,6 +258,11 @@ def get_multimodal_preprocess_value(
 def trans_multimodal_input(
     input_py: GenerateInput, input_pb: GenerateInputPB, generate_config: GenerateConfig
 ):
+    input_pb.multimodal_inputs.extend(iter_multimodal_inputs(input_py, generate_config))
+
+
+def iter_multimodal_inputs(input_py: GenerateInput, generate_config: GenerateConfig):
+    """Resolve preprocessing identically for inference and routing, one input at a time."""
     resized_shape = [-1, -1]
     if generate_config.resized_shape:
         if len(generate_config.resized_shape) != 2:
@@ -307,16 +312,16 @@ def trans_multimodal_input(
                 getattr(mm_input.mm_preprocess_config, "max_long_side_pixel", -1),
             )
         )
-        input_pb.multimodal_inputs.append(mm_input_pb)
+        yield mm_input_pb
 
 
 def multimodal_cache_keys(input_py: GenerateInput) -> list[str]:
     from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 
-    inputs = GenerateInputPB()
-    trans_multimodal_input(input_py, inputs, input_py.generate_config)
     keys = []
-    for original, item in zip(input_py.mm_inputs, inputs.multimodal_inputs):
+    for original, item in zip(
+        input_py.mm_inputs, iter_multimodal_inputs(input_py, input_py.generate_config)
+    ):
         if not item.multimodal_url or (
             original.tensor is not None and original.tensor.numel() > 0
         ):

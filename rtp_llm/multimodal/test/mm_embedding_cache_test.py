@@ -9,6 +9,28 @@ from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCache, MMHashKeyCac
 
 
 class EmbeddingCapacityTest(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_active_tensor_survives_demotion_eviction_and_same_key_replacement(self):
+        cache = MMEmbeddingCache(gpu_max_bytes=128, cpu_max_bytes=128)
+        _, entry = cache.try_acquire("image")
+        expected = torch.arange(32, dtype=torch.float32, device="cuda").reshape(4, 8)
+        entry.complete((expected, None))
+        held = entry.wait()[0]
+        cache.resize(0, 128)
+        self.assertEqual(entry.result[0].device.type, "cpu")
+        cache.resize(0, 0)
+        cache.resize(128, 128)
+        _, replacement = cache.try_acquire("image")
+        replacement.complete((torch.full((4, 8), 99.0, device="cuda"), None))
+        self.assertNotEqual(held.data_ptr(), replacement.wait()[0].data_ptr())
+        self.assertTrue(
+            torch.equal(
+                held, torch.arange(32, dtype=torch.float32, device="cuda").reshape(4, 8)
+            )
+        )
+        cache.clear()
+        self.assertTrue(torch.equal(held, expected))
+
     def test_variable_sizes_and_lru(self):
         cache = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
         entries = {}
@@ -424,7 +446,7 @@ class HashCapacityTest(unittest.TestCase):
         cache.put("x" * 8192, [], "g")
         self.assertEqual(cache.keys(), ["keep"])
 
-    def test_embedding_eviction_invalidates_metadata_but_keeps_hash_history(self):
+    def test_hash_metadata_survives_embedding_eviction(self):
         cache = MMHashKeyCache(max_bytes=8192)
         embeddings = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=8)
         _, entry = embeddings.try_acquire("a")
@@ -433,7 +455,49 @@ class HashCapacityTest(unittest.TestCase):
         self.assertTrue(cache.metadata(["a"], embeddings)["entries"][0]["hit"])
         embeddings.resize(0, 0)
         self.assertEqual(cache.keys(), ["a"])
-        self.assertFalse(cache.metadata(["a"], embeddings)["entries"][0]["hit"])
+        metadata = cache.metadata(["a"], embeddings)["entries"][0]
+        self.assertTrue(metadata["hit"])
+        self.assertTrue(metadata["hash_hit"])
+        self.assertFalse(metadata["embedding_hit"])
+        self.assertIsNone(metadata["embedding_tier"])
+        self.assertEqual(metadata["feature_hashes"], [1])
+        self.assertEqual(metadata["entry_generation"], entry.generation)
+
+    def test_hash_and_embedding_availability_are_independent(self):
+        hashes = MMHashKeyCache(max_bytes=8192)
+        embeddings = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=32)
+        _, ready = embeddings.try_acquire("ready")
+        ready.complete(torch.ones(2))
+        hashes.put("history", [torch.tensor([71, 72])], "old-generation")
+        embeddings.try_acquire("history")
+        before = embeddings.stats(), hashes.keys(), hashes.stats()
+        entries = hashes.metadata(["ready", "history", "absent"], embeddings)["entries"]
+        self.assertFalse(entries[0]["hash_hit"])
+        self.assertTrue(entries[0]["embedding_hit"])
+        self.assertEqual(entries[0]["embedding_tier"], "cpu")
+        self.assertTrue(entries[1]["hash_hit"])
+        self.assertFalse(entries[1]["embedding_hit"])
+        self.assertEqual(entries[1]["feature_hashes"], [71, 72])
+        self.assertFalse(entries[2]["hash_hit"])
+        self.assertFalse(entries[2]["embedding_hit"])
+        self.assertEqual(before, (embeddings.stats(), hashes.keys(), hashes.stats()))
+
+    def test_residency_snapshot_excludes_pending_and_does_not_touch_lru(self):
+        embeddings = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=16)
+        for key in ("a", "b"):
+            _, entry = embeddings.try_acquire(key)
+            entry.complete(torch.ones(2))
+        embeddings.try_acquire("pending")
+        before = embeddings.stats()
+        self.assertEqual(embeddings.resident_tiers(limit=1), {"b": "cpu"})
+        self.assertEqual(
+            embeddings.resident_tiers(["a", "pending", "absent"]), {"a": "cpu"}
+        )
+        self.assertEqual(embeddings.resident_tiers(limit=0), {})
+        self.assertEqual(before, embeddings.stats())
+        _, latest = embeddings.try_acquire("c")
+        latest.complete(torch.ones(2))
+        self.assertIsNone(embeddings.peek("a"))
 
     def test_concurrent_puts_replacements_and_resize_stay_bounded(self):
         cache = MMHashKeyCache(max_bytes=8192)

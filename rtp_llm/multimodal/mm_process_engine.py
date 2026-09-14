@@ -1316,13 +1316,15 @@ class MMProcessEngine:
         timeout_ms: int = 120000,
         request_id: int = 0,
         cancellation_event: Optional[threading.Event] = None,
+        hashes_only: bool = False,
     ) -> List[MMEmbeddingRes]:
         """Retrieve embedding results, blocking until ready if necessary.
 
         Each input is looked up independently by its cache_key.
         If a key was never submitted, queues it on the shared async executor.
         If in-progress, blocks until the computing thread finishes.
-        If complete, returns immediately.
+        If complete, returns immediately. With hashes_only, return sidecar hashes
+        without exporting embeddings or promoting a CPU entry with cached hashes.
         """
         current_entry: Optional[MMEmbeddingCacheEntry] = None
         try:
@@ -1339,23 +1341,41 @@ class MMProcessEngine:
             for cache_key, entry in claims:
                 current_entry = entry
                 remaining = max(0.0, deadline - time.monotonic())
-                raw_result = entry.wait(timeout=remaining)
+                entry.wait_ready(timeout=remaining)
                 feature_hashes = self._hash_key_cache.get(cache_key, entry.generation)
+                raw_result = None
+                if not hashes_only or feature_hashes is None:
+                    raw_result = entry.wait(
+                        timeout=max(0.0, deadline - time.monotonic())
+                    )
                 if feature_hashes is None:
                     feature_hashes = _feature_hashes_from_result(raw_result)
                     self._hash_key_cache.put(
                         cache_key, feature_hashes, entry.generation
                     )
-                results.append(
-                    self._work_item_result_to_response(raw_result, feature_hashes)
-                )
+                if hashes_only:
+                    results.append(MMEmbeddingRes([], feature_hashes=feature_hashes))
+                else:
+                    results.append(
+                        self._work_item_result_to_response(raw_result, feature_hashes)
+                    )
+                del raw_result
 
             kmonitor.report(
                 GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
-                sum(_embedding_token_length(result.embeddings) for result in results),
+                sum(
+                    (
+                        sum(h.numel() for h in result.feature_hashes)
+                        if hashes_only
+                        else _embedding_token_length(result.embeddings)
+                    )
+                    for result in results
+                ),
             )
             return results
         except Exception as error:
+            if hashes_only:
+                self.cancel_queued_request(request_id)
             self.report_vit_error(error, current_entry)
             raise
 

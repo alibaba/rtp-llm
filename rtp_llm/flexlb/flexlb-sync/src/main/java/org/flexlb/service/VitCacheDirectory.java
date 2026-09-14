@@ -58,8 +58,24 @@ public class VitCacheDirectory {
     private boolean wasMaster;
     private long pendingPrunedAt;
 
-    private record Snapshot(WorkerStatus worker, String instance, Set<String> keys, long time) {}
+    private record Snapshot(WorkerStatus worker, String instance, Set<String> keys,
+                            Set<String> gpuEmbeddingKeys, Set<String> cpuEmbeddingKeys, long time) {}
     private record Placement(String worker, long expiry) {}
+
+    private record MatchScore(int hashHits, int embeddingHits, int gpuHits, int pendingHits)
+            implements Comparable<MatchScore> {
+        @Override
+        public int compareTo(MatchScore other) {
+            int result = Integer.compare(hashHits, other.hashHits);
+            if (result == 0) {
+                result = Integer.compare(embeddingHits, other.embeddingHits);
+            }
+            if (result == 0) {
+                result = Integer.compare(gpuHits, other.gpuHits);
+            }
+            return result == 0 ? Integer.compare(pendingHits, other.pendingHits) : result;
+        }
+    }
 
     @Data
     @JsonIgnoreProperties(ignoreUnknown = true)
@@ -69,6 +85,10 @@ public class VitCacheDirectory {
         @JsonProperty("feature_hash_version")
         private int featureHashVersion;
         private List<String> keys;
+        @JsonProperty("gpu_embedding_keys")
+        private List<String> gpuEmbeddingKeys;
+        @JsonProperty("cpu_embedding_keys")
+        private List<String> cpuEmbeddingKeys;
     }
 
     public VitCacheDirectory(EngineWorkerStatus workers, ConfigService config,
@@ -130,8 +150,19 @@ public class VitCacheDirectory {
         Map<String, WorkerStatus> live = workers.selectModelWorkerStatus(RoleType.VIT, null);
         if (live.get(worker.getIpPort()) != worker || !worker.isAlive()
                 || StringUtils.isBlank(response.getWorkerInstance()) || response.getFeatureHashVersion() != 1
-                || response.getKeys() == null || response.getKeys().size() > 100_000
-                || response.getKeys().stream().anyMatch(k -> k == null || k.isEmpty() || k.length() > 4096)) {
+                || response.getKeys() == null || !validKeys(response.getKeys())
+                || !validKeys(response.getGpuEmbeddingKeys()) || !validKeys(response.getCpuEmbeddingKeys())) {
+            return;
+        }
+        Set<String> keys = Set.copyOf(response.getKeys());
+        Set<String> gpuKeys = response.getGpuEmbeddingKeys() == null
+                ? Set.of() : Set.copyOf(response.getGpuEmbeddingKeys());
+        Set<String> cpuKeys = response.getCpuEmbeddingKeys() == null
+                ? Set.of() : Set.copyOf(response.getCpuEmbeddingKeys());
+        Set<String> allKeys = new HashSet<>(keys);
+        allKeys.addAll(gpuKeys);
+        allKeys.addAll(cpuKeys);
+        if (allKeys.size() > 100_000 || gpuKeys.stream().anyMatch(cpuKeys::contains)) {
             return;
         }
         String address = worker.getIpPort();
@@ -140,11 +171,16 @@ public class VitCacheDirectory {
             pending.values().removeIf(p -> p.worker().equals(address));
         }
         removeSnapshot(address);
-        Set<String> keys = Set.copyOf(response.getKeys());
-        snapshots.put(address, new Snapshot(worker, response.getWorkerInstance(), keys, System.currentTimeMillis()));
+        snapshots.put(address, new Snapshot(worker, response.getWorkerInstance(), keys,
+                gpuKeys, cpuKeys, System.currentTimeMillis()));
         for (String key : keys) {
             owners.computeIfAbsent(key, ignored -> new HashSet<>()).add(address);
         }
+    }
+
+    private boolean validKeys(List<String> keys) {
+        return keys == null || (keys.size() <= 100_000
+                && keys.stream().noneMatch(k -> k == null || k.isEmpty() || k.length() > 4096));
     }
 
     private void removeSnapshot(String address) {
@@ -198,26 +234,39 @@ public class VitCacheDirectory {
         long now = System.currentTimeMillis();
         prune(workers.selectModelWorkerStatus(RoleType.VIT, null), now);
         List<WorkerStatus> best = new ArrayList<>();
-        long bestScore = -1;
+        MatchScore bestScore = null;
         for (WorkerStatus worker : workers.selectModelWorkerStatus(RoleType.VIT, group).values()) {
             if (!available(ctx, worker)) {
                 continue;
             }
-            long score = 0;
+            int hashHits = 0;
+            int gpuHits = 0;
+            int cpuHits = 0;
+            int pendingHits = 0;
+            Snapshot snapshot = snapshots.get(worker.getIpPort());
             for (String key : keys) {
                 if (owners.getOrDefault(key, Set.of()).contains(worker.getIpPort())) {
-                    score += 257;
+                    hashHits++;
+                }
+                if (snapshot != null) {
+                    if (snapshot.gpuEmbeddingKeys().contains(key)) {
+                        gpuHits++;
+                    } else if (snapshot.cpuEmbeddingKeys().contains(key)) {
+                        cpuHits++;
+                    }
                 }
                 Placement p = pending.get(key);
                 if (p != null && p.expiry() > now && p.worker().equals(worker.getIpPort())) {
-                    score++;
+                    pendingHits++;
                 }
             }
-            if (score > bestScore) {
+            MatchScore score = new MatchScore(hashHits, gpuHits + cpuHits, gpuHits, pendingHits);
+            int comparison = bestScore == null ? 1 : score.compareTo(bestScore);
+            if (comparison > 0) {
                 best.clear();
                 bestScore = score;
             }
-            if (score == bestScore) {
+            if (comparison >= 0) {
                 best.add(worker);
             }
         }
