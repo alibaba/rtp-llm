@@ -367,6 +367,14 @@ class BaseModel(object):
         return self._as_multimodal_model() is not None
 
     def _as_multimodal_model(self) -> Optional[_MultiModalModel]:
+        # V4.1 DSpark is a structural multimodal model because it inherits the
+        # target hooks, but its proposal weights never own a ViT.  Keep the
+        # proposal path out of multimodal initialization when no VitConfig was
+        # supplied; target V4.1 still passes a real VitConfig and is unchanged.
+        if getattr(self, "vit_config", None) is None and getattr(
+            self.model_config, "is_mtp", False
+        ):
+            return None
         if isinstance(self, _MultiModalModel):
             return cast(_MultiModalModel, self)
         return None

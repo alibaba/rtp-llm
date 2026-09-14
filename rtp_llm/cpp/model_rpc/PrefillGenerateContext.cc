@@ -115,7 +115,9 @@ grpc::Status PrefillGenerateContext::closeGrpcStream() {
         return last_grpc_stream_closed_status;
     }
     grpc_stream_closed = true;
-    if (cancelled() || isRequestCancelled()) {
+    // A terminal local failure cannot produce the remaining LOAD/GENERATE
+    // messages. Cancel that attempt before joining its downstream RPC.
+    if (hasError() || isRequestCancelled()) {
         tryCancelDownstream();
     }
     if (client_stream) {

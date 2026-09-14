@@ -15,6 +15,7 @@ from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import build_model_config
 from rtp_llm.models.deepseek_v41 import DeepSeekV41
+from rtp_llm.models.deepseek_v41_dspark import DeepSeekV41DSpark
 from rtp_llm.models_py.model_desc.deepseek_v41_model import (
     DeepSeekV41Model,
     _BatchedAttention,
@@ -25,6 +26,7 @@ from rtp_llm.models_py.model_desc.deepseek_v41_model import (
 )
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.dsv41.cache_layout import (
+    GLOBAL_OWNERS,
     PAIR_OWNERS,
     CacheLayout,
     CacheRegion,
@@ -73,6 +75,9 @@ def framework_fixture():
     model.config = SimpleNamespace(hidden_size=5120)
     model._max_tokens = 2048
     model.max_tokens_per_rank = 2048
+    model._capture_aux = ()
+    model._mtp_aux_buffer = None
+    model._active_v41_graph_impl = None
     model._pages, model._pair_pools, model._groups = {}, {}, {}
     model.target = RecordTarget()
     regions = [
@@ -157,6 +162,12 @@ def request_fixture(starts=(0,), lengths=(2,), ready=(False,), ids=(101,), fake=
 
 
 class EngineAdapterContractTest(unittest.TestCase):
+    def test_dspark_proposal_without_vit_skips_multimodal_hooks(self):
+        model = DeepSeekV41DSpark.__new__(DeepSeekV41DSpark)
+        model.model_config = SimpleNamespace(is_mtp=True)
+        model.vit_config = None
+        self.assertIsNone(model._as_multimodal_model())
+
     def test_standard_config_preserves_mixed_checkpoint_and_typed_cache(self):
         raw = flash_config()
         with tempfile.TemporaryDirectory() as folder:
@@ -435,14 +446,147 @@ class EngineAdapterContractTest(unittest.TestCase):
             result, torch.tensor([[2, 2], [2, 2], [4, 4], [0, 0]]).float()
         )
 
-    def test_uncached_warmup_and_graph_are_explicitly_pending(self):
+    def test_uncached_allocation_warmup_does_not_bind_request_pages(self):
         model, _ = framework_fixture()
         inputs, _ = request_fixture()
         model.kv_cache = None
-        with self.assertRaisesRegex(RuntimeError, "cache-backed engine warmup"):
-            model(inputs)
-        with self.assertRaisesRegex(NotImplementedError, "CUDA Graph implementation"):
+        output = model(inputs)
+        self.assertEqual(tuple(output.hidden_states.shape), (2, 5120))
+        self.assertFalse(bool(output.hidden_states.any()))
+        self.assertEqual(model.target.calls, 0)
+        self.assertIsNone(model.prepare_fmha_impl(inputs))
+        with self.assertRaisesRegex(ValueError, "complete local engine pages"):
             model.prepare_fmha_impl(inputs, is_cuda_graph=True)
+
+    def test_cp_dispatch_chunks_the_complete_input_inside_one_forward(self):
+        model, _ = framework_fixture()
+        inputs, rows = request_fixture(lengths=(8,))
+        inputs.attention_inputs.context_parallel_info = object()
+        model.max_tokens_per_rank = 2
+        result = PyModelOutputs(torch.ones((8, 5120), dtype=torch.bfloat16))
+        with (
+            patch("torch.cuda.is_current_stream_capturing", return_value=False),
+            patch.object(model, "_requests", return_value=[]) as requests,
+            patch.object(model, "_forward_cp", return_value=result) as execute,
+            patch.object(model, "_write_cache_store") as write,
+        ):
+            self.assertIs(model(inputs), result)
+        self.assertEqual(requests.call_count, 1)
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(write.call_count, 1)
+        self.assertEqual(model.target.calls, 0)
+        torch.testing.assert_close(execute.call_args.args[1].token_ids, rows.token_ids)
+
+    def test_decode_dispatch_refreshes_shared_aux_across_graph_buckets(self):
+        model, _ = framework_fixture()
+        model._capture_aux = (37, 38, 39)
+        model._mtp_aux_buffer = torch.full((6, 15360), -1, dtype=torch.bfloat16)
+        buffer_ptr = model._mtp_aux_buffer.data_ptr()
+        calls = []
+
+        class Target(nn.Module):
+            def forward(
+                self, rows, context, *, execution_mode, aux_row_indices, dense_aux
+            ):
+                calls.append((context, execution_mode, dense_aux))
+                torch.testing.assert_close(
+                    aux_row_indices, torch.arange(rows.token_ids.numel())
+                )
+                hidden = rows.token_ids[:, None].expand(-1, 5120).to(torch.bfloat16)
+                return SimpleNamespace(
+                    hidden_states=hidden, aux_hidden_states=hidden.repeat(1, 3)
+                )
+
+        model.target = Target()
+        for width, token in ((6, 11), (1, 27), (6, 43)):
+            inputs, rows = request_fixture(lengths=(width,))
+            rows.token_ids.fill_(token)
+            impl = SimpleNamespace(rows=rows, context=object())
+            with (
+                patch.object(impl, "begin_forward", create=True) as begin,
+                patch.object(impl, "finish_forward", create=True) as finish,
+                patch.object(
+                    impl, "get_execution_states", create=True, return_value=[]
+                ) as states,
+                patch("torch.cuda.is_current_stream_capturing", return_value=False),
+            ):
+                model._active_v41_graph_impl = impl
+                output = model(inputs, impl)
+            self.assertEqual(begin.call_count, 1)
+            self.assertEqual(finish.call_count, 1)
+            self.assertEqual(states.call_count, 1)
+            self.assertEqual(tuple(output.hidden_states.shape), (width, 5120))
+            aux = model.get_mtp_target_hidden_states(width)
+            self.assertEqual(aux.data_ptr(), buffer_ptr)
+            self.assertTrue(bool((aux == token).all()))
+        self.assertTrue(all(mode == "full" and dense for _, mode, dense in calls))
+        with self.assertRaisesRegex(ValueError, "fixed decode buffer"):
+            model.get_mtp_target_hidden_states(7)
+
+    def test_restored_cp_protects_original_boundary_and_predecessors(self):
+        model, _ = framework_fixture()
+        _, rows = request_fixture(starts=(1024,), lengths=(3,), ready=(True,))
+        rows.history_ids[0] = torch.tensor([31, 129264, 37])
+        rows.history_valid[0] = torch.tensor([True, False, True])
+        native = object()
+
+        def gather(values, first, last):
+            self.assertEqual((first, last), (1024, 1025))
+            return values[:1]
+
+        context = SimpleNamespace(start=1024, end=1027, gather_rows=gather)
+        ranges = torch.tensor([[896, 1024, 0]] * 43, dtype=torch.int64)
+        with patch.object(model, "_cp_protect", return_value=True) as protect:
+            model._protect_restored_cp(native, context, rows, ranges)
+        protect.assert_called_once()
+        self.assertIs(protect.call_args.args[0], native)
+        self.assertIs(protect.call_args.args[1], context)
+        self.assertEqual(protect.call_args.args[2].token_ids, (31, 129264, 37))
+        self.assertEqual(protect.call_args.args[2].image_mask, (False, True, False))
+        self.assertEqual(protect.call_args.kwargs["publication_end"], 1024)
+        self.assertIs(protect.call_args.kwargs["swa_ranges"], ranges)
+        self.assertEqual(context.end, 1027)
+
+    def test_restored_publication_uses_native_ranges_before_python_swa_exists(self):
+        layout = CacheLayout(cp_size=8, speculative_tokens=5, draft_enabled=True)
+        cache = SimpleNamespace(
+            request_id="101",
+            layout=layout,
+            swa={},
+            swa_ends={layer: 1024 for layer in range(43)},
+            owners={
+                layer: SimpleNamespace(
+                    materialized_end=1024, pair=SimpleNamespace(next_position=1024)
+                )
+                for layer in GLOBAL_OWNERS
+            },
+        )
+        context = SimpleNamespace(cache=cache, start=1024, end=1027)
+        ranges = torch.tensor(
+            [[896, 1024, 0 if layer <= 20 else 896] for layer in range(43)],
+            dtype=torch.int64,
+        )
+        state = DeepSeekV41Model._context_state(
+            context,
+            (31, 129264, 37),
+            (False, True, False),
+            publication_end=1024,
+            swa_ranges=ranges,
+        )
+        self.assertEqual(state.materialized_end, 1024)
+        self.assertEqual(state.swa_valid_end, [1024] * 43)
+        self.assertEqual(state.swa_replay_floor, [0] * 21 + [896] * 22)
+        self.assertEqual((state.aux_valid_start, state.aux_valid_end), (896, 1024))
+        self.assertEqual(cache.swa, {})
+        ranges[-1, 1] = 1027
+        with self.assertRaisesRegex(ValueError, "checkpoint boundary"):
+            DeepSeekV41Model._context_state(
+                context,
+                (31, 129264, 37),
+                (False, True, False),
+                publication_end=1024,
+                swa_ranges=ranges,
+            )
 
 
 if __name__ == "__main__":

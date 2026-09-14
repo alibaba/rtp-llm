@@ -5,8 +5,10 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include <algorithm>
 #include <cstdlib>
 #include <string>
+#include <unordered_set>
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
 #include "ATen/cuda/CUDAContext.h"
@@ -43,6 +45,68 @@ void syncPinnedCpuCopies(bool need_sync) {
 }
 
 }  // namespace
+
+absl::Status NormalOutputDispatcher::prepareV41Sampling(const StreamGroups& stream_groups,
+                                                        const GptModelOutputs& model_output) {
+    std::unordered_set<int64_t> seen;
+    for (const auto& progress : model_output.v41_execution_progress) {
+        if (!seen.insert(progress.request_id).second)
+            return absl::InvalidArgumentError("V4.1 output contains duplicate encoder progress");
+        const auto& streams = stream_groups.allStreams();
+        const auto stream = std::find_if(streams.begin(), streams.end(), [&](const auto& item) {
+            return item->streamId() == progress.request_id && !item->isFakeStream();
+        });
+        if (stream == streams.end())
+            return absl::InvalidArgumentError("V4.1 progress does not belong to this batch");
+        const auto state = (*stream)->kvCachePtr()->cacheResource(0).dsv41CacheState();
+        if (!state)
+            return absl::InvalidArgumentError("V4.1 progress has no native request state");
+        try {
+            state->publishProgress(progress);
+        } catch (const std::exception& error) {
+            return absl::InvalidArgumentError(error.what());
+        }
+        const auto complete = std::find_if(model_output.v41_execution_states.begin(),
+                                           model_output.v41_execution_states.end(), [&](const auto& item) {
+            return item.request_id == progress.request_id
+                   && item.materialized_end == (*stream)->seqLength()
+                   && item.materialized_end >= progress.encoder_materialized_end;
+        });
+        if (complete == model_output.v41_execution_states.end())
+            return absl::FailedPreconditionError(
+                "V4.1 encoder-only work cannot be sampled; report intermediate chunks through the execution context");
+    }
+    seen.clear();
+    for (const auto& publication : model_output.v41_execution_states) {
+        if (!seen.insert(publication.request_id).second)
+            return absl::InvalidArgumentError("V4.1 output contains duplicate execution publications");
+    }
+    for (const auto& stream : stream_groups.allStreams()) {
+        if (stream->isFakeStream() || !stream->generateInput()->v41_inputs)
+            continue;
+        const auto state = stream->kvCachePtr()->cacheResource(0).dsv41CacheState();
+        if (!state)
+            return absl::InvalidArgumentError("V4.1 sampling requires its native cache state");
+        const auto publication = std::find_if(model_output.v41_execution_states.begin(),
+                                               model_output.v41_execution_states.end(), [&](const auto& item) {
+            return item.request_id == stream->streamId();
+        });
+        if (publication == model_output.v41_execution_states.end()) {
+            if (state->view().identity.replay_mode == DSV41ReplayMode::BOUNDED_CHECKPOINT_V1)
+                return absl::FailedPreconditionError("V4.1 bounded prefill has not completed its decoder rows");
+            continue;
+        }
+        if (publication->materialized_end != stream->seqLength())
+            return absl::InvalidArgumentError("V4.1 sampling publication has a stale request boundary");
+        try {
+            const auto& config = stream->resourceContext().cache_manager->cacheConfig();
+            publication->validate(state->view().identity, config.layer_all_num - config.layer_num);
+        } catch (const std::exception& error) {
+            return absl::InvalidArgumentError(error.what());
+        }
+    }
+    return absl::OkStatus();
+}
 
 absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                                               const MergedOutput& merge_outputs) const {
@@ -227,8 +291,18 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         const int64_t end = stream->seqLength();
         for (int batch = 0; batch < cur_batch_size; ++batch) {
             auto state = stream->kvCachePtr()->cacheResource(batch).dsv41CacheState();
-            if (state && state->view().identity.replay_mode == DSV41ReplayMode::FULL)
+            const auto& publications = model_output.v41_execution_states;
+            const auto publication = std::find_if(publications.begin(), publications.end(), [&](const auto& item) {
+                return item.request_id == stream->streamId();
+            });
+            if (state && publication != publications.end()) {
+                RTP_LLM_CHECK_WITH_INFO(cur_batch_size == 1 && publication->materialized_end == end,
+                                        "V4.1 model publication does not match the executed request boundary");
+                stream->streamCacheResource().publishDsv41Execution(
+                    *publication, end, stream->queryPdSep() && stream->isContextStream());
+            } else if (state && state->view().identity.replay_mode == DSV41ReplayMode::FULL) {
                 state->markTargetReady(end);
+            }
         }
     }
 

@@ -25,6 +25,49 @@ SPARSE_BLOCK = 8
 INDEX_TOPK = 512
 
 
+def warmup_sparse_indexer(device) -> None:
+    """Initialize the paged sparse metadata path before CUDA Graph capture.
+
+    DeepGEMM lazily creates device state on the first metadata request.  That
+    initialization is rejected while a framework-owned capture is active, so
+    use the largest graph bucket and the fixed V4.1 block geometry once during
+    model construction.
+    """
+    if os.environ.get("DSV41_SPARSE_INDEXER") != "1":
+        return
+    with torch.cuda.device(device):
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "sparse indexer warmup cannot run inside CUDA Graph capture"
+            )
+        import deep_gemm
+
+        blocks = CANDIDATE_BLOCKS
+        for rows in range(1, QUERY_TILE + 1):
+            packed_count = torch.full(
+                (rows,), blocks * SPARSE_BLOCK, dtype=torch.int32, device=device
+            )
+            packed_table = torch.arange(
+                rows * blocks, dtype=torch.int32, device=device
+            ).view(rows, blocks)
+            request_ids = torch.arange(rows, dtype=torch.int32, device=device)
+            candidates = (
+                torch.arange(blocks, dtype=torch.int32, device=device)[None, :]
+                .expand(rows, -1)
+                .contiguous()
+            )
+            deep_gemm.get_paged_sparse_mqa_logits_metadata(
+                packed_count,
+                packed_table,
+                request_ids,
+                SPARSE_BLOCK,
+                candidates,
+                torch.int8,
+                SPARSE_BLOCK,
+            )
+        torch.cuda.current_stream(device).synchronize()
+
+
 @dataclass(frozen=True)
 class RankedPositions:
     scores: torch.Tensor

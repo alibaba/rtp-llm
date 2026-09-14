@@ -168,7 +168,39 @@ bool KVCacheMemoryConnector::bindDsv41ReadPlan(CopyPlan&                        
             ++it;
         }
     }
-    return !plan.copy_infos.empty();
+    return !plan.copy_infos.empty() && bindDsv41WorkerBlocks(plan, resource, slots);
+}
+
+bool KVCacheMemoryConnector::bindDsv41WorkerBlocks(CopyPlan& plan, const KVCacheResource& resource,
+                                                   const std::vector<LayerRegionSlot>& slots) const {
+    const auto& workers = resource.dsv41WorkerBlockIds();
+    if (workers.empty())
+        return true;
+    if (!broadcast_manager_ || workers.size() != broadcast_manager_->workerNum())
+        return false;
+    for (auto& info : plan.copy_infos) {
+        const auto found = std::find(resource.cacheKeys().begin(), resource.cacheKeys().end(), info.cache_key);
+        if (found == resource.cacheKeys().end())
+            return false;
+        const size_t index = found - resource.cacheKeys().begin();
+        info.worker_gpu_blocks.assign(workers.size(), std::vector<BlockIdxType>(slots.size(), NULL_BLOCK_IDX));
+        for (size_t rank = 0; rank < workers.size(); ++rank) {
+            if (workers[rank].size() != static_cast<size_t>(resource.groupNums()))
+                return false;
+            for (size_t slot = 0; slot < slots.size(); ++slot) {
+                if (kindForSlot(slots[slot]) != info.kind)
+                    continue;
+                const auto position = dsv41SlotIndex(resource, index, slots[slot]);
+                const auto& blocks = workers[rank].at(slots[slot].group_id);
+                if (!position || *position >= blocks.size() || blocks[*position] <= 0)
+                    return false;
+                info.worker_gpu_blocks[rank][slot] = blocks[*position];
+            }
+        }
+        if (info.worker_gpu_blocks.front() != info.gpu_blocks)
+            return false;
+    }
+    return true;
 }
 
 bool KVCacheMemoryConnector::stageDsv41Checkpoint(const std::shared_ptr<KVCacheResource>& resource,
@@ -196,7 +228,10 @@ bool KVCacheMemoryConnector::stageDsv41Checkpoint(const std::shared_ptr<KVCacheR
     }
     if (count == 0)
         return false;
-    auto source = std::make_shared<KVCacheResource>(*resource);
+    // Keep the allocator's reference-owning handle until the last worker copy
+    // releases this selection, including a failed protection attempt.
+    auto source = std::shared_ptr<KVCacheResource>(new KVCacheResource(*resource),
+                                                  [resource](KVCacheResource* selected) { delete selected; });
     source->setCacheKeys(CacheKeysType(resource->cacheKeys().begin(), resource->cacheKeys().begin() + count));
     source->setBlockDependencies(
         BlockDependenciesType(resource->blockDependencies().begin(), resource->blockDependencies().begin() + count));
@@ -211,11 +246,11 @@ bool KVCacheMemoryConnector::stageDsv41Checkpoint(const std::shared_ptr<KVCacheR
             || current.encoder_materialized_end != view.completed->materialized_end)
             return false;
         auto write = asyncWrite(source, meta);
-        if (!write)
-            return false;
-        write->waitDone();
-        if (!write->success())
-            return false;
+        if (write) {
+            write->waitDone();
+            if (!write->success())
+                return false;
+        }
         const auto slots = layerRegionSlots();
         auto       plan  = buildPrefixCopyPlanForRead(source->cacheKeys(),
                                                source->blockDependencies(),
@@ -230,7 +265,7 @@ bool KVCacheMemoryConnector::stageDsv41Checkpoint(const std::shared_ptr<KVCacheR
         state->protect(std::make_shared<DSV41ProtectedSnapshot>(*view.completed, std::move(owner), plan));
         return true;
     } catch (const std::exception& error) {
-        RTP_LLM_LOG_WARNING("V4.1 optional checkpoint protection failed: %s", error.what());
+        RTP_LLM_LOG_WARNING("V4.1 checkpoint protection failed: %s", error.what());
         return false;
     }
 }

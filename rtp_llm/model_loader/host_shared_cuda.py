@@ -12,7 +12,7 @@ import logging
 import os
 import resource
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import torch
@@ -206,9 +206,10 @@ class _RegisteredBuffer:
 
 
 class SharedEngramGraph:
-    def __init__(self, owner):
+    def __init__(self, owner, *, external_only=False):
         self.owner = owner
-        self.graph = torch.cuda.CUDAGraph()
+        self.external_only = external_only
+        self.graph = None if external_only else torch.cuda.CUDAGraph()
         self.inputs = []
         self.closed = False
         self.captured = False
@@ -220,7 +221,7 @@ class SharedEngramGraph:
             )
 
     @contextmanager
-    def capture(self, stream=None):
+    def capture(self, stream=None, *, external=False):
         owner = self.owner
         with owner._lock, torch.cuda.device(owner.device):
             owner._check_open()
@@ -230,13 +231,26 @@ class SharedEngramGraph:
                 )
             owner._capture = self
             try:
-                with torch.cuda.graph(self.graph, stream=stream):
+                if external and not torch.cuda.is_current_stream_capturing():
+                    raise RuntimeError(
+                        "external Engram binding needs an active capture"
+                    )
+                scope = (
+                    nullcontext()
+                    if external
+                    else torch.cuda.graph(self.graph, stream=stream)
+                )
+                with scope:
                     yield self
                 self.captured = True
             finally:
                 owner._capture = None
 
     def replay(self):
+        if self.external_only:
+            raise RuntimeError(
+                "external Engram bindings are owned by the caller's graph"
+            )
         with self.owner._lock, torch.cuda.device(self.owner.device):
             self.owner._check_open()
             if self.closed or not self.captured:
@@ -261,7 +275,8 @@ class SharedEngramGraph:
                     "finish Engram graph capture before closing its binding"
                 )
             torch.cuda.synchronize(self.owner.device)
-            self.graph.reset()
+            if self.graph is not None:
+                self.graph.reset()
             self.closed = True
             self.inputs.clear()
             self.owner._graphs.discard(self)
@@ -417,10 +432,10 @@ class SharedEngramLookup:
         if self._closed or self._closing:
             raise RuntimeError("shared Engram lookup is closing or closed")
 
-    def graph(self):
+    def graph(self, *, external_only=False):
         with self._lock, torch.cuda.device(self.device):
             self._check_open()
-            binding = SharedEngramGraph(self)
+            binding = SharedEngramGraph(self, external_only=external_only)
             self._graphs.add(binding)
             return binding
 
@@ -537,7 +552,8 @@ class SharedEngramLookup:
             # No buffer or lease is released if completion cannot be confirmed.
             torch.cuda.synchronize(self.device)
             for binding in list(self._graphs):
-                binding.graph.reset()
+                if binding.graph is not None:
+                    binding.graph.reset()
                 binding.closed = True
                 binding.inputs.clear()
             self._graphs.clear()

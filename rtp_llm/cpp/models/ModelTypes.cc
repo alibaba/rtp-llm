@@ -84,9 +84,31 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     if (inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.is_cuda()) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitLmOutputIndexes;
     }
+    if (inputs.v41_token_types.defined() && inputs.v41_token_types.is_cuda()) {
+        device_bits |= GptModelInputDeviceBit::kDeviceBitV41Rows;
+    }
     shape_hints[GptModelInputIndex::tensorDeviceMap]     = static_cast<int64_t>(device_bits);
     shape_hints[GptModelInputIndex::v41InputsPresent]    = inputs.v41_token_types.defined();
     shape_hints[GptModelInputIndex::v41ExecutionPresent] = inputs.v41_request_id.defined();
+    shape_hints[GptModelInputIndex::v41CacheContextPresent] = inputs.v41_execution_context.defined();
+    RTP_LLM_CHECK_WITH_INFO(inputs.v41_execution_context.defined() == inputs.v41_swa_ranges.defined(),
+                            "V4.1 progress and SWA ranges must be present together");
+    if (inputs.v41_execution_context.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(inputs.v41_request_id.defined() && inputs.input_lengths.defined(),
+                                "V4.1 cache progress requires request execution metadata");
+        const int64_t batch_size = inputs.input_lengths.numel();
+        RTP_LLM_CHECK_WITH_INFO(inputs.v41_execution_context.device().is_cpu()
+                                    && inputs.v41_execution_context.is_contiguous()
+                                    && inputs.v41_execution_context.scalar_type() == torch::kInt64
+                                    && inputs.v41_execution_context.dim() == 2
+                                    && inputs.v41_execution_context.size(0) == batch_size
+                                    && inputs.v41_execution_context.size(1) == 4
+                                    && inputs.v41_swa_ranges.device().is_cpu() && inputs.v41_swa_ranges.is_contiguous()
+                                    && inputs.v41_swa_ranges.scalar_type() == torch::kInt64
+                                    && inputs.v41_swa_ranges.dim() == 3 && inputs.v41_swa_ranges.size(0) == batch_size
+                                    && inputs.v41_swa_ranges.size(1) == 43 && inputs.v41_swa_ranges.size(2) == 3,
+                                "V4.1 cache context requires CPU int64 [requests,4] and [requests,43,3]");
+    }
     RTP_LLM_CHECK_WITH_INFO(inputs.v41_token_types.defined() == inputs.v41_token_valid.defined()
                                 && inputs.v41_token_types.defined() == inputs.engram_history_ids.defined()
                                 && inputs.v41_token_types.defined() == inputs.engram_history_valid.defined(),
@@ -94,10 +116,11 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     if (inputs.v41_token_types.defined()) {
         const int64_t rows = inputs.combo_tokens.numel();
         RTP_LLM_CHECK_WITH_INFO(
-            inputs.v41_token_types.device().is_cpu() && inputs.v41_token_types.is_contiguous()
-                && inputs.v41_token_valid.device().is_cpu() && inputs.v41_token_valid.is_contiguous()
-                && inputs.engram_history_ids.device().is_cpu() && inputs.engram_history_ids.is_contiguous()
-                && inputs.engram_history_valid.device().is_cpu() && inputs.engram_history_valid.is_contiguous()
+            (inputs.v41_token_types.device().is_cpu() || inputs.v41_token_types.is_cuda())
+                && inputs.v41_token_types.is_contiguous()
+                && inputs.v41_token_valid.device() == inputs.v41_token_types.device() && inputs.v41_token_valid.is_contiguous()
+                && inputs.engram_history_ids.device() == inputs.v41_token_types.device() && inputs.engram_history_ids.is_contiguous()
+                && inputs.engram_history_valid.device() == inputs.v41_token_types.device() && inputs.engram_history_valid.is_contiguous()
                 && inputs.v41_token_types.scalar_type() == torch::kInt32 && inputs.v41_token_types.dim() == 1
                 && inputs.v41_token_types.numel() == rows && inputs.v41_token_valid.scalar_type() == torch::kBool
                 && inputs.v41_token_valid.sizes() == inputs.v41_token_types.sizes()
@@ -159,6 +182,8 @@ std::array<int64_t, 2> decodeMtpHiddenStatesShape(int64_t total_numel, int64_t r
 }
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {
+    if (parallelism_config.tp_rank != 0)
+        inputs.v41_execution_contexts.clear();
     if (parallelism_config.tp_size <= 1) {
         return;
     }
@@ -225,9 +250,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     const auto request_length    = checkedHint(GptModelInputIndex::gptModelRequestLength, "gptModelRequestLength");
     const auto has_v41           = checkedHint(GptModelInputIndex::v41InputsPresent, "v41InputsPresent");
     const auto has_v41_execution = checkedHint(GptModelInputIndex::v41ExecutionPresent, "v41ExecutionPresent");
+    const auto has_v41_cache_context = checkedHint(GptModelInputIndex::v41CacheContextPresent, "v41CacheContextPresent");
     RTP_LLM_CHECK_WITH_INFO(has_v41 <= 1, "invalid V4.1 input presence flag");
     RTP_LLM_CHECK_WITH_INFO(has_v41_execution <= 1 && (!has_v41_execution || has_v41),
                             "invalid V4.1 execution presence flag or missing canonical model rows");
+    RTP_LLM_CHECK_WITH_INFO(has_v41_cache_context <= 1 && (!has_v41_cache_context || has_v41_execution),
+                            "invalid V4.1 cache context presence flag or missing execution metadata");
 
     auto allocBuf = [&](rtp_llm::DataType       dtype,
                         std::vector<int64_t>    dims,
@@ -338,10 +366,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         if (has_v41) {
             const auto rows             = checkedHint(GptModelInputIndex::comboTokens, "comboTokens");
-            inputs.v41_token_types      = allocBuf(rtp_llm::DataType::TYPE_INT32, {rows});
-            inputs.v41_token_valid      = allocBuf(rtp_llm::DataType::TYPE_BOOL, {rows});
-            inputs.engram_history_ids   = allocBuf(rtp_llm::DataType::TYPE_INT32, {rows, 3});
-            inputs.engram_history_valid = allocBuf(rtp_llm::DataType::TYPE_BOOL, {rows, 3});
+            const auto row_allocation = pickAlloc(GptModelInputDeviceBit::kDeviceBitV41Rows);
+            inputs.v41_token_types      = allocBuf(rtp_llm::DataType::TYPE_INT32, {rows}, row_allocation);
+            inputs.v41_token_valid      = allocBuf(rtp_llm::DataType::TYPE_BOOL, {rows}, row_allocation);
+            inputs.engram_history_ids   = allocBuf(rtp_llm::DataType::TYPE_INT32, {rows, 3}, row_allocation);
+            inputs.engram_history_valid = allocBuf(rtp_llm::DataType::TYPE_BOOL, {rows, 3}, row_allocation);
         } else {
             inputs.v41_token_types      = torch::Tensor();
             inputs.v41_token_valid      = torch::Tensor();
@@ -357,6 +386,14 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             inputs.v41_request_id  = torch::Tensor();
             inputs.v41_state_ready = torch::Tensor();
             inputs.v41_is_fake     = torch::Tensor();
+        }
+        if (has_v41_cache_context) {
+            const auto batch_size = checkedHint(GptModelInputIndex::inputLengths, "inputLengths");
+            inputs.v41_execution_context = allocBuf(rtp_llm::DataType::TYPE_INT64, {batch_size, 4});
+            inputs.v41_swa_ranges = allocBuf(rtp_llm::DataType::TYPE_INT64, {batch_size, 43, 3});
+        } else {
+            inputs.v41_execution_context = torch::Tensor();
+            inputs.v41_swa_ranges = torch::Tensor();
         }
         if (mm_features_locs_size) {
             inputs.mm_features_locs = allocBuf(rtp_llm::DataType::TYPE_INT32, {mm_features_locs_size});
@@ -430,6 +467,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         collect(inputs.v41_request_id);
         collect(inputs.v41_state_ready);
         collect(inputs.v41_is_fake);
+    }
+    if (has_v41_cache_context) {
+        collect(inputs.v41_execution_context);
+        collect(inputs.v41_swa_ranges);
     }
     if (mm_features_locs_size) {
         collect(inputs.mm_features_locs);

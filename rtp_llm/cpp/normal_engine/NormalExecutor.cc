@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -308,6 +309,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
         return absl::OkStatus();
     }
+
+    const auto v41_sampling = NormalOutputDispatcher::prepareV41Sampling(stream_groups, model_output);
+    if (!v41_sampling.ok())
+        return v41_sampling;
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.sampler_forward");

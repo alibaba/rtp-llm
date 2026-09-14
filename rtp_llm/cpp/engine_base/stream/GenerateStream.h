@@ -140,6 +140,7 @@ public:
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void         update(const StreamUpdateInfo& update_info);
     void         specUpdate(const StreamSpecUpdateInfo& update_info);
+    int previewSpeculativeRetainedRows(const torch::Tensor& accepted_tokens, int accepted_count) const;
     bool         updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
     virtual size_t scoreLen() const {

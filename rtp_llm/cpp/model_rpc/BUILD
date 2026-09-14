@@ -37,7 +37,6 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
-        "//rtp_llm/cpp/utils:core_utils",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ],
@@ -63,6 +62,8 @@ cc_library(
         ":rpc_error_code",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/cache:dsv41_checkpoint_state",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "//rtp_llm/cpp/disaggregate/cache_store",

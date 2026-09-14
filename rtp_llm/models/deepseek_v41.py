@@ -329,12 +329,10 @@ class DeepSeekV41(DeepSeekV2):
         revision = model_config.dsv41_model_revision
         if len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
             raise ValueError("DSV41_HF_REVISION must identify the immutable checkpoint")
-        if model_config.dsv41_replay_mode != "full":
-            raise NotImplementedError("V4.1 standard bounded replay is not connected")
         return super().from_config(model_config, *args, **kwargs)
 
     def support_cuda_graph(self) -> bool:
-        return False
+        return True
 
     def init_multimodal(self, mm_model_config, vit_config, device):
         # The ordinary model loader owns these tensors; bind them after loading.
@@ -352,6 +350,7 @@ class DeepSeekV41(DeepSeekV2):
     def _create_python_model(self):
         from rtp_llm.model_loader.host_shared_cuda import SharedEngramLookup
         from rtp_llm.models_py.model_desc.deepseek_v41_model import DeepSeekV41Model
+        from rtp_llm.models_py.modules.dsv41.draft import V41PrefillDraftCommit
         from rtp_llm.ops import VitSeparation
 
         if self.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_REMOTE:
@@ -366,6 +365,7 @@ class DeepSeekV41(DeepSeekV2):
             device=self._get_device_str(),
         )
         try:
+            lookup.warmup()
             if (
                 lookup.shared.manifest["revision"]
                 != self.model_config.dsv41_model_revision
@@ -384,10 +384,48 @@ class DeepSeekV41(DeepSeekV2):
                 py_hw_kernel_config=self.hw_kernel_config,
                 device_resource_config=self.device_resource_config,
                 vision=getattr(self, "mm_part", None),
+                prefill_draft=(
+                    V41PrefillDraftCommit.from_model_weights(
+                        self.model_config.dsv41_config, self._load_prefill_draft()
+                    )
+                    if self.parallelism_config.prefill_cp_config.is_enabled()
+                    and self.model_config.capture_aux_hidden_layer_ids
+                    else None
+                ),
             )
         except BaseException:
             lookup.close()
             raise
+
+    def _load_prefill_draft(self):
+        from rtp_llm.model_loader.loader import get_model_loader
+        from rtp_llm.utils.database import CkptDatabase
+
+        info = DeepSeekV41PrefillDraftWeight(
+            model_config=self.model_config,
+            parallelism_config=self.parallelism_config,
+            hw_kernel_config=self.hw_kernel_config,
+            kv_cache_config=self.kv_cache_config,
+            load_method=self.load_method,
+        )
+        loader = get_model_loader(
+            self.model_config,
+            info,
+            [],
+            CkptDatabase(self.model_config.ckpt_path, self.model_config.ptuning_path),
+            load_method=self.load_method,
+            force_cpu_load_weights=self.force_cpu_load_weights,
+        )
+        try:
+            return loader.load_weights(
+                device=self._get_device_str(),
+                global_weight_aliases={
+                    name: self.weight.global_weights[name]
+                    for name in (W.embedding, W.lm_head)
+                },
+            )
+        finally:
+            loader.cleanup_database()
 
     @staticmethod
     def get_weight_cls():

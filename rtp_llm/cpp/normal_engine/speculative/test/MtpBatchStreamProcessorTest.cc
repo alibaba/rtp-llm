@@ -242,7 +242,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputBuildsPositionSpec
               toVec<float>(sampler_inputs.temperature));
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens) {
+TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBeginAndAllowsThinkEnd) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -258,6 +258,8 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
 
     ResourceContext resource_context;
     auto stream = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1, {7}, {8, 9});
+    ASSERT_FALSE(stream->generateConfig()->in_think_mode);
+    ASSERT_EQ(0, stream->generateConfig()->max_thinking_tokens);
     stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
 
     MtpBatchStreamProcessor processor(
@@ -277,7 +279,9 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     task.total_streams   = 1;
     task.propose_step    = static_cast<int>(sp_config.gen_num_per_cycle);
     task.vocab_size      = model_config.vocab_size;
-    task.draft_tokens    = torch::tensor(std::vector<int32_t>{1, 2}, torch::kInt32).reshape({1, 2});
+    // NO_THINK allows the complete end tag in proposals and target logits;
+    // only the begin token is forbidden, as in ordinary target sampling.
+    task.draft_tokens    = torch::tensor(std::vector<int32_t>{8, 9}, torch::kInt32).reshape({1, 2});
     size_t processor_idx = 0;
     for (const auto& processor_ptr : stream->getAllLogitsProcessorPtr()) {
         auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(processor_ptr);
@@ -294,6 +298,7 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     ASSERT_EQ(1u, task.active.size());
     auto spec_result = runner.buildInline(task);
     ASSERT_TRUE(spec_result.has_active_processor);
+    EXPECT_EQ((std::vector<int32_t>{2}), toVec<int32_t>(spec_result.spec_cap_cpu_owner));
 
     auto sampler_inputs_status =
         processor.gatherSpecSamplerInput(stream_groups, model_output, spec_result, task.draft_tokens);
@@ -308,7 +313,7 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     float neg_inf = -std::numeric_limits<float>::max();
     for (int i = 0; i < 3; ++i) {
         EXPECT_EQ(neg_inf, logits_cpu[i][7].item<float>());
-        EXPECT_EQ(neg_inf, logits_cpu[i][8].item<float>());
+        EXPECT_EQ(0, logits_cpu[i][8].item<float>());
         EXPECT_EQ(0, logits_cpu[i][9].item<float>());
     }
 }
@@ -1024,6 +1029,61 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGe
     EXPECT_TRUE(torch::equal(model_input.lm_output_indexes, lm_output_indexes));
     EXPECT_TRUE(torch::equal(model_input.last_hidden_states, target_features));
     EXPECT_TRUE(model_input.is_target_verify);
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testV41DSparkRebuildsCanonicalHistoryAndMasksRequestBudgets) {
+    ModelConfig model_config;
+    PDSepConfig pd_sep_config;
+    ProfilingDebugLoggingConfig logging;
+    CacheConfig cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 5;
+    sp_config.sp_dspark_mask_token_id = 255;
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, logging, cache_config, sp_config, false);
+
+    GptModelInputs inputs;
+    inputs.v41_token_types = torch::full({3}, -1, torch::kInt32);
+    inputs.v41_token_valid = torch::tensor({true, true, false}, torch::kBool);
+    inputs.engram_history_ids = torch::tensor({{12, 13, 14}, {0, 0, 22}, {0, 0, 0}}, torch::kInt32);
+    inputs.engram_history_valid =
+        torch::tensor({{true, false, true}, {false, false, true}, {false, false, false}}, torch::kBool);
+    inputs.v41_execution_context = torch::tensor({3, 10, 10, 0, 1, 2, 2, 0, 0, 0, 0, 0}, torch::kInt64).reshape({3, 4});
+    inputs.v41_swa_ranges = torch::zeros({3, 43, 3}, torch::kInt64);
+    inputs.v41_request_id = torch::tensor({10, 20, -1}, torch::kInt64);
+    inputs.v41_state_ready = torch::tensor({true, true, false}, torch::kBool);
+    inputs.v41_is_fake = torch::tensor({false, false, true}, torch::kBool);
+    const auto committed_context = inputs.v41_execution_context.clone();
+    const auto swa_ranges = inputs.v41_swa_ranges.clone();
+    const auto anchors = torch::tensor({101, 202, 0}, torch::kInt32).to(torch::kCUDA);
+    const auto ends = torch::tensor({10, 2, 0}, torch::kInt32).to(torch::kCUDA);
+    const auto limits = torch::tensor({6, 2, 0}, torch::kInt32);
+    TensorHolder holder;
+    processor.buildDSparkProposeInput(inputs, anchors, ends, holder, limits);
+    EXPECT_EQ(toVec<int32_t>(inputs.engram_history_ids.narrow(0, 0, 5)),
+              (std::vector<int32_t>{12, 13, 14, 13, 14, 101, 14, 101, 255, 101, 255, 255, 255, 255, 255}));
+    EXPECT_EQ(toVec<bool>(inputs.v41_token_valid),
+              (std::vector<bool>{true, true, true, true, true, true, true, false, false, false,
+                                  false, false, false, false, false}));
+    const auto proposal_history = inputs.engram_history_ids.clone();
+    MtpBatchStreamProcessor::DSparkRoundHead round_head{anchors, ends, limits};
+    const auto proposals = torch::tensor({{31, 32, 33, 34, 35}, {41, 42, 43, 44, 45}, {0, 0, 0, 0, 0}}, torch::kInt32)
+                               .to(torch::kCUDA);
+    processor.updateDSparkTargetVerifyModelInput(round_head, inputs, proposals, holder);
+    EXPECT_EQ(toVec<int32_t>(inputs.engram_history_ids.narrow(0, 0, 6)),
+              (std::vector<int32_t>{12, 13, 14, 13, 14, 101, 14, 101, 31, 101, 31, 32, 31, 32, 33, 32, 33, 34}));
+    EXPECT_EQ(toVec<bool>(inputs.engram_history_valid.narrow(0, 0, 3)),
+              (std::vector<bool>{true, false, true, false, true, true, true, true, true}));
+    EXPECT_EQ(toVec<bool>(inputs.v41_token_valid),
+              (std::vector<bool>{true, true, true, true, true, true, true, true, false, false, false, false,
+                                  false, false, false, false, false, false}));
+    EXPECT_FALSE(inputs.engram_history_valid.narrow(0, 8, 10).any().item<bool>());
+    EXPECT_EQ(toVec<int32_t>(proposal_history.narrow(0, 3, 1)), (std::vector<int32_t>{101, 255, 255}));
+    EXPECT_TRUE(torch::equal(inputs.v41_execution_context, committed_context));
+    EXPECT_TRUE(torch::equal(inputs.v41_swa_ranges, swa_ranges));
+    EXPECT_NE(getModelInputShapeHints(inputs)[GptModelInputIndex::tensorDeviceMap] & kDeviceBitV41Rows, 0);
+    EXPECT_EQ(toVec<int32_t>(inputs.input_lengths), (std::vector<int32_t>{6, 6, 6}));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {

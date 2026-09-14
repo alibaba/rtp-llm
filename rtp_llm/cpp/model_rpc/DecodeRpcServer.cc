@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/DSV41RpcState.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/LockFreeThreadPool.h"
@@ -106,6 +107,17 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
         decode_context.peer_addrs.push_back(addr);
     }
     decode_context.prefill_cp_size = std::max(1, allocate_request.prefill_cp_size());
+    const auto& cache_config       = engine_->resourceContext().cache_manager->cacheConfig();
+    if (cache_config.dsv41_cache_layout_version != 0 || allocate_request.has_v41_identity()) {
+        try {
+            validateDSV41TransferIdentity(
+                cache_config, allocate_request.v41_identity(), decode_context.prefill_cp_size);
+            validateDSV41Peers(decode_context.peer_addrs, decode_context.prefill_cp_size);
+        } catch (const std::exception& e) {
+            decode_context.error_status = grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what());
+            return;
+        }
+    }
     if (maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded
         && maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
         const auto configured_prefill_cp_size = maga_init_params_.parallelism_config.prefill_cp_config.prefill_cp_size;
@@ -174,6 +186,18 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     GenerateRequestPB load_request;
     GRPC_RET_IF_ERROR(
         decode_context, grpc_stream->Read(&load_request), grpc::StatusCode::INTERNAL, "failed to get loadReqeust");
+    const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+    if (cache_config.dsv41_cache_layout_version != 0) {
+        try {
+            decode_context.prefill_cache_keys = dsv41PrefillCacheKeysForLoad(load_request,
+                                                                             decode_context.request_id,
+                                                                             decode_context.getStream()->inputLength(),
+                                                                             cache_config.seq_size_per_block);
+        } catch (const std::exception& e) {
+            decode_context.error_status = grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what());
+            return;
+        }
+    }
     decode_context.time_info.updateLoadBeginTime();
     auto error_info = loadCacheForAllRank(decode_context);
     decode_context.time_info.updateLoadEndTime();
@@ -197,6 +221,7 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
                               "decode load cache from prefill failed: " + error_info.ToString());
     }
     GRPC_RET_IF_ERROR(decode_context, error_info.ok(), grpc::StatusCode::INTERNAL, error_info.ToString().c_str());
+    decode_context.cache_load_complete = true;
     RTP_LLM_LOG_DEBUG("request [%s] load cache from prefill done", decode_context.request_key.c_str());
 }
 
@@ -214,6 +239,29 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                       generate_request.stage() == RemoteStage::GENERATE,
                       grpc::StatusCode::INTERNAL,
                       "message first status != RemoteStage::GENERATE");
+    const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+    if (cache_config.dsv41_cache_layout_version != 0 || generate_request.has_v41_execution_state()) {
+        try {
+            if (!decode_context.cache_load_complete || !generate_request.has_v41_execution_state()
+                || generate_request.request_id() != decode_context.request_id
+                || generate_stream->currentBatchSize() != 1)
+                throw std::invalid_argument(
+                    "V4.1 PD GENERATE requires completed cache bytes and a producer publication");
+            const auto publication = dsv41ExecutionStateFromProto(generate_request.v41_execution_state(),
+                                                                  cache_config,
+                                                                  decode_context.prefill_cp_size,
+                                                                  decode_context.request_id,
+                                                                  generate_stream->inputLength());
+            validateDSV41History(publication, decode_context.allocate_request.input());
+            const auto& state = generate_stream->kvCachePtr()->cacheResource(0).dsv41CacheState();
+            if (!state)
+                throw std::invalid_argument("V4.1 PD destination is missing request state");
+            state->publishExecution(publication, cache_config.layer_all_num - cache_config.layer_num);
+        } catch (const std::exception& e) {
+            decode_context.error_status = grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what());
+            return;
+        }
+    }
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);
     generate_stream->step();
@@ -397,7 +445,9 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     auto*       generate_stream    = decode_context.getStream().get();
-    auto&       cache_keys         = generate_stream->cacheKeys(0);
+    const auto& cache_config      = engine_->resourceContext().cache_manager->cacheConfig();
+    const auto& cache_keys        = cache_config.dsv41_cache_layout_version != 0 ?
+                                       decode_context.prefill_cache_keys : generate_stream->cacheKeys(0);
     const auto& block_ids_by_group = generate_stream->kvCachePtr()->groupBlocks(0);
 
     if (resource_.workers.size() % decode_context.peer_addrs.size() != 0
@@ -499,6 +549,9 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
         } else {
             load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
+        }
+        if (decode_context.allocate_request.has_v41_identity()) {
+            *load_request.mutable_v41_identity() = decode_context.allocate_request.v41_identity();
         }
         std::unique_ptr<ClientAsyncResponseReader<BroadcastLoadResponsePB>> reader(rpc_context.stub->AsyncRemoteLoad(
             rpc_context.client_context.get(), load_request, &completion_queues[i % completion_queues.size()]));
@@ -681,7 +734,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     };
     auto isCpSlicedFixedRegion = [](KVCacheRegionName region_name) {
         return region_name == KVCacheRegionName::INDEXER_STATE || region_name == KVCacheRegionName::CSA_STATE
-               || region_name == KVCacheRegionName::HCA_STATE || region_name == KVCacheRegionName::SWA_KV;
+               || region_name == KVCacheRegionName::HCA_STATE || region_name == KVCacheRegionName::SWA_KV
+               || region_name == KVCacheRegionName::DSV41_PAIR_STATE;
     };
     auto shouldLoadGroupFromPeer = [&](CacheGroupType group_type, KVCacheRegionName region_name, int peer_idx) {
         if (!is_page_level_rr) {
@@ -705,6 +759,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         RTP_LLM_CHECK_WITH_INFO(gid < cfg.cache_specs.size(), "group id out of range for cache_specs: %zu", gid);
         const auto& spec = cfg.cache_specs[gid];
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "null cache spec for group %zu", gid);
+        if (cfg.dsv41_cache_layout_version != 0) {
+            return dsv41FixedDestinationSliceBytes(cfg, gid, static_cast<size_t>(load_context.prefill_cp_size));
+        }
         const auto* state_spec = dynamic_cast<const DSV4StateSpec*>(spec.get());
         RTP_LLM_CHECK_WITH_INFO(state_spec != nullptr,
                                 "CP-sliced fixed DSV4 group %zu expects DSV4StateSpec, got %s",
@@ -847,6 +904,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 if (use_typed_regions && gid < cache_config.group_region_names.size()) {
                     region_name = cache_config.group_region_names[gid];
                 }
+                if (cache_config.dsv41_cache_layout_version != 0
+                    && cache_config.physicalOwner(layer_id, region_name) != static_cast<int>(layer_id)) {
+                    continue;
+                }
                 CacheGroupType group_type = groupType(cache_config, use_hybrid, gid);
 
                 auto block_pos_list =
@@ -985,11 +1046,19 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 load_context.block_ids_by_group[gid] != nullptr, "null mtp group_block: gid=%zu", gid);
                             const auto& block_ids = load_context.block_ids_by_group[gid]->blocks();
                             auto        block_num = block_ids.size();
-                            size_t      model_id  = mtp_base_model_id;
+                            // V4.1 P commits draft SWA inside the target's joint
+                            // 43-layer writer, so its wire keys use global layers.
+                            const bool joint_v41 = mtp_cache_cfg.dsv41_cache_layout_version == 1;
+                            const size_t model_id = joint_v41 ? maga_init_params_.model_id : mtp_base_model_id;
+                            const size_t source_layer_id = joint_v41 ? global_layer_id : layer_id;
 
                             KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;
                             if (mtp_use_typed_regions && gid < mtp_cache_cfg.group_region_names.size()) {
                                 region_name = mtp_cache_cfg.group_region_names[gid];
+                            }
+                            if (mtp_cache_cfg.dsv41_cache_layout_version != 0
+                                && mtp_cache_cfg.physicalOwner(layer_id, region_name) != static_cast<int>(layer_id)) {
+                                continue;
                             }
                             CacheGroupType group_type     = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
                             auto           block_pos_list = blockPositionsForLoad(
@@ -1017,7 +1086,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 }
                                 auto       cache_key      = makeCacheKey(model_id,
                                                               std::to_string(load_context.cache_keys[cache_key_index]),
-                                                              layer_id,
+                                                              source_layer_id,
                                                               region_name);
                                 const bool mtp_use_mla    = mtp_cache_cfg.use_mla;
                                 const int  local_part_cnt = is_page_level_rr ? 1 : peer_cnt;
@@ -1117,6 +1186,20 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
         return grpc::Status::OK;
+    }
+
+    const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+    if (cache_config.dsv41_cache_layout_version != 0 || request->has_v41_identity()) {
+        try {
+            validateDSV41TransferIdentity(
+                cache_config, request->v41_identity(), std::max(1, request->prefill_cp_size()));
+            validateDSV41Peers({request->peer_addrs().begin(), request->peer_addrs().end()},
+                               request->prefill_cp_size());
+            if (request->partition_count() != 1 || request->partition_id() != 0)
+                throw std::invalid_argument("V4.1 PD destination must gather whole P shards independent of D EP size");
+        } catch (const std::exception& e) {
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what());
+        }
     }
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());

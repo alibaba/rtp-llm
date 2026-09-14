@@ -93,6 +93,67 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
+TEST_F(GenerateStreamTest, SpeculativeRetainedRowsRespectEosStopAndBudgetWithoutMutatingTokens) {
+    auto stream = GenerateStreamBuilder().createDecoderStream({1, 2, 3}, {4});
+    stream->special_tokens_.eos_token_id = 9;
+    auto& config = *stream->generate_input_->generate_config;
+    config.max_new_tokens = 20;
+    config.min_new_tokens = 0;
+    const auto tokens = torch::tensor({5, 9, 7, 8, 6, 4}, torch::kInt32);
+    const auto original = stream->completeTokenIdsVec();
+    EXPECT_EQ(stream->previewSpeculativeRetainedRows(tokens, 6), 2);
+    config.stop_words_list = {{4, 5}};
+    EXPECT_EQ(stream->previewSpeculativeRetainedRows(tokens, 6), 1);
+    config.stop_words_list.clear();
+    config.ignore_eos = true;
+    EXPECT_EQ(stream->previewSpeculativeRetainedRows(tokens, 6), 6);
+    config.max_new_tokens = 3;
+    EXPECT_EQ(stream->previewSpeculativeRetainedRows(tokens, 6), 2);
+    config.max_new_tokens = 20;
+    config.ignore_eos = false;
+    config.min_new_tokens = 10;
+    EXPECT_EQ(stream->previewSpeculativeRetainedRows(tokens, 6), 6);
+    EXPECT_EQ(stream->completeTokenIdsVec(), original);
+}
+
+TEST_F(GenerateStreamTest, SpeculativeRetainedRowsUseEarliestStopAfterMinimumLength) {
+    auto stream = GenerateStreamBuilder().createDecoderStream({1, 2, 3}, {4});
+    stream->special_tokens_.eos_token_id = 9;
+    auto& config = *stream->generate_input_->generate_config;
+    config.max_new_tokens = 20;
+    config.min_new_tokens = 0;
+    config.stop_words_list = {{7, 8}, {4, 5}};
+    const auto tokens = torch::tensor({5, 9, 7, 8, 9, 4}, torch::kInt32);
+    EXPECT_EQ(stream->previewSpeculativeRetainedRows(tokens, 6), 1);
+    config.min_new_tokens = 5;
+    EXPECT_EQ(stream->previewSpeculativeRetainedRows(tokens, 6), 4);
+    config.stop_words_list.clear();
+    EXPECT_EQ(stream->previewSpeculativeRetainedRows(tokens, 6), 5);
+    config.min_new_tokens = 6;
+    config.stop_words_list = {{7, 8}, {9, 4}};
+    config.ignore_eos = true;
+    EXPECT_EQ(stream->previewSpeculativeRetainedRows(tokens, 6), 6);
+}
+
+TEST_F(GenerateStreamTest, SpeculativeMinimumLengthMatchesFinalTokenBookkeeping) {
+    auto stream = GenerateStreamBuilder().createDecoderStream({1, 2, 3}, {4, 5, 9, 7, 8, 9, 4});
+    stream->special_tokens_.eos_token_id = 9;
+    stream->generate_input_->generate_config->min_new_tokens = 5;
+    stream->matchEosToken(0);
+    EXPECT_EQ(stream->seqLength(), 9);
+
+    stream = GenerateStreamBuilder().createDecoderStream({1, 2, 3}, {4, 5, 9, 7, 8, 9, 4});
+    stream->generate_input_->generate_config->min_new_tokens = 5;
+    stream->generate_input_->generate_config->stop_words_list = {{4, 5}, {7, 8}};
+    stream->matchStopWordsList(0);
+    EXPECT_EQ(stream->seqLength(), 8);
+
+    stream = GenerateStreamBuilder().createDecoderStream({1}, {2});
+    stream->generate_input_->generate_config->stop_words_list = {{}, {0, 0, 1, 2}};
+    stream->matchStopWordsList(0);
+    EXPECT_EQ(stream->seqLength(), 2);
+}
+
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});

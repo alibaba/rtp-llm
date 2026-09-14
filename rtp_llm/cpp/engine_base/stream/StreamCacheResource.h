@@ -11,6 +11,8 @@ namespace rtp_llm {
 
 class AsyncContext;
 class GenerateStream;
+struct DSV41ExecutionContext;
+struct DSV41ExecutionState;
 
 class StreamCacheResource {
 public:
@@ -37,6 +39,12 @@ public:
     void         releaseResource();
     bool         asyncLoadCache();
     bool         loadCacheDone();
+    std::shared_ptr<DSV41ExecutionContext> createDsv41ExecutionContext();
+    bool protectDsv41Checkpoint(const DSV41ExecutionState& publication,
+                                const std::vector<std::vector<int32_t>>& actual_block_ids,
+                                const std::vector<std::vector<std::vector<int32_t>>>& worker_block_ids);
+    void publishDsv41Execution(const DSV41ExecutionState& publication, int64_t materialized_end,
+                               bool finish_prefill = false, const torch::Tensor& accepted_tokens = {});
 
     // swap all linear groups rhs and lhs
     void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);

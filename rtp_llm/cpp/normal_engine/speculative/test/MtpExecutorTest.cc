@@ -9,6 +9,7 @@
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
@@ -603,6 +604,9 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     MtpExecutorTestConfig test_config;
     test_config.gen_num_per_cycle = 4;
     auto components               = createMtpExecutorComponents(test_config);
+    StepWindowProfiler profiler;
+    profiler.configure(true, "mtp_real_prefill", 10, 1);
+    components.executor->step_profiler_ = &profiler;
 
     size_t batch_size = 1;
 
@@ -622,8 +626,8 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     target_output.logits           = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({(int64_t)batch_size, 4});
     target_output.all_hidden_states =
         torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f}).reshape({4, 2});
-    components.fake_target_model->setInputs({target_input});
-    components.fake_target_model->setOutputs({target_output});
+    components.fake_target_model->setInputs({target_input, target_input});
+    components.fake_target_model->setOutputs({target_output, target_output});
 
     // set fake draft model outputs
     auto draft_input               = GptModelInputs{};
@@ -637,8 +641,10 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     draft_output.all_hidden_states =
         torch::tensor({0.11f, 0.12f, 0.13f, 0.14f, 0.15f, 0.16f, 0.17f, 0.18f}).reshape({4, 2});
 
-    components.fake_draft_model->setInputs({draft_input});
-    components.fake_draft_model->setOutputs({draft_output});
+    auto fake_stream_draft_input               = target_input;
+    fake_stream_draft_input.last_hidden_states = target_output.all_hidden_states;
+    components.fake_draft_model->setInputs({fake_stream_draft_input, draft_input});
+    components.fake_draft_model->setOutputs({draft_output, draft_output});
 
     // set fake sampler outputs
     auto sampler_input  = SamplerInputs{target_output.logits};
@@ -662,8 +668,16 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
                     std::move(components.fake_sampler));
 
     // Verify executor was created successfully
+    ASSERT_TRUE(components.executor->process({}).ok());
+    EXPECT_EQ(profiler.waited_steps_, 0);
+    auto idle_stream = createContextStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3});
+    idle_stream->setIsFakeStream(true);
+    ASSERT_TRUE(components.executor->process({idle_stream}).ok());
+    EXPECT_EQ(profiler.waited_steps_, 0);
     auto status = components.executor->process({stream1});
     ASSERT_TRUE(status.ok());
+    EXPECT_EQ(profiler.waited_steps_, 1);
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.17, 0.18});

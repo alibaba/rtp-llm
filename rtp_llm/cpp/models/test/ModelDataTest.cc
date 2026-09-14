@@ -170,6 +170,18 @@ TEST_F(ModelDataTest, testV41ExecutionShapeHintsIncludeDecodeRequests) {
     EXPECT_EQ(getModelInputShapeHints(GptModelInputs{})[GptModelInputIndex::v41ExecutionPresent], 0);
 }
 
+TEST_F(ModelDataTest, testV41SpeculativeCanonicalRowsPreserveDeviceBroadcastClass) {
+    auto inputs = makeV41DecodeInputs();
+    const auto fields = {&GptModelInputs::v41_token_types, &GptModelInputs::v41_token_valid,
+                          &GptModelInputs::engram_history_ids, &GptModelInputs::engram_history_valid};
+    EXPECT_EQ(getModelInputShapeHints(inputs)[GptModelInputIndex::tensorDeviceMap] & kDeviceBitV41Rows, 0);
+    for (const auto member : fields)
+        inputs.*member = (inputs.*member).to(torch::kCUDA);
+    EXPECT_NE(getModelInputShapeHints(inputs)[GptModelInputIndex::tensorDeviceMap] & kDeviceBitV41Rows, 0);
+    inputs.engram_history_valid = inputs.engram_history_valid.cpu();
+    EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
+}
+
 TEST_F(ModelDataTest, testV41ExecutionMetadataMustBeCompleteAndCanonical) {
     for (int present_mask = 1; present_mask < 7; ++present_mask) {
         SCOPED_TRACE(present_mask);
@@ -239,6 +251,20 @@ TEST_F(ModelDataTest, testEmptyV41ExecutionMetadataRemainsExplicitlyPresent) {
     EXPECT_EQ(hints[GptModelInputIndex::inputLengths], 0);
     EXPECT_EQ(hints[GptModelInputIndex::v41InputsPresent], 1);
     EXPECT_EQ(hints[GptModelInputIndex::v41ExecutionPresent], 1);
+}
+
+TEST_F(ModelDataTest, testV41CacheContextRequiresMatchingHostProgressAndRanges) {
+    auto inputs = makeV41DecodeInputs();
+    inputs.v41_execution_context = torch::tensor({4, 11, 11, 0, 7, 22, 22, 0}, torch::kInt64).reshape({2, 4});
+    inputs.v41_swa_ranges = torch::full({2, 43, 3}, -1, torch::kInt64);
+    EXPECT_EQ(getModelInputShapeHints(inputs)[GptModelInputIndex::v41CacheContextPresent], 1);
+    inputs.v41_swa_ranges = torch::zeros({2, 40, 3}, torch::kInt64);
+    EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
+    inputs.v41_swa_ranges = torch::Tensor();
+    EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
+    inputs.v41_swa_ranges = torch::full({2, 43, 3}, -1, torch::kInt64);
+    inputs.v41_execution_context = inputs.v41_execution_context.to(torch::kInt32);
+    EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
 }
 
 }  // namespace rtp_llm

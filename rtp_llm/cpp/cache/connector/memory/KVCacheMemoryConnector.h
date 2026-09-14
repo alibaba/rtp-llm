@@ -97,6 +97,7 @@ private:
         int32_t                   disk_slot{-1};
         size_t                    block_size{0};
         std::vector<BlockIdxType> gpu_blocks;
+        std::vector<std::vector<BlockIdxType>> worker_gpu_blocks;
         std::vector<uint8_t>      slot_valid_mask;
         bool                      is_complete{true};
         bool                      request_released{false};
@@ -119,6 +120,8 @@ private:
                             size_t                                                block_index,
                             const std::shared_ptr<const DSV41CheckpointMetadata>& metadata) const;
     bool bindDsv41ReadPlan(CopyPlan& plan, const KVCacheResource& resource, const std::vector<LayerRegionSlot>& slots);
+    bool bindDsv41WorkerBlocks(CopyPlan& plan, const KVCacheResource& resource,
+                               const std::vector<LayerRegionSlot>& slots) const;
     std::optional<size_t>
          dsv41SlotIndex(const KVCacheResource& resource, size_t key_index, const LayerRegionSlot& slot) const;
     bool isDsv41TypedCacheLayout(const std::vector<LayerRegionSlot>& slots) const;
@@ -143,7 +146,8 @@ private:
     std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
     sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
     std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
-         sendMemoryRequest(const MemoryOperationRequestPB& mem_req, int64_t timeout_ms) const;
+         sendMemoryRequest(const MemoryOperationRequestPB& mem_req, int64_t timeout_ms,
+                           const CopyPlan* copy_plan = nullptr) const;
     void printCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
 
     bool                     prepareCopyBuffers(BlockIdxType                     mem_block,

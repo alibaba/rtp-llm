@@ -550,6 +550,8 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
     CacheKeysType                 selected_keys;
     BlockDependenciesType         selected_dependencies;
     std::vector<BlockIndicesType> selected_blocks(static_cast<size_t>(kvcache_resource.groupNums()));
+    KVCacheResource::WorkerBlockIds selected_worker_blocks(
+        kvcache_resource.dsv41WorkerBlockIds().size(), std::vector<BlockIndicesType>(kvcache_resource.groupNums()));
     const auto&                   source_dependencies = kvcache_resource.blockDependencies();
 
     selected_dependencies.reserve(cache_keys.size());
@@ -562,6 +564,7 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
         const size_t              pos             = it->second;
         bool                      any_valid_block = false;
         std::vector<BlockIdxType> blocks_for_key(static_cast<size_t>(kvcache_resource.groupNums()), NULL_BLOCK_IDX);
+        std::vector<size_t> source_positions(kvcache_resource.groupNums());
         for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
             const auto& src_blocks                   = kvcache_resource.blocks(gid);
             size_t      source_pos                   = pos;
@@ -573,6 +576,7 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
                 source_pos              = end % fixed_unit == 0 ? end / fixed_unit - 1 : src_blocks.size();
             }
             const auto block = source_pos < src_blocks.size() ? src_blocks[source_pos] : NULL_BLOCK_IDX;
+            source_positions[gid] = source_pos;
             blocks_for_key[static_cast<size_t>(gid)] = block;
             any_valid_block                          = any_valid_block || (!isNullBlockIdx(block) && block > 0);
         }
@@ -590,6 +594,11 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
                 BlockDependency{false, 0, static_cast<uint32_t>(selected_dependencies.size())});
         for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
             selected_blocks[static_cast<size_t>(gid)].push_back(blocks_for_key[static_cast<size_t>(gid)]);
+            for (size_t rank = 0; rank < selected_worker_blocks.size(); ++rank) {
+                const auto& blocks = kvcache_resource.dsv41WorkerBlockIds().at(rank).at(gid);
+                selected_worker_blocks[rank][gid].push_back(source_positions[gid] < blocks.size() ?
+                                                               blocks[source_positions[gid]] : NULL_BLOCK_IDX);
+            }
         }
     }
 
@@ -599,6 +608,7 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
 
     selected_resource->cacheKeys() = std::move(selected_keys);
     selected_resource->setBlockDependencies(std::move(selected_dependencies));
+    selected_resource->setDsv41WorkerBlockIds(std::move(selected_worker_blocks));
     for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
         BlockIndicesType valid;
         for (auto b : selected_blocks[static_cast<size_t>(gid)]) {

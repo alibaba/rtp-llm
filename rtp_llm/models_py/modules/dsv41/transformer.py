@@ -407,7 +407,11 @@ class V41TargetModel(nn.Module):
                 )
             if aux_row_indices is not None and layer in self.aux_layer_ids:
                 # DSpark captures HC means at the block input, after Engram.
-                aux.append(hidden.index_select(0, aux_row_indices).mean(dim=1))
+                aux.append(
+                    hidden.index_select(0, aux_row_indices)
+                    .mean(dim=1)
+                    .masked_fill(~rows.valid[aux_row_indices, None], 0)
+                )
             hidden, pre_mix = self.blocks[layer](
                 hidden, pre_mix, context, rows.image_mask
             )
@@ -450,10 +454,19 @@ class V41TargetModel(nn.Module):
             raise ValueError(
                 "retained L20 HC/pre_mix has a different geometry or device"
             )
-        torch._assert_async(
-            l20.rows.valid.all(), "late prefill cannot consume padding aux"
-        )
-        selected = torch.arange(count, dtype=torch.int64, device=self.embedding.device)
+        if hasattr(context, "cp"):
+            if count != context.query_rows or not torch.equal(
+                l20.rows.valid, context.valid
+            ):
+                raise ValueError(
+                    "late CP rows must preserve the selected canonical validity"
+                )
+        else:
+            torch._assert_async(
+                l20.rows.valid.all(), "late prefill cannot consume padding aux"
+            )
+        # Padded ranks still execute every block/EP collective, but never create aux.
+        selected = l20.rows.valid.nonzero().flatten()
         hidden, pre_mix, aux = self._run_blocks(
             l20.rows, l20.hidden_states, l20.pre_mix, context, 21, 40, selected
         )
@@ -468,6 +481,7 @@ class V41TargetModel(nn.Module):
         execution_mode: str,
         image_features: V41ImageFeatures | None = None,
         aux_row_indices: torch.Tensor | None = None,
+        dense_aux: bool = False,
         lookup_outputs: Mapping[int, torch.Tensor] | None = None,
     ) -> V41TargetOutput:
         if execution_mode != "full":
@@ -475,6 +489,10 @@ class V41TargetModel(nn.Module):
                 "this target component only implements explicit full execution"
             )
         hidden, pre_mix = self._embed_rows(rows, image_features)
+        if dense_aux and (
+            aux_row_indices is None or aux_row_indices.numel() != rows.token_ids.numel()
+        ):
+            raise ValueError("dense aux requires the fixed complete input row set")
         if aux_row_indices is not None:
             indices = aux_row_indices
             if (
@@ -491,9 +509,17 @@ class V41TargetModel(nn.Module):
                 & (indices[1:] > indices[:-1]).all(),
                 "V4.1 aux rows must be unique, ordered and inside the current input",
             )
-            torch._assert_async(
-                rows.valid[indices].all(), "V4.1 aux rows cannot include padding"
-            )
+            if dense_aux:
+                torch._assert_async(
+                    (
+                        indices == torch.arange(indices.numel(), device=indices.device)
+                    ).all(),
+                    "dense aux must retain the complete fixed input order",
+                )
+            else:
+                torch._assert_async(
+                    rows.valid[indices].all(), "V4.1 aux rows cannot include padding"
+                )
         hidden, pre_mix, aux = self._run_blocks(
             rows, hidden, pre_mix, context, 0, 40, aux_row_indices, lookup_outputs
         )

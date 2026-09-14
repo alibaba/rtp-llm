@@ -1296,6 +1296,8 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
             reportWriteMetrics(no_need_write, timer.done_us(), static_cast<int64_t>(cache_keys_size), 0);
             return dsv41 && !no_need_write ? failedMemoryCopyContext() : nullptr;
         }
+        if (dsv41 && !bindDsv41WorkerBlocks(*copy_plan, *resource, slots))
+            return failedMemoryCopyContext();
         auto write_done = [copy_plan, resource_copy = resource, slots, timer, total_block_num = cache_keys_size, this](
                               bool success) mutable {
             int64_t disk_write_block_num = 0;
@@ -1700,16 +1702,30 @@ KVCacheMemoryConnector::sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan)
         }
     }
 
-    return sendMemoryRequest(mem_req, copyPlanTimeoutMs(copy_plan));
+    return sendMemoryRequest(mem_req, copyPlanTimeoutMs(copy_plan), copy_plan.get());
 }
 
 std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
-KVCacheMemoryConnector::sendMemoryRequest(const MemoryOperationRequestPB& mem_req, int64_t timeout_ms) const {
+KVCacheMemoryConnector::sendMemoryRequest(const MemoryOperationRequestPB& mem_req, int64_t timeout_ms,
+                                         const CopyPlan* copy_plan) const {
     std::vector<FunctionRequestPB> requests;
     requests.reserve(broadcast_manager_->workerNum());
     for (size_t i = 0; i < broadcast_manager_->workerNum(); ++i) {
         FunctionRequestPB req;
         req.mutable_mem_request()->CopyFrom(mem_req);
+        if (copy_plan) {
+            for (size_t item = 0; item < copy_plan->copy_infos.size(); ++item) {
+                const auto& mappings = copy_plan->copy_infos[item].worker_gpu_blocks;
+                if (mappings.empty())
+                    continue;
+                if (mappings.size() != broadcast_manager_->workerNum())
+                    return nullptr;
+                auto* copy = req.mutable_mem_request()->mutable_copy_items(item);
+                copy->clear_gpu_blocks();
+                for (const auto block : mappings[i])
+                    copy->add_gpu_blocks(block);
+            }
+        }
         requests.emplace_back(std::move(req));
     }
     auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,

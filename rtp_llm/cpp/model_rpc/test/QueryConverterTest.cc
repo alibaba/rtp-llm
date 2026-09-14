@@ -15,6 +15,32 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
+TEST(QueryConverterHandoffTest, PreservesTransportKeyAcrossDecodeAndPrefillConversion) {
+    GenerateInputPB request;
+    request.set_request_id(123);
+    request.add_token_ids(7);
+    request.mutable_generate_config()->set_unique_key("decode-process_123_handoff");
+    request.mutable_generate_config()->set_can_use_pd_separation(true);
+
+    auto decode_input = QueryConverter::transQuery(&request);
+    ASSERT_EQ(decode_input->generate_config->unique_key, "decode-process_123_handoff");
+
+    GenerateInputPB prefill_request = request;
+    prefill_request.mutable_generate_config()->set_unique_key(decode_input->generate_config->unique_key);
+    GenerateInputPB received;
+    ASSERT_TRUE(received.ParseFromString(prefill_request.SerializeAsString()));
+    auto prefill_input = QueryConverter::transQuery(&received);
+    EXPECT_EQ(prefill_input->generate_config->unique_key, "decode-process_123_handoff");
+
+    request.mutable_generate_config()->set_unique_key("decode-process_124_handoff");
+    auto next_input = QueryConverter::transQuery(&request);
+    EXPECT_EQ(next_input->generate_config->unique_key, "decode-process_124_handoff");
+    EXPECT_EQ(prefill_input->generate_config->unique_key, "decode-process_123_handoff");
+
+    request.mutable_generate_config()->clear_unique_key();
+    EXPECT_TRUE(QueryConverter::transQuery(&request)->generate_config->unique_key.empty());
+}
+
 TEST_F(QueryConverterTest, testTransInput) {
     GenerateInputPB input;
     input.mutable_request_info()->set_frontend_ip("10.0.0.1");

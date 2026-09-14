@@ -33,6 +33,8 @@ public:
     absl::Status dispatchDecode(const StreamGroups&                          stream_groups,
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                 const MergedOutput&                          draft_prefill_output) const;
+    void truncateV41AcceptedRows(const StreamGroups& stream_groups,
+                                  speculative::SpeculativeSamplerOutput& output) const;
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                           TensorHolder&       host_holder) const;
@@ -77,7 +79,8 @@ public:
     void buildDSparkProposeInput(GptModelInputs&      model_input,
                                  const torch::Tensor& anchors,
                                  const torch::Tensor& committed_ends,
-                                 TensorHolder&        host_holder);
+                                 TensorHolder&        host_holder,
+                                 const torch::Tensor& v41_row_limits = {});
 
     // Round-head stream state (anchor = last accepted token, committed_end =
     // committed length - 1), derived once per decode round and consumed by
@@ -87,6 +90,7 @@ public:
     struct DSparkRoundHead {
         torch::Tensor anchors;
         torch::Tensor committed_ends;
+        torch::Tensor v41_row_limits;
     };
     DSparkRoundHead buildDSparkRoundHead(const StreamGroups&   stream_groups,
                                          const GptModelInputs& model_input,

@@ -79,6 +79,20 @@ torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tenso
     return cuda_tensor;
 }
 
+std::vector<DSV41ExecutionState> PyWrappedModel::commitV41RetainedRows(const torch::Tensor& retained_rows) {
+    py::gil_scoped_acquire gil;
+    if (!pending_v41_inputs_ || !py::hasattr(py_model_, "commit_retained_rows"))
+        throw std::logic_error("V4.1 speculative commit requires the current verify inputs and model callback");
+    auto result = py_model_.attr("commit_retained_rows")(retained_rows, *pending_v41_inputs_)
+                      .cast<std::vector<DSV41ExecutionState>>();
+    pending_v41_inputs_.reset();
+    return result;
+}
+
+bool PyWrappedModel::usesV41CacheLayout() const {
+    return cache_manager_ && cache_manager_->cacheConfig().dsv41_cache_layout_version == 1;
+}
+
 void PyWrappedModel::releaseBuffers() {
     if (held_attn_pyobj_.ptr()) {
         py::gil_scoped_acquire gil;
@@ -768,6 +782,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_inputs.request_id           = inputs.v41_request_id;
             py_model_inputs.v41_state_ready      = inputs.v41_state_ready;
             py_model_inputs.v41_is_fake          = inputs.v41_is_fake;
+            py_model_inputs.v41_execution_context = inputs.v41_execution_context;
+            py_model_inputs.v41_swa_ranges        = inputs.v41_swa_ranges;
+            py_model_inputs.v41_execution_contexts = inputs.v41_execution_contexts;
         }
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
@@ -785,6 +802,16 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
             hidden_states = py_model_outputs.hidden_states.clone();
+            // Capture-time host metadata never describes later replay requests.
+            py_model_outputs.v41_execution_states.clear();
+            py_model_outputs.v41_execution_progress.clear();
+            if (!inputs.warmup && inputs.v41_request_id.defined()) {
+                py::gil_scoped_acquire gil;
+                if (py::hasattr(py_model_, "get_execution_states")) {
+                    py_model_outputs.v41_execution_states = py_model_.attr("get_execution_states")(py_model_inputs)
+                                                                .cast<std::vector<DSV41ExecutionState>>();
+                }
+            }
         } else {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
@@ -796,6 +823,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();
             hidden_states    = py_model_outputs.hidden_states.clone();
+        }
+        if (!inputs.warmup && inputs.is_target_verify && inputs.v41_request_id.defined()
+            && dspark_model_role_ == DSparkModelRole::NONE) {
+            pending_v41_inputs_ = py_model_inputs;
+            py_model_outputs.v41_execution_states.clear();
+            py_model_outputs.v41_execution_progress.clear();
         }
         if (!inputs.warmup && inputs.pd_separation) {
             cache_store_async_writer_->waitAllDone();
@@ -811,12 +844,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // this by reusing the standard "has any context stream" test
         // already used by callForwardPostLayers.
         const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+        auto       with_execution_state = [&](GptModelOutputs outputs) {
+            outputs.v41_execution_states = std::move(py_model_outputs.v41_execution_states);
+            outputs.v41_execution_progress = std::move(py_model_outputs.v41_execution_progress);
+            return outputs;
+        };
         if (dspark_model_role_ != DSparkModelRole::NONE) {
             if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
                 // Python returns normalized [B*gamma, hidden_dim]. Reuse the
                 // regular C++ lm_head and TP logits gather for every proposal
                 // row; the speculative executor owns only Markov sampling.
-                return callForwardPostLayers(hidden_states, inputs, true);
+                return with_execution_state(callForwardPostLayers(hidden_states, inputs, true));
             }
             // Commit only updates the draft KV cache and has no logits
             // consumer. Preserve its row-aligned hidden output for the common
@@ -824,13 +862,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             GptModelOutputs outputs;
             outputs.hidden_states     = hidden_states;
             outputs.all_hidden_states = hidden_states;
-            return outputs;
+            return with_execution_state(std::move(outputs));
         }
         if (enable_prefill_cp_ && has_context_request) {
             context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
-            return forwardPostLayersLastHidden(hidden_states, inputs);
+            return with_execution_state(forwardPostLayersLastHidden(hidden_states, inputs));
         }
-        return callForwardPostLayers(hidden_states, inputs, true);
+        return with_execution_state(callForwardPostLayers(hidden_states, inputs, true));
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());

@@ -1,6 +1,7 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/DSV41RpcState.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
@@ -325,6 +326,13 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     if (cp_cfg.kv_cache_sharded && maga_init_params_.parallelism_config.tp_size > 1) {
         alloc_request.set_prefill_cp_size(static_cast<int32_t>(maga_init_params_.parallelism_config.tp_size));
     }
+    const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+    if (cache_config.dsv41_cache_layout_version != 0) {
+        *alloc_request.mutable_v41_identity() =
+            dsv41TransferIdentity(cache_config, std::max(1, alloc_request.prefill_cp_size()));
+        validateDSV41Peers(prefill_context.prefill_worker_cache_store_addrs,
+                           std::max(1, alloc_request.prefill_cp_size()));
+    }
 
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Write(alloc_request), ErrorCode::REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED);
@@ -347,7 +355,18 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", prefill_context.request_id);
-    auto stream = engine_->enqueue(prefill_context.generate_input);
+    std::shared_ptr<GenerateStream> stream;
+    const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+    if (cache_config.dsv41_cache_layout_version != 0) {
+        stream = engine_->makeStream(prefill_context.generate_input);
+        if (!stream->hasError()) {
+            prefill_context.prefill_cache_keys =
+                dsv41PrefillPromptCacheKeys(stream->completeTokenIdsPtr(), cache_config);
+        }
+        engine_->enqueue(stream);
+    } else {
+        stream = engine_->enqueue(prefill_context.generate_input);
+    }
     prefill_context.setStream(stream);
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", prefill_context.request_id);
 }
@@ -369,6 +388,21 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
     load_request.set_client_id(process_id_);
     load_request.set_request_id(prefill_context.request_id);
     load_request.set_start_time(currentTimeUs());
+    load_request.set_stage(RemoteStage::LOAD);
+    const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+    if (cache_config.dsv41_cache_layout_version != 0) {
+        for (auto key : prefill_context.prefill_cache_keys)
+            load_request.add_prefill_cache_keys(key);
+        try {
+            dsv41PrefillCacheKeysForLoad(load_request,
+                                         prefill_context.request_id,
+                                         prefill_context.getStream()->inputLength(),
+                                         cache_config.seq_size_per_block);
+        } catch (const std::exception& e) {
+            prefill_context.error_status = grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what());
+            return;
+        }
+    }
     start_time_us = currentTimeUs();
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.client_stream->Write(load_request), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
@@ -435,6 +469,23 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     generate_request.set_client_id(process_id_);
     generate_request.set_request_id(prefill_context.request_id);
     generate_request.set_first_generate_token_id(first_token);
+    const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+    if (cache_config.dsv41_cache_layout_version != 0) {
+        const auto& state = stream->kvCachePtr()->cacheResource(0).dsv41CacheState();
+        const auto  view  = state ? state->view() : DSV41CacheState::View{};
+        if (!view.execution || view.execution->request_id != prefill_context.request_id
+            || view.execution->materialized_end != stream->inputLength()) {
+            prefill_context.error_status =
+                grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                             "V4.1 PD requires actual completed producer state at prompt end");
+            return;
+        }
+        const auto& cp_config = maga_init_params_.parallelism_config.prefill_cp_config;
+        const int   cp_size   = cp_config.kv_cache_sharded ? maga_init_params_.parallelism_config.tp_size : 1;
+        *generate_request.mutable_v41_execution_state() =
+            dsv41ExecutionStateToProto(*view.execution, cache_config, cp_size);
+        validateDSV41History(*view.execution, *prefill_context.rpc_context.request);
+    }
     auto context_position_ids = stream->getContextPositionIds();
     if (context_position_ids.defined()) {
         generate_request.mutable_position_ids()->CopyFrom(

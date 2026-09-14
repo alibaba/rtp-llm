@@ -201,6 +201,94 @@ class FlashMLAIndices:
     extra_lengths: torch.Tensor | None
     status: torch.Tensor
     query_valid: torch.Tensor
+    have_kv: torch.Tensor | None = None
+
+
+def _fast_staging(tensor):
+    return os.environ.get("DSV41_FLASHMLA_FAST_STAGING", "0") == "1" and is_supported(
+        tensor
+    )
+
+
+def _build_indices_fast(
+    request_ids, query_positions, replay_floors, swa, global_kv, global_indices
+):
+    from rtp_llm.models_py.modules.dsv41._flashmla_staging_triton import (
+        build_indices_kernel,
+    )
+    import triton
+
+    device = request_ids.device
+    requests = swa.validate(device)
+    rows = request_ids.numel()
+    for tensor in (request_ids, query_positions, replay_floors):
+        _integer_tensor(tensor, (rows,), device)
+    ratio, capacity, width, table_width, global_entries, global_pages = 0, 0, 0, 0, 1, 0
+    table = swa.page_ids
+    indices = request_ids
+    if global_kv is None:
+        if global_indices is not None:
+            raise ValueError("global indices require an explicit planar global binding")
+    else:
+        global_kv.validate(requests, device)
+        if (
+            global_indices is None
+            or global_indices.ndim != 2
+            or global_indices.shape[0] != rows
+            or global_indices.shape[1] > 512
+        ):
+            raise ValueError("FlashMLA global indices must be [rows, at most 512]")
+        _integer_tensor(global_indices, tuple(global_indices.shape), device)
+        capacity = global_indices.shape[1]
+        width = max(64, (capacity + 63) // 64 * 64)
+        ratio = global_kv.compress_ratio
+        table, indices = global_kv.page_table, global_indices
+        table_width = table.shape[1]
+        global_entries = global_kv.pages.entries_per_page
+        global_pages = global_kv.pages.data.shape[0]
+    main = torch.empty((rows, 1, 128), dtype=torch.int32, device=device)
+    main_lengths = torch.empty((rows,), dtype=torch.int32, device=device)
+    extra = (
+        torch.empty((rows, 1, width), dtype=torch.int32, device=device)
+        if ratio
+        else None
+    )
+    extra_lengths = torch.empty_like(main_lengths) if ratio else None
+    status = torch.empty_like(main_lengths)
+    query_valid = torch.empty((rows,), dtype=torch.bool, device=device)
+    have_kv = torch.empty_like(query_valid)
+    if rows:
+        build_indices_kernel[(rows,)](
+            request_ids,
+            query_positions,
+            replay_floors,
+            swa.page_ids,
+            swa.valid_starts,
+            swa.valid_ends,
+            table,
+            indices,
+            main,
+            main_lengths,
+            extra if ratio else main,
+            extra_lengths if ratio else main_lengths,
+            status,
+            query_valid,
+            have_kv,
+            REQUESTS=requests,
+            SWA_PAGES=swa.pages.data.shape[0],
+            SWA_ENTRIES=swa.pages.entries_per_page,
+            GLOBAL_PAGES=global_pages,
+            GLOBAL_ENTRIES=global_entries,
+            TABLE_WIDTH=table_width,
+            CAPACITY=capacity,
+            EXTRA_WIDTH=width,
+            RATIO=ratio,
+            BLOCK=triton.next_power_of_2(max(64, width)),
+            num_warps=4,
+        )
+    return FlashMLAIndices(
+        main, main_lengths, extra, extra_lengths, status, query_valid, have_kv
+    )
 
 
 def build_indices(
@@ -213,6 +301,10 @@ def build_indices(
     global_indices=None,
 ):
     """Map logical rows to safe physical indices on GPU, including during replay."""
+    if _fast_staging(request_ids):
+        return _build_indices_fast(
+            request_ids, query_positions, replay_floors, swa, global_kv, global_indices
+        )
     device = request_ids.device
     requests = swa.validate(device)
     rows = request_ids.numel()
@@ -334,6 +426,35 @@ def _pack_selected_rows(pages: CompactPages, indices: torch.Tensor):
     payload = 512 if pages.region == CacheRegion.SWA else 256
     entries = pages.entries_per_page
     stride = (slots * row_bytes + 511) // 512 * 512
+    if _fast_staging(pages.data) and slots % 64 == 0:
+        from rtp_llm.models_py.modules.dsv41._flashmla_staging_triton import (
+            pack_selected_rows_kernel,
+        )
+        import triton
+
+        packed = PlanarPages(
+            torch.empty(
+                (rows + 1, stride), device=pages.data.device, dtype=torch.uint8
+            ),
+            pages.region,
+            slots,
+        )
+        remapped = torch.empty_like(indices)
+        pack_selected_rows_kernel[(rows + 1, triton.cdiv(slots, 4))](
+            pages.data,
+            indices,
+            packed.data,
+            remapped,
+            ENTRIES=entries,
+            SOURCE_STRIDE=pages.data.stride(0),
+            SLOTS=slots,
+            PAYLOAD=payload,
+            SCALES=row_bytes - payload,
+            PACKED_STRIDE=stride,
+            BLOCK_SLOTS=4,
+            num_warps=4,
+        )
+        return packed, remapped
     packed = PlanarPages(
         torch.zeros((rows + 1, stride), device=pages.data.device, dtype=torch.uint8),
         pages.region,
@@ -448,6 +569,27 @@ def _flashmla_attention(
             global_indices,
         ),
     )
+    precision_guard = (
+        compact
+        and heads == 64
+        and os.environ.get("DSV41_FLASHMLA_PRECISION_GUARD", "0") == "1"
+    )
+    if precision_guard and (global_kv is None or global_indices.shape[1] < 512):
+        from rtp_llm.models_py.modules.dsv41.compact_reader import compact_attention
+
+        return compact_attention(
+            query,
+            request_ids,
+            query_positions,
+            replay_floors,
+            swa,
+            sinks,
+            global_kv=global_kv,
+            global_indices=global_indices,
+            output=output,
+            lse=lse,
+            status=status,
+        )
     if rows:
         main_pages = swa.pages
         extra_pages = None if global_kv is None else global_kv.pages
@@ -483,9 +625,11 @@ def _flashmla_attention(
         )
         active = metadata.query_valid[:, None]
         output.copy_(torch.where(active[:, :, None], native_output.view_as(output), 0))
-        have_kv = (metadata.main >= 0).any(dim=(1, 2))
-        if metadata.extra is not None:
-            have_kv |= (metadata.extra >= 0).any(dim=(1, 2))
+        have_kv = metadata.have_kv
+        if have_kv is None:
+            have_kv = (metadata.main >= 0).any(dim=(1, 2))
+            if metadata.extra is not None:
+                have_kv |= (metadata.extra >= 0).any(dim=(1, 2))
         # Upstream LSE excludes the sink and uses +inf for no-KV queries.
         attention_lse = torch.where(
             have_kv[:, None], native_lse.reshape(rows, heads), -torch.inf
@@ -493,6 +637,45 @@ def _flashmla_attention(
         combined_lse = torch.logaddexp(attention_lse, sinks[None, :])
         lse.copy_(torch.where(active, combined_lse, -torch.inf))
         status.copy_(metadata.status[:, None].expand(-1, heads))
+        if precision_guard:
+            from rtp_llm.models_py.modules.dsv41._flashmla_precision_triton import (
+                partial_extra_attention_kernel,
+            )
+
+            # Full-topk rows retain native output. Partial rows use the existing
+            # FP32 reader, with the same device predicate on every Graph replay.
+            partial_extra_attention_kernel[(rows, heads)](
+                query,
+                request_ids,
+                query_positions,
+                replay_floors,
+                swa.pages.data,
+                swa.page_ids,
+                swa.valid_starts,
+                swa.valid_ends,
+                global_kv.pages.data,
+                global_kv.page_table,
+                global_indices,
+                sinks,
+                output,
+                lse,
+                status,
+                metadata.extra_lengths,
+                HEADS=heads,
+                NUM_REQUESTS=swa.page_ids.numel(),
+                SWA_NUM_PAGES=swa.pages.data.shape[0],
+                SWA_ENTRIES=swa.pages.entries_per_page,
+                SWA_PAGE_STRIDE=swa.pages.data.stride(0),
+                GLOBAL_NUM_PAGES=global_kv.pages.data.shape[0],
+                GLOBAL_ENTRIES=global_kv.pages.entries_per_page,
+                GLOBAL_PAGE_STRIDE=global_kv.pages.data.stride(0),
+                GLOBAL_TABLE_WIDTH=global_kv.page_table.shape[1],
+                GLOBAL_CAPACITY=global_indices.shape[1],
+                COMPRESS_RATIO=global_kv.compress_ratio,
+                SCALE=1.0 / math.sqrt(512),
+                BLOCK_N=16,
+                num_warps=8,
+            )
     return ReaderResult(output, status, lse)
 
 

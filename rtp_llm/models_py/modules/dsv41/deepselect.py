@@ -67,8 +67,13 @@ def topk(
     if tuple(deep_select.get_stride_requirement()) != (1024, 32):
         raise RuntimeError("DeepSelect alignment differs from the pinned interface")
     rows, columns = values.shape
+    fused_checked = os.environ.get("DSV41_DEEPSELECT_FUSED_CHECKED") == "1"
+    has_end = end is not None
     if end is None:
-        end = torch.full((rows,), columns, dtype=torch.int32, device=values.device)
+        if fused_checked:
+            end = torch.empty((rows,), dtype=torch.int32, device=values.device)
+        else:
+            end = torch.full((rows,), columns, dtype=torch.int32, device=values.device)
     if (
         end.shape != (rows,)
         or end.dtype != torch.int32
@@ -100,6 +105,48 @@ def topk(
         raise ValueError("TopK output needs padded storage and must not alias inputs")
     if rows == 0:
         return TopKSelection(values.new_empty((0, k)), output_idx, end.clone())
+    if fused_checked:
+        # This path keeps the vendor call and its fixed buffers, while moving
+        # NaN/length sanitization and output validation into explicit Triton
+        # kernels. The old Torch sequence remains the default fallback.
+        from rtp_llm.models_py.modules.dsv41._deepselect_checked_triton import (
+            _validate_and_materialize,
+            prepare_inputs,
+        )
+        from triton import next_power_of_2
+
+        scratch = _aligned(rows, columns, values.dtype, values.device, 1024)
+        safe_end, status, selected = prepare_inputs(
+            values, end, scratch, k, has_end
+        )
+        deep_select.topk(
+            scratch,
+            k,
+            end=safe_end,
+            output_idx=output_idx,
+            indices_type=torch.int32,
+            sorted_index=sorted_index,
+            idx_oob_fill_value=-1,
+            return_value=False,
+            abort_when_nan_found=False,
+        )
+        _validate_and_materialize[(rows,)](
+            values,
+            values.stride(0),
+            values.stride(1),
+            safe_end,
+            status,
+            output_idx,
+            output_idx.stride(0),
+            selected,
+            selected.stride(0),
+            k,
+            BLOCK_K=next_power_of_2(k),
+        )
+        if sorted_value:
+            selected, order = selected.sort(dim=-1, descending=True, stable=True)
+            output_idx.copy_(output_idx.gather(1, order))
+        return TopKSelection(selected, output_idx, status)
     bad_lengths = (end < 0) | (end > columns)
     valid = torch.arange(columns, device=values.device)[None, :] < end[:, None]
     invalid = bad_lengths | (torch.isnan(values) & valid).any(-1)

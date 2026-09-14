@@ -290,6 +290,41 @@ enum RemoteStage {
     GENERATE = 2;
 }
 
+message V41TransferIdentityPB {
+    uint32 schema_version = 1;
+    string model_revision = 2;
+    string layout_fingerprint = 3;
+    string source_fingerprint = 4;
+    string replay_mode = 5;
+    uint32 tail_policy_version = 6;
+    uint32 replay_window = 7;
+    uint32 physical_swa_entries = 8;
+    uint32 draft_layers = 9;
+    uint32 prefill_cp_size = 10;
+}
+
+message V41ExecutionStatePB {
+    V41TransferIdentityPB identity = 1;
+    int64 request_id = 2;
+    int64 materialized_end = 3;
+    int64 encoder_materialized_end = 4;
+    int64 decoder_checkpoint_end = 5;
+    uint32 draft_layers = 6;
+    int64 aux_valid_start = 7;
+    int64 aux_valid_end = 8;
+    repeated int64 global_entries = 9;
+    repeated int64 index_entries = 10;
+    repeated int64 swa_valid_start = 11;
+    repeated int64 swa_valid_end = 12;
+    repeated int64 swa_replay_floor = 13;
+    repeated int64 pair_positions = 14;
+    repeated uint32 pair_valid = 15;
+    repeated int64 history_token_ids = 16;
+    repeated uint32 history_image_mask = 17;
+    bool history_ready = 18;
+    bool draft_committed = 19;
+}
+
 message GenerateRequestPB {
     RemoteStage stage = 1;
     int64 request_id = 2;
@@ -306,6 +341,11 @@ message GenerateRequestPB {
     // cp_size physical blocks per virtual block. Default 0 keeps backward
     // compatibility (treated as 1 by decode side).
     int32 prefill_cp_size = 13;
+    V41TransferIdentityPB v41_identity = 14;
+    V41ExecutionStatePB v41_execution_state = 15;
+    // V4.1 LOAD uses the producer's keys: CP byte-sliced P and full-page D
+    // deliberately retain different local memory-cache layout identities.
+    repeated int64 prefill_cache_keys = 16;
 }
 
 // in tp case, decode master broadcast to decode worker
@@ -323,6 +363,7 @@ message BroadcastLoadRequestPB {
     int32 partition_id = 11;
     repeated IntVector group_block_ids = 12;
     int32 prefill_cp_size = 13;
+    V41TransferIdentityPB v41_identity = 14;
 }
 
 message BroadcastLoadResponsePB {

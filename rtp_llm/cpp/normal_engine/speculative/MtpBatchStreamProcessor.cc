@@ -210,6 +210,48 @@ torch::Tensor makeCudaInt32Range(int64_t end) {
     return torch::arange(0, end, cudaInt32Options());
 }
 
+void rebuildV41DenseRows(GptModelInputs& model_input, int64_t batch_size, int64_t width, TensorHolder& host_holder,
+                         const torch::Tensor& row_limits) {
+    if (!model_input.v41_token_types.defined())
+        return;
+    RTP_LLM_CHECK_WITH_INFO(batch_size > 0 && width > 0
+                                && model_input.combo_tokens.numel() == batch_size * width
+                                && model_input.v41_token_types.numel() >= batch_size
+                                && model_input.v41_token_types.numel() % batch_size == 0
+                                && model_input.v41_token_valid.numel() == model_input.v41_token_types.numel()
+                                && model_input.engram_history_ids.numel() == model_input.v41_token_types.numel() * 3
+                                && model_input.engram_history_valid.numel() == model_input.engram_history_ids.numel(),
+                            "V4.1 speculative rows require one canonical history seed per request");
+    for (const auto& tensor : {model_input.v41_token_types, model_input.v41_token_valid,
+                               model_input.engram_history_ids, model_input.engram_history_valid})
+        host_holder.hold_host(tensor);
+    const auto device = model_input.combo_tokens.device();
+    const auto seed_types = model_input.v41_token_types.to(device, true).reshape({batch_size, -1}).select(1, 0);
+    const auto seed_valid = model_input.v41_token_valid.to(device, true).reshape({batch_size, -1}).select(1, 0);
+    const auto seed_ids = model_input.engram_history_ids.to(device, true).reshape({batch_size, -1, 3}).select(1, 0);
+    const auto seed_history_valid =
+        model_input.engram_history_valid.to(device, true).reshape({batch_size, -1, 3}).select(1, 0);
+    auto types = torch::full({batch_size, width}, -1, seed_types.options());
+    types.select(1, 0).copy_(seed_types);
+    auto valid = seed_valid.unsqueeze(1).expand({batch_size, width}).contiguous();
+    if (row_limits.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(row_limits.numel() == batch_size, "V4.1 row budgets must match the request batch");
+        host_holder.hold_host(row_limits);
+        valid = valid & torch::arange(width, seed_types.options()).unsqueeze(0)
+                            .lt(row_limits.to(device, true).reshape({batch_size, 1}));
+    }
+    types.masked_fill_(~valid, -1);
+    // The first row retains its committed predecessor seed. Later rows see
+    // this phase's actual tokens, never the earlier proposal noise rows.
+    auto history_ids = torch::cat({seed_ids, model_input.combo_tokens.reshape({batch_size, width})}, 1);
+    auto history_valid = torch::cat({seed_history_valid, valid & types.eq(-1)}, 1);
+    model_input.v41_token_types = types.reshape({-1});
+    model_input.v41_token_valid = valid.reshape({-1});
+    model_input.engram_history_ids = history_ids.unfold(1, 3, 1).narrow(1, 0, width).contiguous().reshape({-1, 3});
+    model_input.engram_history_valid =
+        (history_valid.unfold(1, 3, 1).narrow(1, 0, width) & valid.unsqueeze(2)).contiguous().reshape({-1, 3});
+}
+
 torch::Tensor committedLenToDraftDecodePosition(const torch::Tensor& committed_len, TensorHolder& host_holder) {
     return toCudaInt32(committed_len, host_holder);
 }
@@ -361,11 +403,42 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&  strea
     // we set propose token in extra loop to avoid cuda sync
     updateProposeTokens(stream_groups, propose_output, spec_update_infos);
 
+    for (const auto& publication : prefill_output.model_output.v41_execution_states) {
+        for (const auto& stream : stream_groups.allStreams()) {
+            if (!stream->isFakeStream() && stream->streamId() == publication.request_id)
+                stream->streamCacheResource().publishDsv41Execution(publication, stream->seqLength(),
+                                                                    stream->queryPdSep());
+        }
+    }
+
     // update streams
     stream_groups.updateStreams(spec_update_infos);
 
     RTP_LLM_LOG_DEBUG("dispatch prefill done");
     return absl::OkStatus();
+}
+
+void MtpBatchStreamProcessor::truncateV41AcceptedRows(const StreamGroups& stream_groups,
+                                                      speculative::SpeculativeSamplerOutput& output) const {
+    auto lengths = output.accept_len.to(torch::kCPU).contiguous();
+    auto tokens = output.accept_tokens.to(torch::kCPU).contiguous();
+    int64_t row = 0;
+    for (const auto& stream : stream_groups.allStreams()) {
+        RTP_LLM_CHECK_WITH_INFO(stream->currentBatchSize() == 1 && stream->nextBatchSize() == 1,
+                                "V4.1 speculative retained rows require one beam per request");
+        if (!stream->isFakeStream()) {
+            lengths.data_ptr<int32_t>()[row] = stream->previewSpeculativeRetainedRows(
+                tokens[row], lengths.data_ptr<int32_t>()[row]);
+            RTP_LLM_CHECK_WITH_INFO(lengths.data_ptr<int32_t>()[row] > 0,
+                                    "V4.1 cannot commit a speculative round for a request with no remaining tokens");
+        }
+        ++row;
+    }
+    RTP_LLM_CHECK_WITH_INFO(row == lengths.numel(), "V4.1 accepted rows do not match the actual request batch");
+    output.accept_len.copy_(lengths);
+    output.accept_len_cpu = std::move(lengths);
+    output.accept_tokens_cpu = std::move(tokens);
+    output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 }
 
 absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&                          stream_groups,
@@ -379,6 +452,22 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
 
     // to avoid cuda sync, we need to set propose token in extra loop
     updateProposeTokens(stream_groups, draft_prefill_output, spec_update_infos);
+
+    size_t stream_index = 0;
+    for (const auto& stream : stream_groups.allStreams()) {
+        if (!stream->isFakeStream() && stream->generateInput()->v41_inputs) {
+            const auto& publications = draft_prefill_output.model_output.v41_execution_states;
+            const auto publication = std::find_if(publications.begin(), publications.end(), [&](const auto& value) {
+                return value.request_id == stream->streamId();
+            });
+            RTP_LLM_CHECK_WITH_INFO(publication != publications.end(),
+                                    "V4.1 speculative dispatch has no committed execution publication");
+            const auto end = stream->seqLength() - 1 + spec_update_infos.at(stream_index).num_new_tokens;
+            stream->streamCacheResource().publishDsv41Execution(
+                *publication, end, false, spec_update_infos.at(stream_index).new_tokens);
+        }
+        ++stream_index;
+    }
 
     stream_groups.updateStreams(spec_update_infos);
 
@@ -827,7 +916,8 @@ void MtpBatchStreamProcessor::validatePrefillDSparkCommitInput(const GptModelInp
 void MtpBatchStreamProcessor::buildDSparkProposeInput(GptModelInputs&      model_input,
                                                       const torch::Tensor& anchors,
                                                       const torch::Tensor& committed_ends,
-                                                      TensorHolder&        host_holder) {
+                                                      TensorHolder&        host_holder,
+                                                      const torch::Tensor& v41_row_limits) {
     const int64_t batch_size = anchors.numel();
     RTP_LLM_CHECK_WITH_INFO(propose_step_ > 0, "dspark draft width must be positive");
     RTP_LLM_CHECK_WITH_INFO(
@@ -840,6 +930,7 @@ void MtpBatchStreamProcessor::buildDSparkProposeInput(GptModelInputs&      model
     model_input.input_lengths      = dsparkDraftInputLengths(batch_size);
     model_input.sequence_lengths   = emptyInt32OnCuda({0});
     model_input.lm_output_indexes  = dsparkDraftLmIndexes(batch_size);
+    rebuildV41DenseRows(model_input, batch_size, propose_step_, host_holder, v41_row_limits);
 }
 
 MtpBatchStreamProcessor::DSparkRoundHead MtpBatchStreamProcessor::buildDSparkRoundHead(
@@ -851,7 +942,22 @@ MtpBatchStreamProcessor::DSparkRoundHead MtpBatchStreamProcessor::buildDSparkRou
     // prompt length in the same fields, so new and old streams take one
     // identical path here.
     auto [anchors, committed_ends] = dsparkRoundHeadState(stream_groups, model_input, host_holder);
-    return {std::move(anchors), std::move(committed_ends)};
+    torch::Tensor row_limits;
+    if (model_input.v41_token_types.defined()) {
+        row_limits = torch::zeros({static_cast<int64_t>(stream_groups.size())},
+                                   torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+        int64_t row = 0;
+        for (const auto& stream : stream_groups.allStreams()) {
+            if (!stream->isFakeStream()) {
+                RTP_LLM_CHECK_WITH_INFO(!stream->hasPendingAsyncBookkeeping(),
+                                        "V4.1 speculative row budgets require completed token bookkeeping");
+                row_limits.data_ptr<int32_t>()[row] = std::max<int64_t>(
+                    0, static_cast<int64_t>(stream->maxTokenNum()) - stream->seqLength());
+            }
+            ++row;
+        }
+    }
+    return {std::move(anchors), std::move(committed_ends), std::move(row_limits)};
 }
 
 MtpBatchStreamProcessor::DSparkRoundHead MtpBatchStreamProcessor::prepareDSparkDraftModelInput(
@@ -860,7 +966,8 @@ MtpBatchStreamProcessor::DSparkRoundHead MtpBatchStreamProcessor::prepareDSparkD
     if (!round_head.anchors.defined() || round_head.anchors.numel() == 0) {
         return round_head;
     }
-    buildDSparkProposeInput(model_input, round_head.anchors, round_head.committed_ends, host_holder);
+    buildDSparkProposeInput(
+        model_input, round_head.anchors, round_head.committed_ends, host_holder, round_head.v41_row_limits);
     return round_head;
 }
 
@@ -883,6 +990,7 @@ void MtpBatchStreamProcessor::updateDSparkTargetVerifyModelInput(const DSparkRou
     auto verify                = torch::cat({anchor_col, proposals.to(torch::kInt32)}, 1).reshape({-1});
     model_input.prefix_lengths = round_head.committed_ends;
     setVerifyPairInputs(model_input, std::move(verify), batch_size, propose_step_ + 1, host_holder);
+    rebuildV41DenseRows(model_input, batch_size, propose_step_ + 1, host_holder, round_head.v41_row_limits);
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(GptModelInputs&      model_input,

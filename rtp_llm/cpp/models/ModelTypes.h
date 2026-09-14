@@ -104,6 +104,7 @@ enum GptModelInputIndex : size_t {
     tensorDeviceMap,
     v41InputsPresent,
     v41ExecutionPresent,
+    v41CacheContextPresent,
     gptModelInputLength,
 };
 
@@ -117,6 +118,7 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitSequenceLengths = 1u << 2,
     kDeviceBitPrefixLengths   = 1u << 3,
     kDeviceBitLmOutputIndexes = 1u << 4,
+    kDeviceBitV41Rows         = 1u << 5,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);
@@ -146,6 +148,9 @@ public:
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
+    virtual std::vector<DSV41ExecutionState> commitV41RetainedRows(const torch::Tensor& /*retained_rows*/) {
+        throw std::logic_error("V4.1 target model does not implement retained-row commit");
+    }
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
     // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).

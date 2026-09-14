@@ -64,6 +64,16 @@ test_deps = [
 # )
 
 cc_test(
+    name = "v41_rpc_state_test",
+    srcs = ["DSV41RpcStateTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/cache:dsv41_checkpoint_state",
+    ],
+)
+
+cc_test(
     name = "v41_input_bridge_test",
     srcs = ["V41InputBridgeTest.cc"],
     copts = test_copts,

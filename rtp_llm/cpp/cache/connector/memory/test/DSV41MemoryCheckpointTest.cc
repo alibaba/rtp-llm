@@ -5,7 +5,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <set>
 #include <tuple>
@@ -93,6 +96,20 @@ public:
     KVCacheMemoryConnector* connector{nullptr};
     std::atomic<bool>       fail_next{false};
     std::atomic<size_t>     copied_requests{0};
+    void holdNextResponse() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        hold_response_ = true;
+        response_held_ = false;
+    }
+    bool waitForHeldResponse() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, std::chrono::seconds(5), [this] { return response_held_; });
+    }
+    void releaseResponse() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        hold_response_ = false;
+        cv_.notify_all();
+    }
     grpc::Status
     ExecuteFunction(grpc::ServerContext*, const FunctionRequestPB* request, FunctionResponsePB* response) override {
         try {
@@ -100,12 +117,40 @@ public:
                 return {grpc::StatusCode::INVALID_ARGUMENT, "missing copy"};
             if (connector->copyCache(request->mem_request(), *response->mutable_mem_response()))
                 ++copied_requests;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                if (hold_response_) {
+                    response_held_ = true;
+                    cv_.notify_all();
+                    cv_.wait(lock, [this] { return !hold_response_; });
+                }
+            }
             if (fail_next.exchange(false))
                 response->mutable_mem_response()->set_success(false);
             return grpc::Status::OK;
         } catch (const std::exception& error) {
             return {grpc::StatusCode::INTERNAL, error.what()};
         }
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool hold_response_{false};
+    bool response_held_{false};
+};
+
+struct CopyWorker {
+    CopyService service;
+    std::shared_ptr<KVCacheMemoryConnector> connector;
+    std::unique_ptr<grpc::Server> server;
+    ~CopyWorker() {
+        service.releaseResponse();
+        if (server) {
+            server->Shutdown();
+            server->Wait();
+        }
+        service.connector = nullptr;
     }
 };
 
@@ -149,7 +194,7 @@ TEST(DSV41CacheStateTest, ModeTailPolicyAndActualRangesFollowRestoredState) {
     state.restore(metadata, 128);
     EXPECT_TRUE(*state.view().completed == metadata);
     EXPECT_EQ(state.view().completed->swa[21].replay_floor, 128);
-    EXPECT_EQ(state.view().target_ready_end, 0);
+    EXPECT_EQ(state.view().target_ready_end, 256);
     bounded.tail_policy_version = 2;
     EXPECT_THROW(DSV41CacheState invalid(bounded), std::invalid_argument);
 }
@@ -215,8 +260,9 @@ protected:
         builder.RegisterService(&service_);
         server_ = builder.BuildAndStart();
         ASSERT_TRUE(server_);
+        rpc_address_ = "127.0.0.1:" + std::to_string(port);
         connector_ = std::make_shared<KVCacheMemoryConnector>(
-            config_, kv_, allocator_, std::vector<std::string>{"127.0.0.1:" + std::to_string(port)});
+            config_, kv_, allocator_, std::vector<std::string>{rpc_address_});
         ASSERT_TRUE(connector_->init());
         service_.connector = connector_.get();
         meta_              = std::make_shared<MemoryMeta>();
@@ -391,6 +437,7 @@ protected:
     std::shared_ptr<MemoryMeta>                 meta_;
     CopyService                                 service_;
     std::unique_ptr<grpc::Server>               server_;
+    std::string                               rpc_address_;
 };
 
 TEST_F(DSV41MemoryCheckpointGpuTest, PhysicalSlotsCountOwnersOnceAndKeepAllTargetDraftSwa) {
@@ -569,6 +616,64 @@ TEST_F(DSV41MemoryCheckpointGpuTest, FailedWritePublishesNothingAndPreservesSour
     EXPECT_EQ(connector_->state_swa_pool_->freeBlocksNum(), state_free);
     EXPECT_EQ(bytes(source, 3, false), expected);
     ASSERT_TRUE(write(source));
+}
+
+TEST_F(DSV41MemoryCheckpointGpuTest, WorkerSpecificPagesAndDelayedCompletionPreserveCopyOwnership) {
+    CopyWorker other;
+    grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&other.service);
+    other.server = builder.BuildAndStart();
+    ASSERT_TRUE(other.server);
+    const std::vector<std::string> addresses{rpc_address_, "127.0.0.1:" + std::to_string(port)};
+    connector_ = std::make_shared<KVCacheMemoryConnector>(config_, kv_, allocator_, addresses);
+    ASSERT_TRUE(connector_->init());
+    service_.connector = connector_.get();
+    other.connector = std::make_shared<KVCacheMemoryConnector>(config_, kv_, allocator_, addresses);
+    ASSERT_TRUE(other.connector->init());
+    other.service.connector = other.connector.get();
+
+    auto bindWorkers = [](KVCacheResource& rank0, const KVCacheResource& rank1) {
+        KVCacheResource::WorkerBlockIds workers(2);
+        for (int group = 0; group < rank0.groupNums(); ++group) {
+            workers[0].push_back(rank0.blocks(group));
+            workers[1].push_back(rank1.blocks(group));
+        }
+        rank0.setDsv41WorkerBlockIds(std::move(workers));
+    };
+    auto source = resource(1, 60500);
+    auto source_other = resource(1, 60500);
+    fill(source, 31);
+    fill(source_other, 47);
+    tail(source, 0);
+    bindWorkers(*source, *source_other);
+    ASSERT_NE(source->blocks(0), source_other->blocks(0));
+    const auto expected = bytes(source, 1, true);
+    const auto expected_other = bytes(source_other, 1, true);
+    std::weak_ptr<KVCacheResource> retained_source = source;
+    other.service.holdNextResponse();
+    auto pending_write = connector_->asyncWrite(source, meta_);
+    ASSERT_NE(pending_write, nullptr);
+    ASSERT_TRUE(other.service.waitForHeldResponse());
+    source.reset();
+    EXPECT_FALSE(retained_source.expired());
+    EXPECT_FALSE(pending_write->done());
+    EXPECT_TRUE(connector_->cacheKeys().empty());
+    other.service.releaseResponse();
+    ASSERT_TRUE(done(pending_write));
+    EXPECT_TRUE(retained_source.expired());
+
+    auto destination = resource(1, 60500);
+    auto destination_other = resource(1, 60500);
+    fill(destination, 71);
+    fill(destination_other, 89);
+    bindWorkers(*destination, *destination_other);
+    ASSERT_TRUE(restore(destination, 1));
+    EXPECT_EQ(bytes(destination, 1, false), expected);
+    EXPECT_EQ(bytes(destination_other, 1, false), expected_other);
+    EXPECT_EQ(destination->dsv41CacheState()->view().target_ready_end, 128);
+    EXPECT_EQ(other.service.copied_requests.load(), 2);
 }
 
 TEST_F(DSV41MemoryCheckpointGpuTest, InvalidWriteMappingReportsFailureInsteadOfNoOp) {
@@ -895,9 +1000,9 @@ TEST_P(DSV41MemoryCheckpointCp8GpuTest, CanonicalSuffixCopiesExactOwnerBytesAtOr
     ASSERT_NE(destination->dsv41RecoveryMetadata(1), nullptr);
     EXPECT_EQ(destination->dsv41RecoveryMetadata(1)->materialized_end, blockSize() * 8 * 2);
     EXPECT_EQ(destination->dsv41CacheState()->view().decoder_checkpoint_end, blockSize() * 8 * 2);
-    // A copied aux range declaration does not restore the L20 replay source tensors.
+    // Completed all-worker copies restore the complete decoder checkpoint.
     EXPECT_GT(destination->dsv41RecoveryMetadata(1)->aux_valid_end, 0);
-    EXPECT_EQ(destination->dsv41CacheState()->view().target_ready_end, 0);
+    EXPECT_EQ(destination->dsv41CacheState()->view().target_ready_end, blockSize() * 8 * 2);
     EXPECT_EQ(destination->memoryReuseBlockNum(), 1);
 }
 

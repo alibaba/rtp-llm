@@ -1,9 +1,9 @@
 """Explicit eager target attention over the native V4.1 compact cache.
 
 This component composes initialized projections, four owner compressors and
-eight query scorers. Full local pages are required; distributed CP assembly and
-Graph scheduling remain caller integration work. No legacy reader fallback is
-selected. The local allocator is for component execution, not a CP deployment.
+eight query scorers. The CP request adapter owns communication and framework
+shard publication. Graph scheduling remains caller integration work. No legacy
+reader fallback is selected. The local allocator is for component execution.
 """
 
 import os
@@ -183,6 +183,14 @@ class V41AttentionContext:
     def query_identity(self):
         return self._identity
 
+    @property
+    def query_rows(self):
+        return self.end - self.start
+
+    @property
+    def query_device(self):
+        return next(iter(self.cache.swa.values())).pages.data.device
+
     def validate(self):
         if (
             self.cache.poisoned
@@ -257,8 +265,8 @@ class V41AttentionContext:
         )
 
     def _validate_selection(self, selected):
-        rows = self.end - self.start
-        device = self.cache.swa[selected.query_owner].pages.data.device
+        rows = self.query_rows
+        device = self.query_device
         tensors = [(selected.topk, (rows, 512)), (selected.status, (rows,))]
         if selected.query_owner == 20:
             if selected.candidate_blocks is None:
@@ -511,6 +519,10 @@ class V41Attention(nn.Module):
 
     @torch.inference_mode()
     def forward(self, hidden, context: V41AttentionContext):
+        if getattr(context, "cp", None) is not None:
+            from rtp_llm.models_py.modules.dsv41.cp import forward_cp_attention
+
+            return forward_cp_attention(self, hidden, context)
         context.validate()
         if os.environ.get("DSV41_ATTENTION") != "1" or not is_supported(hidden):
             raise RuntimeError(

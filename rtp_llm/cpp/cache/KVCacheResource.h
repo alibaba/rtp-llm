@@ -84,6 +84,13 @@ using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
 
 class KVCacheResource {
 public:
+    using WorkerBlockIds = std::vector<std::vector<BlockIndicesType>>;
+    const WorkerBlockIds& dsv41WorkerBlockIds() const {
+        return dsv41_worker_block_ids_;
+    }
+    void setDsv41WorkerBlockIds(WorkerBlockIds ids) {
+        dsv41_worker_block_ids_ = std::move(ids);
+    }
     void setDsv41CacheState(std::shared_ptr<DSV41CacheState> state) {
         dsv41_cache_state_ = std::move(state);
     }
@@ -184,6 +191,7 @@ public:
     std::string debugString() const;
 
 private:
+    WorkerBlockIds dsv41_worker_block_ids_;
     std::shared_ptr<DSV41CacheState> dsv41_cache_state_;
     std::vector<std::shared_ptr<const DSV41CheckpointMetadata>> dsv41_recovery_metadata_;
     // layer_id -> block_indices

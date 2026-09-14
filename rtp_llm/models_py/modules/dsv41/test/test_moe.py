@@ -9,8 +9,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-from torch import nn
-
 from rtp_llm.config.dsv41_config import V41Config
 from rtp_llm.models_py.modules.dsv41.linear import is_supported
 from rtp_llm.models_py.modules.dsv41.moe import (
@@ -24,6 +22,7 @@ from rtp_llm.models_py.modules.dsv41.test.official_compressor import (
     load_official_compressor,
 )
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 
 def official_gate_forward():
@@ -184,7 +183,21 @@ class V41MoEBindingTest(unittest.TestCase):
             device=self.device,
         )
         torch.testing.assert_close(indices, expected, rtol=0, atol=0)
-        torch.testing.assert_close(route, torch.full_like(route, 0.25), rtol=0, atol=0)
+        reference = SimpleNamespace(
+            weight=weights["ffn.gate.weight"],
+            bias=weights["ffn.gate.bias"],
+            bias_vl=weights["ffn.gate.bias_vl"],
+            gate_temp=1.0,
+            score_func="sqrtsoftplus",
+            norm_topk_prob=True,
+            topk=6,
+            route_scale=1.5,
+        )
+        official_route, official_ids = self.reference_gate(
+            reference, hidden, image_mask
+        )
+        torch.testing.assert_close(indices, official_ids, rtol=0, atol=0)
+        torch.testing.assert_close(route, official_route, rtol=0, atol=0)
 
     def test_packed_expert_bytes_global_order_and_shared32_layout(self):
         for draft, ep_size, rank in (

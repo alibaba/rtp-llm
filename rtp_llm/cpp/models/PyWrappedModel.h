@@ -70,6 +70,7 @@ public:
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
+    std::vector<DSV41ExecutionState> commitV41RetainedRows(const torch::Tensor& retained_rows) override;
     void            releaseBuffers() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
@@ -80,6 +81,7 @@ public:
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
+    bool usesV41CacheLayout() const;
 
 private:
     // Helper functions to reduce code duplication
@@ -153,6 +155,7 @@ private:
 
     std::atomic<bool>            prepared_attention_inputs_{false};
     torch_ext::PyAttentionInputs attention_inputs_;
+    std::optional<torch_ext::PyModelInputs> pending_v41_inputs_;
     CudaGraphState               graph_state_;
 };
 
@@ -435,12 +438,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         has_mtp_hidden_buffer_ = py_model_.attr("has_mtp_hidden_buffer")().cast<bool>();
     }
 
-    // Speculative prefill CP needs every target rank to retain the complete
-    // rank-local hidden sequence for the following draft prefill. The normal
-    // CP output contains only the selected last-token rows, so reject the
-    // configuration while initializing the target model if that hand-off is
-    // unavailable.
-    if (enable_prefill_cp_ && use_spec_decoding_ && !hasMtpTargetHiddenBuffer()) {
+    // V4.1 commits selected draft rows inside the target forward. Other CP
+    // speculative targets still need a full rank-local hidden handoff.
+    const bool internal_draft_commit = params.sp_config.type == SP_TYPE_DSPARK && usesV41CacheLayout();
+    if (enable_prefill_cp_ && use_spec_decoding_ && !internal_draft_commit && !hasMtpTargetHiddenBuffer()) {
         throw std::runtime_error(
             "speculative prefill CP requires the target model to provide a rank-local MTP hidden buffer");
     }

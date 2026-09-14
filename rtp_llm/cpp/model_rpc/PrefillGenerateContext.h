@@ -124,6 +124,7 @@ public:
     RemoteServerResource*                resource;
     RPCContext                           rpc_context;
     std::shared_ptr<GenerateInput>       generate_input;
+    CacheKeysType                       prefill_cache_keys;
     std::string                          decode_addr;
     std::vector<std::string>             prefill_worker_cache_store_addrs;
     GrpcConnection                       grpc_connection;

@@ -269,6 +269,15 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
                            py_model_inputs_.input_hiddens,
                            inputs.input_hiddens.numel() * inputs.input_hiddens.element_size());
     }
+    // Model-owned graph inputs include state that is not attention metadata.
+    // Refresh them on the replay stream, including the async-prepare path.
+    if (inputs.v41_token_valid.defined()) {
+        py::gil_scoped_acquire gil;
+        auto                   attn_pyobj = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
+        if (py::hasattr(attn_pyobj, "prepare_model_inputs")) {
+            attn_pyobj.attr("prepare_model_inputs")(inputs);
+        }
+    }
 }
 
 void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
@@ -1029,6 +1038,15 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         RTP_LLM_LOG_INFO("Capture for %s %d begin.", key_type, key);
         PyModelOutputs outputs;
         {
+            // V4.1's sparse DeepGEMM metadata lazily initializes per CUDA
+            // stream.  Prepare it after switching to the capture stream and
+            // before graphCaptureBegin; doing so on the default stream leaves
+            // the first metadata call inside capture and CUDA rejects it.
+            if (const char* sparse_indexer = std::getenv("DSV41_SPARSE_INDEXER");
+                sparse_indexer != nullptr && std::string(sparse_indexer) == "1") {
+                py::gil_scoped_acquire gil;
+                attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs);
+            }
             cuda_graph::graphCaptureBegin(graph, shared_graph_pool_);
             CudaGraphCaptureGuard capture_guard;
             try {

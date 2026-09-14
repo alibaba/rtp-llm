@@ -792,7 +792,8 @@ void GenerateStream::matchEosToken() {
 
 void GenerateStream::matchEosToken(int batch_id) {
     if ((!generate_input_->generate_config->ignore_eos)
-        && complete_token_ids_->matchEosToken(batch_id, special_tokens_.eos_token_id)) {
+        && complete_token_ids_->matchEosToken(
+            batch_id, special_tokens_.eos_token_id, inputLength() + generate_input_->generate_config->min_new_tokens)) {
         sub_generate_status_[batch_id] = StreamState::FINISHED;
     }
 }
@@ -833,7 +834,8 @@ void GenerateStream::matchStopWordsList(int batch_id) {
             && stop_words[0] == special_tokens_.eos_token_id) {
             continue;
         }
-        if (complete_token_ids_->matchStopWordsList(batch_id, stop_words)) {
+        if (complete_token_ids_->matchStopWordsList(
+                batch_id, stop_words, inputLength() + generate_input_->generate_config->min_new_tokens)) {
             match = true;
             break;
         }
@@ -841,6 +843,44 @@ void GenerateStream::matchStopWordsList(int batch_id) {
     if (match) {
         sub_generate_status_[batch_id] = StreamState::FINISHED;
     }
+}
+
+int GenerateStream::previewSpeculativeRetainedRows(const torch::Tensor& accepted_tokens, int accepted_count) const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    RTP_LLM_CHECK_WITH_INFO(currentBatchSize() == 1 && accepted_tokens.device().is_cpu()
+                                && accepted_tokens.scalar_type() == torch::kInt32 && accepted_tokens.is_contiguous()
+                                && accepted_count >= 0 && accepted_count <= accepted_tokens.numel(),
+                            "V4.1 retained rows require one request and canonical accepted CPU tokens");
+    int count = std::min<int64_t>(accepted_count,
+                                   std::max<int64_t>(0, static_cast<int64_t>(maxTokenNum()) - seqLength()));
+    const auto& config = *generate_input_->generate_config;
+    const auto* accepted = accepted_tokens.data_ptr<int32_t>();
+    for (int rows = 1; rows <= count; ++rows) {
+        if (seqLength() + rows < inputLength() + config.min_new_tokens)
+            continue;
+        if (!config.ignore_eos && accepted[rows - 1] == special_tokens_.eos_token_id)
+            return rows;
+        for (const auto& stop : config.stop_words_list) {
+            if (stop.empty() || (config.ignore_eos && stop.size() == 1 && stop[0] == special_tokens_.eos_token_id))
+                continue;
+            const int64_t begin = static_cast<int64_t>(seqLength()) + rows - static_cast<int64_t>(stop.size());
+            if (begin < 0)
+                continue;
+            bool matches = true;
+            for (size_t token = 0; token < stop.size(); ++token) {
+                const int64_t position = begin + token;
+                const int id = position < seqLength() ? complete_token_ids_->data(0)[position] :
+                                                       accepted[position - seqLength()];
+                if (id != stop[token]) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches)
+                return rows;
+        }
+    }
+    return count;
 }
 
 void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {

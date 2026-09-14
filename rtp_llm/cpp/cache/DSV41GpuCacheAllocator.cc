@@ -247,8 +247,7 @@ MallocResult HybridPoolKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     size_t ready    = 0;
     for (size_t index = 0; index < resource.deviceReuseBlockNum(); ++index) {
         auto metadata = resource.dsv41RecoveryMetadata(index);
-        // Bounded recovery also needs its L20 replay-source payload.
-        if (metadata && metadata->identity.replay_mode == DSV41ReplayMode::FULL)
+        if (metadata)
             ready = index + 1;
     }
     if (!cloneDsv41WritableBacking(resource, ready)) {

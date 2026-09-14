@@ -80,6 +80,7 @@ cc_library(
         "//rtp_llm/cpp/models:stats",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/cpp/cache:cache_group_type",
+        "//rtp_llm/cpp/cache:dsv41_checkpoint_state",
         "//rtp_llm/cpp/utils:stack_trace",
         "//rtp_llm/cpp/utils:tensor_debug_utils",
         "//rtp_llm/cpp/config:static_config",

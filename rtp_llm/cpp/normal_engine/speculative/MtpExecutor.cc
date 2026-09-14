@@ -1,7 +1,9 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
+#include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -43,6 +45,20 @@ bool MtpExecutor::dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_c
 }
 
 namespace {
+
+// Kineto must start/finish on the engine thread, including early returns.
+// Construct only after TP input synchronization has ruled out an idle step.
+struct ProfileStepGuard {
+    explicit ProfileStepGuard(StepWindowProfiler* profiler): profiler(profiler) {
+        if (profiler)
+            profiler->startStep();
+    }
+    ~ProfileStepGuard() {
+        if (profiler)
+            profiler->finishStep();
+    }
+    StepWindowProfiler* profiler;
+};
 
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
@@ -499,9 +515,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          MlaOpsType                                     mla_ops_type,
                          int32_t                                        kv_cache_group_num,
                          const std::vector<int32_t>&                    kv_cache_layer_to_group,
-                         bool                                           warm_up):
+                         bool                                           warm_up,
+                         StepWindowProfiler*                            step_profiler):
     Executor(),
     cache_manager_(cache_manager),
+    step_profiler_(step_profiler),
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
         params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
@@ -604,6 +622,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     if (cache_manager) {
         target_cache_layer_layout = cache_manager->getMainModelCacheLayerLayout();
         draft_cache_layer_layout  = cache_manager->getMTPModuleCacheLayerLayout(0);
+        if (cache_manager->cacheConfig().dsv41_cache_layout_version == 1)
+            target_cache_layer_layout = cache_manager->allLayerCacheBase();
     }
 
     // CacheConfig is the single source of truth for tokens_per_block /
@@ -870,6 +890,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    ProfileStepGuard profile_step(model_input.is_fake_stream ? nullptr : step_profiler_);
     metrics_collector.not_skip = true;
 
     // release model input before forward
@@ -884,6 +905,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // on rank 0 before the second tpSync (which then broadcasts the
     // restored full view to every rank for the draft pass).
     const bool    cp_enabled = enable_prefill_cp_;
+    const bool v41_prefill_commit = is_dspark_ && cache_manager_->cacheConfig().dsv41_cache_layout_version == 1;
     torch::Tensor saved_combo_tokens;
     torch::Tensor saved_input_lengths;
     // Only rank 0 restores; non-root ranks get the restored view from the
@@ -900,8 +922,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
         model_output                        = std::move(model_->forward(model_input));
-        maybeOverrideAllHiddenStatesWithMtpBuffer(
-            model_output, *model_, cp_enabled ? -1 : model_input.combo_tokens.numel());
+        if (!v41_prefill_commit)
+            maybeOverrideAllHiddenStatesWithMtpBuffer(
+                model_output, *model_, cp_enabled ? -1 : model_input.combo_tokens.numel());
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -917,6 +940,20 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
         if (!model_input.is_fake_stream) {
+            const auto status = NormalOutputDispatcher::prepareV41Sampling(stream_groups, model_output);
+            if (!status.ok())
+                return status;
+            if (v41_prefill_commit && !warm_up_) {
+                for (const auto& stream : streams) {
+                    const auto found = std::find_if(model_output.v41_execution_states.begin(),
+                                                    model_output.v41_execution_states.end(), [&](const auto& value) {
+                        return value.request_id == stream->streamId() && value.draft_layers == 3
+                               && value.materialized_end == stream->seqLength() && value.draft_committed;
+                    });
+                    RTP_LLM_CHECK_WITH_INFO(found != model_output.v41_execution_states.end(),
+                                            "V4.1 prefill must commit selected draft rows before sampling");
+                }
+            }
             CHECK_AND_RETURN_REF(sampler_input,
                                  batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
@@ -940,8 +977,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         }
     }
 
-    // draft model prefill
-    {
+    // V4.1 commits only the selected aux rows inside the bounded target forward.
+    if (!v41_prefill_commit) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
         // CP and DSpARK target hidden states are rank-local. Do not broadcast
         // rank 0's copy; after syncing the remaining inputs, every rank binds
@@ -1283,6 +1320,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         ensureModelInputsOnCuda(model_input, "decode.after_tp_sync");
     }
     size_t batch_size             = model_input.input_lengths.size(0);
+    ProfileStepGuard profile_step(model_input.is_fake_stream ? nullptr : step_profiler_);
     spec_logits_processor_present = isTpRank0() && !model_input.is_fake_stream && hasSpecLogitsProcessor(streams);
     if (isTpRank0() && !model_input.is_fake_stream && hasUnsupportedMtpStatefulLogitsProcessor(streams)) {
         return absl::InternalError(
@@ -1423,6 +1461,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    const bool v41_decode = cache_manager_->cacheConfig().dsv41_cache_layout_version == 1;
     SamplerOutput sampler_output;
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(rejection_sampling)");
@@ -1458,6 +1497,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
             applySpecLogitsAcceptLenCap(
                 sampler_input, sampler_output, speculative_sampler_output, batch_size, propose_step_);
+            if (v41_decode)
+                batch_stream_processor_->truncateV41AcceptedRows(stream_groups, speculative_sampler_output);
         }
 
         if (is_dspark_) {
@@ -1507,6 +1548,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         // freshly committed ring.
         draft_prefill_model_output = runDraftCommitForward(model_input);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+
+    if (v41_decode && !warm_up_ && !model_input.is_fake_stream) {
+        auto retained = isTpRank0() ? speculative_sampler_output.accept_len :
+                                     torch::empty({static_cast<int64_t>(batch_size)},
+                                                  torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        if (parallelism_config_.tp_size > 1)
+            execBroadcast({{retained}, 0});
+        draft_prefill_model_output.v41_execution_states = model_->commitV41RetainedRows(retained);
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -2027,6 +2077,9 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.prepare_streams(stream_size=%zu)", streams.size());
 
     for (auto& stream : streams) {
+        if (cache_manager_ && cache_manager_->cacheConfig().dsv41_cache_layout_version == 1
+            && !stream->isFakeStream() && (stream->isFinished() || stream->hasError()))
+            continue;
         // split streams into prefill and decode
         if (stream->isContextStream()) {
             prefill_streams.push_back(stream);
@@ -2075,7 +2128,10 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
     // bookkeeping round. DROP_BROAD_SYNC lets draft/verify consume the state
     // already published on GPU and waits only at later host consumers such as
     // spec-logits processing and target sampling.
-    if (useStreamAsync() && !useDropBroadSync()) {
+    const bool v41_canonical_history = cache_manager_ && cache_manager_->cacheConfig().dsv41_cache_layout_version == 1;
+    // V4.1 gathers canonical predecessor tokens and completed execution state
+    // together, so its previous native publication must precede input gather.
+    if (useStreamAsync() && (!useDropBroadSync() || v41_canonical_history)) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.wait_prev_bookkeeping(stream_count=%zu)", streams.size());
         spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
     }

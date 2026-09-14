@@ -731,7 +731,15 @@ rename_wheel(
 py_wheel(
     name = "rtp_llm_whl",
     distribution = "rtp_llm",
-    python_tag = "py3",
+    # extension_package embeds CPython engine libraries in this wheel.
+    python_tag = "cp310",
+    abi = "cp310",
+    platform = select({
+        "@//:using_cuda13_arm": "linux_aarch64",
+        "@//:using_cuda12_arm": "linux_aarch64",
+        "@//:using_arm": "linux_aarch64",
+        "//conditions:default": "manylinux1_x86_64",
+    }),
     tags = ["manual", "local", "no-remote"],
     version = RELEASE_VERSION,
     entry_points = {
@@ -784,16 +792,17 @@ py_wheel(
     requires = [],
 )
 
-rename_wheel_aarch64(
+# The py_wheel already emits the architecture-specific CPython wheel. Keep
+# the historical ARM target name as an alias so it does not create a second
+# action with the same output path.
+alias(
     name = "rtp_llm_aarch64",
-    package_name = "rtp_llm-%s" % RELEASE_VERSION,
-    src = ":rtp_llm_whl",
+    actual = ":rtp_llm_whl",
 )
 
-rename_wheel(
+alias(
     name = "rtp_llm",
-    package_name = "rtp_llm-%s" % RELEASE_VERSION,
-    src = ":rtp_llm_whl",
+    actual = ":rtp_llm_whl",
 )
 
 rename_wheel(

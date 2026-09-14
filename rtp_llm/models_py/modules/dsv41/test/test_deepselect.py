@@ -5,6 +5,7 @@ import json
 import os
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 
@@ -171,6 +172,88 @@ class DeepSelectGpuTest(unittest.TestCase):
             profile.export_chrome_trace(
                 str(Path(destination) / "deepselect_trace.json")
             )
+
+
+class DeepSelectFusedGpuTest(DeepSelectGpuTest):
+    def setUp(self):
+        self.fused = patch.dict(os.environ, {"DSV41_DEEPSELECT_FUSED_CHECKED": "1"})
+        self.fused.start()
+        self.addCleanup(self.fused.stop)
+
+    def test_fused_matches_checked_values_with_strided_input_and_default_end(self):
+        for dtype in (torch.bfloat16, torch.float32):
+            values = torch.randn((3, 2049), device="cuda", dtype=dtype)[:, 1::2]
+            values[0, 17] = torch.inf
+            values[1, 23] = -torch.inf
+            with patch.dict(os.environ, {"DSV41_DEEPSELECT_FUSED_CHECKED": "0"}):
+                baseline = topk(values, 37, sorted_index=True)
+            actual = topk(values, 37, sorted_index=True)
+            self.validate_selection(values, actual, [1024] * 3, 37)
+            torch.testing.assert_close(
+                actual.values.sort().values, baseline.values.sort().values, rtol=0, atol=0
+            )
+            torch.testing.assert_close(actual.status, baseline.status, rtol=0, atol=0)
+
+    def test_fused_rejects_malformed_vendor_output_before_gather(self):
+        import deep_select
+
+        values = torch.arange(521, device="cuda", dtype=torch.float32)[None, :]
+        patterns = ([0, 0, 1], [0, 521, 1], [0, -2, 1], [0, -1, 1],
+                    [0x3F3F3F3F, 1, 2])
+        for pattern in patterns:
+            def write_malformed(*args, **kwargs):
+                kwargs["output_idx"].copy_(torch.tensor([pattern], device="cuda", dtype=torch.int32))
+
+            with self.subTest(pattern=pattern), patch.object(deep_select, "topk", write_malformed):
+                result = topk(values, 3)
+                self.assertEqual(result.status.tolist(), [1])
+                self.assertTrue((result.indices == -1).all())
+                self.assertTrue((result.values == -torch.inf).all())
+
+    def test_fused_graph_recovers_after_nan_and_invalid_end(self):
+        values = torch.randn((3, 16384), device="cuda", dtype=torch.bfloat16)
+        ends = torch.full((3,), 16384, device="cuda", dtype=torch.int32)
+        output = torch.empty((3, 512), device="cuda", dtype=torch.int32)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                topk(values, 512, end=ends, output_idx=output)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            result = topk(values, 512, end=ends, output_idx=output)
+        pointers = (result.indices.data_ptr(), result.values.data_ptr(), result.status.data_ptr())
+        for lengths, bad, expected in (
+            ([16384, -1, 0], True, [1, 1, 0]),
+            ([513, 16384, 7], False, [0, 0, 0]),
+            ([16385, 0, 16384], False, [1, 0, 0]),
+            ([16384, 16384, 16384], False, [0, 0, 0]),
+        ):
+            values.normal_()
+            if bad:
+                values[0, 1025] = torch.nan
+            ends.copy_(torch.tensor(lengths, device="cuda", dtype=torch.int32))
+            output.fill_(-777)
+            graph.replay()
+            self.assertEqual(result.status.tolist(), expected)
+            self.assertEqual(
+                (result.indices.data_ptr(), result.values.data_ptr(), result.status.data_ptr()),
+                pointers,
+            )
+            for row, rejected in enumerate(expected):
+                if rejected:
+                    self.assertTrue((result.indices[row] == -1).all())
+                    self.assertTrue((result.values[row] == -torch.inf).all())
+                else:
+                    indices = result.indices[row]
+                    indices = indices[indices >= 0].long()
+                    self.assertEqual(indices.unique().numel(), min(lengths[row], 512))
+                    expected_values = values[row, :lengths[row]].topk(min(lengths[row], 512)).values
+                    torch.testing.assert_close(
+                        values[row, indices].sort().values, expected_values.sort().values,
+                        rtol=0, atol=0,
+                    )
 
 
 if __name__ == "__main__":

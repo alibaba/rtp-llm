@@ -22,6 +22,7 @@
 namespace rtp_llm {
 
 class ModelInputsLogger;
+class StepWindowProfiler;
 
 struct MtpMetricsCollector {
     RtpLLMExecutorMetricsCollector          executor_collector;
@@ -43,7 +44,8 @@ public:
                          MlaOpsType                                     mla_ops_type            = MlaOpsType::AUTO,
                          int32_t                                        kv_cache_group_num      = 1,
                          const std::vector<int32_t>&                    kv_cache_layer_to_group = {},
-                         bool                                           warm_up                 = false);
+                         bool                                           warm_up                 = false,
+                         StepWindowProfiler*                            step_profiler           = nullptr);
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
@@ -205,6 +207,7 @@ private:
     std::unique_ptr<MtpBatchStreamProcessor>                                 batch_stream_processor_;
     std::shared_ptr<KVCacheManager>                                          cache_manager_;
     std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
+    StepWindowProfiler*                                                     step_profiler_ = nullptr;
     bool                                                                     enable_ffn_disaggregate_ = false;
     bool                                                                     enable_detail_log_       = false;
     int                                                                      tp_rank_                 = 0;

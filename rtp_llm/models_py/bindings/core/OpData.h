@@ -1,5 +1,6 @@
 #pragma once
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/DSV41CacheState.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
@@ -74,6 +75,9 @@ struct GptModelInputs {
     torch::Tensor v41_request_id;        // int64 [all requests], including decode.
     torch::Tensor v41_state_ready;       // bool [all requests], target state at execution start.
     torch::Tensor v41_is_fake;           // bool [all requests], scheduler-only placeholders.
+    torch::Tensor v41_execution_context;  // int64 [requests, 4]: prompt length, encoder end, decoder end, protected N.
+    torch::Tensor v41_swa_ranges;         // int64 [requests, 43, 3]: valid start/end/replay floor; -1 is unknown.
+    std::vector<std::shared_ptr<DSV41ExecutionContext>> v41_execution_contexts; // Scheduling-rank callbacks only.
 
     std::optional<std::vector<torch::Tensor>> input_embeddings;  // all input embeddings in gathered stream stored here
     torch::Tensor                             input_embeddings_locs;  // input embeddings index
@@ -120,6 +124,8 @@ struct GptModelOutputs {
     torch::Tensor softmax_result;
 
     std::vector<torch::Tensor> moe_gating;
+    std::vector<DSV41ExecutionState> v41_execution_states;
+    std::vector<DSV41ExecutionProgress> v41_execution_progress;
 };
 
 struct CopyParams {

@@ -1,4 +1,106 @@
 py_test(
+    name = "test_decode_draft",
+    srcs = ["test_decode_draft.py", "test_draft.py", "fixture.py", "official_compressor.py", "test_compact_writer.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    data = ["//:rtp_compute_ops"],
+    env = {
+        "DSV41_BLOCK32_LINEAR": "1",
+        "DSV41_FLASHMLA": "1",
+        "DSV41_NATIVE_COMPACT_WRITER": "1",
+    },
+)
+
+py_test(
+    name = "test_decode_fmha_impl",
+    srcs = ["test_decode_fmha_impl.py", "test_attention.py", "official_compressor.py", "test_compact_writer.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    data = ["//:rtp_compute_ops"],
+    env = {
+        "DSV41_ATTENTION": "1",
+        "DSV41_DECODE_ATTENTION": "1",
+        "DSV41_DECODE_OWNER_COMPRESSOR": "1",
+        "DSV41_OWNER_COMPRESSOR": "1",
+        "DSV41_SPARSE_INDEXER": "1",
+        "DSV41_NATIVE_COMPACT_READER": "1",
+        "DSV41_NATIVE_COMPACT_WRITER": "1",
+    },
+)
+
+py_test(
+    name = "test_decode_fmha_impl_flashmla",
+    main = "test_decode_fmha_impl.py",
+    srcs = ["test_decode_fmha_impl.py", "test_attention.py", "official_compressor.py", "test_compact_writer.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    data = ["//:rtp_compute_ops"],
+    env = {
+        "DSV41_ATTENTION": "1",
+        "DSV41_ATTENTION_BACKEND": "flashmla",
+        "DSV41_FLASHMLA": "1",
+        "DSV41_DECODE_ATTENTION": "1",
+        "DSV41_DECODE_OWNER_COMPRESSOR": "1",
+        "DSV41_OWNER_COMPRESSOR": "1",
+        "DSV41_SPARSE_INDEXER": "1",
+        "DSV41_NATIVE_COMPACT_READER": "1",
+        "DSV41_NATIVE_COMPACT_WRITER": "1",
+    },
+)
+
+py_test(
+    name = "test_decode_attention",
+    srcs = ["test_decode_attention.py", "test_attention.py", "official_compressor.py", "test_compact_writer.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {
+        "DSV41_ATTENTION": "1",
+        "DSV41_DECODE_ATTENTION": "1",
+        "DSV41_DECODE_OWNER_COMPRESSOR": "1",
+        "DSV41_OWNER_COMPRESSOR": "1",
+        "DSV41_SPARSE_INDEXER": "1",
+        "DSV41_NATIVE_COMPACT_READER": "1",
+        "DSV41_NATIVE_COMPACT_WRITER": "1",
+    },
+)
+
+py_test(
+    name = "test_decode_compressor",
+    srcs = ["test_decode_compressor.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {
+        "DSV41_DECODE_OWNER_COMPRESSOR": "1",
+        "DSV41_OWNER_COMPRESSOR": "1",
+        "DSV41_NATIVE_COMPACT_WRITER": "1",
+    },
+)
+
+py_test(
+    name = "test_cp_prefill",
+    srcs = ["test_cp_prefill.py", "test_cp_attention.py", "fixture.py"],
+    deps = ["//rtp_llm:rtp_llm_lib"],
+    data = ["//:rtp_compute_ops"],
+    env = {"GPU_COUNT": "8"},
+    tags = ["manual", "requires-gpu-8"],
+    timeout = "long",
+)
+
+py_test(
+    name = "test_cp_attention",
+    srcs = ["test_cp_attention.py"],
+    deps = ["//rtp_llm:rtp_llm_lib"],
+    data = ["//:rtp_compute_ops"],
+    env = {"GPU_COUNT": "8"},
+    tags = ["manual", "requires-gpu-8"],
+    timeout = "long",
+)
+
+py_test(
     name = "test_engine_adapter",
     srcs = ["test_engine_adapter.py", "fixture.py"],
     deps = [

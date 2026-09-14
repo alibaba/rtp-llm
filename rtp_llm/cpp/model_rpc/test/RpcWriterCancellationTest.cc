@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <atomic>
+#include <chrono>
+#include <thread>
 
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
@@ -125,6 +128,50 @@ TEST(RpcWriterCancellationTest, RemoteWriteFailureCancelsGrpcStreamClosure) {
     EXPECT_EQ(client_stream->finish_calls, 1);
 
     context.stream_.reset();
+}
+
+TEST(RpcWriterCancellationTest, LocalFailureCancelsDownstreamBeforeFinish) {
+    class WaitingDecode: public RpcService::Service {
+    public:
+        grpc::Status RemoteGenerate(grpc::ServerContext* server_context,
+                                    grpc::ServerReaderWriter<GenerateOutputsPB, GenerateRequestPB>* stream) override {
+            GenerateRequestPB request;
+            if (!stream->Read(&request) || !stream->Write(GenerateOutputsPB()))
+                return grpc::Status(grpc::StatusCode::INTERNAL, "handshake failed");
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!server_context->IsCancelled() && std::chrono::steady_clock::now() < deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            cancelled.store(server_context->IsCancelled());
+            return grpc::Status::OK;
+        }
+        std::atomic<bool> cancelled{false};
+    } service;
+    grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&service);
+    auto server = builder.BuildAndStart();
+    ASSERT_NE(server, nullptr);
+    auto stub = RpcService::NewStub(grpc::CreateChannel("127.0.0.1:" + std::to_string(port),
+                                                       grpc::InsecureChannelCredentials()));
+    GenerateInputPB request;
+    RejectingWriter writer;
+    RPCContext rpc_context{&request, &writer};
+    RemoteServerResource resource;
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    auto meta = std::make_shared<RpcServerRuntimeMeta>();
+    PrefillGenerateContext context(&resource, rpc_context, 0, nullptr, metrics_reporter, meta);
+    context.client_context = std::make_shared<grpc::ClientContext>();
+    context.client_context->set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
+    context.client_stream = stub->RemoteGenerate(context.client_context.get());
+    ASSERT_TRUE(context.client_stream->Write(GenerateRequestPB()));
+    GenerateOutputsPB response;
+    ASSERT_TRUE(context.client_stream->Read(&response));
+    context.error_status = grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "invalid producer state");
+    EXPECT_EQ(context.closeGrpcStream().error_code(), grpc::StatusCode::CANCELLED);
+    EXPECT_EQ(context.error_status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+    server->Shutdown();
+    EXPECT_TRUE(service.cancelled.load());
 }
 
 }  // namespace

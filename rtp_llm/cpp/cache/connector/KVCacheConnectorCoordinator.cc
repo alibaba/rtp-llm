@@ -59,6 +59,8 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
                                                int                    cp_size) {
     std::vector<CacheGroupType> group_types;
     group_types.reserve(static_cast<size_t>(source.groupNums()));
+    KVCacheResource::WorkerBlockIds worker_blocks(
+        source.dsv41WorkerBlockIds().size(), std::vector<BlockIndicesType>(source.groupNums()));
     for (int gid = 0; gid < source.groupNums(); ++gid) {
         group_types.push_back(groupTypeForConnector(cache_config, gid));
     }
@@ -125,9 +127,20 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
             }
         }
 
+        const bool compact = isCpCompactFixedGroup(cache_config, gid, cp_size)
+                             || (group_types[gid] == CacheGroupType::FULL
+                                 && isCompactFullBlockList(source, src_blocks, selected_keys));
+        for (size_t rank = 0; rank < worker_blocks.size(); ++rank) {
+            const auto& rank_source = source.dsv41WorkerBlockIds().at(rank).at(gid);
+            for (size_t index = 0; index < dst_blocks.size(); ++index) {
+                const size_t source_index = compact ? index : (index + 1) * cp_size - 1;
+                worker_blocks[rank][gid].push_back(source_index < rank_source.size() ?
+                                                      rank_source[source_index] : NULL_BLOCK_IDX);
+            }
+        }
         selected.mutableBlockIds(gid).assign(std::move(dst_blocks));
     }
-
+    selected.setDsv41WorkerBlockIds(std::move(worker_blocks));
     return selected;
 }
 
@@ -205,9 +218,11 @@ bool KVCacheConnectorCoordinator::init() {
         connectors_.emplace_back(remote_connector_);
     }
 #endif
+#if 0
     if (!initP2PConnectorInternal()) {
         RTP_LLM_LOG_WARNING("init P2P connector failed, P2P path disabled — engine continues without it");
     }
+#endif
     initUpdateThread();
     return true;
 }
@@ -337,6 +352,25 @@ KVCacheConnectorCoordinator::asyncWriteByLayer(int                              
                          layer_context->requestId());
     }
     return p2p_connector_->asyncWriteByLayer(layer_id, layer_context);
+}
+
+bool KVCacheConnectorCoordinator::stageDsv41Checkpoint(const KVCacheResource& source,
+                                                       const std::function<void()>& wait_for_producer,
+                                                       const std::shared_ptr<Meta>& meta) {
+    if (stop_.load() || !memory_connector_ || !meta || !meta->enableMemoryCache()
+        || parallelism_config_.tp_rank != 0 || cache_config_.dsv41_cache_layout_version != 1)
+        return false;
+    auto selected = source;
+    auto keys = source.cacheKeys();
+    const int cp = cpSize();
+    if (cp > 1 && !source.cacheKeysAreCpCanonical()) {
+        keys = source.localCacheKeys(cp - 1, cp);
+        if (keys.empty()) return false;
+        selected = makeCpShardedConnectorResource(source, cache_config_, keys, cp);
+        keys = selected.cacheKeys();
+    }
+    auto reference = allocator_->incrKVCacheRef(selected, keys, true);
+    return reference && memory_connector_->stageDsv41Checkpoint(reference, wait_for_producer, meta);
 }
 
 std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryConnector() {
@@ -511,9 +545,6 @@ bool KVCacheConnectorCoordinator::isPdInvertMode() const {
 }
 
 bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
-    // TODO: P2P connector initialization is disabled until the next PR enables
-    // scheduler async load cache support. Change to `#if 1` to activate.
-#if 0
     if (!isPdInvertMode()) {
         return true;
     }
@@ -535,7 +566,6 @@ bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
         connectors_.emplace_back(p2p_connector_);
     }
     RTP_LLM_LOG_INFO("P2PConnector initialized successfully, total connectors: %zu", connectors_.size());
-#endif
     return true;
 }
 

@@ -1,9 +1,4 @@
-"""Local CED stage execution with owned GPU tails and joint memory snapshots.
-
-These components use the explicit local attention cache. They do not implement
-distributed CP row assembly, PD transport or the engine's CPU offload adapter.
-Snapshots stay in memory and retain every required region together.
-"""
+"""CED stage execution over local pages or framework-owned CP8 cache shards."""
 
 from dataclasses import dataclass, fields, replace
 
@@ -14,6 +9,7 @@ from rtp_llm.models_py.modules.dsv41.attention import (
 )
 from rtp_llm.models_py.modules.dsv41.cache_layout import (
     SWA_WINDOW,
+    DRAFT_LAYERS,
     CacheRegion,
     MemoryCheckpoint,
     RegionSlot,
@@ -22,6 +18,7 @@ from rtp_llm.models_py.modules.dsv41.ced import (
     AuxRowMap,
     LateCompletion,
     PrefillPlan,
+    PrefillExtend,
     PrefillProgress,
     ReplayConfig,
     ReplayMode,
@@ -845,4 +842,470 @@ class V41PrefillExecutor:
             return V41PrefillResult(output, aux_map, context, checkpoint)
         except Exception:
             self.cache.poisoned = True
+            raise
+
+
+@dataclass(frozen=True)
+class V41CPHistory:
+    token_ids: tuple[int, int, int]
+    image_mask: tuple[bool, bool, bool]
+
+    @classmethod
+    def at_boundary(cls, context, rows):
+        packed = torch.cat(
+            (
+                rows.history_ids[:, -2:],
+                rows.token_ids[:, None],
+                (~rows.history_valid[:, -2:]).to(torch.int32),
+                rows.image_mask[:, None].to(torch.int32),
+            ),
+            dim=1,
+        )
+        values = (
+            context.gather_rows(packed, context.end - 1, context.end)[0].cpu().tolist()
+        )
+        for index, position in enumerate(range(context.end - 3, context.end)):
+            if position < 0:
+                values[index], values[index + 3] = -1, 0
+        return cls(tuple(values[:3]), tuple(bool(value) for value in values[3:]))
+
+
+@dataclass(frozen=True)
+class V41CPPrefillResult:
+    hidden_states: torch.Tensor
+    output: V41TargetOutput | None
+    aux_rows: AuxRowMap | None
+    encoder_context: object
+    decoder_context: object | None
+    history: V41CPHistory
+    progress: PrefillProgress
+    checkpoint_protected: bool
+
+
+class V41CPPrefillExecutor:
+    """Request-owned late-stage scheduling using the existing all-worker copy.
+
+    Every CP rank runs the same request/segment order, including empty-valid
+    ranks. The adapter binds fresh framework tables for each engine forward and
+    supplies native protection/progress callbacks; no KV payload is owned here.
+    """
+
+    def __init__(
+        self,
+        target,
+        *,
+        request_id,
+        identity,
+        layout,
+        initial_encoder_end=0,
+        initial_decoder_end=0,
+        initial_protected_end=0,
+        history=None,
+        draft_commit=None,
+        max_tokens_per_rank=None,
+    ):
+        if (
+            not request_id
+            or layout.cp_size != 8
+            or identity.layout_fingerprint != layout.fingerprint
+            or identity.replay_fingerprint
+            not in (
+                ReplayConfig(ReplayMode.FULL).fingerprint,
+                ReplayConfig(ReplayMode.BOUNDED).fingerprint,
+            )
+            or layout.draft_enabled != (draft_commit is not None)
+            or (
+                max_tokens_per_rank is not None
+                and (type(max_tokens_per_rank) is not int or max_tokens_per_rank <= 0)
+            )
+        ):
+            raise ValueError(
+                "CP prefill requires actual request/replay identity and draft writers"
+            )
+        self.target, self.request_id, self.identity, self.layout = (
+            target,
+            request_id,
+            identity,
+            layout,
+        )
+        self.draft_commit = draft_commit
+        self.max_tokens_per_rank = max_tokens_per_rank
+        self.progress = PrefillProgress(
+            initial_encoder_end, initial_decoder_end, initial_protected_end
+        )
+        self.history = history
+        self.tail = None
+        self.observations = []
+        self.poisoned = False
+        self._input_epoch = -1
+        self._execution_epoch = -1
+        self._boundaries = None
+
+    def _extend(self, start, end, checkpoint, final):
+        full = (
+            self.identity.replay_fingerprint
+            == ReplayConfig(ReplayMode.FULL).fingerprint
+        )
+        publish, handoff = end == checkpoint and checkpoint > 0, end == final
+        rows = floor = None
+        history = False
+        if full:
+            rows, floor, history = RowRange(start, end), 0, start > 0
+        elif publish or handoff:
+            previous = self.progress.decoder_checkpoint_end
+            history = previous > 0 and end - previous <= SWA_WINDOW
+            first = previous if history else max(0, end - SWA_WINDOW)
+            rows = RowRange(first, end)
+            floor = max(0, previous - SWA_WINDOW) if history else first
+        return PrefillExtend(
+            RowRange(start, end),
+            rows,
+            floor,
+            history,
+            end if publish else None,
+            handoff,
+            RowRange(max(0, end - SWA_WINDOW), end),
+            checkpoint if checkpoint and start >= checkpoint else 0,
+        )
+
+    def _validate_continuation(self, context, rows):
+        if self.history is None or not context.start:
+            return
+        packed = torch.cat(
+            (rows.history_ids, rows.history_valid.to(torch.int32)), dim=1
+        )
+        values = (
+            context.gather_rows(packed, context.start, context.start + 1)[0]
+            .cpu()
+            .tolist()
+        )
+        for index, position in enumerate(range(context.start - 3, context.start)):
+            if position >= 0 and (
+                values[index] != self.history.token_ids[index]
+                or bool(values[index + 3]) == self.history.image_mask[index]
+            ):
+                raise ValueError(
+                    "CP continuation history differs from its committed token/image tail"
+                )
+
+    def _segments(self, context, rows, checkpoint):
+        from rtp_llm.models.multimodal.deepseek_v41_processor import (
+            IMAGE_END,
+            IMAGE_START,
+            TEXT,
+        )
+
+        # Only token-type metadata is global; all hidden/image rows retain their
+        # original CP owners throughout the internal encoder chunks.
+        types = (
+            context.gather_rows(rows.token_types[:, None], context.start, context.end)
+            .flatten()
+            .cpu()
+            .tolist()
+        )
+        images, image_start = [], None
+        for offset, token_type in enumerate(types):
+            if token_type == IMAGE_START:
+                if image_start is not None:
+                    raise ValueError(
+                        "CP canonical image starts before the previous image ends"
+                    )
+                image_start = context.start + offset
+            elif token_type == IMAGE_END:
+                if image_start is None:
+                    raise ValueError("CP input starts inside a canonical image span")
+                images.append((image_start, context.start + offset + 1))
+                image_start = None
+            elif (token_type == TEXT) != (image_start is None):
+                raise ValueError("CP input contains an incomplete canonical image span")
+        if image_start is not None:
+            raise ValueError("CP input ends inside a canonical image span")
+        if any(first < checkpoint < last for first, last in images):
+            raise ValueError(
+                "CP protected checkpoint cannot split a canonical image span"
+            )
+        cuts, start = [context.start], context.start
+        while start < context.end:
+            end = checkpoint if start < checkpoint < context.end else context.end
+            if self.max_tokens_per_rank is not None:
+                counts = [0] * context.cp.cp_size
+                candidate = start
+                while candidate < end:
+                    rank = (
+                        context._restore_host[candidate - context.start]
+                        // context.local_count
+                    )
+                    if counts[rank] == self.max_tokens_per_rank:
+                        break
+                    counts[rank] += 1
+                    candidate += 1
+                end = candidate
+            for first, last in images:
+                if first < end < last:
+                    end = first
+                    break
+            if end <= start:
+                raise ValueError(
+                    "CP per-rank token budget cannot fit a complete image span"
+                )
+            cuts.append(end)
+            start = end
+        return cuts
+
+    def _validate_late_capacity(self, context, checkpoint, final):
+        if (
+            self.max_tokens_per_rank is None
+            or self.identity.replay_fingerprint
+            == ReplayConfig(ReplayMode.FULL).fingerprint
+        ):
+            return
+        previous = self.progress.decoder_checkpoint_end
+        for end in sorted({checkpoint, final}):
+            if not context.start < end <= context.end:
+                continue
+            first = (
+                previous
+                if previous > 0 and end - previous <= SWA_WINDOW
+                else max(0, end - SWA_WINDOW)
+            )
+            counts = [0] * context.cp.cp_size
+            if first < context.start:
+                if self.tail is None or self.tail.positions.start > first:
+                    raise ValueError("CP bounded decoder is missing retained L20 rows")
+                for rank, positions in enumerate(self.tail.rank_positions):
+                    counts[rank] = sum(
+                        first <= pos < context.start for pos in positions
+                    )
+            for position in range(max(first, context.start), end):
+                rank = (
+                    context._restore_host[position - context.start]
+                    // context.local_count
+                )
+                counts[rank] += 1
+            required = max(counts)
+            if required > self.max_tokens_per_rank:
+                raise ValueError(
+                    f"CP bounded decoder requires {required} rows per rank; "
+                    f"admitted token budget is {self.max_tokens_per_rank}"
+                )
+            previous = end
+
+    @torch.inference_mode()
+    def run_extend(
+        self,
+        rows,
+        context,
+        *,
+        protected_checkpoint_end,
+        final_handoff_end,
+        protect_checkpoint=None,
+        report_progress=None,
+        image_features=None,
+        lookup_outputs=None,
+    ):
+        from rtp_llm.models_py.modules.dsv41.cp import V41CPL20Tail
+
+        context.validate()
+        rows.validate()
+        cache = context.cache
+        boundaries = (protected_checkpoint_end, final_handoff_end)
+        if (
+            self.poisoned
+            or cache.request_id != self.request_id
+            or cache.identity != self.identity
+            or cache.layout != self.layout
+            or context.decoder_only
+            or context.epoch <= self._input_epoch
+            or context.start != self.progress.encoder_materialized_end
+            or rows.token_ids.numel() != context.query_rows
+            or not torch.equal(rows.valid, context.valid)
+            or not 0
+            <= protected_checkpoint_end
+            <= final_handoff_end
+            <= cache.max_tokens
+            or protected_checkpoint_end % self.layout.reuse_unit
+            or context.end > final_handoff_end
+            or (self._boundaries is not None and self._boundaries != boundaries)
+            or any(
+                cache.swa_ends.get(layer) != self.progress.decoder_checkpoint_end
+                for layer in range(21, 43 if self.layout.draft_enabled else 40)
+            )
+        ):
+            raise ValueError(
+                "CP extend has stale request, epoch, progress or checkpoint boundaries"
+            )
+        if (
+            protected_checkpoint_end > self.progress.protected_checkpoint_end
+            and protect_checkpoint is None
+        ):
+            raise ValueError(
+                "CP checkpoint N requires the engine's completed all-worker copy callback"
+            )
+        self._validate_continuation(context, rows)
+        split = self._segments(context, rows, protected_checkpoint_end)
+        self._validate_late_capacity(context, *boundaries)
+        self._input_epoch, self._boundaries = context.epoch, boundaries
+        hidden = self.target.embedding.new_zeros(
+            (context.query_rows, self.target.hidden_size)
+        )
+        output = aux_map = decoder = None
+        protected = False
+        bounded = (
+            self.identity.replay_fingerprint
+            == ReplayConfig(ReplayMode.BOUNDED).fingerprint
+        )
+        try:
+            for start, end in zip(split, split[1:]):
+                extend = self._extend(start, end, *boundaries)
+                progress = self.progress.encoder_completed(extend)
+                self._execution_epoch = (
+                    max(self._execution_epoch, cache.active_epoch) + 1
+                )
+                encoder = context.encoder_slice(start, end, epoch=self._execution_epoch)
+                current_rows = encoder.select_model_rows(rows)
+                l20 = self.target.prefill_encoder(
+                    current_rows,
+                    encoder,
+                    image_features=encoder.select_image_features(image_features),
+                    lookup_outputs=(
+                        None
+                        if lookup_outputs is None
+                        else {
+                            layer: encoder.select_rows(values)
+                            for layer, values in lookup_outputs.items()
+                        }
+                    ),
+                )
+                if not set(range(21)).issubset(
+                    encoder.completed_layers
+                ) or encoder.published_sources != {2, 8, 14, 20}:
+                    raise ValueError(
+                        "CP encoder did not finish every L0-L20 layer and source"
+                    )
+                history = V41CPHistory.at_boundary(encoder, current_rows)
+                if bounded:
+                    self.tail = V41CPL20Tail.append(self.tail, l20, encoder)
+                if report_progress is not None:
+                    report_progress(progress)
+                decoder, draft_rows = None, None
+                if extend.decoder_rows is not None:
+                    if bounded:
+                        l20, decoder = self.tail.select(
+                            encoder, extend.decoder_rows, extend.replay_floor
+                        )
+                    else:
+                        decoder = encoder.for_decoder(extend)
+                    output = self.target.prefill_decoder(l20, decoder)
+                    indices = output.aux_row_indices
+                    if indices is None or not torch.equal(
+                        indices, l20.rows.valid.nonzero().flatten()
+                    ):
+                        raise ValueError(
+                            "CP late execution returned a different valid aux row set"
+                        )
+                    positions = tuple(decoder.positions[indices].cpu().tolist())
+                    aux_map = AuxRowMap(
+                        self.request_id,
+                        decoder.epoch,
+                        self.identity.replay_fingerprint,
+                        positions,
+                        positions,
+                        tuple(l20.rows.image_mask[indices].cpu().tolist()),
+                    )
+                    if self.draft_commit is not None:
+                        aux_map, committed = decoder.commit_draft(
+                            self.draft_commit, output, l20.rows
+                        )
+                        draft_rows = {
+                            "main_projection_rows": committed.main_projection_rows,
+                            "stage_projection_rows": committed.stage_projection_rows,
+                        }
+                    if not set(range(21, 40)).issubset(decoder.completed_layers) or any(
+                        cache.swa_ends.get(layer) != end
+                        for layer in range(43 if self.layout.draft_enabled else 40)
+                    ):
+                        raise ValueError(
+                            "CP late execution did not materialize all target/draft SWA"
+                        )
+                    progress = progress.decoder_completed(
+                        extend, LateCompletion(extend.decoder_rows, True, True)
+                    )
+                    decoder.scatter_rows(output.hidden_states, output=hidden)
+                    if report_progress is not None:
+                        report_progress(progress)
+                    if extend.checkpoint_end is not None:
+                        if protect_checkpoint(decoder, history) is not True:
+                            raise RuntimeError(
+                                "CP checkpoint copy failed; source suffix cannot overwrite N"
+                            )
+                        checkpoint = MemoryCheckpoint(
+                            end,
+                            self.identity,
+                            self.layout.required_slots,
+                            max(
+                                int(cache.swa[layer].valid_starts[0])
+                                for layer in range(40)
+                            ),
+                            (
+                                max(
+                                    int(cache.swa[layer].valid_starts[0])
+                                    for layer in DRAFT_LAYERS
+                                )
+                                if self.layout.draft_enabled
+                                else None
+                            ),
+                            decoder.replay_floor,
+                            True,
+                            True,
+                            True,
+                        )
+                        progress = progress.checkpoint_protected(
+                            checkpoint, self.layout, self.identity
+                        )
+                        protected = True
+                if extend.final_handoff:
+                    progress.require_handoff(
+                        final_handoff_end, protected_checkpoint_end
+                    )
+                self.progress, self.history = progress, history
+                self.observations.append(
+                    {
+                        "epoch": encoder.epoch,
+                        "encoder_range": (start, end),
+                        "encoder_local_rows": encoder.query_rows,
+                        "decoder_range": (
+                            None if decoder is None else (decoder.start, decoder.end)
+                        ),
+                        "decoder_local_rows": (
+                            0 if decoder is None else decoder.query_rows
+                        ),
+                        "encoder_layers": tuple(encoder.observations),
+                        "decoder_layers": (
+                            ()
+                            if decoder is None
+                            else tuple(
+                                row
+                                for row in decoder.observations
+                                if row.get("layer", 0) > 20
+                            )
+                        ),
+                        "retained_bytes": (
+                            0 if self.tail is None else self.tail.storage_bytes
+                        ),
+                        "draft_rows": draft_rows,
+                        "protected_end": progress.protected_checkpoint_end,
+                    }
+                )
+            return V41CPPrefillResult(
+                hidden,
+                output,
+                aux_map,
+                encoder,
+                decoder,
+                self.history,
+                self.progress,
+                protected,
+            )
+        except Exception:
+            self.poisoned = cache.poisoned = True
             raise
