@@ -36,7 +36,7 @@ from rtp_llm.utils.database import CkptDatabase
 
 class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
     def __init__(self, mm_related_params: VitParameters):
-        self.video_backend = os.environ.get("QWEN35_VIDEO_BACKEND", "cpu")
+        self.video_backend = os.environ.get("QWEN35_VIDEO_BACKEND", "nvdec")
         if self.video_backend not in ("cpu", "nvdec"):
             raise ValueError("QWEN35_VIDEO_BACKEND must be cpu or nvdec")
         logging.info("Qwen3.5 video preprocessing backend: %s", self.video_backend)

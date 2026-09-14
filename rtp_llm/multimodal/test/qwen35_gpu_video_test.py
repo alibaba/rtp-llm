@@ -8,12 +8,20 @@ from unittest import mock
 import torch
 from transformers import Qwen3VLVideoProcessor
 
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe import gpu_video
+from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe import qwen3_5_moe_mixin as qwen35
 from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.gpu_video import (
     GpuVideoInput,
     prepare_gpu_video,
     preprocess_video_cuda,
 )
+from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.video_processing import (
+    video_frame_indices,
+    video_processor_size,
+    video_resize_shape,
+)
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 class GpuVideoTest(unittest.TestCase):
@@ -83,6 +91,112 @@ class GpuVideoTest(unittest.TestCase):
         self.assertEqual(pickle.loads(pickle.dumps(data)), data)
         self.assertEqual(grid.device.type, "cpu")
         self.assertGreater(data.workspace_bytes, 94 * 1024 * 1024)
+
+    def test_vllm_video_total_pixel_budgets(self):
+        processor = self.processor()
+        configs = self.configs()
+        configs.min_pixels = 2500000
+        configs.max_pixels = 73728000
+        # H/W results from the Qwen3-VL whole-video resize formula.
+        for frames, expected in (
+            (6, (1088, 1920)),
+            (60, (800, 1472)),
+            (180, (480, 832)),
+        ):
+            with self.subTest(frames=frames):
+                self.assertEqual(
+                    video_resize_shape(configs, frames, 1080, 1920, processor),
+                    expected,
+                )
+        # The lower budget is also across frames; it is not 2.5M per frame.
+        self.assertEqual(
+            video_resize_shape(configs, 180, 64, 64, processor), (128, 128)
+        )
+
+    def test_request_sampling_controls(self):
+        configs = self.configs()
+        configs.fps = 6
+        configs.max_frames = 180
+        self.assertEqual(len(video_frame_indices(configs, 900, 30)), 180)
+        configs.max_frames = 5
+        self.assertEqual(video_frame_indices(configs, 80, 30), (0, 20, 40, 59, 79))
+
+    def test_request_pixel_budgets_do_not_mutate_model_defaults(self):
+        processor = self.processor()
+        original = dict(processor.size)
+        configs = self.configs()
+        configs.min_pixels = 2500000
+        configs.max_pixels = 73728000
+        self.assertEqual(
+            video_processor_size(processor, configs),
+            {"shortest_edge": 2500000, "longest_edge": 73728000},
+        )
+        self.assertEqual(processor.size, original)
+        self.assertEqual(video_processor_size(processor, self.configs()), original)
+        configs.min_pixels = -1
+        configs.max_pixels = 4194304
+        self.assertEqual(
+            video_processor_size(processor, configs),
+            {"shortest_edge": original["shortest_edge"], "longest_edge": 4194304},
+        )
+
+    def test_video_preprocess_defers_nvdec_with_request_config(self):
+        processor = self.processor()
+        container = mock.MagicMock()
+        container.__enter__.return_value.streams.video = [
+            SimpleNamespace(
+                frames=80,
+                average_rate=30,
+                height=64,
+                width=64,
+                codec_context=SimpleNamespace(
+                    colorspace=1, color_range=1, format=SimpleNamespace(name="yuv420p")
+                ),
+            )
+        ]
+        preprocess_config = self.configs()
+        preprocess_config.fps = 2
+        preprocess_config.max_frames = 5
+        preprocess_config.min_pixels = 4096
+        preprocess_config.max_pixels = 10240
+        item = SimpleNamespace(
+            mm_type=MMUrlType.VIDEO,
+            url="unused",
+            mm_preprocess_config=preprocess_config,
+        )
+        with mock.patch("av.open", return_value=container), mock.patch.object(
+            qwen35, "get_bytes_io_from_url", return_value=io.BytesIO(b"video")
+        ), mock.patch.object(
+            qwen35.Qwen3_VLImageEmbedding,
+            "load_video",
+            side_effect=AssertionError("video used the inherited CPU decoder"),
+        ), mock.patch(
+            "torch.cuda.init", side_effect=AssertionError("CPU worker initialized CUDA")
+        ):
+            gpu_input, grid = qwen35.Qwen3_5MoeImageEmbedding.preprocess_input(
+                [item], VitConfig(), SimpleNamespace(video_processor=processor)
+            )
+        self.assertIsInstance(gpu_input, GpuVideoInput)
+        self.assertEqual(gpu_input.encoded, b"video")
+        self.assertEqual(gpu_input.frame_indices, (0, 20, 40, 59, 79))
+        # Request pixel budget resizes 64x64 to 32x32; the fifth frame is padded.
+        self.assertEqual(grid.tolist(), [[3, 2, 2]])
+        self.assertEqual(gpu_input.shape, (12, 1536))
+        self.assertEqual(grid.device.type, "cpu")
+        self.assertEqual(pickle.loads(pickle.dumps(gpu_input)), gpu_input)
+
+    def test_image_preprocessing_is_inherited(self):
+        item = SimpleNamespace(mm_type=MMUrlType.IMAGE)
+        config, processor = VitConfig(), object()
+        expected = object()
+        with mock.patch.object(
+            qwen35.Qwen3_VLImageEmbedding, "preprocess_input", return_value=expected
+        ) as parent:
+            actual = qwen35.Qwen3_5MoeImageEmbedding.preprocess_input(
+                [item], config, processor
+            )
+        self.assertIs(actual, expected)
+        parent.assert_called_once_with([item], config, processor, 32)
 
     def test_unknown_frame_count_is_rejected_before_gpu(self):
         container = mock.MagicMock()
