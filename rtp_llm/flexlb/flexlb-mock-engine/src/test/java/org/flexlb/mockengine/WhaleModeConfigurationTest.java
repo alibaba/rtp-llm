@@ -278,7 +278,7 @@ class WhaleModeConfigurationTest {
     void engineLabelsMatchExistingGrafanaWildcardFilters() {
         var tags = WhaleMockMonitor.engineTags(java.util.Map.of(
                 "HIPPO_APP", "whale_prod_test", "HIPPO_ROLE", "test.prefill-cpu_part0",
-                "HIPPO_SLAVE_IP", "10.0.0.1", "HIPPO_SERVICE_NAME", "test-group"), "10.1.0.2");
+                "HIPPO_SLAVE_IP", "10.0.0.1", "HIPPO_SERVICE_NAME", "test-group"), "10.1.0.2", "ROLE_TYPE_PREFILL");
         assertEquals("whale_prod_test", tags.get("hippo_app"));
         assertEquals("test.prefill-cpu_part0", tags.get("hippo_role"));
         assertEquals("10.0.0.1", tags.get("host_ip"));
@@ -286,6 +286,26 @@ class WhaleModeConfigurationTest {
         for (String key : List.of("dp_rank", "priority", "mtp_model_type", "pool")) {
             assertFalse(tags.get(key).isEmpty(), "wildcard filters require tag " + key);
         }
+    }
+
+    @Test
+    void monitoringAliasesSeparateRolesWithoutChangingProcessIdentity() {
+        var env = java.util.Map.of(
+                "HIPPO_APP", "whale_prod_test", "HIPPO_ROLE", "test.master_part",
+                "MOCK_KMONITOR_PREFILL_HIPPO_APP", " test_mock_prefill ",
+                "MOCK_KMONITOR_DECODE_HIPPO_APP", "test_mock_decode",
+                "MOCK_KMONITOR_PREFILL_HIPPO_ROLE", "test.mock_prefill",
+                "MOCK_KMONITOR_DECODE_HIPPO_ROLE", " ");
+        var p = WhaleMockMonitor.engineTags(env, "10.1.0.2", "ROLE_TYPE_PREFILL");
+        var d = WhaleMockMonitor.engineTags(env, "10.1.0.2", "ROLE_TYPE_DECODE");
+        assertEquals("test_mock_prefill", p.get("hippo_app"));
+        assertEquals("test_mock_decode", d.get("hippo_app"));
+        assertEquals("test.mock_prefill", p.get("hippo_role"));
+        assertEquals("test.master_part", d.get("hippo_role"));
+        assertEquals("whale_prod_test", env.get("HIPPO_APP"));
+        assertEquals(p.get("container_ip"), d.get("container_ip"));
+        assertEquals("whale_prod_test", WhaleMockMonitor.engineTags(
+                env, "10.1.0.2", "ROLE_TYPE_UNKNOWN").get("hippo_app"));
     }
 
     @Test

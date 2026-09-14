@@ -126,7 +126,7 @@ final class WhaleMockMonitor implements AutoCloseable {
         });
     }
 
-    static Map<String, String> engineTags(Map<String, String> environment, String host) {
+    static Map<String, String> engineTags(Map<String, String> environment, String host, String role) {
         Map<String, String> tags = new HashMap<>();
         tags.put("hippo_app", environment.getOrDefault("HIPPO_APP", ""));
         tags.put("hippo_role", environment.getOrDefault("HIPPO_ROLE", ""));
@@ -137,6 +137,18 @@ final class WhaleMockMonitor implements AutoCloseable {
         tags.put("priority", "0"); // Aggregate mock series, not a per-priority breakdown.
         tags.put("mtp_model_type", "main");
         tags.put("pool", "0"); // The mock has one physical KV pool, matching C++ gid=0.
+        String prefix = switch (role) {
+            case "ROLE_TYPE_PREFILL" -> "MOCK_KMONITOR_PREFILL_";
+            case "ROLE_TYPE_DECODE" -> "MOCK_KMONITOR_DECODE_";
+            default -> "";
+        };
+        if (!prefix.isEmpty()) {
+            // Metric aliases only: discovery and the process HIPPO identity remain unchanged.
+            for (String key : java.util.List.of("hippo_app", "hippo_role")) {
+                String alias = environment.get(prefix + key.toUpperCase(java.util.Locale.ROOT));
+                if (alias != null && !alias.isBlank()) tags.put(key, alias.trim());
+            }
+        }
         return tags;
     }
 

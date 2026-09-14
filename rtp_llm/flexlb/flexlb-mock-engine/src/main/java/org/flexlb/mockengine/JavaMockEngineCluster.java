@@ -5755,10 +5755,11 @@ public final class JavaMockEngineCluster {
         long getCrashEpoch() { return crashEpoch.get(); }
         boolean isStopped() { return stopped; }
         Map<String, String> whaleMetricTags() {
-            Map<String, String> tags = WhaleMockMonitor.engineTags(System.getenv(), whaleBundle ? whalePodIp : host);
+            Map<String, String> tags = WhaleMockMonitor.engineTags(
+                    System.getenv(), whaleBundle ? whalePodIp : host, roleType.name());
             if (whaleBundle) {
                 // One physical Pod, distinct logical engines. Preserve the real
-                // container address and role; never impersonate a separate Pod.
+                // container address; monitoring aliases do not represent separate Pods.
                 tags.put("engine_port", Integer.toString(grpcPort));
                 tags.put("engine_ip", host);
             }

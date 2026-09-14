@@ -46,6 +46,20 @@ Whale 健康探测使用 `START_PORT` 的 `/health`；停止/排空状态返回 
 
 ## 监控和验证边界
 
+同 Pod 寄生多个 P/D engine 时，可按角色设置监控别名，避免现有大盘将 P/D 平均到一条曲线：
+
+```sh
+MOCK_KMONITOR_PREFILL_HIPPO_APP=example_mock_prefill
+MOCK_KMONITOR_DECODE_HIPPO_APP=example_mock_decode
+MOCK_KMONITOR_PREFILL_HIPPO_ROLE=example.mock_prefill
+MOCK_KMONITOR_DECODE_HIPPO_ROLE=example.mock_decode
+```
+
+四项各自可选，未设置或空白时沿用原始 HIPPO 标签。若希望同一 app 下按 role 选择，只设置后两项。
+别名覆盖该角色所有 mock KMonitor 指标，包括周期采样、执行事件和缓存驱逐寿命；启动时配置后重启生效。
+仅修改指标标签，不修改进程的 `HIPPO_APP`/`HIPPO_ROLE`、服务发现、Pod 地址或 master/frontend 指标。
+别名应使用明确的 mock 名称，避免与真实服务指标混合。切换后历史曲线仍保留在旧标签下，新曲线从启用时开始。
+
 Whale KMonitor 上报累计 context/generate token、KV tokens、waiting/running requests、completed/cancelled 数，以及按实际时间差计算的 TPS。所有指标带 engine、role、进程 generation、backend=mock 标签。累计 token 读数不被 HTTP 抓取消耗。
 
 引擎指标使用无 `whale-lb.` 前缀的 `rtp_llm_*` 名称，兼容现有引擎大盘。标签与 C++ 引擎一致：小写 hippo_app/hippo_role/hippo_group、host_ip（物理宿主）、container_ip（Pod）、dp_rank=0；mock 汇总吞吐使用 priority=0。队列、batch 和 KV 空闲/可用块等从 mock 状态读取，used_ratio 为不可用块占总量的百分比。mock 的 TPS 为采样窗口 token 增量除以墙钟时间，不代表真实 GPU step 的吞吐；不伪造 GPU 指标或优先级拆分。内部适配只复用 master 的 sink 初始化，mock 在自己的进程内创建不带 master 指标前缀的 reporter；生产 master 的监控代码和大盘无需修改。
