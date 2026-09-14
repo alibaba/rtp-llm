@@ -606,6 +606,14 @@ def trans_output(
 
         if all_custom_output is not None:
             output_py.custom_output = all_custom_output[i]
+            # Temporary deployment compatibility: legacy ingress preserves
+            # aux_info.softmax_probs but may drop custom_output. Mirror the
+            # final processor values without applying exp/sigmoid/softmax or
+            # requesting vocabulary probabilities. Keep custom_output canonical.
+            if current_aux_info is not None:
+                current_aux_info.softmax_probs = (
+                    output_py.custom_output.reshape(-1).tolist()
+                )
 
         if (
             logits_index is not None

@@ -609,6 +609,81 @@ class ModelRpcClientTest(TestCase):
             outputs.generate_outputs[1].all_hidden_states.tolist(),
         )
 
+    def test_trans_output_mirrors_custom_output_into_softmax_probs(self):
+        # Cover scalar score heads, flattened vector outputs and multiple
+        # sequences, with and without existing vocabulary probabilities.
+        for shape, values in (
+            ([2, 1, 1], [0.25, 0.75]),
+            ([2, 1, 2], [0.25, 0.75, 0.5, 0.125]),
+        ):
+            for existing_probs in (False, True):
+                with self.subTest(shape=shape, existing_probs=existing_probs):
+                    input_py = GenerateInput(
+                        token_ids=torch.tensor([1, 2, 3]),
+                        generate_config=GenerateConfig(
+                            aux_info=True, return_softmax_probs=False
+                        ),
+                        request_id=123,
+                        mm_inputs=[],
+                    )
+                    outputs_pb = GenerateOutputsPB()
+                    flatten = outputs_pb.flatten_output
+                    flatten.finished.extend([True, True])
+                    for _ in range(2):
+                        aux = flatten.aux_info.add()
+                        aux.input_len = 3
+                        if existing_probs:
+                            aux.softmax_probs.CopyFrom(
+                                TensorPB(
+                                    data_type=TensorPB.DataType.FP32,
+                                    shape=[1],
+                                    fp32_data=struct.pack("<f", 0.9),
+                                )
+                            )
+                    flatten.custom_output.CopyFrom(
+                        TensorPB(
+                            data_type=TensorPB.DataType.FP32,
+                            shape=shape,
+                            fp32_data=struct.pack("<" + "f" * len(values), *values),
+                        )
+                    )
+
+                    outputs = trans_output(input_py, outputs_pb, StreamState())
+
+                    expected = torch.tensor(values).reshape(shape)
+                    for index, output in enumerate(outputs.generate_outputs):
+                        torch.testing.assert_close(
+                            output.custom_output, expected[index]
+                        )
+                        self.assertEqual(
+                            output.aux_info.softmax_probs,
+                            expected[index].reshape(-1).tolist(),
+                        )
+                        self.assertEqual(output.aux_info.input_len, 3)
+
+    def test_trans_output_preserves_softmax_probs_without_custom_output(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(aux_info=True, return_softmax_probs=True),
+            request_id=123,
+            mm_inputs=[],
+        )
+        outputs_pb = GenerateOutputsPB()
+        flatten = outputs_pb.flatten_output
+        flatten.finished.append(True)
+        flatten.aux_info.add().softmax_probs.CopyFrom(
+            TensorPB(
+                data_type=TensorPB.DataType.FP32,
+                shape=[2],
+                fp32_data=struct.pack("<ff", 0.25, 0.75),
+            )
+        )
+
+        output = trans_output(input_py, outputs_pb, StreamState()).generate_outputs[0]
+
+        self.assertIsNone(output.custom_output)
+        self.assertEqual(output.aux_info.softmax_probs, [0.25, 0.75])
+
     def test_trans_output_does_not_create_aux_info_for_custom_output(self):
         input_py = GenerateInput(
             token_ids=torch.tensor([1, 2, 3]),
