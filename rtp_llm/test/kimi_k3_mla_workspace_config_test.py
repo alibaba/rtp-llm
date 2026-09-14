@@ -29,11 +29,11 @@ class KimiK3MLAWorkspaceConfigTest(unittest.TestCase):
         )
         return config.attn_config.mla_prefill_expanded_kv_budget_bytes
 
-    def test_k3_defaults_to_disabled_expanded_kv_planner(self) -> None:
+    def test_k3_defaults_to_six_gib_expanded_kv_budget(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop(self._BUDGET_ENV, None)
-            self.assertEqual(_mla_prefill_expanded_kv_budget_bytes(), 0)
-            self.assertEqual(self._parse_budget_bytes(), 0)
+            self.assertEqual(_mla_prefill_expanded_kv_budget_bytes(), 6 * 1024**3)
+            self.assertEqual(self._parse_budget_bytes(), 6 * 1024**3)
 
     def test_explicit_budget_and_zero_disable_are_forwarded(self) -> None:
         for raw, expected in (("1073741824", 1024**3), ("0", 0)):

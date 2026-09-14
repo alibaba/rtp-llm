@@ -5,14 +5,32 @@ from typing import Optional
 import torch
 from torch import nn
 
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_gather_trim,
+    get_process_group,
+)
+from rtp_llm.models_py.distributed.sequence_parallel import (
+    TokenShardLayout,
+    shard_tokens,
+    token_shard_layout,
+)
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.kimi_k3 import resolve_kimi_k3_moe_strategy
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import Embedding, LinearFactory, RMSNorm
+from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import configure_all_gather_gemm
+from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import (
+    configure_gemm_reduce_scatter,
+)
 from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLA
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.models_py.modules.kimi_k3.moe_se import KimiK3LatentMoESE
-from rtp_llm.models_py.modules.kimi_k3.utils import sequence_offsets
+from rtp_llm.models_py.modules.kimi_k3.utils import (
+    collective_gemm_workspace_global_tokens,
+    prefill_chunk_tokens,
+    sequence_offsets,
+)
 from rtp_llm.ops.compute_ops import PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
@@ -76,7 +94,15 @@ class KimiK3MtpLayer(nn.Module):
         self.moe = moe_cls(config, parallelism, weights, 0)
 
     def forward(
-        self, embedding, previous_h, positions, fmha_impl, kv_cache, attention_inputs
+        self,
+        embedding,
+        previous_h,
+        positions,
+        fmha_impl,
+        kv_cache,
+        attention_inputs,
+        *,
+        prefill_sp_layout: Optional[TokenShardLayout] = None,
     ):
         embedding = torch.where(positions.reshape(-1, 1) == 0, 0, embedding)
         x = self.eh_proj(
@@ -84,10 +110,35 @@ class KimiK3MtpLayer(nn.Module):
                 (self.enorm(embedding), self.hnorm(previous_h.contiguous())), dim=-1
             )
         )
-        a = x + self.attention(
-            self.input_norm(x), fmha_impl, kv_cache, attention_inputs=attention_inputs
+        # Unlike the target, MTP also fuses the token embedding and previous
+        # hidden. Do not keep those local intermediates alive through MoE.
+        del embedding, previous_h
+        sp_kwargs = (
+            dict(sequence_parallel=True, prefill_sp_layout=prefill_sp_layout)
+            if prefill_sp_layout is not None
+            else {}
         )
-        return a + self.moe(self.post_norm(a))
+        attention_output = self.attention(
+            self.input_norm(x),
+            fmha_impl,
+            kv_cache,
+            attention_inputs=attention_inputs,
+            **sp_kwargs,
+        )
+        a = x + attention_output
+        del x, attention_output
+        if prefill_sp_layout is not None:
+            # This draft has one layer. Its output projection/residual has
+            # consumed MLA's aliased output, so scratch need not overlap MoE.
+            fmha_impl.release_forward_workspace()
+            moe_output = self.moe(
+                self.post_norm(a),
+                sequence_parallel=True,
+                valid_token_count=prefill_sp_layout.local_valid_tokens,
+            )
+        else:
+            moe_output = self.moe(self.post_norm(a))
+        return a + moe_output
 
 
 class KimiK3MtpModel(GptModelBase):
@@ -130,6 +181,7 @@ class KimiK3MtpModel(GptModelBase):
         self._max_batch = max_generate_batch_size
         self._proposal_steps = model_config.gen_num_per_cycle
         self._decode_role = False
+        self._prefill_sp_enabled = False
         self._recurrent: Optional[torch.Tensor] = None
         self._recurrent_valid_tokens = 0
 
@@ -144,6 +196,35 @@ class KimiK3MtpModel(GptModelBase):
             capacity *= max(1, self._proposal_steps + 1)
             self._recurrent = self.embedding.weight.new_empty(
                 capacity, self.hidden_size
+            )
+        tp_size = int(self.parallelism_config.get_attn_tp_size())
+        self._prefill_sp_enabled = not self._decode_role and tp_size > 1
+        if self._prefill_sp_enabled:
+            if int(self.parallelism_config.ep_size) != tp_size:
+                raise RuntimeError(
+                    "Kimi K3 MTP Prefill Sequence Parallel requires TP == EP"
+                )
+            max_tokens = collective_gemm_workspace_global_tokens(
+                int(self.config.max_seq_len),
+                int(init_resource.max_context_batch_size),
+                prefill_chunk_tokens(),
+            )
+            max_physical_tokens = (max_tokens + tp_size - 1) // tp_size * tp_size
+            group = get_process_group(Group.TP)
+            # Native BF16 MTP shares the target's RS capacity but needs the
+            # BF16 AG state even when target attention uses FP8.
+            configure_all_gather_gemm(
+                group,
+                self.embedding.weight.device,
+                max_m=max_physical_tokens,
+                k=self.hidden_size,
+                dtype=self.embedding.weight.dtype,
+            )
+            configure_gemm_reduce_scatter(
+                group,
+                self.embedding.weight.device,
+                max_m=max_physical_tokens,
+                n=self.hidden_size,
             )
         return True
 
@@ -205,6 +286,26 @@ class KimiK3MtpModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         select_block_map_for_layer(inputs.attention_inputs, 0)
+        layout = None
+        # Decode proposal/replay and speculative verification retain the
+        # replicated layout expected by their cache and CUDA Graph metadata.
+        if (
+            self._prefill_sp_enabled
+            and inputs.attention_inputs.is_prefill
+            and not getattr(inputs.attention_inputs, "is_target_verify", False)
+        ):
+            layout = token_shard_layout(
+                inputs.input_ids.numel(),
+                int(self.parallelism_config.get_attn_tp_size()),
+                int(self.parallelism_config.get_attn_tp_rank()),
+            )
+            # Embedding itself gathers feature shards across TP, so its input
+            # IDs must stay replicated. Copy only the local output token rows
+            # to stop a contiguous view retaining the full embedding storage.
+            embedding = shard_tokens(embedding, layout).clone()
+            previous_h = shard_tokens(previous_h, layout)
+            positions = shard_tokens(positions, layout)
+        layer_kwargs = dict(prefill_sp_layout=layout) if layout is not None else {}
         h = self.layer(
             embedding,
             previous_h,
@@ -212,7 +313,11 @@ class KimiK3MtpModel(GptModelBase):
             fmha_impl,
             self.kv_cache.get_layer_cache(0) if self.kv_cache else None,
             inputs.attention_inputs,
+            **layer_kwargs,
         )
+        if layout is not None:
+            # The executor and next proposal consume full, unnormalized rows.
+            h = all_gather_trim(h, layout.logical_tokens, group=Group.TP)
         if self._decode_role:
             if self._recurrent is None or h.size(0) > self._recurrent.size(0):
                 raise ValueError(

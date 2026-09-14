@@ -70,8 +70,8 @@ export KIMI_K3_MLA_FP8_DIAGNOSTICS=0
 export LOAD_METHOD=fastsafetensors
 export RTP_LLM_SKIP_BUILD=1
 export SMOKE_SUITE=all
-# Default smoke prefix-expansion budget: 4 GiB per rank.
-export KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES=4294967296
+# Default K3 prefix-expansion budget: 6 GiB per rank.
+export KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES=6442450944
 python3 example/k3/kimi_k3_full_model_two_host_pd_smoke_driver.py
 ```
 
@@ -82,9 +82,11 @@ without starting services. Each role records and checks the supplied settings
 against its service process in `service.env`; these environment checks alone do
 not prove FP8 kernel execution.
 
-The smoke prefix budget defaults to `4294967296`. The full `all` suite requires
+The K3 model and smoke prefix budget default to `6442450944` (6 GiB per rank).
+The full `all` suite uses a one-million-token prefix and requires
 a positive budget so its long-prefix case can exercise multiple historical
-blocks. Outside this smoke the model default remains `0` (disabled). The budget splits historical KV
+blocks. An explicit budget of `0` disables the planner outside this smoke.
+The budget splits historical KV
 expansion into page-aligned blocks, runs attention on each block, and merges
 output/LSE. It does not cap the current chunk's expanded KV or FP8 temporary
 buffers; use `SMOKE_CHUNK_TOKENS` to control the current input chunk. A positive

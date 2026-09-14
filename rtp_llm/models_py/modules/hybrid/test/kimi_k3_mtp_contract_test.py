@@ -419,6 +419,7 @@ class KimiK3MtpContractTest(unittest.TestCase):
         nn.Module.__init__(model)
         model.hidden_size = 4
         model._decode_role = True
+        model._prefill_sp_enabled = False
         model._recurrent = torch.empty(8, 4)
         address = model._recurrent.data_ptr()
         model.kv_cache = None
@@ -445,6 +446,81 @@ class KimiK3MtpContractTest(unittest.TestCase):
         self.assertEqual(model._recurrent.data_ptr(), address)
         self.assertFalse(torch.allclose(z, model.get_mtp_target_hidden_states(3)))
 
+
+    def test_prefill_sp_preserves_fusion_positions_padding_and_recurrent_output(self):
+        from rtp_llm.models_py.distributed.sequence_parallel import (
+            shard_tokens, token_shard_layout,
+        )
+
+        class Moe(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = nn.Linear(4, 4, bias=False)
+                self.calls = []
+
+            def forward(self, x, **kwargs):
+                self.calls.append((x.shape, kwargs))
+                return self.linear(x)
+
+        torch.manual_seed(31)
+        layer = KimiK3MtpLayer.__new__(KimiK3MtpLayer)
+        nn.Module.__init__(layer)
+        for name in ("enorm", "hnorm", "input_norm", "post_norm"):
+            setattr(layer, name, nn.RMSNorm(4, eps=1e-5))
+        layer.eh_proj = nn.Linear(8, 4, bias=False)
+        layer.attention = _Attention()
+        layer.moe = Moe()
+        # Include T<TP, exact division, padded tail and packed-request zeros.
+        for tokens in (1, 7, 8, 9, 17):
+            e, previous = torch.randn(tokens, 4), torch.randn(tokens, 4)
+            positions = torch.arange(tokens) + 23
+            positions[::5] = 0
+            masked = torch.where(positions[:, None] == 0, 0, e)
+            x = layer.eh_proj(torch.cat((layer.enorm(masked), layer.hnorm(previous)), -1))
+            a = x + layer.input_norm(x) * 0.3
+            expected = a + layer.moe.linear(layer.post_norm(a))
+            for rank in range(8):
+                with self.subTest(tokens=tokens, rank=rank):
+                    layout = token_shard_layout(tokens, 8, rank)
+                    model = KimiK3MtpModel.__new__(KimiK3MtpModel)
+                    nn.Module.__init__(model)
+                    model.hidden_size = 4
+                    model._decode_role = False
+                    model._prefill_sp_enabled = True
+                    model.parallelism_config = SimpleNamespace(
+                        get_attn_tp_size=lambda: 8, get_attn_tp_rank=lambda: rank,
+                    )
+                    model.layer = layer
+                    model.kv_cache = None
+                    model.final_norm = nn.RMSNorm(4, eps=1e-5)
+                    inputs = SimpleNamespace(
+                        input_ids=torch.zeros(tokens, dtype=torch.long),
+                        input_hiddens=previous, combo_position_ids=positions,
+                        attention_inputs=SimpleNamespace(is_prefill=True),
+                    )
+                    fmha = SimpleNamespace(fmha_params=None, release_forward_workspace=MagicMock())
+                    def gather(local, logical_tokens, **kwargs):
+                        self.assertEqual(logical_tokens, tokens)
+                        torch.testing.assert_close(local, shard_tokens(expected, layout))
+                        return expected.clone()
+                    with patch.object(model, "_embed_shifted_tokens", return_value=e), patch(
+                        "rtp_llm.models_py.model_desc.kimi_k3_mtp.select_block_map_for_layer"
+                    ), patch(
+                        "rtp_llm.models_py.model_desc.kimi_k3_mtp.all_gather_trim", side_effect=gather
+                    ) as ag, patch(
+                        "rtp_llm.models_py.model_desc.kimi_k3_mtp.PyModelOutputs", side_effect=lambda z, _: z
+                    ), patch.object(layer.attention, "forward", wraps=layer.attention.forward) as attn:
+                        result = model.forward(inputs, fmha)
+                    torch.testing.assert_close(result, model.final_norm(expected))
+                    torch.testing.assert_close(model.get_mtp_target_hidden_states(-1), expected)
+                    self.assertEqual(attn.call_args.args[0].shape, (layout.local_tokens, 4))
+                    self.assertTrue(attn.call_args.kwargs["sequence_parallel"])
+                    self.assertEqual(attn.call_args.kwargs["prefill_sp_layout"], layout)
+                    self.assertEqual(layer.moe.calls[-1][1], dict(
+                        sequence_parallel=True, valid_token_count=layout.local_valid_tokens,
+                    ))
+                    fmha.release_forward_workspace.assert_called_once()
+                    ag.assert_called_once()
 
 if __name__ == "__main__":
     unittest.main()

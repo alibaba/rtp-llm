@@ -176,7 +176,7 @@ Important optional variables:
   KIMI_K3_FP8_COLLECTIVE_GEMM
                             1 (default) enables FP8 collective GEMM
   KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES
-                            defaults to 4294967296 (4 GiB) per rank;
+                            defaults to 6442450944 (6 GiB) per rank;
                             0 disables historical KV expansion limits.
                             Current-chunk KV and FP8 temporaries are not capped.
   SMOKE_KEEP_CLUSTER_ON_SUCCESS
@@ -364,7 +364,7 @@ smoke_proposal_tokens="${GEN_NUM_PER_CIRCLE:-3}"
 smoke_shared_expert_shard=$((smoke_tp_size % 2 == 0))
 smoke_decode_kv_cache_mem_mb="${SMOKE_DECODE_KV_CACHE_MEM_MB:-20000}"
 smoke_decode_kda_pool_blocks="${SMOKE_DECODE_KDA_POOL_BLOCKS:-32}"
-smoke_long_prefix_target_tokens="${SMOKE_LONG_PREFIX_TARGET_TOKENS:-100000}"
+smoke_long_prefix_target_tokens="${SMOKE_LONG_PREFIX_TARGET_TOKENS:-1000000}"
 smoke_long_prefix_tp_size="${SMOKE_LONG_PREFIX_TP_SIZE:-1}"
 smoke_linear_step="${SMOKE_LINEAR_STEP:-1}"
 smoke_chunkwise_rdma="${SMOKE_CHUNKWISE_RDMA:-1}"
@@ -828,7 +828,7 @@ apply_validated_common_profile() {
     export KIMI_K3_MLA_FP8="${KIMI_K3_MLA_FP8:-1}"
     export KIMI_K3_MLA_FP8_Q_SCALE="${KIMI_K3_MLA_FP8_Q_SCALE:-1}"
     export KIMI_K3_MLA_FP8_KV_SCALE="${KIMI_K3_MLA_FP8_KV_SCALE:-1}"
-    export KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES="${KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES:-4294967296}"
+    export KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES="${KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES:-6442450944}"
     export SEQ_SIZE_PER_BLOCK="${smoke_block_size}"
     export KERNEL_SEQ_SIZE_PER_BLOCK="${smoke_kernel_block_size}"
     export CONCURRENCY_LIMIT=32

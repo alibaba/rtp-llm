@@ -23,7 +23,9 @@ _MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES_ENV = (
 def _mla_prefill_expanded_kv_budget_bytes() -> int:
     """Resolve K3's dense-MLA expanded-KV workspace budget."""
 
-    raw = os.environ.get(_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES_ENV, "0").strip()
+    raw = os.environ.get(
+        _MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES_ENV, str(6 * 1024**3)
+    ).strip()
     try:
         value = int(raw)
     except ValueError as error:

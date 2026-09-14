@@ -21,7 +21,7 @@ EXPECTED = {
     "late": "BIRCH-7251",
     "square": 1369,
 }
-DEFAULT_TARGET_TOKENS = 600000
+DEFAULT_TARGET_TOKENS = 1000000
 FILLER = (
     "The following archive entry is neutral background material. "
     "It introduces no named record or instruction.\n"
