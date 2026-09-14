@@ -103,7 +103,7 @@ public final class RequestScheduler {
                         failure = switch (committed.status()) {
                             case SUCCESS -> {
                                 var delivery = committed.value();
-                                lifecycle.beginRouteDelivery(delivery.claim(), delivery.precedingWork(), delivery.unstartedWorkMs());
+                                delivery.claim().publishRoute(delivery.precedingWork(), delivery.unstartedWorkMs());
                                 yield null;
                             }
                             case REJECTED -> committed.rejection();
@@ -163,6 +163,6 @@ public final class RequestScheduler {
     }
 
     private static Response error(StrategyErrorType type, String detail) {
-        return RequestRegistry.buildErrorResponse(type, detail);
+        return RequestResponses.buildErrorResponse(type, detail);
     }
 }

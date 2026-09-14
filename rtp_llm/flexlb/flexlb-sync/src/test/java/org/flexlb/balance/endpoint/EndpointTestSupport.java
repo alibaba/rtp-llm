@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.scheduler.DeliveryClaim;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
@@ -318,24 +319,17 @@ public final class EndpointTestSupport {
                         invocation.getArgument(1)).getAsBoolean()) {
                     return null;
                 }
-                RequestRegistry.DeliveryClaim claim = org.mockito.Mockito.mock(
-                        RequestRegistry.DeliveryClaim.class);
+                DeliveryClaim claim = org.mockito.Mockito.mock(
+                        DeliveryClaim.class);
                 org.mockito.Mockito.when(claim.item()).thenReturn(
                         invocation.getArgument(0));
+                org.mockito.Mockito.doAnswer(inv -> { onCompleted(claim, inv.getArgument(0)); return null; })
+                        .when(claim).complete(org.mockito.Mockito.any());
+                org.mockito.Mockito.doAnswer(inv -> { claim.complete(DeliveryResult.delivered()); return null; })
+                        .when(claim).publishRoute(org.mockito.Mockito.any(), org.mockito.Mockito.anyLong());
                 return claim;
             }).when(requests).tryClaimRouteDelivery(
                     org.mockito.Mockito.any(), org.mockito.Mockito.any());
-            org.mockito.Mockito.doAnswer(invocation -> {
-                onCompleted(invocation.getArgument(0),
-                        invocation.getArgument(1));
-                return null;
-            }).when(requests).complete(
-                    org.mockito.Mockito.any(), org.mockito.Mockito.any());
-            org.mockito.Mockito.doAnswer(invocation -> {
-                requests.complete(invocation.getArgument(0), DeliveryResult.delivered());
-                return null;
-            }).when(requests).beginRouteDelivery(
-                    org.mockito.Mockito.any(), org.mockito.Mockito.any(), org.mockito.Mockito.anyLong());
             org.mockito.Mockito.doAnswer(invocation -> {
                 onQueueOfferFailure(
                         invocation.getArgument(0), invocation.getArgument(1));
@@ -359,7 +353,7 @@ public final class EndpointTestSupport {
         }
 
         void onCompleted(
-                RequestRegistry.DeliveryClaim claim,
+                DeliveryClaim claim,
                 DeliveryResult result) {
         }
 

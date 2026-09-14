@@ -167,9 +167,7 @@ public final class DecodePreemptionCoordinator {
                         "endpoint_cancel_linearization_failed"));
             }
             for (ClaimedVictim owned : capability.claims) {
-                if (!requests.tryApplyPreemptionPhase(
-                        owned.claim(),
-                        PreemptionCancelPhase.CANCEL_IN_FLIGHT)) {
+                if (!owned.claim().applyPhase(PreemptionCancelPhase.CANCEL_IN_FLIGHT)) {
                     return CompletableFuture.completedFuture(capability.abort(
                             true,
                             "inflight_cancel_linearization_failed:"
@@ -255,9 +253,7 @@ public final class DecodePreemptionCoordinator {
                             command.endpoint().recordPriorityCancelPhase(
                                     capability.token, victim.requestId(),
                                     PreemptionCancelPhase.CANCEL_REQUESTED)
-                            && requests.tryApplyPreemptionPhase(
-                                    owned.claim(),
-                                    PreemptionCancelPhase.CANCEL_REQUESTED);
+                            && owned.claim().applyPhase(PreemptionCancelPhase.CANCEL_REQUESTED);
                     if (transitioned) {
                         capability.transferred(owned);
                         owned.acceptedAcknowledgement = true;
@@ -271,9 +267,7 @@ public final class DecodePreemptionCoordinator {
                     command.endpoint().recordPriorityCancelPhase(
                             capability.token, victim.requestId(),
                             PreemptionCancelPhase.NOT_FOUND_STALE);
-                    requests.tryApplyPreemptionPhase(
-                            owned.claim(),
-                            PreemptionCancelPhase.NOT_FOUND_STALE);
+                    owned.claim().applyPhase(PreemptionCancelPhase.NOT_FOUND_STALE);
                     capability.transferred(owned);
                     if (!capability.isTerminal(owned)) {
                         hasNotFound = true;
@@ -340,8 +334,7 @@ public final class DecodePreemptionCoordinator {
         boolean endpointSettled = command.endpoint().settlePriorityTombstoned(
                 capability.token, reservation(command.endpoint(), victim));
         boolean inflightSettled = endpointSettled
-                && requests.trySettlePreemptionTombstone(
-                        owned.claim(), command.detail());
+                && owned.claim().settleTerminal(command.detail());
         boolean attemptSettled = inflightSettled
                 && capability.recordTerminal(owned);
         return endpointSettled && inflightSettled && attemptSettled;
@@ -555,8 +548,7 @@ public final class DecodePreemptionCoordinator {
             command.endpoint().recordPriorityCancelPhase(
                     token, owned.requestId(),
                     PreemptionCancelPhase.CANCEL_UNKNOWN);
-            requests.tryApplyPreemptionPhase(
-                    owned.claim(), PreemptionCancelPhase.CANCEL_UNKNOWN);
+            owned.claim().applyPhase(PreemptionCancelPhase.CANCEL_UNKNOWN);
             transferred(owned);
         }
 
@@ -624,7 +616,7 @@ public final class DecodePreemptionCoordinator {
             for (ClaimedVictim owned : claims) {
                 if (owned.disposition == ClaimDisposition.RELEASABLE) {
                     try {
-                        requests.tryReleasePreemption(owned.claim());
+                        owned.claim().release();
                     } catch (RuntimeException | Error failure) {
                         recordCleanupFailure(
                                 "release_claim:" + owned.requestId(),

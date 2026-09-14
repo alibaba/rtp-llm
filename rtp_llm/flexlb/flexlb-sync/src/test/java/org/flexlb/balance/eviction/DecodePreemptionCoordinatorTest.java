@@ -104,7 +104,7 @@ class DecodePreemptionCoordinatorTest {
         assertTrue(timedOut.controlFailure());
         assertEquals("cancel_terminal_unknown", timedOut.detail());
         verify(fixture.endpoint()).abortPriorityPreemption(1L);
-        verify(fixture.requests(), never()).tryReleasePreemption(victimClaim);
+        verify(victimClaim, never()).release();
         assertFalse(terminal.isDone(), "timing out admission must retain the victim terminal observation");
 
         terminal.complete(new VictimTerminal(11L));
@@ -128,7 +128,6 @@ class DecodePreemptionCoordinatorTest {
         when(endpoint.commitPriorityPreemption(anyLong())).thenReturn(true);
         when(requests.findCancelTarget(anyLong(), anyLong())).thenReturn(
                 Optional.of(new CancelTarget("10.0.0.1", 9090)));
-        when(requests.tryApplyPreemptionPhase(any(), any())).thenReturn(true);
         return new Fixture(requests, endpoint);
     }
 
@@ -139,6 +138,7 @@ class DecodePreemptionCoordinatorTest {
             CompletableFuture<VictimTerminal> terminal) {
         PreemptionRegistration claim = mock(PreemptionRegistration.class);
         when(claim.requestId()).thenReturn(requestId);
+        when(claim.applyPhase(any())).thenReturn(true);
         when(claim.attemptToken()).thenReturn(1L);
         when(claim.terminalObservation()).thenReturn(terminal);
         return claim;

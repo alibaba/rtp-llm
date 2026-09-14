@@ -73,7 +73,7 @@ class RequestCompletionPublicationRaceTest {
                     prefill, decode, reservation, slot.createdAtMs());
             RequestLifecycleTestSupport.bind(registry,
                     new RequestLifecycleTestSupport.Registered(item, future));
-            RequestRegistry.DeliveryClaim claim = RequestLifecycleTestSupport.claimBatch(
+            DeliveryClaim claim = RequestLifecycleTestSupport.claimBatch(
                     registry, item, 601L, () -> true);
             assertNotNull(claim);
 
@@ -92,7 +92,7 @@ class RequestCompletionPublicationRaceTest {
             CompletableFuture<Void> callback = future.thenAccept(response ->
                     assertFalse(Thread.holdsLock(slot), "frontend callbacks must not hold the slot lock"));
 
-            Future<?> acknowledgement = operations.submit(() -> registry.complete(claim, DeliveryResult.delivered()));
+            Future<?> acknowledgement = operations.submit(() -> claim.complete(DeliveryResult.delivered()));
             assertTrue(reportingEntered.await(2L, TimeUnit.SECONDS));
             assertEquals(RequestState.Phase.ACKNOWLEDGED, slot.snapshot().state());
             assertFalse(future.isDone());
@@ -144,7 +144,7 @@ class RequestCompletionPublicationRaceTest {
         synchronized (fixture.slot()) {
             fixture.slot().markCancellationRequested(CancelReason.DEADLINE_EXCEEDED, "request inactive");
             TerminalAction terminal = fixture.slot().beginTerminalizing(true, false, false, null,
-                    owner -> owner.timeout("request inactive"), new Response());
+                    TerminalOutcome.timeout("request inactive"), new Response());
             assertNotNull(terminal);
             assertNull(terminal.publication(), "an already selected delivery owns the frontend result");
             assertEquals(RequestState.Phase.TIMED_OUT,
@@ -165,7 +165,7 @@ class RequestCompletionPublicationRaceTest {
         synchronized (fixture.slot()) {
             // ACKNOWLEDGED records the Engine fact, not a selected frontend result.
             terminal = fixture.slot().beginTerminalizing(true, false, false, null,
-                    owner -> owner.fail("worker failed before response publication"), failure);
+                    TerminalOutcome.fail("worker failed before response publication"), failure);
             assertNotNull(terminal.publication());
             fixture.slot().finishTombstone(terminal);
         }
@@ -195,7 +195,7 @@ class RequestCompletionPublicationRaceTest {
 
     private static Fixture fixture() {
         RequestCompletionPublisher publisher = mock(RequestCompletionPublisher.class);
-        RequestSlot slot = new RequestSlot(publisher, 701L);
+        RequestSlot slot = new RequestSlot(publisher, 701L, null, null, null);
         when(publisher.tryReservePublication(eq(slot), any())).thenAnswer(invocation ->
                 new RequestSlot.PublicationPermit(publisher, slot, invocation.getArgument(1)));
         var config = SchedulingTestConfig.batchConfig();

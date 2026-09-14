@@ -101,7 +101,7 @@ class RequestConfirmationTimeoutTest {
                     return true;
                 }));
             }
-            RequestRegistry.DeliveryClaim claim;
+            DeliveryClaim claim;
             try (var routeCommit = prefill.tryBeginRouteCommitAdmission()) {
                 assertNotNull(routeCommit);
                 claim = requests.tryClaimRouteDelivery(item, () -> {
@@ -110,11 +110,10 @@ class RequestConfirmationTimeoutTest {
                     }
                 });
                 assertNotNull(claim);
-                requests.beginDelivery(claim,
-                        new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L);
+                claim.begin(new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L);
             }
             if (waiting == ConfirmationWait.UNCERTAIN_REPLY) {
-                requests.complete(claim, DeliveryResult.uncertain(new IllegalStateException("reply was lost")));
+                claim.complete(DeliveryResult.uncertain(new IllegalStateException("reply was lost")));
             }
             assertEquals(1, requests.liveRequestCount());
             assertFalse(future.isDone());

@@ -175,7 +175,7 @@ class RequestSchedulerTest {
                         RoleType.PREFILL, "g1", "127.0.0.1:8000")));
         when(router.select(context, null)).thenReturn(
                 PlacementResult.success(route),
-                PlacementResult.rejected(RequestRegistry.buildErrorResponse(
+                PlacementResult.rejected(RequestResponses.buildErrorResponse(
                         StrategyErrorType.NO_PREFILL_WORKER, null)));
         PlacementAvailability availability = new PlacementAvailability();
         RequestScheduler scheduler = new RequestScheduler(
@@ -219,7 +219,7 @@ class RequestSchedulerTest {
         when(lifecycle.claimAdmissionMutation(900L, future)).thenReturn(
                 mock(AdmissionMutation.class));
         when(router.select(context, null)).thenReturn(
-                PlacementResult.rejected(RequestRegistry.buildErrorResponse(
+                PlacementResult.rejected(RequestResponses.buildErrorResponse(
                         StrategyErrorType.NO_PREFILL_WORKER, null)));
 
         RequestScheduler scheduler = new RequestScheduler(
@@ -261,7 +261,7 @@ class RequestSchedulerTest {
             gatePlanningStarted.countDown();
             releaseGatePlanning.await(5, TimeUnit.SECONDS);
             return PlacementResult.rejected(
-                    RequestRegistry.buildErrorResponse(
+                    RequestResponses.buildErrorResponse(
                             StrategyErrorType.NO_PREFILL_WORKER, null));
         });
 
@@ -333,7 +333,7 @@ class RequestSchedulerTest {
                 PlacementResult.blocked(
                         PlacementKey.anyGroup(RoleType.PREFILL)));
         when(router.select(highPriority, null)).thenReturn(
-                PlacementResult.rejected(RequestRegistry.buildErrorResponse(
+                PlacementResult.rejected(RequestResponses.buildErrorResponse(
                         StrategyErrorType.NO_PREFILL_WORKER, null)));
 
         RequestScheduler scheduler = new RequestScheduler(
@@ -1045,7 +1045,7 @@ class RequestSchedulerTest {
                     });
             when(router.select(context, null)).thenReturn(
                     PlacementResult.rejected(
-                            RequestRegistry.buildErrorResponse(
+                            RequestResponses.buildErrorResponse(
                                     StrategyErrorType.NO_PREFILL_WORKER,
                                     null)));
             scheduler = new RequestScheduler(
