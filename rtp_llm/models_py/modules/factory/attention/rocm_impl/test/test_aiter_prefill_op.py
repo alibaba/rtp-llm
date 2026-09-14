@@ -18,9 +18,14 @@ Skips automatically off ROCm or without ``aiter`` so the suite stays green
 on the rest of the fleet.
 """
 
+import importlib.util
 import math
+import sys
+import threading
+import types
 import unittest
 from itertools import accumulate
+from pathlib import Path
 from typing import List, Optional, Sequence
 from unittest.mock import patch
 
@@ -1371,6 +1376,250 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
                 )
 
 
+def _load_graph_prefill_module_for_mock_test():
+    fake_aiter = types.ModuleType("aiter")
+    fake_jit = types.ModuleType("aiter.jit")
+    fake_jit_core = types.ModuleType("aiter.jit.core")
+    fake_ops = types.ModuleType("aiter.ops")
+    fake_mha = types.ModuleType("aiter.ops.mha")
+
+    def compile_ops(*args, **kwargs):
+        del args, kwargs
+
+        def decorate(function):
+            return function
+
+        return decorate
+
+    fake_jit_core.AITER_CSRC_DIR = "/mock/aiter/csrc"
+    fake_jit_core.compile_ops = compile_ops
+    fake_mha.cmdGenFunc_mha_batch_prefill = lambda *args, **kwargs: {"md_name": "mock"}
+    module_path = Path(__file__).resolve().parent.parent / "aiter_graph_prefill.py"
+    spec = importlib.util.spec_from_file_location(
+        f"_test_aiter_graph_prefill_{id(fake_aiter)}", module_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    with patch.dict(
+        sys.modules,
+        {
+            "aiter": fake_aiter,
+            "aiter.jit": fake_jit,
+            "aiter.jit.core": fake_jit_core,
+            "aiter.ops": fake_ops,
+            "aiter.ops.mha": fake_mha,
+        },
+    ):
+        spec.loader.exec_module(module)
+    return module
+
+
+class _GraphPrefillFakeTensor:
+    def __init__(self, shape, device_index=0, dtype=torch.float16):
+        self.device = torch.device("cuda", device_index)
+        self.dtype = dtype
+        self.shape = torch.Size(shape)
+        stride = []
+        running_stride = 1
+        for dimension in reversed(shape):
+            stride.append(running_stride)
+            running_stride *= dimension
+        self._stride = tuple(reversed(stride))
+
+    def stride(self):
+        return self._stride
+
+    def data_ptr(self):
+        return id(self)
+
+
+class TestAiterGraphPrefillSpecializationConcurrency(unittest.TestCase):
+    class _CountingSet(set):
+        def __init__(self):
+            super().__init__()
+            self.add_calls = 0
+
+        def add(self, value):
+            self.add_calls += 1
+            super().add(value)
+
+    class _ObservedLock:
+        def __init__(self):
+            self._lock = threading.Lock()
+            self.waiter_seen = threading.Event()
+
+        def __enter__(self):
+            if not self._lock.acquire(blocking=False):
+                self.waiter_seen.set()
+                self._lock.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            self._lock.release()
+
+    def setUp(self):
+        self.module = _load_graph_prefill_module_for_mock_test()
+
+    def tearDown(self):
+        self.module._ready_specializations.clear()
+        self.module._failed_specializations.clear()
+
+    def _make_args(self, device_index=0, token_count=8):
+        q = _GraphPrefillFakeTensor((token_count, 4, 64), device_index)
+        k = _GraphPrefillFakeTensor((8, 2, 8, 16, 8), device_index)
+        v = _GraphPrefillFakeTensor((8, 2, 2, 64, 8), device_index)
+        out = _GraphPrefillFakeTensor((token_count, 4, 64), device_index)
+        block_table = _GraphPrefillFakeTensor((2, 8), device_index, torch.int32)
+        sanitized_block_table = _GraphPrefillFakeTensor(
+            (2, 16), device_index, torch.int32
+        )
+        return (
+            q,
+            k,
+            v,
+            object(),
+            object(),
+            object(),
+            token_count,
+            128,
+            0.125,
+            out,
+            object(),
+            object(),
+            object(),
+            block_table,
+            sanitized_block_table,
+            object(),
+            None,
+            False,
+            None,
+            None,
+            None,
+        )
+
+    def _key_for_args(self, args):
+        return self.module._specialization_key(
+            args[0],
+            args[1],
+            args[2],
+            args[9],
+            args[13],
+            args[14],
+            args[6],
+            args[7],
+            args[17],
+            args[18],
+            args[19],
+            args[20],
+        )
+
+    def test_same_key_initialization_is_serialized_and_registered_once(self):
+        ready = self._CountingSet()
+        observed_lock = self._ObservedLock()
+        self.module._ready_specializations = ready
+        self.module._specialization_lock = observed_lock
+        first_invoke_entered = threading.Event()
+        release_first_invoke = threading.Event()
+        call_count_lock = threading.Lock()
+        call_count = 0
+
+        def invoke(*args):
+            nonlocal call_count
+            with call_count_lock:
+                call_count += 1
+                current_call = call_count
+            if current_call == 1:
+                first_invoke_entered.set()
+                if not release_first_invoke.wait(timeout=5):
+                    raise TimeoutError(
+                        "timed out waiting to release mock initialization"
+                    )
+            return args[9]
+
+        self.module._mha_batch_prefill_graph = invoke
+        args = self._make_args()
+        results = []
+        errors = []
+
+        def run():
+            try:
+                results.append(self.module.mha_batch_prefill_graph(*args))
+            except Exception as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=run) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        try:
+            self.assertTrue(first_invoke_entered.wait(timeout=5))
+            self.assertTrue(observed_lock.waiter_seen.wait(timeout=5))
+            self.assertEqual(call_count, 1)
+            self.assertEqual(ready.add_calls, 0)
+        finally:
+            release_first_invoke.set()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
+        self.assertEqual(results, [args[9], args[9]])
+        self.assertEqual(call_count, 2)
+        self.assertEqual(ready.add_calls, 1)
+        self.assertEqual(len(ready), 1)
+        self.assertEqual(len(self.module._failed_specializations), 0)
+
+    def test_failed_key_does_not_disable_other_device_or_geometry(self):
+        calls = []
+
+        def invoke(*args):
+            q = args[0]
+            signature = q.device.index, tuple(q.shape)
+            calls.append(signature)
+            if signature == (0, (8, 4, 64)):
+                raise ValueError("mock specialization failure")
+            return args[9]
+
+        self.module._mha_batch_prefill_graph = invoke
+        failed_args = self._make_args()
+        with self.assertRaisesRegex(ValueError, "mock specialization failure"):
+            self.module.mha_batch_prefill_graph(*failed_args)
+        with self.assertRaisesRegex(RuntimeError, "specialization is disabled"):
+            self.module.mha_batch_prefill_graph(*failed_args)
+
+        other_device_args = self._make_args(device_index=1)
+        other_geometry_args = self._make_args(token_count=16)
+        self.assertIs(
+            self.module.mha_batch_prefill_graph(*other_device_args),
+            other_device_args[9],
+        )
+        self.assertIs(
+            self.module.mha_batch_prefill_graph(*other_geometry_args),
+            other_geometry_args[9],
+        )
+
+        self.assertEqual(
+            calls,
+            [(0, (8, 4, 64)), (1, (8, 4, 64)), (0, (16, 4, 64))],
+        )
+        self.assertEqual(len(self.module._failed_specializations), 1)
+        self.assertEqual(len(self.module._ready_specializations), 2)
+        self.assertTrue(
+            self.module.graph_prefill_has_failed(torch.float16, torch.float16, False)
+        )
+        self.assertTrue(
+            self.module.graph_prefill_is_ready(torch.float16, torch.float16, False)
+        )
+        self.assertTrue(self.module.graph_prefill_is_ready_for(torch.float16, False))
+
+    def test_specialization_key_ignores_storage_identity(self):
+        first_args = self._make_args()
+        second_args = self._make_args()
+
+        self.assertNotEqual(first_args[0].data_ptr(), second_args[0].data_ptr())
+        self.assertEqual(
+            self._key_for_args(first_args), self._key_for_args(second_args)
+        )
+
+
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOpPaged module")
 class TestAiterPrefillAttnOpPagedCudaGraphLifecycle(unittest.TestCase):
     def test_graph_warmup_invokes_unready_specialization(self):
@@ -1385,6 +1634,9 @@ class TestAiterPrefillAttnOpPagedCudaGraphLifecycle(unittest.TestCase):
         op.kv_page_indices_buf = torch.zeros(1, dtype=torch.int32)
         op.descale_buf = torch.ones(1, dtype=torch.float32)
         op.sanitized_bt_buf = torch.empty(2, 10, dtype=torch.int32)
+        op.scratch_bt_buf = torch.empty(2, 10, dtype=torch.int32)
+        op.k_scratch_buf = torch.empty(0, dtype=torch.float16)
+        op.v_scratch_buf = torch.empty(0, dtype=torch.float16)
         op.output_buf = torch.empty(8, 4, 8, dtype=torch.float16)
         op.softmax_lse_buf = torch.empty(0, dtype=torch.float32)
         op.dropout_randval_buf = torch.empty(0, dtype=torch.float16)
@@ -1530,7 +1782,7 @@ class TestAiterBatchPrefillCudaGraph(unittest.TestCase):
             [[2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]],
         )
 
-    def test_linear_v_capture_replay_restores_cache_and_matches_eager(self):
+    def test_linear_v_capture_replay_preserves_live_cache_with_shared_pages(self):
         from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter_graph_prefill import (
             mha_batch_prefill_graph,
         )
@@ -1539,14 +1791,14 @@ class TestAiterBatchPrefillCudaGraph(unittest.TestCase):
         device = torch.device("cuda")
         dtype = torch.bfloat16
         q_len, max_k = 21, 48
-        q_heads, kv_heads, head_dim, page_size = 4, 2, 64, 16
+        q_heads, kv_heads, qk_head_dim, value_head_dim, page_size = 4, 2, 64, 32, 16
         vector_width = 16 // torch.empty(0, dtype=dtype).element_size()
         num_blocks = max_k // page_size
-        q = torch.randn(q_len, q_heads, head_dim, device=device, dtype=dtype)
+        q = torch.randn(q_len, q_heads, qk_head_dim, device=device, dtype=dtype)
         k = torch.randn(
             num_blocks,
             kv_heads,
-            head_dim // vector_width,
+            qk_head_dim // vector_width,
             page_size,
             vector_width,
             device=device,
@@ -1556,39 +1808,69 @@ class TestAiterBatchPrefillCudaGraph(unittest.TestCase):
             num_blocks,
             kv_heads,
             page_size,
-            head_dim,
+            value_head_dim,
             device=device,
             dtype=dtype,
         )
         v_reference = (
             v_logical.reshape(
-                num_blocks, kv_heads, page_size // vector_width, vector_width, head_dim
+                num_blocks,
+                kv_heads,
+                page_size // vector_width,
+                vector_width,
+                value_head_dim,
             )
             .permute(0, 1, 2, 4, 3)
             .contiguous()
         )
+        # The non-ASM writer's live bytes are [value_head_dim, page_size]. The
+        # 5D tensor is only the descriptor accepted by the graph wrapper.
         v_flat = v_logical.permute(0, 1, 3, 2).contiguous()
         v_cache = v_flat.view(
-            num_blocks, kv_heads, page_size // vector_width, head_dim, vector_width
+            num_blocks,
+            kv_heads,
+            page_size // vector_width,
+            value_head_dim,
+            vector_width,
         )
-        v_flat_before = v_flat.clone()
+        k_before = k.clone()
+        v_before = v_flat.clone()
 
         cu_seqlens_q = torch.tensor([0, q_len], device=device, dtype=torch.int32)
         kv_indptr = torch.zeros(2, device=device, dtype=torch.int32)
         kv_page_indices = torch.zeros(1, device=device, dtype=torch.int32)
-        block_table = torch.arange(num_blocks, device=device, dtype=torch.int32).view(
-            1, -1
-        )
-        seqlen_k = torch.tensor([32], device=device, dtype=torch.int32)
+        # The invalid third entry is deliberately live for warmup. It must map
+        # to a zero-filled scratch page rather than reaching CK as page -1.
+        block_table = torch.tensor([[2, 2, -1]], device=device, dtype=torch.int32)
+        seqlen_k = torch.tensor([48], device=device, dtype=torch.int32)
         sanitized_block_table = torch.empty(
             1, num_blocks + 8, device=device, dtype=torch.int32
         )
-        page_claims = torch.empty_like(sanitized_block_table)
-        output = torch.empty(q_len, q_heads, head_dim, device=device, dtype=dtype)
+        scratch_block_table = torch.empty_like(sanitized_block_table)
+        scratch_pages = sanitized_block_table.numel()
+        k_scratch = torch.empty(
+            scratch_pages,
+            kv_heads,
+            qk_head_dim // vector_width,
+            page_size,
+            vector_width,
+            device=device,
+            dtype=dtype,
+        )
+        v_scratch = torch.empty(
+            scratch_pages,
+            kv_heads,
+            page_size // vector_width,
+            value_head_dim,
+            vector_width,
+            device=device,
+            dtype=dtype,
+        )
+        output = torch.empty(q_len, q_heads, value_head_dim, device=device, dtype=dtype)
         softmax_lse = torch.empty(0, device=device, dtype=torch.float32)
         dropout_randval = torch.empty(0, device=device, dtype=dtype)
         rng_state = torch.zeros(2, device=device, dtype=torch.int64)
-        softmax_scale = head_dim**-0.5
+        softmax_scale = qk_head_dim**-0.5
 
         def eager_reference(query, table, lengths):
             return aiter.mha_batch_prefill_func(
@@ -1607,7 +1889,9 @@ class TestAiterBatchPrefillCudaGraph(unittest.TestCase):
             ).clone()
 
         second_q = torch.randn_like(q)
-        second_table = torch.tensor([[2, 1, 0]], device=device, dtype=torch.int32)
+        # Page 2 appears twice. Each table slot must receive an independent
+        # scratch page while producing the same result as the shared live page.
+        second_table = torch.tensor([[2, 1, 2]], device=device, dtype=torch.int32)
         second_seqlen_k = torch.tensor([48], device=device, dtype=torch.int32)
         second_reference = eager_reference(second_q, second_table, second_seqlen_k)
         args = (
@@ -1627,13 +1911,27 @@ class TestAiterBatchPrefillCudaGraph(unittest.TestCase):
             block_table,
             sanitized_block_table,
             seqlen_k,
-            page_claims,
+            scratch_block_table,
             True,
+            None,
+            None,
+            None,
+            k_scratch,
+            v_scratch,
         )
 
         mha_batch_prefill_graph(*args)
         torch.cuda.synchronize()
-        self.assertTrue(torch.equal(v_flat, v_flat_before))
+        self.assertTrue(torch.equal(k, k_before))
+        self.assertTrue(torch.equal(v_flat, v_before))
+        self.assertEqual(
+            scratch_block_table.cpu().tolist(), [list(range(scratch_pages))]
+        )
+        self.assertTrue(torch.equal(k_scratch[0], k[2]))
+        self.assertTrue(torch.equal(v_scratch[0], v_reference[2]))
+        self.assertTrue(torch.count_nonzero(k_scratch[2]).item() == 0)
+        self.assertTrue(torch.count_nonzero(v_scratch[2]).item() == 0)
+
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             mha_batch_prefill_graph(*args)
@@ -1645,7 +1943,10 @@ class TestAiterBatchPrefillCudaGraph(unittest.TestCase):
         torch.cuda.synchronize()
 
         self.assertTrue(torch.equal(output, second_reference))
-        self.assertTrue(torch.equal(v_flat, v_flat_before))
+        self.assertTrue(torch.equal(k, k_before))
+        self.assertTrue(torch.equal(v_flat, v_before))
+        self.assertTrue(torch.equal(k_scratch[0], k_scratch[2]))
+        self.assertTrue(torch.equal(v_scratch[0], v_scratch[2]))
 
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOpTriton module")
@@ -1716,7 +2017,7 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
     def test_paged_graph_workspace_keeps_capture_capacity_during_replay(self):
         from types import SimpleNamespace
 
-        op = AiterPrefillAttnOpPaged(_make_attn_configs(4, 2, 8))
+        op = AiterPrefillAttnOpPaged(_make_attn_configs(4, 2, 8), linear_v=True)
         cu_seqlens_q = torch.tensor([0, 128], dtype=torch.int32)
         cu_seqlens_k = torch.tensor([0, 2048], dtype=torch.int32)
         block_table = torch.zeros(1, 128, dtype=torch.int32)
@@ -1736,7 +2037,9 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
             op.prepare_cuda_graph(params, attn_inputs)
             captured_ptrs = (
                 op.sanitized_bt_buf.data_ptr(),
-                op.page_claims_buf.data_ptr(),
+                op.scratch_bt_buf.data_ptr(),
+                op.k_scratch_buf.data_ptr(),
+                op.v_scratch_buf.data_ptr(),
                 op.output_buf.data_ptr(),
             )
 
@@ -1747,12 +2050,19 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
             op.prepare_cuda_graph(params, attn_inputs)
 
         self.assertEqual(op.sanitized_bt_buf.shape, (1, 136))
+        self.assertEqual(op.scratch_bt_buf.shape, (1, 136))
+        self.assertEqual(op.k_scratch_buf.shape, (136, 2, 1, 16, 8))
+        self.assertEqual(op.v_scratch_buf.shape, (136, 2, 2, 8, 8))
+        self.assertEqual(op.k_scratch_buf.dtype, torch.float16)
+        self.assertEqual(op.v_scratch_buf.dtype, torch.float16)
         self.assertEqual(op.output_buf.shape, (128, 4, 8))
         self.assertEqual(
             captured_ptrs,
             (
                 op.sanitized_bt_buf.data_ptr(),
-                op.page_claims_buf.data_ptr(),
+                op.scratch_bt_buf.data_ptr(),
+                op.k_scratch_buf.data_ptr(),
+                op.v_scratch_buf.data_ptr(),
                 op.output_buf.data_ptr(),
             ),
         )
@@ -3819,6 +4129,36 @@ class TestVLayoutContract(unittest.TestCase):
             BrokenImpl.error = RuntimeError("HIP error: illegal memory access")
             with self.assertRaisesRegex(RuntimeError, "illegal memory access"):
                 attn_factory.get_fmha_impl(config, None, inputs)
+
+    def test_graph_prefill_respects_disabled_paged_impl(self):
+        class AiterPrefillImplPaged:
+            accepts_fmha_config = False
+            support = support_parallelism_config = staticmethod(lambda *_: True)
+
+            def __init__(self, *_):
+                raise AssertionError("disabled implementation was instantiated")
+
+        class FallbackImpl(AiterPrefillImplPaged):
+            def __init__(self, *_):
+                pass
+
+            def support_cuda_graph(self):
+                return True
+
+        config, inputs = self._make_case(128, 16)
+        config.need_rope_kv_cache = False
+        flags = FMHAConfig()
+        flags.use_aiter_pa = False
+        with patch.object(
+            attn_factory, "get_device_type", return_value=None
+        ), patch.object(
+            attn_factory, "PREFILL_MHA_IMPS", [AiterPrefillImplPaged, FallbackImpl]
+        ):
+            impl = attn_factory.get_fmha_impl(
+                config, None, inputs, fmha_config=flags, is_cuda_graph=True
+            )
+
+        self.assertIsInstance(impl, FallbackImpl)
 
 
 if __name__ == "__main__":

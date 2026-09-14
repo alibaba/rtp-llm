@@ -65,6 +65,11 @@ class _FailingModel(_Model):
         return super().forward(inputs, attention)
 
 
+class _PreparationFailingModel(_Model):
+    def prepare_fmha_impl(self, _inputs, _capture):
+        raise RuntimeError("intentional preparation failure")
+
+
 class _InspectingModel(_Model):
     def __init__(self):
         self.last_graph_inputs = None
@@ -88,7 +93,7 @@ class TestCudaGraphLazyCapture(unittest.TestCase):
             self.tokens_per_block,
             self.tokens_per_block,
             self.buckets,
-            True,
+            lazy_capture=True,
         )
         self.addCleanup(self._close_runner, runner)
         return runner
@@ -246,6 +251,15 @@ class TestCudaGraphLazyCapture(unittest.TestCase):
 
     def test_failed_capture_falls_back_without_retry(self):
         runner = self._runner(_FailingModel())
+        inputs = self._inputs(2)
+
+        self.assertEqual(runner.plan(inputs), "CaptureAfterEager")
+        self.assertFalse(runner.captureCurrentBucket())
+        self.assertEqual(runner.plan(inputs), "Eager")
+        self.assertFalse(runner.captureCurrentBucket())
+
+    def test_failed_preparation_falls_back_without_retry(self):
+        runner = self._runner(_PreparationFailingModel())
         inputs = self._inputs(2)
 
         self.assertEqual(runner.plan(inputs), "CaptureAfterEager")

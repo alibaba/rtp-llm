@@ -2179,36 +2179,54 @@ bool CudaGraphRunner::captureBucketLazy(int key) {
         local_prepared = false;
         RTP_LLM_LOG_ERROR("lazy capture preparation failed for %s %d", key_type, key);
     }
+
+    // A preparation failure must stop every TP rank before any rank enters graph-held
+    // collectives. This synchronization is also the final result synchronization for
+    // the failed preparation path, so captureCurrentBucket must not reduce it again.
     if (!synchronizeCaptureSuccess(local_prepared)) {
         RTP_LLM_LOG_ERROR(
             "lazy capture preparation failed for %s %d; bucket will fall back to eager forever", key_type, key);
         return false;
     }
 
+    bool local_success    = false;
     bool finish_attempted = false;
     try {
         captureOneGraphInstance(key, key_type);
         finish_attempted = true;
         cuda_graph::finish_capture_session();
         replayAndSyncCheck(key, key_type);
+        local_success = true;
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("lazy capture or replay check failed for %s %d: %s", key_type, key, e.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("lazy capture or replay check failed for %s %d", key_type, key);
+    }
+
+    if (!local_success && !finish_attempted && captureSessionMayBeDirty()) {
+        try {
+            cuda_graph::finish_capture_session();
+        } catch (const std::exception& cleanup_error) {
+            RTP_LLM_LOG_ERROR("failed to finalize capture session for %s %d: %s", key_type, key, cleanup_error.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("failed to finalize capture session for %s %d", key_type, key);
+        }
+    }
+
+    // All ranks that passed preparation execute exactly one final result collective,
+    // including ranks whose capture, session finalization, or replay check failed.
+    const bool global_success = synchronizeCaptureSuccess(local_success);
+    if (global_success) {
         capture_session_may_be_dirty_.store(false, std::memory_order_release);
         RTP_LLM_LOG_INFO("lazy capture success for %s: %d", key_type, key);
         return true;
-    } catch (...) {
-        if (!finish_attempted) {
-            try {
-                cuda_graph::finish_capture_session();
-            } catch (const std::exception& cleanup_error) {
-                RTP_LLM_LOG_ERROR(
-                    "failed to finalize capture session for %s %d: %s", key_type, key, cleanup_error.what());
-            } catch (...) {
-                RTP_LLM_LOG_ERROR("failed to finalize capture session for %s %d", key_type, key);
-            }
-        }
-        RTP_LLM_LOG_ERROR(
-            "lazy capture failed after collective execution began for %s %d; aborting request", key_type, key);
-        throw;
     }
+
+    RTP_LLM_LOG_ERROR("lazy capture failed for %s %d", key_type, key);
+    if (captureSessionMayBeDirty()) {
+        throw std::runtime_error("lazy capture failed after graph capture began");
+    }
+    return false;
 }
 
 bool CudaGraphRunner::synchronizeCaptureSuccess(bool local_success) {
@@ -2218,18 +2236,18 @@ bool CudaGraphRunner::synchronizeCaptureSuccess(bool local_success) {
             return local_success;
         }
 
-        auto status = torch::tensor({local_success ? 1 : 0}, options_cuda_int32_);
-        dist.attr("all_reduce")(status, dist.attr("ReduceOp").attr("MIN"));
-        const bool global_success = status.item<int>() != 0;
+        auto       status         = torch::tensor({local_success ? 1 : 0}, options_cuda_int32_);
+        auto       global_status  = execAllReduce({status, ReduceOp::Min, false, ParallelMode::TP}).buffer;
+        const bool global_success = global_status.item<int>() != 0;
         if (local_success && !global_success) {
-            RTP_LLM_LOG_WARNING("lazy capture failed on another rank; disabling this bucket on all ranks");
+            RTP_LLM_LOG_WARNING("lazy capture failed on another TP rank; disabling this bucket on all TP ranks");
         }
         return global_success;
     } catch (const std::exception& e) {
-        RTP_LLM_LOG_ERROR("failed to synchronize lazy capture result: %s", e.what());
+        RTP_LLM_LOG_ERROR("failed to synchronize lazy capture result across TP ranks: %s", e.what());
         return false;
     } catch (...) {
-        RTP_LLM_LOG_ERROR("failed to synchronize lazy capture result");
+        RTP_LLM_LOG_ERROR("failed to synchronize lazy capture result across TP ranks");
         return false;
     }
 }
@@ -2286,6 +2304,7 @@ bool CudaGraphRunner::captureCurrentBucket(const CudaGraphState& state) {
 
     py::gil_scoped_acquire gil;
     try {
+        // captureBucketLazy returns the already TP-synchronized result.
         const bool success = captureBucketLazy(key);
         std::lock_guard<std::mutex> lock(bucket_states_mutex_);
         bucket_states_[key] = success ? BucketState::Ready : BucketState::Failed;

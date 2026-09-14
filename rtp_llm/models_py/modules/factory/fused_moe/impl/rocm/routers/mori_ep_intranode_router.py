@@ -128,7 +128,8 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
     ) -> torch.Tensor:
         # Combine uses the global dispatch expert ids carried with the payload; the
         # AIter expert kernel maps them to local experts via expert_mask internally.
-        assert combine_indices is not None, "combine_indices missing for Mori finalize"
+        if combine_indices is None:
+            raise RuntimeError("combine_indices missing for Mori finalize")
         global_dispatch_ids = combine_indices
         if global_dispatch_ids.dtype != torch.int32:
             global_dispatch_ids = global_dispatch_ids.to(torch.int32)

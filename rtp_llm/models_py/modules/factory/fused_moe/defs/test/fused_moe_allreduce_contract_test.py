@@ -1,7 +1,7 @@
 """Platform-neutral FusedMoe TP all-reduce contract tests."""
 
 from unittest import TestCase, main
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -32,6 +32,7 @@ class FusedMoeSkipAllreduceTest(TestCase):
 
         router = Mock(spec=FusedMoeDataRouter)
         router.supports_skip_tp_allreduce = supports_skip
+        router.max_inp_tokens = None
         router.prepare.return_value = ExpertForwardPayload(
             expert_x=hidden_states,
             expert_topk_ids=topk_ids,
@@ -148,6 +149,56 @@ class FusedMoeSkipAllreduceTest(TestCase):
         router.prepare.assert_not_called()
         experts.execute.assert_not_called()
         router.finalize.assert_not_called()
+
+    def test_chunked_forward_validates_skip_before_dispatch(self):
+        fused_moe, router, experts, hidden_states, topk_weights, topk_ids = (
+            self._make_fused_moe(False)
+        )
+        router.max_inp_tokens = 2
+
+        with self.assertRaisesRegex(ValueError, "supports_skip_tp_allreduce"):
+            fused_moe(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                skip_tp_allreduce=True,
+            )
+
+        router.prepare.assert_not_called()
+        experts.execute.assert_not_called()
+        router.finalize.assert_not_called()
+
+    def test_chunked_forward_passes_skip_to_every_chunk(self):
+        fused_moe, router, experts, hidden_states, topk_weights, topk_ids = (
+            self._make_fused_moe(True)
+        )
+        router.max_inp_tokens = 2
+        router.prepare.side_effect = lambda a1, _, __, weights, ids: (
+            ExpertForwardPayload(
+                expert_x=a1,
+                expert_topk_ids=ids,
+                expert_topk_weights=weights,
+            )
+        )
+        experts.execute.side_effect = lambda payload, **_: CombineForwardPayload(
+            fused_expert_output=payload.expert_x.clone()
+        )
+        router.finalize.side_effect = lambda payload, *_: payload.fused_expert_output
+
+        with patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=False
+        ):
+            output = fused_moe(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                skip_tp_allreduce=True,
+            )
+
+        torch.testing.assert_close(output, hidden_states)
+        self.assertEqual(router.finalize.call_count, 2)
+        for finalize_call in router.finalize.call_args_list:
+            self.assertTrue(finalize_call.args[4][SKIP_TP_ALLREDUCE_ARG])
 
     def test_gate_pack_rejects_skip_before_dispatch(self):
         fused_moe, router, experts, hidden_states, _, _ = self._make_fused_moe(False)

@@ -582,6 +582,15 @@ class MoriEpIntranodeRouterTest(unittest.TestCase):
         if max_gpu_count < 2:
             self.skipTest(f"Need at least 2 GPUs, got {max_gpu_count}")
 
+    def test_finalize_rejects_missing_combine_indices(self):
+        _ensure_moriep_symbols_loaded()
+        router = MoriEpIntranodeRouter.__new__(MoriEpIntranodeRouter)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "combine_indices missing for Mori finalize"
+        ):
+            router._finalize_single(torch.empty(0), None, None)
+
     def test_world_size_2(self):
         self._check_skip()
         max_gpu_count, _ = _gpu_count_without_parent_cuda_init()

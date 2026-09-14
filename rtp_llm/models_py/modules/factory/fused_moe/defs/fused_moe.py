@@ -344,6 +344,7 @@ class FusedMoe(torch.nn.Module):
         extra_finalize_args: Optional[FinalizeArgs] = None,
         skip_tp_allreduce: bool = False,
     ) -> torch.Tensor:
+        self._validate_skip_tp_allreduce(skip_tp_allreduce)
         max_inp_tokens = self.router.max_inp_tokens
         if max_inp_tokens is not None and hidden_states.shape[0] > max_inp_tokens:
             if torch.cuda.is_current_stream_capturing():
@@ -367,11 +368,11 @@ class FusedMoe(torch.nn.Module):
                             if extra_finalize_args is not None
                             else None
                         ),
+                        skip_tp_allreduce=skip_tp_allreduce,
                     )
                 )
             return torch.cat(outputs, dim=0)
 
-        self._validate_skip_tp_allreduce(skip_tp_allreduce)
         return self._forward_single(
             hidden_states,
             topk_weights,

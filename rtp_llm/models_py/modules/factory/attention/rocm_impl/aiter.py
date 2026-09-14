@@ -873,9 +873,11 @@ class AiterPrefillAttnOpPaged:
         self.head_num_kv = attn_configs.kv_head_num
         self.tokens_per_block = attn_configs.kernel_tokens_per_block
         self.max_seq_len = attn_configs.max_seq_len
-        self.tokens_per_block = attn_configs.kernel_tokens_per_block
         self.attn_dtype = attn_configs.dtype
         self.has_fp8_cache = attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+        self.kv_cache_dtype = (
+            torch.float8_e4m3fn if self.has_fp8_cache else self.attn_dtype
+        )
         self.linear_v = linear_v
         self.enable_cuda_graph = False
         self.cuda_graph_prepared = False
@@ -885,7 +887,9 @@ class AiterPrefillAttnOpPaged:
         self.kv_page_indices_buf: Optional[torch.Tensor] = None
         self.descale_buf: Optional[torch.Tensor] = None
         self.sanitized_bt_buf: Optional[torch.Tensor] = None
-        self.page_claims_buf: Optional[torch.Tensor] = None
+        self.scratch_bt_buf: Optional[torch.Tensor] = None
+        self.k_scratch_buf: Optional[torch.Tensor] = None
+        self.v_scratch_buf: Optional[torch.Tensor] = None
         self._block_positions: Optional[torch.Tensor] = None
         self.output_buf: Optional[torch.Tensor] = None
         self.softmax_lse_buf: Optional[torch.Tensor] = None
@@ -899,7 +903,9 @@ class AiterPrefillAttnOpPaged:
     def _supports_graph_kernel_geometry(self) -> bool:
         if self.attn_dtype not in (torch.float16, torch.bfloat16):
             return False
-        vector_width = 16 if self.has_fp8_cache else 16 // self.attn_dtype.itemsize
+        if self.linear_v and self.has_fp8_cache:
+            return False
+        vector_width = 16 // self.kv_cache_dtype.itemsize
         return (
             0 < self.head_dim <= 256
             and self.head_dim % vector_width == 0
@@ -1011,6 +1017,22 @@ class AiterPrefillAttnOpPaged:
         )
         output_shape = (graph_token_q_capacity, self.head_num, self.head_dim)
         output_dtype = self._graph_output_dtype()
+        vector_width = 16 // self.kv_cache_dtype.itemsize
+        scratch_pages = required_bt_shape[0] * required_bt_shape[1]
+        k_scratch_shape = (
+            scratch_pages,
+            self.head_num_kv,
+            self.head_dim // vector_width,
+            self.tokens_per_block,
+            vector_width,
+        )
+        v_scratch_shape = (
+            scratch_pages,
+            self.head_num_kv,
+            self.tokens_per_block // vector_width,
+            self.head_dim,
+            vector_width,
+        )
         if self.seqlen_k_buf is None:
             self.seqlen_k_buf = torch.empty(
                 max(1, batch_size), dtype=torch.int32, device=self.graph_device
@@ -1043,9 +1065,27 @@ class AiterPrefillAttnOpPaged:
             self.sanitized_bt_buf = torch.empty(
                 required_bt_shape, dtype=torch.int32, device=self.graph_device
             )
-            self.page_claims_buf = torch.empty(
+            self.scratch_bt_buf = torch.empty(
                 required_bt_shape, dtype=torch.int32, device=self.graph_device
             )
+            if self.linear_v:
+                self.k_scratch_buf = torch.empty(
+                    k_scratch_shape,
+                    dtype=self.kv_cache_dtype,
+                    device=self.graph_device,
+                )
+                self.v_scratch_buf = torch.empty(
+                    v_scratch_shape,
+                    dtype=self.kv_cache_dtype,
+                    device=self.graph_device,
+                )
+            else:
+                self.k_scratch_buf = torch.empty(
+                    0, dtype=self.kv_cache_dtype, device=self.graph_device
+                )
+                self.v_scratch_buf = torch.empty(
+                    0, dtype=self.kv_cache_dtype, device=self.graph_device
+                )
             self.output_buf = torch.empty(
                 output_shape, dtype=output_dtype, device=self.graph_device
             )
@@ -1060,11 +1100,24 @@ class AiterPrefillAttnOpPaged:
             )
         elif (
             self.sanitized_bt_buf.shape != required_bt_shape
-            or self.page_claims_buf is None
-            or self.page_claims_buf.shape != required_bt_shape
+            or self.sanitized_bt_buf.dtype != torch.int32
+            or self.sanitized_bt_buf.device != self.graph_device
+            or self.scratch_bt_buf is None
+            or self.scratch_bt_buf.shape != required_bt_shape
+            or self.scratch_bt_buf.dtype != torch.int32
+            or self.scratch_bt_buf.device != self.graph_device
+            or self.k_scratch_buf is None
+            or (self.linear_v and self.k_scratch_buf.shape != k_scratch_shape)
+            or self.k_scratch_buf.dtype != self.kv_cache_dtype
+            or self.k_scratch_buf.device != self.graph_device
+            or self.v_scratch_buf is None
+            or (self.linear_v and self.v_scratch_buf.shape != v_scratch_shape)
+            or self.v_scratch_buf.dtype != self.kv_cache_dtype
+            or self.v_scratch_buf.device != self.graph_device
             or self.output_buf is None
             or self.output_buf.shape != output_shape
             or self.output_buf.dtype != output_dtype
+            or self.output_buf.device != self.graph_device
         ):
             raise ValueError(
                 "AIter graph prefill metadata shape changed after preparation"
@@ -1075,18 +1128,44 @@ class AiterPrefillAttnOpPaged:
         q_tensor = qkv[0][: fmha_params.token_q_num]
         device = q_tensor.device
 
-        key_cache = kv_cache.kv_cache_base.select(1, 0)
-        value_cache = kv_cache.kv_cache_base.select(1, 1)
-        vector_width = 16 // key_cache.element_size()
-        kv_sizes = key_cache.shape
-        key_cache = key_cache.view(
+        kv_cache_base = kv_cache.kv_cache_base
+        if (
+            kv_cache_base.dim() != 5
+            or kv_cache_base.size(1) != 2
+            or kv_cache_base.size(2) != self.head_num_kv
+            or kv_cache_base.size(3) != self.tokens_per_block
+            or kv_cache_base.size(4) != self.head_dim
+        ):
+            raise ValueError(
+                "AIter paged prefill requires KV cache shaped "
+                "[num_blocks, 2, num_kv_heads, page_size, head_dim]"
+            )
+        valid_cache_dtypes = (
+            (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+            if self.has_fp8_cache
+            else (self.kv_cache_dtype,)
+        )
+        if kv_cache_base.dtype not in valid_cache_dtypes:
+            raise ValueError(
+                f"KV cache dtype mismatch: expected one of {valid_cache_dtypes}, "
+                f"got {kv_cache_base.dtype}"
+            )
+
+        key_cache_4d = kv_cache_base.select(1, 0)
+        value_cache_4d = kv_cache_base.select(1, 1)
+        vector_width = 16 // key_cache_4d.element_size()
+        kv_sizes = key_cache_4d.shape
+        key_cache = key_cache_4d.view(
             kv_sizes[0],
             kv_sizes[1],
             kv_sizes[3] // vector_width,
             kv_sizes[2],
             vector_width,
         )
-        value_cache = value_cache.view(
+        # For linear_v, this is only a 5D descriptor for the live allocation:
+        # its physical V bytes remain [head_dim, page_size]. The custom graph
+        # kernel reads that order into a separate CK-vectorized scratch tensor.
+        value_cache = value_cache_4d.view(
             kv_sizes[0],
             kv_sizes[1],
             kv_sizes[2] // vector_width,
@@ -1168,11 +1247,13 @@ class AiterPrefillAttnOpPaged:
                 block_table,
                 self.sanitized_bt_buf,
                 seqlen_k,
-                self.page_claims_buf,
+                self.scratch_bt_buf,
                 self.linear_v,
                 q_descale,
                 k_descale,
                 v_descale,
+                self.k_scratch_buf,
+                self.v_scratch_buf,
             )
             return res[: fmha_params.token_q_num].reshape(
                 fmha_params.token_q_num, self.head_num * self.head_dim
@@ -1192,7 +1273,22 @@ class AiterPrefillAttnOpPaged:
                 dtype=torch.int32,
                 device=device,
             )
-            page_claims = torch.empty_like(sanitized_block_table)
+            scratch_block_table = torch.empty_like(sanitized_block_table)
+            if self.linear_v:
+                scratch_pages = sanitized_block_table.numel()
+                k_scratch = torch.empty(
+                    (scratch_pages, *key_cache.shape[1:]),
+                    dtype=key_cache.dtype,
+                    device=device,
+                )
+                v_scratch = torch.empty(
+                    (scratch_pages, *value_cache.shape[1:]),
+                    dtype=value_cache.dtype,
+                    device=device,
+                )
+            else:
+                k_scratch = torch.empty(0, dtype=key_cache.dtype, device=device)
+                v_scratch = torch.empty(0, dtype=value_cache.dtype, device=device)
             output = torch.empty(output_shape, dtype=output_dtype, device=device)
             softmax_lse = torch.empty(0, dtype=torch.float32, device=device)
             dropout_randval = torch.empty(0, dtype=output_dtype, device=device)
@@ -1215,11 +1311,13 @@ class AiterPrefillAttnOpPaged:
                     block_table,
                     sanitized_block_table,
                     seqlen_k,
-                    page_claims,
+                    scratch_block_table,
                     self.linear_v,
                     q_descale,
                     k_descale,
                     v_descale,
+                    k_scratch,
+                    v_scratch,
                 )
             except Exception as error:
                 self._graph_prefill_disabled = True
