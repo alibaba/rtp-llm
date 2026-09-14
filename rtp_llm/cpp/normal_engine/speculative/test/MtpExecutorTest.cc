@@ -1858,12 +1858,9 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
     RTP_LLM_LOG_INFO("[dispatch-bench] speedup: %.1fx", speedup);
 }
 
-// M2: a speculative (MTP) executor must carry the sleep pause marker through its
-// empty skip-run step, exactly like NormalExecutor, so a TP-only sleep quiesce
-// wave releases worker ranks AND makes the engine loop self-pause. Before the fix
-// MtpExecutor inherited Executor::processForPause() (empty step, no marker) and
-// the base consumeLastPauseSignal() (always false), so this returned false.
-TEST_F(MtpExecutorTest, testProcessForPauseSignalsSelfPause) {
+// Legacy pause can still drive an empty matching executor round. Sleep itself
+// uses the round fence, with no per-forward pause-marker bookkeeping.
+TEST_F(MtpExecutorTest, testProcessForPauseUsesEmptyStep) {
     MtpExecutorTestConfig test_config;
     auto                  components = createMtpExecutorComponents(test_config);
 
@@ -1876,15 +1873,9 @@ TEST_F(MtpExecutorTest, testProcessForPauseSignalsSelfPause) {
                     std::move(components.fake_speculative_sampler),
                     std::move(components.fake_sampler));
 
-    // A plain empty step (normal serving with nothing to do) must NOT raise a
-    // pause signal.
     ASSERT_TRUE(components.executor->process({}).ok());
-    EXPECT_FALSE(components.executor->consumeLastPauseSignal());
-
-    // The pause wave must raise exactly one self-pause signal, then drain.
     ASSERT_TRUE(components.executor->processForPause().ok());
-    EXPECT_TRUE(components.executor->consumeLastPauseSignal());
-    EXPECT_FALSE(components.executor->consumeLastPauseSignal());
+    ASSERT_TRUE(components.executor->process({}).ok());
 }
 
 }  // namespace rtp_llm

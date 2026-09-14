@@ -684,7 +684,6 @@ absl::Status NormalEngine::releasePendingTpCollectiveForPause(uint64_t pause_epo
 
     RTP_LLM_LOG_INFO("normal engine pause: run one empty TP sync step, epoch=%lu", pause_epoch);
     auto status = executor_->processForPause();
-    (void)executor_->consumeLastPauseSignal();
     if (!status.ok()) {
         return status;
     }

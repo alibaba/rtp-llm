@@ -21,9 +21,6 @@ public:
         std::list<GenerateStreamPtr> empty_streams;
         return process(empty_streams);
     }
-    virtual bool consumeLastPauseSignal() {
-        return false;
-    }
 
     // Drain any outstanding stream-async worker tasks (dispatch / MTP prepare-verify
     // runners) before acknowledging sleep quiescence. For DP/EP the engine calls
