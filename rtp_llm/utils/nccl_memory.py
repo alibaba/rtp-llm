@@ -354,8 +354,7 @@ def comms(device: object = None) -> List[Tuple[str, int]]:
     """``(group key, raw ncclComm_t)`` for every distinct NCCL communicator.
 
     rtp-llm registers the same ProcessGroup under several keys in
-    ``collective_torch._group_map``, and ``Group.SLEEP_QUIESCE`` is gloo (no
-    communicator at all), so both duplicates and non-NCCL groups are dropped.
+    ``collective_torch._group_map``. Both duplicates and non-NCCL groups are dropped.
     Deduplication is by raw pointer, which is what makes the double-suspend rule
     (4) enforceable: suspending the same comm twice via two keys is an error.
 

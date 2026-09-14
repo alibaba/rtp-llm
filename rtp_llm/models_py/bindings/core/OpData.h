@@ -25,9 +25,6 @@ enum class ParallelMode {
     FFN_TP    = 3,
     EP        = 4,
     EPLB      = 5,
-    // Reserved legacy callback mode. Round-fenced sleep uses host-only lifecycle
-    // RPCs and does not create a process group or issue per-step sleep collectives.
-    SLEEP_QUIESCE = 6,
 };
 
 // A batch includes two parts: context batch and decoder batch.

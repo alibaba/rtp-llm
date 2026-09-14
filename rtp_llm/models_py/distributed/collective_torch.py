@@ -18,9 +18,6 @@ _CPP_PARALLEL_MODE_TP = 0
 _CPP_PARALLEL_MODE_DP = 1
 _CPP_PARALLEL_MODE_DP_AND_TP = 2
 _UDS_SUN_PATH_LIMIT = 108
-# Reserved legacy callback mode. Round-fenced sleep creates no process group;
-# coordination now uses host-only lifecycle RPCs, outside normal inference.
-_CPP_PARALLEL_MODE_SLEEP_QUIESCE = 6
 
 
 class Group(Enum):
@@ -29,8 +26,6 @@ class Group(Enum):
     DP = "DP"
     TP = "TP"
     DP_AND_TP = "DP_AND_TP"
-    # Reserved for legacy callback users; no sleep group is created at startup.
-    SLEEP_QUIESCE = "SLEEP_QUIESCE"
 
 
 # Global process group storage
@@ -321,10 +316,6 @@ def _register_process_groups_to_cpp():
             if _CPP_PARALLEL_MODE_DP_AND_TP not in registered_modes:
                 mode_to_group[_CPP_PARALLEL_MODE_DP_AND_TP] = pg
                 registered_modes.add(_CPP_PARALLEL_MODE_DP_AND_TP)
-        elif group_key == Group.SLEEP_QUIESCE:
-            if _CPP_PARALLEL_MODE_SLEEP_QUIESCE not in registered_modes:
-                mode_to_group[_CPP_PARALLEL_MODE_SLEEP_QUIESCE] = pg
-                registered_modes.add(_CPP_PARALLEL_MODE_SLEEP_QUIESCE)
         elif isinstance(group_key, str):
             if group_key.startswith(Group.TP.name):
                 if _parallelism_config is not None:
@@ -420,13 +411,6 @@ def _register_process_groups_to_cpp():
         target = dest if dest is not None else tensor
         if dest is not None:
             target.copy_(tensor)
-        if mode == _CPP_PARALLEL_MODE_SLEEP_QUIESCE:
-            # Legacy callback compatibility only; normal serving no longer calls
-            # this mode or creates its group. Never promote a host vote to CUDA.
-            torch.distributed.all_reduce(
-                target, op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM), group=pg
-            )
-            return target
         device_id = torch.cuda.current_device()
         gpu_t, was_cpu = _ensure_cuda(target, device_id)
         torch.distributed.all_reduce(
@@ -703,7 +687,9 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     torch.distributed.broadcast(tensor, src, group=process_group)
 
 
-def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> torch.Tensor:
+def all_reduce(
+    tensor: torch.Tensor, group: Group, *, inplace: bool = False
+) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
 
     Args:

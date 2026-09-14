@@ -283,13 +283,8 @@ def enumerate_process_group_comms(
                 continue
             reader = getattr(backend, "_comm_ptr", None)
             if reader is None:
-                # The expected, uninteresting case. Group.SLEEP_QUIESCE is gloo,
-                # and `_get_backend(cuda)` hands back its ProcessGroupGloo instead
-                # of raising -- so "has a CUDA backend" is NOT the same question as
-                # "owns an ncclComm_t". Gating the complaint on the backend actually
-                # being the NCCL one is what keeps this branch meaning what it says:
-                # measured on DSV4 PD, treating gloo as a rename logged an ERROR on
-                # every rank of every sleep while the release was in fact working.
+                # Non-NCCL groups may return a backend rather than raise.
+                # Only a missing accessor on an actual NCCL backend is an error.
                 if _is_nccl_backend(backend):
                     logging.error(
                         "[NcclMemory] %s is an NCCL backend with no _comm_ptr "

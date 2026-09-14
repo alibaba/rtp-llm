@@ -1,6 +1,5 @@
-"""Sleep adds no communicator; the reserved legacy callback remains host-only."""
+"""Both sleep levels keep the existing inference process groups unchanged."""
 
-import sys
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -12,58 +11,40 @@ from rtp_llm.models_py.distributed import collective_torch as ct
 
 class SleepQuiesceHostCollectiveTest(unittest.TestCase):
 
-    def test_sleep_enabled_dp_does_not_create_or_warm_a_quiesce_group(self):
-        config = SimpleNamespace(
-            world_rank=0, world_size=2, tp_size=1, dp_size=2, ep_size=2
-        )
-        with mock.patch.dict(
-            "os.environ", {"ENABLE_SLEEP_MODE": "1"}
-        ), mock.patch.object(ct, "_group_map", {}), mock.patch.object(
-            torch.distributed, "new_group"
-        ) as new_group, mock.patch.object(
-            torch.distributed, "all_reduce"
-        ) as reduce:
-            ct._create_process_groups(config, "nccl", None)
-            new_group.assert_not_called()
-            reduce.assert_not_called()
-            self.assertNotIn(ct.Group.SLEEP_QUIESCE, ct._group_map)
-
-    def test_sleep_vote_and_destination_stay_on_cpu(self):
-        callbacks = []
-        extension = SimpleNamespace(
-            register_comm_ops=lambda *args: callbacks.extend(args)
-        )
-        group = mock.Mock()
-        group.size.return_value = 2
-        with mock.patch.dict(
-            sys.modules, {"librtp_compute_ops": extension}
-        ), mock.patch.object(
-            ct, "_group_map", {ct.Group.SLEEP_QUIESCE: group}
-        ), mock.patch.object(
-            ct, "_parallelism_config", None
-        ):
-            ct._register_process_groups_to_cpp()
-        reduce = callbacks[1]
-
-        def all_reduce(tensor, op, group):
-            self.assertEqual(tensor.device.type, "cpu")
-            tensor.mul_(2)
-
-        with mock.patch.object(
-            torch.distributed, "all_reduce", side_effect=all_reduce
-        ), mock.patch.object(
-            torch.cuda,
-            "current_device",
-            side_effect=AssertionError("sleep vote touched CUDA"),
-        ):
-            for use_dest in (False, True):
-                source = torch.tensor([1, 0], dtype=torch.int64)
-                dest = torch.empty_like(source) if use_dest else None
-                result = reduce(source, 0, ct._CPP_PARALLEL_MODE_SLEEP_QUIESCE, dest)
-                self.assertEqual(result.tolist(), [2, 0])
-                self.assertIs(result, dest if use_dest else source)
-                if use_dest:
-                    self.assertEqual(source.tolist(), [1, 0])
+    def test_sleep_does_not_add_or_warm_process_groups(self):
+        for enabled in ("0", "1"):
+            for level in ("1", "2"):
+                for tp_size, dp_size in ((1, 2), (2, 1), (2, 2)):
+                    with self.subTest(
+                        enabled=enabled, level=level, tp=tp_size, dp=dp_size
+                    ):
+                        config = SimpleNamespace(
+                            world_rank=0,
+                            world_size=tp_size * dp_size,
+                            tp_size=tp_size,
+                            dp_size=dp_size,
+                        )
+                        with mock.patch.dict(
+                            "os.environ",
+                            {"ENABLE_SLEEP_MODE": enabled, "SLEEP_MODE_LEVEL": level},
+                        ), mock.patch.object(ct, "_group_map", {}), mock.patch.object(
+                            torch.distributed, "new_group"
+                        ) as new_group, mock.patch.object(
+                            torch.distributed, "all_reduce"
+                        ) as reduce, mock.patch.object(
+                            torch.distributed, "barrier"
+                        ), mock.patch.object(
+                            ct, "_get_symm_mem"
+                        ):
+                            ct._create_process_groups(config, "nccl", None)
+                            mixed = tp_size > 1 and dp_size > 1
+                            self.assertEqual(new_group.call_count, 4 if mixed else 0)
+                            for call in new_group.call_args_list:
+                                self.assertEqual(call.kwargs["backend"], "nccl")
+                            self.assertEqual(
+                                set(ct._group_map), {"DP0", "TP0"} if mixed else set()
+                            )
+                            reduce.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -1475,8 +1475,7 @@ class CommsTest(NcclMemoryTestBase):
 
         Deduplication by raw pointer is what makes rule (4) enforceable:
         suspending the same comm twice via two aliases is ``ncclInvalidUsage``.
-        The gloo SLEEP_QUIESCE group has no communicator at all and must vanish
-        rather than raise.
+        Non-NCCL groups have no NCCL communicator and must be skipped.
         """
         self.install_group_map(
             {
@@ -1484,7 +1483,7 @@ class CommsTest(NcclMemoryTestBase):
                 "DP0": _FakePg(_COMM_A),  # same PG under a second key
                 "TP0": _FakePg(_COMM_B),
                 # gloo, as it really presents itself: a backend object, no raise
-                "Group.SLEEP_QUIESCE": _FakePg(None, backend=ProcessGroupGloo()),
+                "Group.CPU_ONLY": _FakePg(None, backend=ProcessGroupGloo()),
                 "Group.NO_CUDA_BACKEND": _FakePg(None),  # _get_backend() raises
                 "Group.BROKEN": _FakePg(0),  # getCommPtr() returned nullptr
             }
@@ -1505,7 +1504,7 @@ class CommsTest(NcclMemoryTestBase):
         than no logging: they train whoever is on call to ignore the real one.
         """
         self.install_group_map(
-            {"Group.SLEEP_QUIESCE": _FakePg(None, backend=ProcessGroupGloo())}
+            {"Group.CPU_ONLY": _FakePg(None, backend=ProcessGroupGloo())}
         )
 
         with self.assertLogs(level="ERROR") as captured:

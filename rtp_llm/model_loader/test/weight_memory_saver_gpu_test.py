@@ -19,8 +19,8 @@ out of it, and :func:`loader.ModelLoader.load_weights` additionally runs a gated
 reused out-of-tag. This test locks that behavior down empirically.
 
 It uses ``hook_mode="torch"`` (CUDAPluggableAllocator) so it runs in-process
-without the LD_PRELOAD shim, then drives the *real* RTP-LLM wrapper
-(``weights_region`` / ``pause_weights`` / ``resume_weights``) at level 2.
+without the LD_PRELOAD shim, then drives the real RTP-LLM ``weights_region``
+at level 2 and the allocator's native tag pause/resume operations.
 Skips cleanly when CUDA or torch_memory_saver is unavailable.
 """
 
@@ -89,12 +89,8 @@ class Level2WeightsRegionIsolationTest(unittest.TestCase):
         wms._import_attempted = True
 
     def tearDown(self) -> None:
-        # Never leave the region paused for the next test; do NOT empty_cache or
-        # destroy the pool here (that is what triggers the teardown segfault).
-        try:
-            wms.resume_weights()
-        except Exception:
-            pass
+        # Every pause is immediately paired with resume before assertions. Do
+        # not empty_cache or destroy the pool here (the teardown segfault).
         wms._reset_for_testing()
         for name, value in self._saved_env.items():
             if value is None:
@@ -129,13 +125,11 @@ class Level2WeightsRegionIsolationTest(unittest.TestCase):
         sentinel_sum_before = float(sentinel.sum().item())
 
         # level-2 sleep: discard the weights tag (no cpu backup).
-        self.assertTrue(wms.pause_weights())
-        self.assertTrue(wms.is_paused())
+        self._saver.pause(wms.WEIGHTS_TAG)
         # level-2 wake: remap blank physical pages at the SAME VA. The real reload
         # would copy_ weights back from the checkpoint here; we only assert the
         # memory-plumbing invariants.
-        self.assertTrue(wms.resume_weights())
-        self.assertFalse(wms.is_paused())
+        self._saver.resume(wms.WEIGHTS_TAG)
         torch.cuda.synchronize()
 
         # 1) Weight VA is preserved (C++ aliases / captured CUDA graphs stay valid).
@@ -195,8 +189,8 @@ class Level2WeightsRegionIsolationTest(unittest.TestCase):
                     self.assertNotEqual(ptr, raw.data_ptr())
                     torch.testing.assert_close(result, raw)
                     torch.cuda.synchronize()
-                    self.assertTrue(wms.pause_weights())
-                    self.assertTrue(wms.resume_weights())
+                    self._saver.pause(wms.WEIGHTS_TAG)
+                    self._saver.resume(wms.WEIGHTS_TAG)
                     torch.cuda.synchronize()
                     self.assertEqual(result.data_ptr(), ptr)
                     self.assertEqual(result.count_nonzero().item(), 0)
@@ -213,8 +207,8 @@ class Level2WeightsRegionIsolationTest(unittest.TestCase):
             weight = torch.zeros(512, 512, device="cuda", dtype=torch.float32)
         weight_ptr = weight.data_ptr()
 
-        self.assertTrue(wms.pause_weights())
-        self.assertTrue(wms.resume_weights())
+        self._saver.pause(wms.WEIGHTS_TAG)
+        self._saver.resume(wms.WEIGHTS_TAG)
         torch.cuda.synchronize()
 
         self.assertEqual(weight.data_ptr(), weight_ptr)

@@ -43,6 +43,8 @@ class PausableScratchGpuTest(unittest.TestCase):
         # user's original allocator policy for every scratch allocation below.
         with wms.weights_region():
             weight = torch.ones(1024, device="cuda")
+        saver = wms._get_tms()
+        self.assertIsNotNone(saver)
         wms.release_init_segment_splitting()
         wms.enable_runtime_expandable()
         runtime_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF")
@@ -98,8 +100,8 @@ class PausableScratchGpuTest(unittest.TestCase):
             self.assertTrue(torch.all(graph_output == 4).item())
 
             for _ in range(2):
-                self.assertTrue(wms.pause_weights())
-                self.assertTrue(wms.resume_weights())
+                saver.pause(wms.WEIGHTS_TAG)
+                saver.resume(wms.WEIGHTS_TAG)
                 self.assertEqual([buffer.data_ptr() for buffer in buffers], pointers)
                 if level == 1:
                     for buffer in buffers:

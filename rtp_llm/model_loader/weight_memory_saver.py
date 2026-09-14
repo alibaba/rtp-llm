@@ -1,13 +1,10 @@
-"""WeightMemorySaver: weight GPU memory pause/resume with CPU backup.
+"""WeightMemorySaver: sleep-safe allocation of model weights and scratch.
 
 Wraps ``torch_memory_saver`` so that every CUDA allocation that holds model
-weights is registered under the ``tag="weights"`` region with
-``enable_cpu_backup=True``. On engine sleep, :func:`pause_weights` backs the
-weight pages up to host (pinned) memory and releases the physical GPU pages
-while keeping the virtual addresses stable (data_ptr must not change because
-CUDA graphs and the C++ ``weights_`` aliases bake pointers in). On wake_up,
-:func:`resume_weights` remaps physical pages at the same VA and copies the
-content back so weight values are preserved.
+weights is registered under the ``tag="weights"`` region. Level 1 enables CPU
+backup; level 2 discards the pages and reloads weights after wake. The C++ sleep
+controller owns pause/resume through the native allocator backend, preserving
+virtual addresses used by CUDA graphs and the C++ ``weights_`` aliases.
 
 Activation
 ----------
@@ -79,7 +76,6 @@ WEIGHTS_TAG: str = "weights"
 _lock = threading.RLock()
 _tms: Optional[Any] = None
 _import_attempted: bool = False
-_paused: bool = False
 _enabled_override: Optional[bool] = None
 _level_override: Optional[int] = None
 _collective_release_override: Optional[bool] = None
@@ -207,7 +203,7 @@ def configure_from_runtime(
     /sleep request.
     """
     global _enabled_override, _level_override, _collective_release_override
-    global _tms, _import_attempted, _paused
+    global _tms, _import_attempted
     with _lock:
         _enabled_override = bool(enable_sleep_mode)
         if sleep_mode_level is not None:
@@ -217,7 +213,6 @@ def configure_from_runtime(
         if not _enabled_override:
             _tms = None
             _import_attempted = False
-            _paused = False
 
 
 def is_enabled() -> bool:
@@ -336,11 +331,6 @@ def start_configured_process(process: Any) -> None:
     """Start a child process with weight memory saver preload when required."""
     with configure_subprocess():
         process.start()
-
-
-def is_paused() -> bool:
-    """Whether the weights region is currently paused (physical pages released)."""
-    return _paused
 
 
 def _alloc_conf_without_expandable(conf: str) -> str:
@@ -863,61 +853,9 @@ def suppress_weights_region() -> Iterator[None]:
         _region_suppressed.value = prev
 
 
-def pause_weights() -> bool:
-    """Backup weights to host and release physical GPU pages (VA preserved).
-
-    Returns True if the weights are paused after the call. No-op (warning,
-    returns False) when the saver is unavailable; idempotent when already
-    paused. Intended to be called from the sleep sequence *after* the KV
-    cache pause.
-    """
-    global _paused
-    tms = _get_tms()
-    if tms is None:
-        logging.warning(
-            "WeightMemorySaver.pause_weights: saver unavailable "
-            f"(enabled={is_enabled()}), skip pausing weight memory"
-        )
-        return False
-    with _lock:
-        if _paused:
-            logging.info("WeightMemorySaver.pause_weights: already paused, skip")
-            return True
-        tms.pause(WEIGHTS_TAG)
-        _paused = True
-        logging.info("WeightMemorySaver: weights paused (cpu backup, VA preserved)")
-        return True
-
-
-def resume_weights() -> bool:
-    """Remap physical pages at the same VA and copy weight content back.
-
-    Returns True if the weights are resumed (not paused) after the call.
-    No-op (warning, returns False) when the saver is unavailable; idempotent
-    when not paused. Intended to be called from the wake_up sequence *after*
-    the KV cache physical memory is remapped.
-    """
-    global _paused
-    tms = _get_tms()
-    if tms is None:
-        logging.warning(
-            "WeightMemorySaver.resume_weights: saver unavailable "
-            f"(enabled={is_enabled()}), skip resuming weight memory"
-        )
-        return False
-    with _lock:
-        if not _paused:
-            logging.info("WeightMemorySaver.resume_weights: not paused, skip")
-            return True
-        tms.resume(WEIGHTS_TAG)
-        _paused = False
-        logging.info("WeightMemorySaver: weights resumed (content restored)")
-        return True
-
-
 def _reset_for_testing() -> None:
     """Reset module-level caches/state. Test-only helper."""
-    global _tms, _import_attempted, _paused, _enabled_override
+    global _tms, _import_attempted, _enabled_override
     global _level_override, _collective_release_override
     global _expandable_prepared, _expandable_requested, _expandable_active
     global _expandable_base_conf, _expandable_live
@@ -928,7 +866,6 @@ def _reset_for_testing() -> None:
         _scratch_pool_owners = []
         _tms = None
         _import_attempted = False
-        _paused = False
         _enabled_override = None
         # Reset the level and collective-release overrides too: leaving them set
         # leaks a previous test's configure_from_runtime into the next one, which
