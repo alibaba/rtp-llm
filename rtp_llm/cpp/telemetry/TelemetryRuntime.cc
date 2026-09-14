@@ -16,6 +16,7 @@
 #include "opentelemetry/exporters/otlp/otlp_http_exporter_factory.h"
 #include "opentelemetry/exporters/otlp/otlp_http_exporter_options.h"
 #include "opentelemetry/sdk/resource/resource.h"
+#include "opentelemetry/sdk/resource/resource_detector.h"
 #include "opentelemetry/sdk/trace/batch_span_processor_factory.h"
 #include "opentelemetry/sdk/trace/batch_span_processor_options.h"
 #include "opentelemetry/sdk/trace/provider.h"
@@ -53,6 +54,7 @@ struct RuntimeGlobals {
     // path, and config is long gone by then. Published before the `active`
     // release store, so any reader that observes ACTIVE also observes this rank.
     std::atomic<int64_t> world_rank{0};
+    std::string          scope_version;
 };
 
 RuntimeGlobals& globals() {
@@ -146,52 +148,17 @@ std::string readHostname() {
     return std::string(buffer);
 }
 
-bool getEnvBool(const char* name, bool default_value) {
-    std::string value = getEnvString(name, "");
-    if (value.empty()) {
-        return default_value;
+// 通过 SDK 的显式构造入口绕过环境 Resource 探测。
+class ExplicitResourceDetector final: public resource::ResourceDetector {
+public:
+    explicit ExplicitResourceDetector(const resource::ResourceAttributes& attributes): attributes_(attributes) {}
+    resource::Resource Detect() override {
+        return resource::Resource::GetDefault().Merge(Create(attributes_));
     }
-    return value == "1" || value == "true" || value == "TRUE" || value == "True" || value == "on" || value == "ON";
-}
 
-// Parses positive integer; falls back to default on invalid input (fail-open).
-int64_t getEnvPositiveInt(const char* name, int64_t default_value) {
-    std::string value = getEnvString(name, "");
-    if (value.empty()) {
-        return default_value;
-    }
-    try {
-        int64_t parsed = std::stoll(value);
-        if (parsed <= 0) {
-            RTP_LLM_LOG_WARNING(
-                "telemetry env %s=%s invalid (must be > 0), fallback %ld", name, value.c_str(), (long)default_value);
-            return default_value;
-        }
-        return parsed;
-    } catch (const std::exception&) {
-        RTP_LLM_LOG_WARNING("telemetry env %s=%s parse failed, fallback %ld", name, value.c_str(), (long)default_value);
-        return default_value;
-    }
-}
-
-double getEnvRatio(const char* name, double default_value) {
-    std::string value = getEnvString(name, "");
-    if (value.empty()) {
-        return default_value;
-    }
-    try {
-        size_t parsed_length = 0;
-        double parsed        = std::stod(value, &parsed_length);
-        if (parsed_length != value.size() || !std::isfinite(parsed) || parsed < 0.0 || parsed > 1.0) {
-            RTP_LLM_LOG_WARNING("telemetry env %s=%s out of [0,1], fallback %f", name, value.c_str(), default_value);
-            return default_value;
-        }
-        return parsed;
-    } catch (const std::exception&) {
-        RTP_LLM_LOG_WARNING("telemetry env %s=%s parse failed, fallback %f", name, value.c_str(), default_value);
-        return default_value;
-    }
-}
+private:
+    resource::ResourceAttributes attributes_;
+};
 
 void setGlobalNoop() {
     std::shared_ptr<trace_api::TracerProvider> none;
@@ -200,41 +167,6 @@ void setGlobalNoop() {
 
 }  // namespace
 
-TelemetryConfig TelemetryConfig::fromEnv() {
-    TelemetryConfig config;
-    config.enabled = getEnvBool("RTP_LLM_OTEL_TRACE_ENABLE", false);
-
-    // Endpoint priority: signal-specific > generic (+ /v1/traces) > empty.
-    std::string signal_endpoint  = getEnvString("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "");
-    std::string generic_endpoint = getEnvString("OTEL_EXPORTER_OTLP_ENDPOINT", "");
-    if (!signal_endpoint.empty()) {
-        config.endpoint = signal_endpoint;
-    } else if (!generic_endpoint.empty()) {
-        // OTLP spec: for HTTP the generic endpoint gets the signal path appended.
-        std::string base = generic_endpoint;
-        while (!base.empty() && base.back() == '/') {
-            base.pop_back();
-        }
-        config.endpoint = base + "/v1/traces";
-    }
-
-    config.sampler_ratio         = getEnvRatio("RTP_LLM_OTEL_TRACE_SAMPLER_RATIO", 1.0);
-    config.max_queue_size        = (size_t)getEnvPositiveInt("RTP_LLM_OTEL_BSP_MAX_QUEUE_SIZE", 2048);
-    config.schedule_delay_ms     = getEnvPositiveInt("RTP_LLM_OTEL_BSP_SCHEDULE_DELAY_MS", 5000);
-    config.max_export_batch_size = (size_t)getEnvPositiveInt("RTP_LLM_OTEL_BSP_MAX_EXPORT_BATCH_SIZE", 512);
-    config.http_timeout_ms       = getEnvPositiveInt("RTP_LLM_OTEL_HTTP_TIMEOUT_MS", 3000);
-    // Empty means "derive from role at init()" (role-split components).
-    config.service_name = getEnvString("RTP_LLM_OTEL_SERVICE_NAME", "");
-    // BSP requires max_export_batch_size <= max_queue_size.
-    if (config.max_export_batch_size > config.max_queue_size) {
-        RTP_LLM_LOG_WARNING("telemetry max_export_batch_size %zu > max_queue_size %zu, clamp",
-                            config.max_export_batch_size,
-                            config.max_queue_size);
-        config.max_export_batch_size = config.max_queue_size;
-    }
-    return config;
-}
-
 bool TelemetryRuntime::initInternal(std::unique_ptr<trace_sdk::SpanExporter> exporter, const TelemetryConfig& config) {
     // Caller holds globals().mutex.
     auto& g = globals();
@@ -242,7 +174,7 @@ bool TelemetryRuntime::initInternal(std::unique_ptr<trace_sdk::SpanExporter> exp
     // initWithExporter()). Role-split components: an empty service_name derives
     // from the deployment role (rtp_llm_prefill / rtp_llm_decode /
     // rtp_llm_pdfusion) so the Unitrace topology shows P/D as separate nodes;
-    // an explicit RTP_LLM_OTEL_SERVICE_NAME still overrides globally. Resolving
+    // An explicit internal config can override the name; JSON uses the role default.
     // here rather than in init() keeps the test entry on the same contract as
     // production, so a broken derivation can no longer pass the tests.
     const std::string service_name = !config.service_name.empty() ?
@@ -291,7 +223,7 @@ bool TelemetryRuntime::initInternal(std::unique_ptr<trace_sdk::SpanExporter> exp
         if (!pod_ip.empty()) {
             attributes.SetAttribute("rtp_llm.pod_ip", opentelemetry::nostd::string_view(pod_ip));
         }
-        auto res = resource::Resource::Create(attributes);
+        auto res = ExplicitResourceDetector(attributes).Detect();
 
         // 2. Sampler: ParentBased(TraceIdRatio) trusts the upstream sampled flag.
         auto delegate = std::make_shared<trace_sdk::TraceIdRatioBasedSampler>(config.sampler_ratio);
@@ -316,51 +248,51 @@ bool TelemetryRuntime::initInternal(std::unique_ptr<trace_sdk::SpanExporter> exp
             nostd::shared_ptr<otel_ctx::propagation::TextMapPropagator>(
                 new trace_api::propagation::HttpTraceContext()));
 
-        g.state = TelemetryState::ACTIVE;
+        g.scope_version = config.scope_version;
+        g.state         = TelemetryState::ACTIVE;
         g.world_rank.store(config.world_rank, std::memory_order_relaxed);
         g.active.store(true, std::memory_order_release);
-        RTP_LLM_LOG_INFO("telemetry runtime active: role=%s tp_rank=%ld service=%s",
+        RTP_LLM_LOG_INFO("telemetry runtime active: role=%s tp_rank=%ld source=%s root_ratio=%f parent_based=true",
                          config.role.c_str(),
                          (long)config.tp_rank,
-                         service_name.c_str());
+                         config.source.c_str(),
+                         config.sampler_ratio);
         return true;
     } catch (const std::exception&) {
         g.state = TelemetryState::INIT_FAILURE;
         g.provider.reset();
         setGlobalNoop();
-        RTP_LLM_LOG_ERROR("telemetry init failed (telemetry disabled, inference unaffected)");
+        RTP_LLM_LOG_WARNING("telemetry disabled: field=sdk reason=initialization_failed role=%s", config.role.c_str());
         return false;
     } catch (...) {
         g.state = TelemetryState::INIT_FAILURE;
         g.provider.reset();
         setGlobalNoop();
-        RTP_LLM_LOG_ERROR("telemetry init failed with unknown exception (telemetry disabled)");
+        RTP_LLM_LOG_WARNING("telemetry disabled: field=sdk reason=initialization_failed role=%s", config.role.c_str());
         return false;
     }
 }
 
-bool TelemetryRuntime::init(const std::string& role, int64_t tp_rank, int64_t dp_rank, int64_t world_rank) {
+bool TelemetryRuntime::init(
+    const TelemetryConfig& input, const std::string& role, int64_t tp_rank, int64_t dp_rank, int64_t world_rank) {
     auto&                       g = globals();
     std::lock_guard<std::mutex> lock(g.mutex);
     if (g.state == TelemetryState::ACTIVE) {
         return true;
     }
 
-    TelemetryConfig config = TelemetryConfig::fromEnv();
+    if (g.state != TelemetryState::UNINITIALIZED) {
+        return false;
+    }
+    TelemetryConfig config = input;
     config.role            = role;
     config.tp_rank         = tp_rank;
     config.dp_rank         = dp_rank;
     config.world_rank      = world_rank;
-    // service_name stays as resolved by fromEnv(): an empty value is derived
-    // from the role inside initInternal(), the single point both entry points
-    // share.
 
     if (!config.enabled) {
         g.state = TelemetryState::DISABLED;
-        // Log once so a missing RTP_LLM_OTEL_TRACE_ENABLE in this process is
-        // diagnosable (live PD run 2026-07-26: the silent branch made "env not
-        // propagated" indistinguishable from "init never called").
-        RTP_LLM_LOG_INFO("telemetry disabled: RTP_LLM_OTEL_TRACE_ENABLE not set (role=%s)", role.c_str());
+        RTP_LLM_LOG_INFO("telemetry disabled: JSON configuration disabled (role=%s)", role.c_str());
         return false;
     }
     // Only tp_rank==0 owns request spans.
@@ -369,10 +301,12 @@ bool TelemetryRuntime::init(const std::string& role, int64_t tp_rank, int64_t dp
         RTP_LLM_LOG_INFO("telemetry disabled on tp_rank %ld (only rank0 produces spans)", (long)tp_rank);
         return false;
     }
-    if (config.endpoint.empty()) {
+    if (config.endpoint.empty() || config.headers.empty() || !std::isfinite(config.sampler_ratio)
+        || config.sampler_ratio < 0 || config.sampler_ratio > 1 || config.max_queue_size == 0
+        || config.max_export_batch_size == 0 || config.max_export_batch_size > config.max_queue_size
+        || config.schedule_delay_ms <= 0 || config.http_timeout_ms <= 0) {
         g.state = TelemetryState::DISABLED;
-        RTP_LLM_LOG_ERROR("telemetry enabled but no OTLP endpoint configured "
-                          "(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / OTEL_EXPORTER_OTLP_ENDPOINT), telemetry disabled");
+        RTP_LLM_LOG_WARNING("telemetry disabled: field=config reason=invalid_resolved_config role=%s", role.c_str());
         return false;
     }
 
@@ -382,13 +316,28 @@ bool TelemetryRuntime::init(const std::string& role, int64_t tp_rank, int64_t dp
         exporter_options.url          = config.endpoint;
         exporter_options.content_type = otlp::HttpRequestContentType::kBinary;
         exporter_options.timeout      = std::chrono::milliseconds(config.http_timeout_ms);
-        // HTTPS endpoints need a CA bundle for libcurl; without one every C++
-        // span is silently dropped with "error setting certificate verify
-        // locations" (hit on the live 2026-07-26 run). The options constructor
-        // already honors OTEL_EXPORTER_OTLP(_TRACES)_CERTIFICATE; only when
-        // nothing is configured, fall back to the common system bundles.
-        if (config.endpoint.rfind("https", 0) == 0 && exporter_options.ssl_ca_cert_path.empty()
-            && exporter_options.ssl_ca_cert_string.empty()) {
+        // 显式覆盖构造器的全部环境敏感字段，不让旧配置参与导出。
+        exporter_options.http_headers.clear();
+        for (const auto& header : config.headers) {
+            exporter_options.http_headers.emplace(header.first, header.second);
+        }
+        exporter_options.ssl_insecure_skip_verify = false;
+        exporter_options.ssl_ca_cert_path         = config.certificate;
+        exporter_options.ssl_ca_cert_string.clear();
+        exporter_options.ssl_client_key_path.clear();
+        exporter_options.ssl_client_key_string.clear();
+        exporter_options.ssl_client_cert_path.clear();
+        exporter_options.ssl_client_cert_string.clear();
+        exporter_options.ssl_min_tls.clear();
+        exporter_options.ssl_max_tls.clear();
+        exporter_options.ssl_cipher.clear();
+        exporter_options.ssl_cipher_suite.clear();
+        exporter_options.compression.clear();
+        exporter_options.retry_policy_max_attempts       = 5;
+        exporter_options.retry_policy_initial_backoff    = std::chrono::duration<float>{1.0f};
+        exporter_options.retry_policy_max_backoff        = std::chrono::duration<float>{5.0f};
+        exporter_options.retry_policy_backoff_multiplier = 1.5f;
+        if (config.endpoint.rfind("https", 0) == 0 && exporter_options.ssl_ca_cert_path.empty()) {
             static const char* kCaBundleCandidates[] = {
                 "/etc/pki/tls/certs/ca-bundle.crt",    // RHEL / Alibaba Cloud Linux
                 "/etc/ssl/certs/ca-certificates.crt",  // Debian / Ubuntu
@@ -404,7 +353,7 @@ bool TelemetryRuntime::init(const std::string& role, int64_t tp_rank, int64_t dp
             }
             if (exporter_options.ssl_ca_cert_path.empty()) {
                 RTP_LLM_LOG_WARNING("telemetry HTTPS endpoint but no CA bundle found; export will likely fail "
-                                    "(set OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE)");
+                                    "(configure certificate in JSON)");
             }
         }
         exporter = otlp::OtlpHttpExporterFactory::Create(exporter_options);
@@ -413,7 +362,7 @@ bool TelemetryRuntime::init(const std::string& role, int64_t tp_rank, int64_t dp
         exporter = std::make_unique<DiagnosticSpanExporter>(std::move(exporter));
     } catch (const std::exception&) {
         g.state = TelemetryState::INIT_FAILURE;
-        RTP_LLM_LOG_ERROR("telemetry exporter create failed (telemetry disabled)");
+        RTP_LLM_LOG_WARNING("telemetry disabled: field=sdk reason=exporter_failed role=%s", role.c_str());
         return false;
     }
     return initInternal(std::move(exporter), config);
@@ -474,6 +423,16 @@ bool TelemetryRuntime::shutdown(int64_t deadline_ms) {
     return true;
 }
 
+bool TelemetryRuntime::resetForTest() {
+    if (!shutdown(5000)) {
+        return false;
+    }
+    auto&                       g = globals();
+    std::lock_guard<std::mutex> lock(g.mutex);
+    g.state = TelemetryState::UNINITIALIZED;
+    return true;
+}
+
 bool TelemetryRuntime::isActive() {
     // Lock-free: called once per request on RPC hot paths even when telemetry
     // is disabled; the mutex-guarded state stays authoritative for init/shutdown.
@@ -497,10 +456,7 @@ nostd::shared_ptr<trace_api::Tracer> TelemetryRuntime::tracer() {
         auto&                       g = globals();
         std::lock_guard<std::mutex> lock(g.mutex);
         if (g.state == TelemetryState::ACTIVE && g.provider) {
-            // Scope version is injected by the Python launcher (same env
-            // inheritance path as OTEL_EXPORTER_OTLP_TRACES_*).
-            static const std::string scope_version = getEnvString("RTP_LLM_OTEL_SCOPE_VERSION", "");
-            return g.provider->GetTracer("rtp_llm", scope_version);
+            return g.provider->GetTracer("rtp_llm", g.scope_version);
         }
     }
     static nostd::shared_ptr<trace_api::TracerProvider> noop_provider(new trace_api::NoopTracerProvider());

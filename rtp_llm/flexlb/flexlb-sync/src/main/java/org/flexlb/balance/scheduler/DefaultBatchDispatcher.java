@@ -422,8 +422,10 @@ public class DefaultBatchDispatcher {
             for (ScheduledRequest item : items) {
                 item.ctx().setBatchDispatchedNanos(dispatchedNanos);
                 FlexlbTrace.setScheduleAttribute(item.ctx().getTraceContext(), FlexlbTrace.BATCH_ID, batchId);
-                FlexlbTrace.setScheduleAttribute(item.ctx().getTraceContext(), FlexlbTrace.BATCH_SIZE, items.size());
-                FlexlbTrace.setScheduleAttribute(item.ctx().getTraceContext(), FlexlbTrace.DISPATCH_REASON, task.reason());
+                FlexlbTrace.setScheduleAttribute(item.ctx().getTraceContext(), FlexlbTrace.BATCH_SIZE,
+                        (long) items.size());
+                FlexlbTrace.setScheduleAttribute(item.ctx().getTraceContext(), FlexlbTrace.DISPATCH_REASON,
+                        task.reason());
             }
             attempt.rpcInvocationStarted = true;
             rpcFuture = grpcClient.batchEnqueueAsync(

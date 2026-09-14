@@ -54,7 +54,7 @@ class DefaultBatchDispatcherTest {
 
     @BeforeEach
     void setUp() {
-        org.flexlb.telemetry.FlexlbTrace.configureEnabled(true);
+        org.flexlb.telemetry.FlexlbTrace.configure(io.opentelemetry.api.OpenTelemetry.noop(), "");
         configService = mock(ConfigService.class);
         grpcClient = mock(EngineGrpcClient.class);
         config = new FlexlbConfig();
@@ -67,7 +67,7 @@ class DefaultBatchDispatcherTest {
 
     @AfterEach
     void tearDown() {
-        org.flexlb.telemetry.FlexlbTrace.configureEnabled(false);
+        org.flexlb.telemetry.FlexlbTrace.configure(null, "");
         dispatcher.shutdown();
     }
 
@@ -87,7 +87,7 @@ class DefaultBatchDispatcherTest {
     }
 
     private void assertDispatchedTraceContexts(boolean enabled, boolean validScheduleContext) throws Exception {
-        org.flexlb.telemetry.FlexlbTrace.configureEnabled(enabled);
+        org.flexlb.telemetry.FlexlbTrace.configure(enabled ? io.opentelemetry.api.OpenTelemetry.noop() : null, "");
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest first = createScheduledRequest(501L, 500, 200, prefillEp);
         ScheduledRequest second = createScheduledRequest(502L, 500, 200, prefillEp);

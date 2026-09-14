@@ -1,6 +1,7 @@
 package org.flexlb.telemetry;
 
-import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanBuilder;
 import io.opentelemetry.api.trace.SpanContext;
@@ -23,11 +24,6 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Small fail-open facade for the FlexLB manual tracing points.
- *
- * <p>When RTP_LLM_OTEL_TRACE_ENABLE is enabled, the FlexLB application enables
- * the SDK provider before Spring starts. An external instrumentation provider
- * may supply it instead. The manual tracing switch is independent of provider
- * ownership; when disabled, only W3C propagation remains active.</p>
  */
 public final class FlexlbTrace {
 
@@ -37,28 +33,38 @@ public final class FlexlbTrace {
      * string spelling of the internal ID. Mirrors kAttrRequestId / REQUEST_ID in the C++ and
      * Python registries.
      */
-    public static final String REQUEST_ID = "request_id";
-    public static final String BATCH_ID = "rtp_llm.batch_id";
-    public static final String BATCH_SIZE = "rtp_llm.batch_size";
-    public static final String PREFILL_ADDRESS = "rtp_llm.prefill_address";
-    public static final String DECODE_ADDRESS = "rtp_llm.decode_address";
-    public static final String DISPATCH_REASON = "rtp_llm.dispatch_reason";
-    public static final String SCHEDULE_MODE = "flexlb.schedule.mode";
-    public static final String SCHEDULE_CODE = "flexlb.schedule.code";
-    public static final String ENQUEUED_BY_MASTER = "rtp_llm.enqueued_by_master";
-    public static final String ROUTE_SUBMIT_MS = "rtp_llm.route_submit_ms";
-    public static final String BATCH_WAIT_MS = "rtp_llm.batch_wait_ms";
-    public static final String ENQUEUE_BATCH_MS = "rtp_llm.enqueue_batch_ms";
-    public static final String ACK_TO_RESPONSE_MS = "rtp_llm.ack_to_response_ms";
-    public static final String GRPC_STATUS_CODE = "rpc.grpc.status_code";
-    public static final String RTP_LLM_GRPC_STATUS_CODE = "rtp_llm.grpc_status_code";
+    public static final AttributeKey<String> REQUEST_ID = AttributeKey.stringKey("request_id");
+    public static final AttributeKey<Long> BATCH_ID = AttributeKey.longKey("rtp_llm.batch_id");
+    public static final AttributeKey<Long> BATCH_SIZE = AttributeKey.longKey("rtp_llm.batch_size");
+    public static final AttributeKey<String> PREFILL_ADDRESS = AttributeKey.stringKey("rtp_llm.prefill_address");
+    public static final AttributeKey<String> DECODE_ADDRESS = AttributeKey.stringKey("rtp_llm.decode_address");
+    public static final AttributeKey<String> DISPATCH_REASON = AttributeKey.stringKey("rtp_llm.dispatch_reason");
+    public static final AttributeKey<String> SCHEDULE_MODE = AttributeKey.stringKey("flexlb.schedule.mode");
+    public static final AttributeKey<Long> SCHEDULE_CODE = AttributeKey.longKey("flexlb.schedule.code");
+    public static final AttributeKey<Long> SCHEDULE_PRIORITY = AttributeKey.longKey("flexlb.schedule.priority");
+    public static final AttributeKey<Boolean> ENQUEUED_BY_MASTER =
+            AttributeKey.booleanKey("rtp_llm.enqueued_by_master");
+    public static final AttributeKey<Long> ROUTE_SUBMIT_MS = AttributeKey.longKey("rtp_llm.route_submit_ms");
+    public static final AttributeKey<Long> BATCH_WAIT_MS = AttributeKey.longKey("rtp_llm.batch_wait_ms");
+    public static final AttributeKey<Long> ENQUEUE_BATCH_MS = AttributeKey.longKey("rtp_llm.enqueue_batch_ms");
+    public static final AttributeKey<Long> ACK_TO_RESPONSE_MS = AttributeKey.longKey("rtp_llm.ack_to_response_ms");
+    public static final AttributeKey<Long> GRPC_STATUS_CODE = AttributeKey.longKey("rpc.grpc.status_code");
+    public static final AttributeKey<Long> RTP_LLM_GRPC_STATUS_CODE =
+            AttributeKey.longKey("rtp_llm.grpc_status_code");
     /**
      * Canonical gRPC terminal status on a SERVER span, mirroring the C++
      * kAttrRpcResponseStatusCode contract; GRPC_STATUS_CODE above carries the
      * numeric companion.
      */
-    public static final String RPC_RESPONSE_STATUS_CODE = "rpc.response.status_code";
-    public static final String ERROR_TYPE = "error.type";
+    public static final AttributeKey<String> RPC_RESPONSE_STATUS_CODE =
+            AttributeKey.stringKey("rpc.response.status_code");
+    public static final AttributeKey<String> ERROR_TYPE = AttributeKey.stringKey("error.type");
+    /**
+     * OTel semantic convention for the peer endpoint on a CLIENT span. Kept next
+     * to the RTP-LLM keys so both spellings are owned by this facade.
+     */
+    public static final AttributeKey<String> SERVER_ADDRESS = AttributeKey.stringKey("server.address");
+    public static final AttributeKey<Long> SERVER_PORT = AttributeKey.longKey("server.port");
 
     private static final TextMapSetter<Map<String, String>> MAP_SETTER =
             (carrier, key, value) -> carrier.put(key, value);
@@ -70,13 +76,17 @@ public final class FlexlbTrace {
     private static final Map<Span, BusinessError> BUSINESS_ERRORS =
             Collections.synchronizedMap(new WeakHashMap<>());
     private static volatile boolean enabled;
+    private static volatile Tracer tracer = OpenTelemetry.noop().getTracer(INSTRUMENTATION_NAME);
 
     private FlexlbTrace() {
     }
 
-    /** Configured at startup, before requests; does not initialize or own a provider. */
-    public static void configureEnabled(boolean value) {
-        enabled = value;
+    /** 完整初始化成功后注入 Provider；null 表示关闭。 */
+    public static void configure(OpenTelemetry sdk, String scopeVersion) {
+        enabled = false;
+        tracer = sdk == null ? OpenTelemetry.noop().getTracer(INSTRUMENTATION_NAME)
+                : sdk.getTracer(INSTRUMENTATION_NAME, scopeVersion);
+        enabled = sdk != null;
     }
 
     public static boolean isEnabled() {
@@ -157,29 +167,9 @@ public final class FlexlbTrace {
         setAttribute(span, REQUEST_ID, Long.toString(requestId));
     }
 
-    public static void setAttribute(Span span, String key, long value) {
-        try {
-            if (enabled && span != null) {
-                span.setAttribute(key, value);
-            }
-        } catch (Throwable ignored) {
-            // Trace must never affect routing or dispatch.
-        }
-    }
-
-    public static void setAttribute(Span span, String key, String value) {
+    public static <T> void setAttribute(Span span, AttributeKey<T> key, T value) {
         try {
             if (enabled && span != null && value != null) {
-                span.setAttribute(key, value);
-            }
-        } catch (Throwable ignored) {
-            // Trace must never affect routing or dispatch.
-        }
-    }
-
-    public static void setAttribute(Span span, String key, boolean value) {
-        try {
-            if (enabled && span != null) {
                 span.setAttribute(key, value);
             }
         } catch (Throwable ignored) {
@@ -192,19 +182,11 @@ public final class FlexlbTrace {
      * scheduling work is asynchronous, so this deliberately does not create
      * a child span or replace the request context.
      */
-    public static void setScheduleAttribute(Context context, String key, long value) {
+    public static <T> void setScheduleAttribute(Context context, AttributeKey<T> key, T value) {
         setAttribute(spanFromContext(context), key, value);
     }
 
-    public static void setScheduleAttribute(Context context, String key, String value) {
-        setAttribute(spanFromContext(context), key, value);
-    }
-
-    public static void setScheduleAttribute(Context context, String key, boolean value) {
-        setAttribute(spanFromContext(context), key, value);
-    }
-
-    public static void setScheduleDuration(Context context, String key,
+    public static void setScheduleDuration(Context context, AttributeKey<Long> key,
                                             long startNanos, long endNanos) {
         if (startNanos > 0 && endNanos >= startNanos) {
             setScheduleAttribute(context, key,
@@ -265,8 +247,8 @@ public final class FlexlbTrace {
             return;
         }
         setAttribute(span, RPC_RESPONSE_STATUS_CODE, canonicalCode);
-        setAttribute(span, GRPC_STATUS_CODE, numericCode);
-        setAttribute(span, RTP_LLM_GRPC_STATUS_CODE, numericCode);
+        setAttribute(span, GRPC_STATUS_CODE, (long) numericCode);
+        setAttribute(span, RTP_LLM_GRPC_STATUS_CODE, (long) numericCode);
         if (ok) {
             finish(span, null);
             return;
@@ -323,7 +305,7 @@ public final class FlexlbTrace {
             return null;
         }
         try {
-            Tracer tracer = GlobalOpenTelemetry.getTracer(INSTRUMENTATION_NAME);
+            Tracer tracer = FlexlbTrace.tracer;
             SpanBuilder builder = tracer.spanBuilder(name).setSpanKind(kind);
             if (parent == null) {
                 builder.setParent(Context.current());

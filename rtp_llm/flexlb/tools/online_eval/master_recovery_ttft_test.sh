@@ -192,8 +192,6 @@ start_master() {
   env ${FLEXLB_ENV_ARGS[@]+"${FLEXLB_ENV_ARGS[@]}"} \
     "FLEXLB_CONFIG=${flexlb_config}" \
     "FLEXLB_EXPECT_FETCH_RESPONSE=true" \
-    "OTEL_TRACE_SKIP_PATTERN=.*" \
-    "OTEL_EXPORTER_OTLP_ENDPOINT=none" \
     "HIPPO_ROLE=flexlb_recovery_ttft_test" \
     java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
     --server.port="${FLEXLB_HTTP_PORT}" \

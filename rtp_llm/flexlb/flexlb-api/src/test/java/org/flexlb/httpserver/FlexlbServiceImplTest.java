@@ -65,7 +65,7 @@ class FlexlbServiceImplTest {
 
     @BeforeEach
     void setUp() {
-        org.flexlb.telemetry.FlexlbTrace.configureEnabled(true);
+        org.flexlb.telemetry.FlexlbTrace.configure(io.opentelemetry.api.OpenTelemetry.noop(), "");
         routeService = mock(RouteService.class);
         lbStatusConsistencyService = mock(LBStatusConsistencyService.class);
         engineHealthReporter = mock(EngineHealthReporter.class);
@@ -101,7 +101,7 @@ class FlexlbServiceImplTest {
 
     @AfterEach
     void tearDown() {
-        org.flexlb.telemetry.FlexlbTrace.configureEnabled(false);
+        org.flexlb.telemetry.FlexlbTrace.configure(null, "");
         pvLogger.detachAppender(pvAppender);
         pvAppender.stop();
     }
@@ -613,6 +613,7 @@ class FlexlbServiceImplTest {
         io.opentelemetry.sdk.OpenTelemetrySdk sdk =
                 io.opentelemetry.sdk.OpenTelemetrySdk.builder().setTracerProvider(provider).build();
         io.opentelemetry.api.GlobalOpenTelemetry.set(sdk);
+        org.flexlb.telemetry.FlexlbTrace.configure(sdk, "");
         try {
             io.opentelemetry.api.trace.Span serverSpan =
                     org.flexlb.telemetry.FlexlbTrace.startServer(
@@ -661,6 +662,7 @@ class FlexlbServiceImplTest {
                             io.opentelemetry.api.common.AttributeKey.longKey("flexlb.schedule.code")));
             assertTrue(span.getEvents().isEmpty());
         } finally {
+            org.flexlb.telemetry.FlexlbTrace.configure(null, "");
             sdk.close();
             io.opentelemetry.api.GlobalOpenTelemetry.resetForTest();
         }
@@ -783,16 +785,16 @@ class FlexlbServiceImplTest {
             }).join();
             assertEquals(1, exporter.spans.size());
             var data = exporter.spans.getFirst();
-            assertEquals(success ? io.opentelemetry.api.trace.StatusCode.OK : io.opentelemetry.api.trace.StatusCode.ERROR,
-                    data.getStatus().getStatusCode());
-            assertEquals(success ? "10.0.0.10:8000" : null,
-                    data.getAttributes().get(io.opentelemetry.api.common.AttributeKey.stringKey("rtp_llm.prefill_address")));
-            assertEquals(success && !fusion ? "10.0.0.20:9000" : null,
-                    data.getAttributes().get(io.opentelemetry.api.common.AttributeKey.stringKey("rtp_llm.decode_address")));
-            assertEquals(forwarded ? null : 20L,
-                    data.getAttributes().get(io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.batch_wait_ms")));
-            assertEquals(forwarded ? null : 10L,
-                    data.getAttributes().get(io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.route_submit_ms")));
+            assertEquals(success ? io.opentelemetry.api.trace.StatusCode.OK
+                    : io.opentelemetry.api.trace.StatusCode.ERROR, data.getStatus().getStatusCode());
+            assertEquals(success ? "10.0.0.10:8000" : null, data.getAttributes().get(
+                    io.opentelemetry.api.common.AttributeKey.stringKey("rtp_llm.prefill_address")));
+            assertEquals(success && !fusion ? "10.0.0.20:9000" : null, data.getAttributes().get(
+                    io.opentelemetry.api.common.AttributeKey.stringKey("rtp_llm.decode_address")));
+            assertEquals(forwarded ? null : 20L, data.getAttributes().get(
+                    io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.batch_wait_ms")));
+            assertEquals(forwarded ? null : 10L, data.getAttributes().get(
+                    io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.route_submit_ms")));
             if (forwarded || missingAck) {
                 org.junit.jupiter.api.Assertions.assertNull(data.getAttributes().get(
                         io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.ack_to_response_ms")));

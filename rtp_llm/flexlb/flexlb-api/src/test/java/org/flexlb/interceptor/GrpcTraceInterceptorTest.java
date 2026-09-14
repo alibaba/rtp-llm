@@ -45,7 +45,6 @@ class GrpcTraceInterceptorTest {
 
     @BeforeEach
     void setUp() {
-        FlexlbTrace.configureEnabled(true);
         GlobalOpenTelemetry.resetForTest();
         exporter = new RecordingExporter();
         SdkTracerProvider provider = SdkTracerProvider.builder()
@@ -54,18 +53,19 @@ class GrpcTraceInterceptorTest {
                 .build();
         sdk = OpenTelemetrySdk.builder().setTracerProvider(provider).build();
         GlobalOpenTelemetry.set(sdk);
+        FlexlbTrace.configure(sdk, "");
     }
 
     @AfterEach
     void tearDown() {
-        FlexlbTrace.configureEnabled(false);
+        FlexlbTrace.configure(null, "");
         sdk.close();
         GlobalOpenTelemetry.resetForTest();
     }
 
     @Test
     void disabledTracingWithExternalProviderAndCurrentSpanOnlyPropagates() {
-        FlexlbTrace.configureEnabled(false);
+        FlexlbTrace.configure(null, "");
         Span upstream = sdk.getTracer("external").spanBuilder("owner").startSpan();
         Metadata headers = new Metadata();
         String traceparent = "00-11111111111111111111111111111111-2222222222222222-01";
@@ -213,6 +213,7 @@ class GrpcTraceInterceptorTest {
         // re-injected byte-for-byte for the downstream forward. An invalid span
         // must never clobber the remote parent.
         GlobalOpenTelemetry.resetForTest();
+        FlexlbTrace.configure(io.opentelemetry.api.OpenTelemetry.noop(), "");
         try {
             Metadata headers = new Metadata();
             headers.put(Metadata.Key.of("traceparent", Metadata.ASCII_STRING_MARSHALLER),
@@ -248,6 +249,7 @@ class GrpcTraceInterceptorTest {
             // Restore the SDK provider so tearDown()'s sdk.close() stays valid.
             GlobalOpenTelemetry.resetForTest();
             GlobalOpenTelemetry.set(sdk);
+            FlexlbTrace.configure(sdk, "");
         }
     }
 

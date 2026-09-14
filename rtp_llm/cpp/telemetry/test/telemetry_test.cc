@@ -1,4 +1,10 @@
 #include <chrono>
+#include <algorithm>
+#include <cctype>
+#include <future>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -97,9 +103,8 @@ class TelemetryTest: public ::testing::Test {
 protected:
     void SetUp() override {
         clearTelemetryEnv();
-        // Each test starts from a clean runtime; shutdown is idempotent and
-        // must NOT be called from helpers that already hold the runtime lock.
-        TelemetryRuntime::shutdown(5000);
+        // 测试独立运行，生产状态机仍只允许启动时初始化。
+        ASSERT_TRUE(TelemetryRuntime::resetForTest());
     }
 
     void TearDown() override {
@@ -151,7 +156,7 @@ protected:
 };
 
 TEST_F(TelemetryTest, ConfigDefaultsAreBoundedAndDisabled) {
-    auto config = TelemetryConfig::fromEnv();
+    TelemetryConfig config;
     EXPECT_FALSE(config.enabled);
     EXPECT_TRUE(config.endpoint.empty());
     EXPECT_DOUBLE_EQ(config.sampler_ratio, 1.0);
@@ -163,46 +168,121 @@ TEST_F(TelemetryTest, ConfigDefaultsAreBoundedAndDisabled) {
     EXPECT_EQ(config.service_name, "");
 }
 
-TEST_F(TelemetryTest, ConfigEndpointPrioritySignalSpecificWins) {
-    setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://signal:4318/v1/traces", 1);
-    setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://generic:4318", 1);
-    auto config = TelemetryConfig::fromEnv();
-    EXPECT_EQ(config.endpoint, "http://signal:4318/v1/traces");
+TEST_F(TelemetryTest, OldEnvironmentCannotEnableTrace) {
+    ScopedEnv enabled("RTP_LLM_OTEL_TRACE_ENABLE", "1");
+    ScopedEnv endpoint("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://localhost/v1/traces");
+    EXPECT_FALSE(TelemetryRuntime::init(TelemetryConfig{}, "pdfusion", 0));
+    EXPECT_FALSE(TelemetryRuntime::isActive());
 }
 
-TEST_F(TelemetryTest, ConfigEndpointGenericAppendsPath) {
-    setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://generic:4318/", 1);
-    auto config = TelemetryConfig::fromEnv();
-    EXPECT_EQ(config.endpoint, "http://generic:4318/v1/traces");
+TEST_F(TelemetryTest, LegacyResourceCannotOverrideIdentity) {
+    ScopedEnv resource("OTEL_RESOURCE_ATTRIBUTES", "host.ip=wrong,poison=wrong");
+    ScopedEnv service("OTEL_SERVICE_NAME", "wrong");
+    auto      data  = startFastFlushRuntime("prefill");
+    auto      spans = exportProbeSpan(data);
+    ASSERT_EQ(spans.size(), 1u);
+    const auto& attributes = spans[0]->GetResource().GetAttributes();
+    EXPECT_EQ(attributes.count("poison"), 0u);
+    EXPECT_EQ(nostd::get<std::string>(attributes.at("service.name")), "rtp_llm_prefill");
 }
 
-TEST_F(TelemetryTest, ConfigInvalidValuesFallBackToDefaults) {
-    setenv("RTP_LLM_OTEL_BSP_MAX_QUEUE_SIZE", "-5", 1);
-    setenv("RTP_LLM_OTEL_BSP_SCHEDULE_DELAY_MS", "abc", 1);
-    setenv("RTP_LLM_OTEL_BSP_MAX_EXPORT_BATCH_SIZE", "0", 1);
-    setenv("RTP_LLM_OTEL_TRACE_SAMPLER_RATIO", "3.5", 1);
-    auto config = TelemetryConfig::fromEnv();
-    EXPECT_EQ(config.max_queue_size, 2048u);
-    EXPECT_EQ(config.schedule_delay_ms, 5000);
-    EXPECT_EQ(config.max_export_batch_size, 512u);
-    EXPECT_DOUBLE_EQ(config.sampler_ratio, 1.0);
-
-    for (const char* invalid_ratio : {"nan", "inf", "-inf", "0.5junk"}) {
-        setenv("RTP_LLM_OTEL_TRACE_SAMPLER_RATIO", invalid_ratio, 1);
-        EXPECT_DOUBLE_EQ(TelemetryConfig::fromEnv().sampler_ratio, 1.0) << invalid_ratio;
-    }
+TEST_F(TelemetryTest, InvalidResolvedConfigDoesNotClamp) {
+    TelemetryConfig config;
+    config.enabled               = true;
+    config.endpoint              = "http://localhost/v1/traces";
+    config.headers               = {{"x-test", "fake"}};
+    config.max_queue_size        = 1;
+    config.max_export_batch_size = 512;
+    EXPECT_FALSE(TelemetryRuntime::init(config, "pdfusion", 0));
+    EXPECT_FALSE(TelemetryRuntime::isActive());
 }
 
-TEST_F(TelemetryTest, ConfigBatchSizeClampedToQueueSize) {
-    setenv("RTP_LLM_OTEL_BSP_MAX_QUEUE_SIZE", "100", 1);
-    setenv("RTP_LLM_OTEL_BSP_MAX_EXPORT_BATCH_SIZE", "500", 1);
-    auto config = TelemetryConfig::fromEnv();
-    EXPECT_EQ(config.max_queue_size, 100u);
-    EXPECT_EQ(config.max_export_batch_size, 100u);
+TEST_F(TelemetryTest, ExplicitExporterIgnoresLegacyEnvironment) {
+    // 回环接收器验证真实导出，不向平台发送测试数据。
+    struct Socket {
+        int fd;
+        ~Socket() {
+            if (fd >= 0) {
+                close(fd);
+            }
+        }
+    };
+    Socket listener{socket(AF_INET, SOCK_STREAM, 0)};
+    ASSERT_GE(listener.fd, 0);
+    sockaddr_in address{};
+    address.sin_family      = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ASSERT_EQ(bind(listener.fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+    ASSERT_EQ(listen(listener.fd, 1), 0);
+    socklen_t length = sizeof(address);
+    ASSERT_EQ(getsockname(listener.fd, reinterpret_cast<sockaddr*>(&address), &length), 0);
+    auto            receiver = std::async(std::launch::async, [&listener]() {
+        pollfd pending{listener.fd, POLLIN, 0};
+        if (poll(&pending, 1, 5000) <= 0) {
+            return std::string{};
+        }
+        Socket client{accept(listener.fd, nullptr, nullptr)};
+        if (client.fd < 0) {
+            return std::string{};
+        }
+        timeval timeout{5, 0};
+        setsockopt(client.fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        std::string request;
+        size_t      required = std::string::npos;
+        while (required == std::string::npos || request.size() < required) {
+            char buffer[8192];
+            auto count = recv(client.fd, buffer, sizeof(buffer), 0);
+            if (count <= 0) {
+                break;
+            }
+            request.append(buffer, count);
+            auto end = request.find("\r\n\r\n");
+            if (end != std::string::npos && required == std::string::npos) {
+                auto headers = request.substr(0, end);
+                std::transform(
+                    headers.begin(), headers.end(), headers.begin(), [](unsigned char c) { return std::tolower(c); });
+                auto pos = headers.find("content-length:");
+                if (pos == std::string::npos) {
+                    break;
+                }
+                required = end + 4 + std::stoull(headers.substr(pos + 15));
+            }
+        }
+        const std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        send(client.fd, response.data(), response.size(), MSG_NOSIGNAL);
+        return request;
+    });
+    ScopedEnv       endpoint("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://invalid.example/ignored");
+    ScopedEnv       headers("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "authorization=wrong");
+    ScopedEnv       certificate("OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE", "/invalid/ignored");
+    ScopedEnv       compression("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "gzip");
+    ScopedEnv       disabled("OTEL_SDK_DISABLED", "true");
+    ScopedEnv       resource("OTEL_RESOURCE_ATTRIBUTES", "poison=wrong");
+    TelemetryConfig config;
+    config.enabled           = true;
+    config.endpoint          = "http://127.0.0.1:" + std::to_string(ntohs(address.sin_port)) + "/custom";
+    config.headers           = {{"authorization", "fake-test-only"}};
+    config.schedule_delay_ms = 1;
+    ASSERT_TRUE(TelemetryRuntime::init(config, "prefill", 0));
+    TelemetryRuntime::tracer()->StartSpan("wire_probe")->End();
+    EXPECT_TRUE(TelemetryRuntime::shutdown(5000));
+    auto request = receiver.get();
+    EXPECT_EQ(request.find("POST /custom HTTP/1.1"), 0u);
+    auto boundary = request.find("\r\n\r\n");
+    ASSERT_NE(boundary, std::string::npos);
+    auto wire_headers = request.substr(0, boundary);
+    std::transform(wire_headers.begin(), wire_headers.end(), wire_headers.begin(), [](unsigned char c) {
+        return std::tolower(c);
+    });
+    EXPECT_NE(wire_headers.find("authorization: fake-test-only"), std::string::npos);
+    EXPECT_NE(wire_headers.find("content-type: application/x-protobuf"), std::string::npos);
+    EXPECT_EQ(wire_headers.find("content-encoding: gzip"), std::string::npos);
+    EXPECT_NE(request.find("wire_probe", boundary), std::string::npos);
+    EXPECT_EQ(request.find("poison", boundary), std::string::npos);
 }
 
 TEST_F(TelemetryTest, DisabledByDefault) {
-    EXPECT_FALSE(TelemetryRuntime::init("pdfusion", 0));
+    EXPECT_FALSE(TelemetryRuntime::init(TelemetryConfig{}, "pdfusion", 0));
     EXPECT_EQ(TelemetryRuntime::state(), TelemetryState::DISABLED);
     EXPECT_FALSE(TelemetryRuntime::isActive());
     // no-op tracer must be non-null and safe to use
@@ -213,15 +293,18 @@ TEST_F(TelemetryTest, DisabledByDefault) {
 }
 
 TEST_F(TelemetryTest, NonRankZeroDisabled) {
-    setenv("RTP_LLM_OTEL_TRACE_ENABLE", "1", 1);
-    setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4318/v1/traces", 1);
-    EXPECT_FALSE(TelemetryRuntime::init("prefill", 1));
+    TelemetryConfig config;
+    config.enabled  = true;
+    config.endpoint = "http://127.0.0.1:4318/v1/traces";
+    config.headers  = {{"x-test", "fake"}};
+    EXPECT_FALSE(TelemetryRuntime::init(config, "prefill", 1));
     EXPECT_EQ(TelemetryRuntime::state(), TelemetryState::DISABLED);
 }
 
 TEST_F(TelemetryTest, EnabledWithoutEndpointDisabled) {
-    setenv("RTP_LLM_OTEL_TRACE_ENABLE", "1", 1);
-    EXPECT_FALSE(TelemetryRuntime::init("pdfusion", 0));
+    TelemetryConfig config;
+    config.enabled = true;
+    EXPECT_FALSE(TelemetryRuntime::init(config, "pdfusion", 0));
     EXPECT_EQ(TelemetryRuntime::state(), TelemetryState::DISABLED);
 }
 

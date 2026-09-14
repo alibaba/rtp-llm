@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <string>
 
 #include "opentelemetry/nostd/shared_ptr.h"
@@ -12,31 +13,21 @@
 namespace rtp_llm {
 namespace telemetry {
 
-// Trace telemetry configuration resolved from environment variables.
-// All values fall back to safe defaults on invalid input (fail-open).
+// Python 校验后的 Trace 配置，独立于引擎调试配置，禁止输出凭证。
 struct TelemetryConfig {
-    // Master switch, off unless set. Env: RTP_LLM_OTEL_TRACE_ENABLE
-    bool enabled = false;
-    // OTLP/HTTP endpoint resolved by priority:
-    //   1. OTEL_EXPORTER_OTLP_TRACES_ENDPOINT (signal-specific, used as-is)
-    //   2. OTEL_EXPORTER_OTLP_ENDPOINT (generic, "/v1/traces" appended)
-    //   3. empty -> telemetry disabled with warning
-    std::string endpoint;
-    // Local root sampling ratio for ParentBased delegate, default 1.0.
-    // Env: RTP_LLM_OTEL_TRACE_SAMPLER_RATIO
-    double sampler_ratio = 1.0;
-    // Bounded BSP defaults: conservative enough that a stalled collector can
-    // never grow unbounded memory, all overridable per deployment.
-    // Env: RTP_LLM_OTEL_BSP_MAX_QUEUE_SIZE / RTP_LLM_OTEL_BSP_SCHEDULE_DELAY_MS /
-    //      RTP_LLM_OTEL_BSP_MAX_EXPORT_BATCH_SIZE / RTP_LLM_OTEL_HTTP_TIMEOUT_MS
+    bool                               enabled = false;
+    std::string                        endpoint;
+    std::map<std::string, std::string> headers;
+    std::string                        certificate;
+    std::string                        scope_version;
+    std::string                        source;
+    // 仅根 span 使用比例采样；有父上下文时跟随父节点。
+    double  sampler_ratio         = 1.0;
     size_t  max_queue_size        = 2048;
     int64_t schedule_delay_ms     = 5000;
     size_t  max_export_batch_size = 512;
     int64_t http_timeout_ms       = 3000;
-    // Env: RTP_LLM_OTEL_SERVICE_NAME. Empty means "derive from role during
-    // initialization" (rtp_llm_<role>, or plain "rtp_llm" when role is empty).
-    // Both entry points resolve this identically in initInternal(), so a
-    // directly constructed config behaves exactly like the production one.
+    // 空值按运行时角色派生 service.name。
     std::string service_name;
 
     // Process identity set by caller, not env.
@@ -47,8 +38,6 @@ struct TelemetryConfig {
     // only semantic keys distinguishing replicas on the platform.
     int64_t dp_rank    = 0;
     int64_t world_rank = 0;
-
-    static TelemetryConfig fromEnv();
 };
 
 // Telemetry runtime health states, queryable for self monitoring.
@@ -66,11 +55,12 @@ enum class TelemetryState {
 // -> global W3C TraceContext propagator.
 class TelemetryRuntime {
 public:
-    // Initialize from env config. Only tp_rank==0 actually enables span
-    // production; dp_rank/world_rank ride along as replica-identity resource
-    // attributes.
-    // Returns true iff telemetry becomes ACTIVE. Never throws.
-    static bool init(const std::string& role, int64_t tp_rank, int64_t dp_rank = 0, int64_t world_rank = 0);
+    // 初始化显式配置，实际 rank 由引擎传入；不读取 Trace 环境变量。
+    static bool init(const TelemetryConfig& config,
+                     const std::string&     role,
+                     int64_t                tp_rank,
+                     int64_t                dp_rank    = 0,
+                     int64_t                world_rank = 0);
 
     // Test-only: initialize with an injected exporter regardless of env switch.
     // Caller must ensure prior state is SHUTDOWN/UNINITIALIZED (no lock re-entry).
@@ -81,6 +71,8 @@ public:
     // expiry the provider is intentionally leaked so business exit never hangs.
     // Idempotent.
     static bool shutdown(int64_t deadline_ms = 2000);
+    // 仅供测试隔离使用；生产进程不重读配置。
+    static bool resetForTest();
 
     static bool           isActive();
     static TelemetryState state();
