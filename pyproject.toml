@@ -398,9 +398,22 @@ markexpr = "SM100 and not SM100_ARM and not smoke and not perf and not manual"
 description = "Python UT on AMD MI308X (py-ut-amd)"
 gpu_type = "MI308X"
 minimum_count = 1
-expected_count = 127
+# 36 main-baseline Python targets, two BeamSearch cases, and three existing
+# torch_moe_ref cases. Includes all 21 GDN decode / four chunk-prefill inputs.
+expected_count = 286
 forbid_skips = true
+remote_env = { RTP_LLM_REQUIRE_ACCELERATOR = "1" }
 paths = [
+    "rtp_llm/model_loader/test/test_inline_fp8_quant.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/defs/test/fused_moe_allreduce_contract_test.py",
+    "rtp_llm/models_py/triton_kernels/fla/test/test_gdn_decode.py",
+    "rtp_llm/models_py/triton_kernels/fla/test/test_flydsl_chunk_gdn_shape_gate.py",
+    "rtp_llm/models_py/triton_kernels/fla/test/test_l2norm.py",
+    "rtp_llm/models_py/triton_kernels/fla/test/test_chunk_prefill.py",
+    "rtp_llm/models_py/triton_kernels/fla/test/test_gdn_block_prefill.py",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_remap_local_ids.py",
+    "rtp_llm/models_py/model_desc/test/generic_moe_allreduce_test.py",
+    "rtp_llm/models_py/bindings/rocm/ops/tests/test_rocm_beam_search_op.py",
     "rtp_llm/models_py/modules/base/rocm/test/",
     "rtp_llm/models_py/modules/factory/attention/rocm_impl/test/",
     "rtp_llm/models_py/modules/factory/fused_moe/impl/rocm/test/",

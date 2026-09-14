@@ -228,6 +228,14 @@ def test_chunk_varlen(
     assert_close("ht", ref_ht, tri_ht.transpose(-1, -2), 0.005)
 
 
+@pytest.mark.gpu(type="MI308X")
+@pytest.mark.parametrize(
+    "cu_seqlens", [[0, 15], [0, 256, 500, 1000]], ids=["short_seq", "multi_seg"]
+)
+def test_chunk_varlen_fp32_state(cu_seqlens):
+    test_chunk_varlen(4, 64, 0, cu_seqlens, torch.bfloat16, torch.float32)
+
+
 if __name__ == "__main__":
     test_params = [
         # (H, D, mask_p, cu_seqlens, dtype, state_dtype)

@@ -400,6 +400,14 @@ def pytest_collection_modifyitems(config, items):
     - Deselect tests marked @pytest.mark.manual (require manual execution).
     - Add synthetic gpu_count_N markers before pytest applies -m selection.
     """
+    profile = getattr(config.option, "rtp_ci_profile", None) or _os.environ.get(
+        "RTP_PYTEST_CI_PROFILE"
+    )
+    if profile == "py_ut_amd":
+        from rtp_llm.test.amd_coverage import route_amd_items
+
+        route_amd_items(items)
+
     # These sources had an H20 Bazel target before the pytest migration. Native
     # pytest does not yet have every legacy GPU pool, so preserve the H20 route
     # and do not let the unmarked SM8x profile silently collect them on A10.

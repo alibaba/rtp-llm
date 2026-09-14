@@ -569,6 +569,7 @@ def _collect_repo_runtime_files(
             "rtp_llm/libs/*.so",
             "rtp_llm/libs/*.so.*",
             "rtp_llm/libs/**/*.so",
+            "rtp_llm/libs/test/*",
         ):
             files.extend(
                 str(p.relative_to(rootdir))

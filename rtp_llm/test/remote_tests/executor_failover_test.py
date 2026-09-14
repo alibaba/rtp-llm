@@ -634,6 +634,42 @@ def test_session_command_forwards_profile_ignore_paths(monkeypatch):
     assert "--ignore=rtp_llm/models_py/modules/dsv4" in shell
 
 
+def test_amd_session_forwards_routing_profile_and_all_gpu_tiers():
+    plugin = object.__new__(remote_plugin.RemoteREAPIPlugin)
+    plugin.workers = 8
+    plugin._collect_outputs = False
+    plugin.config = SimpleNamespace(
+        option=SimpleNamespace(markexpr="MI308X", keyword=""),
+        rootpath=Path(__file__).resolve().parents[3],
+    )
+    plugin.timeout_policy = select_remote_timeout_policy("py_ut_amd", per_test=False)
+    runtime = remote_exec_rtp.RemoteRuntimeConfig(
+        ignore_args=[], env_vars={},
+        platform_properties={"gpu": "MI308X", "gpu_count": "8"},
+        remote_setup_prefix="",
+    )
+    shell = plugin._build_session_command("", runtime, ci_profile="py_ut_amd")[2]
+    assert "export RTP_PYTEST_CI_PROFILE=py_ut_amd" in shell
+    for tier in (1, 2, 4, 8):
+        assert f"export GPU_COUNT_PER_WORKER={tier};" in shell
+    assert "test_rocm_beam_search_op.py" in shell
+    assert "test_gdn_decode.py" in shell
+
+
+def test_amd_session_rejects_missing_targets_despite_matching_total():
+    config = _FakeProfileConfig(remote_session=True)
+    config._rtp_ci_minimum_count = 1
+    config._rtp_ci_expected_count = 286
+    config._rtp_ci_forbid_skips = True
+    error = remote_plugin._validate_session_profile_result(
+        config, "py_ut_amd", tests=286, skipped=0,
+        nodeids=[f"other.py::test_other[{i}]" for i in range(286)],
+    )
+    assert "AMD baseline coverage missing" in error
+    assert "test_inline_fp8_quant" in error
+    assert "RocmBeamSearchOpTest.simpleTest" in error
+
+
 def test_session_command_runs_profile_isolated_paths_in_fresh_processes(monkeypatch):
     isolated_path = (
         "rtp_llm/models_py/modules/factory/attention/cuda_cp_impl/"
@@ -1253,6 +1289,10 @@ def test_collect_session_files_packs_runtime_lib_archive(tmp_path):
         p.write_bytes(f"{name}\n".encode())
         p.chmod(0o755)
 
+    binary = tmp_path / "rtp_llm/libs/test/rocm_beam_search_op_test"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"native test binary")
+    binary.chmod(0o755)
     files = remote_exec_rtp.collect_session_files(tmp_path)
 
     archive_rel = ".pytest_cache/remote_inputs/rtp_llm_libs.tar"
@@ -1270,6 +1310,7 @@ def test_collect_session_files_packs_runtime_lib_archive(tmp_path):
     assert "rtp_llm/libs/libth_transformer_config.so" not in files
     with tarfile.open(tmp_path / archive_rel, "r") as tar:
         names = set(tar.getnames())
+        assert tar.getmember("rtp_llm/libs/test/rocm_beam_search_op_test").mode & 0o111
     assert "rtp_llm/libs/libth_transformer_config.so" in names
     assert "rtp_llm/libs/libth_grammar_tokenizer_info.so" in names
     assert "rtp_llm/libs/libdependency.so.1" in names

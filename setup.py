@@ -727,6 +727,14 @@ _CUDA129_TEST_BAZEL_STAGED_OUTPUTS = [
     ),
 ]
 
+_ROCM_TEST_BAZEL_STAGED_OUTPUTS = [
+    (
+        _STAGED_OUTPUT_TEST,
+        "//rtp_llm/models_py/bindings/rocm/ops/tests:beam_search_op_test",
+        (("beam_search_op_test", "test/rocm_beam_search_op_test"),),
+    ),
+]
+
 _REMOTE_KVCM_RUNTIME_BAZEL_STAGED_OUTPUTS = [
     (
         _STAGED_OUTPUT_RUNTIME,
@@ -806,6 +814,8 @@ def _selected_bazel_staged_outputs(build_config: str, bazel_args: list = None) -
     if bazel_args is None:
         bazel_args = parse_bazel_config(default_config=build_config)
     staged_outputs = list(_CORE_BAZEL_STAGED_OUTPUTS)
+    if build_config == "rocm" or "rocm" in _bazel_config_names(bazel_args):
+        staged_outputs.extend(_ROCM_TEST_BAZEL_STAGED_OUTPUTS)
     if "cuda12_9" in _bazel_config_names(bazel_args):
         # Python-native CUDA tests run in the H20 pytest session. Keep their
         # bindings below libs/test/ so remote-session archives them, while

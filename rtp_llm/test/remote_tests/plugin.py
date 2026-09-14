@@ -54,7 +54,7 @@ _REMOTE_CONTROLLER_RESULT_MARGIN_SECONDS = 300
 # Session mode runs pytest in phases by gpu(count=N). Keep all counts up to the
 # default 4-worker session so mixed PD topologies such as 1+2 GPUs do not fall
 # back into the 1-GPU phase.
-_GPU_COUNT_TIERS = [1, 2, 3, 4]
+_GPU_COUNT_TIERS = [1, 2, 3, 4, 8]
 
 _PHASE_LINE_RE = re.compile(r"^>>>PHASE:\S+\s+\d+\s*$")
 _NODEID_PROPERTY = "nodeid"
@@ -306,12 +306,19 @@ def _validate_session_profile_result(
     *,
     tests: int,
     skipped: int,
+    nodeids: Optional[List[str]] = None,
 ) -> str:
     if not ci_profile:
         return ""
     try:
         validate_ci_profile_count(config, tests, context="reported")
-    except pytest.UsageError as exc:
+        if ci_profile == "py_ut_amd" and not config.getoption(
+            "--rtp-ci-allow-subset"
+        ):
+            from rtp_llm.test.amd_coverage import validate_amd_coverage
+
+            validate_amd_coverage(nodeids or [])
+    except (pytest.UsageError, ValueError) as exc:
         return str(exc)
     if getattr(config, "_rtp_ci_forbid_skips", False) and skipped:
         return (
@@ -1814,12 +1821,18 @@ class RemoteREAPIPlugin:
             xml_content
         )
         merged_skipped = 0
+        merged_nodeids = []
         if merged_xml:
             junit_path = self.rootdir / "bazel-testlogs" / "pytest" / "test.xml"
             junit_path.parent.mkdir(parents=True, exist_ok=True)
             junit_path.write_text(merged_xml)
             merged_root = ET.fromstring(merged_xml)
             _, _, _, merged_skipped, _ = _count_junit(merged_root)
+            merged_nodeids = [
+                nodeid
+                for testcase in merged_root.iter("testcase")
+                if (nodeid := _testcase_nodeid(testcase)) is not None
+            ]
             log.info(
                 "Wrote remote junitxml to %s (%d bytes, replayed_cached=%d)",
                 junit_path,
@@ -1860,6 +1873,7 @@ class RemoteREAPIPlugin:
             self.ci_profile,
             tests=merged_tests,
             skipped=merged_skipped,
+            nodeids=merged_nodeids,
         )
         if profile_error:
             log.error("Remote session profile validation failed: %s", profile_error)
@@ -2203,6 +2217,8 @@ class RemoteREAPIPlugin:
         lines.append("final_ec=0; any_ran=0")
         lines.append('export PYTHONPATH="/tmp:$PWD:${PYTHONPATH:-}"')
         lines.append("export PYTHONFAULTHANDLER=1")
+        if ci_profile:
+            lines.append(f"export RTP_PYTEST_CI_PROFILE={shlex.quote(ci_profile)}")
         lines.append("ulimit -c unlimited 2>/dev/null || true")
         lines.append(
             'echo ">>>INHERITED_CVD=${CUDA_VISIBLE_DEVICES:-unset} HVD=${HIP_VISIBLE_DEVICES:-unset}"'

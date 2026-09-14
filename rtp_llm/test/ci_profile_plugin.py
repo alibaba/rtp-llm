@@ -131,6 +131,12 @@ def pytest_configure(config: pytest.Config) -> None:
         _apply_default_cli(config, default_cli)
 
     prof = _get_profile(root, name)
+    if name == "py_ut_amd" and config.getoption("--remote-session", default=False):
+        workers = config.getoption("--remote-workers", default=4)
+        if workers < 8:
+            raise pytest.UsageError(
+                "py_ut_amd requires --remote-workers=8 for moriep coverage"
+            )
     expected_count = prof.get("expected_count")
     if expected_count is not None:
         if not isinstance(expected_count, int) or expected_count < 1:
@@ -240,6 +246,15 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         # plugin validates the merged worker JUnit after execution instead.
         return
     validate_ci_profile_count(session.config, len(session.items))
+    if _active_profile_name == "py_ut_amd" and not session.config.getoption(
+        "--rtp-ci-allow-subset"
+    ):
+        from rtp_llm.test.amd_coverage import validate_amd_coverage
+
+        try:
+            validate_amd_coverage(item.nodeid for item in session.items)
+        except ValueError as exc:
+            raise pytest.UsageError(str(exc)) from exc
 
 
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
