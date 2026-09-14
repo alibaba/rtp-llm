@@ -199,7 +199,7 @@ failed = 0
 requested working set = addressable working set = visited working set
 ```
 
-result 还记录每个 tier 的 capacity/allocated/addressable blocks、每方向 attempted/succeeded/failed、首个错误、descriptor batch 的 requested/resolved/actual avg/max、requested/actual copy strategy 和是否 wrap-around。显式 `batch`/`staged-sm` 会在 benchmark 配置中关闭另一个 Device↔Host copy 优化路径，并由 benchmark-only recorder 记录 measured window 实际命中的策略；任何 fallback 或 mixed 命中都会使 case 无效。
+result 还记录每个 tier 的 capacity/allocated/addressable blocks、每方向 attempted/succeeded/failed、首个错误、descriptor batch 的 requested/resolved/actual avg/max、requested/actual copy strategy 和是否 wrap-around。显式 `3d-batch`/`batch`/`staged-sm` 会在 benchmark 配置中关闭其他 Device↔Host copy 优化路径，并由 benchmark-only recorder 记录 measured window 实际命中的策略；任何 fallback 或 mixed 命中都会使 case 无效。
 
 所有 host/device block 在运行前清零。mixed disk case 的 read 跟随同 coordinate 的 write；如果方向顺序无法提供该前置条件，setup 会预填完整 disk working set。warmup、pilot、measured 使用连续 coordinate cursor，不从 offset 0 重放。
 

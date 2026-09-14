@@ -84,6 +84,10 @@ void execNoBlockCopy(const MultiCopyParams& params);
 // EXECUTION_FAILED means a CUDA call was attempted and failed.
 BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& params);
 
+// Same tile/sub-batch contract, using cudaMemcpy3DBatchAsync with one {bytes, 1, 1}
+// operation per tile. Completion and fallback semantics match execBatchedMemoryCopy.
+BatchedMemoryCopyStatus execBatched3DMemoryCopy(const BatchedMemoryCopyParams& params);
+
 // Stages compact host payload in GPU memory, then uses one SM gather/scatter kernel.
 // host_segments may describe non-contiguous host blocks; they are packed/unpacked on CPU.
 // scratch is optional; passing one lets callers reuse pinned host staging and device metadata buffers.

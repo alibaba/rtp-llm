@@ -39,12 +39,9 @@ StrategyResult GenericMultiCopyDeviceHostCopyStrategy::tryExecute(const DeviceHo
     return StrategyResult::done();
 }
 
-StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan&    plan,
-                                                           const DeviceHostCopyOptions& options) {
-    if (!options.cuda_batch_copy_enabled) {
-        return StrategyResult::notApplicable();
-    }
-
+namespace {
+StrategyResult executeBatchCopy(const DeviceHostCopyPlan& plan,
+                                BatchedMemoryCopyStatus (*copy)(const BatchedMemoryCopyParams&)) {
     const int device_index = plan.copy_tiles.front().device_index;
     if (device_index < 0) {
         return StrategyResult::notApplicable();
@@ -67,7 +64,7 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
         params.tiles.push_back(batch_tile);
     }
 
-    const auto status = execBatchedMemoryCopy(params);
+    const auto status = copy(params);
     if (status == BatchedMemoryCopyStatus::NOT_SUPPORTED) {
         return StrategyResult::notApplicable();
     }
@@ -75,6 +72,20 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
         return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
     }
     return StrategyResult::done();
+}
+
+}  // namespace
+
+StrategyResult Cuda3DBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan& plan,
+                                                            const DeviceHostCopyOptions& options) {
+    return options.cuda_3d_batch_copy_enabled ? executeBatchCopy(plan, execBatched3DMemoryCopy) :
+                                               StrategyResult::notApplicable();
+}
+
+StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan& plan,
+                                                          const DeviceHostCopyOptions& options) {
+    return options.cuda_batch_copy_enabled ? executeBatchCopy(plan, execBatchedMemoryCopy) :
+                                            StrategyResult::notApplicable();
 }
 
 static constexpr size_t kStagedAlignment = 16;

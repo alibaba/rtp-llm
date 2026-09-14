@@ -290,7 +290,9 @@ private:
 static std::string copyStrategyOrder(const DeviceHostTransferExecutor& executor) {
     std::string result;
     for (const auto& strategy : executor.strategies_) {
-        if (dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(strategy.get())) {
+        if (dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get())) {
+            result += 'D';
+        } else if (dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(strategy.get())) {
             result += 'B';
         } else if (dynamic_cast<StagedSmDeviceHostCopyStrategy*>(strategy.get())) {
             result += 'S';
@@ -301,30 +303,32 @@ static std::string copyStrategyOrder(const DeviceHostTransferExecutor& executor)
     return result;
 }
 
-static void installStrategyRecorders(DeviceHostTransferExecutor& executor, std::array<StrategyCounters, 3>& counters) {
+static void installStrategyRecorders(DeviceHostTransferExecutor& executor, std::array<StrategyCounters, 4>& counters) {
     RTP_LLM_CHECK(executor.strategies_.size() == counters.size());
     for (size_t i = 0; i < counters.size(); ++i) {
         executor.strategies_[i] = std::make_unique<RecordingStrategy>(std::move(executor.strategies_[i]), &counters[i]);
     }
 }
 
-TEST(DeviceHostTransferExecutorConfigTest, PrefersCudaBatchThenStagedSmThenGeneric) {
+TEST(DeviceHostTransferExecutorConfigTest, Prefers3DBatchThenCudaBatchThenStagedSmThenGeneric) {
     ScopedCopyPriorityEnv priority(nullptr);
     BlockTreeTaskPool          task_pool(1, 8, "DeviceHostExecutorConfigTest");
     DeviceHostTransferExecutor executor(task_pool, 8);
+    EXPECT_TRUE(executor.options_.cuda_3d_batch_copy_enabled);
     EXPECT_TRUE(executor.options_.cuda_batch_copy_enabled);
     EXPECT_TRUE(executor.options_.staged_sm_copy_enabled);
-    ASSERT_EQ(executor.strategies_.size(), 3u);
-    EXPECT_NE(dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(executor.strategies_[0].get()), nullptr);
-    EXPECT_NE(dynamic_cast<StagedSmDeviceHostCopyStrategy*>(executor.strategies_[1].get()), nullptr);
-    EXPECT_NE(dynamic_cast<GenericMultiCopyDeviceHostCopyStrategy*>(executor.strategies_[2].get()), nullptr);
+    ASSERT_EQ(executor.strategies_.size(), 4u);
+    EXPECT_NE(dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(executor.strategies_[0].get()), nullptr);
+    EXPECT_NE(dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(executor.strategies_[1].get()), nullptr);
+    EXPECT_NE(dynamic_cast<StagedSmDeviceHostCopyStrategy*>(executor.strategies_[2].get()), nullptr);
+    EXPECT_NE(dynamic_cast<GenericMultiCopyDeviceHostCopyStrategy*>(executor.strategies_[3].get()), nullptr);
 }
 
 TEST(DeviceHostTransferExecutorConfigTest, PromotesOnlyExistingSelectedStrategyAtInitialization) {
     const std::pair<const char*, const char*> cases[] = {
-        {nullptr, "BSG"},       {"", "BSG"},           {"cuda_batch", "BSG"},
-        {"sm", "SBG"},         {"generic", "GBS"},    {"cuda_3d_batch", "BSG"},
-        {"unknown", "BSG"},    {"SM", "BSG"}};
+        {nullptr, "DBSG"},      {"", "DBSG"},          {"cuda_batch", "BDSG"},
+        {"sm", "SDBG"},        {"generic", "GDBS"},   {"cuda_3d_batch", "DBSG"},
+        {"unknown", "DBSG"},   {"SM", "DBSG"}};
     BlockTreeTaskPool task_pool(1, 8, "CopyPriorityTest");
     for (const auto& [value, expected] : cases) {
         SCOPED_TRACE(value != nullptr ? value : "<unset>");
@@ -337,7 +341,7 @@ TEST(DeviceHostTransferExecutorConfigTest, PromotesOnlyExistingSelectedStrategyA
         ScopedCopyPriorityEnv::set("generic");
         EXPECT_EQ(copyStrategyOrder(executor), expected);
         DeviceHostTransferExecutor later(task_pool, 8, options);
-        EXPECT_EQ(copyStrategyOrder(later), "GBS");
+        EXPECT_EQ(copyStrategyOrder(later), "GDBS");
     }
 }
 
@@ -1500,9 +1504,10 @@ protected:
 
 TEST_F(PerRankBlockTransferEngineStrategyTest, GenericStrategyRoundTrip) {
     DeviceHostCopyOptions options;
+    options.cuda_3d_batch_copy_enabled = false;
     options.cuda_batch_copy_enabled                          = false;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
-    std::array<StrategyCounters, 3> counters;
+    std::array<StrategyCounters, 4> counters;
     installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);
 
     fillDeviceLayer(device_pool_, 0, device_block_, {0xAA});
@@ -1534,19 +1539,20 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, GenericStrategyRoundTrip) {
         EXPECT_EQ(d1[i], 0xBB);
     for (size_t i = 128; i < d1.size(); ++i)
         EXPECT_EQ(d1[i], 0x00);
-    EXPECT_EQ(counters[0].not_applicable, 2);
     EXPECT_EQ(counters[1].not_applicable, 2);
-    EXPECT_EQ(counters[2].done, 2);
+    EXPECT_EQ(counters[2].not_applicable, 2);
+    EXPECT_EQ(counters[3].done, 2);
 
     releasePoolBlock(*host_pool_, host_block);
 }
 
 TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupportedOtherwiseFallsBack) {
     DeviceHostCopyOptions options;
+    options.cuda_3d_batch_copy_enabled = false;
     options.cuda_batch_copy_enabled                          = true;
     options.staged_sm_copy_enabled                           = false;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
-    std::array<StrategyCounters, 3> counters;
+    std::array<StrategyCounters, 4> counters;
     installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);
 
     fillDeviceLayer(device_pool_, 0, device_block_, {0x11});
@@ -1579,25 +1585,77 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupporte
     for (size_t i = 128; i < d1.size(); ++i)
         EXPECT_EQ(d1[i], 0x00);
 
-    EXPECT_EQ(counters[0].attempts, 2);
-    EXPECT_EQ(counters[0].failed, 0);
+    EXPECT_EQ(counters[1].attempts, 2);
     EXPECT_EQ(counters[1].failed, 0);
-    if (counters[0].done == 2) {
-        EXPECT_EQ(counters[0].not_applicable, 0);
-        EXPECT_EQ(counters[1].attempts, 0);
+    EXPECT_EQ(counters[2].failed, 0);
+    if (counters[1].done == 2) {
+        EXPECT_EQ(counters[1].not_applicable, 0);
         EXPECT_EQ(counters[2].attempts, 0);
+        EXPECT_EQ(counters[3].attempts, 0);
     } else {
-        EXPECT_EQ(counters[0].done, 0);
-        EXPECT_EQ(counters[0].not_applicable, 2);
-        EXPECT_EQ(counters[1].attempts, 2);
         EXPECT_EQ(counters[1].done, 0);
         EXPECT_EQ(counters[1].not_applicable, 2);
         EXPECT_EQ(counters[2].attempts, 2);
-        EXPECT_EQ(counters[2].done, 2);
-        EXPECT_EQ(counters[2].not_applicable, 0);
-        EXPECT_EQ(counters[2].failed, 0);
+        EXPECT_EQ(counters[2].done, 0);
+        EXPECT_EQ(counters[2].not_applicable, 2);
+        EXPECT_EQ(counters[3].attempts, 2);
+        EXPECT_EQ(counters[3].done, 2);
+        EXPECT_EQ(counters[3].not_applicable, 0);
+        EXPECT_EQ(counters[3].failed, 0);
     }
 
+    releasePoolBlock(*host_pool_, host_block);
+}
+
+TEST_F(PerRankBlockTransferEngineStrategyTest, ThreeDBatchRoundTripPreservesTiles) {
+    DeviceHostCopyOptions options;
+    options.cuda_3d_batch_copy_enabled = true;
+    options.cuda_batch_copy_enabled                          = false;
+    options.staged_sm_copy_enabled                           = false;
+    auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
+    std::array<StrategyCounters, 4> counters;
+    installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);
+
+    fillDeviceLayer(device_pool_, 0, device_block_, {0x11});
+    fillDeviceLayer(device_pool_, 1, device_block_, {0x22});
+
+    BlockIdxType host_block = poolMalloc(*host_pool_);
+    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+
+    auto d2h = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block);
+    ASSERT_TRUE(executeSucceeded(per_rank_transfer_engine, d2h));
+
+    const auto* host_data = static_cast<const uint8_t*>(host_pool_->blockBuffer(host_block).addr);
+    for (size_t i = 0; i < 128; ++i)
+        EXPECT_EQ(host_data[i], 0x11);
+    for (size_t i = 128; i < 256; ++i)
+        EXPECT_EQ(host_data[i], 0x22);
+
+    fillDeviceLayer(device_pool_, 0, device_block_, {0x00});
+    fillDeviceLayer(device_pool_, 1, device_block_, {0x00});
+
+    auto h2d = makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, host_block);
+    ASSERT_TRUE(executeSucceeded(per_rank_transfer_engine, h2d));
+
+    auto d0 = readDeviceLayer(device_pool_, 0, device_block_);
+    auto d1 = readDeviceLayer(device_pool_, 1, device_block_);
+    for (auto b : d0)
+        EXPECT_EQ(b, 0x11);
+    for (size_t i = 0; i < 128; ++i)
+        EXPECT_EQ(d1[i], 0x22);
+    for (size_t i = 128; i < d1.size(); ++i)
+        EXPECT_EQ(d1[i], 0x00);
+
+    if (counters[0].done == 0) {
+        EXPECT_EQ(counters[0].not_applicable, 2);
+        releasePoolBlock(*host_pool_, host_block);
+        GTEST_SKIP() << "CUDA 3D batch unsupported by this runtime/driver";
+    }
+    EXPECT_EQ(counters[0].done, 2);
+    EXPECT_EQ(counters[0].failed, 0);
+    EXPECT_EQ(counters[1].attempts, 0);
+    EXPECT_EQ(counters[2].attempts, 0);
+    EXPECT_EQ(counters[3].attempts, 0);
     releasePoolBlock(*host_pool_, host_block);
 }
 
@@ -1606,9 +1664,10 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedEnabledBelowThresholdFallsB
     options.staged_sm_copy_enabled                           = true;
     options.staged_sm_min_tile_count                         = 100;
     options.staged_sm_min_bytes                              = 0;
+    options.cuda_3d_batch_copy_enabled = false;
     options.cuda_batch_copy_enabled                          = false;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
-    std::array<StrategyCounters, 3> counters;
+    std::array<StrategyCounters, 4> counters;
     installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);
 
     fillDeviceLayer(device_pool_, 0, device_block_, {0xCC});
@@ -1625,9 +1684,9 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedEnabledBelowThresholdFallsB
         EXPECT_EQ(host_data[i], 0xCC);
     for (size_t i = 128; i < 256; ++i)
         EXPECT_EQ(host_data[i], 0xDD);
-    EXPECT_EQ(counters[0].not_applicable, 1);
     EXPECT_EQ(counters[1].not_applicable, 1);
-    EXPECT_EQ(counters[2].done, 1);
+    EXPECT_EQ(counters[2].not_applicable, 1);
+    EXPECT_EQ(counters[3].done, 1);
 
     releasePoolBlock(*host_pool_, host_block);
 }
@@ -1637,9 +1696,10 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyAboveThresholdRound
     options.staged_sm_copy_enabled                           = true;
     options.staged_sm_min_tile_count                         = 1;
     options.staged_sm_min_bytes                              = 1;
+    options.cuda_3d_batch_copy_enabled = false;
     options.cuda_batch_copy_enabled                          = false;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
-    std::array<StrategyCounters, 3> counters;
+    std::array<StrategyCounters, 4> counters;
     installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);
 
     fillDeviceLayer(device_pool_, 0, device_block_, {0x31});
@@ -1667,14 +1727,14 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyAboveThresholdRound
         EXPECT_EQ(staged_layer1[i], 0x42);
     for (size_t i = 128; i < staged_layer1.size(); ++i)
         EXPECT_EQ(staged_layer1[i], 0x00);
-    EXPECT_EQ(counters[0].attempts, 2);
-    EXPECT_EQ(counters[0].not_applicable, 2);
-    EXPECT_EQ(counters[0].done, 0);
-    EXPECT_EQ(counters[0].failed, 0);
     EXPECT_EQ(counters[1].attempts, 2);
-    EXPECT_EQ(counters[1].done, 2);
+    EXPECT_EQ(counters[1].not_applicable, 2);
+    EXPECT_EQ(counters[1].done, 0);
     EXPECT_EQ(counters[1].failed, 0);
-    EXPECT_EQ(counters[2].attempts, 0);
+    EXPECT_EQ(counters[2].attempts, 2);
+    EXPECT_EQ(counters[2].done, 2);
+    EXPECT_EQ(counters[2].failed, 0);
+    EXPECT_EQ(counters[3].attempts, 0);
 
     releasePoolBlock(*host_pool_, host_block);
 }
@@ -1684,9 +1744,10 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, CudaBatchPrecedesStagedSmWithStag
     options.staged_sm_copy_enabled                           = true;
     options.staged_sm_min_tile_count                         = 1;
     options.staged_sm_min_bytes                              = 1;
+    options.cuda_3d_batch_copy_enabled = false;
     options.cuda_batch_copy_enabled                          = true;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
-    std::array<StrategyCounters, 3> counters;
+    std::array<StrategyCounters, 4> counters;
     installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);
 
     fillDeviceLayer(device_pool_, 0, device_block_, {0x5C});
@@ -1696,20 +1757,20 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, CudaBatchPrecedesStagedSmWithStag
     expectStatus(per_rank_transfer_engine,
                  makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block),
                  TransferStatus::OK);
-    EXPECT_EQ(counters[0].attempts, 1);
-    EXPECT_EQ(counters[0].failed, 0);
-    if (counters[0].done == 1) {
-        EXPECT_EQ(counters[0].not_applicable, 0);
-        EXPECT_EQ(counters[1].attempts, 0);
-    } else {
-        EXPECT_EQ(counters[0].done, 0);
-        EXPECT_EQ(counters[0].not_applicable, 1);
-        EXPECT_EQ(counters[1].attempts, 1);
-        EXPECT_EQ(counters[1].done, 1);
+    EXPECT_EQ(counters[1].attempts, 1);
+    EXPECT_EQ(counters[1].failed, 0);
+    if (counters[1].done == 1) {
         EXPECT_EQ(counters[1].not_applicable, 0);
-        EXPECT_EQ(counters[1].failed, 0);
+        EXPECT_EQ(counters[2].attempts, 0);
+    } else {
+        EXPECT_EQ(counters[1].done, 0);
+        EXPECT_EQ(counters[1].not_applicable, 1);
+        EXPECT_EQ(counters[2].attempts, 1);
+        EXPECT_EQ(counters[2].done, 1);
+        EXPECT_EQ(counters[2].not_applicable, 0);
+        EXPECT_EQ(counters[2].failed, 0);
     }
-    EXPECT_EQ(counters[2].attempts, 0);
+    EXPECT_EQ(counters[3].attempts, 0);
 
     releasePoolBlock(*host_pool_, host_block);
 }
