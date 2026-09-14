@@ -600,10 +600,10 @@ TEST(MMKvcmTransportTest, rejectsConfiguredObjectAndReceiptByteLimitViolationsBe
     }
     {
         Harness h;
-        h.config.max_object_bytes = static_cast<int64_t>(kMMKvcmMaxObjectBytes + 1);
+        h.config.max_object_bytes  = static_cast<int64_t>(kMMKvcmMaxObjectBytes + 1);
         h.config.max_receipt_bytes = h.config.max_object_bytes;
         h.reader                   = std::make_unique<MMKvcmReader>(h.client, h.config, -1);
-        const auto result         = h.consume(validReceipt());
+        const auto result          = h.consume(validReceipt());
         EXPECT_FALSE(result.succeeded());
         EXPECT_EQ(h.client->load_calls, 0u);
     }

@@ -19,8 +19,7 @@ std::size_t nextMMKvcmBatchEnd(const std::vector<MMKvcmBuffer>& objects, std::si
 
 std::string
 validateMMKvcmObjects(const std::vector<MMKvcmBuffer>& objects, uint64_t max_object_bytes, uint64_t max_receipt_bytes) {
-    if (max_object_bytes == 0 || max_object_bytes > kMMKvcmMaxObjectBytes
-        || max_receipt_bytes < max_object_bytes
+    if (max_object_bytes == 0 || max_object_bytes > kMMKvcmMaxObjectBytes || max_receipt_bytes < max_object_bytes
         || max_receipt_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
         return "KVCM object byte limits are invalid";
     }

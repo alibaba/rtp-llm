@@ -172,8 +172,8 @@ private:
         const auto max_timeout_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::time_point::max() - now)
                 .count();
-        const auto deadline = timeout_ms >= max_timeout_ms ? std::chrono::steady_clock::time_point::max()
-                                                           : now + std::chrono::milliseconds(timeout_ms);
+        const auto deadline = timeout_ms >= max_timeout_ms ? std::chrono::steady_clock::time_point::max() :
+                                                             now + std::chrono::milliseconds(timeout_ms);
         std::vector<ServiceBatch> batches;
         if (const auto error = prepareObjectBatches(objects, &batches); !error.empty()) {
             return error;
@@ -261,15 +261,12 @@ private:
 
 namespace detail {
 
-std::shared_ptr<MMKvcmClient>
-createMMKvcmClientAdapter(std::unique_ptr<kv_cache_manager::KvMetaObjectClient> client,
-                          std::uint64_t                                         max_object_bytes,
-                          std::uint64_t                                         max_receipt_bytes) {
+std::shared_ptr<MMKvcmClient> createMMKvcmClientAdapter(std::unique_ptr<kv_cache_manager::KvMetaObjectClient> client,
+                                                        std::uint64_t max_object_bytes,
+                                                        std::uint64_t max_receipt_bytes) {
     if (client == nullptr
-        || kv_cache_manager::GetKvMetaObjectClientApiVersion()
-               != kv_cache_manager::kKvMetaObjectClientApiVersion
-        || max_object_bytes == 0 || max_object_bytes > kMMKvcmMaxObjectBytes
-        || max_receipt_bytes < max_object_bytes
+        || kv_cache_manager::GetKvMetaObjectClientApiVersion() != kv_cache_manager::kKvMetaObjectClientApiVersion
+        || max_object_bytes == 0 || max_object_bytes > kMMKvcmMaxObjectBytes || max_receipt_bytes < max_object_bytes
         || max_receipt_bytes > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
         return nullptr;
     }
@@ -290,8 +287,7 @@ std::shared_ptr<MMKvcmClient> createMMKvcmClient(const MMKvcmConfig& config) {
         // Check the linked client library before Create constructs metadata,
         // transfer, or registered-memory state.  The adapter repeats this
         // check for dependency-injected clients used by tests and embedders.
-        if (kv_cache_manager::GetKvMetaObjectClientApiVersion()
-            != kv_cache_manager::kKvMetaObjectClientApiVersion) {
+        if (kv_cache_manager::GetKvMetaObjectClientApiVersion() != kv_cache_manager::kKvMetaObjectClientApiVersion) {
             return nullptr;
         }
         kv_cache_manager::KvMetaObjectClientConfig kvcm_config;

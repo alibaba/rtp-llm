@@ -257,8 +257,7 @@ bool MMKvcmReader::validateAndAllocate(const MultimodalOutputPB&   receipt,
         return false;
     }
     if (validate_manifest_
-        && (config_.max_object_bytes <= 0
-            || static_cast<uint64_t>(config_.max_object_bytes) > kMMKvcmMaxObjectBytes
+        && (config_.max_object_bytes <= 0 || static_cast<uint64_t>(config_.max_object_bytes) > kMMKvcmMaxObjectBytes
             || config_.max_receipt_bytes < config_.max_object_bytes
             || static_cast<uint64_t>(config_.max_receipt_bytes)
                    > static_cast<uint64_t>(std::numeric_limits<size_t>::max()))) {

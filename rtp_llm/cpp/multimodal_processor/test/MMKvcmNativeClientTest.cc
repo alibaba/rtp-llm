@@ -46,9 +46,9 @@ public:
     }
 
     kv_cache_manager::ClientErrorCode LoadObjects(const std::string&,
-                                                   const std::vector<std::string>&   keys,
-                                                   const std::vector<std::uint64_t>&,
-                                                   const kv_cache_manager::BlockBuffers&) override {
+                                                  const std::vector<std::string>& keys,
+                                                  const std::vector<std::uint64_t>&,
+                                                  const kv_cache_manager::BlockBuffers&) override {
         const auto call = load_batches.size();
         load_batches.push_back(keys);
         if (call == throw_load_call) {
@@ -57,8 +57,8 @@ public:
         return call == fail_load_call ? kv_cache_manager::ER_SDKREAD_ERROR : kv_cache_manager::ER_OK;
     }
 
-    kv_cache_manager::ClientErrorCode Remove(const std::string& trace_id,
-                                              const std::vector<std::string>& keys) override {
+    kv_cache_manager::ClientErrorCode Remove(const std::string&              trace_id,
+                                             const std::vector<std::string>& keys) override {
         const auto call = remove_batches.size();
         remove_traces.push_back(trace_id);
         remove_batches.push_back(keys);
@@ -107,7 +107,7 @@ struct NativeAdapter {
     NativeAdapter(std::uint64_t max_object_bytes = 1, std::uint64_t max_receipt_bytes = 2048) {
         auto owned = std::make_unique<FakeNativeObjectClient>();
         native     = owned.get();
-        client = detail::createMMKvcmClientAdapter(std::move(owned), max_object_bytes, max_receipt_bytes);
+        client     = detail::createMMKvcmClientAdapter(std::move(owned), max_object_bytes, max_receipt_bytes);
     }
 
     FakeNativeObjectClient*       native = nullptr;
@@ -218,7 +218,7 @@ TEST(MMKvcmNativeClientTest, loadCapsHugeDeadlineAndSanitizesProviderException) 
         NativeAdapter adapter;
         ObjectBatch   batch(1);
         adapter.native->throw_load_call = 0;
-        const auto error = adapter.client->load("trace", batch.objects, 1000);
+        const auto error                = adapter.client->load("trace", batch.objects, 1000);
         EXPECT_EQ(error, "KVCM load threw an exception");
         EXPECT_EQ(error.find("provider load secret"), std::string::npos);
     }
@@ -235,8 +235,7 @@ TEST(MMKvcmNativeClientTest, loadDeadlineBoundsContentionBeforeProviderIo) {
     bool entered = false;
     {
         std::unique_lock<std::mutex> lock(adapter.native->gate_mutex);
-        entered = adapter.native->gate_condition.wait_for(
-            lock, 5s, [&]() { return adapter.native->save_entered; });
+        entered = adapter.native->gate_condition.wait_for(lock, 5s, [&]() { return adapter.native->save_entered; });
     }
     if (!entered) {
         {
