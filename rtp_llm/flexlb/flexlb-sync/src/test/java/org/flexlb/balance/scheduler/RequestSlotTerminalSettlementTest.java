@@ -71,7 +71,7 @@ class RequestSlotTerminalSettlementTest {
             assertTrue(slot.installInactivityDeadline(inactivity));
 
             TerminalAction action = slot.beginTerminalizing(true, false, false, null,
-                    owner -> owner.cancel("original client cancellation; request inactive"), null);
+                    TerminalOutcome.cancel("original client cancellation; request inactive"), null);
             assertNotNull(action);
             assertSame(claim, action.preemption());
             assertTrue(claim.isSettled());
@@ -95,7 +95,7 @@ class RequestSlotTerminalSettlementTest {
             assertNull(slot.activeItem());
             assertFalse(slot.hasCancellationFirstCause());
             assertNull(slot.beginTerminalizing(true, false, false, null,
-                    owner -> owner.timeout("duplicate expiry"), null));
+                    TerminalOutcome.timeout("duplicate expiry"), null));
         }
     }
 
@@ -111,7 +111,7 @@ class RequestSlotTerminalSettlementTest {
             assertTrue(slot.future().completeOwned(delivered));
 
             TerminalAction action = slot.beginTerminalizing(true, false, false, null,
-                    owner -> owner.timeout("request inactive"), new Response());
+                    TerminalOutcome.timeout("request inactive"), new Response());
             assertNotNull(action);
             assertNull(action.publication());
             assertNull(action.response());
@@ -143,7 +143,7 @@ class RequestSlotTerminalSettlementTest {
             assertEquals(RequestState.Phase.CANCEL_REQUESTED, slot.snapshot().state());
 
             TerminalAction action = slot.beginTerminalizing(false, false, false, null,
-                    owner -> owner.cancel("first client cancellation; worker completed"), null);
+                    TerminalOutcome.cancel("first client cancellation; worker completed"), null);
             assertNotNull(action);
             assertEquals(RequestState.Phase.CANCELLED,
                     slot.finishTombstone(action).terminal().state());
@@ -157,7 +157,7 @@ class RequestSlotTerminalSettlementTest {
     private static Fixture fixture(boolean completeAdmission) {
         var config = SchedulingTestConfig.newConfig();
         BalanceContext context = RequestLifecycleTestSupport.context(config, RESERVATION.requestId());
-        RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class), RESERVATION.requestId());
+        RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class), RESERVATION.requestId(), null, null, null);
         ScheduledRequest item = new ScheduledRequest(context, slot.future(), new Response(), null, null,
                 mock(PrefillEndpoint.class), mock(DecodeEndpoint.class), RESERVATION,
                 System.currentTimeMillis());

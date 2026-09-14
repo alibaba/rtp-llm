@@ -44,7 +44,7 @@ class RequestInactivityTest {
     private ScheduledRequest item;
     private PrefillEndpoint prefill;
     private DecodeEndpoint decode;
-    private RequestRegistry.DeliveryClaim claim;
+    private DeliveryClaim claim;
     private long registeredAtMs;
 
     @BeforeEach
@@ -129,14 +129,14 @@ class RequestInactivityTest {
         assertFalse(item.future().get(1L, TimeUnit.SECONDS).isSuccess());
 
         // A late delivery acknowledgement must not resurrect the expired request.
-        registry.complete(claim, DeliveryResult.delivered());
+        claim.complete(DeliveryResult.delivered());
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
     }
 
     @ParameterizedTest
     @EnumSource(value = DeliveryResult.Status.class, names = {"UNCERTAIN", "TIMED_OUT"})
     void uncertainDeliveryKeepsOnlyABoundedConfirmationWait(DeliveryResult.Status outcome) throws Exception {
-        registry.complete(claim, new DeliveryResult(outcome, new IllegalStateException("reply was lost")));
+        claim.complete(new DeliveryResult(outcome, new IllegalStateException("reply was lost")));
         assertLiveAndCharged();
         registry.expireInactiveRequest(slot, registeredAtMs + TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
@@ -228,7 +228,7 @@ class RequestInactivityTest {
     }
 
     private void acknowledgeDelivery() throws Exception {
-        registry.complete(claim, DeliveryResult.delivered());
+        claim.complete(DeliveryResult.delivered());
         assertTrue(item.future().get(1L, TimeUnit.SECONDS).isSuccess());
     }
 

@@ -331,7 +331,7 @@ class RequestLifecycleDeliveryLockContractTest {
         }, "try-commit-slot-contender");
 
         try {
-            Future<RequestRegistry.DeliveryClaim> committed = owner.submit(() ->
+            Future<DeliveryClaim> committed = owner.submit(() ->
                     RequestLifecycleTestSupport.claimRoute(lifecycle,
                             registered.item(),
                             () -> {
@@ -352,14 +352,13 @@ class RequestLifecycleDeliveryLockContractTest {
                     "another slot operation must not enter during endpoint transfer");
 
             releaseTransfer.countDown();
-            RequestRegistry.DeliveryClaim claim = committed.get(5, TimeUnit.SECONDS);
+            DeliveryClaim claim = committed.get(5, TimeUnit.SECONDS);
             assertNotNull(claim);
             contender.join(TimeUnit.SECONDS.toMillis(5));
             assertFalse(contender.isAlive());
             assertEquals(0L, contenderEntered.getCount());
 
-            lifecycle.complete(
-                    claim, DeliveryResult.delivered());
+            claim.complete(DeliveryResult.delivered());
             assertTrue(registered.future().get(5, TimeUnit.SECONDS).isSuccess());
         } finally {
             releaseTransfer.countDown();
@@ -396,7 +395,7 @@ class RequestLifecycleDeliveryLockContractTest {
         Registered registered = registerItem(204L);
         bind(lifecycle, registered);
 
-        RequestRegistry.DeliveryClaim claim = RequestLifecycleTestSupport.claimBatch(lifecycle,
+        DeliveryClaim claim = RequestLifecycleTestSupport.claimBatch(lifecycle,
                 registered.item(),
                 701L,
                 () -> true);
@@ -417,7 +416,7 @@ class RequestLifecycleDeliveryLockContractTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         Registered registered = registerItem(207L, endpoint);
         bind(lifecycle, registered);
-        RequestRegistry.DeliveryClaim claim = RequestLifecycleTestSupport.claimBatch(
+        DeliveryClaim claim = RequestLifecycleTestSupport.claimBatch(
                 lifecycle, registered.item(), 703L, () -> true);
         assertNotNull(claim);
         RequestSlot original = lifecycle.requestSlot(207L);
@@ -428,15 +427,15 @@ class RequestLifecycleDeliveryLockContractTest {
         Response terminal = registered.future().get(5L, TimeUnit.SECONDS);
         assertTrue(terminal.isSuccess());
 
-        lifecycle.beginDelivery(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
-        lifecycle.complete(claim, DeliveryResult.delivered());
+        claim.begin(new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
+        claim.complete(DeliveryResult.delivered());
         assertSame(terminal, registered.future().join());
         assertTrue(lifecycle.removeExactTombstone(original, Long.MAX_VALUE));
 
         Registered replacement = registerItem(207L, endpoint);
         bind(lifecycle, replacement);
-        lifecycle.beginDelivery(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
-        lifecycle.complete(claim, DeliveryResult.failed(new IllegalStateException("late RPC failure")));
+        claim.begin(new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
+        claim.complete(DeliveryResult.failed(new IllegalStateException("late RPC failure")));
         assertFalse(replacement.future().isDone());
         assertQueuedWithoutClaim(207L);
     }
@@ -460,17 +459,17 @@ class RequestLifecycleDeliveryLockContractTest {
         if (acceptanceBeforeClaim) {
             lifecycle.onDecodeAccepted(decode, reservation);
         }
-        RequestRegistry.DeliveryClaim claim = batch
+        DeliveryClaim claim = batch
                 ? lifecycle.tryClaimBatchDelivery(item, 704L, () -> true)
                 : lifecycle.tryClaimRouteDelivery(item, () -> true);
         assertNotNull(claim);
         WorkSnapshot precedingWork = new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L);
 
         if (batch) {
-            lifecycle.beginDelivery(claim, precedingWork, 30_000L);
+            claim.begin(precedingWork, 30_000L);
             assertFalse(future.isDone(), "Decode acceptance cannot replace the EnqueueBatch ACK");
         } else {
-            lifecycle.beginRouteDelivery(claim, precedingWork, 30_000L);
+            claim.publishRoute(precedingWork, 30_000L);
         }
         RequestSlot slot = lifecycle.requestSlot(208L);
         synchronized (slot) {
@@ -478,7 +477,7 @@ class RequestLifecycleDeliveryLockContractTest {
             assertTrue(slot.decisionDeadlineAtMs().isEmpty(), "accepted Decode needs no observation deadline");
         }
         if (batch) {
-            lifecycle.complete(claim, DeliveryResult.delivered());
+            claim.complete(DeliveryResult.delivered());
         }
         assertTrue(future.get(5L, TimeUnit.SECONDS).isSuccess());
     }
@@ -488,7 +487,7 @@ class RequestLifecycleDeliveryLockContractTest {
         Registered registered = registerItem(206L);
         bind(lifecycle, registered);
 
-        RequestRegistry.DeliveryClaim claim = RequestLifecycleTestSupport.claimBatch(lifecycle,
+        DeliveryClaim claim = RequestLifecycleTestSupport.claimBatch(lifecycle,
                 registered.item(),
                 702L,
                 () -> true);
@@ -501,8 +500,7 @@ class RequestLifecycleDeliveryLockContractTest {
         assertEquals(RequestState.Phase.DISPATCHING, afterDeadline.state(),
                 "the committed delivery claim must own the deadline race");
 
-        lifecycle.complete(
-                claim, DeliveryResult.delivered());
+        claim.complete(DeliveryResult.delivered());
         assertTrue(registered.future().join().isSuccess());
     }
 
@@ -513,11 +511,11 @@ class RequestLifecycleDeliveryLockContractTest {
                 205L, null, mock(DecodeEndpoint.class));
         bindRoute(lifecycle, registered);
 
-        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimRouteDelivery(
+        DeliveryClaim claim = lifecycle.tryClaimRouteDelivery(
                 registered.item(),
                 () -> true);
         assertNotNull(claim);
-        lifecycle.beginRouteDelivery(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 10L);
+        claim.publishRoute(new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 10L);
 
         assertTrue(registered.future().join().isSuccess());
         assertEquals(RequestState.Phase.ACKNOWLEDGED,

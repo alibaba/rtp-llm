@@ -1,9 +1,11 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.util.Logger;
 
 import java.util.ArrayDeque;
-import java.util.Objects;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -12,6 +14,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.Supplier;
+
+import static org.flexlb.balance.scheduler.RequestTerminalCleanup.runTerminalLeaf;
 
 /**
  * Publishes frontend completions without running user continuations on a
@@ -29,7 +33,8 @@ final class RequestCompletionPublisher implements AutoCloseable {
 
     private static final int DEFAULT_PUBLISHER_WORKERS = 8;
 
-    private final RequestRegistry lifecycle;
+    private final ExpirationTimer expirationTimer;
+    private final BatchSchedulerReporter reporter;
     private final ThreadPoolExecutor executor;
     private final Object lifecycleMonitor = new Object();
     private final ThreadLocal<ArrayDeque<Runnable>> localDrain =
@@ -40,8 +45,9 @@ final class RequestCompletionPublisher implements AutoCloseable {
     private int inFlightPublications;
     private Throwable closeFailure;
 
-    RequestCompletionPublisher(RequestRegistry lifecycle, int configuredWorkers) {
-        this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
+    RequestCompletionPublisher(ExpirationTimer timer, BatchSchedulerReporter reporter, int configuredWorkers) {
+        this.expirationTimer = timer;
+        this.reporter = reporter;
         int workers = configuredWorkers > 0
                 ? configuredWorkers : DEFAULT_PUBLISHER_WORKERS;
         AtomicInteger workerSequence = new AtomicInteger();
@@ -99,7 +105,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
             RequestSlot exactSlot,
             Response response) {
         return publish(exactSlot, "external response publication",
-                () -> lifecycle.publishExternalResponse(exactSlot, response),
+                () -> exactSlot.publishExternalResponse(response),
                 permit -> permit.claimTerminalResponse(response));
     }
 
@@ -107,7 +113,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
             RequestSlot exactSlot,
             Throwable error) {
         return publish(exactSlot, "external failure publication",
-                () -> lifecycle.publishExternalFailure(exactSlot, error),
+                () -> exactSlot.publishExternalFailure(error),
                 permit -> permit.claimFailure(error));
     }
 
@@ -115,7 +121,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
             RequestSlot exactSlot,
             boolean mayInterruptIfRunning) {
         return publish(exactSlot, "external cancellation publication",
-                () -> lifecycle.publishExternalCancellation(exactSlot),
+                () -> exactSlot.publishExternalCancellation(),
                 permit -> permit.claimCancellation(mayInterruptIfRunning));
     }
 
@@ -163,6 +169,42 @@ final class RequestCompletionPublisher implements AutoCloseable {
             permit.abandonIfUnclaimed();
             throw claimFailure;
         }
+    }
+
+    void publishDelivery(
+            RequestSlot slot,
+            ScheduledRequest item,
+            Response response,
+            RequestSlot.DeliveryConfirmation confirmation,
+            DeliveryClaimKind deliveryKind) {
+        Throwable preparationFailure = null;
+        preparationFailure = runTerminalLeaf(
+                preparationFailure,
+                confirmation.requestDeadline() == null
+                        ? null : () -> expirationTimer.cancel(
+                                confirmation.requestDeadline()));
+        if (deliveryKind == DeliveryClaimKind.BATCH_ENQUEUE
+                && item.ctx().getAckAtMs() > 0L && confirmation.batchEnqueueStartedAtMs() > 0L) {
+            long latencyMs = Math.max(
+                    0L,
+                    item.ctx().getAckAtMs() - confirmation.batchEnqueueStartedAtMs());
+            preparationFailure = runTerminalLeaf(
+                    preparationFailure,
+                    () -> reporter.reportDispatchAckTimeMs(
+                            RoleType.PREFILL.name(),
+                            item.prefillEp() == null
+                                    ? ""
+                                    : item.prefillEp().getIp(),
+                            latencyMs));
+        }
+        if (preparationFailure != null) {
+            Logger.error(
+                    "Delivery publication preparation isolated: request_id={}",
+                    item.requestId(),
+                    preparationFailure);
+        }
+        submitDeliveryResponse(
+                confirmation.publication(), response);
     }
 
     @Override

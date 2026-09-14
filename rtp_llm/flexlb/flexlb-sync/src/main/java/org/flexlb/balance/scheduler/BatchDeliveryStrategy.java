@@ -217,7 +217,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             for (int index = 0; index < original.size(); index++) {
                 ScheduledRequest item = original.get(index);
                 try {
-                    RequestRegistry.DeliveryClaim claim =
+                    DeliveryClaim claim =
                             requests.tryClaimBatchDelivery(
                                     item,
                                     batch.batchId(),
@@ -245,7 +245,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                                             ScheduledRequest::hitCache));
                 }
                 for (ClaimedMember member : claimed) {
-                    requests.beginDelivery(member.claim(), precedingWork, deliveredPredictionMs);
+                    member.claim().begin(precedingWork, deliveredPredictionMs);
                 }
                 gate = new DispatchGate(
                         claimed, requests);
@@ -282,9 +282,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 Throwable completionFailure = null;
                 for (ClaimedMember member : claimed) {
                     try {
-                        requests.complete(
-                                member.claim(),
-                                DeliveryResult.failed(handoffFailure));
+                        member.claim().complete(DeliveryResult.failed(handoffFailure));
                     } catch (Throwable memberFailure) {
                         completionFailure = append(
                                 completionFailure, memberFailure);
@@ -765,12 +763,12 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
 
     private record ClaimedMember(
             ScheduledRequest item,
-            RequestRegistry.DeliveryClaim claim) {
+            DeliveryClaim claim) {
     }
 
     private static final class DispatchGate
             implements BiConsumer<ScheduledRequest, DeliveryResult> {
-        private final Map<ScheduledRequest, RequestRegistry.DeliveryClaim>
+        private final Map<ScheduledRequest, DeliveryClaim>
                 claimsByItem;
         private final RequestRegistry requests;
         private boolean deferred = true;
@@ -782,7 +780,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             this.requests = requests;
             this.claimsByItem = new IdentityHashMap<>(members.size());
             for (ClaimedMember member : members) {
-                RequestRegistry.DeliveryClaim previous = claimsByItem.put(
+                DeliveryClaim previous = claimsByItem.put(
                         member.item(), member.claim());
                 if (previous != null) {
                     throw new IllegalArgumentException(
@@ -834,15 +832,15 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         private void invoke(Event event) {
-            RequestRegistry.DeliveryClaim claim = claimFor(event.item());
+            DeliveryClaim claim = claimFor(event.item());
             if (claim == null) {
                 throw new IllegalStateException(
                         "batch completion referenced an unsubmitted identity");
             }
-            requests.complete(claim, event.completion());
+            claim.complete(event.completion());
         }
 
-        private RequestRegistry.DeliveryClaim claimFor(ScheduledRequest item) {
+        private DeliveryClaim claimFor(ScheduledRequest item) {
             return claimsByItem.get(item);
         }
     }
