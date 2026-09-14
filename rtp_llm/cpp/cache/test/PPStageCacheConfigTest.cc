@@ -107,6 +107,7 @@ TEST(PPStageCacheConfig, stageScopedPp1IsIdentity) {
     const auto mc     = makeHybridModelConfig(8);
     const auto staged = CacheConfigCreator::stageScopedModelConfig(mc, ParallelismConfig{});
     EXPECT_EQ(staged.num_layers, 8);
+    EXPECT_EQ(staged.global_layer_begin, 0u);
     EXPECT_EQ(staged.kv_cache_spec_descs.size(), 8u);
     EXPECT_EQ(staged.hybrid_attention_config.hybrid_attention_types.size(), 8u);
 }
@@ -118,6 +119,7 @@ TEST(PPStageCacheConfig, stageScopedMatchesLayerPartition) {
         const auto staged       = CacheConfigCreator::stageScopedModelConfig(mc, makePpConfig(65, 4, rank));
         const auto [begin, end] = expected[static_cast<size_t>(rank)];
         EXPECT_EQ(staged.num_layers, end - begin) << "rank=" << rank;
+        EXPECT_EQ(staged.global_layer_begin, static_cast<uint32_t>(begin)) << "rank=" << rank;
         ASSERT_EQ(staged.kv_cache_spec_descs.size(), static_cast<size_t>(end - begin)) << "rank=" << rank;
         ASSERT_EQ(staged.hybrid_attention_config.hybrid_attention_types.size(), static_cast<size_t>(end - begin))
             << "rank=" << rank;
@@ -161,6 +163,7 @@ TEST(PPStageCacheConfig, independentPoolPp2SlicesGeometry) {
         const auto stage = CacheConfigCreator::createBasicConfig(mc, makePpConfig(8, 2, rank), false, 0);
         EXPECT_EQ(stage.layer_num, 4u) << "rank=" << rank;
         EXPECT_EQ(stage.layer_all_num, 4u) << "rank=" << rank;
+        EXPECT_EQ(stage.global_layer_begin, static_cast<uint32_t>(rank) * 4u) << "rank=" << rank;
         ASSERT_EQ(stage.topology().layers().size(), 4u) << "rank=" << rank;
         for (size_t l = 0; l < 4; ++l) {
             EXPECT_EQ(stage.topology().layers()[l].layer_id, static_cast<int>(l)) << "rank=" << rank;
@@ -216,6 +219,7 @@ TEST(PPStageCacheConfig, singlePp2SlicesGeometry) {
     for (int64_t rank = 0; rank < 2; ++rank) {
         const auto stage = CacheConfigCreator::createBasicConfig(mc, makePpConfig(8, 2, rank), false, 0);
         EXPECT_EQ(stage.layer_num, 4u) << "rank=" << rank;
+        EXPECT_EQ(stage.global_layer_begin, static_cast<uint32_t>(rank) * 4u) << "rank=" << rank;
         ASSERT_EQ(stage.groupNums(), 1) << "rank=" << rank;
         const auto& group = stage.topology().groups()[0];
         ASSERT_EQ(group.layer_ids.size(), 4u) << "rank=" << rank;
@@ -566,8 +570,8 @@ protected:
 TEST_F(PPCacheNegotiationTest, snapshotSizingDoesNotMutateMtpConfig) {
     for (bool independent_pools : {false, true}) {
         for (uint32_t first_blocks : {24u, 8u}) {
-            SCOPED_TRACE(::testing::Message() << "independent_pools=" << independent_pools
-                                             << ", first_blocks=" << first_blocks);
+            SCOPED_TRACE(::testing::Message()
+                         << "independent_pools=" << independent_pools << ", first_blocks=" << first_blocks);
             auto score                                                        = makeSingleModelConfig(4);
             auto propose                                                      = makeSingleModelConfig(2);
             score.hybrid_attention_config.enable_independent_kv_cache_pools   = independent_pools;
@@ -577,12 +581,12 @@ TEST_F(PPCacheNegotiationTest, snapshotSizingDoesNotMutateMtpConfig) {
             SpeculativeExecutionConfig sp_config;
             sp_config.type              = SP_TYPE_MTP;
             sp_config.gen_num_per_cycle = 2;
-            const auto first_config = CacheConfigCreator::createConfig(
+            const auto first_config     = CacheConfigCreator::createConfig(
                 score, makePpConfig(4, 2, 0), RuntimeConfig{}, kv_cache_config, std::nullopt, sp_config);
             first_snapshot_                = StageCacheSnapshot::fromConfig(first_config);
             local_snapshot_                = {};
             kv_cache_config.test_block_num = 32;
-            const auto config = CacheConfigCreator::createSpConfig(score,
+            const auto config              = CacheConfigCreator::createSpConfig(score,
                                                                    propose,
                                                                    makePpConfig(4, 2, 1),
                                                                    RuntimeConfig{},
@@ -592,9 +596,9 @@ TEST_F(PPCacheNegotiationTest, snapshotSizingDoesNotMutateMtpConfig) {
                                                                    true,
                                                                    false);
             ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
-            const auto topology       = config.topologyPtr();
-            const auto draft          = config.mtp_sub_configs[0];
-            const auto draft_topology = draft->topologyPtr();
+            const auto                topology       = config.topologyPtr();
+            const auto                draft          = config.mtp_sub_configs[0];
+            const auto                draft_topology = draft->topologyPtr();
             PPCacheCapacityNegotiator negotiator;
             if (first_blocks == 24u) {
                 const auto validation = negotiator.negotiate(config, 28, RuntimeConfig{});
@@ -631,7 +635,7 @@ TEST(PPStageCacheConfig, composedCapacityRejectsMtpSubConfigMismatch) {
         SpeculativeExecutionConfig sp_config;
         sp_config.type              = SP_TYPE_MTP;
         sp_config.gen_num_per_cycle = 2;
-        auto config = CacheConfigCreator::createSpConfig(score,
+        auto config                 = CacheConfigCreator::createSpConfig(score,
                                                          propose,
                                                          makePpConfig(4, 2, 1),
                                                          RuntimeConfig{},
@@ -815,8 +819,8 @@ TEST(PPStageCacheConfig, managerConstructorRequiresNegotiatorUnderPp) {
     auto       config = CacheConfigCreator::createBasicConfig(mc, makePpConfig(8, 2, 0), false, 0);
     config.finalizeBlockNums(100, RuntimeConfig{});
 
-    EXPECT_THROW(
-        KVCacheManager(config, false, nullptr, KVCacheConfig{}, makePpConfig(8, 2, 0), RuntimeConfig{}), std::exception);
+    EXPECT_THROW(KVCacheManager(config, false, nullptr, KVCacheConfig{}, makePpConfig(8, 2, 0), RuntimeConfig{}),
+                 std::exception);
 }
 
 TEST(PPStageCacheConfig, managerWarmupSkipsCapacityCommunicationUnderPp) {

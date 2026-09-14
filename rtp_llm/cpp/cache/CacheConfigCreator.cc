@@ -235,8 +235,9 @@ ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       
                             model_config.kv_cache_spec_descs.size(),
                             model_config.num_layers);
 
-    ModelConfig stage_config = model_config;
-    stage_config.num_layers  = end - begin;
+    ModelConfig stage_config        = model_config;
+    stage_config.num_layers         = end - begin;
+    stage_config.global_layer_begin = static_cast<uint32_t>(begin);
     stage_config.kv_cache_spec_descs.assign(model_config.kv_cache_spec_descs.begin() + begin,
                                             model_config.kv_cache_spec_descs.begin() + end);
 
