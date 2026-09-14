@@ -146,14 +146,19 @@ class PrefillEndpointTest {
         ScheduledRequest first = createScheduledRequest(101L, 500, 200);
         ScheduledRequest sibling = createScheduledRequest(102L, 300, 100);
         registerBatch(endpoint, 7L, 100, List.of(first, sibling));
+        assertEquals(2, endpoint.getLocallyOwnedRequestCount());
+        assertEquals(1, endpoint.getInflightBatchCount());
 
         assertTrue(endpoint.expireCommittedItem(first));
         assertFalse(endpoint.expireCommittedItem(first));
+        assertEquals(1, endpoint.getLocallyOwnedRequestCount());
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1, endpoint.observedRequestCount());
         assertEquals(1, endpoint.captureRouteProjectionInputs().work().batches().size());
 
         assertTrue(endpoint.expireCommittedItem(sibling));
+        assertFalse(endpoint.expireCommittedItem(sibling));
+        assertEquals(0, endpoint.getLocallyOwnedRequestCount());
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.captureRouteProjectionInputs().work().batches().size());
         assertEquals(0, endpoint.observedRequestCount());

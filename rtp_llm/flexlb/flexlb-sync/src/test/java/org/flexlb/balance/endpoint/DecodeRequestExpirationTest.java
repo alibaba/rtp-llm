@@ -157,7 +157,7 @@ class DecodeRequestExpirationTest {
     }
 
     @Test
-    void ordinaryFinishedRequestsDoNotPopulateRetainedTombstones() {
+    void ordinaryFinishedRequestsDoNotPopulateRetainedTerminalRecords() {
         int requestCount = 10_000;
         Map<String, TaskInfo> finished = new HashMap<>(requestCount);
         for (long requestId = 1; requestId <= requestCount; requestId++) {

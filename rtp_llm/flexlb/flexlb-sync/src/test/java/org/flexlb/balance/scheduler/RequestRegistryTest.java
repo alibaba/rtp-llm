@@ -266,7 +266,7 @@ class RequestRegistryTest {
         lifecycle.cancelRequest(602L, 0L, CancelReason.DEADLINE_EXCEEDED);
         assertEquals(RequestState.Phase.TIMED_OUT,
                 lifecycle.getRequestState(602L, 0L).state());
-        verify(registered.item().decodeEp()).releaseReservationExact(
+        verify(registered.item().decodeEp()).releaseLocalShadowIfExact(
                 registered.item().decodeReservation());
     }
 
@@ -308,11 +308,11 @@ class RequestRegistryTest {
         old.expireInactiveRequest(old.createdAtMs()
                 + config.getRequestLifecycle().getRequest().getTimeoutMs());
         registered.future().join();
-        assertTrue(lifecycle.removeExactTombstone(old, Long.MAX_VALUE));
+        assertTrue(lifecycle.removeExactTerminalRecord(old, Long.MAX_VALUE));
         CompletableFuture<Response> replacement = lifecycle.register(context(703L));
 
         delivery.complete(org.flexlb.balance.delivery.DeliveryResult.delivered());
-        assertFalse(preemption.settleTerminal("late engine cancellation"));
+        assertFalse(preemption.completePreemption("late engine cancellation"));
         assertFalse(preemption.release());
         assertNull(old.cancelRequest(0L, CancelReason.CLIENT_CANCELLED));
         assertFalse(replacement.isDone());

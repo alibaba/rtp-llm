@@ -6,14 +6,14 @@ retain their existing transaction and execution responsibilities.
 
 | Component | State and responsibility | Entry points |
 | --- | --- | --- |
-| RequestRegistry | Canonical ID-to-slot mapping, registration mutex, global admission shutdown barrier | register, exact ID/item resolution, conditional tombstone removal, snapshots, shutdown |
+| RequestRegistry | Canonical ID-to-slot mapping, registration mutex, global admission shutdown barrier | register, exact ID/item resolution, conditional terminal record removal, snapshots, shutdown |
 | RequestSlot | Request state, admission first cause and retained facts, delivery/engine ownership, preemption, deadline validity, terminal and response selection | cancelRequest, finishAdmission/terminateAdmission, commitRoute, claimBatchDelivery/claimRouteDelivery, setDeliveryPrediction, publishRoute, completeDelivery (through DeliveryClaim), processPrefillStatus/processDecodeStatus, recordPrefillRetirement/recordDecodeRetirement, updatePreemption/releasePreemption/completePreemption, expire, prepareShutdown |
 | RequestSlot.AdmissionHandle | One-shot completion of one exact admission | close, terminate; callbacks capture their slot and release the global admission count |
 | RequestSlot.DeliveryClaim | Exact asynchronous delivery identity; only Slot can construct it and consume its result | complete |
-| PreemptionRegistration | One exact preemption attempt and its observed protocol phase | applyPhase, release, settleTerminal; callbacks go directly to its slot |
-| RequestTerminalCleanup | Executes a detached terminal action, isolates cleanup failures, commits tombstone, submits selected response | finishTerminal, submitTerminal |
+| PreemptionRegistration | One exact preemption attempt and its observed protocol phase | applyPhase, release, completePreemption; callbacks go directly to its slot |
+| RequestTerminalCleanup | Executes a detached terminal action, isolates cleanup failures, commits terminal record, submits selected response | finishTerminal, submitTerminal |
 | RequestCompletionPublisher | Frontend execution and publication shutdown accounting | reserve publication capacity, submit selected completion, execute selected completion synchronously |
-| ExpirationTimer | Timer scheduling and exact timer capabilities; periodic retention scan | attach/cancel deadlines; deliver expiry to the owning slot; remove exact tombstones via directory |
+| ExpirationTimer | Timer scheduling and exact timer capabilities; periodic retention scan | attach/cancel deadlines; deliver expiry to the owning slot; remove exact terminal records via directory |
 | Endpoint | Queue and resource ledgers, exact handoff/settlement transactions | unchanged exact item/reservation operations |
 | Response | Defensive response representation construction | success/error construction, server status copies |
 
@@ -23,6 +23,11 @@ cancellation first cause, transport outcome or terminal replay. Delivery and
 preemption callbacks no longer return to the registry or resolve a bare ID.
 The slot has no directory reference: its only global admission dependency is the
 completion callback for the already-counted mutation.
+
+`TERMINAL_RECORD` means cleanup has committed and only retained request state remains.
+`REQUEST_FENCED` means the engine prevents later enqueue of that request ID. The
+gRPC value `CANCEL_STATUS_TOMBSTONED` and HTTP value `"TOMBSTONED"` remain wire
+compatibility names and are translated at the transport boundary.
 
 ## Execution paths
 
@@ -54,7 +59,7 @@ completion callback for the already-counted mutation.
   reconciliation transactions retain resource settlement authority.
 - Terminal: Slot selects immutable TerminalOutcome and claims TERMINALIZING,
   detaching cleanup/publication capabilities. RequestTerminalCleanup executes
-  selected leaves outside the slot monitor, then Slot commits TOMBSTONE. Slot selects the frontend result before submission; Publisher completes the Future outside locks.
+  selected leaves outside the slot monitor, then Slot commits TERMINAL_RECORD. Slot selects the frontend result before submission; Publisher completes the Future outside locks.
 - Shutdown: close registration/admission and wait for in-flight mutations, ask
   each slot for its shutdown action, execute actions, then close Timer and Publisher.
 
@@ -71,14 +76,46 @@ completion callback for the already-counted mutation.
 4. Slot arbitrates publication against a terminal selected after ACK confirmation,
    before submitting a concrete SelectedPublication. Publisher never re-enters
    request decisions; it only executes the selected completion and accounts for it.
-5. TERMINALIZING excludes competing request actions before cleanup; TOMBSTONE is
+5. TERMINALIZING excludes competing request actions before cleanup; TERMINAL_RECORD is
    committed after cleanup. Cleanup failure remains isolated and logged.
 6. Directory removal invalidates the slot under its monitor. Old delivery,
    preemption, timer and Future capabilities cannot resolve a replacement request.
 
 TerminalOutcome replaces arbitrary externally supplied transition functions.
-The resource flags in TerminalAction are internal decisions built by Slot;
-RequestTerminalCleanup only consumes them and never chooses an outcome.
+TerminalAction carries the exact item and the original terminal event through
+lock-free cleanup; it has no release flags or counterpart callback. Local terminal
+claims need no endpoint event. The existing DeferredTerminal event family also
+represents inactivity expiry; this is not a new Slot state or a cleanup-policy enum.
+RequestTerminalCleanup executes cleanup, commits the terminal record and publishes.
+ExpirationTimer only owns timer operations.
+
+### Resource ownership at each boundary
+
+Slot retains only `item` for exact resource identity. It does not duplicate queue
+membership, Prefill accounting or Decode reservation ownership in nullable fields.
+`releaseTerminalEndpoints` reads the existing delivery stage after terminal claim;
+that stage cannot change before cleanup commits the terminal record. The original event
+explains which endpoint has already settled. Endpoint methods atomically validate
+identity and actual ownership under their own locks. There is no query-then-release
+window and no endpoint operation runs under the Slot monitor.
+
+| Stage/event | Preconditions | Endpoint operation |
+| --- | --- | --- |
+| Local cancellation/shutdown | Active, no admission/handoff/Engine owner | Remove exact queue membership, release only local Decode shadow, settle per-request Prefill accounting |
+| Publication rollback | Exact pinned admission | Admission transaction rolls back provisional resources; Slot drops item |
+| BATCH delivery response | Successful exact handoff | Keep endpoint-owned batch and Decode lifecycle; response publication releases neither |
+| NON_BATCH delivery response | Successful exact handoff | Keep per-request Prefill accounting and Decode lifecycle |
+| Prefill terminal | Exact post-settlement Prefill fact | Only remaining local Decode shadow is reversible; Engine/protocol ownership is protected |
+| Decode terminal | Exact post-settlement Decode fact | Settle NON_BATCH Prefill accounting; do not settle the Prefill-owned BATCH group |
+| Definite rejection/Decode retirement/priority terminal | Existing exact endpoint settlement committed | Settle the remaining exact Prefill member, including a BATCH member |
+| Cancel ACK | Exact preemption registration | No resource release; wait for the existing terminal reconciliation |
+| Inactivity | Exact expired lifetime, admission finished | Expire both exact endpoint registrations, including uncertain handoff; preserve physical KV samples |
+
+`TerminalResources` contains only detached timers. Each cleanup leaf is isolated so
+failure of a timer or endpoint operation cannot skip the other endpoint. Local
+Decode shadow release refuses to consume an Engine/protocol owner even when its
+status projection has not reached Slot. Inactivity uses its explicit event, never
+the frontend response status or cancellation first cause, to expire local tracking.
 
 ## Validation
 
@@ -151,7 +188,7 @@ or change the separate request-terminal and frontend-publication winners.
   request waits for resource evidence; repeated cancellation cannot replace its cause.
 - Inactivity expiry uses `beginExpiredRequestLocked` for accounting cleanup. It does
   not switch ordinary cancellation behavior with a boolean argument.
-- `settleAdmissionLocked` handles retained evidence and any pending cancellation
+- `processAdmissionResultLocked` handles retained evidence and any pending cancellation
   together. There is no separate cancellation replay after releasing the monitor.
 - Worker termination selects its resource cleanup from Endpoint evidence and its
   outcome from the preserved first cause. It has no cancellation-specific wrapper chain.

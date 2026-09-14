@@ -1618,7 +1618,7 @@ def main():
         # 聚合端按 epoch 对齐差分；与客户端 QPS 同节呈现。全零也画：
         # 零 cancel 曲线本身就是「无抢占/取消」的正面证据。
         # 20260830+ 聚合端拆 cancel 角色（新 aggregate 才有这些键）：master 侧
-        # = census unknown/finished/tombstone 差分（cancel RPC 到达引擎时
+        # = census unknown/finished/terminal record 差分（cancel RPC 到达引擎时
         # 引擎已无该请求活跃条目，即 master 调度层发起的取消：queueTimeout/
         # deadline 到期、decode generation retired 批量取消等）；prefill/
         # decode 侧 = 引擎仍在跟踪该请求时的真实取消（final_snapshot 每引擎
