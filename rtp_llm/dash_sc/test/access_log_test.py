@@ -434,6 +434,49 @@ class CorrelationHeaderTest(TestCase):
 
 
 class BuildRecordTest(TestCase):
+    def test_acceptance_logging_preserves_request_state_on_error(self) -> None:
+        rec = _make_record(status="CANCELLED", finish_reason=10)
+        rec.record_frontend_backend_aux_info(
+            SimpleNamespace(
+                speculative_verify_rounds=2,
+                speculative_accepted_token_num=6,
+                speculative_proposed_draft_tokens=8,
+            )
+        )
+        counters = dict(rec.frontend_backend_metric_counters)
+        for _ in range(2):
+            payload = rec.build_record(server_id=1, rank_id=0)
+            self.assertEqual(payload["status"], "CANCELLED")
+            self.assertEqual(payload["finish_reason"], 10)
+            self.assertEqual(payload["speculative_accept_rate"], 0.5)
+            self.assertEqual(rec.frontend_backend_metric_counters, counters)
+
+    def test_non_speculative_request_omits_acceptance_fields(self) -> None:
+        rec = _make_record()
+        rec.record_frontend_backend_aux_info(SimpleNamespace(output_len=10))
+        payload = rec.build_record(server_id=1, rank_id=0)
+        self.assertFalse(any(key.startswith("speculative_") for key in payload))
+
+    def test_speculative_acceptance_handles_missing_denominators(self) -> None:
+        for rounds, accepted, proposed, avg_length, rate in (
+            (2, 4, 0, 2.0, None),
+            (0, 0, 8, None, 0.0),
+            (2, 1, 8, 0.5, 0.0),
+            (2, 20, 8, 10.0, 1.0),
+        ):
+            with self.subTest(rounds=rounds, accepted=accepted, proposed=proposed):
+                rec = _make_record()
+                rec.record_frontend_backend_aux_info(
+                    SimpleNamespace(
+                        speculative_verify_rounds=rounds,
+                        speculative_accepted_token_num=accepted,
+                        speculative_proposed_draft_tokens=proposed,
+                    )
+                )
+                payload = rec.build_record(server_id=1, rank_id=0)
+                self.assertEqual(payload["speculative_avg_accept_length"], avg_length)
+                self.assertEqual(payload["speculative_accept_rate"], rate)
+
     def test_frontend_mtp_generate_tokens_match_backend_tps_numerator(self) -> None:
         rec = _make_record()
         rec.record_frontend_backend_aux_info(
@@ -662,6 +705,14 @@ class BuildRecordTest(TestCase):
 
     def test_forward_summary_mode_and_backend_diagnostics(self) -> None:
         rec = _make_record(raw_mode=True)
+        # Even if counters are present, raw forwarding keeps its summary schema.
+        rec.record_frontend_backend_aux_info(
+            SimpleNamespace(
+                speculative_verify_rounds=2,
+                speculative_accepted_token_num=6,
+                speculative_proposed_draft_tokens=8,
+            )
+        )
         rec.record_request_frame(_make_infer_request(input_ids=[1, 2, 3]))
         rec.mark_backend_call_start("10.0.0.7:9000")
         for resp in (
@@ -683,6 +734,7 @@ class BuildRecordTest(TestCase):
         self.assertEqual(payload["buffered_stage"], "flushed_both")
         self.assertIsNotNone(payload["request_controls"])
         self.assertNotIn("raw_responses", payload)
+        self.assertFalse(any(key.startswith("speculative_") for key in payload))
         # Forwarder keeps its no-structured-payload contract: token ids and
         # frontend-only statistics are not observed, so they are not logged.
         for field in (
@@ -732,6 +784,38 @@ class BuildRecordTest(TestCase):
 
 
 class EmitLogTest(TestCase):
+    def test_access_log_correlates_cumulative_acceptance_with_request(self) -> None:
+        rec = _make_record(upstream_request_id="dashscope-glm53-123")
+        rec.record_request_frame(_make_infer_request(request_id="glm53-123"))
+        # Each phase reports cumulative counters. The second phase1 frame
+        # replaces its first snapshot, while a new backend phase adds to it.
+        for phase, rounds, accepted, proposed in (
+            ("phase1", 1, 3, 4),
+            ("phase1", 2, 6, 8),
+            ("phase2", 1, 4, 4),
+        ):
+            rec.record_frontend_backend_aux_info(
+                SimpleNamespace(
+                    speculative_verify_rounds=rounds,
+                    speculative_accepted_token_num=accepted,
+                    speculative_proposed_draft_tokens=proposed,
+                ),
+                phase=phase,
+            )
+        with patch.object(
+            logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
+        ) as info:
+            emit_access_log(rec, rank_id=0, server_id=1)
+        info.assert_called_once()
+        payload = json.loads(info.call_args.args[0])
+        self.assertEqual(payload["request_id"], "glm53-123")
+        self.assertEqual(payload["upstream_request_id"], "dashscope-glm53-123")
+        self.assertEqual(payload["speculative_verify_rounds"], 3)
+        self.assertEqual(payload["speculative_accepted_token_num"], 10)
+        self.assertEqual(payload["speculative_proposed_draft_tokens"], 12)
+        self.assertAlmostEqual(payload["speculative_avg_accept_length"], 10 / 3)
+        self.assertAlmostEqual(payload["speculative_accept_rate"], 7 / 12)
+
     def test_query_log_arrival_breadcrumb(self) -> None:
         rec = _make_record(
             upstream_request_id="corr-xyz",

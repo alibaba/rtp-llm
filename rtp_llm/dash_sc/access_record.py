@@ -972,6 +972,31 @@ class GrpcAccessRecord:
         )
         if self.generate_config_role_addrs is not None:
             record["generate_config_role_addrs"] = self.generate_config_role_addrs
+        verify_rounds, accepted_tokens, proposed_tokens = (
+            self.frontend_combined_metric_counters[:3]
+        )
+        if verify_rounds > 0 or proposed_tokens > 0:
+            # Same request-level definitions as FrontendRequestMetrics. Accepted
+            # tokens include one target/bonus token per verify round; exclude
+            # those bonus tokens when measuring draft-token acceptance.
+            record.update(
+                {
+                    "speculative_verify_rounds": verify_rounds,
+                    "speculative_accepted_token_num": accepted_tokens,
+                    "speculative_proposed_draft_tokens": proposed_tokens,
+                    "speculative_avg_accept_length": (
+                        accepted_tokens / verify_rounds if verify_rounds > 0 else None
+                    ),
+                    "speculative_accept_rate": (
+                        min(
+                            max(accepted_tokens - verify_rounds, 0) / proposed_tokens,
+                            1.0,
+                        )
+                        if proposed_tokens > 0
+                        else None
+                    ),
+                }
+            )
         record.update(self._repetition_monitor.record_fields())
         return record
 

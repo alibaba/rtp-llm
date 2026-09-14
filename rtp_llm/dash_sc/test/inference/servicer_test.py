@@ -3319,12 +3319,36 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             request_metrics=FrontendRequestMetrics(sink),
         )
 
-        responses = await _drain(
-            servicer.ModelStreamInfer(
-                _areq_iter([self._valid_infer_request()]),
-                MagicMock(),
+        request = self._valid_infer_request()
+        context = _FakeGrpcContext(metadata=(("x-request-id", "mtp-upstream-123"),))
+        with patch.object(
+            logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
+        ) as log_info:
+            responses = await _drain(
+                servicer.ModelStreamInfer(_areq_iter([request]), context)
             )
+        log_info.assert_called_once()
+        access = json.loads(log_info.call_args.args[0])
+        self.assertEqual(access["request_id"], request.id)
+        self.assertEqual(access["upstream_request_id"], "mtp-upstream-123")
+        self.assertEqual(access["speculative_verify_rounds"], 2)
+        self.assertEqual(access["speculative_accepted_token_num"], 6)
+        self.assertEqual(access["speculative_proposed_draft_tokens"], 8)
+        self.assertEqual(
+            [access["speculative_accept_rate"]],
+            sink.values(GaugeMetrics.FRONTEND_SPECULATIVE_ACCEPT_RATE_METRIC),
         )
+        self.assertEqual(
+            [access["speculative_avg_accept_length"]],
+            sink.values(GaugeMetrics.FRONTEND_SPECULATIVE_AVG_ACCEPT_LENGTH_METRIC),
+        )
+        for response in responses:
+            self.assertFalse(
+                any(
+                    output.name.startswith("speculative_")
+                    for output in response.infer_response.outputs
+                )
+            )
 
         self.assertEqual(len(responses), 2)
         self.assertEqual(
