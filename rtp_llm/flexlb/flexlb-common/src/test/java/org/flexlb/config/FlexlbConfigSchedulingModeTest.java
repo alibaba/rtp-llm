@@ -12,6 +12,68 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class FlexlbConfigSchedulingModeTest {
 
     @Test
+    void global_fixed_window_requires_single_worker_decision() {
+        FlexlbConfig defaults = ConfigService.parse("{}");
+        assertEquals(GlobalDecisionConfig.Type.SINGLE,
+                defaults.queueScheduler().getGlobalDecision().getType());
+        FlexlbConfig config = ConfigService.parse("""
+                {"scheduler":{"globalDecision":{"type":"FIXED_WINDOW"},
+                              "decision":{"type":"SINGLE"}},
+                 "router":{"roles":{"prefill":{
+                   "candidateChoice":{"type":"BEST_ONLY"}}}}}
+                """);
+        GlobalDecisionConfig global = config.queueScheduler().getGlobalDecision();
+        assertEquals(GlobalDecisionConfig.Type.FIXED_WINDOW, global.getType());
+        assertEquals(8, global.getMaxRequests());
+        assertEquals(5L, global.getMaxCollectionWaitMs());
+        assertEquals(4096, global.getMaxPlanEvaluations());
+        assertTrue(config.isSingleDecision());
+
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {"scheduler":{"globalDecision":{"type":"FIXED_WINDOW"}},
+                 "router":{"roles":{"prefill":{
+                   "candidateChoice":{"type":"BEST_ONLY"}}}}}
+                """));
+    }
+
+    @Test
+    void global_window_rejects_invalid_limits_and_inactive_parameters() {
+        for (String global : new String[] {
+                "{\"type\":\"FIXED_WINDOW\",\"maxRequests\":0}",
+                "{\"type\":\"FIXED_WINDOW\",\"maxCollectionWaitMs\":-1}",
+                "{\"type\":\"FIXED_WINDOW\",\"maxPlanEvaluations\":0}",
+                "{\"type\":\"SINGLE\",\"maxRequests\":8}",
+                "{\"type\":null}"
+        }) {
+            assertThrows(ConfigValidationException.class, () -> ConfigService.parse(
+                    "{\"scheduler\":{\"globalDecision\":" + global + "}}"), global);
+        }
+        FlexlbConfig immediate = ConfigService.parse("""
+                {"scheduler":{"globalDecision":{"type":"FIXED_WINDOW",
+                  "maxRequests":1,"maxCollectionWaitMs":0,
+                  "maxPlanEvaluations":17},
+                  "decision":{"type":"SINGLE"}},
+                 "router":{"roles":{"prefill":{
+                   "candidateChoice":{"type":"BEST_ONLY"}}}}}
+                """);
+        assertEquals(0L, immediate.queueScheduler().getGlobalDecision().getMaxCollectionWaitMs());
+        assertEquals(17, immediate.queueScheduler().getGlobalDecision().getMaxPlanEvaluations());
+    }
+
+    @Test
+    void global_window_requires_best_only_prefill_choice() {
+        ConfigValidationException failure = assertThrows(
+                ConfigValidationException.class,
+                () -> ConfigService.parse("""
+                        {"scheduler":{"globalDecision":{
+                          "type":"FIXED_WINDOW"},
+                          "decision":{"type":"SINGLE"}}}
+                        """));
+        assertTrue(failure.getMessage().contains(
+                "router.roles.prefill.candidateChoice.type"));
+    }
+
+    @Test
     void direct_is_explicit_and_only_supports_non_batch_delivery() {
         FlexlbConfig config = FlexlbConfigMerger.mergeWithDefaults("""
                 {

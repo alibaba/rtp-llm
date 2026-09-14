@@ -6,7 +6,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
-import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
+import org.flexlb.balance.strategy.PrefillStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
@@ -48,7 +48,7 @@ import static org.mockito.Mockito.when;
 /** Final selector/pin ownership contracts for {@link DefaultRouter}. */
 class DefaultRouterTest {
 
-    private CostBasedPrefillStrategy prefillSelector;
+    private PrefillStrategy prefillSelector;
     private CostBasedDecodeStrategy decodeSelector;
     private RandomStrategy vitSelector;
     private ConfigService configService;
@@ -56,7 +56,7 @@ class DefaultRouterTest {
 
     @BeforeEach
     void setUp() {
-        prefillSelector = mock(CostBasedPrefillStrategy.class);
+        prefillSelector = mock(PrefillStrategy.class);
         decodeSelector = mock(CostBasedDecodeStrategy.class);
         vitSelector = mock(RandomStrategy.class);
         configService = mock(ConfigService.class);
@@ -422,6 +422,24 @@ class DefaultRouterTest {
 
         verify(prefillSelector).select(
                 context, RoleType.PREFILL, null);
+    }
+
+    @Test
+    void batchRouteRejectsMismatchedStrategyResultsAndReleasesSelections() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
+        DefaultRouter router = router();
+        BalanceContext first = context(81L);
+        BalanceContext second = context(82L);
+        SelectionFixture selection = selection(
+                RoleType.PREFILL, 81L, "p", 8001, "g1");
+        when(prefillSelector.selectBatch(any())).thenReturn(
+                List.of(PlacementResult.success(selection.selection)));
+
+        assertThrows(IllegalStateException.class, () -> router.routeBatchForQueue(
+                List.of(first, second), List.of("", "")));
+
+        verify(prefillSelector).selectBatch(any());
+        verify(selection.selection).close();
     }
 
     private DefaultRouter router() {

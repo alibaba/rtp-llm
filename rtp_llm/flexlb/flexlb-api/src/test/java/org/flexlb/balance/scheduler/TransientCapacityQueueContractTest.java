@@ -10,8 +10,10 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
+import org.flexlb.balance.strategy.CostBasedBatchedPrefillStrategy;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
+import org.flexlb.balance.strategy.PrefillStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -920,8 +922,8 @@ class TransientCapacityQueueContractTest {
             CacheAwareService cache = mock(CacheAwareService.class);
             when(cache.findMatchingEngines(any()))
                     .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
-            CostBasedPrefillStrategy prefillSelector =
-                    new CostBasedPrefillStrategy(
+            CostBasedBatchedPrefillStrategy prefillStrategy =
+                    new CostBasedBatchedPrefillStrategy(
                             workers,
                             cache,
                             mock(EngineHealthReporter.class));
@@ -931,7 +933,7 @@ class TransientCapacityQueueContractTest {
                     event -> metrics.recordPlacementWakeup(event.key()));
             runtime.bindRouter(new RecordingRouter(
                     new DefaultRouter(
-                            prefillSelector,
+                            prefillStrategy,
                             decodeSelector,
                             new RandomStrategy(workers),
                             configService,
@@ -1088,7 +1090,7 @@ class TransientCapacityQueueContractTest {
                 DefaultRouter delegate,
                 PlacementMetrics metrics) {
             super(
-                    mock(CostBasedPrefillStrategy.class),
+                    mock(PrefillStrategy.class),
                     mock(CostBasedDecodeStrategy.class),
                     mock(RandomStrategy.class),
                     mock(ConfigService.class),

@@ -4,6 +4,8 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.GlobalDecisionConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
@@ -30,21 +32,23 @@ import java.util.concurrent.locks.ReentrantLock;
  *
  * <p>This queue is the model's ordered placement boundary. A request is
  * selected from the complete live candidate fleet before the endpoint runtime
- * receives it. A bounded planning frontier controls how many
- * independent routes can be prepared together; request collection and grouping
- * remain exclusively endpoint-runtime concerns. The queue lock protects only
- * index operations; route projection and RPCs are never performed while it is
- * held.</p>
+ * receives it. SINGLE prepares independent routes through a bounded planning
+ * frontier. Global FIXED_WINDOW collects an eligible prefix before worker
+ * selection and jointly plans each AutoTPM priority tier. The queue lock
+ * protects only index operations; route projection and RPCs are never
+ * performed while it is held.</p>
  *
  * <p>Plans are committed in queue order unless the exact endpoint selected by
  * one request is locally full. In that case the request is parked against that
  * endpoint and a later plan may commit only when it does not use the parked
  * endpoint. Selector misses block overlapping routing domains; explicit,
  * disjoint groups can progress independently. Planning concurrency is bounded
- * by the planner pool, while {@link WorkerBatcher} remains the sole SINGLE or
- * FIXED_WINDOW group owner. This keeps cache/KV
- * projections adjacent to each exact reservation while retaining planner
- * parallelism where the policy permits it.</p>
+ * by the planner pool for SINGLE. In global FIXED_WINDOW mode, validation
+ * requires a local SINGLE decision and {@link WorkerBatcher} only performs
+ * endpoint delivery. Without global batching, WorkerBatcher owns the
+ * endpoint-local SINGLE or FIXED_WINDOW group. This keeps cache/KV projections
+ * adjacent to each exact reservation while preserving endpoint-specific
+ * ordering.</p>
  */
 final class GlobalQueueCoordinator implements AutoCloseable {
 
@@ -57,6 +61,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final RequestRegistry lifecycle;
     private final PlacementAvailability availability;
     private final boolean priorityOrdering;
+    private final boolean globalFixedWindow;
     private final int plannerCount;
     private final ConfigService configService;
     private final ReentrantLock lock = new ReentrantLock();
@@ -86,6 +91,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
         this.availability = Objects.requireNonNull(availability, "availability");
         this.priorityOrdering = resolvePriorityOrdering(checkedConfig);
+        this.globalFixedWindow = globalFixedWindow(checkedConfig);
         this.orderedQueue = new OrderedRequestQueue(priorityOrdering);
         this.blockedRequests = new BlockedRequestIndex(priorityOrdering);
 
@@ -156,22 +162,25 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     }
 
     private void runDecisionLoop() {
+        PlanningFrontier carriedFrontier = null;
         try {
             while (!closed.get()) {
-                List<GlobalQueueEntry> frontier;
+                PlanningFrontier frontier;
                 try {
-                    frontier = nextPlanningFrontier();
+                    frontier = carriedFrontier == null
+                            ? nextPlanningFrontier() : carriedFrontier;
+                    carriedFrontier = null;
                 } catch (Throwable failure) {
                     Logger.error(
                             "Global queue planning-frontier capture failed",
                             failure);
+                    close();
+                    return;
+                }
+                if (frontier.entries().isEmpty()) {
                     continue;
                 }
-                if (frontier.isEmpty()) {
-                    continue;
-                }
-                PlanningPipeline plans = new PlanningPipeline(
-                        frontier, plannerCount);
+                PlanSequence plans = planningSequence(frontier);
                 boolean restartFrontier = false;
                 for (int planIndex = 0; planIndex < plans.size(); planIndex++) {
                     Plan plan = plans.awaitNext();
@@ -246,6 +255,11 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 }
                 if (restartFrontier) {
                     signal();
+                } else if (plans.size() < frontier.entries().size()) {
+                    carriedFrontier = new PlanningFrontier(
+                            frontier.entries().subList(
+                                    plans.size(), frontier.entries().size()),
+                            frontier.decision());
                 }
             }
         } finally {
@@ -273,25 +287,94 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
     }
 
-    private List<GlobalQueueEntry> nextPlanningFrontier() {
+    private PlanningFrontier nextPlanningFrontier() {
+        long collectionDeadlineNanos = 0L;
+        FlexlbConfig windowConfig = null;
+        GlobalDecisionSnapshot decision = null;
+        int collectedPriority = -1;
         while (!closed.get()) {
-            int frontierSize = planningFrontierSize();
             lock.lock();
             try {
                 orderedQueue.pruneCompletedHeads();
-                List<GlobalQueueEntry> frontier = orderedQueue.snapshotPrefix(
-                        frontierSize, this::isEligible);
-                if (!frontier.isEmpty()) {
-                    return frontier;
+                List<GlobalQueueEntry> first = orderedQueue.snapshotPrefix(
+                        1, this::isEligible);
+                if (first.isEmpty()) {
+                    collectionDeadlineNanos = 0L;
+                    windowConfig = null;
+                    decision = null;
+                    collectedPriority = -1;
+                    // Only queue mutations and relevant capacity events make a
+                    // parked request eligible again. There is no timed retry.
+                    awaitChanged();
+                    continue;
                 }
-                // Only queue mutations and relevant capacity events make a
-                // parked request eligible again. There is no timed retry.
-                awaitChanged();
+                GlobalQueueEntry head = first.getFirst();
+                boolean priorityPreempted = priorityOrdering
+                        && collectedPriority >= 0
+                        && head.priority > collectedPriority;
+                FlexlbConfig headConfig = requestConfig(head);
+                if (windowConfig != headConfig) {
+                    windowConfig = headConfig;
+                    decision = GlobalDecisionSnapshot.from(
+                            windowConfig, globalFixedWindow);
+                    collectionDeadlineNanos = 0L;
+                    collectedPriority = head.priority;
+                }
+                int configuredFrontierSize = planningFrontierSize(windowConfig);
+                int frontierSize = decision.fixedWindow()
+                        ? Math.min(configuredFrontierSize, decision.maxRequests())
+                        : configuredFrontierSize;
+                List<GlobalQueueEntry> captured = orderedQueue.snapshotPrefix(
+                        frontierSize, this::isEligible);
+                List<GlobalQueueEntry> frontier = compatibleConfigPrefix(
+                        captured, windowConfig);
+                if (!frontier.isEmpty()) {
+                    boolean configurationBoundary =
+                            frontier.size() < captured.size();
+                    boolean higherPriorityArrived = priorityPreempted
+                            || priorityOrdering && frontier.getFirst().priority
+                                    > collectedPriority;
+                    if (!decision.fixedWindow()
+                            || configurationBoundary
+                            || frontier.size() >= frontierSize
+                            || decision.maxCollectionWaitMs() == 0L
+                            || higherPriorityArrived) {
+                        return new PlanningFrontier(frontier, decision);
+                    }
+                    if (collectionDeadlineNanos == 0L) {
+                        collectionDeadlineNanos = System.nanoTime()
+                                + TimeUnit.MILLISECONDS.toNanos(
+                                        decision.maxCollectionWaitMs());
+                    }
+                    long remainingNanos = collectionDeadlineNanos
+                            - System.nanoTime();
+                    if (remainingNanos <= 0L) {
+                        return new PlanningFrontier(frontier, decision);
+                    }
+                    awaitChanged(remainingNanos);
+                    continue;
+                }
             } finally {
                 lock.unlock();
             }
         }
-        return List.of();
+        return PlanningFrontier.empty();
+    }
+
+    private List<GlobalQueueEntry> compatibleConfigPrefix(
+            List<GlobalQueueEntry> entries, FlexlbConfig config) {
+        int end = 0;
+        while (end < entries.size()
+                && requestConfig(entries.get(end)) == config) {
+            end++;
+        }
+        return List.copyOf(entries.subList(0, end));
+    }
+
+    private FlexlbConfig requestConfig(GlobalQueueEntry entry) {
+        FlexlbConfig requestConfig = entry.context.getConfig();
+        return requestConfig == null
+                ? configService.loadBalanceConfig() : requestConfig;
     }
 
     private boolean isEligible(GlobalQueueEntry entry) {
@@ -337,6 +420,150 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             mutation.close();
             return Plan.failure(entry, failure, availabilitySequence);
         }
+    }
+
+    private PlanSequence planningSequence(PlanningFrontier frontier) {
+        if (!frontier.decision().fixedWindow()) {
+            return new PlanningPipeline(frontier.entries(), plannerCount);
+        }
+        return new ReadyPlans(planEligibleBatch(frontier.entries()));
+    }
+
+    /** Plan only the highest eligible priority tier so the next tier sees committed capacity. */
+    private List<Plan> planEligibleBatch(List<GlobalQueueEntry> frontier) {
+        int end = frontier.size();
+        if (priorityOrdering) {
+            int priority = frontier.getFirst().priority;
+            end = 1;
+            while (end < frontier.size()
+                    && frontier.get(end).priority == priority) {
+                end++;
+            }
+        }
+        return planBatch(frontier.subList(0, end));
+    }
+
+    private List<Plan> planBatch(List<GlobalQueueEntry> entries) {
+        long availabilitySequence = availability.sequence();
+        Plan[] plans = new Plan[entries.size()];
+        List<Integer> activeIndexes = new java.util.ArrayList<>();
+        List<GlobalQueueEntry> activeEntries = new java.util.ArrayList<>();
+        List<AdmissionMutation> mutations = new java.util.ArrayList<>();
+        for (int entryIndex = 0;
+                entryIndex < entries.size();
+                entryIndex++) {
+            GlobalQueueEntry entry = entries.get(entryIndex);
+            Plan terminal = terminalPlan(entry, availabilitySequence);
+            if (terminal != null) {
+                plans[entryIndex] = terminal;
+                continue;
+            }
+            AdmissionMutation mutation = lifecycle.claimAdmissionMutation(
+                    entry.context.getRequestId(), entry.future);
+            if (mutation == null) {
+                plans[entryIndex] = Plan.done(
+                        entry, availabilitySequence);
+                continue;
+            }
+            activeIndexes.add(entryIndex);
+            activeEntries.add(entry);
+            mutations.add(mutation);
+        }
+        if (activeEntries.isEmpty()) {
+            return List.of(plans);
+        }
+        List<PlacementResult<QueueRouteAdmission, PlacementKey>> results = null;
+        boolean[] transferred = new boolean[activeEntries.size()];
+        try {
+            results = router.routeBatchForQueue(
+                            activeEntries.stream()
+                                    .map(entry -> entry.context)
+                                    .toList(),
+                            activeEntries.stream()
+                                    .map(entry -> entry.routingGroup)
+                                    .toList()
+            );
+            if (results.size() != activeEntries.size()) {
+                throw new IllegalStateException(
+                        "batch route result count does not match input");
+            }
+            for (int i = 0; i < activeEntries.size(); i++) {
+                GlobalQueueEntry entry = activeEntries.get(i);
+                AdmissionMutation mutation = mutations.get(i);
+                PlacementResult<QueueRouteAdmission, PlacementKey> result =
+                        results.get(i);
+                if (result.status() == PlacementResult.Status.SUCCESS) {
+                    plans[activeIndexes.get(i)] = Plan.success(
+                            entry, mutation, result.value(),
+                            availabilitySequence);
+                    transferred[i] = true;
+                } else {
+                    mutation.close();
+                    transferred[i] = true;
+                    plans[activeIndexes.get(i)] = Plan.result(
+                            entry, result, availabilitySequence);
+                }
+            }
+            return List.of(plans);
+        } catch (Throwable failure) {
+            for (int i = 0; i < mutations.size(); i++) {
+                int planIndex = activeIndexes.get(i);
+                Plan ownedPlan = plans[planIndex];
+                if (ownedPlan != null) {
+                    closePlan(ownedPlan);
+                    plans[planIndex] = null;
+                } else if (!transferred[i]) {
+                    closeAfterBatchPlanningFailure(
+                            mutations.get(i), failure);
+                    if (results != null && i < results.size()) {
+                        PlacementResult<QueueRouteAdmission, PlacementKey> result =
+                                results.get(i);
+                        if (result.status() == PlacementResult.Status.SUCCESS) {
+                            closeAfterBatchPlanningFailure(
+                                    result.value(), failure);
+                        }
+                    }
+                }
+                plans[activeIndexes.get(i)] = Plan.failure(
+                        activeEntries.get(i), failure,
+                        availabilitySequence);
+            }
+            if (results != null) {
+                for (int i = activeEntries.size(); i < results.size(); i++) {
+                    PlacementResult<QueueRouteAdmission, PlacementKey> result =
+                            results.get(i);
+                    if (result.status() == PlacementResult.Status.SUCCESS) {
+                        closeAfterBatchPlanningFailure(result.value(), failure);
+                    }
+                }
+            }
+            return List.of(plans);
+        }
+    }
+
+    private static void closeAfterBatchPlanningFailure(
+            AutoCloseable owned, Throwable failure) {
+        try {
+            owned.close();
+        } catch (Throwable closeFailure) {
+            failure.addSuppressed(closeFailure);
+        }
+    }
+
+    private Plan terminalPlan(
+            GlobalQueueEntry entry,
+            long availabilitySequence) {
+        if (entry.removed || entry.future.isDone()) {
+            return Plan.done(entry, availabilitySequence);
+        }
+        if (entry.context.requestExpired(System.currentTimeMillis())) {
+            lifecycle.cancelRequest(
+                    entry.context.getRequestId(),
+                    0L,
+                    CancelReason.DEADLINE_EXCEEDED);
+            return Plan.done(entry, availabilitySequence);
+        }
+        return null;
     }
 
     private Outcome commit(Plan plan) {
@@ -562,19 +789,79 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         return configService.loadBalanceConfig().isPriorityOrdering();
     }
 
+    /**
+     * Reads the global collection topology once; config hot updates may tune
+     * its active window but must not start or stop this coordinator behavior.
+     */
+    private static boolean globalFixedWindow(ConfigService configService) {
+        FlexlbConfig config = configService.loadBalanceConfig();
+        return config.isQueue()
+                && config.queueScheduler().getGlobalDecision().getType()
+                == GlobalDecisionConfig.Type.FIXED_WINDOW;
+    }
+
     /** Bound each ordered pass by admitted work; the pipeline bounds CPU concurrency. */
-    private int planningFrontierSize() {
+    private static int planningFrontierSize(FlexlbConfig config) {
         // Planning owns CPU slots, not endpoint capacity. In particular, zero
         // free credits must still allow exact-route priority rescue. Publication
         // and replacement share the endpoint's authoritative capacity check.
         return Math.max(MIN_PLANNING_FRONTIER_SIZE,
-                configService.loadBalanceConfig().queueScheduler().getCapacity()
+                config.queueScheduler().getCapacity()
                         .getMaxOutstandingRequestsGlobal());
+    }
+
+    private record PlanningFrontier(
+            List<GlobalQueueEntry> entries,
+            GlobalDecisionSnapshot decision) {
+
+        private PlanningFrontier {
+            entries = List.copyOf(entries);
+            Objects.requireNonNull(decision, "decision");
+        }
+
+        private static PlanningFrontier empty() {
+            return new PlanningFrontier(List.of(),
+                    new GlobalDecisionSnapshot(false, 1, 0L));
+        }
+    }
+
+    private record GlobalDecisionSnapshot(
+            boolean fixedWindow,
+            int maxRequests,
+            long maxCollectionWaitMs) {
+
+        /**
+         * Captures the current global-window parameters for one request-config
+         * boundary. {@code globalFixedWindow} is startup-fixed, whereas the
+         * size and wait budget are intentionally read from the current
+         * request's configuration snapshot.
+         */
+        private static GlobalDecisionSnapshot from(
+                FlexlbConfig config, boolean globalFixedWindow) {
+            if (!globalFixedWindow) {
+                return new GlobalDecisionSnapshot(false, 1, 0L);
+            }
+            GlobalDecisionConfig source = config.queueScheduler()
+                    .getGlobalDecision();
+            return new GlobalDecisionSnapshot(
+                    true, source.getMaxRequests(),
+                    source.getMaxCollectionWaitMs());
+        }
     }
 
     private void awaitChanged() {
         try {
             changed.await();
+        } catch (InterruptedException interruption) {
+            if (closed.get()) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private void awaitChanged(long waitNanos) {
+        try {
+            changed.awaitNanos(waitNanos);
         } catch (InterruptedException interruption) {
             if (closed.get()) {
                 Thread.currentThread().interrupt();
@@ -717,8 +1004,16 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         REPLAN
     }
 
+    private interface PlanSequence {
+        int size();
+
+        Plan awaitNext();
+
+        void closeSubmitted();
+    }
+
     /** Ordered, bounded submission view over one captured planning frontier. */
-    private final class PlanningPipeline {
+    private final class PlanningPipeline implements PlanSequence {
         private final List<GlobalQueueEntry> entries;
         private final ArrayDeque<SubmittedPlan> submitted;
         private final int maxInFlight;
@@ -733,11 +1028,13 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                     this.maxInFlight, entries.size()));
         }
 
-        private int size() {
+        @Override
+        public int size() {
             return entries.size();
         }
 
-        private Plan awaitNext() {
+        @Override
+        public Plan awaitNext() {
             fill();
             SubmittedPlan next = submitted.removeFirst();
             return awaitPlan(next.future(), next.entry());
@@ -751,7 +1048,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             }
         }
 
-        private void closeSubmitted() {
+        @Override
+        public void closeSubmitted() {
             // A submitted plan owns its entry's sole AdmissionMutation.
             // Re-entering the queue before it closes can misread temporary
             // ownership as terminal state. Abandonment is rare and bounded by
@@ -776,6 +1074,33 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         private record SubmittedPlan(
                 GlobalQueueEntry entry,
                 CompletableFuture<Plan> future) {}
+    }
+
+    /** Already computed joint plans consumed through the same commit loop. */
+    private static final class ReadyPlans implements PlanSequence {
+        private final List<Plan> plans;
+        private int next;
+
+        private ReadyPlans(List<Plan> plans) {
+            this.plans = List.copyOf(plans);
+        }
+
+        @Override
+        public int size() {
+            return plans.size();
+        }
+
+        @Override
+        public Plan awaitNext() {
+            return plans.get(next++);
+        }
+
+        @Override
+        public void closeSubmitted() {
+            while (next < plans.size()) {
+                closePlan(plans.get(next++));
+            }
+        }
     }
 
     private static final class Plan implements AutoCloseable {

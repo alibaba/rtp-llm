@@ -15,8 +15,8 @@ import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.QueueRouteAdmission;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
+import org.flexlb.balance.strategy.CostBasedBatchedPrefillStrategy;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
-import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -460,7 +460,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         when(modelMeta.requiredRoles()).thenReturn(
                 List.of(RoleType.DECODE, RoleType.PREFILL));
         return new DefaultRouter(
-                new CostBasedPrefillStrategy(
+                new CostBasedBatchedPrefillStrategy(
                         workers, cache, healthReporter),
                 new CostBasedDecodeStrategy(workers),
                 new RandomStrategy(workers),

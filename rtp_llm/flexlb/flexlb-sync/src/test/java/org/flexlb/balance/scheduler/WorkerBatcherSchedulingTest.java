@@ -249,6 +249,26 @@ class WorkerBatcherSchedulingTest {
         assertEquals(100L, runtime.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
     }
 
+    @Test
+    void requestLimitUpdateInvalidatesProjectionWithoutQueueMutation() {
+        FlexlbConfig initial = fixedConfig();
+        AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
+        WorkerBatcher runtime = new WorkerBatcher("hot-limit-projection", stableEndpoint(stableStatus()),
+                current::get, mock(DeliveryStrategy.class), mock(EndpointEventProjector.class));
+        runtimes.add(runtime);
+        runtime.start();
+
+        var before = runtime.captureRouteProjectionInputs();
+        assertEquals(2, before.queue().constraints().maxRequests());
+        FlexlbConfig updated = fixedConfig();
+        updated.decisionPolicy().setMaxRequests(5);
+        current.set(updated);
+
+        var after = runtime.captureRouteProjectionInputs();
+        assertEquals(5, after.queue().constraints().maxRequests());
+        assertEquals(before.queue().activeItems(), after.queue().activeItems());
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     @Timeout(value = 10, unit = TimeUnit.SECONDS)

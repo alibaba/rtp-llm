@@ -7,7 +7,8 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
-import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
+import org.flexlb.balance.strategy.PrefillStrategy;
+import org.flexlb.balance.strategy.PrefillStrategy.BatchRequest;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
@@ -29,7 +30,7 @@ import java.util.Objects;
 @Component
 public class DefaultRouter {
 
-    private final CostBasedPrefillStrategy prefillSelector;
+    private final PrefillStrategy prefillStrategy;
     private final CostBasedDecodeStrategy decodeSelector;
     private final RandomStrategy vitSelector;
     private final ConfigService configService;
@@ -37,26 +38,20 @@ public class DefaultRouter {
     private final RoleType queueAdmissionRole;
 
     @Autowired
-    public DefaultRouter(
-            CostBasedPrefillStrategy prefillSelector,
-            CostBasedDecodeStrategy decodeSelector,
-            RandomStrategy vitSelector,
-            ConfigService configService,
-            ModelMetaConfig modelMetaConfig) {
-        this.prefillSelector = Objects.requireNonNull(
-                prefillSelector, "prefillSelector");
-        this.decodeSelector = Objects.requireNonNull(
-                decodeSelector, "decodeSelector");
-        this.vitSelector = Objects.requireNonNull(
-                vitSelector, "vitSelector");
-        this.configService = Objects.requireNonNull(
-                configService, "configService");
+    public DefaultRouter(PrefillStrategy prefillStrategy,
+                         CostBasedDecodeStrategy decodeSelector,
+                         RandomStrategy vitSelector,
+                         ConfigService configService,
+                         ModelMetaConfig modelMetaConfig) {
+        this.prefillStrategy = Objects.requireNonNull(prefillStrategy, "prefillStrategy");
+        this.decodeSelector = Objects.requireNonNull(decodeSelector, "decodeSelector");
+        this.vitSelector = Objects.requireNonNull(vitSelector, "vitSelector");
+        this.configService = Objects.requireNonNull(configService, "configService");
         this.requiredRoles = List.copyOf(
-                Objects.requireNonNull(
-                        modelMetaConfig, "modelMetaConfig").requiredRoles());
+                Objects.requireNonNull(modelMetaConfig, "modelMetaConfig").requiredRoles()
+        );
         this.queueAdmissionRole = requiredRoles.stream()
-                .filter(role -> role == RoleType.PREFILL
-                        || role == RoleType.PDFUSION)
+                .filter(role -> role == RoleType.PREFILL || role == RoleType.PDFUSION)
                 .findFirst()
                 .orElse(RoleType.PREFILL);
     }
@@ -77,13 +72,11 @@ public class DefaultRouter {
         }
     }
 
-    public PlacementResult<QueueRouteAdmission, PlacementKey> routeForQueue(
-            BalanceContext context) {
+    public PlacementResult<QueueRouteAdmission, PlacementKey> routeForQueue(BalanceContext context) {
         return routeForQueue(context, resolvePolicyGroup(context));
     }
 
-    public PlacementResult<QueueRouteAdmission, PlacementKey> routeForQueue(
-            BalanceContext context, String policyGroup) {
+    public PlacementResult<QueueRouteAdmission, PlacementKey> routeForQueue(BalanceContext context, String policyGroup) {
         Response validationFailure = validateRequest(context);
         if (validationFailure != null) {
             return PlacementResult.rejected(validationFailure);
@@ -101,7 +94,80 @@ public class DefaultRouter {
         }
     }
 
-    /** Capacity domain that gates publication into the selected Prefill queue. */
+    /**
+     * Route one already ordered priority tier with a joint Prefill decision.
+     * Planning does not reserve endpoint capacity; every returned admission
+     * retains the existing per-request commit contract.
+     */
+    List<PlacementResult<QueueRouteAdmission, PlacementKey>> routeBatchForQueue(List<BalanceContext> contexts,
+                                                                                List<String> policyGroups) {
+        if (contexts.size() != policyGroups.size()) {
+            throw new IllegalArgumentException(
+                    "batch contexts and policy groups must have equal size");
+        }
+        List<BatchRouting> routes = new ArrayList<>(contexts.size());
+        for (int i = 0; i < contexts.size(); i++) {
+            BalanceContext context = contexts.get(i);
+            Response rejection = validateRequest(context);
+            routes.add(new BatchRouting(context, policyGroups.get(i), rejection));
+        }
+        try {
+            for (RoleType role : requiredRoles) {
+                if (role == RoleType.PREFILL || role == RoleType.PDFUSION) {
+                    selectBatchPrefill(routes, role);
+                } else {
+                    selectBatchRole(routes, role);
+                }
+            }
+            List<PlacementResult<QueueRouteAdmission, PlacementKey>> results =
+                    new ArrayList<>(routes.size());
+            for (BatchRouting route : routes) {
+                results.add(route.finish());
+            }
+            return List.copyOf(results);
+        } catch (RuntimeException | Error failure) {
+            for (BatchRouting route : routes) {
+                route.close(failure);
+            }
+            throw failure;
+        }
+    }
+
+    private void selectBatchPrefill(List<BatchRouting> routes, RoleType role) {
+        List<BatchRequest> requests = new ArrayList<>();
+        List<BatchRouting> active = new ArrayList<>();
+        for (BatchRouting route : routes) {
+            if (route.active()) {
+                active.add(route);
+                requests.add(new BatchRequest(
+                        route.context, role, route.group));
+            }
+        }
+        List<PlacementResult<SelectedRole, RoleType>> selections = prefillStrategy.selectBatch(requests);
+        if (selections.size() != active.size()) {
+            IllegalStateException failure = new IllegalStateException(
+                    "batch Prefill result count does not match input");
+            selections.stream()
+                    .filter(result -> result.value() != null)
+                    .forEach(result -> closeSelection(result.value(), failure));
+            throw failure;
+        }
+        for (int i = 0; i < active.size(); i++) {
+            active.get(i).accept(selections.get(i));
+        }
+    }
+
+    private void selectBatchRole(List<BatchRouting> routes, RoleType role) {
+        for (BatchRouting route : routes) {
+            if (route.active()) {
+                route.accept(selectRole(route.context, role, route.group));
+            }
+        }
+    }
+
+    /**
+     * Capacity domain that gates publication into the selected Prefill queue.
+     */
     RoleType queueAdmissionRole() {
         return queueAdmissionRole;
     }
@@ -185,11 +251,9 @@ public class DefaultRouter {
                 .orElse(null);
     }
 
-    private PlacementResult<SelectedRole, RoleType> selectRole(
-            BalanceContext context, RoleType role, String group) {
+    private PlacementResult<SelectedRole, RoleType> selectRole(BalanceContext context, RoleType role, String group) {
         return switch (role) {
-            case PREFILL, PDFUSION ->
-                    prefillSelector.select(context, role, group);
+            case PREFILL, PDFUSION -> prefillStrategy.select(context, role, group);
             case DECODE -> decodeSelector.select(context, role, group);
             case VIT -> selectedOrBlocked(
                     vitSelector.select(context, role, group), role);
@@ -198,8 +262,7 @@ public class DefaultRouter {
         };
     }
 
-    private static PlacementResult<SelectedRole, RoleType> selectedOrBlocked(
-            SelectedRole selected, RoleType role) {
+    private static PlacementResult<SelectedRole, RoleType> selectedOrBlocked(SelectedRole selected, RoleType role) {
         return selected == null
                 ? PlacementResult.blocked(role)
                 : PlacementResult.success(selected);
@@ -524,6 +587,75 @@ public class DefaultRouter {
 
         private void closePin() {
             pin.close();
+        }
+    }
+
+    private final class BatchRouting {
+        private final BalanceContext context;
+        private final String policyGroup;
+        private final List<SelectedRole> selections = new ArrayList<>();
+        private String group;
+        private PlacementKey failure;
+        private Response rejection;
+
+        private BatchRouting(
+                BalanceContext context,
+                String policyGroup,
+                Response rejection) {
+            this.context = context;
+            this.policyGroup = policyGroup;
+            this.group = policyGroup;
+            this.rejection = rejection;
+        }
+
+        private boolean active() {
+            return failure == null && rejection == null;
+        }
+
+        private void accept(PlacementResult<SelectedRole, RoleType> result) {
+            if (result.status() == PlacementResult.Status.SUCCESS) {
+                SelectedRole selected = result.value();
+                selections.add(selected);
+                if (StringUtils.isBlank(policyGroup)) {
+                    group = selected.serverStatus().getGroup();
+                }
+                return;
+            }
+            if (result.status() == PlacementResult.Status.REJECTED) {
+                rejection = result.rejection();
+            } else if (result.status() == PlacementResult.Status.BLOCKED) {
+                failure = new PlacementKey(result.blocker(), group);
+            } else {
+                throw new IllegalStateException(
+                        "unexpected batch selector result: "
+                                + result.status());
+            }
+            close(null);
+        }
+
+        private PlacementResult<QueueRouteAdmission, PlacementKey> finish() {
+            if (rejection != null) {
+                close(null);
+                return PlacementResult.rejected(rejection);
+            }
+            if (failure != null) {
+                close(null);
+                return PlacementResult.blocked(failure);
+            }
+            Response response = buildSuccessResponse(
+                    selections.stream()
+                            .map(SelectedRole::serverStatus)
+                            .toList());
+            return PlacementResult.success(QueueRouteAdmission.prepare(
+                    context, selections, response));
+        }
+
+        private void close(Throwable primaryFailure) {
+            Throwable failure = closeSelections(selections, primaryFailure);
+            selections.clear();
+            if (failure != null && failure != primaryFailure) {
+                throw propagate(failure);
+            }
         }
     }
 }

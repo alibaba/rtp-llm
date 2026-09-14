@@ -18,6 +18,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcherTestFactory;
 import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.balance.strategy.CostBasedBatchedPrefillStrategy;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
@@ -335,8 +336,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
         when(cacheAwareService.prepareBlockCacheKeys(any()))
                 .thenReturn(CompletableFuture.completedFuture(null));
-        CostBasedPrefillStrategy prefillSelector =
-                new CostBasedPrefillStrategy(
+        CostBasedBatchedPrefillStrategy prefillStrategy =
+                new CostBasedBatchedPrefillStrategy(
                         engineWorkerStatus,
                         cacheAwareService,
                         mock(EngineHealthReporter.class));
@@ -345,7 +346,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         when(modelMeta.requiredRoles()).thenReturn(
                 List.of(RoleType.DECODE, RoleType.PREFILL));
         return new DefaultRouter(
-                prefillSelector,
+                prefillStrategy,
                 new CostBasedDecodeStrategy(engineWorkerStatus),
                 new RandomStrategy(engineWorkerStatus),
                 configService,

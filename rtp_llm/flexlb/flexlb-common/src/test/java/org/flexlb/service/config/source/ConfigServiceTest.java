@@ -3,7 +3,9 @@ package org.flexlb.service.config.source;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.GlobalDecisionConfig;
 import org.flexlb.config.KvcmCacheMatchingConfig;
 import org.flexlb.config.LocalSyncCacheMatchingConfig;
 import org.flexlb.config.VictimStage;
@@ -201,6 +203,59 @@ class ConfigServiceTest {
                 .isEqualTo(LogLevel.WARN);
         assertThat(updatedSnapshot.getObservability().getLogging()
                 .isStdoutEnabled()).isTrue();
+    }
+
+    @Test
+    void runtimeUpdateKeepsStartupDecisionTopologyAndAppliesActiveFields() {
+        FakeConfigSource source = new FakeConfigSource(
+                "Nacos",
+                200,
+                """
+                        {"schemaVersion":2,
+                         "scheduler":{"globalDecision":{"type":"FIXED_WINDOW"},
+                                      "decision":{"type":"SINGLE"}},
+                         "router":{"roles":{"prefill":{
+                           "candidateChoice":{"type":"BEST_ONLY"}}}}}
+                        """);
+        ConfigService service = createService(List.of(
+                environmentSource(Map.of()), source));
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(ConfigService.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            source.emit("""
+                    {"schemaVersion":2,
+                     "scheduler":{"queueTimeoutMs":123,
+                                  "globalDecision":{"type":"SINGLE",
+                                                    "maxRequests":4,
+                                                    "maxCollectionWaitMs":7,
+                                                    "maxPlanEvaluations":11},
+                                  "decision":{"type":"FIXED_WINDOW",
+                                              "maxRequests":99}}}
+                    """);
+
+            FlexlbConfig updated = service.loadBalanceConfig();
+            assertThat(updated.queueScheduler().getGlobalDecision().getType())
+                    .isEqualTo(GlobalDecisionConfig.Type.FIXED_WINDOW);
+            assertThat(updated.decisionPolicy().getType())
+                    .isEqualTo(DecisionPolicyConfig.Type.SINGLE);
+            assertThat(updated.queueScheduler().getGlobalDecision().getMaxRequests())
+                    .isEqualTo(4);
+            assertThat(updated.queueScheduler().getGlobalDecision()
+                    .getMaxCollectionWaitMs()).isEqualTo(7L);
+            assertThat(updated.queueScheduler().getGlobalDecision()
+                    .getMaxPlanEvaluations()).isEqualTo(11);
+            assertThat(updated.queueScheduler().getQueueTimeoutMs()).isEqualTo(123L);
+            assertThat(appender.list)
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .anyMatch(message -> message.contains(
+                            "Ignored runtime update to startup-fixed scheduler.globalDecision.type"));
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
     }
 
     @Test

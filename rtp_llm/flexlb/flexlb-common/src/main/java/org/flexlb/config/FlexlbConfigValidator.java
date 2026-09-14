@@ -34,6 +34,8 @@ public final class FlexlbConfigValidator {
                 validateOrderingShape(
                         scheduler.path("ordering"),
                         effectiveScheduler.path("ordering"));
+                validateGlobalDecisionShape(scheduler.path("globalDecision"),
+                        effectiveScheduler.path("globalDecision"));
                 validateDecisionShape(
                         scheduler.path("decision"),
                         effectiveScheduler.path("decision"));
@@ -66,6 +68,19 @@ public final class FlexlbConfigValidator {
         } else if ("PRIORITY".equals(type)) {
             rejectFieldsExcept(ordering, "scheduler.ordering", "type",
                     "defaultPriority", "preemption");
+        }
+    }
+
+    private static void validateGlobalDecisionShape(
+            JsonNode decision, JsonNode effectiveDecision) {
+        if (!decision.isObject()) {
+            return;
+        }
+        if ("FIXED_WINDOW".equals(effectiveDecision.path("type").asText("SINGLE"))) {
+            rejectFieldsExcept(decision, "scheduler.globalDecision", "type",
+                    "maxRequests", "maxCollectionWaitMs", "maxPlanEvaluations");
+        } else {
+            rejectFieldsExcept(decision, "scheduler.globalDecision", "type");
         }
     }
 
@@ -118,6 +133,15 @@ public final class FlexlbConfigValidator {
         }
         config.getDispatcher().validateFor(config.getScheduler());
         validateRouting(config.getRouter());
+        if (config.isQueue()
+                && config.queueScheduler().getGlobalDecision().getType()
+                == GlobalDecisionConfig.Type.FIXED_WINDOW) {
+            require(config.getRouter().getRoles().getPrefill()
+                            .getCandidateChoice().getType()
+                            == CandidateChoiceType.BEST_ONLY,
+                    "router.roles.prefill.candidateChoice.type",
+                    "must be BEST_ONLY with global FIXED_WINDOW");
+        }
         validateWorkerRegistry(config.getWorkerRegistry());
         validateObservability(config.getObservability());
         validateServiceDiscovery(config.getServiceDiscovery());
@@ -152,6 +176,27 @@ public final class FlexlbConfigValidator {
                             == DecisionPolicyConfig.DEFAULT_MAX_COLLECTION_WAIT_MS
                             && decision.getMaxPredictedExecutionMs() == null,
                     "scheduler.decision",
+                    "fixed-window fields are supported only with FIXED_WINDOW");
+        }
+        GlobalDecisionConfig global = queue.getGlobalDecision();
+        require(global != null, "scheduler.globalDecision", "is required for QUEUE");
+        require(global.getType() != null, "scheduler.globalDecision.type", "is required");
+        if (global.getType() == GlobalDecisionConfig.Type.FIXED_WINDOW) {
+            positive(global.getMaxRequests(), "scheduler.globalDecision.maxRequests");
+            nonNegative(global.getMaxCollectionWaitMs(),
+                    "scheduler.globalDecision.maxCollectionWaitMs");
+            positive(global.getMaxPlanEvaluations(),
+                    "scheduler.globalDecision.maxPlanEvaluations");
+            require(decision.getType() == DecisionPolicyConfig.Type.SINGLE,
+                    "scheduler.decision.type",
+                    "must be SINGLE with global FIXED_WINDOW");
+        } else {
+            require(global.getMaxRequests() == GlobalDecisionConfig.DEFAULT_MAX_REQUESTS
+                            && global.getMaxCollectionWaitMs()
+                            == GlobalDecisionConfig.DEFAULT_MAX_COLLECTION_WAIT_MS
+                            && global.getMaxPlanEvaluations()
+                            == GlobalDecisionConfig.DEFAULT_MAX_PLAN_EVALUATIONS,
+                    "scheduler.globalDecision",
                     "fixed-window fields are supported only with FIXED_WINDOW");
         }
         positive(queue.getLifecycle().getStaleInflightTimeoutMs(),

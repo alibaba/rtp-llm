@@ -33,17 +33,19 @@ import java.util.function.Consumer;
 public class ConfigService {
 
     public static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
-    public static final String MODEL_SERVICE_CONFIG_ENV = "MODEL_SERVICE_CONFIG";
 
     private static final List<ConfigSource> CONFIG_SOURCES = new ArrayList<>();
 
     private final AtomicReference<FlexlbConfig> currentFlexlbConfig;
     private final AtomicReference<ServiceRoute> currentModelServiceConfig;
     private final List<Consumer<FlexlbConfig>> updateListeners = new ArrayList<>();
+    private final StartupDecisionTopology startupDecisionTopology;
     private final Object updateLock = new Object();
     private int configSchemaVersion = ConfigSchemaVersion.V0_COMPATIBILITY;
 
-    /** Compatibility constructor for direct construction in tests and embedders. */
+    /**
+     * Compatibility constructor for direct construction in tests and embedders.
+     */
     public ConfigService() {
         this(List.of(
                 new StandardConfigDocumentParser(),
@@ -58,6 +60,7 @@ public class ConfigService {
         this.currentFlexlbConfig = new AtomicReference<>(new FlexlbConfig());
         this.currentModelServiceConfig = new AtomicReference<>();
         initializeConfigSources();
+        this.startupDecisionTopology = StartupDecisionTopology.from(currentFlexlbConfig.get());
         logEffectiveConfig(currentFlexlbConfig.get(), configSchemaVersion);
     }
 
@@ -66,12 +69,6 @@ public class ConfigService {
             CONFIG_SOURCES.add(source);
             CONFIG_SOURCES.sort(Comparator.comparingInt(ConfigSource::priority));
         }
-    }
-
-    private static synchronized List<ConfigSource> registeredSources() {
-        List<ConfigSource> sources = new ArrayList<>(CONFIG_SOURCES);
-        sources.sort(Comparator.comparingInt(ConfigSource::priority));
-        return sources;
     }
 
     public static FlexlbConfig parse(String document) {
@@ -91,15 +88,6 @@ public class ConfigService {
         }
     }
 
-    public static String serialize(FlexlbConfig config) {
-        FlexlbConfigValidator.validate(config);
-        try {
-            return JsonUtils.toStrictString(config);
-        } catch (Exception error) {
-            throw new IllegalStateException("Failed to serialize FlexLB configuration", error);
-        }
-    }
-
     public FlexlbConfig loadBalanceConfig() {
         return currentFlexlbConfig.get();
     }
@@ -108,11 +96,9 @@ public class ConfigService {
         return currentModelServiceConfig.get();
     }
 
-    static ServiceRoute parseModelServiceConfig(String document) {
-        return ModelServiceConfigParser.parse(document);
-    }
-
-    /** DSV4 compatibility alias retained for existing integrations. */
+    /**
+     * DSV4 compatibility alias retained for existing integrations.
+     */
     public ServiceRoute loadModelServiceConfig() {
         return modelServiceConfig();
     }
@@ -193,7 +179,8 @@ public class ConfigService {
             try {
                 FlexlbConfig previous = currentFlexlbConfig.get();
                 NormalizedConfig normalized = source.normalize(content);
-                FlexlbConfig updated = FlexlbConfigMerger.merge(previous, normalized.flexlbConfig(), source.name());
+                String activeDocument = preserveStartupDecisionTopology(normalized.flexlbConfig());
+                FlexlbConfig updated = FlexlbConfigMerger.merge(previous, activeDocument, source.name());
                 if (updated == previous) {
                     log.info("Ignored empty FlexLB configuration update from {} source",
                             source.name());
@@ -209,6 +196,107 @@ public class ConfigService {
                                 + "keeping last-known-good configuration: {}",
                         source.name(), error.getMessage());
             }
+        }
+    }
+
+    /**
+     * Removes a runtime attempt to change either decision type before normal
+     * merge validation runs.
+     *
+     * <p>The two types select threads and strategy beans at startup, so a
+     * type update cannot take effect safely. Active numeric fields are left in
+     * the document and continue through the regular hot-update path. Fields
+     * belonging only to a requested-but-inactive fixed-window mode are removed
+     * with its type rather than rejected as a whole update.
+     */
+    private String preserveStartupDecisionTopology(String content) throws Exception {
+        if (startupDecisionTopology == null || content == null || content.isBlank()) {
+            return content;
+        }
+        JsonNode parsed = JsonUtils.readStrictTree(content);
+        if (!(parsed instanceof ObjectNode document)
+                || !(document.get("scheduler") instanceof ObjectNode scheduler)) {
+            return content;
+        }
+        boolean changed = false;
+        if (scheduler.get("globalDecision") instanceof ObjectNode globalDecision) {
+            changed |= preserveGlobalDecisionType(globalDecision);
+        }
+        if (scheduler.get("decision") instanceof ObjectNode decision) {
+            changed |= preserveWorkerDecisionType(decision);
+        }
+        return changed ? JsonUtils.toStrictString(document) : content;
+    }
+
+    /**
+     * Keeps the global decision type selected at startup while preserving
+     * numeric global-window fields when that startup type is FIXED_WINDOW.
+     */
+    private boolean preserveGlobalDecisionType(ObjectNode decision) {
+        JsonNode type = decision.get("type");
+        if (type == null || !type.isTextual()) {
+            return false;
+        }
+        GlobalDecisionConfig.Type requested;
+        try {
+            requested = GlobalDecisionConfig.Type.valueOf(type.textValue());
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
+        GlobalDecisionConfig.Type active = startupDecisionTopology.globalDecisionType();
+        if (requested == active) {
+            return false;
+        }
+        decision.remove("type");
+        if (active == GlobalDecisionConfig.Type.SINGLE) {
+            decision.remove("maxRequests");
+            decision.remove("maxCollectionWaitMs");
+            decision.remove("maxPlanEvaluations");
+        }
+        log.warn("Ignored runtime update to startup-fixed scheduler.globalDecision.type: "
+                + "requested={}, active={}", requested, active);
+        return true;
+    }
+
+    /**
+     * Keeps the per-worker decision type selected at startup while preserving
+     * numeric local-window fields when that startup type is FIXED_WINDOW.
+     */
+    private boolean preserveWorkerDecisionType(ObjectNode decision) {
+        JsonNode type = decision.get("type");
+        if (type == null || !type.isTextual()) {
+            return false;
+        }
+        DecisionPolicyConfig.Type requested;
+        try {
+            requested = DecisionPolicyConfig.Type.valueOf(type.textValue());
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
+        DecisionPolicyConfig.Type active = startupDecisionTopology.decisionType();
+        if (requested == active) {
+            return false;
+        }
+        decision.remove("type");
+        if (active == DecisionPolicyConfig.Type.SINGLE) {
+            decision.remove("maxRequests");
+            decision.remove("maxCollectionWaitMs");
+            decision.remove("maxPredictedExecutionMs");
+        }
+        log.warn("Ignored runtime update to startup-fixed scheduler.decision.type: "
+                + "requested={}, active={}", requested, active);
+        return true;
+    }
+
+    private record StartupDecisionTopology(GlobalDecisionConfig.Type globalDecisionType,
+                                           DecisionPolicyConfig.Type decisionType) {
+
+        /** Captures the non-hot-swappable scheduling topology once at startup. */
+        private static StartupDecisionTopology from(FlexlbConfig config) {
+            SchedulerConfig scheduler = config.getScheduler();
+            return new StartupDecisionTopology(
+                    scheduler.getGlobalDecision().getType(),
+                    scheduler.getDecision().getType());
         }
     }
 

@@ -131,14 +131,26 @@ master forwarding 透传 protobuf 响应。物理地址字段与既有 service p
   `CACHE_AFFINITY_FALLBACK` 或 `SHORTEST_TTFT_FALLBACK`。决策快照（debug 级）写入
   `BalanceContext.shortestTtftDecisionByRole`。
 
-### CostBasedPrefillStrategy
+### Cost-based Prefill strategies
 
-按候选的资源、排队和预测执行时间做成本筛选与打分。它与 ShortestTTFT 一样通过统一的
+`PrefillStrategy` 抽象基类统一候选发现、资源和 outlier 过滤、`RouteProjection`、缓存命中
+折算、cache affinity 门控、决策遥测、generation pin 与结果 materialize，并定义 `select()` 与
+`selectBatch()` 两种调用形态。`PrefillStrategyBindingConfiguration` 在启动期读取
+`globalDecision.type`：`FIXED_WINDOW` 注册 `CostBasedBatchedPrefillStrategy`，其余模式注册
+`CostBasedPrefillStrategy`。两个 concrete strategy 都不自行注册为组件，因而生产上下文始终只有一个
+`PrefillStrategy` Bean。`DefaultRouter` 只依赖该抽象；`GlobalQueueCoordinator` 按启动期拓扑调用单请求
+或批量入口，路由器不读取 `globalDecision` 配置。
+
+两种策略都按候选的资源、排队和预测执行时间做成本筛选与打分。它们与 ShortestTTFT 一样通过统一的
 `CacheAwareService.findMatchingEngines(CacheMatchQuery)` 取得 cache 匹配，因此 PREFILL 和
 PDFUSION 的 cost-based 路径也遵循 [04-worker-sync-and-cache](04-worker-sync-and-cache.md) 的
 源选择：`LOCAL_SYNC`、`KVCM` 或 KVCM 不可用时的 `LOCAL_STANDBY`。本地命中按全量折算；KVCM
 返回的 P2P 增量命中按 `cacheAffinity.p2pHitDiscount` 折算（默认 `0.2`），再进入原有的成本估算。
-这只改变 cache 命中的输入来源，不改变 cost-based 的候选过滤、成本公式和提交/回滚语义。
+批量策略先按总预测 TTFT 建立基线，再在每条请求自己的 `maxExtraTtftMs` 上限内提高总缓存命中；
+批内虚拟工作按原提交顺序累积，并共享 worker 状态快照中的可用 KV 与 delivery request 容量。
+规划不预留真实容量，逐请求发布仍执行现有精确容量检查与回滚。批量入口只有一条请求时直接复用
+单请求选择流程和公平游标，保持精确平局、reason 与遥测副作用一致。
+FlexLB 的规划和提交顺序不代表引擎执行顺序。
 
 ### WeightedCacheLoadBalancer（DECODE 默认）
 

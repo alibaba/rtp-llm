@@ -187,7 +187,7 @@ public final class WorkerBatcher {
     private final EndpointEventProjector endpointEvents;
     private final FlexlbConfig config;
     private final Supplier<FlexlbConfig> configSupplier;
-    private final DecisionPolicyConfig fixedWindowDecision;
+    private final boolean fixedWindowDecision;
     private final boolean singleDecision;
     private final boolean queueScheduling;
     private final DeliveryStrategy deliveryStrategy;
@@ -256,12 +256,8 @@ public final class WorkerBatcher {
         this.config = config;
         this.queueScheduling = config.isQueue();
         this.singleDecision = config.isSingleDecision();
-        DecisionPolicyConfig resolvedDecision = queueScheduling
-                ? config.decisionPolicy() : null;
-        this.fixedWindowDecision = resolvedDecision != null
-                && resolvedDecision.getType()
-                == DecisionPolicyConfig.Type.FIXED_WINDOW
-                ? resolvedDecision : null;
+        this.fixedWindowDecision = queueScheduling
+                && config.decisionPolicy().getType() == DecisionPolicyConfig.Type.FIXED_WINDOW;
         boolean priorityOrdering = config.isPriorityOrdering();
         this.endpointEvents = Objects.requireNonNull(
                 endpointEvents, "endpointEvents");
@@ -937,9 +933,21 @@ public final class WorkerBatcher {
                 .getMaxWaitingRequestsPerPrefillWorker();
     }
 
+    /**
+     * Returns the maximum number of requests in this worker's <em>local</em>
+     * fixed-window decision.
+     *
+     * <p>This deliberately does not read {@code scheduler.globalDecision}.
+     * When global fixed-window mode is selected at startup, validation requires
+     * {@code scheduler.decision.type=SINGLE}, so this method returns one and
+     * {@link GlobalQueueCoordinator} owns the cross-worker batch size. In
+     * local fixed-window mode it reads the current {@code scheduler.decision}
+     * limit, allowing the active local limit to be hot-updated without changing
+     * the startup decision topology.
+     */
     private int maxDecisionRequests() {
-        return fixedWindowDecision == null
-                ? 1 : fixedWindowDecision.resolveMaxRequests();
+        return !fixedWindowDecision
+                ? 1 : configSupplier.get().decisionPolicy().resolveMaxRequests();
     }
 
     /** Endpoint-local request credits exposed to the global planning pump. */
@@ -948,17 +956,34 @@ public final class WorkerBatcher {
                 ? 0 : publicationCapacity().availableCredits();
     }
 
+    /**
+     * Returns the wait budget for this worker's local fixed-window collector.
+     *
+     * <p>The value is zero unless local fixed-window mode was selected at
+     * startup. It is not the global collection wait: in global fixed-window
+     * mode the {@link GlobalQueueCoordinator} owns timing and reads
+     * {@code scheduler.globalDecision.maxCollectionWaitMs}. The local value is
+     * read from the current configuration so it remains hot-updatable.
+     */
     private long collectionWindowMs() {
-        return fixedWindowDecision == null
+        return !fixedWindowDecision
                 ? 0L : Math.max(0L,
                 configSupplier.get().decisionPolicy().getMaxCollectionWaitMs());
     }
 
+    /**
+     * Returns the optional prediction cutoff for local fixed-window planning.
+     *
+     * <p>Like the local size and wait budget, this is inactive outside local
+     * fixed-window mode and is intentionally refreshed from the current
+     * configuration rather than captured at startup.
+     */
     private long predictedExecutionBudgetMs() {
-        if (fixedWindowDecision == null) {
+        if (!fixedWindowDecision) {
             return 0L;
         }
-        Long configured = fixedWindowDecision.getMaxPredictedExecutionMs();
+        Long configured = configSupplier.get().decisionPolicy()
+                .getMaxPredictedExecutionMs();
         return configured == null ? 0L : configured;
     }
 
@@ -1096,11 +1121,15 @@ public final class WorkerBatcher {
             long queueVersion,
             long schedulingInputVersion,
             long ownershipVersion,
+            int maxDecisionRequests,
+            long predictedExecutionBudgetMs,
             long collectionWindowMs,
             RouteProjection.Inputs inputs) {
     }
 
     private RouteProjection.Inputs captureRouteProjectionInputs(Supplier<AdmissionBlock> admissionBlockSnapshot) {
+        int fixedMaxRequests = maxDecisionRequests();
+        long predictedBudgetMs = predictedExecutionBudgetMs();
         long fixedWaitMs = collectionWindowMs();
         long observedQueueVersion = queueVersion.get();
         long observedInputVersion = schedulingInputVersion.get();
@@ -1110,6 +1139,8 @@ public final class WorkerBatcher {
                 && observed.queueVersion() == observedQueueVersion
                 && observed.schedulingInputVersion() == observedInputVersion
                 && observed.ownershipVersion() == observedOwnershipVersion
+                && observed.maxDecisionRequests() == fixedMaxRequests
+                && observed.predictedExecutionBudgetMs() == predictedBudgetMs
                 && observed.collectionWindowMs() == fixedWaitMs) {
             return observed.inputs();
         }
@@ -1133,6 +1164,8 @@ public final class WorkerBatcher {
                             == currentSchedulingInputVersion
                     && cached.ownershipVersion()
                             == currentOwnershipVersion
+                    && cached.maxDecisionRequests() == fixedMaxRequests
+                    && cached.predictedExecutionBudgetMs() == predictedBudgetMs
                     && cached.collectionWindowMs() == fixedWaitMs) {
                 return cached.inputs();
             }
@@ -1152,10 +1185,10 @@ public final class WorkerBatcher {
                         queueScheduling,
                         projectionOrder,
                         new GroupPlanner.Constraints(
-                                maxDecisionRequests(),
+                                fixedMaxRequests,
                                 capacity.batchTokenCapacity(),
                                 capacity.batchKvCapacity(),
-                                predictedExecutionBudgetMs(),
+                                predictedBudgetMs,
                                 fixedWaitMs),
                         items,
                         admissionBlock);
@@ -1171,6 +1204,8 @@ public final class WorkerBatcher {
                     currentQueueVersion,
                     currentSchedulingInputVersion,
                     currentOwnershipVersion,
+                    fixedMaxRequests,
+                    predictedBudgetMs,
                     fixedWaitMs,
                     captured);
         }
@@ -1259,7 +1294,9 @@ public final class WorkerBatcher {
             for (ScheduledRequest item : transaction.items()) {
                 var ctx = item.ctx();
                 ctx.setDecisionGroup(new org.flexlb.dao.pv.DecisionGroup(groupId,
-                        ctx.getConfig().decisionPolicy().getType().name(),
+                        fixedWindowDecision
+                                ? DecisionPolicyConfig.Type.FIXED_WINDOW.name()
+                                : DecisionPolicyConfig.Type.SINGLE.name(),
                         ctx.getConfig().getDispatcher().getType().name(), item.prefillEp().getIp(),
                         transaction.items().size(), decisionReason, committedAtMs,
                         Math.max(0L, committedAtMs - item.enqueuedAtMs())));

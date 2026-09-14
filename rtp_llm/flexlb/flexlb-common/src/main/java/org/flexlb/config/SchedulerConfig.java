@@ -18,6 +18,7 @@ public final class SchedulerConfig {
     private long queueTimeoutMs = 3_600_000L;
     private QueueOrderingConfig ordering = new QueueOrderingConfig();
     /** How queued requests form decision groups. */
+    private GlobalDecisionConfig globalDecision = new GlobalDecisionConfig();
     private DecisionPolicyConfig decision = new DecisionPolicyConfig();
     private QueueCapacityConfig capacity = new QueueCapacityConfig();
     private RequestLifecycleConfig lifecycle = new RequestLifecycleConfig();

@@ -9,8 +9,8 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodePreemptionCoordinator;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.strategy.CostBasedBatchedPrefillStrategy;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
-import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
@@ -212,7 +212,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         private BindingRouter(org.flexlb.sync.status.WorkerDirectory workers, ConfigService configs) {
             // Real constructor dependencies keep Mockito instrumentation out of
             // the selector classes exercised by the bound production router.
-            super(new CostBasedPrefillStrategy(workers,
+            super(new CostBasedBatchedPrefillStrategy(
+                            workers,
                             org.mockito.Mockito.mock(org.flexlb.cache.match.CacheAwareService.class),
                             org.mockito.Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class)),
                     new CostBasedDecodeStrategy(workers),

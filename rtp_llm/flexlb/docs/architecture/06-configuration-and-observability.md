@@ -100,13 +100,17 @@ Java 还可能等待接近 30 秒才发现新内容。因此两段等待叠加�
 
 ### 凑批窗口热更新
 
-`scheduler.decision.maxCollectionWaitMs` 在每次固定窗口决策时从配置服务的当前内存快照读取。
-同一次决策的预检查与最终组选择共用一个窗口值。路由预估缓存将窗口值作为有效性条件，
-窗口变化时重新生成预估输入。读取不会触发 UniConfig 或 Nacos 网络请求。
+`scheduler.decision.type` 和 `scheduler.globalDecision.type` 是启动期拓扑字段。ConfigService 在初始
+配置合并后记录它们；运行期更新若试图修改任一 type，会忽略该字段并记录 warning，更新里的其他合法
+字段仍会合并。启动期 `globalDecision.type=FIXED_WINDOW` 选择全局联合策略且要求
+`scheduler.decision.type=SINGLE`；worker `FIXED_WINDOW` 则要求 `globalDecision.type=SINGLE`。
 
-配置更新不主动打断已有定时等待；队列事件、状态事件或原定截止时间触发下一次决策时，
-使用最新窗口值。因此缩短窗口不会保证已有等待立即结束，后续窗口无需重启即可使用新值。
-此行为仅覆盖窗口时长，不承诺调度模式、交付模式或其他启动时配置的热切换。
+两个 fixed-window 的 `maxRequests` 和 `maxCollectionWaitMs` 都可热更新；global fixed-window 的
+`maxPlanEvaluations`（默认 4096）也可热更新。worker-local 窗口每次决策
+从当前内存快照读取 B、等待与预测预算；路由预估缓存以这些值作为有效性条件。global 窗口从最早
+eligible 请求绑定的快照读取 B/等待/规划预算，并在下一个配置快照到达时先关闭旧窗口，避免混合评分域。
+读取不会触发 UniConfig 或 Nacos 网络请求，配置更新也不主动打断已有定时等待；队列或状态事件、
+原截止时间、或新的配置边界会使后续决策使用新值。
 
 ### Nacos 连接
 
@@ -141,9 +145,10 @@ UniConfig / Nacos 的 v1 部分更新示例：
 
 ## FLEXLB_CONFIG 结构
 
-公共 schema 当前为 version 1，按责任分区：
+公共 schema 当前为 version 2，按责任分区：
 
-- `scheduler`：`DIRECT` / `QUEUE`；QUEUE 拥有 ordering、capacity 和 lifecycle。
+- `scheduler`：`DIRECT` / `QUEUE`；QUEUE 拥有 ordering、globalDecision、worker decision、
+  capacity 和 lifecycle。
 - `dispatcher`：`BATCH` / `NON_BATCH`。
 - `router`：角色 availability、execution estimator、selector、cache affinity 和
   group selector。
