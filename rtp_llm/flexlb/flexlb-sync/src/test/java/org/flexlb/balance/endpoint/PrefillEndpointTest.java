@@ -1,10 +1,10 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.DeliveryClaim;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;

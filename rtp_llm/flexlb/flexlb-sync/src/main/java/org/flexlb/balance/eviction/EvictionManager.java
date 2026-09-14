@@ -3,7 +3,7 @@ package org.flexlb.balance.eviction;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.AdmissionMutation;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteAdmission;
 import org.flexlb.balance.scheduler.ScheduledRequest;
@@ -225,17 +225,17 @@ public class EvictionManager {
                     victim.reservationToken()));
         }
 
-        // The victim mutation and incoming placement form one generation
+        // The victim eviction and incoming placement form one generation
         // commit. Cancel/deadline either close before any victim is touched,
         // or observe the incoming request after the complete handoff.
-        AdmissionMutation mutation =
-                requests.claimAdmissionMutation(
+        AdmissionHandle handle =
+                requests.claimAdmissionHandle(
                         request.requestId(), future);
-        if (mutation == null) {
+        if (handle == null) {
             admission.close();
             return;
         }
-        try (mutation; admission) {
+        try (handle; admission) {
             boolean evictionCommitted =
                     decodeEp.tryEvictLocalReservationsAndReserveIncoming(
                             reservedVictims,
@@ -253,7 +253,7 @@ public class EvictionManager {
                         ctx.getRequestId(),
                         reservedVictims.size(),
                         proposal.endpointId());
-                mutation.terminate(admissionError(
+                handle.terminate(admissionError(
                         StrategyErrorType.RESOURCE_EXHAUSTED,
                         AdmissionRejectReason.RESOURCE_EXHAUSTED,
                         "exact Decode eviction plan changed before commit"));
@@ -273,7 +273,7 @@ public class EvictionManager {
             DecodeEndpoint.ReservationHandle incoming =
                     decodeEp.reservationHandle(request.requestId());
             if (incoming == null) {
-                mutation.terminate(admissionError(
+                handle.terminate(admissionError(
                         StrategyErrorType.RESOURCE_EXHAUSTED,
                         AdmissionRejectReason.RESOURCE_EXHAUSTED,
                         "Decode reservation disappeared before canonical placement"));
@@ -282,7 +282,7 @@ public class EvictionManager {
             Response placementFailure = placeReservedDecode(
                     ctx, future, decodeEp, incoming, admission);
             if (placementFailure != null) {
-                mutation.terminate(placementFailure);
+                handle.terminate(placementFailure);
                 return;
             }
         }
@@ -416,27 +416,27 @@ public class EvictionManager {
 
         CompletableFuture<DecodePreemptionCoordinator.PreemptionResult>
                 execution;
-        AdmissionMutation mutation =
-                requests.claimAdmissionMutation(
+        AdmissionHandle handle =
+                requests.claimAdmissionHandle(
                         request.requestId(), future);
-        if (mutation == null) {
+        if (handle == null) {
             admission.close();
             return;
         }
         try {
             reportCancelRequests(ctx, proposal);
             // execute() performs the victim-claim and sends every Cancel
-            // before returning. The mutation claim keeps an incoming
+            // before returning. The handle claim keeps an incoming
             // Cancel pending until this asynchronous attempt settles.
             execution = preemptionCoordinator.preempt(command);
         } catch (RuntimeException | Error startFailure) {
-            mutation.close();
+            handle.close();
             throw startFailure;
         }
 
         execution.whenComplete(
                 (result, error) -> {
-                    try (mutation; admission) {
+                    try (handle; admission) {
                         Response terminal;
                         try {
                             terminal = enginePreemptionTerminal(
@@ -455,7 +455,7 @@ public class EvictionManager {
                                             + callbackError.getMessage());
                         }
                         if (terminal != null) {
-                            mutation.terminate(terminal);
+                            handle.terminate(terminal);
                         }
                     }
                 });

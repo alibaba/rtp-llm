@@ -3,6 +3,8 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
+import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
@@ -20,7 +22,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.function.BooleanSupplier;
 
 import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -28,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -137,12 +139,12 @@ class RequestCompletionPublicationRaceTest {
         Fixture fixture = fixture();
         Response success = new Response();
         success.setSuccess(true);
-        BooleanSupplier publishSuccess = fixture.delivery().publication().claimDeliveryResponse(success);
+        RequestSlot.SelectedPublication publishSuccess = fixture.slot().selectResponse(fixture.delivery().publication(), success);
         assertFalse(fixture.slot().future().isDone());
         CompletableFuture<Void> callback = fixture.slot().future().thenAccept(response ->
                 assertFalse(Thread.holdsLock(fixture.slot())));
         synchronized (fixture.slot()) {
-            fixture.slot().markCancellationRequested(CancelReason.DEADLINE_EXCEEDED, "request inactive");
+            RequestLifecycleTestSupport.recordCancellation(fixture.slot(), CancelReason.DEADLINE_EXCEEDED, "request inactive");
             TerminalAction terminal = fixture.slot().beginTerminalizing(true, false, false, null,
                     TerminalOutcome.timeout("request inactive"), new Response());
             assertNotNull(terminal);
@@ -150,7 +152,7 @@ class RequestCompletionPublicationRaceTest {
             assertEquals(RequestState.Phase.TIMED_OUT,
                     fixture.slot().finishTombstone(terminal).terminal().state());
         }
-        assertTrue(publishSuccess.getAsBoolean());
+        assertTrue(publishSuccess.complete());
         assertSame(success, fixture.slot().future().join());
         callback.join();
     }
@@ -171,18 +173,18 @@ class RequestCompletionPublicationRaceTest {
         }
         Response success = new Response();
         success.setSuccess(true);
-        assertFalse(fixture.delivery().publication().claimDeliveryResponse(success).getAsBoolean());
+        assertFalse(fixture.slot().selectResponse(fixture.delivery().publication(), success).complete());
         assertFalse(fixture.slot().future().isDone());
         CompletableFuture<Void> callback = fixture.slot().future().handle((response, error) -> {
             assertFalse(Thread.holdsLock(fixture.slot()));
             return null;
         });
-        BooleanSupplier publication = switch (form) {
-            case RESPONSE -> terminal.publication().claimTerminalResponse(failure);
-            case FAILURE -> terminal.publication().claimFailure(new IllegalStateException("worker failed"));
-            case CANCELLATION -> terminal.publication().claimCancellation(false);
+        RequestSlot.SelectedPublication publication = switch (form) {
+            case RESPONSE -> fixture.slot().selectResponse(terminal.publication(), failure);
+            case FAILURE -> fixture.slot().selectFailure(terminal.publication(), new IllegalStateException("worker failed"));
+            case CANCELLATION -> fixture.slot().selectCancellation(terminal.publication(), false);
         };
-        assertTrue(publication.getAsBoolean());
+        assertTrue(publication.complete());
         callback.join();
         assertTrue(fixture.slot().future().isDone());
         if (form == TerminalForm.RESPONSE) {
@@ -193,23 +195,42 @@ class RequestCompletionPublicationRaceTest {
         }
     }
 
+    @ParameterizedTest
+    @EnumSource(TerminalForm.class)
+    void externalFutureOperationUnderSlotLockLeavesRequestUnchanged(TerminalForm form) {
+        RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class), 702L,
+                null, null, null, null);
+        synchronized (slot) {
+            assertThrows(IllegalStateException.class, () -> {
+                switch (form) {
+                    case RESPONSE -> slot.future().complete(new Response());
+                    case FAILURE -> slot.future().completeExceptionally(new IllegalStateException("failure"));
+                    case CANCELLATION -> slot.future().cancel(false);
+                }
+            });
+            assertTrue(slot.isOpen());
+            assertEquals(RequestState.Phase.QUEUED, slot.snapshot().state());
+            assertFalse(slot.future().isDone());
+        }
+    }
+
     private static Fixture fixture() {
         RequestCompletionPublisher publisher = mock(RequestCompletionPublisher.class);
-        RequestSlot slot = new RequestSlot(publisher, 701L, null, null, null);
+        RequestSlot slot = new RequestSlot(publisher, 701L, null, null, null, null);
         when(publisher.tryReservePublication(eq(slot), any())).thenAnswer(invocation ->
                 new RequestSlot.PublicationPermit(publisher, slot, invocation.getArgument(1)));
         var config = SchedulingTestConfig.batchConfig();
         BalanceContext context = RequestLifecycleTestSupport.context(config, slot.requestId());
         ScheduledRequest item = new ScheduledRequest(context, slot.future(), new Response(), null, null,
                 null, null, null, slot.createdAtMs());
-        RequestSlot.DeliveryConfirmation delivery;
+        RequestSlot.DeliveryPublication delivery;
         synchronized (slot) {
-            AdmissionMutation admission = slot.tryBeginAdmissionMutation((owner, response) -> { }, owner -> { });
+            AdmissionHandle admission = slot.tryBeginAdmissionHandle();
             assertNotNull(admission);
             assertTrue(slot.tryBindItemForPublication(item));
-            slot.completeAdmissionMutation(admission);
-            slot.startBatchEnqueue(801L);
-            delivery = slot.confirmDeliveryForPublication(item, DeliveryClaimKind.BATCH_ENQUEUE, 801L);
+            slot.completeAdmissionHandle(admission);
+            RequestLifecycleTestSupport.startBatchDelivery(slot, 801L);
+            delivery = RequestLifecycleTestSupport.acknowledge(slot, 801L).delivery();
             assertNotNull(delivery);
         }
         return new Fixture(slot, delivery);
@@ -217,5 +238,5 @@ class RequestCompletionPublicationRaceTest {
 
     private enum TerminalForm { RESPONSE, FAILURE, CANCELLATION }
 
-    private record Fixture(RequestSlot slot, RequestSlot.DeliveryConfirmation delivery) { }
+    private record Fixture(RequestSlot slot, RequestSlot.DeliveryPublication delivery) { }
 }

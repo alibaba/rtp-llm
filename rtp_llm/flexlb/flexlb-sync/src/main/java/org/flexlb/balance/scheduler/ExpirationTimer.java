@@ -256,16 +256,10 @@ final class ExpirationTimer implements AutoCloseable {
     }
 
     private void inactivityDeadlineExpired(RequestSlot slot, InactivityDeadline exact) {
-        synchronized (slot) {
-            if (!slot.expireInactivityDeadline(exact)) {
-                return;
-            }
-        }
         try {
-            slot.expireInactiveRequest(clock.getAsLong());
+            slot.expire(exact, clock.getAsLong());
         } finally {
-            // Engine facts only renew the timestamp. Rearm when the old wake-up
-            // fires, so frequent status reports do not create new timer tasks.
+            // A matching Engine fact may have extended the inactivity deadline.
             attachInactivityDeadline(slot);
         }
     }
@@ -384,28 +378,12 @@ final class ExpirationTimer implements AutoCloseable {
         }
     }
 
-    private void requestDeadlineExpired(
-            RequestSlot exactSlot,
-            RequestDeadline exactDeadline) {
-        boolean cancelRequest;
-        synchronized (exactSlot) {
-            cancelRequest = exactSlot.expireRequestDeadline(exactDeadline);
-        }
-        if (cancelRequest) {
-            exactSlot.cancelRequest(0L, CancelReason.DEADLINE_EXCEEDED);
-        }
+    private void requestDeadlineExpired(RequestSlot slot, RequestDeadline exact) {
+        slot.expire(exact);
     }
 
-    private void decisionDeadlineExpired(
-            RequestSlot exactSlot,
-            DecisionDeadline exactDeadline) {
-        RequestSlot.DecisionExpiry expiry;
-        synchronized (exactSlot) {
-            expiry = exactSlot.expireDecisionDeadline(exactDeadline);
-        }
-        if (expiry != null) {
-            exactSlot.onDecisionExpired(expiry);
-        }
+    private void decisionDeadlineExpired(RequestSlot slot, DecisionDeadline exact) {
+        slot.expire(exact);
     }
 
     private DetachedDeadlines detachDeadlinesForClose(

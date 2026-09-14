@@ -4,6 +4,7 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -111,9 +112,9 @@ class RequestInactivityTest {
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
 
         // A delayed status or timer callback cannot reopen or double-release this generation.
-        registry.onPrefillFact(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
-        registry.onDecodeFact(decode, DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()));
-        registry.onDecodeFact(decode, DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 0L));
+        registry.processPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
+        registry.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()));
+        registry.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 0L));
         registry.expireInactiveRequest(slot, lastStatusAt + 2L * TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
     }
@@ -165,17 +166,17 @@ class RequestInactivityTest {
         long lateStatusAt = registeredAtMs + 2L * TIMEOUT_MS;
         synchronized (slot) {
             RequestSlot.EngineObservation observation = switch (source) {
-                case PREFILL_ENDPOINT -> slot.observePrefillFact(mock(PrefillEndpoint.class), RoleType.PREFILL,
+                case PREFILL_ENDPOINT -> slot.applyPrefillStatusLocked(mock(PrefillEndpoint.class), RoleType.PREFILL,
                         PrefillState.WorkerStatusFact.active(item), lateStatusAt);
-                case PREFILL_ITEM -> slot.observePrefillFact(prefill, RoleType.PREFILL,
+                case PREFILL_ITEM -> slot.applyPrefillStatusLocked(prefill, RoleType.PREFILL,
                         PrefillState.WorkerStatusFact.active(new ScheduledRequest(item.ctx(), item.future(),
                                 item.routeResponse(), item.prefill(), null, prefill, decode,
                                 item.decodeReservation(), registeredAtMs)), lateStatusAt);
-                case DECODE_ENDPOINT -> slot.observeDecodeFact(mock(DecodeEndpoint.class),
+                case DECODE_ENDPOINT -> slot.applyDecodeStatusLocked(mock(DecodeEndpoint.class),
                         DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()), lateStatusAt);
-                case DECODE_GENERATION -> slot.observeDecodeFact(decode, DecodeEndpoint.WorkerStatusFact.active(
+                case DECODE_GENERATION -> slot.applyDecodeStatusLocked(decode, DecodeEndpoint.WorkerStatusFact.active(
                         new DecodeEndpoint.ReservationHandle(2L, REQUEST_ID, 1L)), lateStatusAt);
-                case DECODE_RESERVATION -> slot.observeDecodeFact(decode, DecodeEndpoint.WorkerStatusFact.active(
+                case DECODE_RESERVATION -> slot.applyDecodeStatusLocked(decode, DecodeEndpoint.WorkerStatusFact.active(
                         new DecodeEndpoint.ReservationHandle(1L, REQUEST_ID, 2L)), lateStatusAt);
             };
             assertSame(RequestSlot.EngineObservation.STALE, observation);
@@ -206,10 +207,10 @@ class RequestInactivityTest {
     private void observeActive(RoleType source, long nowMs) {
         synchronized (slot) {
             if (source == RoleType.PREFILL) {
-                slot.observePrefillFact(prefill, RoleType.PREFILL,
+                slot.applyPrefillStatusLocked(prefill, RoleType.PREFILL,
                         PrefillState.WorkerStatusFact.active(item), nowMs);
             } else {
-                slot.observeDecodeFact(decode,
+                slot.applyDecodeStatusLocked(decode,
                         DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()), nowMs);
             }
         }

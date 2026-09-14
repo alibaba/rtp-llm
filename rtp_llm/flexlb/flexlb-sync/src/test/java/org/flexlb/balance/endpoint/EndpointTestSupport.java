@@ -1,6 +1,5 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.DeliveryClaim;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
@@ -8,6 +7,7 @@ import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.WorkerStatus;
@@ -16,9 +16,7 @@ import org.flexlb.dao.route.RoleType;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.function.Supplier;
 
 /** Shared fixtures which exercise only the frozen endpoint-facing ports. */
 public final class EndpointTestSupport {
@@ -309,27 +307,7 @@ public final class EndpointTestSupport {
         private final List<ScheduledRequest> offerFailures =
                 new CopyOnWriteArrayList<>();
         TestRequestRuntime() {
-            org.mockito.Mockito.doAnswer(invocation -> Optional.ofNullable(
-                    ((Supplier<?>) invocation.getArgument(1)).get()))
-                    .when(requests).prepareIfOwned(
-                            org.mockito.Mockito.any(),
-                            org.mockito.Mockito.any());
-            org.mockito.Mockito.doAnswer(invocation -> {
-                if (!((java.util.function.BooleanSupplier)
-                        invocation.getArgument(1)).getAsBoolean()) {
-                    return null;
-                }
-                DeliveryClaim claim = org.mockito.Mockito.mock(
-                        DeliveryClaim.class);
-                org.mockito.Mockito.when(claim.item()).thenReturn(
-                        invocation.getArgument(0));
-                org.mockito.Mockito.doAnswer(inv -> { onCompleted(claim, inv.getArgument(0)); return null; })
-                        .when(claim).complete(org.mockito.Mockito.any());
-                org.mockito.Mockito.doAnswer(inv -> { claim.complete(DeliveryResult.delivered()); return null; })
-                        .when(claim).publishRoute(org.mockito.Mockito.any(), org.mockito.Mockito.anyLong());
-                return claim;
-            }).when(requests).tryClaimRouteDelivery(
-                    org.mockito.Mockito.any(), org.mockito.Mockito.any());
+            org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.stubRouteDelivery(requests, this::onCompleted);
             org.mockito.Mockito.doAnswer(invocation -> {
                 onQueueOfferFailure(
                         invocation.getArgument(0), invocation.getArgument(1));
