@@ -16,6 +16,8 @@
 #include <memory>
 #include <thread>
 #include <vector>
+#include <stdexcept>
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 
 using namespace std;
 namespace W = rtp_llm::W;
@@ -25,6 +27,90 @@ namespace rtp_llm {
 class NormalEngineTest: public DeviceTestBase {
 public:
 };
+
+class NormalWarmupConfigTest: public DeviceTestBase {
+public:
+    void SetUp() override {
+        DeviceTestBase::SetUp();
+        previous_factory_ = std::move(NormalExecutor::test_model_factory);
+    }
+
+    void TearDown() override {
+        NormalExecutor::test_model_factory = std::move(previous_factory_);
+        DeviceTestBase::TearDown();
+    }
+
+private:
+    NormalExecutor::ModelFactory previous_factory_;
+};
+
+TEST_F(NormalWarmupConfigTest, testExecutorGraphConfigIsLocalToWarmup) {
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto mutable_params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    auto cache_manager =
+        std::make_shared<KVCacheManager>(makeMhaCacheConfig(2, 5, 2, 64, 2, DataType::TYPE_FP16), true);
+    ASSERT_TRUE(cache_manager->init());
+    const bool vmm_available = VmmBackend().isAvailable();
+    for (bool graph_enabled : {false, true}) {
+        mutable_params.hw_kernel_config.enable_cuda_graph = graph_enabled;
+        const EngineInitParams params                     = mutable_params;
+        for (bool warm_up : {false, true}) {
+            for (bool has_cache : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << "vmm=" << vmm_available << " graph=" << graph_enabled
+                                                  << " warm_up=" << warm_up << " cache=" << has_cache);
+                int factory_calls                  = 0;
+                NormalExecutor::test_model_factory = [&](const GptModelInitParams& model_params) {
+                    ++factory_calls;
+                    EXPECT_EQ(params.hw_kernel_config.enable_cuda_graph, graph_enabled);
+                    EXPECT_NE(&model_params.hw_kernel_config, &params.hw_kernel_config);
+                    EXPECT_EQ(model_params.hw_kernel_config.enable_cuda_graph,
+                              graph_enabled && !(warm_up && has_cache && vmm_available));
+                    return std::make_unique<MockModel>(model_config.vocab_size);
+                };
+                { NormalExecutor executor(params, has_cache ? cache_manager : nullptr, warm_up); }
+                EXPECT_EQ(factory_calls, 1);
+                EXPECT_EQ(params.hw_kernel_config.enable_cuda_graph, graph_enabled);
+                NormalExecutor::test_model_factory = nullptr;
+            }
+        }
+    }
+}
+
+TEST_F(NormalWarmupConfigTest, testDecodeWarmupFailurePreservesConstCallerConfig) {
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto mutable_params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    mutable_params.runtime_config.warm_up  = true;
+    mutable_params.pd_sep_config.role_type = RoleType::DECODE;
+    const bool vmm_available               = VmmBackend().isAvailable();
+    for (bool graph_enabled : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "vmm=" << vmm_available << " graph=" << graph_enabled);
+        mutable_params.hw_kernel_config.enable_cuda_graph = graph_enabled;
+        const EngineInitParams params                     = mutable_params;
+        int                    factory_calls              = 0;
+        NormalExecutor::test_model_factory = [&](const GptModelInitParams& model_params) -> std::unique_ptr<ModelBase> {
+            ++factory_calls;
+            // Check during construction as well as after failure: restoring
+            // a mutated caller config later would still violate this contract.
+            EXPECT_EQ(params.hw_kernel_config.enable_cuda_graph, graph_enabled);
+            EXPECT_EQ(model_params.hw_kernel_config.enable_cuda_graph, graph_enabled && !vmm_available);
+            throw std::runtime_error("injected warmup model construction failure");
+        };
+        try {
+            NormalEngine engine(params, nullptr);
+            FAIL() << "warmup model construction should fail";
+        } catch (const std::runtime_error& error) {
+            EXPECT_STREQ(error.what(), "injected warmup model construction failure");
+        }
+        EXPECT_EQ(factory_calls, 1);
+        EXPECT_EQ(params.hw_kernel_config.enable_cuda_graph, graph_enabled);
+        NormalExecutor::test_model_factory = nullptr;
+        setTraceMemory(false);
+    }
+}
 
 TEST_F(NormalEngineTest, testEmptyTpSleepRoundKeepsSkipInputWithoutFakeForward) {
     class RecordingExecutor: public Executor {

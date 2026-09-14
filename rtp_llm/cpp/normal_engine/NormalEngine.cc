@@ -27,7 +27,6 @@
 
 #if USING_CUDA
 #include "c10/cuda/CUDACachingAllocator.h"
-#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #endif
 
 #ifdef __linux__
@@ -356,29 +355,8 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
-    // Under engine-sleep (torch_memory_saver preload) the throwaway warmup
-    // executor must NOT capture CUDA graphs. decodeWarmUp builds a real
-    // cache_manager for valid block geometry, so PyWrappedModel's
-    // "DeepSeekV4 warmup" guard (keyed on !kv_cache_layer_layout.has_value())
-    // does not fire and the executor would capture graphs under the
-    // 'cuda_graph' VMM tag. Those graphs are discarded immediately and the
-    // post-warmup emptyCache() then faults releasing the tagged-but-unmapped
-    // VMM ranges. The persistent graphs are (re)captured by the real executor
-    // in initExecutor() after CacheManager init. Only skip capture when VMM is
-    // active so the non-sleep path (accurate warmup memory accounting) is
-    // unchanged. Restored right after so initExecutor still captures normally.
-    const bool skip_warmup_graph = VmmBackend().isAvailable() && params.hw_kernel_config.enable_cuda_graph;
-    auto&      mutable_hw_kernel = const_cast<HWKernelConfig&>(params.hw_kernel_config);
-    if (skip_warmup_graph) {
-        RTP_LLM_LOG_INFO("decodeWarmUp: VMM active, disabling CUDA graph capture for the throwaway warmup "
-                         "executor; real executor captures after CacheManager init");
-        mutable_hw_kernel.enable_cuda_graph = false;
-    }
     executor_.reset(new NormalExecutor(
         params, cache_manager, true, false, 0, mla_ops_type_, kv_cache_group_num_, kv_cache_layer_to_group_));
-    if (skip_warmup_graph) {
-        mutable_hw_kernel.enable_cuda_graph = true;
-    }
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
