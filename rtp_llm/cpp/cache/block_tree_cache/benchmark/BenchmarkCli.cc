@@ -22,8 +22,9 @@ void validateTransferOptions(const TransferOptions& options) {
         throw std::runtime_error("--disk-io-mode must be direct or buffered");
     if (options.disk_access_pattern != "sequential" && options.disk_access_pattern != "random")
         throw std::runtime_error("--disk-access-pattern must be sequential or random");
-    if (options.copy_strategy != "auto" && options.copy_strategy != "batch" && options.copy_strategy != "staged-sm") {
-        throw std::runtime_error("--copy-strategy must be auto, batch or staged-sm");
+    if (options.copy_strategy != "auto" && options.copy_strategy != "batch" && options.copy_strategy != "staged-sm"
+        && options.copy_strategy != "3d-batch") {
+        throw std::runtime_error("--copy-strategy must be auto, 3d-batch, batch or staged-sm");
     }
 }
 

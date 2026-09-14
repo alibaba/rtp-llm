@@ -122,6 +122,11 @@ void execNoBlockCopy(const MultiCopyParams& params, const DeviceHostCopyExecutio
 BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams&        params,
                                               const DeviceHostCopyExecutionContext& context);
 
+// Same tile/sub-batch contract, using cudaMemcpy3DBatchAsync with one {bytes, 1, 1}
+// operation per tile. Completion and fallback semantics match execBatchedMemoryCopy.
+BatchedMemoryCopyStatus execBatched3DMemoryCopy(const BatchedMemoryCopyParams& params,
+                                                const DeviceHostCopyExecutionContext& context);
+
 // Stages compact host payload in GPU memory, then uses one SM gather/scatter kernel.
 // host_segments may describe non-contiguous host blocks; they are packed/unpacked on CPU.
 // scratch is optional; passing one lets callers reuse pinned host staging and device metadata buffers.

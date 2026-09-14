@@ -82,11 +82,13 @@ private:
 void installStrategyRecorders(PerRankBlockTransferEngine&                          engine,
                               const std::shared_ptr<BenchmarkDeviceHostCopyStats>& stats) {
     auto& strategies = engine.device_host_executor_->strategies_;
-    RTP_LLM_CHECK(strategies.size() == 3);
+    RTP_LLM_CHECK(strategies.size() == 4);
     for (auto& strategy : strategies) {
         std::atomic<size_t>* completed = nullptr;
         if (dynamic_cast<StagedSmDeviceHostCopyStrategy*>(strategy.get()) != nullptr) {
             completed = &stats->staged_sm;
+        } else if (dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get()) != nullptr) {
+            completed = &stats->cuda_3d_batch;
         } else if (dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(strategy.get()) != nullptr) {
             completed = &stats->cuda_batch;
         } else if (dynamic_cast<GenericMultiCopyDeviceHostCopyStrategy*>(strategy.get()) != nullptr) {
@@ -354,11 +356,17 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
     setup.copy_stats                    = std::make_shared<BenchmarkDeviceHostCopyStats>();
     DeviceHostCopyOptions copy_options;
     if (options_.copy_strategy == "staged-sm") {
+        copy_options.cuda_3d_batch_copy_enabled = false;
         copy_options.staged_sm_copy_enabled   = true;
         copy_options.staged_sm_min_tile_count = 0;
         copy_options.staged_sm_min_bytes      = 0;
         copy_options.cuda_batch_copy_enabled  = false;
+    } else if (options_.copy_strategy == "3d-batch") {
+        copy_options.cuda_3d_batch_copy_enabled = true;
+        copy_options.cuda_batch_copy_enabled = false;
+        copy_options.staged_sm_copy_enabled = false;
     } else if (options_.copy_strategy == "batch") {
+        copy_options.cuda_3d_batch_copy_enabled = false;
         copy_options.staged_sm_copy_enabled  = false;
         copy_options.cuda_batch_copy_enabled = true;
     }
@@ -671,6 +679,8 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
     const bool   wrapped = ((final_operations + direction_count - 1) / direction_count) > working_set_blocks;
 
     std::vector<std::string> actual_strategies;
+    if (setup.copy_stats->cuda_3d_batch.load(std::memory_order_relaxed) > 0)
+        actual_strategies.push_back("3d-batch");
     if (setup.copy_stats->staged_sm.load(std::memory_order_relaxed) > 0)
         actual_strategies.push_back("staged-sm");
     if (setup.copy_stats->cuda_batch.load(std::memory_order_relaxed) > 0)

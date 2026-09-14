@@ -75,6 +75,13 @@ private:
     std::map<int, std::unique_ptr<StagedMemoryCopyScratch>> scratch_by_device_;
 };
 
+class Cuda3DBatchDeviceHostCopyStrategy: public DeviceHostCopyStrategy {
+public:
+    StrategyResult tryExecute(const DeviceHostCopyPlan&             plan,
+                              const DeviceHostCopyOptions&          options,
+                              const DeviceHostCopyExecutionContext& context) override;
+};
+
 class CudaBatchDeviceHostCopyStrategy: public DeviceHostCopyStrategy {
 public:
     StrategyResult tryExecute(const DeviceHostCopyPlan&             plan,

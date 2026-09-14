@@ -73,5 +73,21 @@ TEST(BenchmarkCliTest, DispatchesMixedCommonAndTreeOptions) {
     EXPECT_TRUE(result.ran);
     EXPECT_TRUE(result.error.empty());
 }
+TEST(BenchmarkCliTest, AcceptsThreeDBatchStrategy) {
+    const char* runfiles = std::getenv("TEST_SRCDIR");
+    const char* workspace = std::getenv("TEST_WORKSPACE");
+    ASSERT_NE(runfiles, nullptr);
+    ASSERT_NE(workspace, nullptr);
+    const std::string path =
+        std::string(runfiles) + "/" + workspace
+        + "/rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles/deepseek_v4_pro_fp8_tp1_cp1.json";
+    const auto result = invoke({"transfer", "--model-profile", path, "--copy-strategy=3d-batch"});
+    EXPECT_EQ(result.code, 0);
+    EXPECT_TRUE(result.ran);
+    EXPECT_TRUE(result.error.empty());
+    const auto invalid = invoke({"transfer", "--model-profile", path, "--copy-strategy=unknown"});
+    EXPECT_EQ(invalid.code, 1);
+    EXPECT_FALSE(invalid.ran);
+}
 }  // namespace
 }  // namespace rtp_llm::benchmark
