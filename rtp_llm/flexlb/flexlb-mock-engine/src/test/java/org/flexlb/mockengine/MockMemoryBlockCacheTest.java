@@ -114,4 +114,89 @@ class MockMemoryBlockCacheTest {
         assertThrows(IllegalStateException.class, () -> model("{\"enabled\":true,\"capacity_blocks\":0}"));
         assertThrows(IllegalStateException.class, () -> model("{\"enabled\":true,\"capacity_blocks\":2,\"read_ms_per_block\":-1}"));
     }
+    @Test void pinnedReadsSurvivePressureAndReleaseExactlyOnce() {
+        var c = new MockMemoryBlockCache(2, ignored -> {});
+        c.write(List.of(1L, 2L));
+        var a = c.pinRead(List.of(1L, 2L), 0);
+        var b = c.pinRead(List.of(1L), 0);
+        assertEquals(0, c.availableBlocks());
+        assertNull(c.beginWrite(List.of(3L)));
+        a.close(); a.close();
+        assertEquals(1, c.availableBlocks());
+        var write = c.beginWrite(List.of(3L));
+        assertNotNull(write);
+        assertEquals(List.of(1L), c.keys(), "pinned key survives eviction");
+        assertEquals(1, c.pendingBlocks());
+        assertEquals(0, c.peekMatch(List.of(3L), 0), "uncommitted data is invisible");
+        assertTrue(write.commit());
+        b.close();
+        assertEquals(2, c.availableBlocks());
+    }
+
+    @Test void duplicateWriteDoesNotTouchLruAndAbortOrClearCannotResurrectKeys() {
+        var c = new MockMemoryBlockCache(2, ignored -> {});
+        c.write(List.of(1L, 2L));
+        c.beginWrite(List.of(1L)).commit();
+        var w = c.beginWrite(List.of(3L));
+        assertEquals(List.of(2L), c.keys(), "duplicate writes must not refresh key 1");
+        w.close(); w.close(); assertFalse(w.commit());
+        assertEquals(0, c.pendingBlocks());
+        var old = c.beginWrite(List.of(4L));
+        c.clear();
+        c.beginWrite(List.of(4L)).commit();
+        assertFalse(old.commit(), "a pre-clear callback cannot publish into a new incarnation");
+        assertEquals(List.of(4L), c.keys());
+    }
+
+    @Test void birthTimeStartsAtCommitAndCopyConfigIsPreserved() throws Exception {
+        var t = new AtomicLong(); var ages = new ArrayList<Double>();
+        var c = new MockMemoryBlockCache(1, ages::add, t::get);
+        var w = c.beginWrite(List.of(1L));
+        t.set(20_000_000); w.commit();
+        t.set(25_000_000); c.beginWrite(List.of(2L)).commit();
+        assertEquals(List.of(5.0), ages);
+        var m = model("{\"enabled\":true,\"capacity_blocks\":10,\"copy_lifecycle\":true,\"write_ms_per_block\":2}").forEngine();
+        assertTrue(m.memoryCopyLifecycle); assertEquals(2.0, m.memoryWriteMsPerBlock);
+        assertThrows(IllegalStateException.class, () -> model("{\"enabled\":true,\"capacity_blocks\":2,\"write_ms_per_block\":-1}"));
+        assertThrows(IllegalStateException.class, () -> model("{\"enabled\":true,\"capacity_blocks\":2,\"copy_lifecycle\":1}"));
+    }
+
+    @Test void asyncWriteRetainsGpuUntilCommitAndCancellationReleasesBothPools() throws Exception {
+        var m = model("{\"enabled\":true,\"capacity_blocks\":10,\"copy_lifecycle\":true,\"write_ms_per_block\":200}");
+        try (var cluster = MockEngineTestCluster.create(m, 61040, 1, 0)) {
+            var p = cluster.prefill(0);
+            var mem = (MockMemoryBlockCache) field(p, "memoryCache");
+            var gpu = (MockLruBlockCache) field(p, "cache");
+            for (int round = 0; round < 2; round++) {
+                long id = 800 + round;
+                String keys = round == 0 ? "[1,2,3]" : "[4,5,6]";
+                var req = EngineRpcService.GenerateInputPB.newBuilder().setRequestId(id)
+                        .addAllTokenIds(java.util.Collections.nCopies(192, 123))
+                        .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(1)
+                            .setUniqueKey("{\"input_len\":192,\"output_len\":1,\"block_cache_keys\":" + keys + "}"))
+                        .build();
+                var done = new java.util.concurrent.CountDownLatch(1);
+                var error = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+                p.generateStreamCall(req, new io.grpc.stub.StreamObserver<EngineRpcService.GenerateOutputsPB>() {
+                    public void onNext(EngineRpcService.GenerateOutputsPB value) {
+                        if (value.hasErrorInfo()) error.set(new AssertionError(value.getErrorInfo()));
+                    }
+                    public void onError(Throwable t) { error.set(t); done.countDown(); }
+                    public void onCompleted() { done.countDown(); }
+                });
+                assertTrue(done.await(3, java.util.concurrent.TimeUnit.SECONDS)); assertNull(error.get());
+                assertEquals(3, mem.pendingBlocks());
+                assertTrue(gpu.referencedKeyBlocks() >= 3, "GPU copy source remains pinned after P terminal");
+                if (round == 1) p.cancel(id);
+                long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+                while (mem.pendingBlocks() != 0 && System.nanoTime() < deadline) Thread.sleep(5);
+                assertEquals(0, mem.pendingBlocks());
+                // Copy completion releases the GPU reference just after publishing host keys.
+                while (gpu.referencedKeyBlocks() != 0 && System.nanoTime() < deadline) Thread.sleep(5);
+                assertEquals(0, gpu.referencedKeyBlocks());
+            }
+            assertEquals(java.util.Set.of(1L, 2L, 3L), new java.util.HashSet<>(mem.keys()));
+        }
+    }
+
 }

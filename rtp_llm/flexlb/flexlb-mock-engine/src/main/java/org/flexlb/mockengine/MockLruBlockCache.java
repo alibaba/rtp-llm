@@ -5,6 +5,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -470,6 +471,19 @@ final class MockLruBlockCache {
     /** Total number of LRU evictions (capacity + forced). */
     synchronized long evictions() {
         return evictions;
+    }
+
+    /** Extra connector reference to already computed GPU source blocks. */
+    synchronized BlockLease pinExisting(List<Long> keys) {
+        for (Long key : keys) if (!blocks.containsKey(key)) return null;
+        List<Long> held = new ArrayList<>(new LinkedHashSet<>(keys));
+        for (Long key : held) {
+            int refs = blocks.get(key);
+            if (refs == 0) referencedBlocks++;
+            blocks.put(key, refs + 1);
+            refreshLeaf(key);
+        }
+        return new BlockLease(held, 0);
     }
 
     synchronized int peekPrefixHitBlocks(List<Long> keys) {

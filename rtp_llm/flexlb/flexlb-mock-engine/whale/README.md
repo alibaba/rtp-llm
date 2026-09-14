@@ -84,3 +84,26 @@ check of master candidate eligibility. The global history is a hypothetical shar
 it may combine blocks held on different engines and is not necessarily routable. Seed
 reads and observer attachment are also non-atomic. Use only with a stable, homogeneous,
 colocated P topology; separate-pod mode cannot inspect other processes with this endpoint.
+
+### Optional Memory copy lifecycle
+
+In the existing `prefill.memory_cache` performance JSON, set `copy_lifecycle: true`.
+It defaults to false to preserve existing case behavior. `read_ms_per_block` controls
+host-to-device transfer time; `write_ms_per_block` controls device-to-host transfer time
+(default 0, finite nonnegative milliseconds). Capacity remains one host pool plus one
+device pool; there is no unconditional write-on-GPU-eviction rule.
+
+At batch preparation, host matches are revalidated and pinned; pins release at modeled
+read completion, not at decode termination. Successful P compute starts an optional host
+write: missing entries reserve host capacity, GPU source blocks retain a connector lease,
+and new host keys become visible only at copy commit. Existing host keys are skipped
+without LRU refresh. Host pressure skips pinned and pending blocks; a failed optional host
+reservation skips the cache write without failing inference. Cancellation/reset/shutdown
+release leases, and old callbacks cannot republish keys after reset. Zero copy durations
+mean synchronous completion, not a fabricated DMA delay.
+
+`mock_memory_cache_pinned_blocks`, `mock_memory_cache_pending_write_blocks`, and
+`mock_memory_cache_write_rejected_total` expose copy pressure. Host allocated blocks
+include pending writes; available blocks exclude pins and reservations but include
+reclaimable LRU entries. The model remains metadata-only (no layer-wise DMA overlap,
+partial-block payloads, or device index/reference separation).

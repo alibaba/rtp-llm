@@ -635,6 +635,95 @@ public final class JavaMockEngineCluster {
         private volatile boolean whaleRemote;
         private boolean whaleBundle;
         private MockMemoryBlockCache memoryCache;
+        private final Map<Long, MockMemoryBlockCache.ReadLease> memoryReads = new ConcurrentHashMap<>();
+        private final Map<Long, MemoryWrite> memoryWrites = new ConcurrentHashMap<>();
+
+        private final class MemoryWrite {
+            final MockMemoryBlockCache.WriteLease host;
+            final MockLruBlockCache.BlockLease device;
+            final long epoch;
+            boolean closed;
+            MemoryWrite(MockMemoryBlockCache.WriteLease host, MockLruBlockCache.BlockLease device) {
+                this.host = host; this.device = device; this.epoch = crashEpoch.get();
+            }
+            synchronized void finish(boolean success) {
+                if (closed) return;
+                closed = true;
+                if (success && epoch == crashEpoch.get()) {
+                    if (host.commit()) cacheVersion.incrementAndGet();
+                } else host.close();
+                // A crash has already reset GPU reference accounting.
+                if (epoch == crashEpoch.get()) cache.release(device);
+                wakeFifoOnCapacityRelease();
+            }
+        }
+
+        private void releaseMemoryRead(long id) {
+            var read = memoryReads.remove(id);
+            if (read != null) read.close();
+        }
+
+        private void abortMemoryCopies(long id) {
+            releaseMemoryRead(id);
+            var write = memoryWrites.remove(id);
+            if (write != null) write.finish(false);
+        }
+
+        private List<BatchMember> prepareMemoryReads(List<BatchMember> members) {
+            if (memoryCache == null || !performance.memoryCopyLifecycle) return members;
+            List<BatchMember> prepared = new ArrayList<>();
+            for (var member : members) {
+                var old = member.shape();
+                long id = old.input().getRequestId();
+                synchronized (completionLock) {
+                    int gpu = old.hitBlocks() - old.memoryHitBlocks();
+                    int host = 0;
+                    if (!cancelledRequests.containsKey(id) && !shuttingDown) {
+                        var lease = memoryCache.pinRead(old.blockKeys(), gpu);
+                        var previous = memoryReads.put(id, lease);
+                        if (previous != null) previous.close();
+                        host = lease.blocks();
+                    }
+                    var fresh = new MockPerformanceModel.RequestShape(old.input(), old.inputLen(), old.outputLen(),
+                            old.blockKeys(), Math.min((long) (gpu + host) * seqSizePerBlock, old.inputLen()),
+                            gpu + host, old.nativeKeys(), host);
+                    prepared.add(new BatchMember(fresh, member.batchId(), member.dpRank()));
+                }
+            }
+            return prepared;
+        }
+
+        private void writePrefillMemory(MockPerformanceModel.RequestShape shape) {
+            if (memoryCache == null) return;
+            if (!performance.memoryCopyLifecycle) { memoryCache.write(shape.blockKeys()); return; }
+            long id = shape.input().getRequestId();
+            synchronized (completionLock) {
+                if (cancelledRequests.containsKey(id) || shuttingDown || !activeBlockLeases.containsKey(id)) return;
+                // Compute completion publishes GPU keys but retains the request's reference.
+                activeBlockLeases.computeIfPresent(id, (ignored, lease) -> cache.retainComputed(lease, shape.blockKeys()));
+                long before = memoryCache.evictions();
+                var host = memoryCache.beginWrite(shape.blockKeys());
+                if (memoryCache.evictions() != before) cacheVersion.incrementAndGet();
+                if (host == null) return; // optional cache write: no request failure on host pressure
+                var device = cache.pinExisting(host.keys());
+                if (device == null) { host.close(); return; }
+                var copy = new MemoryWrite(host, device);
+                var previous = memoryWrites.put(id, copy);
+                if (previous != null) previous.finish(false);
+                Runnable finish = () -> {
+                    if (memoryWrites.remove(id, copy)) copy.finish(!cancelledRequests.containsKey(id));
+                };
+                long nanos = (long) (host.blocks() * performance.memoryWriteMsPerBlock * 1_000_000.0);
+                if (nanos == 0) finish.run();
+                else {
+                    try { scheduler.schedule(finish, nanos, TimeUnit.NANOSECONDS); }
+                    catch (java.util.concurrent.RejectedExecutionException stopped) {
+                        if (memoryWrites.remove(id, copy)) copy.finish(false);
+                    }
+                }
+            }
+        }
+
         private final java.util.concurrent.atomic.LongAdder memoryReadBlocks = new java.util.concurrent.atomic.LongAdder();
         private java.util.function.BiConsumer<String, Double> cacheEvictionReporter;
 
@@ -2322,6 +2411,7 @@ public final class JavaMockEngineCluster {
             if (cancelledRequests.putIfAbsent(requestId, System.nanoTime()) != null) {
                 return null;
             }
+            abortMemoryCopies(requestId);
             addCancelledRid(requestId);
             if (priorityPreemption) {
                 addPriorityCancelTombstone(requestId);
@@ -3554,7 +3644,8 @@ public final class JavaMockEngineCluster {
          * one running batch regardless of which EnqueueBatch delivered each
          * stream).
          */
-        private void runPrefillBatch(List<BatchMember> members) {
+        private void runPrefillBatch(List<BatchMember> originalMembers) {
+            List<BatchMember> members = prepareMemoryReads(originalMembers);
             List<MockPerformanceModel.RequestShape> shapes = shapesOf(members);
             long executionMs = performance.prefillMs(shapes);
             long memoryBlocks = shapes.stream().mapToLong(MockPerformanceModel.RequestShape::memoryHitBlocks).sum();
@@ -3599,6 +3690,23 @@ public final class JavaMockEngineCluster {
                         startPrefillBatch(members);
                     }
                 }, startDelayNanos, TimeUnit.NANOSECONDS);
+            }
+
+            if (memoryCache != null && performance.memoryCopyLifecycle) {
+                for (var member : members) {
+                    long id = member.shape().input().getRequestId();
+                    var read = memoryReads.get(id);
+                    long readDelay = startDelayNanos + (long) (member.shape().memoryHitBlocks()
+                            * performance.memoryReadMsPerBlock * 1_000_000.0);
+                    Runnable release = () -> {
+                        if (read != null && memoryReads.remove(id, read)) read.close();
+                    };
+                    if (readDelay == 0) release.run();
+                    else {
+                        try { scheduler.schedule(release, readDelay, TimeUnit.NANOSECONDS); }
+                        catch (java.util.concurrent.RejectedExecutionException stopped) { release.run(); }
+                    }
+                }
             }
 
             long delayNanos = Math.max(0, finishNanos - now);
@@ -3682,7 +3790,7 @@ public final class JavaMockEngineCluster {
                         // excluded), with_cache = il (the
                         // rtp_llm_context_tps_with_cache numerator, the
                         // DeepSeek-style "input tokens/s incl. cache hits").
-                        if (memoryCache != null && !asyncFail) memoryCache.write(shape.blockKeys());
+                        if (!asyncFail) writePrefillMemory(shape);
                         MockCacheDiagnostics diag = cacheDiagnostics;
                         if (!asyncFail && diag != null) diag.completed(engineName, shape.blockKeys());
                         long inputLen = shape.inputLen();
@@ -5241,6 +5349,7 @@ public final class JavaMockEngineCluster {
 
         /** Cancel path: return the lease's blocks to the pool without LRU handover. */
         private void releaseBlockLease(long requestId) {
+            releaseMemoryRead(requestId);
             MockLruBlockCache.BlockLease lease = activeBlockLeases.remove(requestId);
             if (lease != null) {
                 long beforeEvictions = cache.retentionEvictions();
@@ -5499,6 +5608,8 @@ public final class JavaMockEngineCluster {
          */
         void drainAndShutdown() {
             shuttingDown = true;
+            memoryReads.keySet().forEach(this::releaseMemoryRead);
+            memoryWrites.keySet().forEach(this::abortMemoryCopies);
             setStopped(true);
             for (Long requestId : List.copyOf(prefillSessions.keySet())) {
                 cancel(requestId, false, false);
@@ -5625,6 +5736,8 @@ public final class JavaMockEngineCluster {
             synchronized (completionLock) {
                 completions.clear();
             }
+            memoryReads.keySet().forEach(this::releaseMemoryRead);
+            memoryWrites.keySet().forEach(this::abortMemoryCopies);
             // KV memory: every held block and LRU entry is gone with the process.
             cache.clear();
             if (memoryCache != null) memoryCache.clear();
@@ -5837,14 +5950,17 @@ public final class JavaMockEngineCluster {
                             : 100.0 * (cache.totalBlocks() - cache.availableBlocks()) / cache.totalBlocks())));
             if (memoryCache != null) {
                 metrics.put("rtp_llm_kv_cache_memory_cache_status_total_block_num", memoryCache.capacity());
-                metrics.put("rtp_llm_kv_cache_memory_cache_status_allocated_block_num", memoryCache.size());
-                // Metadata copies complete atomically; cached blocks are all reclaimable.
-                metrics.put("rtp_llm_kv_cache_memory_cache_status_available_block_num", memoryCache.capacity());
-                metrics.put("rtp_llm_kv_cache_memory_cache_status_used_ratio", 0);
+                metrics.put("rtp_llm_kv_cache_memory_cache_status_allocated_block_num", memoryCache.size() + memoryCache.pendingBlocks());
+                // Cached unpinned entries are reclaimable; in-flight copies are not.
+                metrics.put("rtp_llm_kv_cache_memory_cache_status_available_block_num", memoryCache.availableBlocks());
+                metrics.put("rtp_llm_kv_cache_memory_cache_status_used_ratio", 100.0 * (memoryCache.capacity() - memoryCache.availableBlocks()) / memoryCache.capacity());
                 metrics.put("mock_memory_cache_occupancy_ratio", (double) memoryCache.size() / memoryCache.capacity());
                 metrics.put("mock_memory_cache_total_tokens", (long) memoryCache.capacity() * seqSizePerBlock);
                 metrics.put("mock_memory_cache_evicted_blocks_total", memoryCache.evictions());
                 metrics.put("mock_memory_cache_read_blocks_total", memoryReadBlocks.sum());
+                metrics.put("mock_memory_cache_pinned_blocks", memoryCache.pinnedBlocks());
+                metrics.put("mock_memory_cache_pending_write_blocks", memoryCache.pendingBlocks());
+                metrics.put("mock_memory_cache_write_rejected_total", memoryCache.writeRejected());
             }
             return metrics;
         }
