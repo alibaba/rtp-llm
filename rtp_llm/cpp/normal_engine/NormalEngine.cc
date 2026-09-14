@@ -192,7 +192,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     }
     if (propose_params_) {
         const auto gamma = propose_params_->gen_num_per_circle;
-        if (propose_params_->sp_type == SP_TYPE_DSPARK) {
+        if (isBlockDraftType(propose_params_->sp_type)) {
             RTP_LLM_CHECK_WITH_INFO(gamma <= static_cast<size_t>(std::numeric_limits<int>::max()) / 3,
                                     "DSpARK gen_num_per_circle is too large: %zu",
                                     gamma);
@@ -862,7 +862,7 @@ void NormalEngine::startTimelineProfiling(const std::string& trace_name, int sta
 bool NormalEngine::isMTPEagle() {
     if (propose_params_) {
         return propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE
-               || propose_params_->sp_type == SP_TYPE_DSPARK;
+               || isBlockDraftType(propose_params_->sp_type);
     }
     return false;
 }
@@ -882,7 +882,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     if (isMTPEagle()) {
         int        propose_step   = sp_config.gen_num_per_cycle;
         int        mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
-        const bool is_dspark      = propose_params_->sp_type == SP_TYPE_DSPARK;
+        const bool is_dspark      = isBlockDraftType(propose_params_->sp_type);
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
                 if (streams.empty()) {

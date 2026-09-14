@@ -10,6 +10,9 @@
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
+// The ROCm compiler wrapper drops -fno-access-control. These existing
+// executor policy fixtures intentionally inspect protected engine/stream state.
+#define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -28,6 +31,7 @@
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
+#undef protected
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #include <ATen/cuda/CUDAContext.h>
@@ -610,6 +614,9 @@ public:
         sp_config.type                                     = test_config.sp_type;
         sp_config.gen_num_per_cycle                        = test_config.gen_num_per_cycle;
         sp_config.sp_dspark_mask_token_id                  = test_config.dspark_mask_token_id;
+        if (test_config.sp_type == SP_TYPE_DFLASH) {
+            sp_config.sp_dspark_sample_from_anchor = false;
+        }
 
         resource_context.cache_manager =
             std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
@@ -748,6 +755,163 @@ public:
         return output;
     }
 };
+
+TEST_F(MtpExecutorTest, DFlashInitializesWithoutMarkovWeights) {
+    MtpExecutorTestConfig config;
+    config.sp_type              = SP_TYPE_DFLASH;
+    config.gen_num_per_cycle    = 7;
+    config.dspark_mask_token_id = 3;
+    auto components             = createMtpExecutorComponents(config);
+    EXPECT_TRUE(components.executor->is_block_draft_);
+    EXPECT_TRUE(components.executor->is_dflash_);
+    EXPECT_FALSE(components.executor->dspark_markov_w1_.defined());
+    EXPECT_FALSE(components.executor->dspark_markov_w2_.defined());
+    EXPECT_EQ(components.executor->fast_topk_sampler_, nullptr);
+}
+
+TEST_F(MtpExecutorTest, DFlashExecutorRoutesOneBlockForwardToPlainSampler) {
+    MtpExecutorTestConfig config;
+    config.sp_type              = SP_TYPE_DFLASH;
+    config.gen_num_per_cycle    = 7;
+    config.vocab_size_override   = config.vocab_size;
+    config.dspark_mask_token_id = 3;
+    auto components             = createMtpExecutorComponents(config);
+    auto stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    stream->generateConfig()->top_p = 0.001f;
+    StreamGroups streams({stream});
+
+    GptModelInputs input;
+    input.combo_tokens      = torch::tensor({1, 3, 3, 3, 3, 3, 3, 3}, torch::kInt32);
+    input.input_lengths     = torch::tensor({8}, torch::kInt32);
+    input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
+    input.lm_output_indexes = torch::arange(1, 8, torch::kInt32);
+    GptModelOutputs model_output;
+    model_output.logits =
+        torch::tensor({0.0f, 1.0f, 2.0f, 3.0f}, torch::TensorOptions().device(torch::kCUDA)).repeat({7, 1});
+    components.fake_draft_model->setInputs({input});
+    components.fake_draft_model->setOutputs({model_output});
+    auto* model = components.fake_draft_model.get();
+    components.executor->setDraftModel(std::move(components.fake_draft_model));
+    MtpBatchStreamProcessor::DSparkRoundState state;
+    state.anchors = torch::tensor({1}, torch::kInt32);
+    SamplerOutput draft;
+    int64_t       forward_us = 0;
+    components.executor->runDSparkProposal(input, streams, state, draft, forward_us);
+
+    EXPECT_EQ(model->forward_count_, 1);
+    EXPECT_TRUE(torch::equal(draft.token_ids.cpu(), torch::full({1, 7}, 3, torch::kInt32)));
+    // Nucleus sampling is stochastic even when q has only one surviving token.
+    // DSpARK's temperature-only/Markov path cannot satisfy this contract.
+    ASSERT_FALSE(draft.token_ids_are_point_mass);
+    EXPECT_TRUE(torch::equal(draft.all_probs.cpu(),
+                             torch::tensor({0.0f, 0.0f, 0.0f, 1.0f}).reshape({1, 1, 4}).repeat({1, 7, 1})));
+}
+
+TEST_F(MtpExecutorTest, DFlashMixedSamplingAndPaddedVocabularyRejection) {
+    MtpExecutorTestConfig config;
+    config.sp_type              = SP_TYPE_DFLASH;
+    config.gen_num_per_cycle    = 7;
+    config.dspark_mask_token_id = 3;
+    auto components             = createMtpExecutorComponents(config);
+    auto greedy =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    auto stochastic =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {2, 3});
+    greedy->generateConfig()->do_sample       = false;
+    stochastic->generateConfig()->top_k       = 2;
+    stochastic->generateConfig()->top_p       = 0.9f;
+    stochastic->generateConfig()->temperature = 0.8f;
+    const std::list<GenerateStreamPtr> streams{greedy, stochastic};
+    auto                               options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    // Artificial lm-head padding dominates the logits but must never be sampled.
+    auto logits = torch::full({14, 128}, 1000.0f, options);
+    logits.narrow(1, 0, 4).copy_(torch::tensor({0.0f, 1.0f, 2.0f, 3.0f}, options).expand({14, 4}));
+    spec::SpeculativeSampler sampler({}, 7);
+    auto                     draft = sampler.sampleDFlashDraft(logits, streams, 4);
+    ASSERT_FALSE(draft.token_ids_are_point_mass);
+    EXPECT_EQ(draft.token_ids.size(0), 2);
+    EXPECT_EQ(draft.token_ids.size(1), 7);
+    EXPECT_EQ(draft.token_ids.max().item<int32_t>(), 3);
+    EXPECT_TRUE(torch::equal(draft.all_probs[0], torch::tensor({0.0f, 0.0f, 0.0f, 1.0f}, options).expand({7, 4})));
+    EXPECT_TRUE(torch::allclose(
+        draft.all_probs[1],
+        spec::dflashDraftProbabilities(logits.narrow(0, 7, 7).narrow(1, 0, 4), *stochastic->generateConfig())));
+
+    SamplerOutput target;
+    target.all_probs = torch::zeros({2, 8, 128}, options);
+    target.all_probs.narrow(1, 0, 7).narrow(2, 0, 4).copy_(draft.all_probs);
+    target.all_probs.select(1, 7).select(1, 1).fill_(1.0f);
+    auto target_tokens = torch::ones({2, 8}, options.dtype(torch::kInt32));
+    target_tokens.narrow(1, 0, 7).copy_(draft.token_ids);
+    target.token_ids = target_tokens.reshape({16, 1});
+    // Equal p and q must accept every proposal, including mixed greedy rows.
+    auto result = sampler.forward(streams, draft, target);
+    EXPECT_TRUE(torch::equal(result.accept_len.cpu(), torch::tensor({8, 8}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(result.accept_tokens.cpu(), target_tokens.cpu()));
+
+    stochastic->generateConfig()->do_sample = false;
+    auto point_mass                         = sampler.sampleDFlashDraft(logits, streams, 4);
+    EXPECT_TRUE(point_mass.token_ids_are_point_mass);
+    EXPECT_FALSE(point_mass.all_probs.defined());
+    EXPECT_TRUE(torch::equal(point_mass.token_ids.cpu(), torch::full({2, 7}, 3, torch::kInt32)));
+}
+
+TEST_F(MtpExecutorTest, DFlashSeededDraftSamplingIsReproducible) {
+    MtpExecutorTestConfig config;
+    config.sp_type              = SP_TYPE_DFLASH;
+    config.gen_num_per_cycle    = 7;
+    config.dspark_mask_token_id = 3;
+    auto components             = createMtpExecutorComponents(config);
+    auto make_seeded_stream     = [&]() {
+        auto query                          = std::make_shared<GenerateInput>();
+        query->input_ids                    = torch::tensor({0, 1}, torch::kInt32);
+        query->generate_config              = std::make_shared<GenerateConfig>();
+        query->generate_config->random_seed = 913;
+        return std::make_shared<NormalGenerateStream>(
+            query, components.model_config, components.runtime_config, components.resource_context, nullptr);
+    };
+    auto                     first   = make_seeded_stream();
+    auto                     second  = make_seeded_stream();
+    auto                     options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto                     logits  = torch::tensor({0.0f, 0.3f, 0.6f, 0.9f}, options).expand({7, 4});
+    spec::SpeculativeSampler sampler({}, 7);
+    auto                     a = sampler.sampleDFlashDraft(logits, {first}, 4);
+    auto                     b = sampler.sampleDFlashDraft(logits, {second}, 4);
+    EXPECT_TRUE(torch::equal(a.token_ids, b.token_ids));
+    EXPECT_TRUE(torch::equal(a.all_probs, b.all_probs));
+}
+
+TEST_F(MtpExecutorTest, DFlashPartialRejectionUsesTargetResidualWithPaddedVocabulary) {
+    MtpExecutorTestConfig config;
+    config.sp_type              = SP_TYPE_DFLASH;
+    config.gen_num_per_cycle    = 7;
+    config.dspark_mask_token_id = 3;
+    auto components             = createMtpExecutorComponents(config);
+    auto stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    // Stochastic request with a nucleus containing one token. It must retain
+    // dense q, then reject against a target assigning that token zero mass.
+    stream->generateConfig()->top_p  = 0.001f;
+    auto                     options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto                     logits  = torch::tensor({0.0f, 1.0f, 2.0f, 3.0f}, options).expand({7, 4});
+    spec::SpeculativeSampler sampler({}, 7);
+    auto                     draft = sampler.sampleDFlashDraft(logits, {stream}, 4);
+    ASSERT_FALSE(draft.token_ids_are_point_mass);
+    for (int64_t first_rejected : {0, 3, 6}) {
+        SamplerOutput target;
+        target.all_probs = torch::zeros({1, 8, 128}, options);
+        target.all_probs.narrow(1, first_rejected, 8 - first_rejected).select(2, 0).fill_(1.0f);
+        target.all_probs.narrow(1, 0, first_rejected).select(2, 3).fill_(1.0f);
+        target.token_ids = torch::zeros({8, 1}, options.dtype(torch::kInt32));
+        target.token_ids.narrow(0, 0, first_rejected).fill_(3);
+        auto result = sampler.forward({stream}, draft, target);
+        EXPECT_EQ(result.accept_len.cpu()[0].item<int32_t>(), first_rejected + 1);
+        auto tokens = result.accept_tokens.cpu()[0];
+        EXPECT_EQ(tokens[first_rejected].item<int32_t>(), 0);
+        EXPECT_TRUE(torch::equal(tokens.narrow(0, 0, first_rejected), torch::full({first_rejected}, 3, torch::kInt32)));
+    }
+}
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     MtpExecutorTestConfig test_config;
@@ -2153,6 +2317,9 @@ TEST_F(MtpExecutorTest, testDSparkFakeDecodeStartsWithoutProposalState) {
     EXPECT_EQ((std::vector<int32_t>{1, 1, 0}), stream->speculativeAcceptedTokensPerPos());
 }
 
+#if USING_CUDA
+// This fused dispatch helper has a CUDA implementation only. ROCm uses the
+// executor's tensor fallback, covered by the lifecycle tests above.
 TEST_F(MtpExecutorTest, testDispatchStatePrepareKernel) {
     // Test invokeMtpDispatchStatePrepare correctness
     const int64_t batch_size = 8;
@@ -2243,6 +2410,7 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
     RTP_LLM_LOG_INFO("[dispatch-bench] scalar:  %ld us total, %.2f us/iter", us_scalar, (double)us_scalar / iterations);
     RTP_LLM_LOG_INFO("[dispatch-bench] speedup: %.1fx", speedup);
 }
+#endif
 
 // MTP-incompatible stateful processor: main's capability contract makes the
 // stream (not the whole engine step) fail, so decodeStep must keep running.

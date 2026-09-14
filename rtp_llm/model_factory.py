@@ -26,6 +26,8 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.device.device_type import is_hip
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
 from rtp_llm.ops import (
+    DataType,
+    KvCacheDataType,
     ProfilingDebugLoggingConfig,
     SpeculativeType,
     TaskType,
@@ -151,6 +153,7 @@ class ModelFactory:
             or sp_type == SpeculativeType.EAGLE3
             or sp_type == SpeculativeType.EAGLE
             or sp_type == SpeculativeType.DSPARK
+            or sp_type == SpeculativeType.DFLASH
         ):
             model_type = propose_model_config.model_type
             if model_type == "deepseek-v3-mtp" or model_type == "mixtbstars-mtp":
@@ -184,8 +187,9 @@ class ModelFactory:
 
             propose_hw_kernel_config = engine_config.hw_kernel_config
             if (
-                sp_type == SpeculativeType.DSPARK
-                and propose_model_config.model_type == "qwen_3_dspark"
+                sp_type in (SpeculativeType.DSPARK, SpeculativeType.DFLASH)
+                and propose_model_config.model_type
+                in ("qwen_3_dspark", "qwen_3_dflash")
                 and is_hip()
                 and propose_hw_kernel_config.use_swizzleA
             ):
@@ -197,7 +201,7 @@ class ModelFactory:
                 propose_hw_kernel_config = copy.deepcopy(propose_hw_kernel_config)
                 propose_hw_kernel_config.use_swizzleA = False
                 logging.info(
-                    "disable ROCm swizzleA for BF16 qwen_3_dspark propose model"
+                    "disable ROCm swizzleA for BF16 Qwen3 block-draft propose model"
                 )
 
             gpt_model = model_cls.from_config(
@@ -457,18 +461,19 @@ class ModelFactory:
         if not sp_config.checkpoint_path:
             return None
 
-        # Current learned-draft SP engine supports MTP, EAGLE and DSpARK.
+        # Current learned-draft SP engine supports MTP, EAGLE, DSpARK and DFlash.
         if sp_config.type not in [
             SpeculativeType.MTP,
             SpeculativeType.EAGLE,
             SpeculativeType.DSPARK,
+            SpeculativeType.DFLASH,
         ]:
             logging.error(
-                "Speculative engine only supports MTP, EAGLE and DSpARK, but got %s",
+                "Speculative engine only supports MTP, EAGLE, DSpARK and DFlash, but got %s",
                 sp_config.type.name,
             )
             raise ValueError(
-                "Speculative engine only supports MTP, EAGLE and DSpARK, but got %s"
+                "Speculative engine only supports MTP, EAGLE, DSpARK and DFlash, but got %s"
                 % sp_config.type.name
             )
 
@@ -510,6 +515,10 @@ class ModelFactory:
 
         if sp_config.type == SpeculativeType.DSPARK:
             ModelFactory._setup_dspark_configs(
+                sp_config, model_config, propose_model_config
+            )
+        elif sp_config.type == SpeculativeType.DFLASH:
+            ModelFactory._setup_dflash_configs(
                 sp_config, model_config, propose_model_config
             )
 
@@ -604,4 +613,129 @@ class ModelFactory:
             noise_token_id,
             target_layer_ids,
             markov_rank,
+        )
+
+    @staticmethod
+    def _setup_dflash_configs(
+        sp_config, model_config: ModelConfig, propose_model_config: ModelConfig
+    ) -> None:
+        """Validate DFlash V1 metadata and wire target hidden capture.
+
+        DFlash uses the existing fixed-block ABI during the initial rollout,
+        but has independent checkpoint metadata and no Markov state.
+        """
+        gamma = int(sp_config.gen_num_per_cycle)
+        if gamma not in tuple(range(1, 8)) + (15,):
+            raise ValueError(
+                "DFlash V1 supports proposal gamma=1..7 or native gamma=15 "
+                f"(query width gamma+1), got {gamma}"
+            )
+        noise_token_id = getattr(propose_model_config, "dflash_mask_token_id", None)
+        layer_ids = getattr(propose_model_config, "dflash_target_layer_ids", None)
+        layer_types = getattr(propose_model_config, "dflash_layer_types", None)
+        window = getattr(propose_model_config, "dflash_sliding_window", None)
+        native_block_size = getattr(
+            propose_model_config, "dflash_native_block_size", None
+        )
+        if noise_token_id is None or layer_ids is None or layer_types is None:
+            raise ValueError(
+                "sp_type dflash requires mask token, target layer ids, and layer types"
+            )
+        input_vocab = int(
+            getattr(propose_model_config, "input_vocab_size", 0)
+            or propose_model_config.vocab_size
+        )
+        noise_token_id = int(noise_token_id)
+        if noise_token_id < 0 or noise_token_id >= input_vocab:
+            raise ValueError(
+                f"invalid dflash_mask_token_id {noise_token_id} for input_vocab_size {input_vocab}"
+            )
+        layer_ids = [int(layer_id) for layer_id in layer_ids]
+        if not layer_ids or layer_ids != sorted(set(layer_ids)):
+            raise ValueError("dflash target layer ids must be unique and ordered")
+        if any(layer_id < 0 or layer_id >= model_config.num_layers for layer_id in layer_ids):
+            raise ValueError(
+                f"dflash target layer ids {layer_ids} are invalid for target layers={model_config.num_layers}"
+            )
+        layer_types = [str(layer_type) for layer_type in layer_types]
+        if len(layer_types) != propose_model_config.num_layers:
+            raise ValueError(
+                "dflash layer_types count must equal draft num_layers: "
+                f"{len(layer_types)} != {propose_model_config.num_layers}"
+            )
+        if any(layer_type not in ("sliding_attention", "full_attention") for layer_type in layer_types):
+            raise ValueError(f"unsupported dflash layer types: {layer_types}")
+        if "sliding_attention" in layer_types and (window is None or int(window) <= 0):
+            raise ValueError("dflash sliding_attention requires a positive sliding_window")
+        if native_block_size is None:
+            raise ValueError(
+                "sp_type dflash requires checkpoint dflash_native_block_size "
+                "metadata"
+            )
+        if native_block_size != 16:
+            raise ValueError(
+                "DFlash V1 requires checkpoint native block_size=16, got "
+                f"{native_block_size}"
+            )
+        if int(propose_model_config.hidden_size) != int(model_config.hidden_size):
+            raise ValueError(
+                "dflash target/draft hidden sizes must match for shared target features: "
+                f"{model_config.hidden_size} != {propose_model_config.hidden_size}"
+            )
+        if int(propose_model_config.vocab_size) != int(model_config.vocab_size):
+            raise ValueError(
+                "dflash requires the target full vocabulary for the shared lm head: "
+                f"{propose_model_config.vocab_size} != {model_config.vocab_size}"
+            )
+        target_input_vocab = int(
+            getattr(model_config, "input_vocab_size", 0) or model_config.vocab_size
+        )
+        if input_vocab != target_input_vocab:
+            raise ValueError(
+                "dflash requires input_vocab_size to match the target shared embedding: "
+                f"{input_vocab} != {target_input_vocab}"
+            )
+        config_dtype = str(getattr(propose_model_config, "config_dtype", None) or "").lower()
+        effective_dtype = getattr(propose_model_config, "data_type", None)
+        # The effective dtype is resolved by init_precision_config from
+        # --act_type or the checkpoint dtype, so a checkpoint json without an
+        # explicit dtype/torch_dtype is fine as long as the effective dtype is
+        # BF16; only an explicitly declared non-BF16 dtype is a hard error.
+        if effective_dtype != DataType.TYPE_BF16 or config_dtype not in (
+            "",
+            "none",
+            "bfloat16",
+            "bf16",
+        ):
+            raise ValueError(
+                "DFlash V1 supports BF16 draft weights and activations only, got "
+                f"config_dtype={config_dtype!r}, data_type={effective_dtype!r}"
+            )
+        if getattr(propose_model_config, "quantization", None) not in (None, "", "none"):
+            raise ValueError("DFlash V1 does not support quantized draft weights")
+        if getattr(propose_model_config, "quant_config", None) is not None:
+            raise ValueError("DFlash V1 does not support a draft quant_config")
+        quant_algo = getattr(propose_model_config, "quant_algo", None)
+        if quant_algo is not None and quant_algo.isQuant():
+            raise ValueError("DFlash V1 does not support a quantized draft quant_algo")
+        if not bool(getattr(propose_model_config, "qk_norm", False)):
+            raise ValueError("DFlash V1 requires Qwen3 Q/K RMSNorm and RoPE")
+        # The draft has its own cache allocation.  Never inherit the target's
+        # FP8 cache request into the BF16-only DFlash writer/attention kernels.
+        propose_model_config.attn_config.kv_cache_dtype = KvCacheDataType.BASE
+
+        # Reuse the current fixed block input fields until the C++ ABI grows
+        # DFlash-specific names.  This is geometry only, never a claim that
+        # DFlash has DSpARK's Markov sampler.
+        sp_config.sp_dspark_mask_token_id = noise_token_id
+        sp_config.sp_dspark_sample_from_anchor = False
+        model_config.capture_aux_hidden_layer_ids = layer_ids
+        propose_model_config.capture_aux_hidden_layer_ids = layer_ids
+        logging.info(
+            "DFlash fixed-block wiring: gamma=%d, mask_token_id=%d, "
+            "target capture layer ids=%s, layer_types=%s",
+            gamma,
+            noise_token_id,
+            layer_ids,
+            layer_types,
         )
