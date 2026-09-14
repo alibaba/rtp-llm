@@ -47,6 +47,10 @@ private:
     torch::Tensor d2t_map_;
 };
 
+// The exact draft q used both to draw DFlash proposals and in rejection sampling.
+// Works on CPU as well as CUDA/ROCm so filtering semantics have a small oracle test.
+torch::Tensor dflashDraftProbabilities(const torch::Tensor& logits, const GenerateConfig& config);
+
 class SpeculativeSampler {
 public:
     SpeculativeSampler(torch::Tensor d2t_map, size_t propose_step): d2t_map_(d2t_map), propose_step_(propose_step) {}
@@ -61,6 +65,10 @@ public:
                                     const torch::Tensor& markov_w1,
                                     const torch::Tensor& markov_w2,
                                     size_t               draft_vocab_size) const;
+
+    SamplerOutput sampleDFlashDraft(const torch::Tensor&                base_logits,
+                                    const std::list<GenerateStreamPtr>& streams,
+                                    size_t                              draft_vocab_size) const;
 
 private:
     void batchSample(SpeculativeSamplerOutput&           sample_output,
