@@ -569,17 +569,20 @@ class MMScheduler:
             # loop's pre-execute stop-check then rejects the not-yet-run batch.
             if self._stopped.is_set():
                 break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            # Cap the block at the stop-poll interval so close() is noticed within
-            # _STOP_POLL_INTERVAL_S instead of waiting out the whole window. A real
-            # arrival still wakes get() immediately; on the poll timeout we loop to
-            # re-check _stopped and the deadline rather than ending the window.
+            # Always drain ready work, including when batch_wait_ms is zero.
+            # The deadline limits waiting for future arrivals, not queued work.
             try:
-                req = self._waiting.get(timeout=min(remaining, _STOP_POLL_INTERVAL_S))
+                req = self._waiting.get_nowait()
             except queue.Empty:
-                continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    req = self._waiting.get(
+                        timeout=min(remaining, _STOP_POLL_INTERVAL_S)
+                    )
+                except queue.Empty:
+                    continue
             if req.future.cancelled():
                 continue  # caller already timed out; don't spend budget on it
 

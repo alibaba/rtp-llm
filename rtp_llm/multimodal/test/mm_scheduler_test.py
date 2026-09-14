@@ -188,6 +188,37 @@ def _submit_concurrently(
 
 
 class MMSchedulerTest(TestCase):
+    def test_zero_wait_batches_already_queued_requests(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        gate = threading.Event()
+        part = _FakeMMPart(block_until=gate)
+        scheduler = MMScheduler(part, batch_wait_ms=0, max_batch_size=4)
+        try:
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                first = pool.submit(scheduler.submit_and_wait, [_FakeWorkItem()])
+                self.assertTrue(part.forward_entered.wait(5))
+                pending = [
+                    pool.submit(scheduler.submit_and_wait, [_FakeWorkItem()])
+                    for _ in range(4)
+                ]
+                try:
+                    deadline = time.monotonic() + 3
+                    while (
+                        scheduler._waiting.qsize() < 4 and time.monotonic() < deadline
+                    ):
+                        time.sleep(0.001)
+                    self.assertEqual(scheduler._waiting.qsize(), 4)
+                finally:
+                    gate.set()
+                first.result(timeout=5)
+                for result in pending:
+                    result.result(timeout=5)
+            self.assertEqual(part.calls, [1, 4])
+        finally:
+            gate.set()
+            scheduler.close()
+
     def test_multi_request_batching(self):
         """Several concurrent submissions are merged into one forward."""
         fake = _FakeMMPart()

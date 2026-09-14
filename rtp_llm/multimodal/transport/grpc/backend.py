@@ -4,23 +4,20 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputsPB,
     MultimodalOutputPB,
 )
-from rtp_llm.multimodal.transport.base import (
-    MMOutputResult,
-    MMTerminalBackend,
-)
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
+from rtp_llm.multimodal.transport.base import MMOutputResult, MMTerminalBackend
 from rtp_llm.utils.grpc_util import trans_from_tensor
 
 TRANSPORT_BYTES = "bytes"
 
 
-def _tensor_pb_bytes(tensor_pb) -> int:
-    return (
-        len(tensor_pb.fp32_data)
-        + len(tensor_pb.int32_data)
-        + len(tensor_pb.fp16_data)
-        + len(tensor_pb.bf16_data)
-    )
+def _tensor_bytes(tensors) -> int:
+    # Reading protobuf bytes fields materializes the payload again.
+    return sum(t.numel() * t.element_size() for t in (tensors or []) if t is not None)
+
+
+def _concat(tensors):
+    return tensors[0] if len(tensors) == 1 else torch.concat(tensors)
 
 
 class GrpcInlineOutputBackend(MMTerminalBackend):
@@ -35,11 +32,9 @@ class GrpcInlineOutputBackend(MMTerminalBackend):
         return MMOutputResult(
             receipt=receipt,
             transport=TRANSPORT_BYTES,
-            payload_embedding_bytes=_tensor_pb_bytes(receipt.multimodal_embedding),
-            payload_pos_bytes=_tensor_pb_bytes(receipt.multimodal_pos_id),
-            payload_extra_bytes=sum(
-                _tensor_pb_bytes(extra) for extra in receipt.multimodal_extra_input
-            ),
+            payload_embedding_bytes=_tensor_bytes(res.embeddings),
+            payload_pos_bytes=_tensor_bytes(res.position_ids) if res.embeddings else 0,
+            payload_extra_bytes=_tensor_bytes(res.extra_input) if res.embeddings else 0,
         )
 
     def _build_receipt(self, res: MMEmbeddingRes) -> MultimodalOutputPB:
@@ -50,15 +45,11 @@ class GrpcInlineOutputBackend(MMTerminalBackend):
         contain_extra_input = (res.extra_input is not None) and (
             len(res.extra_input) > 0
         )
-        receipt = MultimodalOutputPB(
-            multimodal_embedding=trans_from_tensor(torch.concat(res.embeddings)),
-            split_size=[e.shape[0] for e in res.embeddings],
-        )
+        receipt = MultimodalOutputPB(split_size=[e.shape[0] for e in res.embeddings])
+        trans_from_tensor(_concat(res.embeddings), receipt.multimodal_embedding)
         if contain_pos:
-            receipt.multimodal_pos_id.CopyFrom(
-                trans_from_tensor(torch.concat(res.position_ids))
-            )
+            trans_from_tensor(_concat(res.position_ids), receipt.multimodal_pos_id)
         if contain_extra_input:
             for extra in res.extra_input:
-                receipt.multimodal_extra_input.append(trans_from_tensor(extra))
+                trans_from_tensor(extra, receipt.multimodal_extra_input.add())
         return receipt

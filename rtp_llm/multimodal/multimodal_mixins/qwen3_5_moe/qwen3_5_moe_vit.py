@@ -285,6 +285,20 @@ def eager_attention_forward(
 def apply_rotary_pos_emb_vision(
     q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if (
+        q.is_cuda
+        and q.device == k.device == cos.device == sin.device
+        and q.ndim == 3
+        and q.shape == k.shape
+        and q.shape[-1] % 2 == 0
+        and cos.shape == sin.shape == (q.shape[0], q.shape[-1])
+        and q.dtype in (torch.float16, torch.bfloat16, torch.float32)
+        and k.dtype == q.dtype
+        and not any(t.requires_grad for t in (q, k, cos, sin))
+    ):
+        from .vision_kernels import rotary_embedding
+
+        return rotary_embedding(q, k, cos, sin)
     orig_q_dtype = q.dtype
     orig_k_dtype = k.dtype
     q, k = q.float(), k.float()

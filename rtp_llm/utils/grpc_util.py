@@ -43,10 +43,16 @@ def trans_tensor(t: TensorPB):
         raise Exception("unkown error type")
 
 
-def trans_from_tensor(t: torch.Tensor):
+def trans_from_tensor(t: torch.Tensor, res=None):
+    # Fill an existing protobuf field in place to avoid copying large payloads
+    # through a temporary nested message.
+    if res is None:
+        res = TensorPB()
+    else:
+        res.Clear()
+        res.SetInParent()
     if t is None or t.numel() == 0:
-        return TensorPB()
-    res = TensorPB()
+        return res
     t = t.cpu()
     res.shape.extend(list(t.shape))
     if t.dtype == torch.float32:

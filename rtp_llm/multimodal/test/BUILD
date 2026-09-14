@@ -127,3 +127,9 @@ py_test(
     srcs = ["qwen35_gpu_video_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "qwen35_vision_kernels_test",
+    srcs = ["qwen35_vision_kernels_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

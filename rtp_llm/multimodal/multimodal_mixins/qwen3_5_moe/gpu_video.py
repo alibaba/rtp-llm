@@ -138,6 +138,10 @@ def _load_nvcodec():
 
 def nv12_to_rgb(video, height, color_space):
     """Match Decord/x86 swscale's limited-range fixed-point RGB conversion."""
+    if video.is_cuda and video.is_contiguous():
+        from .vision_kernels import nv12_rgb
+
+        return nv12_rgb(video, height, color_space)
     # BT.709 and BT.601 coefficients scaled by 8192. Each contribution is
     # truncated before addition, matching the CPU's signed high-word multiply.
     cy, cr, cu, cgu, cgv = (
@@ -177,77 +181,93 @@ def decode_video_cuda(data: GpuVideoInput, device):
     if device.index is None:
         device = torch.device("cuda", torch.cuda.current_device())
     with torch.cuda.device(device), torch.profiler.record_function("video_nvdec"):
-        stream = torch.cuda.current_stream(device)
-        offset = 0
+        consumer_stream = torch.cuda.current_stream(device)
+        if getattr(_decode_state, "device", None) != device:
+            _decode_state.stream = torch.cuda.Stream(device=device)
+            _decode_state.device = device
+        stream = _decode_state.stream
+        with torch.cuda.stream(stream):
+            return _decode_on_stream(data, device, nvc, stream, consumer_stream)
 
-        def feed(buffer):
-            nonlocal offset
-            chunk = data.encoded[offset : offset + len(buffer)]
-            buffer[: len(chunk)] = chunk
-            offset += len(chunk)
-            return len(chunk)
 
-        demuxer = nvc.CreateDemuxer(feed)
-        # Dimensions and codec changes create a new bounded hardware session.
-        key = (
-            device.index,
-            stream.cuda_stream,
-            demuxer.GetNvCodecId(),
-            data.width,
-            data.height,
+def _decode_on_stream(data, device, nvc, stream, consumer_stream):
+    # A dedicated decode stream keeps surface-lifetime waits from draining the
+    # preceding ViT forward on the consumer stream. Only sampled frames cross
+    # the stream boundary; no frame or embedding is cached across requests.
+    offset = 0
+
+    def feed(buffer):
+        nonlocal offset
+        chunk = data.encoded[offset : offset + len(buffer)]
+        buffer[: len(chunk)] = chunk
+        offset += len(chunk)
+        return len(chunk)
+
+    demuxer = nvc.CreateDemuxer(feed)
+    # Dimensions and codec changes create a new bounded hardware session.
+    key = (
+        device.index,
+        stream.cuda_stream,
+        demuxer.GetNvCodecId(),
+        data.width,
+        data.height,
+    )
+    if getattr(_decode_state, "key", None) != key:
+        _decode_state.decoder = None
+        _decode_state.key = None
+        _decode_state.decoder = nvc.CreateDecoder(
+            gpuid=device.index,
+            codec=demuxer.GetNvCodecId(),
+            cudacontext=0,
+            cudastream=stream.cuda_stream,
+            usedevicememory=True,
+            outputColorType=nvc.OutputColorType.NATIVE,
         )
-        if getattr(_decode_state, "key", None) != key:
-            _decode_state.decoder = None
-            _decode_state.key = None
-            _decode_state.decoder = nvc.CreateDecoder(
-                gpuid=device.index,
-                codec=demuxer.GetNvCodecId(),
-                cudacontext=0,
-                cudastream=stream.cuda_stream,
-                usedevicememory=True,
-                outputColorType=nvc.OutputColorType.NATIVE,
-            )
-            _decode_state.key = key
-        decoder = _decode_state.decoder
-        wanted = set(data.frame_indices)
-        selected = {}
-        count = 0
-        try:
-            # Include the demuxer's EOS packet: draining delayed/B-frames is
-            # required both for display-order indices and safe session reuse.
-            for packet in demuxer:
-                frames = decoder.Decode(packet)
-                copied = False
-                for frame in frames:
-                    if count in wanted:
-                        tensor = torch.from_dlpack(frame)
-                        if (
-                            tensor.device != device
-                            or tensor.dtype != torch.uint8
-                            or tuple(tensor.shape) != (data.height * 3 // 2, data.width)
-                        ):
-                            raise ValueError(
-                                "NVDEC returned an unexpected frame shape/device/dtype"
-                            )
-                        selected[count] = tensor.clone()
-                        copied = True
-                    count += 1
-                if copied:
-                    # The next Decode may recycle its external surfaces.
-                    stream.synchronize()
-            if count != data.total_frames or selected.keys() != wanted:
-                raise ValueError("NVDEC and container frame counts disagree")
-            # Explicit indexing also preserves duplicates in a sampling policy.
+        _decode_state.key = key
+    decoder = _decode_state.decoder
+    wanted = set(data.frame_indices)
+    selected = {}
+    count = 0
+    try:
+        # Include the demuxer's EOS packet: draining delayed/B-frames is
+        # required both for display-order indices and safe session reuse.
+        for packet in demuxer:
+            frames = decoder.Decode(packet)
+            copied = False
+            for frame in frames:
+                if count in wanted:
+                    tensor = torch.from_dlpack(frame)
+                    if (
+                        tensor.device != device
+                        or tensor.dtype != torch.uint8
+                        or tuple(tensor.shape) != (data.height * 3 // 2, data.width)
+                    ):
+                        raise ValueError(
+                            "NVDEC returned an unexpected frame shape/device/dtype"
+                        )
+                    selected[count] = tensor.clone()
+                    copied = True
+                count += 1
+            if copied:
+                # The next Decode may recycle its external surfaces.
+                stream.synchronize()
+        if count != data.total_frames or selected.keys() != wanted:
+            raise ValueError("NVDEC and container frame counts disagree")
+        # Explicit indexing also preserves duplicates in a sampling policy.
+        consumer_stream.wait_stream(stream)
+        with torch.cuda.stream(consumer_stream):
+            for tensor in selected.values():
+                tensor.record_stream(consumer_stream)
             return nv12_to_rgb(
                 torch.stack([selected[index] for index in data.frame_indices]),
                 data.height,
                 data.color_space,
             )
-        except Exception:
-            # A failed/incompletely drained session must not reach the next request.
-            _decode_state.decoder = None
-            _decode_state.key = None
-            raise
+    except Exception:
+        # A failed/incompletely drained session must not reach the next request.
+        _decode_state.decoder = None
+        _decode_state.key = None
+        raise
 
 
 @torch.inference_mode()
