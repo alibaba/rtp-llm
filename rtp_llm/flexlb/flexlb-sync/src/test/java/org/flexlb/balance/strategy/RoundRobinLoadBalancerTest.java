@@ -154,8 +154,8 @@ class RoundRobinLoadBalancerTest {
         publish("10.0.0.1", true);
         publish("10.0.0.2", true);
         publish("10.0.0.3", true);
-        List<BatchScheduleTarget> targets = IntStream.range(0, 100).parallel()
-                .mapToObj(i -> scheduler.schedule(request(3)).block())
+        List<BatchScheduleTarget> targets = IntStream.range(0, 150).parallel()
+                .mapToObj(i -> scheduler.schedule(request(2)).block())
                 .flatMap(response -> response.getServerStatus().stream()).toList();
         Map<String, Long> counts = targets.stream().collect(Collectors.groupingBy(
                 BatchScheduleTarget::getServerIp, Collectors.counting()));

@@ -202,28 +202,29 @@ class DispatcherE2ETest {
     }
 
     @ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"request", "response", "count"})
-    void requestAndResponseBudgetsReturn413(String limit) {
+    @CsvSource({"request,1,413", "response,1,413", "count,1,413", "request,122,200", "request,121,413"})
+    void requestAndResponseBudgetsEnforceTheWireBoundary(String limit, long bytes, int status) {
         boolean responseLimit = limit.equals("response");
         if (limit.equals("count")) {
             lb.getRouter().setBatchScheduleMaxCount(1);
         } else if (responseLimit) {
             cfg.setMaxAggregateResponseBytes(1);
-            reply(0, 200, "{\"response_batch\":[1]}");
         } else {
-            cfg.setMaxAggregateRequestBytes(1);
+            cfg.setMaxAggregateRequestBytes(bytes);
         }
+        reply(0, 200, "{\"response_batch\":[1]}");
+        reply(1, 200, "{\"response_batch\":[2]}");
         startDispatcher(1);
         post("/_dryrun/batch_infer", "{\"prompt_batch\":[\"a\",\"b\"]}", responseLimit ? 200 : 413);
-        if (limit.equals("request")) {
+        if (limit.equals("request") && bytes == 1) {
             post("/_dryrun", "{}", 413);
             post("/_dryrun/", "{\"prompt_batch\":[]}", 413);
         }
         verifyNoInteractions(coordinator);
         assertNoFeTraffic();
-        post("/batch_infer", "{\"prompt_batch\":[\"a\",\"b\"]}", 413);
-        assertEquals(responseLimit ? 1 : 0, frontends.get(0).getRequestCount());
-        assertEquals(0, frontends.get(1).getRequestCount());
+        post("/batch_infer", "{\"prompt_batch\":[\"a\",\"b\"]}", status);
+        assertEquals(responseLimit || status == 200 ? 1 : 0, frontends.get(0).getRequestCount());
+        assertEquals(status == 200 ? 1 : 0, frontends.get(1).getRequestCount());
     }
 
     @Test

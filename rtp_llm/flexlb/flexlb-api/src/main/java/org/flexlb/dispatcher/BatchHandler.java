@@ -135,7 +135,7 @@ public class BatchHandler {
                             + loadBalanceConfig.getRouter().getBatchScheduleMaxCount() + " (router.batchScheduleMaxCount)");
         }
         // Charge repeated envelopes before allocating targets or materializing chunks.
-        if (batch.projectedBytes() + 1024L * chunkCount > cfg.getMaxAggregateRequestBytes()) {
+        if (batch.projectedBytes() > cfg.getMaxAggregateRequestBytes()) {
             throw new AggregateRequestTooLargeException(cfg.getMaxAggregateRequestBytes());
         }
 

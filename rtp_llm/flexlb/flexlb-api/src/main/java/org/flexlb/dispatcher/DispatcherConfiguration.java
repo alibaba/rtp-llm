@@ -21,6 +21,7 @@ import reactor.core.scheduler.Schedulers;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
 
+import java.net.URI;
 import java.time.Duration;
 
 /** Dispatcher configuration and isolated HTTP connection pools; enabled by the FE discovery name. */
@@ -58,6 +59,9 @@ public class DispatcherConfiguration {
     private static void validate(DispatchConfig c) {
         Assert.hasText(c.getFePoolServiceId(), "DISPATCH_FE_POOL_SERVICE_ID must name the FE discovery service");
         Assert.hasText(c.getProbePath(), "dispatch.probe-path must not be blank");
+        URI probe = URI.create(c.getProbePath());
+        Assert.isTrue(c.getProbePath().startsWith("/") && probe.getRawAuthority() == null && probe.getRawFragment() == null,
+                "dispatch.probe-path must be an absolute HTTP path without authority or fragment");
         Assert.notNull(c.getFeAllocation(), "dispatch.fe-allocation must be master or local");
         Assert.isTrue(c.getBatchTimeoutMs() > 0, "dispatch.batch-timeout-ms must be > 0");
         Assert.isTrue(c.getBodyReadMarginMs() >= 0, "dispatch.body-read-margin-ms must be >= 0");

@@ -4,7 +4,6 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -14,18 +13,16 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import org.mockito.ArgumentCaptor;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -46,19 +43,19 @@ class BatchScheduleHttpTest {
         client = WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
     }
 
-    @Test
-    void completedAllocationIsSerializedWithoutRestamping() {
+    @ParameterizedTest
+    @CsvSource({"false,true", "true,false", "true,true", ",true"})
+    void completedAllocationIsSerializedWithoutRestamping(Boolean assignBe, boolean assignFe) {
         BatchScheduleTarget target = new BatchScheduleTarget();
         target.setFeUrl("http://master-selected-fe");
         when(coordinator.schedule(any())).thenReturn(Mono.just(BatchScheduleResponse.success(List.of(target))));
         client.post().uri("/rtp_llm/batch_schedule").contentType(MediaType.APPLICATION_JSON)
-                .bodyValue("{\"batch_count\":1,\"assign_be\":false,\"assign_fe\":true}")
+                .bodyValue(assignBe == null ? "{\"batch_count\":1}" : String.format(
+                        "{\"batch_count\":1,\"assign_be\":%s,\"assign_fe\":%s}", assignBe, assignFe))
                 .exchange().expectStatus().isOk().expectBody()
                 .jsonPath("$.server_status[0].fe_url").isEqualTo("http://master-selected-fe");
-        ArgumentCaptor<BatchScheduleRequest> request = ArgumentCaptor.forClass(BatchScheduleRequest.class);
-        verify(coordinator).schedule(request.capture());
-        assertEquals(1, request.getValue().getBatchCount());
-
+        verify(coordinator).schedule(argThat(r -> r.getBatchCount() == 1
+                && r.isAssignBe() == (assignBe == null || assignBe) && r.isAssignFe() == assignFe));
     }
 
     @ParameterizedTest

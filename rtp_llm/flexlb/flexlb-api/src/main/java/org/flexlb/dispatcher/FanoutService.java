@@ -7,6 +7,7 @@ import org.flexlb.util.Logger;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
@@ -112,7 +113,7 @@ public class FanoutService {
             return Mono.error(error);
         }
         String reason = error.toString();
-        int status = DispatcherResponses.httpStatusOf(error);
+        int status = error instanceof WebClientResponseException http ? http.getRawStatusCode() : 0;
         metricsReporter.reportChunk(reasonCategory(status), System.currentTimeMillis() - start);
         if (failureWarn.tryAcquire()) {
             Logger.warn("FE chunk failed: url={}, path={}, size={}, err={}",

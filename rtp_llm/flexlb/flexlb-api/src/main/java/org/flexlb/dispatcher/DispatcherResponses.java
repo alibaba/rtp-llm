@@ -2,7 +2,6 @@ package org.flexlb.dispatcher;
 
 import com.alibaba.fastjson2.JSONObject;
 import org.springframework.http.MediaType;
-import org.springframework.web.reactive.function.client.WebClientResponseException;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
@@ -19,8 +18,4 @@ final class DispatcherResponses {
         return jsonBytes(status, BatchBodyParser.serialize(JSONObject.of("error", code, "message", message)));
     }
 
-    /** FE response status when the failure is a {@link WebClientResponseException}, else 0. */
-    static int httpStatusOf(Throwable e) {
-        return e instanceof WebClientResponseException w ? w.getRawStatusCode() : 0;
-    }
 }
