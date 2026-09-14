@@ -4,10 +4,12 @@
 #include <functional>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 
@@ -78,7 +80,19 @@ public:
                                                   size_t                                      max_nodes,
                                                   const std::function<void(const TreeNode&)>& visitor) const;
 
+    // All publication operations require the owning BlockTreeCache mutex.
+    // Only complete, matchable DEVICE values in every required group are advertised.
+    void            setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<int>& required_group_ids);
+    KVCacheSnapshot logicalCacheSnapshot() const;
+    void            refreshPublishedState(const TreeNode* node);
+
 private:
+    void                               removePublishedKey(CacheKeyType key);
+    KVCacheEventPublisherPtr           event_publisher_;
+    std::vector<ReusableGroupLocation> publication_groups_;
+    std::unordered_set<CacheKeyType>   published_keys_;
+    int64_t                            publication_version_{-1};
+
     friend class BlockTreeEvictor;
 
     BlockTreeInsertResult insertNodeImpl(const CacheKeysType&                              cache_keys,

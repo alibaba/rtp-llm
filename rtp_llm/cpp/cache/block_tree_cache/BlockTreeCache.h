@@ -136,6 +136,8 @@ public:
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
     void                                      reportMetrics() const;
     BlockTreeKeySnapshot                      getKeySnapshot() const;
+    void            setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<int>& required_group_ids);
+    KVCacheSnapshot logicalCacheSnapshot() const;
     bool                                      abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
 
     BlockIndicesType matchedBlocksForGroup(size_t                                group_id,
