@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
@@ -151,7 +152,6 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsRejectTopologyMismatch) {
 }
 
 TEST(PrefillRpcServerTest, PDSepEligibilityRejectsUnsupportedGenerationModes) {
-    PrefillRpcServer server;
     GenerateInputPB  input;
     auto*            config = input.mutable_generate_config();
     config->set_max_new_tokens(2);
@@ -159,46 +159,46 @@ TEST(PrefillRpcServerTest, PDSepEligibilityRejectsUnsupportedGenerationModes) {
     config->set_num_return_sequences(1);
     config->set_can_use_pd_separation(true);
 
-    EXPECT_TRUE(server.canUsePDSep(input));
+    EXPECT_TRUE(checkPDSupport(input).supported);
 
     auto single_token = input;
     single_token.mutable_generate_config()->set_max_new_tokens(1);
-    EXPECT_FALSE(server.canUsePDSep(single_token));
+    EXPECT_FALSE(checkPDSupport(single_token).supported);
 
     auto beam_search = input;
     beam_search.mutable_generate_config()->set_num_beams(2);
-    EXPECT_FALSE(server.canUsePDSep(beam_search));
+    EXPECT_FALSE(checkPDSupport(beam_search).supported);
 
     auto variable_beam = input;
     variable_beam.mutable_generate_config()->add_variable_num_beams(2);
-    EXPECT_FALSE(server.canUsePDSep(variable_beam));
+    EXPECT_FALSE(checkPDSupport(variable_beam).supported);
 
     auto multi_return = input;
     multi_return.mutable_generate_config()->set_num_return_sequences(2);
-    EXPECT_FALSE(server.canUsePDSep(multi_return));
+    EXPECT_FALSE(checkPDSupport(multi_return).supported);
 
     auto explicitly_disabled = input;
     explicitly_disabled.mutable_generate_config()->set_can_use_pd_separation(false);
-    EXPECT_FALSE(server.canUsePDSep(explicitly_disabled));
+    EXPECT_FALSE(checkPDSupport(explicitly_disabled).supported);
 
-    auto expect_aux_output_rejected = [&](auto setter) {
+    auto expect_aux_output_allowed = [&](auto setter) {
         auto with_aux_output = input;
         setter(*with_aux_output.mutable_generate_config());
-        EXPECT_FALSE(server.canUsePDSep(with_aux_output));
+        EXPECT_TRUE(checkPDSupport(with_aux_output).supported);
     };
-    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_calculate_loss(1); });
-    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_hidden_states(true); });
-    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_all_hidden_states(true); });
-    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_logits(true); });
-    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_all_probs(true); });
-    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_all_probs_mode(2); });
-    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_softmax_probs(true); });
-    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_cum_log_probs(true); });
-    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_prompt_logits(true); });
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_calculate_loss(1); });
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_hidden_states(true); });
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_all_hidden_states(true); });
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_logits(true); });
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_all_probs(true); });
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_all_probs_mode(2); });
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_softmax_probs(true); });
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_cum_log_probs(true); });
+    expect_aux_output_allowed([](GenerateConfigPB& config) { config.set_return_prompt_logits(true); });
 
     auto target_logprob_without_prompt_logits = input;
     target_logprob_without_prompt_logits.mutable_generate_config()->set_return_target_logprob(true);
-    EXPECT_TRUE(server.canUsePDSep(target_logprob_without_prompt_logits));
+    EXPECT_TRUE(checkPDSupport(target_logprob_without_prompt_logits).supported);
 }
 
 TEST(DecodeRpcServerTest, MtpCacheKeyUsesSharedBaseModelIdForEverySlot) {

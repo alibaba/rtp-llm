@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include <memory>
 
 #include <gtest/gtest.h>
@@ -53,10 +54,10 @@ TEST(DecodeRpcServerNew2Test, ShouldUsePDSeparationIgnoresUniqueKeyPresence) {
     config->set_num_return_sequences(1);
     config->set_can_use_pd_separation(true);
 
-    EXPECT_TRUE(shouldUsePDSeparation(request));
+    EXPECT_TRUE(checkPDSupport(request).supported);
 
     config->set_unique_key("user-cache-key");
-    EXPECT_TRUE(shouldUsePDSeparation(request));
+    EXPECT_TRUE(checkPDSupport(request).supported);
 }
 
 TEST(DecodeRpcServerNew2Test, DecodeEntranceHandoffUsesInternalKeyAndPreservesBusinessKey) {
@@ -132,11 +133,11 @@ TEST(DecodeRpcServerNew2Test, ShouldUsePDSeparationRejectsNonPdRequests) {
     config->set_num_return_sequences(1);
     config->set_can_use_pd_separation(true);
 
-    EXPECT_FALSE(shouldUsePDSeparation(request));
+    EXPECT_FALSE(checkPDSupport(request).supported);
 
     config->set_max_new_tokens(8);
     config->set_num_beams(2);
-    EXPECT_FALSE(shouldUsePDSeparation(request));
+    EXPECT_FALSE(checkPDSupport(request).supported);
 }
 
 TEST(DecodeRpcServerNew2Test, UpdateAuxInfoUsesPrefillReuseAsTopLevelAndPreservesDecodeReuse) {

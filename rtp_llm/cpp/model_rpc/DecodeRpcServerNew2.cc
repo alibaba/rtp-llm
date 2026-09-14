@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew2.h"
 #include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
+#include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "autil/NetUtil.h"
@@ -50,13 +51,6 @@ bool parseGrpcPort(const std::string& port_text, uint32_t* port) {
 }
 
 }  // namespace
-
-bool shouldUsePDSeparation(const GenerateInputPB& request) {
-    return request.generate_config().max_new_tokens() > 1 && request.generate_config().num_beams() <= 1
-           && request.generate_config().variable_num_beams().size() == 0
-           && request.generate_config().num_return_sequences() <= 1
-           && request.generate_config().can_use_pd_separation();
-}
 
 std::string makeDecodeEntranceUniqueKey(const std::string& bind_ip, int64_t unique_key_id, int64_t current_time_us) {
     return bind_ip + "_" + std::to_string(unique_key_id) + "_" + std::to_string(current_time_us);
@@ -182,7 +176,7 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
     int64_t         handoff_id        = 0;
 
     // Check if pd separation should be used
-    auto pd_separation = shouldUsePDSeparation(*request);
+    auto pd_separation = checkPDSupport(*request).supported;
     if (pd_separation) {
         handoff_id                = unique_key_id_.fetch_add(1);
         auto decode_entrance_keys =
@@ -207,18 +201,14 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
     input->generate_config->timeout_ms = normalized_timeout_ms_i32;
     input->request_deadline_ms = request_entry_ms + normalized_timeout_ms;
 
-    // need to check client has buffer at first
-    if (mm_processor_ != nullptr && input->multimodal_inputs) {
-        auto mm_res = mm_processor_->updateMultimodalFeatures(input);
-        if (!mm_res.ok()) {
-            generate_context.error_status = serializeErrorMsg(generate_context.request_key, mm_res);
-        }
+    auto preprocess_status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle());
+    if (!preprocess_status.ok()) {
+        generate_context.error_status = serializeErrorMsg(generate_context.request_key, preprocess_status);
     }
     CHECK_ERROR_STATUS(generate_context);
+    const auto pd_input_snapshot = snapshotPDInput(*input);
 
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
-    input->generate_config->pd_separation        = true;
-    input->generate_config->force_disable_sp_run = !engine_->isMTPEagle();
     auto stream                                  = engine_->makeStream(input);
     generate_context.setStream(stream);
 
@@ -256,6 +246,7 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
     const auto request_deadline_ms = input->request_deadline_ms;
     GenerateInputPB                             prefill_request;
     prefill_request.CopyFrom(*effective_request);
+    prefill_request.mutable_pd_input_snapshot()->CopyFrom(pd_input_snapshot);
     prefill_request.set_request_deadline_ms(request_deadline_ms);
     prefill_request.mutable_generate_config()->set_timeout_ms(normalized_timeout_ms_i32);
     prefill_request.mutable_generate_config()->set_unique_key(unique_key);

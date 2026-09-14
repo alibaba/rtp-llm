@@ -1,6 +1,7 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
@@ -161,16 +162,6 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
     return grpc::Status::OK;
 }
 
-bool PrefillRpcServer::canUsePDSep(const GenerateInputPB& request) const {
-    const auto& config = request.generate_config();
-    const bool  has_prefill_only_output =
-        config.calculate_loss() != 0 || config.return_hidden_states() || config.return_all_hidden_states()
-        || config.return_logits() || config.return_all_probs() || config.return_all_probs_mode() > 1
-        || config.return_softmax_probs() || config.return_cum_log_probs() || config.return_prompt_logits();
-    return config.max_new_tokens() > 1 && config.num_beams() <= 1 && config.variable_num_beams().size() == 0
-           && config.num_return_sequences() <= 1 && config.can_use_pd_separation() && !has_prefill_only_output;
-}
-
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
     static int max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * 1000;
     auto       begin_time_us       = currentTimeUs();
@@ -194,12 +185,6 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
     auto input                            = QueryConverter::transQuery(prefill_context.rpc_context.request);
-    input->generate_config->pd_separation = true;
-    if (engine_->isMTPEagle()) {
-        input->generate_config->force_disable_sp_run = false;
-    } else {
-        input->generate_config->force_disable_sp_run = true;
-    }
     prefill_context.generate_input = input;
 
     RTP_LLM_LOG_DEBUG("request [%ld] get rpc connection", prefill_context.request_id);
@@ -252,9 +237,9 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
 void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     auto& input = prefill_context.generate_input;
-    if (mm_processor_ != nullptr && input->multimodal_inputs) {
-        auto result = mm_processor_->updateMultimodalFeatures(input);
-        CLIENT_GRPC_RET_IF_ERROR(prefill_context, result.ok(), result.code());
+    auto  result = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle());
+    CLIENT_GRPC_RET_IF_ERROR(prefill_context, result.ok(), result.code());
+    if (input->multimodal_inputs) {
 
         auto mutable_request = const_cast<GenerateInputPB*>(prefill_context.rpc_context.request);
         mutable_request->clear_token_ids();
@@ -498,7 +483,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start generate stream call", request->request_id());
     c10::InferenceMode inference_guard(true);
-    if (!canUsePDSep(*request)) {
+    if (!checkPDSupport(*request).supported) {
         return LocalRpcServer::GenerateStreamCall(server_context, request, writer);
     }
 
@@ -567,7 +552,7 @@ grpc::Status PrefillRpcServer::BatchGenerateCall(grpc::ServerContext*        ser
     bool has_pd_request     = false;
     bool has_non_pd_request = false;
     for (int i = 0; i < batch_size; ++i) {
-        if (canUsePDSep(request->inputs(i))) {
+        if (checkPDSupport(request->inputs(i)).supported) {
             has_pd_request = true;
         } else {
             has_non_pd_request = true;

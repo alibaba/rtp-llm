@@ -8,8 +8,6 @@
 
 namespace rtp_llm {
 
-bool shouldUsePDSeparation(const GenerateInputPB& request);
-
 struct DecodeEntranceKeys {
     std::string business_unique_key;
     std::string handoff_unique_key;

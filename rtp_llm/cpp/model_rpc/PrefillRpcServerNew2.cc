@@ -1,6 +1,6 @@
 #include <limits>
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServerNew2.h"
-#include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew2.h"
+#include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <cerrno>
@@ -223,7 +223,7 @@ grpc::Status PrefillRpcServerNew2::init(const EngineInitParams&                 
 grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                       const GenerateInputPB*                 request,
                                                       grpc::ServerWriter<GenerateOutputsPB>* response_writer) {
-    const bool pd_separation = shouldUsePDSeparation(*request);
+    const bool pd_separation = checkPDSupport(*request).supported;
     if (!pd_separation) {
         RTP_LLM_LOG_INFO("pd separation is disabled, call local rpc server");
         return LocalRpcServer::GenerateStreamCall(server_context, request, response_writer);
@@ -250,22 +250,16 @@ grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*      
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), server_context, metrics_reporter_, meta_);
     auto input                            = QueryConverter::transQuery(request);
-    input->generate_config->pd_separation = true;
-    if (engine_->isMTPEagle()) {
-        input->generate_config->force_disable_sp_run = false;
-    } else {
-        input->generate_config->force_disable_sp_run = true;
-    }
-
     int64_t mm_cost_us = 0, enqueue_cost_us = 0, poll_cost_us = 0;
     int64_t phase_start = currentTimeUs();
 
-    if (mm_processor_ != nullptr && input->multimodal_inputs) {
-        auto mm_res = mm_processor_->updateMultimodalFeatures(input);
-        mm_cost_us  = currentTimeUs() - phase_start;
-        if (!mm_res.ok()) {
-            generate_context.error_status = serializeErrorMsg(generate_context.request_key, mm_res);
-        }
+    auto preprocess_status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle());
+    if (preprocess_status.ok()) {
+        preprocess_status = validatePDInput(*input, *request);
+    }
+    mm_cost_us = currentTimeUs() - phase_start;
+    if (!preprocess_status.ok()) {
+        generate_context.error_status = serializeErrorMsg(generate_context.request_key, preprocess_status);
     }
     if (generate_context.finished || generate_context.hasError()) {
         // mm_processor (or upstream CHECK_ERROR_STATUS path) early-aborted.
