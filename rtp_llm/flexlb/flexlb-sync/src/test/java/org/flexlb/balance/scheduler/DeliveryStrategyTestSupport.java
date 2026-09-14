@@ -297,23 +297,6 @@ final class DeliveryStrategyTestSupport {
                     .when(requests).tryClaimBatchDelivery(
                             Mockito.any(), Mockito.anyLong(), Mockito.any());
             Mockito.doAnswer(invocation -> {
-                complete(invocation.getArgument(0), invocation.getArgument(1));
-                return null;
-            }).when(requests).complete(Mockito.any(), Mockito.any());
-            Mockito.doAnswer(invocation -> {
-                RequestRegistry.DeliveryClaim claim = invocation.getArgument(0);
-                precedingWork.put(claim.item(), invocation.getArgument(1));
-                unstartedWorkMs.put(claim.item(), invocation.getArgument(2));
-                return null;
-            }).when(requests).beginDelivery(Mockito.any(), Mockito.any(), Mockito.anyLong());
-            Mockito.doAnswer(invocation -> {
-                RequestRegistry.DeliveryClaim claim = invocation.getArgument(0);
-                precedingWork.put(claim.item(), invocation.getArgument(1));
-                unstartedWorkMs.put(claim.item(), invocation.getArgument(2));
-                complete(claim, DeliveryResult.delivered());
-                return null;
-            }).when(requests).beginRouteDelivery(Mockito.any(), Mockito.any(), Mockito.anyLong());
-            Mockito.doAnswer(invocation -> {
                 failPrepared(invocation.getArgument(0), invocation.getArgument(1));
                 return null;
             }).when(requests).failPrepared(Mockito.any(), Mockito.any());
@@ -329,7 +312,7 @@ final class DeliveryStrategyTestSupport {
             return Optional.of(preparation.get());
         }
 
-        private RequestRegistry.DeliveryClaim claim(
+        private DeliveryClaim claim(
                 ScheduledRequest exactItem,
                 DeliveryClaimKind kind,
                 long correlationId,
@@ -348,14 +331,26 @@ final class DeliveryStrategyTestSupport {
                 return null;
             }
             events.add("point-of-no-return-" + exactItem.requestId());
-            RequestRegistry.DeliveryClaim claim =
-                    Mockito.mock(RequestRegistry.DeliveryClaim.class);
+            DeliveryClaim claim =
+                    Mockito.mock(DeliveryClaim.class);
             Mockito.when(claim.item()).thenReturn(exactItem);
+            Mockito.doAnswer(inv -> { complete(claim, inv.getArgument(0)); return null; })
+                    .when(claim).complete(Mockito.any());
+            Mockito.doAnswer(inv -> {
+                precedingWork.put(claim.item(), inv.getArgument(0));
+                unstartedWorkMs.put(claim.item(), inv.getArgument(1));
+                return null;
+            }).when(claim).begin(Mockito.any(), Mockito.anyLong());
+            Mockito.doAnswer(inv -> {
+                claim.begin(inv.getArgument(0), inv.getArgument(1));
+                complete(claim, DeliveryResult.delivered());
+                return null;
+            }).when(claim).publishRoute(Mockito.any(), Mockito.anyLong());
             return claim;
         }
 
         private void complete(
-                RequestRegistry.DeliveryClaim exactClaim,
+                DeliveryClaim exactClaim,
                 DeliveryResult completion) {
             beforeCompletion.run();
             completions.add(new CompletionEvent(exactClaim.item(), completion));

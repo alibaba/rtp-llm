@@ -527,7 +527,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     }
 
     private static Response error(StrategyErrorType type, String detail) {
-        return RequestRegistry.buildErrorResponse(type, detail);
+        return RequestResponses.buildErrorResponse(type, detail);
     }
 
     @Override

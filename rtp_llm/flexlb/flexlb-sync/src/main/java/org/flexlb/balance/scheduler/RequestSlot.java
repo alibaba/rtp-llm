@@ -1,9 +1,12 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
+import org.flexlb.balance.preemption.VictimTerminal;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.ExpirationTimer.DecisionDeadline;
 import org.flexlb.balance.scheduler.ExpirationTimer.InactivityDeadline;
@@ -11,8 +14,10 @@ import org.flexlb.balance.scheduler.ExpirationTimer.RequestDeadline;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.util.Logger;
 
 import java.util.Objects;
+import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -20,16 +25,30 @@ import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
+
+import static org.flexlb.balance.scheduler.RequestResponses.buildErrorResponse;
+import static org.flexlb.balance.scheduler.RequestResponses.buildSuccessResponse;
 
 /**
  * Canonical aggregate root for one exact request generation.
  *
- * <p>Every mutable field is private and every method which observes or changes
- * lifecycle state requires {@code synchronized (slot)} unless its contract
- * explicitly says otherwise. Endpoint and transport code receives exact
- * capabilities, never a writable state field or a generic transition API.
+ * <p>Event entry points acquire this monitor, select the request transition,
+ * and execute detached cleanup/publication after unlocking. Internal state
+ * reducers require the monitor; directory queries and timer installation use
+ * the same monitor. Endpoint settlement transactions keep their existing lock
+ * ordering. Transport and preemption callbacks carry exact capabilities.
+ *
+ * <p>Admission first cause, request terminal ownership, endpoint settlement,
+ * and frontend publication are distinct decisions. A delivery ACK can select
+ * a response before the request itself reaches its terminal state.
  */
-final class RequestSlot {
+public final class RequestSlot {
+
+    private final ExpirationTimer expirationTimer;
+    private final RequestTerminalCleanup terminalCleanup;
+    private final Runnable admissionFinished;
+    private static final Runnable NO_POST_LOCK_ACTION = () -> { };
 
     private final RequestCompletionPublisher completionPublisher;
     private final long requestId;
@@ -76,7 +95,11 @@ final class RequestSlot {
 
     RequestSlot(
             RequestCompletionPublisher completionPublisher,
-            long requestId) {
+            long requestId, ExpirationTimer expirationTimer,
+            RequestTerminalCleanup terminalCleanup, Runnable admissionFinished) {
+        this.expirationTimer = expirationTimer;
+        this.terminalCleanup = terminalCleanup;
+        this.admissionFinished = admissionFinished;
         this.completionPublisher = Objects.requireNonNull(
                 completionPublisher, "completionPublisher");
         this.requestId = requestId;
@@ -85,6 +108,413 @@ final class RequestSlot {
         this.lastWorkerStatusAtMs = createdAtMs;
         this.future = new RequestFuture(completionPublisher, this);
     }
+
+    // Event entry points: each owns the complete per-request decision.
+
+    public RequestState cancelRequest(long expectedBatchId,
+                                       CancelReason reason) {
+        Objects.requireNonNull(reason, "reason");
+        TerminalAction localCompletion = null;
+        RequestState result;
+        synchronized (this) {
+            if (!this.isCurrentGeneration()) {
+                return null;
+            }
+            RequestState current = this.snapshot();
+            if (!batchMatches(current, expectedBatchId)) {
+                return null;
+            }
+            if (!this.ownsActiveGeneration() || current.state().isTerminal()) {
+                return current;
+            }
+            if (this.hasCancellationFirstCause()
+                    || (reason == CancelReason.DEADLINE_EXCEEDED
+                        && current.deliveryClaimKind() != DeliveryClaimKind.NONE)) {
+                return current;
+            }
+            String detail = cancelDetail(reason);
+            if (this.deferCancellationDuringAdmission(reason, detail)) {
+                return this.snapshot();
+            }
+            this.markCancellationRequested(reason, detail);
+            CancelReason firstCause = this.requireCancellationFirstCause();
+            ScheduledRequest item = this.activeItem();
+            if (item == null || this.canClaimLocalTerminal()) {
+                localCompletion = beginTerminalLocked(item != null, item != null,
+                        TerminalOutcome.cancellation(firstCause, detail),
+                        buildErrorResponse(this.cancellationErrorType(firstCause), detail));
+            }
+            result = this.snapshot();
+        }
+        terminalCleanup.submitTerminal(localCompletion);
+        return result;
+    }
+
+    void expireInactiveRequest(long nowMs) {
+        TerminalAction expiration;
+        synchronized (this) {
+            if (!this.isCurrentGeneration() || !this.ownsActiveGeneration()
+                    || this.snapshot().state().isTerminal() || !this.requestInactive(nowMs)) {
+                return;
+            }
+            String detail = "REQUEST_INACTIVE: no matching Engine request status before inactivity timeout";
+            if (this.deferInactivityExpiryDuringAdmission(detail)) {
+                return;
+            }
+            this.markCancellationRequested(CancelReason.DEADLINE_EXCEEDED, detail);
+            expiration = beginExpiredRequestLocked(detail);
+        }
+        terminalCleanup.submitTerminal(expiration);
+    }
+
+    void observeEngineFact(Function<RequestSlot, EngineObservation> observation) {
+        EngineObservation effects;
+        Runnable work;
+        synchronized (this) {
+            if (!isCurrentGeneration()) { return; }
+            effects = observation.apply(this);
+            work = materializePostLockActionLocked(effects.transition(), null);
+        }
+        try { cancelDecisionDeadline(effects.obsoleteDeadline()); }
+        finally {
+            try { armDecisionDeadline(); }
+            finally { runPostLock(work); }
+        }
+    }
+
+    void onFailure(StrategyErrorType error, String detail) {
+        Runnable work;
+        synchronized (this) {
+            work = reduceDeferredTerminalFactLocked(DeferredTerminal.failure(error, detail));
+        }
+        runPostLock(work);
+    }
+
+    void onPrefillRetired(PrefillEndpoint source, ScheduledRequest exact) {
+        String detail = "Prefill endpoint generation retired: " + source.ipPort()
+                + "#" + source.getStatus().getGenerationId();
+        TerminalAction action;
+        synchronized (this) {
+            action = beginPrefillRetirementTerminal(source, exact,
+                    TerminalOutcome.fail(detail), buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, detail));
+        }
+        terminalCleanup.submitTerminal(action);
+    }
+
+    void onDecodeRetired(DecodeEndpoint source, DecodeEndpoint.ReservationHandle exact) {
+        Runnable work;
+        synchronized (this) {
+            work = materializePostLockActionLocked(reduceDecodeGenerationRetired(source, exact,
+                            "Decode endpoint generation retired: generation=" + exact.endpointGenerationId()), null);
+        }
+        runPostLock(work);
+    }
+
+    void onAdmissionCompleted(
+            AdmissionMutation exact) {
+        try {
+            RequestSlot.AdmissionMutationCompletion completion;
+            synchronized (this) {
+                completion = this.completeAdmissionMutation(exact);
+            }
+            if (!completion.owned()) {
+                return;
+            }
+            if (completion.pendingTerminal() != null) {
+                Runnable work;
+                synchronized (this) {
+                    work = reduceDeferredTerminalFactLocked(completion.pendingTerminal());
+                }
+                runPostLock(work);
+            } else if (completion.pendingRetirement() != null) {
+                terminalCleanup.submitTerminal(completion.pendingRetirement());
+            }
+            // A retained delivery failure may have become stale after Engine acceptance.
+            // Resume the already-selected cancellation even when that replay is a no-op.
+            if (completion.cancellationToResume() != null) {
+                resumeCancellationAfterAdmission(completion.cancellationToResume(), completion.inactivityExpired());
+            }
+        } finally {
+            try {
+                expirationTimer.attachInactivityDeadline(this);
+            } finally {
+                admissionFinished.run();
+            }
+        }
+    }
+
+    void onAdmissionFailed(
+            AdmissionMutation exact,
+            Response failure) {
+        try {
+            if (failure.isSuccess()) {
+                throw new IllegalArgumentException(
+                        "admission termination requires a failure response");
+            }
+            RequestSlot.AdmissionMutationCompletion completion;
+            Runnable retainedWork = null;
+            TerminalAction action = null;
+            synchronized (this) {
+                completion = this.claimAdmissionMutationTermination(exact);
+                if (completion.pendingTerminal() != null) {
+                    retainedWork = reduceDeferredTerminalFactLocked(completion.pendingTerminal());
+                } else if (completion.pendingRetirement() == null) {
+                    CancelReason pendingCancel =
+                            completion.cancellationToResume();
+                    Response terminalResponse = failure;
+                    TerminalOutcome transition;
+                    if (pendingCancel == null) {
+                        String detail = failure.getErrorMessage() == null
+                                ? "eviction admission failed"
+                                : failure.getErrorMessage();
+                        transition = TerminalOutcome.fail(detail);
+                    } else {
+                        String detail = cancelDetail(pendingCancel);
+                        terminalResponse = buildErrorResponse(
+                                this.cancellationErrorType(pendingCancel), detail);
+                        transition = TerminalOutcome.cancellation(pendingCancel, detail);
+                    }
+                    action = beginTerminalLocked(false, false, transition, terminalResponse);
+                    if (action == null) {
+                        throw new IllegalStateException(
+                                "failed to claim admission terminal for request "
+                                        + this.requestId());
+                    }
+                }
+            }
+            if (retainedWork != null) {
+                runPostLock(retainedWork);
+            } else if (completion.pendingRetirement() != null) {
+                terminalCleanup.submitTerminal(completion.pendingRetirement());
+            } else {
+                terminalCleanup.submitTerminal(action);
+            }
+            if (completion.cancellationToResume() != null) {
+                resumeCancellationAfterAdmission(completion.cancellationToResume(), completion.inactivityExpired());
+            }
+        } finally {
+            try {
+                expirationTimer.attachInactivityDeadline(this);
+            } finally {
+                admissionFinished.run();
+            }
+        }
+    }
+
+    PlacementResult.Status commitRoute(ScheduledRequest exact, BooleanSupplier publication) {
+        synchronized (this) {
+            if (!tryBindItemForPublication(exact)) { return PlacementResult.Status.CLOSED; }
+        }
+        // Endpoint queue publication must not retain this monitor. Admission pins the binding.
+        try {
+            if (publication.getAsBoolean()) { return PlacementResult.Status.SUCCESS; }
+        } catch (RuntimeException | Error failure) {
+            try { synchronized (this) { rollbackItemPublication(exact); } }
+            catch (RuntimeException | Error rollbackFailure) {
+                if (rollbackFailure != failure) { failure.addSuppressed(rollbackFailure); }
+            }
+            throw failure;
+        }
+        synchronized (this) { rollbackItemPublication(exact); }
+        return PlacementResult.Status.BLOCKED;
+    }
+
+    public <T> Optional<T> prepareIfOwned(ScheduledRequest exact, Supplier<T> preparation) {
+        synchronized (this) {
+            return ownsPreparedDelivery(exact) ? Optional.of(preparation.get()) : Optional.empty();
+        }
+    }
+
+    DeliveryClaim claimDelivery(ScheduledRequest exact, DeliveryClaimKind kind,
+                                long correlationId, BooleanSupplier handoff) {
+        synchronized (this) {
+            if (!ownsPreparedDelivery(exact)) { return null; }
+            DeliveryClaim claim = new DeliveryClaim(this, exact, kind, correlationId);
+            if (!handoff.getAsBoolean()) {
+                throw new IllegalStateException("endpoint ownership lost for request " + requestId);
+            }
+            switch (kind) {
+                case BATCH_ENQUEUE -> { startBatchEnqueue(correlationId); markBatchEnqueueStarted(); }
+                case ROUTE_DECISION -> startRouteDecisionDelivery();
+                case NONE -> throw new IllegalArgumentException("delivery claim kind cannot be NONE");
+            }
+            return claim;
+        }
+    }
+
+    void onDeliveryStarted(DeliveryClaim claim, WorkSnapshot work, long unstartedMs) {
+        Objects.requireNonNull(work, "precedingWork");
+        if (unstartedMs < 0L) { throw new IllegalArgumentException("unstarted work must be non-negative"); }
+        ScheduledRequest exact = claim.item;
+        if (exact.decodeEp() != null && exact.decodeEp().isReservationAccepted(exact.decodeReservation())) {
+            observeEngineFact(slot -> slot.observeDecodeFact(exact.decodeEp(),
+                    DecodeEndpoint.WorkerStatusFact.accepted(exact.decodeReservation()), System.currentTimeMillis()));
+        }
+        synchronized (this) {
+            if (!ownsDeliveryClaim(exact, claim.kind, claim.correlationId)) { return; }
+            startDecisionTracking(work, unstartedMs, System.currentTimeMillis());
+        }
+        armDecisionDeadline();
+    }
+
+    void onDeliveryResult(
+            DeliveryClaim claim,
+            DeliveryResult completion) {
+        DeliveryClaim exact = claim != null && claim.slot == this ? claim : null;
+        if (exact == null) {
+            throw new IllegalArgumentException(
+                    "delivery claim was not created by this scheduler");
+        }
+        Runnable work = null;
+        synchronized (exact.slot) {
+            // WorkerStatus may settle this generation before the RPC callback arrives.
+            // Its terminal proof wins; an old transport outcome cannot reopen ownership.
+            if (!ownsDeliveryClaim(exact.item, exact.kind, exact.correlationId)) {
+                return;
+            }
+            if (exact.completed) {
+                throw new IllegalStateException(
+                        "delivery claim is already completed: request_id="
+                                + exact.item.requestId());
+            }
+            exact.completed = true;
+            if (completion.status()
+                    == DeliveryResult.Status.DELIVERED) {
+                work = switch (exact.kind) {
+                    case BATCH_ENQUEUE -> confirmBatchEnqueueLocked(exact.item);
+                    case ROUTE_DECISION -> confirmRouteDecisionLocked(exact.item);
+                    case NONE -> throw new IllegalStateException(
+                            "delivery claim kind cannot be NONE");
+                };
+            } else if (completion.status()
+                    == DeliveryResult.Status.FAILED) {
+                String detail = "Delivery failed: "
+                        + detailOf(completion.cause());
+                if (exact.slot.decodeOwnsRequest()) {
+                    work = materializePostLockActionLocked(exact.slot.reduceDeliveryConfirmed(
+                                    exact.correlationId),
+                            null);
+                } else {
+                    DecodeEndpoint decode = exact.item.decodeEp();
+                    DecodeEndpoint.ReservationHandle reservation =
+                            exact.item.decodeReservation();
+                    DecodeEndpoint.DispatchRejectionSettlement settlement =
+                            decode == null || reservation == null
+                                    ? DecodeEndpoint.DispatchRejectionSettlement.RELEASED
+                                    : decode.settleDefiniteDispatchRejection(
+                                            reservation);
+                    switch (settlement) {
+                        case RELEASED -> work = reduceDeferredTerminalFactLocked(DeferredTerminal.deliveryRejected(detail));
+                        case ENGINE_ACCEPTED -> work = materializePostLockActionLocked(exact.slot.reduceDeliveryConfirmed(
+                                        exact.correlationId),
+                                null);
+                        case CONFLICT -> exact.slot.markAwaitingConfirmation(detail);
+                        case STALE -> work = null;
+                    }
+                }
+            } else if (exact.slot.decodeOwnsRequest()) {
+                work = materializePostLockActionLocked(exact.slot.reduceDeliveryConfirmed(
+                                exact.correlationId),
+                        null);
+            } else {
+                String detail = switch (completion.status()) {
+                    case TIMED_OUT ->
+                            "Delivery timed out: "
+                                    + detailOf(completion.cause());
+                    case UNCERTAIN ->
+                            "Delivery outcome uncertain: "
+                                    + detailOf(completion.cause());
+                    case DELIVERED ->
+                            throw new IllegalStateException(
+                                    "delivered outcome was already handled");
+                    case FAILED ->
+                            throw new IllegalStateException(
+                                    "failed outcome was already handled");
+                };
+                exact.slot.markAwaitingConfirmation(detail);
+            }
+        }
+        runPostLock(work);
+    }
+
+    void onPreparationFailed(ScheduledRequest exact, Throwable cause) {
+        Runnable work;
+        try {
+            synchronized (this) {
+                if (!ownsPreparedDelivery(exact)) { return; }
+                work = reduceDeferredTerminalFactLocked(DeferredTerminal.deliveryFailure(
+                        StrategyErrorType.DISPATCH_FAILED, "Delivery preparation failed: " + detailOf(cause)));
+            }
+            runPostLock(work);
+        } catch (Throwable failure) {
+            if (cause != null && cause != failure) { failure.addSuppressed(cause); }
+            Logger.error("Prepared delivery failure reduction failed request_id={}", requestId, failure);
+        }
+    }
+
+    boolean onPreemptionPhase(PreemptionRegistration claim, PreemptionCancelPhase next) {
+        return next != null && onPreemption(claim, false, slot -> slot.applyPreemptionPhase(claim, next));
+    }
+
+    boolean onPreemptionReleased(PreemptionRegistration claim) {
+        return onPreemption(claim, false, slot -> slot.applyPreemptionRelease(claim));
+    }
+
+    boolean onPreemptionTerminal(PreemptionRegistration claim, String detail) {
+        return onPreemption(claim, true, slot -> slot.applyPreemptionTombstone(claim, detail));
+    }
+
+    void onDecisionExpired(DecisionExpiry expiry) {
+        synchronized (this) {
+            if (expiry.needsConfirmation() && expiry.item() != null && ownsActiveItem(expiry.item())) {
+                markAwaitingConfirmation("decision lifetime expired; awaiting Engine confirmation");
+            }
+        }
+    }
+
+    TerminalAction onShutdown() {
+        synchronized (this) {
+            if (!isCurrentGeneration() || !canClaimLocalTerminal()) { return null; }
+            ScheduledRequest active = activeItem();
+            String message = "request scheduler is shutting down";
+            return beginTerminalLocked(active != null, active != null,
+                    TerminalOutcome.fail(message), buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, message));
+        }
+    }
+
+    boolean publishDecisionResponse(Response response) {
+        PublicationPermit permit = publishExternalResponse(response);
+        if (permit == null) { return false; }
+        try { completionPublisher.submitTerminalResponse(permit, response); return true; }
+        catch (RuntimeException | Error failure) { permit.abortClaimedPublication(); throw failure; }
+    }
+
+    RequestSlot.PublicationPermit publishExternalResponse(Response response) {
+        String detail = response != null && response.getErrorMessage() != null
+                ? response.getErrorMessage() : "external future completion";
+        TerminalOutcome transition =
+                response != null && !response.isSuccess()
+                        ? TerminalOutcome.fail(detail)
+                        : TerminalOutcome.complete(detail);
+        TerminalAction action = claimExternalLocalTerminal(transition);
+        return action == null ? null : terminalCleanup.finishTerminal(action);
+    }
+
+    RequestSlot.PublicationPermit publishExternalFailure(Throwable error) {
+        Objects.requireNonNull(error, "error");
+        String detail = "external future failure"
+                + (error.getMessage() == null ? "" : ": " + error.getMessage());
+        TerminalAction action = claimExternalLocalTerminal(TerminalOutcome.fail(detail));
+        return action == null ? null : terminalCleanup.finishTerminal(action);
+    }
+
+    RequestSlot.PublicationPermit publishExternalCancellation() {
+        String detail = cancelDetail(CancelReason.CLIENT_CANCELLED);
+        TerminalAction action = claimExternalLocalTerminal(TerminalOutcome.cancel(detail));
+        return action == null ? null : terminalCleanup.finishTerminal(action);
+    }
+
+    // State queries and transitions. Callers hold this monitor unless synchronized.
 
     long requestId() {
         return requestId;
@@ -652,7 +1082,7 @@ final class RequestSlot {
     private record PendingPrefillRetirement(
             PrefillEndpoint source,
             ScheduledRequest item,
-            Function<RequestSlot, RequestState> transition,
+            TerminalOutcome transition,
             Response response) {
     }
 
@@ -961,7 +1391,7 @@ final class RequestSlot {
             return null;
         }
         preemption = new PreemptionRegistration(
-                requestId, attemptToken, detail);
+                this, requestId, attemptToken, detail);
         assertInvariant();
         return preemption;
     }
@@ -1363,7 +1793,7 @@ final class RequestSlot {
     TerminalAction beginPrefillRetirementTerminal(
             PrefillEndpoint source,
             ScheduledRequest expected,
-            Function<RequestSlot, RequestState> transition,
+            TerminalOutcome transition,
             Response response) {
         requireSlotLock("Prefill retirement terminal claim");
         PendingPrefillRetirement pending = new PendingPrefillRetirement(
@@ -1412,7 +1842,7 @@ final class RequestSlot {
             boolean releaseDecode,
             boolean releasePrefill,
             Runnable counterpartCleanup,
-            Function<RequestSlot, RequestState> transition,
+            TerminalOutcome transition,
             Response response) {
         return beginTerminalizing(
                 removePrefillQueue,
@@ -1426,7 +1856,7 @@ final class RequestSlot {
 
     /** Claim a locally reversible terminal specifically for public-future use. */
     TerminalAction beginExternalTerminalizing(
-            Function<RequestSlot, RequestState> transition) {
+            TerminalOutcome transition) {
         requireSlotLock("external terminal claim");
         if (!canClaimLocalTerminal()) {
             return null;
@@ -1447,7 +1877,7 @@ final class RequestSlot {
             boolean releaseDecode,
             boolean releasePrefill,
             Runnable counterpartCleanup,
-            Function<RequestSlot, RequestState> transition,
+            TerminalOutcome transition,
             Response response,
             boolean requestPublication) {
         requireSlotLock("terminal claim");
@@ -1529,7 +1959,7 @@ final class RequestSlot {
         RequestState terminal;
         Throwable transitionFailure = null;
         try {
-            terminal = action.transition().apply(this);
+            terminal = applyTerminalOutcome(action.transition());
         } catch (Throwable failure) {
             transitionFailure = failure;
             terminal = fail("terminal projection failed");
@@ -1666,6 +2096,451 @@ final class RequestSlot {
             first.addSuppressed(next);
         }
         return first;
+    }
+
+    private void resumeCancellationAfterAdmission(
+            CancelReason reason,
+            boolean inactivityExpired) {
+        TerminalAction localCompletion = null;
+        synchronized (this) {
+            if (!this.isCurrentGeneration() || !this.ownsActiveGeneration()) {
+                return;
+            }
+            CancelReason firstCause = this.requireCancellationFirstCause();
+            if (firstCause != reason) {
+                throw new IllegalStateException(
+                        "admission cancellation first cause changed for request " + this.requestId());
+            }
+            String detail = inactivityExpired
+                    ? "REQUEST_INACTIVE: no matching Engine request status before inactivity timeout"
+                    : cancelDetail(firstCause);
+            ScheduledRequest item = this.activeItem();
+            if (inactivityExpired || firstCause == CancelReason.DEADLINE_EXCEEDED
+                    || this.requestInactive(System.currentTimeMillis())) {
+                localCompletion = beginExpiredRequestLocked(detail);
+            } else if (item == null || this.canClaimLocalTerminal()) {
+                localCompletion = beginTerminalLocked(item != null, item != null,
+                        TerminalOutcome.cancellation(firstCause, detail),
+                        buildErrorResponse(this.cancellationErrorType(firstCause), detail));
+            }
+        }
+        terminalCleanup.submitTerminal(localCompletion);
+    }
+
+    private Runnable materializePostLockActionLocked(
+            RequestSlot.PreemptionReduction reduction,
+            Runnable priorityCounterpartCleanup) {
+        if (!Thread.holdsLock(this)) {
+            throw new IllegalStateException(
+                    "preemption reduction requires slot lock");
+        }
+        if (reduction.status()
+                == RequestSlot.PreemptionReduction.Status.STALE) {
+            return null;
+        }
+        if (reduction.status()
+                == RequestSlot.PreemptionReduction.Status.NONE) {
+            return NO_POST_LOCK_ACTION;
+        }
+        Runnable publication = materializeReplayLocked(reduction.replay(), priorityCounterpartCleanup);
+        if (publication == null) {
+            throw new IllegalStateException(
+                    "accepted preemption replay produced no publication for request "
+                            + this.requestId());
+        }
+        return replayPostLockAction(publication,
+                reduction.signal());
+    }
+
+    private Runnable materializeReplayLocked(
+            RequestSlot.PendingReplay replay,
+            Runnable priorityCounterpartCleanup) {
+        if (replay.terminal() != null) {
+            DeferredTerminal exact = replay.terminal();
+            if (exact.kind() == DeferredTerminal.Kind.PRIORITY) {
+                return terminalPublication(
+                        beginSettledPriorityTerminalLocked(exact.detail(),
+                                priorityCounterpartCleanup));
+            }
+            return applyOrdinaryTerminalLocked(exact);
+        }
+        return deliveryPublication(replay.item(),
+                replay.confirmation(),
+                replay.kind(),
+                replay.batchId());
+    }
+
+    private Runnable replayPostLockAction(
+            Runnable publication,
+            PreemptionRegistration terminalSignal) {
+        return () -> {
+            try {
+                publication.run();
+            } finally {
+                if (terminalSignal != null) {
+                    terminalSignal.signalTerminal(new VictimTerminal(this.requestId()));
+                }
+            }
+        };
+    }
+
+    private TerminalAction beginSettledPriorityTerminalLocked(
+            String detail,
+            Runnable counterpartCleanup) {
+        if (this.hasCancellationFirstCause()) {
+            CancelReason firstCause = this.requireCancellationFirstCause();
+            String cancellationDetail = cancelDetail(firstCause);
+            return beginWorkerStatusTerminalLocked(counterpartCleanup,
+                    TerminalOutcome.cancellation(firstCause, cancellationDetail),
+                    buildErrorResponse(
+                            this.cancellationErrorType(firstCause),
+                            cancellationDetail));
+        }
+        return beginWorkerStatusTerminalLocked(counterpartCleanup,
+                TerminalOutcome.cancel(detail),
+                buildErrorResponse(
+                        StrategyErrorType.PRIORITY_PREEMPTED, detail));
+    }
+
+    private TerminalAction beginExpiredRequestLocked( String detail) {
+        ScheduledRequest item = this.activeItem();
+        CancelReason firstCause = this.requireCancellationFirstCause();
+        return beginTerminalLocked(true, false, false,
+                item == null ? null : () -> RequestTerminalCleanup.expireEndpointAccounting(item),
+                TerminalOutcome.cancellation(firstCause, detail),
+                buildErrorResponse(this.cancellationErrorType(firstCause), detail));
+    }
+
+    private TerminalAction settleCancellationFromWorkerStatusLocked(
+            String proof,
+            WorkerTerminalSource source) {
+        return settleCancellationAfterEndpointSettlementLocked(proof,
+                workerStatusCounterpartCleanup(source));
+    }
+
+    private TerminalAction settleCancellationAfterEndpointSettlementLocked(
+            String proof,
+            Runnable counterpartCleanup) {
+        CancelReason reason = this.requireCancellationFirstCause();
+        String detail = cancelDetail(reason) + "; " + proof;
+        return beginWorkerStatusTerminalLocked(counterpartCleanup,
+                TerminalOutcome.cancellation(reason, detail),
+                buildErrorResponse(
+                        this.cancellationErrorType(reason), detail));
+    }
+
+    private static String cancelDetail(CancelReason reason) {
+        return reason == CancelReason.DEADLINE_EXCEEDED
+                ? "request deadline exceeded"
+                : "request cancelled by client";
+    }
+
+    private Runnable reduceDeferredTerminalFactLocked(
+            DeferredTerminal terminal) {
+        ScheduledRequest item = this.activeItem();
+        if (item == null) {
+            return null;
+        }
+        RequestSlot.PreemptionReduction reduction;
+        if (terminal.kind() == DeferredTerminal.Kind.DELIVERY_REJECTED
+                && item.decodeEp() != null
+                && item.decodeReservation() != null) {
+            reduction = this.reduceDispatchRejected(
+                    item.decodeEp(), item.decodeReservation(), item, terminal);
+        } else {
+            reduction = terminal.authoritativeWorker()
+                    ? this.reduceWorkerTerminal(
+                            item, terminal)
+                    : this.reduceOrdinaryTerminal(
+                            item, terminal);
+        }
+        return materializePostLockActionLocked(reduction, null);
+    }
+
+    private Runnable applyOrdinaryTerminalLocked(
+            DeferredTerminal terminal) {
+        if (terminal.endpointAlreadyRetired()) {
+            return applyDecodeSettledTerminalLocked(terminal);
+        }
+        return switch (terminal.kind()) {
+            case FAILURE -> applyFailureTerminalLocked(terminal, true);
+            case TIMEOUT -> applyTimeoutTerminalLocked(terminal);
+            case DELIVERY_FAILURE ->
+                    applyFailureTerminalLocked(terminal, true);
+            case DELIVERY_REJECTED ->
+                    applyDecodeSettledTerminalLocked(terminal);
+            case WORKER -> applyWorkerTerminalLocked(terminal);
+            case PRIORITY ->
+                    throw new IllegalStateException(
+                            "priority terminal requires its typed reducer");
+            case DECODE_GENERATION_RETIRED ->
+                    throw new IllegalStateException(
+                            "retired Decode generation was not marked retired");
+        };
+    }
+
+    private Runnable applyTimeoutTerminalLocked(
+            DeferredTerminal timeout) {
+        return terminalPublication(beginTerminalLocked(true,
+                true,
+                TerminalOutcome.timeout(timeout.detail()),
+                buildErrorResponse(
+                        this.timeoutErrorType(), timeout.detail())));
+    }
+
+    private Runnable applyFailureTerminalLocked(
+            DeferredTerminal failure,
+            boolean releaseDecode) {
+        return terminalPublication(beginTerminalLocked(true, releaseDecode,
+                TerminalOutcome.fail(failure.detail()),
+                buildErrorResponse(failure.errorType(), failure.detail())));
+    }
+
+    private Runnable applyDecodeSettledTerminalLocked(
+            DeferredTerminal terminal) {
+        String terminalDetail;
+        if (terminal.kind() == DeferredTerminal.Kind.DELIVERY_REJECTED
+                || terminal.kind()
+                    == DeferredTerminal.Kind.DECODE_GENERATION_RETIRED) {
+            terminalDetail = terminal.detail();
+        } else {
+            throw new IllegalArgumentException(
+                    "Decode-settled reducer requires a Decode terminal");
+        }
+        String detail = terminalDetail == null
+                ? "Decode endpoint generation retired"
+                : terminalDetail;
+        if (this.hasCancellationFirstCause()) {
+            CancelReason firstCause = this.requireCancellationFirstCause();
+            String cancellationDetail = cancelDetail(firstCause)
+                    + "; " + detail;
+            return terminalPublication(beginTerminalLocked(false,
+                    true,
+                    TerminalOutcome.cancellation(firstCause, cancellationDetail),
+                    buildErrorResponse(
+                            this.cancellationErrorType(firstCause),
+                            cancellationDetail)));
+        }
+        return terminalPublication(beginTerminalLocked(false,
+                true,
+                TerminalOutcome.fail(detail),
+                buildErrorResponse(
+                        StrategyErrorType.DISPATCH_FAILED, detail)));
+    }
+
+    private Runnable applyWorkerTerminalLocked(
+            DeferredTerminal terminal) {
+        if (this.hasCancellationFirstCause()) {
+            String proof = terminal.workerSource()
+                    == WorkerTerminalSource.PREFILL_BACKED
+                            ? "Prefill terminal observed after cancellation"
+                            : "Decode terminal observed after cancellation";
+            return terminalPublication(
+                    settleCancellationFromWorkerStatusLocked(proof, terminal.workerSource()));
+        }
+        TerminalOutcome transition;
+        Response response;
+        if (terminal.workerSuccessful()) {
+            transition = TerminalOutcome.complete("decode completed");
+            ScheduledRequest item = this.activeItem();
+            response = buildSuccessResponse(
+                    item, this.snapshot().deliveryClaimKind());
+        } else {
+            String detail = "worker error code "
+                    + terminal.workerErrorCode();
+            transition = TerminalOutcome.fail(detail);
+            response = buildErrorResponse(
+                    StrategyErrorType.WORKER_EXECUTION_FAILED, detail);
+        }
+        return terminalPublication(beginWorkerStatusTerminalLocked(workerStatusCounterpartCleanup(terminal.workerSource()),
+                transition,
+                response));
+    }
+
+    private boolean ownsPreparedDelivery( ScheduledRequest item) {
+        RequestState snapshot = this.snapshot();
+        return this.ownsActiveItem(item)
+                && this.isOpen()
+                && this.canClaimDelivery()
+                && snapshot.state() == RequestState.Phase.QUEUED
+                && snapshot.deliveryClaimKind() == DeliveryClaimKind.NONE;
+    }
+
+    private Runnable confirmRouteDecisionLocked(
+            ScheduledRequest item) {
+        if (!this.ownsDeliveryClaim(
+                item, DeliveryClaimKind.ROUTE_DECISION, 0L)) {
+            return null;
+        }
+        return materializePostLockActionLocked(this.reduceDeliveryConfirmed(0L),
+                null);
+    }
+
+    private Runnable confirmBatchEnqueueLocked(
+            ScheduledRequest item) {
+        RequestState current = this.snapshot();
+        long batchId = current.batchId();
+        if (!this.ownsDeliveryClaim(
+                item, DeliveryClaimKind.BATCH_ENQUEUE, batchId)) {
+            Logger.debug("Ignoring EnqueueBatch ACK without a batch claim request_id={}",
+                    item.requestId());
+            return null;
+        }
+        item.ctx().setAckAtMs(System.currentTimeMillis());
+        item.ctx().setAckAtNanos(System.nanoTime());
+        return materializePostLockActionLocked(this.reduceDeliveryConfirmed(batchId),
+                null);
+    }
+
+    private Runnable deliveryPublication(
+            ScheduledRequest item,
+            RequestSlot.DeliveryConfirmation confirmation,
+            DeliveryClaimKind deliveryKind,
+            long batchId) {
+        Response response = buildSuccessResponse(
+                item, deliveryKind);
+        return () -> completionPublisher.publishDelivery(
+                this, item, response, confirmation, deliveryKind);
+    }
+
+    private TerminalAction beginTerminalLocked(
+            boolean releaseDecode,
+            boolean releasePrefill,
+            TerminalOutcome transition,
+            Response response) {
+        return beginTerminalLocked(true, releaseDecode, releasePrefill, null,
+                transition, response);
+    }
+
+    private TerminalAction beginTerminalLocked(
+            boolean removePrefillQueue,
+            boolean releaseDecode,
+            boolean releasePrefill,
+            Runnable counterpartCleanup,
+            TerminalOutcome transition,
+            Response response) {
+        return this.beginTerminalizing(
+                removePrefillQueue,
+                releaseDecode,
+                releasePrefill,
+                counterpartCleanup,
+                transition,
+                response);
+    }
+
+    private TerminalAction beginWorkerStatusTerminalLocked(
+            Runnable counterpartCleanup,
+            TerminalOutcome transition,
+            Response response) {
+        return beginTerminalLocked(false, false, false, counterpartCleanup,
+                transition, response);
+    }
+
+    private Runnable terminalPublication(TerminalAction action) {
+        return action == null ? null : () -> terminalCleanup.submitTerminal(action);
+    }
+
+    void runPostLock(Runnable action) {
+        if (action == null) {
+            return;
+        }
+        action.run();
+    }
+
+    private void armDecisionDeadline() {
+        java.util.OptionalLong deadline;
+        synchronized (this) {
+            deadline = this.decisionDeadlineAtMs();
+        }
+        if (deadline.isPresent()) {
+            expirationTimer.registerDecisionDeadline(
+                    this, deadline.getAsLong());
+        }
+    }
+
+    void cancelDecisionDeadline(
+            ExpirationTimer.DecisionDeadline cleanup) {
+        if (cleanup == null) {
+            return;
+        }
+        try {
+            expirationTimer.release(cleanup);
+        } catch (Throwable failure) {
+            Logger.error("Admission cleanup isolated", failure);
+        }
+    }
+
+    private static String detailOf(Throwable cause) {
+        if (cause == null) {
+            return "unknown delivery failure";
+        }
+        String message = cause.getMessage();
+        return message == null || message.isBlank()
+                ? cause.getClass().getSimpleName() : message;
+    }
+
+    private Runnable workerStatusCounterpartCleanup(
+            WorkerTerminalSource source) {
+        ScheduledRequest item = this.activeItem();
+        if (item == null) {
+            return null;
+        }
+        if (source == WorkerTerminalSource.PREFILL_BACKED) {
+            DecodeEndpoint decode = item.decodeEp();
+            DecodeEndpoint.ReservationHandle reservation =
+                    item.decodeReservation();
+            return decode == null || reservation == null
+                    ? null
+                    : () -> decode.releaseLocalShadowIfExact(reservation);
+        }
+        if (this.snapshot().deliveryClaimKind()
+                != DeliveryClaimKind.ROUTE_DECISION) {
+            return null;
+        }
+        return exactPrefillCounterpartCleanup(item);
+    }
+
+    private static Runnable exactPrefillCounterpartCleanup(ScheduledRequest item) {
+        PrefillEndpoint prefill = item == null ? null : item.prefillEp();
+        return prefill == null
+                ? null : () -> prefill.releaseCommittedItem(item);
+    }
+
+    private TerminalAction claimExternalLocalTerminal(
+            TerminalOutcome transition) {
+        synchronized (this) {
+            if (!this.isCurrentGeneration() || !this.canClaimLocalTerminal()) {
+                return null;
+            }
+            return this.beginExternalTerminalizing(transition);
+        }
+    }
+
+    /** Registry has resolved identity; all subsequent request decisions stay here. */
+
+    private boolean onPreemption(PreemptionRegistration claim, boolean cleanCounterpart,
+                         Function<RequestSlot, PreemptionReduction> reduction) {
+        Runnable work;
+        synchronized (this) {
+            Runnable cleanup = cleanCounterpart ? exactPrefillCounterpartCleanup(activeItem()) : null;
+            work = materializePostLockActionLocked(reduction.apply(this), cleanup);
+        }
+        runPostLock(work);
+        return work != null;
+    }
+
+    private static boolean batchMatches(RequestState snapshot, long expected) {
+        return snapshot != null && (expected == 0 || snapshot.batchId() == expected);
+    }
+
+    private RequestState applyTerminalOutcome(TerminalOutcome outcome) {
+        return switch (outcome.phase()) {
+            case COMPLETED -> complete(outcome.detail());
+            case FAILED -> fail(outcome.detail());
+            case CANCELLED -> cancel(outcome.detail());
+            case TIMED_OUT -> timeout(outcome.detail());
+            default -> throw new IllegalArgumentException("not a terminal outcome: " + outcome.phase());
+        };
     }
 
     private enum SlotPhase {
@@ -2043,7 +2918,7 @@ record TerminalAction(
         boolean releasePrefill,
         Runnable counterpartCleanup,
         String queueReason,
-        Function<RequestSlot, RequestState> transition,
+        TerminalOutcome transition,
         Response response,
         RequestSlot.PublicationPermit publication) {
 }

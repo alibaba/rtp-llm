@@ -33,7 +33,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -324,7 +323,7 @@ class RequestLifetimeTest {
             ScheduledRequest item = new ScheduledRequest(context, future, new Response(), prefillServer(), null,
                     prefill, decode, reservation, System.currentTimeMillis());
             RequestLifecycleTestSupport.bind(registry, new RequestLifecycleTestSupport.Registered(item, future));
-            RequestRegistry.DeliveryClaim claim = registry.tryClaimBatchDelivery(item, 7L, () -> true);
+            DeliveryClaim claim = registry.tryClaimBatchDelivery(item, 7L, () -> true);
             assertNotNull(claim);
             synchronized (slot) {
                 startPrediction(slot);
@@ -335,7 +334,7 @@ class RequestLifetimeTest {
                 assertFalse(slot.hasCancellationFirstCause());
             }
             if (ackBeforeEvidence) {
-                registry.complete(claim, DeliveryResult.delivered());
+                claim.complete(DeliveryResult.delivered());
             }
             if (ackBeforeEvidence) {
                 assertTrue(future.get(1L, TimeUnit.SECONDS).isSuccess(),
@@ -354,7 +353,7 @@ class RequestLifetimeTest {
 
             if (!ackBeforeEvidence) {
                 assertFalse(future.isDone(), "Engine activity cannot create an EnqueueBatch ACK");
-                registry.complete(claim, DeliveryResult.delivered());
+                claim.complete(DeliveryResult.delivered());
             }
             assertTrue(future.get(1L, TimeUnit.SECONDS).isSuccess());
             synchronized (slot) {
@@ -374,7 +373,7 @@ class RequestLifetimeTest {
 
     @Test
     void timerChecksInactivityAfterThePublicFutureHasCompleted() throws Exception {
-        Fixture fixture = fixture(true);
+        Fixture fixture = fixture(true, true);
         RequestRegistry registry = mock(RequestRegistry.class);
         ConfigService config = mock(ConfigService.class);
         when(config.loadBalanceConfig()).thenReturn(fixture.config);
@@ -382,11 +381,11 @@ class RequestLifetimeTest {
         when(registry.snapshotSlots()).thenReturn(List.of(fixture.slot));
         doAnswer(invocation -> {
             synchronized (fixture.slot) {
-                assertTrue(fixture.slot.requestInactive(invocation.getArgument(1)));
+                assertTrue(fixture.slot.requestInactive(invocation.getArgument(0)));
                 finishInactivity(fixture.slot);
             }
             return null;
-        }).when(registry).expireInactiveRequest(eq(fixture.slot), anyLong());
+        }).when(fixture.slot).expireInactiveRequest(anyLong());
         try (var timer = new ExpirationTimer(registry, config)) {
             synchronized (fixture.slot) {
                 fixture.slot.configureInactivityTimeout(20L);
@@ -395,14 +394,14 @@ class RequestLifetimeTest {
                 fixture.slot.future().completeOwned(new Response());
             }
             assertNotNull(timer.attachInactivityDeadline(fixture.slot));
-            verify(registry, timeout(1000L).times(1)).expireInactiveRequest(eq(fixture.slot), anyLong());
-            verify(registry, never()).cancelForDeadline(any());
+            verify(fixture.slot, timeout(1000L).times(1)).expireInactiveRequest(anyLong());
+            verify(fixture.slot, never()).cancelRequest(anyLong(), any());
         }
     }
 
     @Test
     void renewedActivityRearmsTheTimerUntilTheNewInactivityDeadline() throws Exception {
-        Fixture fixture = fixture(true);
+        Fixture fixture = fixture(true, true);
         RequestRegistry registry = mock(RequestRegistry.class);
         ConfigService config = mock(ConfigService.class);
         when(config.loadBalanceConfig()).thenReturn(fixture.config);
@@ -418,16 +417,16 @@ class RequestLifetimeTest {
                     // A matching status wins after the old timer fired but before cancellation.
                     fixture.slot.observePrefillFact(fixture.item.prefillEp(), RoleType.PREFILL,
                             PrefillState.WorkerStatusFact.active(fixture.item), start + 50L);
-                    assertFalse(fixture.slot.requestInactive(invocation.getArgument(1)));
+                    assertFalse(fixture.slot.requestInactive(invocation.getArgument(0)));
                     now.set(start + 150L);
                 } else {
-                    assertTrue(fixture.slot.requestInactive(invocation.getArgument(1)));
+                    assertTrue(fixture.slot.requestInactive(invocation.getArgument(0)));
                     finishInactivity(fixture.slot);
                     expired.countDown();
                 }
             }
             return null;
-        }).when(registry).expireInactiveRequest(eq(fixture.slot), anyLong());
+        }).when(fixture.slot).expireInactiveRequest(anyLong());
         try (var timer = new ExpirationTimer(registry, config, now::get)) {
             synchronized (fixture.slot) {
                 fixture.slot.configureInactivityTimeout(100L);
@@ -481,7 +480,7 @@ class RequestLifetimeTest {
 
     private static void finishInactivity(RequestSlot slot) {
         TerminalAction terminal = slot.beginTerminalizing(false, false, false, null,
-                owner -> owner.timeout("request inactive"), null);
+                TerminalOutcome.timeout("request inactive"), null);
         assertNotNull(terminal);
         assertNotNull(slot.finishTombstone(terminal).terminal());
     }
@@ -511,11 +510,14 @@ class RequestLifetimeTest {
                         : PrefillState.WorkerStatusFact.active(fixture.item), nowMs);
     }
 
-    private static Fixture fixture(boolean separateDecode) {
+    private static Fixture fixture(boolean separateDecode) { return fixture(separateDecode, false); }
+
+    private static Fixture fixture(boolean separateDecode, boolean observeTimer) {
         FlexlbConfig config = SchedulingTestConfig.newConfig();
         SchedulingTestConfig.useNonBatchDispatcher(config);
         BalanceContext context = RequestLifecycleTestSupport.context(config, 101L);
-        RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class), 101L);
+        RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class), 101L, null, null, null);
+        if (observeTimer) { slot = org.mockito.Mockito.spy(slot); }
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
         DecodeEndpoint decode = separateDecode ? mock(DecodeEndpoint.class) : null;
         DecodeEndpoint.ReservationHandle reservation = separateDecode

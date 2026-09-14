@@ -55,6 +55,7 @@ import static org.mockito.Mockito.when;
 
 /** Final selector/pin ownership contracts for {@link DefaultRouter}. */
 class DefaultRouterTest {
+    private DeliveryClaim lastDelivery;
 
     private CostBasedPrefillStrategy prefillSelector;
     private DecodeSelector decodeSelector;
@@ -78,15 +79,16 @@ class DefaultRouterTest {
                         ? PlacementResult.Status.SUCCESS : PlacementResult.Status.BLOCKED);
         when(requests.tryClaimRouteDelivery(any(), any())).thenAnswer(call -> {
             ((java.util.function.BooleanSupplier) call.getArgument(1)).getAsBoolean();
-            RequestRegistry.DeliveryClaim claim = mock(RequestRegistry.DeliveryClaim.class);
+            DeliveryClaim claim = mock(DeliveryClaim.class);
             when(claim.item()).thenReturn(call.getArgument(0));
+            lastDelivery = claim;
+            doAnswer(inv -> {
+                ScheduledRequest item = claim.item();
+                item.future().complete(item.routeResponse());
+                return null;
+            }).when(claim).publishRoute(any(), anyLong());
             return claim;
         });
-        doAnswer(call -> {
-            ScheduledRequest item = call.getArgument(0, RequestRegistry.DeliveryClaim.class).item();
-            item.future().complete(item.routeResponse());
-            return null;
-        }).when(requests).beginRouteDelivery(any(), any(), anyLong());
         when(requests.publishDecisionResponseAsync(anyLong(), any(), any())).thenAnswer(call ->
                 call.getArgument(1, CompletableFuture.class).complete(call.getArgument(2)));
     }
@@ -194,7 +196,7 @@ class DefaultRouterTest {
         assertTrue(scheduler(router(), context).submit(context).join().isSuccess());
 
         var precedingWork = org.mockito.ArgumentCaptor.forClass(org.flexlb.balance.projection.WorkSnapshot.class);
-        verify(requests).beginRouteDelivery(any(), precedingWork.capture(), eq(0L));
+        verify(lastDelivery).publishRoute(precedingWork.capture(), eq(0L));
         assertEquals(unknown ? java.util.OptionalLong.empty() : java.util.OptionalLong.of(0L),
                 precedingWork.getValue().totalRemainingWorkMs());
         verify(registration).close();

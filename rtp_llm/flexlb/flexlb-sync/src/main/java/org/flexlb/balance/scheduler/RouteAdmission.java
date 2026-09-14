@@ -237,12 +237,12 @@ public final class RouteAdmission implements AutoCloseable {
             throw new IllegalArgumentException("admission cannot build another request");
         }
         return new ScheduledRequest(context, future, response,
-                RequestRegistry.copyOf(prefillStatus()), RequestRegistry.copyOf(decodeStatus()),
+                RequestResponses.copyOf(prefillStatus()), RequestResponses.copyOf(decodeStatus()),
                 prefillEndpoint(), decodeEndpoint(), decodeBinding.reservation(), enqueuedAtMs, decodeBinding);
     }
 
     /** The caller has registered the same canonical request before selecting this route. */
-    record RouteDelivery(RequestRegistry.DeliveryClaim claim, WorkSnapshot precedingWork, long unstartedWorkMs) {
+    record RouteDelivery(DeliveryClaim claim, WorkSnapshot precedingWork, long unstartedWorkMs) {
         RouteDelivery {
             Objects.requireNonNull(claim, "claim");
             Objects.requireNonNull(precedingWork, "precedingWork");

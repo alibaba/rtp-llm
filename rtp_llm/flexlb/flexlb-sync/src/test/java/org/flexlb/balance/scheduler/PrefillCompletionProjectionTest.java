@@ -99,7 +99,7 @@ class PrefillCompletionProjectionTest {
                     }
                 });
                 assertNotNull(claim);
-                requests.beginRouteDelivery(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
+                claim.publishRoute(new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
             }
             assertTrue(future.get(2L, TimeUnit.SECONDS).isSuccess());
             assertEquals(1L, prefill.observedRequestCount());

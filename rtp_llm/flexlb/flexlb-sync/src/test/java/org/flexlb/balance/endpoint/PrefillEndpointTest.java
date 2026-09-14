@@ -1,10 +1,10 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.scheduler.DeliveryClaim;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -1255,7 +1255,7 @@ class PrefillEndpointTest {
                 new EndpointTestSupport.TestRequestRuntime() {
             @Override
             void onCompleted(
-                    RequestRegistry.DeliveryClaim claim,
+                    DeliveryClaim claim,
                     DeliveryResult completion) {
                 try {
                     retirementEndpointRef.get().close();
@@ -1319,7 +1319,7 @@ class PrefillEndpointTest {
         CountDownLatch delivered = new CountDownLatch(1);
         EndpointTestSupport.TestRequestRuntime runtime = new EndpointTestSupport.TestRequestRuntime() {
             @Override
-            void onCompleted(RequestRegistry.DeliveryClaim claim, DeliveryResult completion) {
+            void onCompleted(DeliveryClaim claim, DeliveryResult completion) {
                 delivered.countDown();
             }
         };
@@ -1360,7 +1360,7 @@ class PrefillEndpointTest {
         AtomicInteger preparationCount = new AtomicInteger();
         EndpointTestSupport.TestRequestRuntime runtime = new EndpointTestSupport.TestRequestRuntime() {
             @Override
-            void onCompleted(RequestRegistry.DeliveryClaim claim, DeliveryResult completion) {
+            void onCompleted(DeliveryClaim claim, DeliveryResult completion) {
                 delivered.countDown();
             }
         };
