@@ -102,16 +102,8 @@ private:
                               const P2PWorkerRoutePlan&                 worker_plan,
                               const std::string&                         unique_key,
                               int64_t                                    transfer_deadline_ms,
-                              int                                        scheduled_transfer_count,
-                              int                                        max_outstanding_tasks,
                               const std::shared_ptr<std::atomic<bool>>&  cancel_flag,
                               const std::shared_ptr<SendTransferResult>& transfer_result);
-
-    bool waitForAsyncSendSlot(const std::shared_ptr<SendTransferResult>& transfer_result,
-                              int                                        scheduled_transfer_count,
-                              int                                        max_outstanding_tasks,
-                              int64_t                                    return_deadline_ms,
-                              const std::shared_ptr<std::atomic<bool>>&  cancel_flag) const;
 
     bool waitSendCallbacksWithTimeout(const std::shared_ptr<SendTransferResult>& transfer_result,
                                       int                                        sent_transfer_count,

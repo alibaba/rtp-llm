@@ -21,14 +21,6 @@ namespace {
 
 constexpr size_t kSenderPoolThreadCount = 4;
 constexpr size_t kSenderPoolQueueSize   = 10000;
-// 以「层」为单位的流水深度。真正的 outstanding 传输数要乘上每层的 route 数 ——
-// 该阈值若按传输次数计量，一层的 route 就会填满窗口，per-layer overlap 塌成 1 层。
-// 每次传输的字节是 1/route 数，故乘上去后 in-flight 字节数守恒，不是内存回归。
-constexpr int kMaxOutstandingLayersPerRequest = static_cast<int>(kSenderPoolThreadCount * 2);
-
-int outstandingSendBudget(int routes_per_layer) {
-    return kMaxOutstandingLayersPerRequest * std::max(1, routes_per_layer);
-}
 
 std::string describeRoutes(const P2PWorkerRoutePlan& worker_plan) {
     std::string result = "[";
@@ -400,8 +392,6 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
                 worker_plan,
                 unique_key,
                 return_deadline_ms,
-                sent_count,
-                outstandingSendBudget(worker_plan.maxRoutesPerTag()),
                 cancel_flag,
                 transfer_result);
             if (transfer_result->dispatch_failed.load()) {
@@ -423,8 +413,6 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
                                                      const P2PWorkerRoutePlan&                  worker_plan,
                                                      const std::string&                         unique_key,
                                                      int64_t                                    transfer_deadline_ms,
-                                                     int                                        scheduled_transfer_count,
-                                                     int                                        max_outstanding_tasks,
                                                      const std::shared_ptr<std::atomic<bool>>&  cancel_flag,
                                                      const std::shared_ptr<SendTransferResult>& transfer_result) {
     int       count    = 0;
@@ -496,11 +484,8 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
             return count;
         }
 
-        if (!waitForAsyncSendSlot(transfer_result,
-                                  scheduled_transfer_count + count,
-                                  max_outstanding_tasks,
-                                  transfer_deadline_ms,
-                                  cancel_flag)) {
+        if (transfer_result->dispatch_failed.load() || (cancel_flag && cancel_flag->load(std::memory_order_relaxed))
+            || currentTimeMs() >= transfer_deadline_ms) {
             return count;
         }
 
@@ -585,42 +570,6 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
         }
     }
     return count;
-}
-
-bool P2PConnectorWorkerPrefill::waitForAsyncSendSlot(
-    const std::shared_ptr<SendTransferResult>& transfer_result,
-    int                                        scheduled_transfer_count,
-    int                                        max_outstanding_tasks,
-    int64_t                                    return_deadline_ms,
-    const std::shared_ptr<std::atomic<bool>>&  cancel_flag) const {
-    if (transfer_result->dispatch_failed.load()) {
-        return false;
-    }
-    if (max_outstanding_tasks <= 0) {
-        return true;
-    }
-
-    std::unique_lock<std::mutex> lock(transfer_result->result_mutex);
-    while (scheduled_transfer_count - transfer_result->done_count.load(std::memory_order_relaxed)
-           >= max_outstanding_tasks) {
-        if (transfer_result->dispatch_failed.load() || (cancel_flag && cancel_flag->load(std::memory_order_relaxed))) {
-            return false;
-        }
-        const int64_t now = currentTimeMs();
-        if (now >= return_deadline_ms) {
-            return false;
-        }
-        transfer_result->result_cv.wait_for(
-            lock,
-            std::chrono::milliseconds(return_deadline_ms - now),
-            [&transfer_result, scheduled_transfer_count, max_outstanding_tasks, &cancel_flag]() {
-                return scheduled_transfer_count - transfer_result->done_count.load(std::memory_order_relaxed)
-                           < max_outstanding_tasks
-                       || transfer_result->dispatch_failed.load()
-                       || (cancel_flag && cancel_flag->load(std::memory_order_relaxed));
-            });
-    }
-    return !transfer_result->dispatch_failed.load() && !(cancel_flag && cancel_flag->load(std::memory_order_relaxed));
 }
 
 bool P2PConnectorWorkerPrefill::waitSendCallbacksWithTimeout(const std::shared_ptr<SendTransferResult>& transfer_result,
