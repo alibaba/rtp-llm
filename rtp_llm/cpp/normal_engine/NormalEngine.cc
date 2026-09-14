@@ -929,7 +929,7 @@ void NormalEngine::startTimelineProfiling(const std::string& trace_name, int sta
 bool NormalEngine::isMTPEagle() {
     if (propose_params_) {
         return propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE
-               || propose_params_->sp_type == SP_TYPE_DSPARK;
+               || isBlockDraftType(propose_params_->sp_type);
     }
     return false;
 }
@@ -942,7 +942,7 @@ bool NormalEngine::isEagle() {
 }
 
 bool NormalEngine::isDSpark() {
-    return propose_params_ && propose_params_->sp_type == SP_TYPE_DSPARK;
+    return propose_params_ && isBlockDraftType(propose_params_->sp_type);
 }
 
 size_t NormalEngine::reserveStepForStream(size_t configured_reserve_step, bool is_prefill_only) {
@@ -961,7 +961,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     if (isMTPEagle()) {
         int        propose_step   = sp_config.gen_num_per_cycle;
         int        mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
-        const bool is_dspark      = propose_params_->sp_type == SP_TYPE_DSPARK;
+        const bool is_dspark      = isBlockDraftType(propose_params_->sp_type);
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
                 if (streams.empty()) {
