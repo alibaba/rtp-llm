@@ -16,6 +16,8 @@ the forwarding:
 The policy layer itself is covered by rtp_llm/utils/test/nccl_memory_test.py.
 """
 
+import builtins
+import contextlib
 import unittest
 from types import SimpleNamespace
 from typing import Any, List, Optional, Tuple
@@ -47,6 +49,68 @@ def _manager(device: Any = _DEVICE) -> WeightManager:
 
 
 class WeightManagerCollectivesTest(unittest.TestCase):
+    def test_dsv4_registry_failures_refuse_incomplete_wake(self) -> None:
+        real_import = builtins.__import__
+        modules = {
+            "rtp_llm.models_py.modules.dsv4.fp8.attention": "iter_attentions",
+            "rtp_llm.models_py.modules.dsv4.fp8.compressor": "iter_compressors",
+            "rtp_llm.models_py.modules.dsv4.moe.mega_buf": "iter_mega_strategies",
+            "rtp_llm.models_py.modules.dsv4.moe.mega_se_buf": "iter_mega_se_strategies",
+            "rtp_llm.models_py.modules.dsv4.utils": "iter_fp8_linears",
+        }
+        for model_type in ("deepseek_v4", "deepseek_v4_mtp", "deepseek_v4_dspark"):
+            for fault in ("import", "enumeration", "extra_keys"):
+                with self.subTest(model_type=model_type, fault=fault):
+                    manager = _manager()
+                    manager._model_scope = "owner"
+                    manager._weights_loader = SimpleNamespace(
+                        model_config=SimpleNamespace(model_type=model_type),
+                        can_reload_from_fastsafetensor=lambda: False,
+                        prepare_weights=lambda device: iter(()),
+                        prepare_dynamic_weights=lambda device: iter(()),
+                    )
+                    failure = RuntimeError("injected registry failure")
+                    strategy = SimpleNamespace(
+                        cfg=SimpleNamespace(layer_id=0),
+                        _sleep_model_scope="owner",
+                        sleep_reload_extra_weight_names=mock.Mock(side_effect=failure),
+                    )
+
+                    def importing(name, *args, **kwargs):
+                        if name not in modules:
+                            return real_import(name, *args, **kwargs)
+                        if fault == "import":
+                            raise failure
+                        iterator = mock.Mock(return_value=[])
+                        if modules[name] == "iter_mega_strategies":
+                            if fault == "enumeration":
+                                iterator.side_effect = failure
+                            else:
+                                iterator.return_value = [strategy]
+                        return SimpleNamespace(**{modules[name]: iterator})
+
+                    with (
+                        mock.patch("builtins.__import__", side_effect=importing),
+                        mock.patch.object(
+                            manager, "_live_weight_keys", return_value=set()
+                        ),
+                        mock.patch.object(
+                            weight_manager_module.torch.cuda,
+                            "device",
+                            return_value=contextlib.nullcontext(),
+                        ),
+                        mock.patch.object(
+                            weight_manager_module.torch.cuda,
+                            "mem_get_info",
+                            return_value=(1024, 2048),
+                        ),
+                        self.assertRaisesRegex(
+                            RuntimeError, "refusing incomplete wake"
+                        ) as raised,
+                    ):
+                        manager.reload_weights_from_loader()
+                    self.assertIs(raised.exception.__cause__, failure)
+
     def test_reload_coverage_excludes_draft_global_aliases(self) -> None:
         manager = _manager()
         embedding, head, owned = object(), object(), object()

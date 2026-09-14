@@ -16,8 +16,10 @@ Disabled by default. Enable by setting the environment variable
 and having ``torch_memory_saver`` importable (typically via its LD_PRELOAD
 hook shim). ``RTP_LLM_WEIGHT_MEMORY_SAVER=1`` is kept as a
 low-level developer override for isolated memory-saver tests. When the switch
-is off or the package is unavailable, every API in this module degrades to a
-no-op so production startup paths are unaffected.
+is off, allocation helpers preserve normal PyTorch behavior. Weight-region
+helpers can no-op when the package is unavailable, but enabled CUDA scratch
+requires the preload allocator: silently using unpausable backing would break
+the fixed-address sleep contract. Production subprocess setup injects the shim.
 
 ``expandable_segments:True`` can be requested alongside sleep mode, but it is
 kept OFF through the whole init path (weight load + KV arena allocation + KV MR
@@ -347,7 +349,7 @@ def _alloc_conf_without_expandable(conf: str) -> str:
     kept = [
         part.strip()
         for part in conf.split(",")
-        if part.strip() and not part.strip().startswith(_EXPANDABLE_KEY + ":")
+        if part.strip() and part.partition(":")[0].strip() != _EXPANDABLE_KEY
     ]
     return ",".join(kept)
 
@@ -464,7 +466,19 @@ def _prepare_expandable_coexistence() -> None:
 
     conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
     _capture_base_alloc_conf()
-    if f"{_EXPANDABLE_KEY}:True" not in conf:
+    # PyTorch permits whitespace and the last duplicate key wins. Do not
+    # broaden its case-sensitive True/False contract to lowercase or integers.
+    expandable_value = None
+    for part in conf.split(","):
+        key, _, value = part.partition(":")
+        if key.strip() == _EXPANDABLE_KEY:
+            expandable_value = value.strip()
+    if expandable_value == "False":
+        # TMS scans for a literal True substring, ignoring duplicate-key
+        # precedence. Remove an earlier True without enabling it at runtime.
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = _expandable_base_conf
+        return
+    if expandable_value != "True":
         return
 
     # Remove it from the env so torch_memory_saver._sanity_checks() (which reads
@@ -818,6 +832,8 @@ def pausable_empty(*args, **kwargs):
     device = torch.device(device)
     if device.type != "cuda":
         return torch.empty(*args, **kwargs)
+    if device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
     with torch.cuda.use_mem_pool(_get_scratch_pool(device.index), device=device):
         return torch.empty(*args, **kwargs)
 
@@ -906,7 +922,7 @@ def _reset_for_testing() -> None:
     global _expandable_prepared, _expandable_requested, _expandable_active
     global _expandable_base_conf, _expandable_live
     global _base_conf_captured, _split_cap_live
-    global _scratch_pools, _scratch_pool_owners
+    global _scratch_pools, _scratch_pool_owners, _model_scope_global
     with _lock:
         _scratch_pools = threading.local()
         _scratch_pool_owners = []
@@ -927,6 +943,9 @@ def _reset_for_testing() -> None:
         _base_conf_captured = False
         _split_cap_live = False
     _region_depth.value = 0
+    _region_suppressed.value = False
+    _model_scope.value = None
+    _model_scope_global = None
     # nccl_memory latches a suspended set, a poison flag and a vote sequence that
     # outlive a single test just as stubbornly as the overrides above. Imported
     # lazily and guarded because it pulls in torch.distributed, which must not

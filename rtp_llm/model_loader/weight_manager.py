@@ -562,7 +562,18 @@ class WeightManager:
             compressors = [c for c in iter_compressors() if _owned(c)]
             attentions = [a for a in iter_attentions() if _owned(a)]
             fp8_linears = [linear for linear in iter_fp8_linears() if _owned(linear)]
-        except Exception:
+        except Exception as error:
+            if self._weights_loader.model_config.model_type in (
+                "deepseek_v4",
+                "deepseek_v4_mtp",
+                "deepseek_v4_dspark",
+            ):
+                # Computed tensors are not in ModelWeights, so the checkpoint
+                # coverage assertion cannot detect a skipped registry consumer.
+                raise RuntimeError(
+                    "reload_weights_from_loader: failed to collect DSV4 "
+                    "computed-weight consumers; refusing incomplete wake"
+                ) from error
             logging.info(
                 "reload_weights_from_loader: DSV4 computed-weight registries "
                 "unavailable; skipping mega/compressor/attention re-derivation",

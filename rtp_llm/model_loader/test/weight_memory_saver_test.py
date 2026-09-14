@@ -97,6 +97,40 @@ class PausableScratchTest(unittest.TestCase):
             wms.pausable_empty((16, 16))
             use_pool.assert_called_once_with(pool, device=torch.device("cuda:0"))
 
+    def test_unindexed_cuda_device_uses_the_current_device_for_pool(self):
+        import torch
+
+        for index in (0, 3):
+            for kwargs in ({}, {"device": "cuda"}, {"device": torch.device("cuda")}):
+                with self.subTest(index=index, kwargs=kwargs):
+                    pool = object()
+                    with (
+                        mock.patch.object(wms, "is_enabled", return_value=True),
+                        mock.patch.object(
+                            torch,
+                            "get_default_device",
+                            return_value=torch.device("cuda"),
+                        ),
+                        mock.patch.object(
+                            torch.cuda, "current_device", return_value=index
+                        ),
+                        mock.patch.object(
+                            wms, "_get_scratch_pool", return_value=pool
+                        ) as get_pool,
+                        mock.patch.object(
+                            torch.cuda,
+                            "use_mem_pool",
+                            return_value=contextlib.nullcontext(),
+                        ) as use_pool,
+                        mock.patch.object(torch, "empty") as empty,
+                    ):
+                        wms.pausable_empty((16, 16), **kwargs)
+                        get_pool.assert_called_once_with(index)
+                        use_pool.assert_called_once_with(
+                            pool, device=torch.device("cuda", index)
+                        )
+                        empty.assert_called_once_with((16, 16), **kwargs)
+
     def test_pool_is_created_once_and_selects_the_startup_backup_policy(self):
         import torch
 
@@ -557,6 +591,45 @@ class ExpandableCoexistenceTest(WeightMemorySaverTestBase):
         self.assertFalse(wms._expandable_active)
         self.assertEqual(self.toggles, [False])
 
+    def test_expandable_whitespace_and_duplicate_keys(self) -> None:
+        for setting, requested, normalized in (
+            (" expandable_segments : True ", True, True),
+            ("expandable_segments: True", True, True),
+            ("expandable_segments:False,expandable_segments: True", True, True),
+            ("expandable_segments:True,expandable_segments: False", False, True),
+            ("expandable_segments: False", False, True),
+            ("not_expandable_segments:True", False, False),
+            ("expandable_segments:true", False, False),
+            ("expandable_segments:1", False, False),
+        ):
+            with self.subTest(setting=setting):
+                wms._reset_for_testing()
+                self.toggles.clear()
+                conf = setting + ",large_segment_size_mb:1024"
+                os.environ["PYTORCH_CUDA_ALLOC_CONF"] = conf
+                wms._prepare_expandable_coexistence()
+                self.assertEqual(wms._expandable_requested, requested)
+                self.assertEqual(self.toggles, [False] if requested else [])
+                self.assertEqual(
+                    os.environ["PYTORCH_CUDA_ALLOC_CONF"],
+                    "large_segment_size_mb:1024" if normalized else conf,
+                )
+                if normalized:
+                    # TMS checks this substring, not PyTorch's last-key value.
+                    self.assertNotIn(
+                        "expandable_segments:True",
+                        os.environ["PYTORCH_CUDA_ALLOC_CONF"],
+                    )
+
+    def test_strip_preserves_other_allocator_array_settings(self) -> None:
+        self.assertEqual(
+            wms._alloc_conf_without_expandable(
+                "expandable_segments : True,roundup_power2_divisions:[256:1,512:2],"
+                "large_segment_size_mb:64,expandable_segments:False"
+            ),
+            "roundup_power2_divisions:[256:1,512:2],large_segment_size_mb:64",
+        )
+
     def test_prepare_runs_once(self) -> None:
         wms._prepare_expandable_coexistence()
         wms._prepare_expandable_coexistence()
@@ -864,6 +937,15 @@ class CollectiveReleaseSwitchTest(WeightMemorySaverTestBase):
         self.assertIsNone(wms._collective_release_override)
         # Back to env-driven (env is unset in this class's setUp).
         self.assertFalse(wms.release_collective_memory())
+
+    def test_reset_clears_region_and_model_scope(self) -> None:
+        wms._region_suppressed.value = True
+        wms._model_scope.value = 10
+        wms._model_scope_global = 20
+        wms._reset_for_testing()
+        self.assertFalse(wms._region_suppressed.value)
+        self.assertIsNone(wms._model_scope.value)
+        self.assertIsNone(wms._model_scope_global)
 
 
 class PausableAllocGuardTest(WeightMemorySaverTestBase):

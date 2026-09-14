@@ -6,11 +6,26 @@ No model or distributed group is needed; the test uses one idle CUDA device.
 
 import os
 import unittest
+from contextlib import contextmanager
 from unittest import mock
 
 import torch
 
 from rtp_llm.model_loader import weight_memory_saver as wms
+
+
+@contextmanager
+def capture_without_allocator_cleanup(graph, stream):
+    # torch.cuda.graph.__enter__ flushes the default allocator itself. Use the
+    # same capture API directly so the no-flush assertion tests our scratch
+    # allocation, rather than the convenience context's startup housekeeping.
+    torch.cuda.synchronize()
+    with torch.cuda.stream(stream):
+        graph.capture_begin()
+        try:
+            yield
+        finally:
+            graph.capture_end()
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires an idle CUDA device")
@@ -54,7 +69,7 @@ class PausableScratchGpuTest(unittest.TestCase):
                 torch.add(sentinel, weight)
             torch.cuda.current_stream().wait_stream(stream)
             allocation_graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(allocation_graph, stream=stream):
+            with capture_without_allocator_cleanup(allocation_graph, stream):
                 captured = wms.pausable_empty((1024,), device="cuda")
                 torch.add(sentinel, weight, out=captured)
             captured_pointer = captured.data_ptr()
@@ -76,7 +91,7 @@ class PausableScratchGpuTest(unittest.TestCase):
                 torch.add(sentinel, weight, out=graph_output)
             torch.cuda.current_stream().wait_stream(stream)
             graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, stream=stream):
+            with capture_without_allocator_cleanup(graph, stream):
                 torch.add(sentinel, weight, out=graph_output)
             graph.replay()
             torch.cuda.synchronize()
