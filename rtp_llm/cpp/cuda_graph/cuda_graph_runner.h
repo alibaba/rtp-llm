@@ -99,6 +99,9 @@ public:
     int            getCurrentRealGraphBs(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           initCapture() override;
+    size_t         cudaGraphMemoryBytes() const override {
+        return cuda_graph_memory_bytes_;
+    }
 
     // Factory methods for test: take GraphParams so callers can reuse the same struct
     static CudaGraphRunner* createForPrefill(py::object py_instance, GraphParams params);
@@ -180,6 +183,7 @@ private:
     at::TensorOptions                      options_cuda_int32_;
     at::TensorOptions                      options_cpu_int32_;
     at::TensorOptions                      options_cuda_float_;
+    size_t                                 cuda_graph_memory_bytes_{0};
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
     std::vector<std::string>                       kv_cache_group_tags_;

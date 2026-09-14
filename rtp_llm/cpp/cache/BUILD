@@ -2,6 +2,14 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "runtime_memory_sizing",
+    srcs = ["RuntimeMemorySizing.cc"],
+    hdrs = ["RuntimeMemorySizing.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cp_slot_mapper",
     srcs = ["CPSlotMapper.cc"],
     hdrs = ["CPSlotMapper.h"],
@@ -104,6 +112,56 @@ cc_library(
 )
 
 cc_library(
+    name = "warm_up_result",
+    hdrs = [
+        "WarmUpResult.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "memory_evaluation_sizing",
+    srcs = ["MemoryEvaluationHelper.cc"],
+    hdrs = ["MemoryEvaluationHelper.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_config",
+        ":runtime_memory_sizing",
+        ":warm_up_result",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:memory_status",
+    ],
+)
+
+cc_library(
+    name = "memory_evaluation_sizing_device",
+    srcs = ["MemoryEvaluationHelperDevice.cc"],
+    hdrs = ["MemoryEvaluationHelperDevice.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":memory_evaluation_sizing",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+    ] + torch_deps(),
+)
+
+cc_library(
+    name = "warmup_result_assembly",
+    srcs = ["WarmUpResultAssembly.cc"],
+    hdrs = ["WarmUpResultAssembly.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":warm_up_result",
+        "//rtp_llm/cpp/utils:memory_status",
+    ],
+)
+
+cc_library(
     name = "cache_types",
     srcs = [
         "Types.cc",
@@ -111,7 +169,6 @@ cc_library(
     hdrs = [
         "CacheConfig.h",
         "Types.h",
-        "WarmUpResult.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -122,6 +179,7 @@ cc_library(
         ":cache_group_type",
         ":cache_layout",
         ":kv_cache_specs",
+        ":warm_up_result",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
@@ -300,7 +358,6 @@ cc_library(
         "HybridConfigCreator.cc",
         "HybridPoolConfigCreator.cc",
         "KVCacheHashUtil.cc",
-        "MemoryEvaluationHelper.cc",
         "SingleConfigCreator.cc",
     ],
     hdrs = [
@@ -308,7 +365,6 @@ cc_library(
         "HybridConfigCreator.h",
         "HybridPoolConfigCreator.h",
         "KVCacheHashUtil.h",
-        "MemoryEvaluationHelper.h",
         "SingleConfigCreator.h",
     ],
     copts = copts(),
@@ -318,9 +374,9 @@ cc_library(
         ":cache_types",
         ":kv_cache_allocator",
         ":prefill_cache_hit_metrics_reporter",
+        ":memory_evaluation_sizing_device",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core:type_convert",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/metrics",
@@ -331,14 +387,6 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ] + torch_deps() + select({
-        "@//:using_cuda": [
-            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
-        ],
-        "@//:using_rocm": [
-            "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
-        ],
-        "//conditions:default": [],
-    }) + select({
         "//:using_remote_kv_cache": [
             ":storage_3fs",
         ],

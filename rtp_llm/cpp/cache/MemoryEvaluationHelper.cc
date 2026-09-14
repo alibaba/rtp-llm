@@ -1,31 +1,39 @@
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
+#include "rtp_llm/cpp/cache/RuntimeMemorySizing.h"
 
-#include <numeric>
+#include <cstdint>
+#include <exception>
+#include <limits>
 
-#if USING_CUDA
-#include <cuda_runtime.h>
-#elif USING_ROCM
-#include <hip/hip_runtime.h>
-#include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
-#endif
-
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#if USING_CUDA
-#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
-#endif
 
 namespace rtp_llm {
+
+namespace {
+constexpr size_t kBytesPerMiB        = 1024 * 1024;
+constexpr size_t kNoWarmupFloorBytes = 2048ULL * kBytesPerMiB;
+
+size_t checkedMiBToBytes(int64_t value, const char* name) {
+    RTP_LLM_CHECK_WITH_INFO(value >= 0, "%s must be non-negative, got %ld", name, value);
+    RTP_LLM_CHECK_WITH_INFO(static_cast<uint64_t>(value) <= std::numeric_limits<size_t>::max() / kBytesPerMiB,
+                            "%s is too large: %ld MiB",
+                            name,
+                            value);
+    return static_cast<size_t>(value) * kBytesPerMiB;
+}
+
+}  // namespace
 
 // Helper function to update memory size if below minimum requirement
 void MemoryEvaluationHelper::updateMemoryIfNeeded(size_t& current_size, size_t min_required, const char* scenario) {
     if (current_size < min_required) {
-        current_size = min_required;
-        RTP_LLM_LOG_INFO("%s needs at least %ld MiB memory for runtime by default, "
-                         "but only %ld MiB memory reserved. adjust to minimal value.",
+        const size_t original_size = current_size;
+        current_size               = min_required;
+        RTP_LLM_LOG_INFO("%s runtime memory reserve adjusted from %ld MiB to %ld MiB",
                          scenario,
-                         min_required / 1024 / 1024,
-                         current_size / 1024 / 1024);
+                         original_size / 1024 / 1024,
+                         min_required / 1024 / 1024);
     }
 }
 
@@ -39,32 +47,15 @@ rtp_llm::DataType MemoryEvaluationHelper::getDataTypeForCache(const ModelConfig&
     return dtype;
 }
 
-size_t MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const RuntimeConfig&     runtime_config,
-                                                           const ParallelismConfig& parallelism_config,
-                                                           const ModelConfig&       model_config,
-                                                           const std::optional<SpeculativeExecutionConfig>& sp_config) {
-    size_t reserve_runtime_mem_bytes = runtime_config.reserve_runtime_mem_mb * 1024 * 1024;
-    RTP_LLM_LOG_INFO("RuntimeConfig has reserve_runtime_mem_mb=%ld", runtime_config.reserve_runtime_mem_mb);
-
-    // Reserve at least 5% of total GPU memory for runtime (forward pass intermediates, cublas workspace, etc.)
-    // with a minimum floor of 2048 MiB. This is needed because KV cache is pre-allocated as a fixed block,
-    // and the remaining GPU memory must be sufficient for model forward passes.
-    size_t                  total_gpu_bytes = 0;
-    [[maybe_unused]] size_t free_gpu_bytes  = 0;
-#if USING_CUDA
-    check_cuda_value(cudaMemGetInfo(&free_gpu_bytes, &total_gpu_bytes));
-#elif USING_ROCM
-    ROCM_CHECK(hipMemGetInfo(&free_gpu_bytes, &total_gpu_bytes));
-#endif
-    const auto minimal_runtime_bytes = std::max(2048L * 1024 * 1024, (long)(total_gpu_bytes * 0.05));
-    if (reserve_runtime_mem_bytes < minimal_runtime_bytes) {
-        RTP_LLM_LOG_INFO("tp_size %d needs at least %ld MiB memory for runtime by default, "
-                         "but only %ld MiB reserved memory set by config. adjust to minimal value.",
-                         parallelism_config.get_attn_tp_size(),
-                         minimal_runtime_bytes / 1024 / 1024,
-                         reserve_runtime_mem_bytes / 1024 / 1024);
-        reserve_runtime_mem_bytes = minimal_runtime_bytes;
-    }
+size_t
+MemoryEvaluationHelper::getConfiguredRuntimeMemorySize(const RuntimeConfig&                             runtime_config,
+                                                       const ModelConfig&                               model_config,
+                                                       const std::optional<SpeculativeExecutionConfig>& sp_config) {
+    // The C++ field drops the trailing "r" of the CLI flag; operator-facing text carries both
+    // spellings so either one greps.
+    static constexpr const char* kReserveKnobName = "reserve_runtime_mem_mb (--reserver_runtime_mem_mb)";
+    size_t reserve_runtime_mem_bytes = checkedMiBToBytes(runtime_config.reserve_runtime_mem_mb, kReserveKnobName);
+    RTP_LLM_LOG_INFO("RuntimeConfig has %s=%ld", kReserveKnobName, runtime_config.reserve_runtime_mem_mb);
 
     if (model_config.mm_model_config.is_multimodal) {
         const auto minimal_runtime_required = 2L * 1024 * 1024 * 1024;  // 2 GiB
@@ -82,59 +73,73 @@ size_t MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const RuntimeConfig& 
 size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&                             runtime_config,
                                                     const KVCacheConfig&                             kv_cache_config,
                                                     const ModelConfig&                               model_config,
-                                                    const ParallelismConfig&                         parallelism_config,
+                                                    const MemoryStatus&                              gpu_memory_status,
                                                     const std::optional<WarmUpResult>&               warm_up_result,
                                                     const std::optional<SpeculativeExecutionConfig>& sp_config) {
-    size_t device_reserved_memory_bytes = getGpuExecStatus().device_memory_status.available_bytes;
-    size_t runtime_required_bytes       = 0;
+    const auto&  gpu_mem               = gpu_memory_status;
+    const size_t free_gpu_memory_bytes = gpu_mem.available_bytes;
 
     if (kv_cache_config.kv_cache_mem_mb > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache memory size %ld MiB",
                          kv_cache_config.kv_cache_mem_mb);
-        return kv_cache_config.kv_cache_mem_mb * 1024 * 1024;
+        return checkedMiBToBytes(kv_cache_config.kv_cache_mem_mb, "kv_cache_mem_mb");
     }
 
-    size_t env_runtime_required_bytes = MemoryEvaluationHelper::getDefaultRuntimeMemorySize(
-        runtime_config, parallelism_config, model_config, sp_config);
+    size_t configured_reserve_bytes =
+        MemoryEvaluationHelper::getConfiguredRuntimeMemorySize(runtime_config, model_config, sp_config);
 
+    size_t transient_peak_headroom_bytes = 0;
+    size_t cuda_graph_memory_bytes       = 0;
+    bool   has_trusted_measurement       = false;
     if (warm_up_result) {
-        if (device_reserved_memory_bytes != warm_up_result->device_reserved_bytes) {
-            RTP_LLM_LOG_WARNING("device reserved memory bytes %ld when create config does not equal to "
-                                "the amount when warm up %ld. take min value.",
-                                device_reserved_memory_bytes,
-                                warm_up_result->device_reserved_bytes);
-            device_reserved_memory_bytes =
-                std::min(device_reserved_memory_bytes, warm_up_result->device_reserved_bytes);
+        if (warm_up_result->forward_measurement_trusted) {
+            transient_peak_headroom_bytes = warm_up_result->transient_peak_headroom_bytes;
+            has_trusted_measurement       = true;
+        }
+        if (warm_up_result->cuda_graph_measurement_trusted) {
+            cuda_graph_memory_bytes = warm_up_result->cuda_graph_memory_bytes;
+            has_trusted_measurement = true;
         }
 
-        runtime_required_bytes = std::max(env_runtime_required_bytes, warm_up_result->max_used_memory);
-
-        RTP_LLM_LOG_INFO(
-            "devices reserved %ld MiB memory, warm up consumed %ld MiB max memory, env runtime memory %ld MiB, final runtime memory %ld MiB",
-            device_reserved_memory_bytes / 1024 / 1024,
-            warm_up_result->max_used_memory / 1024 / 1024,
-            env_runtime_required_bytes / 1024 / 1024,
-            runtime_required_bytes / 1024 / 1024);
-    } else {
-        runtime_required_bytes = env_runtime_required_bytes;
-        RTP_LLM_LOG_INFO("warm up result not available, use default runtime memory size %ld MiB",
-                         runtime_required_bytes / 1024 / 1024);
+        if (has_trusted_measurement) {
+            const size_t init_free_memory_bytes = warm_up_result->init_free_memory_bytes;
+            RTP_LLM_CHECK_WITH_INFO(init_free_memory_bytes >= free_gpu_memory_bytes,
+                                    "Error in memory profiling: initial free memory %zu MiB is less than current free "
+                                    "memory %zu MiB. This indicates that another process released GPU memory during "
+                                    "profiling.",
+                                    init_free_memory_bytes / kBytesPerMiB,
+                                    free_gpu_memory_bytes / kBytesPerMiB);
+            const size_t total_consumed_bytes = init_free_memory_bytes - free_gpu_memory_bytes;
+            RTP_LLM_LOG_INFO("memory profiling diagnostic: base %zu MiB, latest free memory %zu MiB, "
+                             "total consumed (persistent) %zu MiB",
+                             init_free_memory_bytes / kBytesPerMiB,
+                             free_gpu_memory_bytes / kBytesPerMiB,
+                             total_consumed_bytes / kBytesPerMiB);
+        }
     }
 
-    size_t sample_need_mem =
-        (size_t)runtime_config.max_generate_batch_size * model_config.vocab_size * 4 * 8;  // just estimated value
-    RTP_LLM_LOG_INFO("sampler needs %ld MiB memory, model runtime needs %ld MiB memory, take max value.",
-                     sample_need_mem / 1024 / 1024,
-                     runtime_required_bytes / 1024 / 1024);
-    runtime_required_bytes = std::max(sample_need_mem, runtime_required_bytes);
+    const double             safety_ratio = kv_cache_config.runtime_mem_safety_ratio;
+    RuntimeMemorySizingInput sizing_input;
+    sizing_input.has_memory_profile            = has_trusted_measurement;
+    sizing_input.configured_reserve_bytes      = configured_reserve_bytes;
+    sizing_input.transient_peak_headroom_bytes = transient_peak_headroom_bytes;
+    sizing_input.cuda_graph_memory_bytes       = cuda_graph_memory_bytes;
+    sizing_input.total_gpu_bytes               = gpu_mem.total_bytes;
+    sizing_input.safety_ratio                  = safety_ratio;
+    sizing_input.no_warmup_floor_bytes         = kNoWarmupFloorBytes;
+    size_t runtime_headroom_bytes              = 0;
+    try {
+        runtime_headroom_bytes = calculateRuntimeMemorySizing(sizing_input);
+    } catch (const std::exception& e) { RTP_LLM_FAIL("%s", e.what()); }
 
-    RTP_LLM_CHECK_WITH_INFO(device_reserved_memory_bytes > runtime_required_bytes,
-                            "device reserved memory %ld  MiB is less than runtime required memory %ld MiB",
-                            device_reserved_memory_bytes / 1024 / 1024,
-                            runtime_required_bytes / 1024 / 1024);
+    RTP_LLM_CHECK_WITH_INFO(free_gpu_memory_bytes > runtime_headroom_bytes,
+                            "current free memory %zu MiB is less than runtime headroom %zu MiB",
+                            free_gpu_memory_bytes / 1024 / 1024,
+                            runtime_headroom_bytes / 1024 / 1024);
 
-    const auto kv_cache_mem_size = device_reserved_memory_bytes - runtime_required_bytes;
-    RTP_LLM_LOG_INFO("cache config final decided kv cache memory size %ld MiB", kv_cache_mem_size / 1024 / 1024);
+    auto kv_cache_mem_size = free_gpu_memory_bytes - runtime_headroom_bytes;
+
+    RTP_LLM_LOG_INFO("cache config final decided kv cache memory size %zu MiB", kv_cache_mem_size / 1024 / 1024);
     return kv_cache_mem_size;
 }
 

@@ -28,8 +28,9 @@ EVENT_PICKLE_FIELDS = (
     "kv_cache_event_host_ip_port",
 )
 
-CURRENT_STATE_SIZE = 62
+CURRENT_STATE_SIZE = 63
 EVENT_FIELD_OFFSET = 57
+EVENT_FIELD_END = EVENT_FIELD_OFFSET + len(EVENT_PICKLE_FIELDS)
 
 
 class KVCacheConfigPickleTest(TestCase):
@@ -37,12 +38,14 @@ class KVCacheConfigPickleTest(TestCase):
         config = KVCacheConfig()
         for name, value in KV_CACHE_EVENT_FIELD_VALUES.items():
             setattr(config, name, value)
+        config.runtime_mem_safety_ratio = 0.25
 
         self.assertEqual(CURRENT_STATE_SIZE, len(config.__getstate__()))
         restored = pickle.loads(pickle.dumps(config))
 
         for name, value in KV_CACHE_EVENT_FIELD_VALUES.items():
             self.assertEqual(value, getattr(restored, name), name)
+        self.assertEqual(0.25, restored.runtime_mem_safety_ratio)
 
     def test_event_pickle_block_follows_declaration_order(self):
         config = KVCacheConfig()
@@ -51,7 +54,7 @@ class KVCacheConfigPickleTest(TestCase):
 
         self.assertEqual(
             tuple(KV_CACHE_EVENT_FIELD_VALUES[name] for name in EVENT_PICKLE_FIELDS),
-            config.__getstate__()[EVENT_FIELD_OFFSET:],
+            config.__getstate__()[EVENT_FIELD_OFFSET:EVENT_FIELD_END],
         )
 
     def test_legacy_54_element_state_uses_event_defaults(self):
@@ -107,7 +110,7 @@ class KVCacheConfigPickleTest(TestCase):
 
     def test_unknown_state_sizes_are_rejected(self):
         current_state = KVCacheConfig().__getstate__()
-        for size in (42, 44, 53, 55, 56, 58, CURRENT_STATE_SIZE - 1):
+        for size in (42, 44, 53, 55, 56, 58, 61):
             with self.subTest(size=size), self.assertRaisesRegex(
                 RuntimeError, "Invalid state"
             ):
