@@ -1913,7 +1913,12 @@ public final class JavaMockEngineCluster {
                 // error on the dispatch RPC, code MALLOC_FAILED=602 in the
                 // EnqueueBatch flavor; generate_stream carries it in the
                 // gRPC status description).
-                if (acquireBlockLease(requestId, shape) == null) {
+                boolean fifo = performance.prefillBatchPolicy() != null;
+                // FIFO initializes P KV at candidate selection. Reject only
+                // impossible standalone requests here; transient shortage parks.
+                boolean impossible = fifo && ((long) needBlocks(shape) + cache.reserveBlocks() > cache.totalBlocks()
+                        || shape.inputLen() >= performance.prefillBatchPolicy().maxSeqLen());
+                if (impossible || (!fifo && acquireBlockLease(requestId, shape) == null)) {
                     prefillLackMemRejects.increment();
                     responseQueues.remove(requestId);
                     requestStates.put(requestId, "rejected");
@@ -3010,6 +3015,9 @@ public final class JavaMockEngineCluster {
          * (unbounded) stays 0.
          */
         private int directWaitingRequestCap() {
+            if (performance.prefillBatchPolicy() != null) {
+                return performance.prefillBatchPolicy().maxWaitingRequests();
+            }
             int batchCap = performance.maxWaitingPrefillBatches();
             return batchCap > 0 ? batchCap * performance.directBatchSizeMax() : 0;
         }
@@ -3061,11 +3069,123 @@ public final class JavaMockEngineCluster {
 
         /** Regroup is ON when at least one budget dimension is configured. */
         private boolean prefillRegroupEnabled() {
-            return performance.maxBatchTokens() > 0 || performance.maxBatchRequests() > 0;
+            return performance.prefillBatchPolicy() != null
+                    || performance.maxBatchTokens() > 0 || performance.maxBatchRequests() > 0;
+        }
+
+        private final AtomicBoolean fifoDrainScheduled = new AtomicBoolean();
+
+        /** Wake on a real P lease release, not on a batching timeout. */
+        private void wakeFifoOnCapacityRelease() {
+            if (performance.prefillBatchPolicy() == null
+                    || roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
+                    || shuttingDown || stopped || !fifoDrainScheduled.compareAndSet(false, true)) return;
+            try {
+                scheduler.execute(() -> {
+                    List<BatchMember> selected = List.of();
+                    synchronized (prefillQueueLock) {
+                        fifoDrainScheduled.set(false);
+                        if (!shuttingDown && !stopped && activePrefillBatches.get() < maxPrefillConcurrency) {
+                            selected = pollFifoBatchLocked(null, null);
+                            if (!selected.isEmpty()) {
+                                activePrefillBatches.incrementAndGet();
+                                activePrefillRequests.addAndGet(selected.size());
+                            }
+                        }
+                    }
+                    if (!selected.isEmpty()) runPrefillBatch(selected);
+                });
+            } catch (java.util.concurrent.RejectedExecutionException shuttingDownExecutor) {
+                fifoDrainScheduled.set(false);
+            }
+        }
+
+        private MockPerformanceModel.RequestShape selectDirectFifoCandidate(
+                MockPerformanceModel.RequestShape queued, MockPrefillBatchPolicy.Budget budget) {
+            long id = queued.input().getRequestId();
+            synchronized (completionLock) {
+                if (!runningTasks.containsKey(id) || cancelledRequests.containsKey(id)) return null;
+                int initializedCap = performance.prefillBatchPolicy().maxInitedKvStreams();
+                if (initializedCap > 0 && activeBlockLeases.size() >= initializedCap) return null;
+                synchronized (cache) {
+                    // A preceding batch may have populated or evicted this prefix
+                    // since enqueue. Price the batch using the execution-time hit.
+                    int hits = cache.prefixHitBlocks(queued.blockKeys());
+                    var current = new MockPerformanceModel.RequestShape(queued.input(), queued.inputLen(),
+                            queued.outputLen(), queued.blockKeys(),
+                            Math.min((long) hits * performance.blockSize(), queued.inputLen()), hits, queued.nativeKeys());
+                    if (!budget.fits(current.inputLen(), current.hitTokens())) return null;
+                    if (acquireBlockLease(id, current) == null) return null;
+                    cacheKeyHits.add(current.hitBlocks() - queued.hitBlocks());
+                    return current;
+                }
+            }
+        }
+
+        /** Production FIFO candidate gate: do not consume a candidate that does
+         * not fit. Keep scanning, retaining skipped requests in their original
+         * queue/order. No timer delays an idle engine to manufacture a batch.
+         */
+        private List<BatchMember> pollFifoBatchLocked(
+                List<BatchMember> arrivals,
+                java.util.function.Consumer<List<BatchMember>> tailSink) {
+            var budget = performance.prefillBatchPolicy().newBudget();
+            List<BatchMember> selected = new ArrayList<>();
+            var direct = directPrefillQueue.iterator();
+            while (direct.hasNext()) {
+                var shape = direct.next();
+                boolean alive = runningTasks.containsKey(shape.input().getRequestId());
+                var candidate = alive ? selectDirectFifoCandidate(shape, budget) : null;
+                if (!alive || candidate != null) {
+                    direct.remove();
+                    waitingPrefillRequests.decrementAndGet();
+                    if (alive) {
+                        selected.add(new BatchMember(candidate, -1L, 0));
+                        budget.add(candidate.inputLen(), candidate.hitTokens());
+                    }
+                }
+            }
+            List<PrefillPendingBatch> remaining = new ArrayList<>();
+            while (!prefillPendingQueue.isEmpty()) {
+                var batch = prefillPendingQueue.pollFirst();
+                List<MockPerformanceModel.RequestShape> skipped = new ArrayList<>();
+                for (var shape : batch.shapes()) {
+                    if (!runningTasks.containsKey(shape.input().getRequestId())) {
+                        waitingPrefillRequests.decrementAndGet();
+                    } else if (budget.fits(shape.inputLen(), shape.hitTokens())) {
+                        selected.add(new BatchMember(shape, batch.batchId(), batch.dpRank()));
+                        budget.add(shape.inputLen(), shape.hitTokens());
+                        waitingPrefillRequests.decrementAndGet();
+                    } else {
+                        skipped.add(shape);
+                    }
+                }
+                if (!skipped.isEmpty()) remaining.add(new PrefillPendingBatch(
+                        List.copyOf(skipped), batch.batchId(), batch.dpRank()));
+            }
+            prefillPendingQueue.addAll(remaining);
+            if (arrivals != null) {
+                List<BatchMember> skipped = new ArrayList<>();
+                for (var member : arrivals) {
+                    var shape = member.shape();
+                    if (!runningTasks.containsKey(shape.input().getRequestId())) continue;
+                    var candidate = member.batchId() < 0 ? selectDirectFifoCandidate(shape, budget)
+                            : (budget.fits(shape.inputLen(), shape.hitTokens()) ? shape : null);
+                    if (candidate != null) {
+                        selected.add(new BatchMember(candidate, member.batchId(), member.dpRank()));
+                        budget.add(candidate.inputLen(), candidate.hitTokens());
+                    } else skipped.add(member);
+                }
+                if (!skipped.isEmpty()) {
+                    waitingPrefillRequests.addAndGet(skipped.size());
+                    tailSink.accept(skipped);
+                }
+            }
+            return selected;
         }
 
         /**
-         * Budget gate, production caliber: binds only from the SECOND
+         * Legacy mock budget gate (retained for existing case configurations): binds only from the SECOND
          * admitted member on (the first member always admits — a single
          * request larger than the whole budget still runs, matching
          * FIFOScheduler admitting the first waiting stream whenever the
@@ -3123,6 +3243,9 @@ public final class JavaMockEngineCluster {
         private List<BatchMember> pollRegroupBatchLocked(
                 List<BatchMember> arrivals,
                 java.util.function.Consumer<List<BatchMember>> tailSink) {
+            if (performance.prefillBatchPolicy() != null) {
+                return pollFifoBatchLocked(arrivals, tailSink);
+            }
             final int tokenBudget = performance.maxBatchTokens();
             final int requestCap = performance.maxBatchRequests();
             List<BatchMember> exec = new ArrayList<>();
@@ -3265,6 +3388,10 @@ public final class JavaMockEngineCluster {
                 if (shuttingDown) {
                     return false;
                 }
+                // FIFO can also park on KV while no execution batch is active.
+                // Its request queue must remain bounded in that state too.
+                if (performance.prefillBatchPolicy() != null && directWaitingRequestCap() > 0
+                        && directPrefillQueue.size() >= directWaitingRequestCap()) return false;
                 if (activePrefillBatches.get() >= maxPrefillConcurrency) {
                     int cap = directWaitingRequestCap();
                     if (cap > 0 && directPrefillQueue.size() >= cap) {
@@ -3293,6 +3420,10 @@ public final class JavaMockEngineCluster {
                     regrouped = pollRegroupBatchLocked(
                             List.of(new BatchMember(shape, -1L, 0)),
                             tail -> {
+                                if (performance.prefillBatchPolicy() != null) {
+                                    for (var member : tail) directPrefillQueue.addLast(member.shape());
+                                    return;
+                                }
                                 for (int i = tail.size() - 1; i >= 0; i--) {
                                     directPrefillQueue.addFirst(tail.get(i).shape());
                                 }
@@ -3599,7 +3730,7 @@ public final class JavaMockEngineCluster {
                                 activePrefillRequests.addAndGet(directBatch.size());
                             }
                         }
-                        if (directBatch == null && nextMembers == null) {
+                        if (directBatch == null && nextMembers == null && !prefillRegroupEnabled()) {
                             while (!prefillPendingQueue.isEmpty()) {
                                 PrefillPendingBatch candidate = prefillPendingQueue.peekFirst();
                                 // Skip batches whose every member was cancelled while queued
@@ -4799,7 +4930,7 @@ public final class JavaMockEngineCluster {
          */
         private int needBlocks(MockPerformanceModel.RequestShape shape) {
             List<Long> keys = shape.blockKeys();
-            if (!keys.isEmpty() && !shape.nativeKeys()) {
+            if (!keys.isEmpty() && !shape.nativeKeys() && performance.prefillBatchPolicy() == null) {
                 return keys.size();
             }
             return (shape.inputLen() + seqSizePerBlock - 1) / seqSizePerBlock;
@@ -4994,7 +5125,9 @@ public final class JavaMockEngineCluster {
             if (lease == null) {
                 return false;
             }
-            return cache.admit(lease, shape.blockKeys());
+            boolean changed = cache.admit(lease, shape.blockKeys());
+            wakeFifoOnCapacityRelease();
+            return changed;
         }
 
         /** Cancel path: return the lease's blocks to the pool without LRU handover. */
@@ -5006,6 +5139,7 @@ public final class JavaMockEngineCluster {
                 if (cache.retentionEvictions() != beforeEvictions) {
                     cacheVersion.incrementAndGet();
                 }
+                wakeFifoOnCapacityRelease();
             }
         }
 

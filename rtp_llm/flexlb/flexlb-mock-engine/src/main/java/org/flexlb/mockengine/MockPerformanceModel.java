@@ -217,6 +217,9 @@ final class MockPerformanceModel {
     // the override value follows the same semantics as the JSON field
     // (0 = unbounded, > 0 = cap on queued prefill batches).
     private volatile Integer overrideMaxWaitingPrefillBatches;
+    private MockPrefillBatchPolicy prefillBatchPolicy;
+
+    MockPrefillBatchPolicy prefillBatchPolicy() { return prefillBatchPolicy; }
 
     private MockPerformanceModel(int blockSize,
                                  double sleepScale,
@@ -265,6 +268,7 @@ final class MockPerformanceModel {
                 tokensPerStep, decodeReserveStep, decodeScale, reportQueuedAsKvAllocated, jitterPct);
         // Explicit overrides installed before startup are part of that engine's initial settings.
         copy.eosModel = eosModel;
+        copy.prefillBatchPolicy = prefillBatchPolicy;
         copy.nativeTokenCacheKeys = nativeTokenCacheKeys;
         copy.overrideFixedPrefillMs = overrideFixedPrefillMs;
         copy.overrideDecodeStepMs = overrideDecodeStepMs;
@@ -356,6 +360,7 @@ final class MockPerformanceModel {
                 decode.path("scale").asDouble(1.0),
                 reportQueuedAsKvAllocated, jitterPct);
         model.eosModel = MockEosModel.load(decode.path("eos"));
+        model.prefillBatchPolicy = MockPrefillBatchPolicy.load(prefill.path("fifo"));
         return model;
     }
 

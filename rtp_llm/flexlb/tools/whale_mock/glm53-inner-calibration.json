@@ -29,8 +29,8 @@
     "eos_caveat": "Geometric mean is a starting point, capped by each unchanged request output limit; does not reproduce the full observed output distribution."
   },
   "bundle_overrides": {
-    "prefill": 42,
-    "decode": 160,
+    "prefill": 44,
+    "decode": 144,
     "mock_heap": "32g",
     "block_size": 64,
     "prefill_block_size": 512,
@@ -46,8 +46,17 @@
     "prefill": {
       "scale": 1,
       "max_waiting_batches": 256,
-      "direct_batch_size_max": 1,
-      "max_batch_requests": 1
+      "fifo": {
+        "max_requests": 64,
+        "max_batch_tokens": 512000,
+        "max_batch_kv_len": 3145728,
+        "max_seq_len": 1048576,
+        "cp_size": 8,
+        "force_single": false,
+        "max_batch_tokens_without_cache": 0,
+        "max_waiting_requests": 256,
+        "max_inited_kv_streams": 128
+      }
     },
     "decode": {
       "scale": 1,
