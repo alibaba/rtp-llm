@@ -390,7 +390,11 @@ def build_remote_setup_command(rootdir: Path, *, setup_env: Optional[dict] = Non
         {str(key): str(value) for key, value in (setup_env or {}).items()}
     )
     setup_env_assignments = _shell_env_assignments(
-        {str(key): str(value) for key, value in (setup_env or {}).items()}
+        {
+            str(key): str(value)
+            for key, value in (setup_env or {}).items()
+            if key != "LD_LIBRARY_PATH"
+        }
     )
     prepare_env_prefix = f"{setup_env_assignments} " if setup_env_assignments else ""
     setup_env_diag = (
@@ -465,7 +469,11 @@ def build_remote_setup_command(rootdir: Path, *, setup_env: Optional[dict] = Non
         + 'echo ">>>PHASE:pip_install_start $(date +%s)"; '
         "mkdir -p logs; "
         "if [ -f internal_source/ci/prepare_venv.py ]; then "
-        f"  {prepare_env_prefix}/opt/conda310/bin/python internal_source/ci/prepare_venv.py "
+        # Dependency installers invoke system Git, whose Kerberos libraries
+        # cannot use Conda's OpenSSL (EVP_KDF_ctrl / OPENSSL_1_1_1b). Keep the
+        # test runtime library path in the parent shell, not the installer.
+        f"  env -u LD_LIBRARY_PATH {prepare_env_prefix}"
+        "/opt/conda310/bin/python internal_source/ci/prepare_venv.py "
         ">logs/prepare_venv.out 2>logs/prepare_venv.err & PV_PID=$!; "
         "  (while kill -0 \"$PV_PID\" 2>/dev/null; do "
         '    if [ -n "${RTP_REMOTE_HEARTBEAT_FILE:-}" ]; then '

@@ -1,4 +1,8 @@
+import json
+import os
+import shlex
 import subprocess
+import sys
 import tarfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -1100,6 +1104,45 @@ def test_remote_setup_exports_profile_env():
         "RTP_BAZEL_CONFIG=--config=custom /opt/conda310/bin/python "
         "internal_source/ci/prepare_venv.py"
     ) in command
+
+
+@pytest.mark.parametrize("profile_library_path", [None, "/profile/rocm/lib"])
+def test_dependency_install_does_not_inherit_runtime_libraries(profile_library_path):
+    setup_env = {
+        "RTP_BAZEL_CONFIG": "--config=rocm",
+        "RTP_LLM_REQUIRE_ACCELERATOR": "1",
+    }
+    if profile_library_path:
+        setup_env["LD_LIBRARY_PATH"] = profile_library_path
+    command = remote_exec_rtp.build_remote_setup_command(
+        Path("."), setup_env=setup_env
+    )
+    invocation = command.split(
+        "if [ -f internal_source/ci/prepare_venv.py ]; then ", 1
+    )[1].split(">logs/prepare_venv.out", 1)[0]
+    args = shlex.split(invocation)
+    python_index = args.index("/opt/conda310/bin/python")
+    # Run an environment probe in place of the installer, with the exact
+    # generated env/assignment arguments used by the remote worker.
+    args[python_index:] = [
+        sys.executable,
+        "-c",
+        "import json, os; print(json.dumps({k: os.getenv(k) for k in "
+        "['LD_LIBRARY_PATH', 'RTP_BAZEL_CONFIG', 'RTP_LLM_REQUIRE_ACCELERATOR']}))",
+    ]
+    runtime_env = dict(os.environ, LD_LIBRARY_PATH="/opt/conda310/lib:/opt/rocm/lib")
+    result = subprocess.run(
+        args, env=runtime_env, text=True, capture_output=True, check=True
+    )
+    assert json.loads(result.stdout) == {
+        "LD_LIBRARY_PATH": None,
+        "RTP_BAZEL_CONFIG": "--config=rocm",
+        "RTP_LLM_REQUIRE_ACCELERATOR": "1",
+    }
+    assert runtime_env["LD_LIBRARY_PATH"] == "/opt/conda310/lib:/opt/rocm/lib"
+    assert "export LD_LIBRARY_PATH=" in command
+    if profile_library_path:
+        assert f"export LD_LIBRARY_PATH={profile_library_path};" in command
 
 
 def test_sm100_markexpr_prefers_explicit_arm_pool():
