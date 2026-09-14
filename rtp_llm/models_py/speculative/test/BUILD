@@ -38,3 +38,30 @@ py_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+py_test(
+    name = "test_qwen3_dflash",
+    srcs = ["test_qwen3_dflash.py"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:models",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    # The module imports librtp_compute_ops (via rtp_llm.ops.compute_ops and
+    # the DFlash triton wrappers), which fails at import time on the default
+    # CPU worker pool; pin to the same GPU pool as test_qwen3_dspark so the
+    # target's cases are reachable there instead of failing the whole target
+    # (and the test gate) on CPU lanes.
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "test_qwen3_dflash_weights",
+    srcs = ["test_qwen3_dflash_weights.py"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:models",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)

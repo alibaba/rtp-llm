@@ -141,6 +141,11 @@ class ModelConfig(CppModelConfig):
         "dspark_target_layer_ids",
         "dspark_markov_rank",
         "dspark_sample_from_anchor",
+        "dflash_mask_token_id",
+        "dflash_target_layer_ids",
+        "dflash_layer_types",
+        "dflash_sliding_window",
+        "dflash_native_block_size",
         "capture_aux_hidden_layer_ids",
         "mtp_layer_offset",
         "normalize_lm_head_weight",
@@ -744,6 +749,14 @@ class ModelConfig(CppModelConfig):
         self.dspark_target_layer_ids: Optional[list[int]] = None
         self.dspark_markov_rank: Optional[int] = None
         self.dspark_sample_from_anchor: bool = True
+        # DFlash V1 checkpoint metadata.  Its runtime proposal width remains
+        # the engine's ``gen_num_per_cycle``; the native checkpoint block size
+        # is retained only for contract validation and provenance.
+        self.dflash_mask_token_id: Optional[int] = None
+        self.dflash_target_layer_ids: Optional[list[int]] = None
+        self.dflash_layer_types: Optional[list[str]] = None
+        self.dflash_sliding_window: Optional[int] = None
+        self.dflash_native_block_size: Optional[int] = None
         # Target-side decoder layer outputs exported to the DSpARK draft.
         self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
         self.mtp_layer_offset: int = 0
