@@ -7,12 +7,46 @@ import sys
 from unittest import TestCase, main
 from unittest.mock import patch
 
+from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_ENV_CASES
 from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
-from rtp_llm.config.test.kv_cache_event_test_values import (
-    KV_CACHE_EVENT_ENV_CASES,
-)
+
+def _shared_kvcm_client_config():
+    return json.dumps(
+        {
+            "": {
+                "enable_vipserver": False,
+                "vipserver_domain": "",
+                "instance_group": "epd",
+                "instance_id": "model-a",
+                "address": ["127.0.0.1:19001", "127.0.0.2:19001"],
+                "block_size": 128,
+                "location_spec_infos": {"tp0": 4096},
+                "location_spec_groups": {},
+                "meta_channel_config": {
+                    "retry_time": 3,
+                    "connection_timeout": 6000,
+                    "call_timeout": 5000,
+                },
+                "sdk_config": {
+                    "thread_num": 4,
+                    "queue_size": 2000,
+                    "sdk_backend_configs": [],
+                    "timeout_config": {
+                        "put_timeout_ms": 12000,
+                        "get_timeout_ms": 12000,
+                    },
+                },
+                "model_deployment": {
+                    "model_name": "model-a",
+                    "dtype": "fp16",
+                    "tp_size": 1,
+                    "user_data": "epd-model-a",
+                },
+            }
+        }
+    )
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
@@ -722,6 +756,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(cfg.vit_config.gpu_batch_wait_ms, 500)
 
     def test_kvcm_transport_vit_args_parse(self):
+        from rtp_llm.config.mm_kvcm_config import configure_mm_kvcm_client
         from rtp_llm.config.py_config_modules import (
             MM_TRANSPORT_MODE_GRPC,
             MM_TRANSPORT_MODE_KVCM,
@@ -745,24 +780,14 @@ class ServerArgsSetTest(TestCase):
             VitConfig.DEFAULT_MM_TIMEOUT_MS + 60 * 1000,
         )
 
+        shared_client_config = _shared_kvcm_client_config()
+
         parser.parse_args(
             [
                 "--mm_transport_mode",
                 "kvcm",
-                "--mm_kvcm_addresses",
-                "127.0.0.1:19001,127.0.0.2:19001",
-                "--mm_kvcm_instance_id",
-                "model-a",
-                "--mm_kvcm_instance_group",
-                "epd-emb",
-                "--mm_kvcm_user_data",
-                "epd-model-a",
-                "--mm_kvcm_transfer_client_config",
-                '{"type":"local"}',
-                "--mm_kvcm_call_timeout_ms",
-                "5000",
-                "--mm_kvcm_write_timeout_seconds",
-                "45",
+                "--reco_client_config",
+                shared_client_config,
                 "--mm_kvcm_object_gc_timeout_ms",
                 "240000",
                 "--mm_kvcm_max_object_bytes",
@@ -775,23 +800,68 @@ class ServerArgsSetTest(TestCase):
                 "67108864",
             ]
         )
+        configure_mm_kvcm_client(cfg, environ={})
 
         self.assertEqual(transport.mode, MM_TRANSPORT_MODE_KVCM)
         self.assertEqual(
             transport.kvcm.addresses,
             ["127.0.0.1:19001", "127.0.0.2:19001"],
         )
-        self.assertEqual(transport.kvcm.instance_id, "model-a")
-        self.assertEqual(transport.kvcm.instance_group, "epd-emb")
+        self.assertEqual(transport.kvcm.instance_id, "kve_model-a")
+        self.assertEqual(transport.kvcm.instance_group, "kve_epd")
         self.assertEqual(transport.kvcm.user_data, "epd-model-a")
-        self.assertEqual(transport.kvcm.transfer_client_config, '{"type":"local"}')
+        transfer_config = json.loads(transport.kvcm.transfer_client_config)
+        self.assertEqual(transfer_config["instance_id"], "kve_model-a")
+        self.assertEqual(transfer_config["instance_group"], "kve_epd")
+        self.assertEqual(transfer_config["block_size"], 1)
+        self.assertEqual(transfer_config["location_spec_infos"], {"value": 1})
         self.assertEqual(transport.kvcm.call_timeout_ms, 5_000)
-        self.assertEqual(transport.kvcm.write_timeout_seconds, 45)
+        self.assertEqual(transport.kvcm.write_timeout_seconds, 30)
         self.assertEqual(transport.kvcm.object_gc_timeout_ms, 240_000)
         self.assertEqual(transport.kvcm.max_object_bytes, 1_048_576)
         self.assertEqual(transport.kvcm.max_receipt_bytes, 8_388_608)
         self.assertEqual(transport.kvcm.max_pending_objects, 4_096)
         self.assertEqual(transport.kvcm.max_pending_bytes, 67_108_864)
+
+    def test_setup_args_derives_kvcm_from_shared_client_config(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            config = server_args.setup_args(
+                [
+                    "--mm_transport_mode",
+                    "kvcm",
+                    "--reco_client_config",
+                    _shared_kvcm_client_config(),
+                ]
+            )
+
+        kvcm = config.vit_config.output_transport.kvcm
+        self.assertEqual(kvcm.instance_group, "kve_epd")
+        self.assertEqual(kvcm.instance_id, "kve_model-a")
+        self.assertEqual(kvcm.addresses, ["127.0.0.1:19001", "127.0.0.2:19001"])
+        self.assertEqual(kvcm.user_data, "epd-model-a")
+        self.assertEqual(kvcm.call_timeout_ms, 5000)
+        self.assertEqual(kvcm.write_timeout_seconds, 30)
+
+    def test_setup_args_default_transport_ignores_kvcm_only_config(self):
+        from rtp_llm.config.py_config_modules import MM_TRANSPORT_MODE_GRPC
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(
+            os.environ,
+            {
+                "RECO_CLIENT_CONFIG": "not-json",
+                "MM_KVCM_INSTANCE_ID": "removed-but-inactive",
+            },
+            clear=True,
+        ):
+            config = server_args.setup_args([])
+
+        self.assertEqual(
+            config.vit_config.output_transport.mode, MM_TRANSPORT_MODE_GRPC
+        )
+        self.assertEqual(config.vit_config.output_transport.kvcm.instance_id, "")
 
     def test_kvcm_transport_vit_args_reject_invalid_values(self):
         from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -803,6 +873,10 @@ class ServerArgsSetTest(TestCase):
         invalid_arguments = (
             ("--mm_transport_mode", "auto"),
             ("--mm_kvcm_addresses", "127.0.0.1:19001,"),
+            ("--mm_kvcm_instance_id", "model-a"),
+            ("--mm_kvcm_instance_group", "epd"),
+            ("--mm_kvcm_user_data", "data"),
+            ("--mm_kvcm_transfer_client_config", "{}"),
             ("--mm_kvcm_call_timeout_ms", "0"),
             ("--mm_kvcm_write_timeout_seconds", "-1"),
             ("--mm_kvcm_object_gc_timeout_ms", "0"),

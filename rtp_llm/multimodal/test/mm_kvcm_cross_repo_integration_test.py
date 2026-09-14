@@ -8,12 +8,14 @@ without adding KVCM to RTP's default test dependency graph.
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -21,9 +23,15 @@ from contextlib import contextmanager
 from importlib import metadata
 from pathlib import Path
 from unittest import TestCase, main, skipUnless
+from urllib import request as urllib_request
 
+import grpc
 import torch
 
+from rtp_llm.config.mm_kvcm_config import (
+    KVE_INSTANCE_PREFIX,
+    derive_mm_kvcm_client_config,
+)
 from rtp_llm.config.py_config_modules import MM_TRANSPORT_MODE_KVCM, MMTransportConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMRdmaSlotPB,
@@ -108,7 +116,7 @@ def _write_startup_config(tmp_path: Path):
 
     suffix = uuid.uuid4().hex[:12]
     storage_name = f"rtp_kvmeta_it_file_{suffix}"
-    instance_group = f"rtp_kvmeta_it_{suffix}"
+    base_instance_group = f"rtp_kvmeta_it_{suffix}"
     storage_root = tmp_path / "kvcm-objects"
     storage_root.mkdir()
 
@@ -121,7 +129,7 @@ def _write_startup_config(tmp_path: Path):
         },
     }
     group = startup["instance_group"]
-    group["name"] = instance_group
+    group["name"] = base_instance_group
     group["storage_candidates"] = [storage_name]
     group["global_quota_group_name"] = f"rtp_kvmeta_it_quota_{suffix}"
     group["max_instance_count"] = max(int(group.get("max_instance_count", 0)), 8)
@@ -137,7 +145,7 @@ def _write_startup_config(tmp_path: Path):
 
     startup_path = tmp_path / "kvmeta-startup.json"
     startup_path.write_text(json.dumps(startup), encoding="utf-8")
-    return startup_path, instance_group
+    return startup_path, base_instance_group
 
 
 def _require_kvcm_dependencies() -> None:
@@ -224,7 +232,12 @@ def _start_kvmeta(tmp_path: Path, startup_path: Path):
             in _read_log_tail(server_log)
         )
         if all_listening and kvmeta_ready:
-            return process, f"127.0.0.1:{rpc_port}", server_log
+            return (
+                process,
+                f"127.0.0.1:{rpc_port}",
+                f"http://127.0.0.1:{admin_http_port}",
+                server_log,
+            )
         time.sleep(0.1)
 
     missing_listeners = ", ".join(
@@ -319,24 +332,145 @@ def _stop_kvmeta(
             )
 
 
-def _transfer_config(instance_group: str, instance_id: str) -> str:
-    return json.dumps(
-        {
-            "instance_group": instance_group,
-            "instance_id": instance_id,
-            "block_size": 1,
-            "sdk_config": {
-                "thread_num": 2,
-                "queue_size": 64,
-                "sdk_backend_configs": [],
-                "timeout_config": {
-                    "get_timeout_ms": 10_000,
-                    "put_timeout_ms": 10_000,
-                },
-            },
-            "location_spec_infos": {"value": 1},
-        }
+def _call_kvcm_admin(admin_url: str, endpoint: str, payload: dict) -> dict:
+    encoded_payload = json.dumps(payload).encode("utf-8")
+    http_request = urllib_request.Request(
+        admin_url + endpoint,
+        data=encoded_payload,
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        method="POST",
     )
+    try:
+        with urllib_request.urlopen(http_request, timeout=5) as response:
+            if response.status != 200:
+                raise RuntimeError()
+            body = response.read(1024 * 1024 + 1)
+    except Exception:
+        raise RuntimeError("KVCM admin integration request failed") from None
+    if len(body) > 1024 * 1024:
+        raise RuntimeError("KVCM admin response exceeded the integration limit")
+    try:
+        parsed = json.loads(body)
+        status = parsed["header"]["status"]["code"]
+    except (KeyError, TypeError, ValueError):
+        raise RuntimeError("KVCM admin response was malformed") from None
+    if status != "OK":
+        message = parsed.get("header", {}).get("status", {}).get("message", "")
+        raise RuntimeError(
+            f"KVCM rejected an admin integration request: "
+            f"status={status!r}, message={message!r}"
+        )
+    return parsed
+
+
+def _create_kvmeta_instance_group(admin_url: str, base_group_name: str) -> None:
+    response = _call_kvcm_admin(
+        admin_url,
+        "/api/getInstanceGroup",
+        {
+            "trace_id": f"rtp-kvmeta-it-get-group-{uuid.uuid4().hex}",
+            "name": base_group_name,
+        },
+    )
+    try:
+        instance_group = response["instance_group"]
+        instance_group["name"] = KVE_INSTANCE_PREFIX + base_group_name
+        instance_group["global_quota_group_name"] = (
+            KVE_INSTANCE_PREFIX + instance_group["global_quota_group_name"]
+        )
+        # The startup JSON format historically allows this field to be empty;
+        # the AdminService's current validation correctly requires it on a new
+        # group. Reuse the group's first configured storage candidate.
+        instance_group["cache_config"]["reclaim_strategy"]["storage_unique_name"] = (
+            instance_group["storage_candidates"][0]
+        )
+    except (IndexError, KeyError, TypeError):
+        raise RuntimeError("KVCM instance group response was malformed") from None
+    _call_kvcm_admin(
+        admin_url,
+        "/api/createInstanceGroup",
+        {
+            "trace_id": f"rtp-kvmeta-it-create-group-{uuid.uuid4().hex}",
+            "instance_group": instance_group,
+        },
+    )
+
+
+def _load_legacy_meta_proto(tmp_path: Path):
+    """Compile the checked-out legacy proto for a same-port compatibility probe."""
+
+    try:
+        from grpc_tools import protoc
+    except ImportError as error:
+        raise RuntimeError(
+            "grpcio-tools is required for the cross-repo test"
+        ) from error
+
+    proto_dir = _KVCM_ROOT / "kv_cache_manager/protocol/protobuf"
+    proto_file = proto_dir / "meta_service.proto"
+    generated_dir = tmp_path / "generated-kvcm-proto"
+    generated_dir.mkdir()
+    result = protoc.main(
+        [
+            "grpc_tools.protoc",
+            f"-I{proto_dir}",
+            f"--python_out={generated_dir}",
+            f"--grpc_python_out={generated_dir}",
+            str(proto_file),
+        ]
+    )
+    if result != 0:
+        raise RuntimeError("failed to compile the KVCM legacy Meta proto")
+
+    # grpc_tools emits a top-level import from *_pb2_grpc.py. Keep the
+    # generated directory available for the lifetime of this one test.
+    sys.path.insert(0, str(generated_dir))
+    try:
+        meta_pb2 = importlib.import_module("meta_service_pb2")
+        meta_pb2_grpc = importlib.import_module("meta_service_pb2_grpc")
+    except Exception:
+        raise RuntimeError("failed to import the generated KVCM Meta proto") from None
+    return meta_pb2, meta_pb2_grpc
+
+
+def _register_legacy_meta_instance(
+    tmp_path: Path,
+    endpoint: str,
+    instance_group: str,
+    instance_id: str,
+):
+    meta_pb2, meta_pb2_grpc = _load_legacy_meta_proto(tmp_path)
+    channel = grpc.insecure_channel(endpoint)
+    try:
+        grpc.channel_ready_future(channel).result(timeout=5)
+        stub = meta_pb2_grpc.MetaServiceStub(channel)
+        response = stub.RegisterInstance(
+            meta_pb2.RegisterInstanceRequest(
+                trace_id=f"rtp-kvmeta-it-register-meta-{uuid.uuid4().hex}",
+                instance_group=instance_group,
+                instance_id=instance_id,
+                block_size=128,
+                location_spec_infos=[meta_pb2.LocationSpecInfo(name="tp0", size=4096)],
+                model_deployment=meta_pb2.ModelDeployment(
+                    model_name="rtp-mm-kvcm-integration",
+                    dtype="fp32",
+                    tp_size=1,
+                    dp_size=1,
+                    pp_size=1,
+                    user_data="rtp-mm-kvcm-integration",
+                ),
+            ),
+            timeout=5,
+        )
+    except Exception:
+        channel.close()
+        raise RuntimeError(
+            "legacy MetaService registration failed on the shared KVCM port"
+        ) from None
+    if response.header.status.code != meta_pb2.OK:
+        channel.close()
+        raise RuntimeError("legacy MetaService rejected the shared client identity")
+    return channel, stub, meta_pb2
 
 
 def _transport_config(
@@ -346,16 +480,55 @@ def _transport_config(
     instance_group: str,
     gc_timeout_ms: int,
 ):
+    shared_client_config = json.dumps(
+        {
+            "": {
+                "enable_vipserver": False,
+                "vipserver_domain": "",
+                "instance_group": instance_group,
+                "instance_id": instance_id,
+                "address": [endpoint],
+                "block_size": 128,
+                "location_spec_infos": {"tp0": 4096},
+                "location_spec_groups": {},
+                "meta_channel_config": {
+                    "retry_time": 3,
+                    "connection_timeout": 3_000,
+                    "call_timeout": 3_000,
+                },
+                "sdk_config": {
+                    "thread_num": 2,
+                    "queue_size": 64,
+                    "sdk_backend_configs": [],
+                    "timeout_config": {
+                        "get_timeout_ms": 10_000,
+                        "put_timeout_ms": 10_000,
+                    },
+                },
+                "model_deployment": {
+                    "model_name": "rtp-mm-kvcm-integration",
+                    "dtype": "fp32",
+                    "use_mla": False,
+                    "tp_size": 1,
+                    "dp_size": 1,
+                    "pp_size": 1,
+                    "extra": "",
+                    "user_data": "rtp-mm-kvcm-integration",
+                },
+            }
+        }
+    )
+    derived = derive_mm_kvcm_client_config(shared_client_config)
     config = MMTransportConfig()
     config.mode = MM_TRANSPORT_MODE_KVCM
     config.control.release_timeout_ms = 3_000
-    config.kvcm.addresses = [endpoint]
-    config.kvcm.instance_id = instance_id
-    config.kvcm.instance_group = instance_group
-    config.kvcm.user_data = "rtp-mm-kvcm-integration"
-    config.kvcm.transfer_client_config = _transfer_config(instance_group, instance_id)
-    config.kvcm.call_timeout_ms = 3_000
-    config.kvcm.write_timeout_seconds = 30
+    config.kvcm.addresses = list(derived.addresses)
+    config.kvcm.instance_id = derived.instance_id
+    config.kvcm.instance_group = derived.instance_group
+    config.kvcm.user_data = derived.user_data
+    config.kvcm.transfer_client_config = derived.transfer_client_config
+    config.kvcm.call_timeout_ms = derived.call_timeout_ms
+    config.kvcm.write_timeout_seconds = derived.write_timeout_seconds
     config.kvcm.max_object_bytes = 32
     config.kvcm.max_receipt_bytes = 1024
     config.kvcm.object_gc_timeout_ms = gc_timeout_ms
@@ -468,13 +641,23 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
             store = None
             backend = None
             transport = None
+            legacy_channel = None
             with _working_directory(tmp_path):
                 try:
                     startup_path, instance_group = _write_startup_config(tmp_path)
-                    process, endpoint, server_log = _start_kvmeta(
+                    process, endpoint, admin_url, server_log = _start_kvmeta(
                         tmp_path, startup_path
                     )
+                    _create_kvmeta_instance_group(admin_url, instance_group)
                     instance_id = f"rtp-kvmeta-it-{uuid.uuid4().hex}"
+                    legacy_channel, legacy_stub, meta_pb2 = (
+                        _register_legacy_meta_instance(
+                            tmp_path,
+                            endpoint,
+                            instance_group,
+                            instance_id,
+                        )
+                    )
                     transport_config = _transport_config(
                         endpoint=endpoint,
                         instance_id=instance_id,
@@ -485,6 +668,24 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                     backend = transport._backend
                     store = backend._writer
                     self.assertIsInstance(store, KvMetaObjectClient)
+                    self.assertEqual(
+                        store.config.instance_group,
+                        KVE_INSTANCE_PREFIX + instance_group,
+                    )
+                    self.assertEqual(
+                        store.config.instance_id,
+                        KVE_INSTANCE_PREFIX + instance_id,
+                    )
+                    legacy_info = legacy_stub.GetInstanceInfo(
+                        meta_pb2.GetInstanceInfoRequest(
+                            trace_id=(f"rtp-kvmeta-it-get-meta-{uuid.uuid4().hex}"),
+                            instance_id=instance_id,
+                        ),
+                        timeout=5,
+                    )
+                    self.assertEqual(legacy_info.header.status.code, meta_pb2.OK)
+                    self.assertEqual(legacy_info.instance_group, instance_group)
+                    self.assertEqual(legacy_info.instance_info.instance_id, instance_id)
 
                     embeddings = [
                         torch.arange(12, dtype=torch.float32).reshape(3, 4),
@@ -699,7 +900,11 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                         if transport is not None:
                             transport.close()
                     finally:
-                        _stop_kvmeta(process, server_log)
+                        try:
+                            if legacy_channel is not None:
+                                legacy_channel.close()
+                        finally:
+                            _stop_kvmeta(process, server_log)
 
 
 if __name__ == "__main__":

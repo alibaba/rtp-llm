@@ -63,3 +63,11 @@ py_test(
         "//rtp_llm:config",
     ],
 )
+
+py_test(
+    name = "mm_kvcm_config_test",
+    srcs = ["mm_kvcm_config_test.py"],
+    deps = [
+        "//rtp_llm:config",
+    ],
+)

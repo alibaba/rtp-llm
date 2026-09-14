@@ -542,6 +542,15 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
     parser.parse_args(args)
     py_env_configs.server_config.validate_allocator_dump_config()
 
+    # Derive the isolated exact-object identity and data-plane schema from the
+    # same final client config consumed by the fixed-block Meta path.  Import
+    # this only for the opt-in mode so existing grpc/rdma startup cannot gain a
+    # KVCM/VIPServer dependency or validation side effect.
+    if py_env_configs.vit_config.output_transport.mode == "kvcm":
+        from rtp_llm.config.mm_kvcm_config import configure_mm_kvcm_client
+
+        configure_mm_kvcm_client(py_env_configs)
+
     # Normalize the two switches before model construction and process spawn.
     from rtp_llm.utils.warmup import configure_warmup
 

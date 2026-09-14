@@ -58,17 +58,6 @@ def _convert_mm_transport_mode(value):
     return value
 
 
-def _kvcm_addresses(value):
-    addresses = [address.strip() for address in str(value).split(",")]
-    if not value or addresses == [""]:
-        return []
-    if any(not address for address in addresses):
-        raise argparse.ArgumentTypeError(
-            "KVCM addresses must be a comma-separated list without empty entries"
-        )
-    return addresses
-
-
 # Reject invalid external-transport limits and timeouts during argument parsing.
 def _positive_int(value):
     try:
@@ -385,63 +374,10 @@ def init_vit_group_args(parser, vit_config):
         default=8 * 1024 * 1024 * 1024,
         help="LLM 侧单个 RDMA receipt 的总载荷上限，默认 8GiB，与 RDMA 总显存池大小一致",
     )
-    vit_group.add_argument(
-        "--mm_kvcm_addresses",
-        env_name="MM_KVCM_ADDRESSES",
-        bind_to=(kvcm_config, "addresses"),
-        type=_kvcm_addresses,
-        default=[],
-        help="KVCM 主 gRPC 服务地址（与固定 block MetaService 同端口），多个地址用逗号分隔；"
-        "仅 mm_transport_mode=kvcm 时使用",
-    )
-    vit_group.add_argument(
-        "--mm_kvcm_instance_id",
-        env_name="MM_KVCM_INSTANCE_ID",
-        bind_to=(kvcm_config, "instance_id"),
-        type=str,
-        default="",
-        help="KVMeta instance id；ViT 与 LLM 必须一致",
-    )
-    vit_group.add_argument(
-        "--mm_kvcm_instance_group",
-        env_name="MM_KVCM_INSTANCE_GROUP",
-        bind_to=(kvcm_config, "instance_group"),
-        type=str,
-        default="",
-        help="KVMeta instance group；仅 mm_transport_mode=kvcm 时必填",
-    )
-    vit_group.add_argument(
-        "--mm_kvcm_user_data",
-        env_name="MM_KVCM_USER_DATA",
-        bind_to=(kvcm_config, "user_data"),
-        type=str,
-        default="",
-        help="注册 KVMeta instance 时透传的 user data",
-    )
-    vit_group.add_argument(
-        "--mm_kvcm_transfer_client_config",
-        env_name="MM_KVCM_TRANSFER_CLIENT_CONFIG",
-        bind_to=(kvcm_config, "transfer_client_config"),
-        type=str,
-        default="",
-        help="KVCM transfer client JSON；仅独立 EMB object path 使用",
-    )
-    vit_group.add_argument(
-        "--mm_kvcm_call_timeout_ms",
-        env_name="MM_KVCM_CALL_TIMEOUT_MS",
-        bind_to=(kvcm_config, "call_timeout_ms"),
-        type=_positive_int,
-        default=3000,
-        help="单次 KVMeta RPC 超时（毫秒）",
-    )
-    vit_group.add_argument(
-        "--mm_kvcm_write_timeout_seconds",
-        env_name="MM_KVCM_WRITE_TIMEOUT_SECONDS",
-        bind_to=(kvcm_config, "write_timeout_seconds"),
-        type=_positive_int,
-        default=30,
-        help="KVMeta write session 超时（秒）",
-    )
+    # KVMeta connection, registration identity, SDK, and timeout settings are
+    # derived from RECO_CLIENT_CONFIG after parsing.  Keeping them out of this
+    # argument group prevents a second set of client env vars from drifting
+    # away from the fixed-block Meta client that shares the same KVCM service.
     vit_group.add_argument(
         "--mm_kvcm_object_gc_timeout_ms",
         env_name="MM_KVCM_OBJECT_GC_TIMEOUT_MS",
