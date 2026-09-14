@@ -418,6 +418,21 @@ class ScopeTest(JitCacheTestBase):
     def scope_id(self, root=None, **overrides):
         return self.resolve(root, **overrides).scope_id
 
+    def test_deepjit_protocol_isolates_old_cache_scope(self):
+        digest = jit.sha256
+        with mock.patch.object(jit, "sha256", wraps=digest) as hash_key:
+            scope = self.resolve()
+        key = hash_key.call_args.args[0]
+        revision = b"\0deep_gemm-committed-v1"
+        self.assertIn(revision, key)
+        old_id = digest(key.replace(revision, b"")).hexdigest()[:16]
+        self.assertNotEqual(scope.scope_id, old_id)
+        self.assertNotEqual(scope.root, scope.root.parent / old_id)
+        os.environ["DG_JIT_CACHE_DIR"] = str(self.root / "external")
+        with mock.patch.object(jit, "sha256", wraps=digest) as hash_key:
+            self.resolve()
+        self.assertNotIn(revision, hash_key.call_args.args[0])
+
     def test_scope_id_covers_every_environment_axis(self):
         base = self.scope_id()
         self.assertEqual(base, self.scope_id())  # deterministic
@@ -813,6 +828,65 @@ class ManagerTest(JitCacheTestBase):
             self.assertTrue(consumer.bootstrap(timeout_s=30))
         self.assertIsNotNone(consumer._restored)
         self.assertEqual(contents(scope.root), {rel: b"compiled-cubin"})
+
+    def test_deepjit_atomic_publish_preserves_empty_marker_on_restore(self):
+        scope = self.make_scope()
+        producer = self.make_manager(scope)
+        with mock.patch.object(producer, "_start_watch", return_value=True):
+            self.assertTrue(producer.bootstrap(timeout_s=30))
+        pending = scope.root / "deep_gemm/tmp/build"
+        expected = {"kernel.cu": b"source", "kernel.cubin": b"cubin", ".committed": b""}
+        for name, data in expected.items():
+            self.write_artifact(scope, f"deep_gemm/tmp/build/{name}", data)
+        self.assertEqual(producer._snapshot_files(), {})
+        final = scope.root / "deep_gemm/cache/kernel.digest"
+        final.parent.mkdir(parents=True)
+        pending.rename(final)
+        producer._dirty.clear()
+        producer.on_any_event(
+            mock.Mock(
+                event_type="moved",
+                src_path=str(pending),
+                dest_path=str(final),
+                is_directory=True,
+            )
+        )
+        self.assertTrue(producer._dirty.is_set())
+        producer.publish_pending_snapshot()
+        producer.stop()
+        shutil.rmtree(scope.root)
+        consumer = self.make_manager(scope)
+        with mock.patch.object(consumer, "_start_watch", return_value=True):
+            self.assertTrue(consumer.bootstrap(timeout_s=30))
+        self.assertIsNotNone(consumer._restored)
+        self.assertEqual(contents(final), expected)
+
+    def test_only_deepjit_marker_allows_empty_file_events_and_snapshots(self):
+        scope = self.make_scope()
+        manager = self.make_manager(scope)
+        for rel, expected in (
+            ("deep_gemm/cache/kernel.digest/.committed", True),
+            ("deep_gemm/tmp/build/.committed", False),
+            ("deep_gemm/cache/empty/kernel.cubin", False),
+            ("triton/cache/.committed", False),
+            ("triton/cache/kernel.cubin", False),
+        ):
+            with self.subTest(rel=rel):
+                path = self.write_artifact(scope, rel, b"")
+                manager._dirty.clear()
+                manager.on_any_event(
+                    mock.Mock(
+                        event_type="created",
+                        src_path=str(path),
+                        is_directory=False,
+                    )
+                )
+                self.assertEqual(manager._dirty.is_set(), expected)
+                self.assertEqual(rel in manager._snapshot_files(), expected)
+        # Older DeepGEMM versions publish cu/cubin without a marker.
+        legacy = "deep_gemm/cache/legacy/kernel.cubin"
+        self.write_artifact(scope, legacy, b"legacy-cubin")
+        self.assertIn(legacy, manager._snapshot_files())
 
     def test_publish_defers_and_rearms_dirty_on_pack_race(self):
         scope = self.make_scope()

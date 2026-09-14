@@ -108,7 +108,7 @@ CLOSED = MOVED | {"closed"}
 CREATED = CLOSED | {"created"}
 COMPONENTS = (
     Component("flashinfer", "FLASHINFER_WORKSPACE_BASE", (rule(CREATED, ".cu", ".inc", ".h"), rule(CLOSED, *NINJA)), ("torch", "@flashinfer-python"), CUDA),
-    Component("deep_gemm", "DG_JIT_CACHE_DIR", (rule(CREATED, "kernel.cu", "kernel.cubin"),), ("accelerator", "@deep_gemm"), CUDA),
+    Component("deep_gemm", "DG_JIT_CACHE_DIR", (rule(CREATED, "kernel.cu", "kernel.cubin", ".committed"),), ("accelerator", "@deep_gemm"), CUDA),
     Component("trtllm_deep_gemm", "TRTLLM_DG_CACHE_DIR", (rule(CREATED, "nvcc_kernel.cubin"),), ("accelerator", "@flashinfer-python"), CUDA),
     Component("tilelang", "TILELANG_CACHE_DIR", (rule(CLOSED, ".so", ".pkl", ".cu", ".json", ".cubin", ".py"),), ("torch", "@tilelang"), CUDA),
     # CMP publishes flat, self-keyed CUBINs by rename; .nvcc.* intermediates are excluded above.
@@ -159,6 +159,10 @@ def resolve_scope(local_root: Path) -> Scope | None:
             if parts and all(parts):
                 selected.append(item)
                 keys.append("-".join((item.name, *parts)))
+                if item.name == "deep_gemm":
+                    # Old snapshots omit DeepJIT's commit marker; isolate both
+                    # local and remote trees so they cannot poison new publishes.
+                    keys.append("deep_gemm-committed-v1")
     if not selected:
         logging.warning("JIT_CACHE_FAIL_OPEN: no managed components")
         return None
@@ -224,14 +228,22 @@ class JitCacheManager(FileSystemEventHandler):
         self._dirty, self._stop = Event(), Event()
 
     def on_any_event(self, event) -> None:
-        if event.is_directory or self._stop.is_set():
+        if self._stop.is_set():
             return
         path = Path(event.dest_path if event.event_type == "moved" else event.src_path)
         for item in self.scope.components:
             if item.local_dir in path.parents:
                 with suppress(OSError, ValueError):
+                    if event.is_directory:
+                        if item.name != "deep_gemm" or event.event_type != "moved":
+                            return
+                        # DeepJIT publishes the complete directory by rename.
+                        path = path / ".committed"
                     rel = path.relative_to(item.local_dir).as_posix()
-                    if item.should_sync(rel, event.event_type) and path.stat().st_size:
+                    if item.should_sync(rel, event.event_type) and (
+                        path.stat().st_size
+                        or (item.name == "deep_gemm" and path.name == ".committed")
+                    ):
                         self._dirty.set()
                 return
 
@@ -308,7 +320,10 @@ class JitCacheManager(FileSystemEventHandler):
                 with suppress(OSError):
                     st, rel = path.lstat(), path.relative_to(item.local_dir).as_posix()
                     packable = S_ISREG(st.st_mode) and os.access(path, os.R_OK)
-                    if st.st_size and packable and item.should_sync(rel):
+                    nonempty_or_marker = st.st_size or (
+                        item.name == "deep_gemm" and path.name == ".committed"
+                    )
+                    if nonempty_or_marker and packable and item.should_sync(rel):
                         files[f"{item.name}/{rel}"] = path
         return files
 
