@@ -57,8 +57,8 @@ final class RequestCompletionPublisher implements AutoCloseable {
                 0L,
                 TimeUnit.MILLISECONDS,
                 // Queue completions so a busy publisher never runs client callbacks
-                // inline on a decision thread. Request lifetime remains owned
-                // by RequestRegistry until terminal publication completes.
+                // inline on a decision thread. Slot owns request lifetime; the
+                // publisher owns only these in-flight frontend completions.
                 new LinkedBlockingQueue<>(),
                 runnable -> {
                     Thread thread = new Thread(
