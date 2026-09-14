@@ -100,6 +100,26 @@ def _get_think_config(generate_env_config):
     return think_mode, think_start_tag, think_end_tag
 
 
+def _strip_boundary_special_ids(tokenizer, ids: List[int]) -> List[int]:
+    """去掉 legacy 回退编码包在词两端的特殊 token。
+
+    旧式 encode() 默认会追加 BOS/EOS，包着特殊 token 的序列在生成输出中
+    永不出现，注册成停止序列等于静默失效。裁剪时至少保留一个 id，避免把
+    <|endoftext|> 这类本身就是特殊 token 的停止词裁空。
+    """
+    if len(ids) <= 1:
+        return ids
+    special_tokens = getattr(tokenizer, "all_special_tokens", None)
+    if not isinstance(special_tokens, (list, tuple)) or not special_tokens:
+        return ids
+    special_ids = set(tokenizer.convert_tokens_to_ids(list(special_tokens)))
+    while len(ids) > 1 and ids[0] in special_ids:
+        ids.pop(0)
+    while len(ids) > 1 and ids[-1] in special_ids:
+        ids.pop()
+    return ids
+
+
 class StreamStatus:
     index: int = 0
     request: ChatCompletionRequest
@@ -418,11 +438,13 @@ class CustomChatRenderer:
                     self._legacy_tokenizer_warned = True
                     logging.warning(
                         "tokenizer %s does not accept add_special_tokens; stop "
-                        "words may pick up special tokens and never match in the "
-                        "engine",
+                        "words fall back to plain encode with boundary special "
+                        "tokens trimmed",
                         type(self.tokenizer).__name__,
                     )
-                ids = self.tokenizer.encode(word)
+                ids = _strip_boundary_special_ids(
+                    self.tokenizer, list(self.tokenizer.encode(word))
+                )
             if ids:
                 ids_list.append(list(ids))
         return ids_list

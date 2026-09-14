@@ -1,6 +1,7 @@
 import itertools
 import json
 import logging
+import threading
 from functools import partial
 from typing import Any, AsyncGenerator, List, Optional
 
@@ -59,6 +60,26 @@ from rtp_llm.utils.complete_response_async_generator import (
 )
 
 _INT32_MAX = 2_147_483_647
+
+# check-then-set 的去重状态在共享 renderer 上可能被并发线程同时读写；
+# 这不是热路径（每个配置组合至多走一次），加锁的代价可以忽略。
+_ENABLED_WITHOUT_ANCHOR_WARN_LOCK = threading.Lock()
+
+
+def _enabled_without_anchor_warn_key(
+    request: Optional[ChatCompletionRequest], think_start_tag: str
+) -> tuple:
+    """告警去重键：(tag, 模板标识)。
+
+    同一个 renderer 实例会按请求切换模板（user_template / template_key /
+    tool-use 变体），只按 renderer+tag 去重会把后续模板的告警一起抑制掉。
+    """
+    return (
+        think_start_tag,
+        getattr(request, "user_template", None),
+        getattr(request, "template_key", None),
+        bool(getattr(request, "functions", None)),
+    )
 
 
 def _positive_int_or_none(value: Optional[int]) -> Optional[int]:
@@ -223,12 +244,19 @@ class OpenaiEndpoint(object):
             if request is not None and request.prompt_has_think_anchor() is not None:
                 anchored = request.prompt_has_think_anchor()
             # 无锚点在 R1 风格模型上是合法配置，逐请求告警会刷屏：按 renderer
-            # （即模板/配置组合）只提醒一次。
-            if not anchored and (
-                getattr(renderer, "_enabled_without_anchor_warned_tag", None)
-                != think_start_tag
-            ):
-                renderer._enabled_without_anchor_warned_tag = think_start_tag
+            # 实例 + 模板 + tag 只提醒一次。
+            warn_key = _enabled_without_anchor_warn_key(request, think_start_tag)
+            with _ENABLED_WITHOUT_ANCHOR_WARN_LOCK:
+                warned_keys = getattr(
+                    renderer, "_enabled_without_anchor_warned_keys", None
+                )
+                if not isinstance(warned_keys, set):
+                    warned_keys = set()
+                    renderer._enabled_without_anchor_warned_keys = warned_keys
+                should_warn = not anchored and warn_key not in warned_keys
+                if should_warn:
+                    warned_keys.add(warn_key)
+            if should_warn:
                 logging.warning(
                     "thinking_mode=ENABLED but the rendered prompt does not end with "
                     "the think start tag %r, so the model may never emit the think end "

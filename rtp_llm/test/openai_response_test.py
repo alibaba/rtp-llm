@@ -3,6 +3,7 @@ import copy
 import functools
 import json
 import os
+import threading
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncGenerator, Callable, List
 from unittest import IsolatedAsyncioTestCase, TestCase, main
@@ -3279,6 +3280,13 @@ class EnabledWithoutAnchorWarningTest(TestCase):
         renderer.get_reasoning_format = Mock(return_value=Mock())
         return endpoint, renderer
 
+    def _make_request(self, user_template=None, template_key=None):
+        return ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hi")],
+            user_template=user_template,
+            template_key=template_key,
+        )
+
     def test_warning_is_emitted_once_per_tag(self):
         endpoint, renderer = self._make_endpoint()
         config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
@@ -3286,6 +3294,58 @@ class EnabledWithoutAnchorWarningTest(TestCase):
         with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
             for _ in range(3):
                 endpoint._reasoning_format_for_prompt(config, renderer, [1, 2, 3])
+
+        self.assertEqual(mock_logging.warning.call_count, 1)
+
+    def test_switching_templates_on_one_renderer_warns_per_template(self):
+        """template_renderer 实例按请求切换模板（user_template/template_key）：
+        去重键必须带上模板标识，否则后一个无锚点模板的告警会被前一个抑制。"""
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+        request_a = self._make_request(user_template="template-a")
+        request_b = self._make_request(user_template="template-b")
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            endpoint._reasoning_format_for_prompt(config, renderer, [1], request_a)
+            endpoint._reasoning_format_for_prompt(config, renderer, [1], request_b)
+            endpoint._reasoning_format_for_prompt(config, renderer, [1], request_a)
+            endpoint._reasoning_format_for_prompt(config, renderer, [1], request_b)
+
+        self.assertEqual(mock_logging.warning.call_count, 2)
+
+    def test_named_template_key_is_part_of_the_dedup_key(self):
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            for template_key in ("default", "tool_use", "default", "tool_use"):
+                endpoint._reasoning_format_for_prompt(
+                    config,
+                    renderer,
+                    [1],
+                    self._make_request(template_key=template_key),
+                )
+
+        self.assertEqual(mock_logging.warning.call_count, 2)
+
+    def test_concurrent_first_requests_warn_once(self):
+        """gate 的 check-then-set 必须原子：并发首请求不能各刷一条告警。"""
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+        request = self._make_request(user_template="template-a")
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            threads = [
+                threading.Thread(
+                    target=endpoint._reasoning_format_for_prompt,
+                    args=(config, renderer, [1], request),
+                )
+                for _ in range(8)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
 
         self.assertEqual(mock_logging.warning.call_count, 1)
 
