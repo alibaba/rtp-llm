@@ -49,13 +49,13 @@ class RequestAdmissionExpirationRaceTest {
             var item = new ScheduledRequest(context, future, new Response(), prefillStatus, null,
                     prefill, decode, reservation, slot.createdAtMs());
 
-            try (var admission = registry.claimAdmissionMutation(requestId, future)) {
+            try (var admission = registry.claimAdmissionHandle(requestId, future)) {
                 assertNotNull(admission);
                 assertTrue(registry.commitItemForPublication(item, () -> true));
                 if (clientCancellation) {
                     registry.cancelRequest(requestId, 0L, CancelReason.CLIENT_CANCELLED);
                 }
-                registry.failPrepared(item, new IllegalStateException("preparation failed"));
+                registry.failDeliveryPreparation(item, new IllegalStateException("preparation failed"));
                 assertFalse(future.isDone(), "the admission still owns its deferred delivery failure");
 
                 // The automatic timer covers a new timeout; the explicit clock
@@ -71,10 +71,10 @@ class RequestAdmissionExpirationRaceTest {
                             "the fired deadline stays disarmed until the admission is completed");
                 }
                 assertFalse(future.isDone());
-                registry.onDecodeFact(decode,
+                registry.processDecodeStatus(decode,
                         DecodeEndpoint.WorkerStatusFact.accepted(reservation));
                 synchronized (slot) {
-                    slot.observeDecodeFact(decode, DecodeEndpoint.WorkerStatusFact.active(reservation), System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1L));
+                    slot.applyDecodeStatusLocked(decode, DecodeEndpoint.WorkerStatusFact.active(reservation), System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1L));
                 }
             }
 

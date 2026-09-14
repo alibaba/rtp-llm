@@ -2,7 +2,7 @@ package org.flexlb.balance.eviction;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.AdmissionMutation;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteAdmission;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
@@ -113,7 +113,7 @@ class EvictionManagerTryAdmitTest {
         context.setRequest(incoming);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(70, System.currentTimeMillis() + 60_000L));
         var future = new CompletableFuture<Response>();
-        when(requests.claimAdmissionMutation(902L, future)).thenReturn(mock(AdmissionMutation.class));
+        when(requests.claimAdmissionHandle(902L, future)).thenReturn(mock(AdmissionHandle.class));
         var frozenRequest = DecodeBinding.capture(context);
         when(admission.decodeBinding()).thenReturn(frozenRequest);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(99L);

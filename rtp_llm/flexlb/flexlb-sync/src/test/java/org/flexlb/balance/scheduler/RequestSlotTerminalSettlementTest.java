@@ -3,11 +3,13 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -59,15 +61,15 @@ class RequestSlotTerminalSettlementTest {
         var inactivity = mock(ExpirationTimer.InactivityDeadline.class);
         var timer = mock(ExpirationTimer.class);
         synchronized (slot) {
-            slot.startBatchEnqueue(7L);
+            RequestLifecycleTestSupport.startBatchDelivery(slot, 7L);
             PreemptionRegistration claim = slot.tryInstallPreemption(
                     RESERVATION.reservationToken(), 9L, "priority victim");
             assertNotNull(claim);
-            assertEquals(RequestSlot.PreemptionReduction.Status.NONE,
+            assertEquals(RequestSlot.RequestEffect.Status.NONE,
                     slot.applyPreemptionPhase(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT).status());
-            assertEquals(RequestSlot.PreemptionReduction.Status.NONE,
+            assertEquals(RequestSlot.RequestEffect.Status.NONE,
                     slot.applyPreemptionPhase(claim, outcome).status());
-            slot.markCancellationRequested(CancelReason.CLIENT_CANCELLED, "original client cancellation");
+            RequestLifecycleTestSupport.recordCancellation(slot, CancelReason.CLIENT_CANCELLED, "original client cancellation");
             assertTrue(slot.installInactivityDeadline(inactivity));
 
             TerminalAction action = slot.beginTerminalizing(true, false, false, null,
@@ -76,14 +78,14 @@ class RequestSlotTerminalSettlementTest {
             assertSame(claim, action.preemption());
             assertTrue(claim.isSettled());
             assertEquals(CancelReason.CLIENT_CANCELLED, slot.requireCancellationFirstCause());
-            assertEquals(RequestSlot.PreemptionReduction.Status.STALE,
-                    slot.reduceDeliveryConfirmed(7L).status());
-            assertEquals(RequestSlot.PreemptionReduction.Status.STALE,
+            assertEquals(RequestSlot.RequestEffect.Status.STALE,
+                    RequestLifecycleTestSupport.acknowledge(slot, 7L).status());
+            assertEquals(RequestSlot.RequestEffect.Status.STALE,
                     slot.applyPreemptionTombstone(claim, "late Cancel ACK").status());
-            assertEquals(RequestSlot.PreemptionReduction.Status.STALE,
+            assertEquals(RequestSlot.RequestEffect.Status.STALE,
                     slot.reduceWorkerTerminal(fixture.item(), DeferredTerminal.worker(
                             WorkerTerminalSource.DECODE_ENDPOINT_SETTLED, true, 0L)).status());
-            assertFalse(slot.expireInactivityDeadline(inactivity));
+            assertFalse(slot.consumeInactivityDeadline(inactivity));
             action.terminalResources().release(timer);
             action.terminalResources().release(timer);
             verify(timer).cancel(inactivity);
@@ -104,8 +106,8 @@ class RequestSlotTerminalSettlementTest {
         Fixture fixture = fixture();
         RequestSlot slot = fixture.slot();
         synchronized (slot) {
-            slot.startBatchEnqueue(7L);
-            slot.markDeliveryConfirmed();
+            RequestLifecycleTestSupport.startBatchDelivery(slot, 7L);
+            RequestLifecycleTestSupport.markAcknowledged(slot);
             Response delivered = new Response();
             delivered.setSuccess(true);
             assertTrue(slot.future().completeOwned(delivered));
@@ -129,15 +131,15 @@ class RequestSlotTerminalSettlementTest {
         DeferredTerminal workerTerminal = DeferredTerminal.worker(
                 WorkerTerminalSource.DECODE_ENDPOINT_SETTLED, true, 0L);
         synchronized (slot) {
-            assertTrue(slot.deferCancellationDuringAdmission(
+            assertTrue(RequestLifecycleTestSupport.recordCancellation(slot,
                     CancelReason.CLIENT_CANCELLED, "first client cancellation"));
-            assertEquals(RequestSlot.PreemptionReduction.Status.NONE,
+            assertEquals(RequestSlot.RequestEffect.Status.NONE,
                     slot.reduceWorkerTerminal(fixture.item(), workerTerminal).status());
 
-            RequestSlot.AdmissionMutationCompletion completion =
-                    slot.completeAdmissionMutation(fixture.admission());
+            RequestSlot.AdmissionHandleCompletion completion =
+                    slot.completeAdmissionHandle(fixture.admission());
             assertTrue(completion.owned());
-            assertNull(completion.cancellationToResume(), "terminal proof needs no extra Cancel send");
+            assertNull(completion.cancellationReason(), "terminal proof needs no extra Cancel send");
             assertSame(workerTerminal, completion.pendingTerminal());
             assertEquals(CancelReason.CLIENT_CANCELLED, slot.requireCancellationFirstCause());
             assertEquals(RequestState.Phase.CANCEL_REQUESTED, slot.snapshot().state());
@@ -150,29 +152,62 @@ class RequestSlotTerminalSettlementTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void workerProofClaimsTerminalBeforeCleanupWithOrWithoutPreemption(boolean preempting) {
+        Fixture fixture = fixture();
+        RequestSlot slot = fixture.slot();
+        synchronized (slot) {
+            RequestLifecycleTestSupport.startBatchDelivery(slot, 7L);
+            RequestLifecycleTestSupport.markAcknowledged(slot);
+            Response acknowledged = new Response();
+            acknowledged.setSuccess(true);
+            slot.future().completeOwned(acknowledged);
+            PreemptionRegistration claim = preempting
+                    ? slot.tryInstallPreemption(RESERVATION.reservationToken(), 9L, "victim") : null;
+            if (preempting) {
+                assertNotNull(claim);
+                slot.applyPreemptionPhase(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT);
+            }
+
+            RequestSlot.RequestEffect effect = slot.reduceWorkerTerminal(fixture.item(),
+                    DeferredTerminal.worker(WorkerTerminalSource.DECODE_ENDPOINT_SETTLED, false, 42L));
+            assertEquals(RequestSlot.RequestEffect.Status.READY, effect.status());
+            assertNotNull(effect.terminal());
+            assertSame(fixture.item(), effect.terminal().item());
+            assertSame(claim, effect.signal());
+            assertFalse(slot.isTombstone(), "cleanup must precede tombstone commitment");
+            assertEquals(RequestSlot.RequestEffect.Status.STALE, RequestLifecycleTestSupport.acknowledge(slot, 7L).status(),
+                    "terminal ownership must exclude late ACK before cleanup runs");
+            verifyNoInteractions(fixture.item().decodeEp());
+            assertEquals(RequestState.Phase.FAILED, slot.finishTombstone(effect.terminal()).terminal().state());
+            assertSame(acknowledged, slot.future().join(), "worker termination cannot replace a published response");
+        }
+    }
+
     private static Fixture fixture() {
         return fixture(true);
     }
 
-    private static Fixture fixture(boolean completeAdmission) {
+    private static Fixture fixture(boolean finishAdmission) {
         var config = SchedulingTestConfig.newConfig();
         BalanceContext context = RequestLifecycleTestSupport.context(config, RESERVATION.requestId());
-        RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class), RESERVATION.requestId(), null, null, null);
+        RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class), RESERVATION.requestId(), null, null, null, null);
         ScheduledRequest item = new ScheduledRequest(context, slot.future(), new Response(), null, null,
                 mock(PrefillEndpoint.class), mock(DecodeEndpoint.class), RESERVATION,
                 System.currentTimeMillis());
-        AdmissionMutation admission;
+        AdmissionHandle admission;
         synchronized (slot) {
             slot.configureInactivityTimeout(60_000L);
-            admission = slot.tryBeginAdmissionMutation((owner, response) -> { }, owner -> { });
+            admission = slot.tryBeginAdmissionHandle();
             assertNotNull(admission);
             assertTrue(slot.tryBindItemForPublication(item));
-            if (completeAdmission) {
-                slot.completeAdmissionMutation(admission);
+            if (finishAdmission) {
+                slot.completeAdmissionHandle(admission);
             }
         }
         return new Fixture(slot, item, admission);
     }
 
-    private record Fixture(RequestSlot slot, ScheduledRequest item, AdmissionMutation admission) { }
+    private record Fixture(RequestSlot slot, ScheduledRequest item, AdmissionHandle admission) { }
 }

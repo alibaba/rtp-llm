@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointRegistry.PrefillRoutingEntry;
@@ -284,7 +285,7 @@ class GlobalQueueProgressTest {
         private final PlacementAvailability availability = new PlacementAvailability();
         private final AtomicInteger aSlots = new AtomicInteger();
         private final Map<Long, RouteAdmission> routes = new ConcurrentHashMap<>();
-        private final Map<Long, AdmissionMutation> mutations = new ConcurrentHashMap<>();
+        private final Map<Long, AdmissionHandle> mutations = new ConcurrentHashMap<>();
         private final Map<Long, String> groups = new ConcurrentHashMap<>();
         private final Map<Long, CompletableFuture<Response>> requests = new ConcurrentHashMap<>();
         private final Set<Long> selected = ConcurrentHashMap.newKeySet();
@@ -330,8 +331,8 @@ class GlobalQueueProgressTest {
                 requests.put(context.getRequestId(), future);
                 return future;
             });
-            when(lifecycle.claimAdmissionMutation(anyLong(), any())).thenAnswer(i -> {
-                AdmissionMutation mutation = mock(AdmissionMutation.class);
+            when(lifecycle.claimAdmissionHandle(anyLong(), any())).thenAnswer(i -> {
+                AdmissionHandle mutation = mock(AdmissionHandle.class);
                 mutations.put(i.getArgument(0), mutation);
                 return mutation;
             });

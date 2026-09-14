@@ -1,10 +1,15 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.preemption.CancelTarget;
+import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
+import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -29,11 +34,9 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
-import java.util.function.Function;
 import java.util.function.LongPredicate;
-import java.util.function.Supplier;
 
-import static org.flexlb.balance.scheduler.RequestResponses.buildErrorResponse;
+import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
 
 /**
  * Canonical request directory and global admission barrier.
@@ -52,7 +55,7 @@ public class RequestRegistry {
     private final AtomicBoolean shuttingDown = new AtomicBoolean();
 
     private final Object admissionQuiescenceMonitor = new Object();
-    private int inFlightAdmissionMutations;
+    private int inFlightAdmissionHandles;
 
     private final Object registrationLock = new Object();
     private final BatchSchedulerReporter reporter;
@@ -70,8 +73,8 @@ public class RequestRegistry {
                 this,
                 Objects.requireNonNull(configService, "configService"));
         this.completionPublisher = new RequestCompletionPublisher(
-                expirationTimer, reporter, completionPublisherWorkers(configService));
-        this.terminalCleanup = new RequestTerminalCleanup(expirationTimer, completionPublisher);
+                completionPublisherWorkers(configService));
+        this.terminalCleanup = new RequestTerminalCleanup(expirationTimer);
     }
 
     private static int completionPublisherWorkers(ConfigService configService) {
@@ -118,34 +121,29 @@ public class RequestRegistry {
         if (exactSlot != null) { exactSlot.expireInactiveRequest(nowMs); }
     }
 
-    void onPrefillFact(PrefillEndpoint source, RoleType role, PrefillState.WorkerStatusFact fact) {
-        applyEngineFact(fact.item().requestId(),
-                slot -> slot.observePrefillFact(source, role, fact, System.currentTimeMillis()));
+    void processPrefillStatus(PrefillEndpoint source, RoleType role, PrefillState.WorkerStatusFact fact) {
+        RequestSlot slot = requestSlot(fact.item().requestId());
+        if (slot != null) { slot.processPrefillStatus(source, role, fact); }
     }
 
-    void onDecodeFact(DecodeEndpoint source, DecodeEndpoint.WorkerStatusFact fact) {
-        applyEngineFact(fact.reservation().requestId(),
-                slot -> slot.observeDecodeFact(source, fact, System.currentTimeMillis()));
+    void processDecodeStatus(DecodeEndpoint source, DecodeEndpoint.WorkerStatusFact fact) {
+        RequestSlot slot = requestSlot(fact.reservation().requestId());
+        if (slot != null) { slot.processDecodeStatus(source, fact); }
     }
 
-    void onDecodeAccepted(DecodeEndpoint source, DecodeEndpoint.ReservationHandle reservation) {
-        onDecodeFact(source, DecodeEndpoint.WorkerStatusFact.accepted(reservation));
-    }
-
-    private void applyEngineFact(long requestId, Function<RequestSlot, RequestSlot.EngineObservation> observation) {
-        RequestSlot slot = requestSlot(requestId);
-        if (slot != null) { slot.observeEngineFact(observation); }
+    void confirmDecodeAcceptance(DecodeEndpoint source, DecodeEndpoint.ReservationHandle reservation) {
+        processDecodeStatus(source, DecodeEndpoint.WorkerStatusFact.accepted(reservation));
     }
 
     void projectPrefillRetirementItem(PrefillEndpoint source, ScheduledRequest exact) {
         if (exact == null || exact.prefillEp() != source) { return; }
         RequestSlot slot = entryFor(exact);
-        if (slot != null) { slot.onPrefillRetired(source, exact); }
+        if (slot != null) { slot.recordPrefillRetirement(source, exact); }
     }
 
     void projectDecodeRetirementReservation(DecodeEndpoint source, DecodeEndpoint.ReservationHandle exact) {
         RequestSlot slot = requestSlot(exact.requestId());
-        if (slot != null) { slot.onDecodeRetired(source, exact); }
+        if (slot != null) { slot.recordDecodeRetirement(source, exact); }
     }
 
     CompletableFuture<Response> register(
@@ -181,7 +179,7 @@ public class RequestRegistry {
                             StrategyErrorType.DISPATCH_FAILED,
                             "request scheduler is shutting down"));
                 }
-                slot = new RequestSlot(completionPublisher, context.getRequestId(), expirationTimer, terminalCleanup, this::exitAdmissionMutationGate);
+                slot = new RequestSlot(completionPublisher, context.getRequestId(), expirationTimer, terminalCleanup, this::exitAdmissionHandleGate, reporter);
                 context.setEnqueueTime(System.currentTimeMillis());
                 synchronized (slot) {
                     slot.configureDeadlineError(StrategyErrorType.BATCH_SLO_EXPIRED);
@@ -267,9 +265,9 @@ public class RequestRegistry {
         }
     }
 
-    public AdmissionMutation claimAdmissionMutation(
+    public AdmissionHandle claimAdmissionHandle(
             long requestId, CompletableFuture<?> future) {
-        if (!enterAdmissionMutationGate()) {
+        if (!enterAdmissionHandleGate()) {
             return null;
         }
         boolean transferred = false;
@@ -278,54 +276,52 @@ public class RequestRegistry {
             if (slot == null || !slot.ownsFuture(future)) {
                 return null;
             }
-            AdmissionMutation mutation;
+            AdmissionHandle handle;
             synchronized (slot) {
-                mutation = isCurrentSlot(slot)
-                        ? slot.tryBeginAdmissionMutation(
-                                (exact, failure) -> slot.onAdmissionFailed(exact, failure),
-                                exact -> slot.onAdmissionCompleted(exact))
+                handle = isCurrentSlot(slot)
+                        ? slot.tryBeginAdmissionHandle()
                         : null;
             }
-            transferred = mutation != null;
-            return mutation;
+            transferred = handle != null;
+            return handle;
         } finally {
             if (!transferred) {
-                exitAdmissionMutationGate();
+                exitAdmissionHandleGate();
             }
         }
     }
 
-    private boolean enterAdmissionMutationGate() {
+    private boolean enterAdmissionHandleGate() {
         synchronized (admissionQuiescenceMonitor) {
             if (shuttingDown.get()) {
                 return false;
             }
-            if (inFlightAdmissionMutations == Integer.MAX_VALUE) {
+            if (inFlightAdmissionHandles == Integer.MAX_VALUE) {
                 throw new IllegalStateException(
-                        "admission mutation counter overflow");
+                        "admission handle counter overflow");
             }
-            inFlightAdmissionMutations++;
+            inFlightAdmissionHandles++;
             return true;
         }
     }
 
-    void exitAdmissionMutationGate() {
+    void exitAdmissionHandleGate() {
         synchronized (admissionQuiescenceMonitor) {
-            if (inFlightAdmissionMutations <= 0) {
+            if (inFlightAdmissionHandles <= 0) {
                 throw new IllegalStateException(
-                        "admission mutation counter underflow");
+                        "admission handle counter underflow");
             }
-            inFlightAdmissionMutations--;
-            if (inFlightAdmissionMutations == 0) {
+            inFlightAdmissionHandles--;
+            if (inFlightAdmissionHandles == 0) {
                 admissionQuiescenceMonitor.notifyAll();
             }
         }
     }
 
-    private void awaitAdmissionMutationQuiescence() {
+    private void awaitAdmissionHandleQuiescence() {
         boolean interrupted = false;
         synchronized (admissionQuiescenceMonitor) {
-            while (inFlightAdmissionMutations != 0) {
+            while (inFlightAdmissionHandles != 0) {
                 try {
                     admissionQuiescenceMonitor.wait();
                 } catch (InterruptedException interruption) {
@@ -380,7 +376,7 @@ public class RequestRegistry {
 
     private void finishVictim(ScheduledRequest item, StrategyErrorType error, String detail) {
         RequestSlot slot = entryFor(item);
-        if (slot != null) { slot.onFailure(error, detail); }
+        if (slot != null) { slot.recordSchedulingFailure(error, detail); }
     }
 
     public Optional<PreemptionRegistration> tryClaim(
@@ -480,7 +476,7 @@ public class RequestRegistry {
         }
         synchronized (entry) {
             RequestState snapshot = entry.snapshot();
-            return batchMatches(snapshot, expectedBatchId) ? snapshot : null;
+            return snapshot != null && snapshot.matchesBatch(expectedBatchId) ? snapshot : null;
         }
     }
 
@@ -501,51 +497,54 @@ public class RequestRegistry {
 
     public void onQueueOfferFailure(ScheduledRequest exact, Throwable error) {
         RequestSlot slot = entryFor(exact);
-        if (slot != null) { slot.onFailure(StrategyErrorType.DISPATCH_FAILED,
+        if (slot != null) { slot.recordSchedulingFailure(StrategyErrorType.DISPATCH_FAILED,
                 "Worker scheduling queue rejected request: "
                         + (error == null ? "endpoint publication failed" : error.getMessage())); }
     }
 
-    public void onPreparedDeliveryFailure(
-            ScheduledRequest exactItem,
-            Throwable error) {
-        failPrepared(exactItem, error);
-    }
-
-    public <T> Optional<T> prepareIfOwned(ScheduledRequest exact, Supplier<T> preparation) {
-        RequestSlot slot = entryFor(exact);
-        return slot == null ? Optional.empty() : slot.prepareIfOwned(exact, preparation);
-    }
-
-    public DeliveryClaim tryClaimRouteDelivery(
-            ScheduledRequest exactItem,
-            BooleanSupplier endpointHandoff) {
-        return tryClaimForDelivery(
-                exactItem, DeliveryClaimKind.ROUTE_DECISION, 0L,
-                endpointHandoff);
-    }
-
-    public DeliveryClaim tryClaimBatchDelivery(
-            ScheduledRequest exactItem,
-            long batchId,
-            BooleanSupplier endpointHandoff) {
-        if (batchId <= 0L) {
-            throw new IllegalArgumentException("batchId must be positive");
-        }
-        return tryClaimForDelivery(
-                exactItem, DeliveryClaimKind.BATCH_ENQUEUE, batchId,
-                endpointHandoff);
-    }
-
-    private DeliveryClaim tryClaimForDelivery(ScheduledRequest item, DeliveryClaimKind kind,
-            long correlationId, BooleanSupplier handoff) {
+    public CapacityBoundary.Attempt<BatchDeliveryStrategy.BatchTransaction> prepareBatchDelivery(
+            ScheduledRequest item, BatchDeliveryStrategy strategy) {
         RequestSlot slot = entryFor(item);
-        return slot == null ? null : slot.claimDelivery(item, kind, correlationId, handoff);
+        return slot == null ? CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST)
+                : slot.prepareBatchDelivery(item, strategy);
     }
 
-    public void failPrepared(ScheduledRequest exact, Throwable cause) {
+    public CapacityBoundary.Attempt<ScheduledRequest> prepareBatchMember(
+            ScheduledRequest item, BatchDeliveryStrategy.BatchTransaction transaction) {
+        RequestSlot slot = entryFor(item);
+        return slot == null ? CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST)
+                : slot.prepareBatchMember(item, transaction);
+    }
+
+    public CapacityBoundary.Attempt<ScheduledRequest> prepareRouteMember(
+            ScheduledRequest item, RouteDeliveryStrategy.RouteTransaction transaction,
+            PrefillTimePredictor.Evaluator evaluator) {
+        RequestSlot slot = entryFor(item);
+        return slot == null ? CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST)
+                : slot.prepareRouteMember(item, transaction, evaluator);
+    }
+
+    public DeliveryClaim claimBatchDelivery(ScheduledRequest item, BatchDeliveryStrategy.BatchTransaction transaction) {
+        RequestSlot slot = entryFor(item);
+        return slot == null ? null : slot.claimBatchDelivery(item, transaction);
+    }
+
+    public DeliveryClaim claimRouteDelivery(ScheduledRequest item, PrefillAdmissionResources.CommittedAdmissionOwner admission) {
+        RequestSlot slot = entryFor(item);
+        return slot == null ? null : slot.claimRouteDelivery(item, admission);
+    }
+
+    public void setDeliveryPrediction(DeliveryClaim claim, WorkSnapshot precedingWork, long predictedMs) {
+        claim.slot.setDeliveryPrediction(claim, precedingWork, predictedMs);
+    }
+
+    public void publishRoute(DeliveryClaim claim, WorkSnapshot precedingWork, long predictedMs) {
+        claim.slot.publishRoute(claim, precedingWork, predictedMs);
+    }
+
+    public void failDeliveryPreparation(ScheduledRequest exact, Throwable cause) {
         RequestSlot slot = entryFor(exact);
-        if (slot != null) { slot.onPreparationFailed(exact, cause); }
+        if (slot != null) { slot.failDeliveryPreparation(exact, cause); }
     }
 
     private RequestSlot entryFor(ScheduledRequest item) {
@@ -573,19 +572,11 @@ public class RequestRegistry {
         return slot != null && slot.ownsFuture(future) && slot.publishDecisionResponse(response);
     }
 
-    private static boolean batchMatches(RequestState snapshot,
-                                        long expectedBatchId) {
-        if (snapshot == null) {
-            return false;
-        }
-        return expectedBatchId == 0 || snapshot.batchId() == expectedBatchId;
-    }
-
     public boolean closeAdmissionAndAwaitMutations() {
         if (!shuttingDown.compareAndSet(false, true)) {
             return false;
         }
-        awaitAdmissionMutationQuiescence();
+        awaitAdmissionHandleQuiescence();
         return true;
     }
 
@@ -613,7 +604,7 @@ public class RequestRegistry {
     private void completeOutstandingRequestsForShutdown() {
         List<TerminalAction> actions = new ArrayList<>();
         for (RequestSlot slot : requestSlots.values()) {
-            TerminalAction action = slot.onShutdown();
+            TerminalAction action = slot.prepareShutdown();
             if (action != null) { actions.add(action); }
         }
         actions.forEach(terminalCleanup::submitTerminal);

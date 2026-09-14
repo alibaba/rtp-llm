@@ -10,6 +10,7 @@ import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -72,14 +73,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         try {
             for (ScheduledRequest item : candidates) {
                 CapacityBoundary.Attempt<ScheduledRequest> attempt =
-                        requests.prepareIfOwned(
-                                item,
-                                () -> transaction.append(
-                                        item,
-                                        predict(evaluator, item)))
-                        .orElseGet(
-                                RouteDeliveryStrategy::<ScheduledRequest>
-                                        ownershipLost);
+                        requests.prepareRouteMember(item, transaction, evaluator);
                 if (!attempt.accepted()) {
                     blockedItem = item;
                     blockedResult = attempt.boundary();
@@ -119,12 +113,11 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             for (ScheduledRequest item : items) {
                 DeliveryClaim claim;
                 try {
-                    claim = requests.tryClaimRouteDelivery(
-                            item,
-                            () -> admission.transferToEndpoint(item));
+                    claim = requests.claimRouteDelivery(
+                            item, admission);
                 } catch (Throwable claimFailure) {
                     try {
-                        requests.failPrepared(item, claimFailure);
+                        requests.failDeliveryPreparation(item, claimFailure);
                     } catch (Throwable terminalFailure) {
                         claimFailure.addSuppressed(terminalFailure);
                         deliveryFailure = append(
@@ -144,7 +137,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                     long itemWorkMs = transaction.predictions.get(item);
                     unstartedWorkMs = unstartedWorkMs > Long.MAX_VALUE - itemWorkMs
                             ? Long.MAX_VALUE : unstartedWorkMs + itemWorkMs;
-                    route.claim().publishRoute(precedingWork, unstartedWorkMs);
+                    requests.publishRoute(route.claim(), precedingWork, unstartedWorkMs);
                     delivered.add(item);
                 } catch (Throwable completionFailure) {
                     deliveryFailure = append(
@@ -189,11 +182,6 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 evaluator, item.seqLen(), item.hitCache());
     }
 
-    private static <T> CapacityBoundary.Attempt<T> ownershipLost() {
-        return CapacityBoundary.Attempt.rejected(
-                CapacityBoundary.OWNERSHIP_LOST);
-    }
-
     private static Throwable close(AutoCloseable capability) {
         try {
             capability.close();
@@ -227,7 +215,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     }
 
     /** Ordered route callback payload and sole owner of its exact members. */
-    private static final class RouteTransaction implements Transaction {
+    static final class RouteTransaction implements Transaction {
         private final RouteDeliveryStrategy owner;
         private final PrefillEndpoint prefill;
         private List<ScheduledRequest> items = List.of();
@@ -266,10 +254,11 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             return new RouteTransaction(owner, blockedItem, blockedResult);
         }
 
-        private synchronized CapacityBoundary.Attempt<ScheduledRequest> append(
+        synchronized CapacityBoundary.Attempt<ScheduledRequest> append(
                 ScheduledRequest exact,
-                long predictedMs) {
+                PrefillTimePredictor.Evaluator evaluator) {
             requirePrepared("append");
+            long predictedMs = predict(evaluator, exact);
             final CapacityBoundary.Attempt<ScheduledRequest> acceptedItem;
             try {
                 acceptedItem = accepted(exact);

@@ -39,11 +39,11 @@ public final class PreemptionRegistration {
         this.detail = detail == null ? "priority preemption" : detail;
     }
 
-    public boolean applyPhase(PreemptionCancelPhase phase) { return owner.onPreemptionPhase(this, phase); }
+    public boolean applyPhase(PreemptionCancelPhase phase) { return owner.updatePreemption(this, phase); }
 
-    public boolean release() { return owner.onPreemptionReleased(this); }
+    public boolean release() { return owner.releasePreemption(this); }
 
-    public boolean settleTerminal(String detail) { return owner.onPreemptionTerminal(this, detail); }
+    public boolean settleTerminal(String detail) { return owner.completePreemption(this, detail); }
 
     public long requestId() {
         return requestId;
@@ -113,12 +113,8 @@ public final class PreemptionRegistration {
         return !settled && phase.acceptsTombstone();
     }
 
-    void retainTerminal(DeferredTerminal candidate) {
-        if (pendingTerminal == null
-                || (!pendingTerminal.authoritativeWorker()
-                    && candidate.authoritativeWorker())) {
-            pendingTerminal = candidate;
-        }
+    void storeTerminal(DeferredTerminal selected) {
+        pendingTerminal = selected;
     }
 
     void recordDeliveryConfirmation(long batchId) {

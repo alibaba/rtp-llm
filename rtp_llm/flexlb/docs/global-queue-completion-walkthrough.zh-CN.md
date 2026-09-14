@@ -140,7 +140,7 @@ private void publishPlan(Plan plan) {
 }
 ```
 
-不能简单地在关闭后 `return`：Plan 可能持有 endpoint pin、AdmissionMutation 等需要关闭的对象。
+不能简单地在关闭后 `return`：Plan 可能持有 endpoint pin、RequestSlot.AdmissionHandle 等需要关闭的对象。
 检查关闭状态和入队在同一把锁下；退出清理也在这把锁下取走缓冲结果，因此结果不会在队列清理后偷偷遗留。
 资源关闭放在锁外，避免清理过程拖住所有入队、取消和容量通知。
 
@@ -192,7 +192,7 @@ private void processCompletedPlan(Plan plan) {
 `park()` 返回 true 也可能表示请求已经离开队列、无需再等待。
 
 第 243 行必须在第 246–248 行之前。否则重新取出的同一个请求可能看到上一次
-`AdmissionMutation` 还没释放，错误地认为它不能继续处理。这里仍然只允许一个协调线程执行 commit，
+`RequestSlot.AdmissionHandle` 还没释放，错误地认为它不能继续处理。这里仍然只允许一个协调线程执行 commit，
 没有把资源提交变成多线程并发。
 
 这里的 close 只清理 Plan 仍然拥有的临时对象；成功准入后已转交给请求生命周期/worker 的资源，

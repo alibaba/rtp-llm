@@ -34,7 +34,7 @@ for mode in BATCH NON_BATCH; do
         status=1
     fi
     # Run the other mode even when one mode fails its throughput/latency gate.
-    awk '/FlexLB offered traffic:|FlexLB Master engine-scale E2E:|\[ERROR\]   Master|BUILD SUCCESS|BUILD FAILURE/' \
+    awk '/FlexLB offered traffic:|FlexLB client latency:|FlexLB Master engine-scale E2E:|\[ERROR\]   Master|BUILD SUCCESS|BUILD FAILURE/' \
         "$output_dir/$mode.log"
 done
 printf 'Logs: %s\n' "$output_dir"
