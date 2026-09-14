@@ -328,27 +328,48 @@ TEST(PPStageCacheConfig, ppRejectsOpaquePools) {
     EXPECT_NO_THROW(CacheConfigCreator::stageScopedModelConfig(mc, ParallelismConfig{}));
 }
 
-TEST(PPStageCacheConfig, speculativeGate) {
-    // createSpConfig builds the joint topology from whole-model configs, so PP
-    // would silently get an unscoped geometry. Gated here as well as at engine
-    // construction; the pp=1 path is covered by CacheConfigCreatorTest.
-    const auto score   = makeSingleModelConfig(4);
-    const auto propose = makeSingleModelConfig(1);
-
+TEST(PPStageCacheConfig, speculativeGateRejectsMtpOnNonLastStages) {
+    const auto    score   = makeSingleModelConfig(7);
+    const auto    propose = makeSingleModelConfig(2);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 32;
     SpeculativeExecutionConfig sp_config;
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = 1;
+    for (int rank : {0, 1}) {
+        EXPECT_THROW(CacheConfigCreator::createSpConfig(score,
+                                                        propose,
+                                                        makePpConfig(7, 3, rank),
+                                                        RuntimeConfig{},
+                                                        kv_cache_config,
+                                                        sp_config,
+                                                        std::nullopt,
+                                                        true,
+                                                        false),
+                     std::exception);
+    }
+}
 
-    EXPECT_THROW(CacheConfigCreator::createSpConfig(score,
-                                                    propose,
-                                                    makePpConfig(4, 2, 0),
-                                                    RuntimeConfig{},
-                                                    defaultKvConfig(),
-                                                    sp_config,
-                                                    std::nullopt,
-                                                    /*is_mtp=*/true,
-                                                    /*is_eagle=*/false),
-                 std::exception);
+TEST(PPStageCacheConfig, speculativeGateRejectsOtherDraftTypes) {
+    const auto    score   = makeSingleModelConfig(4);
+    const auto    propose = makeSingleModelConfig(1);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 32;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.gen_num_per_cycle = 1;
+    for (auto type : {SP_TYPE_VANILLA, SP_TYPE_EAGLE3, SP_TYPE_DSPARK}) {
+        sp_config.type = type;
+        EXPECT_THROW(CacheConfigCreator::createSpConfig(score,
+                                                        propose,
+                                                        makePpConfig(4, 2, 1),
+                                                        RuntimeConfig{},
+                                                        kv_cache_config,
+                                                        sp_config,
+                                                        std::nullopt,
+                                                        true,
+                                                        false),
+                     std::exception);
+    }
 }
 
 TEST(PPStageCacheConfig, heterogeneousLinearTagsLegalUnderPp) {

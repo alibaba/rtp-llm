@@ -757,13 +757,20 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                const std::optional<WarmUpResult>& warm_up_result,
                                                bool                               is_mtp,
                                                bool                               is_eagle) {
-    // The joint topology below is built from whole-model configs (no
-    // stageScopedModelConfig), so it is not stage-scoped yet.
-    RTP_LLM_CHECK_WITH_INFO(parallelism_config.pp_size <= 1,
-                            "pipeline parallelism (pp_size=%ld) cannot be combined with speculative execution yet",
+    // Under pp>1 only the last stage builds the joint SP topology; the score
+    // side is stage-scoped here while the draft side stays complete, since the
+    // draft model loads on this stage only.
+    RTP_LLM_CHECK_WITH_INFO(parallelism_config.pp_size <= 1
+                                || (is_mtp && !is_eagle && sp_config.type == SP_TYPE_MTP
+                                    && RankLayout::fromParallelismConfig(parallelism_config).hasLmHead()),
+                            "pipeline parallelism (pp_size=%ld) only supports MTP speculative execution "
+                            "on the last stage",
                             parallelism_config.pp_size);
-    const auto [seq_size_per_block, kernel_seq_size_per_block] = resolveSeqSizes(score_model_config, kv_cache_config);
-    const auto score_ctx                                       = makeSpecBuildContext(score_model_config,
+    const ModelConfig& score_config_source                     = parallelism_config.pp_size > 1 ?
+                                                                     stageScopedModelConfig(score_model_config, parallelism_config) :
+                                                                     score_model_config;
+    const auto [seq_size_per_block, kernel_seq_size_per_block] = resolveSeqSizes(score_config_source, kv_cache_config);
+    const auto score_ctx                                       = makeSpecBuildContext(score_config_source,
                                                 parallelism_config,
                                                 seq_size_per_block,
                                                 kernel_seq_size_per_block,
@@ -773,12 +780,14 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                   seq_size_per_block,
                                                   kernel_seq_size_per_block,
                                                   sp_config.gen_num_per_cycle);
-    auto       score_data   = buildConfigDataFromDescs(score_model_config, score_ctx);
+    auto       score_data   = buildConfigDataFromDescs(score_config_source, score_ctx);
     auto       propose_data = buildConfigDataFromDescs(propose_model_config, propose_ctx);
 
-    const int joint_step      = std::max(1, kv_cache_config.linear_step);
-    int       num_mtp_modules = 1;
-    if (is_mtp) {
+    const int joint_step = std::max(1, kv_cache_config.linear_step);
+    // Under pp>1 the draft modules live with lm_head on the last stage only;
+    // the stage carries a single merged draft module regardless of cycle width.
+    int num_mtp_modules = 1;
+    if (is_mtp && parallelism_config.pp_size == 1) {
         num_mtp_modules = sp_config.gen_num_per_cycle;
         if (is_eagle || sp_config.type == SP_TYPE_DSPARK) {
             num_mtp_modules = 1;
@@ -883,7 +892,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     auto            main_storage = finalizeGroupStorage(target);
     BuiltConfigData main_data{std::move(target), main_storage};
     CacheConfig     config = makeConfig(
-        std::move(main_data), score_model_config, total_layer_num, seq_size_per_block, score_ctx.dtype, joint_step);
+        std::move(main_data), score_config_source, total_layer_num, seq_size_per_block, score_ctx.dtype, joint_step);
     config.mtp_sub_configs             = std::move(mtp_sub_configs);
     uint32_t validated_total_layer_num = config.layer_num;
     for (size_t module_index = 0; module_index < config.mtp_sub_configs.size(); ++module_index) {

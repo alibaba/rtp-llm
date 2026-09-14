@@ -33,6 +33,35 @@ namespace rtp_llm {
 
 PPExecutor::ModelFactory PPExecutor::test_model_factory = nullptr;
 
+// Mirrors NormalExecutor decodeCacheUpdateMapping: the first column is a
+// group_index in sorted-tag order, resolved to a tag before the cache layer.
+static std::vector<TaggedBlockIdPair> decodeCacheUpdateMapping(const torch::Tensor& mapping,
+                                                               const CacheConfig&   cache_config) {
+    RTP_LLM_CHECK_WITH_INFO(mapping.device().is_cpu() && mapping.scalar_type() == torch::kInt32
+                                && mapping.is_contiguous() && mapping.dim() == 2 && mapping.size(1) == 3,
+                            "kv_cache_update_mapping must be a contiguous CPU int32 [copies, 3] matrix");
+    std::vector<std::string> tags;
+    tags.reserve(cache_config.groups().size());
+    for (const auto& group : cache_config.groups()) {
+        tags.push_back(group.tag);
+    }
+    const auto sorted_tags = sortedCacheGroupTags(tags, "cache update mapping");
+
+    const auto*                    rows = reinterpret_cast<const GroupBlockIdPair*>(mapping.data_ptr());
+    std::vector<TaggedBlockIdPair> tagged;
+    tagged.reserve(static_cast<size_t>(mapping.size(0)));
+    for (int64_t i = 0; i < mapping.size(0); ++i) {
+        const auto group_index = rows[i].group_index;
+        RTP_LLM_CHECK_WITH_INFO(group_index >= 0 && static_cast<size_t>(group_index) < sorted_tags.size(),
+                                "kv_cache_update_mapping row %ld has out-of-range group_index=%d for %zu cache tags",
+                                static_cast<long>(i),
+                                group_index,
+                                sorted_tags.size());
+        tagged.push_back({sorted_tags[static_cast<size_t>(group_index)], rows[i].src, rows[i].dst});
+    }
+    return tagged;
+}
+
 void PPExecutor::InflightBatch::reset() {
     skip_run         = true;
     stream_groups    = StreamGroups();
@@ -113,7 +142,7 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     propose_step_(params.sp_config.gen_num_per_cycle),
     position_id_len_factor_(params.model_config_.attn_config.rope_config.index_factor),
     parallelism_config_(params.parallelism_config),
-    pp_layout_(PPLayout::fromParallelismConfig(parallelism_config_, params.model_config_.num_layers)),
+    pp_layout_(RankLayout::fromParallelismConfig(parallelism_config_)),
     slots_(parallelism_config_.pp_size + 1),
     profile_step_start_(std::move(profile_step_start)),
     profile_step_finish_(std::move(profile_step_finish)),
@@ -200,13 +229,8 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     if (isLastStage() && propose_params) {
         const auto&                            draft_params = propose_params->getEngineInitParams();
         std::optional<GroupedCacheLayerLayout> draft_cache_layer_layout;
-        size_t draft_tokens_per_block        = draft_params.model_config_.attn_config.tokens_per_block;
-        size_t draft_kernel_tokens_per_block = draft_params.model_config_.attn_config.kernel_tokens_per_block;
         if (cache_manager_) {
-            draft_cache_layer_layout       = cache_manager_->getMTPModuleGroupedCacheLayerLayout(0);
-            const auto& draft_cache_config = *cache_manager_->cacheConfig().mtp_sub_configs[0];
-            draft_tokens_per_block         = draft_cache_config.seq_size_per_block;
-            draft_kernel_tokens_per_block  = draft_cache_config.kernel_seq_size_per_block;
+            draft_cache_layer_layout = cache_manager_->getMTPModuleGroupedCacheLayerLayout(0);
         }
 
         GptModelInitParams draft_init_params({draft_params.gpt_weights,
@@ -226,8 +250,6 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
                                               mla_ops_type,
                                               draft_params.model_config_.max_seq_len,
                                               draft_params.model_config_.hidden_size,
-                                              draft_tokens_per_block,
-                                              draft_kernel_tokens_per_block,
                                               cache_manager_,
                                               std::make_optional(0),
                                               draft_params.model_config_.hc_mult});
@@ -546,11 +568,6 @@ torch::Tensor PPExecutor::proposeDraftTokens(GptModelInputs draft_input, size_t 
     for (size_t step = 0; step < num_draft_tokens; ++step) {
         tpSyncModelInputs(draft_input, parallelism_config_);
         draft_model_->releaseBuffers();
-        if (cache_manager_) {
-            const auto& draft_cache_config    = cache_manager_->getMTPModuleCacheConfig(0);
-            draft_input.kv_block_stride_bytes = draft_cache_config.kv_block_stride_bytes;
-            draft_input.kv_scale_stride_bytes = draft_cache_config.kv_scale_stride_bytes;
-        }
         if (model_inputs_logger_) {
             model_inputs_logger_->log(draft_input, ModelInputsModelRole::DRAFT, draft_model_->model_id_);
         }

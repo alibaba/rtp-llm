@@ -45,30 +45,6 @@ class ModelFactory:
             0, model_cls.default_kv_cache_tokens_per_block()
         )
 
-
-def _normalize_pp_cache_config(model_config: ModelConfig, pp_size: int) -> None:
-    """Normalize hybrid cache metadata for any model participating in PP."""
-    hybrid_config = model_config.hybrid_attention_config
-    if (
-        pp_size <= 1
-        or not hybrid_config.enable_hybrid_attention
-        or hybrid_config.enable_independent_kv_cache_pools
-    ):
-        return
-
-    hybrid_config.enable_independent_kv_cache_pools = True
-    _retype_pp_hybrid_spec_tags(
-        model_config.kv_cache_spec_descs,
-        hybrid_config.hybrid_attention_types,
-    )
-    logging.info(
-        "PP hybrid cache switched to independent type pools: num_layers=%d pp_size=%d",
-        model_config.num_layers,
-        pp_size,
-    )
-
-
-class ModelFactory:
     @staticmethod
     def get_config_json(ckpt_path: str):
         check_with_info(os.path.isdir(ckpt_path), f"{ckpt_path} check os.isdir failed")
@@ -465,9 +441,6 @@ class ModelFactory:
                 counts,
             )
 
-        # The cache gate requires independent pools when pp_size > 1; linear tags collapse to a single "linear" tag.
-        _normalize_pp_cache_config(model_config, parallelism_config.pp_size)
-
     @staticmethod
     def create_propose_model_config(
         engine_config: EngineConfig,
@@ -544,9 +517,6 @@ class ModelFactory:
             embedding_config=None,  # Propose model doesn't need embedding_config
         )
         propose_model_cls._post_build_model_config(propose_model_config)
-        _normalize_pp_cache_config(
-            propose_model_config, engine_config.parallelism_config.pp_size
-        )
 
         if sp_config.type == SpeculativeType.DSPARK:
             ModelFactory._setup_dspark_configs(

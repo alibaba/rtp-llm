@@ -58,13 +58,16 @@ def _worker(rank, world_size, pp_size, dp_size, tp_size, master_port, queue):
         }
         # Runtime key derivation must land on a group this rank belongs to.
         looked_up = {
-            "STAGE": torch.distributed.get_process_group_ranks(
-                ct._get_group(ct.Group.STAGE)
-            ),
             "WORLD": torch.distributed.get_process_group_ranks(
                 ct._get_group(ct.Group.WORLD)
             ),
         }
+        # A stage resolves to a group except at pp>1, dp=1, tp=1, where it is a
+        # single rank with no collective to run.
+        if not (pp_size > 1 and dp_size == 1 and tp_size == 1):
+            looked_up["STAGE"] = torch.distributed.get_process_group_ranks(
+                ct._get_group(ct.Group.STAGE)
+            )
         if tp_size > 1 and world_size != tp_size:
             looked_up["TP"] = torch.distributed.get_process_group_ranks(
                 ct._get_group(ct.Group.TP)
@@ -158,10 +161,11 @@ def _run_topology(test, pp_size, dp_size, tp_size):
             )
             test.assertIsNone(err, f"rank {rank} failed: {err}")
             stage_size = dp_size * tp_size
-            test.assertEqual(
-                looked_up["STAGE"],
-                list(range(pp_rank * stage_size, (pp_rank + 1) * stage_size)),
-            )
+            if "STAGE" in looked_up:
+                test.assertEqual(
+                    looked_up["STAGE"],
+                    list(range(pp_rank * stage_size, (pp_rank + 1) * stage_size)),
+                )
             test.assertEqual(looked_up["WORLD"], list(range(world_size)))
             results[rank] = (
                 pp_rank,
@@ -220,7 +224,7 @@ class PPGroupTopologyTest(unittest.TestCase):
         self.assertEqual(membership["PP0"], [0, 2])
         self.assertEqual(membership["PP1"], [1, 3])
         self.assertFalse(any(k.startswith("DP") for k in membership))
-        # dp=1: a stage coincides with its TP group, aliased at registration.
+        # dp=1: a stage coincides with its TP group, so no distinct STAGE group.
         self.assertFalse(any(k.startswith("STAGE") for k in membership))
         self.assertEqual(results[0][0], 0)
         self.assertEqual(results[3][0], 1)
@@ -249,10 +253,6 @@ class PPGroupTopologyTest(unittest.TestCase):
         self.assertEqual(membership["PP1"], [1, 5])
         self.assertEqual(membership["PP2"], [2, 6])
         self.assertEqual(membership["PP3"], [3, 7])
-        # pp>1 & dp>1: a distinct STAGE group per stage, each the stage's dp*tp
-        # ranks as one contiguous interval.
-        self.assertEqual(membership["STAGE0"], [0, 1, 2, 3])
-        self.assertEqual(membership["STAGE1"], [4, 5, 6, 7])
         self.assertEqual(results[0][4]["TP"], [0, 1])
         self.assertEqual(results[0][4]["DP"], [0, 2])
         self.assertEqual(results[0][4]["PP"], [0, 4])
@@ -297,10 +297,9 @@ class PPGroupTopologyTest(unittest.TestCase):
         results = _run_topology(self, pp_size=2, dp_size=1, tp_size=1)
         membership = self._merge(results)
         self.assertEqual(membership["PP0"], [0, 1])
+        # dp=1, tp=1: each stage is a single rank, so no STAGE/TP/DP group exists.
         self.assertFalse(any(k.startswith(("TP", "DP", "STAGE")) for k in membership))
         self.assertEqual(results[0][4]["PP"], [0, 1])
-        self.assertEqual(membership["STAGE0"], [0])
-        self.assertEqual(membership["STAGE1"], [1])
         for result in results.values():
             local_blocks, stage_blocks, stage_snapshots, _ = result[5]
             self.assertEqual(stage_blocks, local_blocks)

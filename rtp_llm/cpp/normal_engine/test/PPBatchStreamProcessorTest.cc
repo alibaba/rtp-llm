@@ -615,7 +615,7 @@ TEST_F(PPBatchStreamProcessorTest, MtpDispatchCommitsAcceptedLinearState) {
                                           << " max_new_tokens=" << c.max_new_tokens);
         auto            cache_config = test::makeSimpleHybridMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16, 1);
         ResourceContext resource_context;
-        resource_context.cache_manager = std::make_shared<KVCacheManager>(cache_config);
+        resource_context.cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
         const auto model_config        = makeModelConfig();
         auto       stream = makeStream(resource_context, model_config, 101, std::vector<int32_t>(c.input_len, 1), 0);
         stream->generateConfig()->max_new_tokens = c.max_new_tokens;
@@ -643,7 +643,7 @@ TEST_F(PPBatchStreamProcessorTest, MtpDispatchCommitsAcceptedLinearState) {
         EXPECT_FALSE(stream->hasError());
         EXPECT_EQ(stream->seqLength(), c.input_len + std::min(c.accept_len, c.max_new_tokens));
         EXPECT_EQ(resource.blocks("linear"), c.expected_linear_blocks);
-        EXPECT_EQ(resource.kernelBlocks("linear"), c.expected_linear_blocks);
+        EXPECT_EQ(resource.blockIds("linear").kernelBlocks(), c.expected_linear_blocks);
         EXPECT_EQ(resource.blocks("full1"), BlockIndicesType({5, 6, 7, 8}));
     }
 }

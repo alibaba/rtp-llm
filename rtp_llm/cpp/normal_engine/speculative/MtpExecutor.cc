@@ -2131,9 +2131,6 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    int64_t&                    model_forward_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(batch_size=%zu)", model_input.combo_tokens.size(0));
 
-    const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
-    applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
-
     std::vector<torch::Tensor> draft_token_columns;
     torch::Tensor              spec_prefix_lengths;
 

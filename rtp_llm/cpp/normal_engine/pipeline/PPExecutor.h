@@ -157,7 +157,7 @@ private:
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;
 
     const ParallelismConfig      parallelism_config_;
-    const PPLayout               pp_layout_;
+    const RankLayout             pp_layout_;
     std::unique_ptr<PPTransport> transport_;
     std::vector<InflightBatch>   slots_;
     size_t                       current_slot_ = 0;

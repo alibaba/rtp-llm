@@ -320,6 +320,8 @@ def _create_process_groups(
                     f"[rank: {world_rank}] Stored PP group with key: {group_key} {pp_group} with ranks: {pp_ranks}"
                 )
             torch.distributed.barrier()
+    else:
+        _group_map[Group.STAGE] = torch.distributed.group.WORLD
 
     if pp_size > 1 and dp_size > 1:
         # STAGE groups: all dp*tp ranks of one pipeline stage. Materialized only
@@ -804,6 +806,7 @@ def _get_group(
         (group == Group.DP and dp_size > 1 and world_size != dp_size)
         or (group == Group.TP and tp_size > 1 and world_size != tp_size)
         or (group == Group.PP and pp_size > 1)
+        or (group == Group.STAGE and pp_size > 1)
     )
     if needs_key:
         layout = RankLayout.from_parallelism_config(_parallelism_config)
@@ -817,10 +820,18 @@ def _get_group(
             group_key = Group.DP.name + str(coord.pp * tp_size + coord.tp)
         elif group == Group.TP:
             group_key = Group.TP.name + str(coord.pp * dp_size + coord.dp)
+        elif group == Group.STAGE:
+            if dp_size > 1:
+                group_key = Group.STAGE.name + str(coord.pp)
+            else:
+                # dp=1: a stage coincides with its TP group.
+                group_key = Group.TP.name + str(coord.pp * dp_size + coord.dp)
         else:
             group_key = Group.PP.name + str(coord.dp * tp_size + coord.tp)
             if cpu_backend:
                 group_key = group_key + "_gloo"
+    elif group == Group.STAGE:
+        group_key = Group.STAGE
     else:
         # WORLD always uses Group.WORLD as key
         group_key = Group.WORLD

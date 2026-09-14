@@ -409,6 +409,11 @@ void validatePPComposedBlockNums(const CacheConfig& composed, const NegotiatedCa
                                 group.block_num,
                                 it->second);
     }
+    for (const auto& sub_config : composed.mtp_sub_configs) {
+        if (sub_config != nullptr) {
+            validatePPComposedBlockNums(*sub_config, agreed);
+        }
+    }
 }
 
 NegotiatedCapacity PPCacheCapacityNegotiator::negotiate(const CacheConfig&   topology,
