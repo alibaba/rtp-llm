@@ -57,24 +57,11 @@ public final class ResponseMerger {
         return new MergedResponse(200, envelope);
     }
 
-    /** On total failure, use the shared FE 4xx if all contacted FEs return it; otherwise 500. */
+    /** On total failure, preserve a 4xx only when every chunk received that same status. */
     private static int commonErrorStatus(List<SubBatchResult> subs) {
-        int common = -1;
-        for (SubBatchResult s : subs) {
-            int st = s.feStatus();
-            if (st <= 0) {
-                continue;
-            }
-            if (st < 400 || st > 499) {
-                return 500;
-            }
-            if (common == -1) {
-                common = st;
-            } else if (common != st) {
-                return 500;
-            }
-        }
-        return common == -1 ? 500 : common;
+        int status = subs.getFirst().feStatus();
+        return status >= 400 && status < 500 && subs.stream().allMatch(s -> s.feStatus() == status)
+                ? status : 500;
     }
 
     /** Client-facing failure reason: a stable, bounded code — never the raw exception text. */

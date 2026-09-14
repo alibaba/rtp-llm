@@ -781,12 +781,17 @@ class OpenaiEndpoint(object):
         visitor = self.backend_rpc_server_visitor
         if visitor.host_service.service_available:
             generators = [await visitor.enqueue(item) for item in inputs]
-            batch_outputs = await asyncio.gather(
-                *(
-                    CompleteResponseAsyncGenerator.get_last_value(gen)
-                    for gen in generators
-                )
-            )
+            tasks = [
+                asyncio.create_task(CompleteResponseAsyncGenerator.get_last_value(gen))
+                for gen in generators
+            ]
+            try:
+                batch_outputs = await asyncio.gather(*tasks)
+            except BaseException:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
         else:
             batch_outputs = await visitor.batch_enqueue(inputs)
 

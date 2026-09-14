@@ -77,17 +77,25 @@ class FakeFrontendWorker(object):
 
 class ForceBatchFrontendWorkerTest(TestCase):
     def test_chat_batch_preserves_master_scheduling_and_static_batch_rpc(self):
-        for available in (False, True):
-            with self.subTest(master_available=available):
+        for mode in ("static", "master", "failure"):
+            with self.subTest(mode=mode):
                 second_finished = asyncio.Event()
+                closed = set()
 
                 async def generate(item):
-                    yield "intermediate"
-                    if item == 700:
-                        await second_finished.wait()
-                    else:
-                        second_finished.set()
-                    yield item
+                    try:
+                        yield "intermediate"
+                        if item == 700:
+                            await second_finished.wait()
+                            if mode == "failure":
+                                raise RuntimeError("batch member failed")
+                        else:
+                            second_finished.set()
+                            if mode == "failure":
+                                await asyncio.Future()
+                        yield item
+                    finally:
+                        closed.add(item)
 
                 endpoint = OpenaiEndpoint.__new__(OpenaiEndpoint)
                 endpoint._prepare_chat_input = lambda rid, _: (rid, GenerateConfig())
@@ -95,19 +103,30 @@ class ForceBatchFrontendWorkerTest(TestCase):
                     side_effect=lambda out, *_: out
                 )
                 visitor = endpoint.backend_rpc_server_visitor = MagicMock()
-                visitor.host_service.service_available = available
+                visitor.host_service.service_available = mode != "static"
                 visitor.enqueue = AsyncMock(side_effect=generate)
                 visitor.batch_enqueue = AsyncMock(return_value=[700, 701])
                 request = SimpleNamespace(
                     requests=[SimpleNamespace(stream=False) for _ in range(2)]
                 )
-                result = asyncio.run(
-                    asyncio.wait_for(endpoint.batch_chat_completion(700, request), 1)
-                )
-                self.assertEqual([700, 701], result)
-                self.assertEqual(2 if available else 0, visitor.enqueue.await_count)
+
+                async def check():
+                    call = endpoint.batch_chat_completion(700, request)
+                    if mode == "failure":
+                        with self.assertRaisesRegex(
+                            RuntimeError, "batch member failed"
+                        ):
+                            await call
+                        self.assertEqual({700, 701}, closed)
+                    else:
+                        self.assertEqual([700, 701], await call)
+
+                asyncio.run(asyncio.wait_for(check(), 1))
                 self.assertEqual(
-                    0 if available else 1, visitor.batch_enqueue.await_count
+                    0 if mode == "static" else 2, visitor.enqueue.await_count
+                )
+                self.assertEqual(
+                    1 if mode == "static" else 0, visitor.batch_enqueue.await_count
                 )
 
     def test_batch_endpoint_preserves_config_identity_and_headers(self):

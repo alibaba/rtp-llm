@@ -6,6 +6,7 @@ import com.alibaba.fastjson2.JSONObject;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
+import okhttp3.mockwebserver.SocketPolicy;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
@@ -93,6 +94,8 @@ class DispatcherE2ETest {
             /batch_infer | {"prompt_batch":["a","b"]} | bad | bad | 400 | 400 | 400 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_client_error"]}
             /batch_infer | {"prompt_batch":["a","b"]} | bad | bad | 400 | 500 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_client_error","fe_server_error"]}
             /batch_infer | {"prompt_batch":["a","b"]} | bad | bad | 400 | 404 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_client_error"]}
+            /batch_infer | {"prompt_batch":["a","b"]} | disconnected | bad | 0 | 400 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_unavailable","fe_client_error"]}
+            /batch_infer | {"prompt_batch":["a","b"]} | bad | disconnected | 404 | 0 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_client_error","fe_unavailable"]}
             /batch_infer | {"prompt_batch":["a","b"]} | [] | bad | 200 | 500 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["malformed_sub_batch","fe_server_error"]}
             /batch_infer | {"prompt_batch":["a","b"]} | {} | bad | 200 | 500 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["malformed_sub_batch","fe_server_error"]}
             /v1/reranker | {"query":"cape pants","documents":["文档🧥0","文档🧥1","文档🧥2","文档🧥3"],"top_k":2} | {"results":[{"index":0,"document":"文档🧥0","relevance_score":0.2},{"index":1,"document":"文档🧥1","relevance_score":0.9}],"total_tokens":11} | {"results":[{"index":0,"document":"文档🧥2","relevance_score":0.9},{"index":1,"document":"文档🧥3","relevance_score":0.4}],"total_tokens":17} | 200 | 200 | 200 | {"results":[{"index":1,"document":"文档🧥1","relevance_score":0.9},{"index":2,"document":"文档🧥2","relevance_score":0.9}],"total_tokens":28}
@@ -297,8 +300,12 @@ class DispatcherE2ETest {
     }
 
     private void reply(int frontend, int status, String body) {
-        frontends.get(frontend).enqueue(new MockResponse().setResponseCode(status)
-                .setHeader("Content-Type", "application/json").setBody(body));
+        MockResponse response = new MockResponse().setResponseCode(status == 0 ? 200 : status)
+                .setHeader("Content-Type", "application/json").setBody(body);
+        if (status == 0) {
+            response.setSocketPolicy(SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY);
+        }
+        frontends.get(frontend).enqueue(response);
     }
 
     private JSONObject takeChunk(int frontend, String path, String field, int size) throws Exception {

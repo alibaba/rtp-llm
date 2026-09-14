@@ -111,7 +111,7 @@ public enum BatchEndpointSpec {
         if (requestsStreaming(body)) {
             return true;
         }
-        // FE gives an explicit top-level adapter_name precedence, including JSON null.
+        // Top-level null clears a nested adapter; no effective adapter means splitting is safe.
         return effectiveAdapterName(body) != null;
     }
 

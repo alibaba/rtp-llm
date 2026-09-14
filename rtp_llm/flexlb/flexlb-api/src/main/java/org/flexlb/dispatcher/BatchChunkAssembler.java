@@ -65,7 +65,7 @@ public final class BatchChunkAssembler {
                 ? 1 + (total - 1) / split.value() : Math.min(total, split.value());
     }
 
-    /** Exact wire bytes without allocating repeated envelopes; JSON byte arrays have int lengths. */
+    /** Wire bytes before BE assignment; outbound accounting also includes the stamped routing fields. */
     public long projectedBytes() {
         if (count == 0) {
             return 0;
