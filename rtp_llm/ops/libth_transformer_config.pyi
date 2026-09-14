@@ -200,6 +200,8 @@ class CacheStoreConfig:
     p2p_rdma_enable_h2d_copy: bool
     p2p_rdma_staging_block_count: int
     p2p_rdma_staging_block_size_bytes: int
+    p2p_prefill_sender_thread_count: int
+    p2p_prefill_sender_queue_size: int
 
     def __getstate__(self) -> tuple:
         ...

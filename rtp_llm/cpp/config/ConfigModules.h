@@ -345,6 +345,8 @@ struct CacheStoreConfig {
     bool    p2p_rdma_enable_h2d_copy                  = false;
     int     p2p_rdma_staging_block_count              = 0;
     int64_t p2p_rdma_staging_block_size_bytes         = 0;
+    int     p2p_prefill_sender_thread_count          = 4;
+    int     p2p_prefill_sender_queue_size            = 10000;
 
     std::string to_string() const;
 };

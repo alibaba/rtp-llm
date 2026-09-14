@@ -58,6 +58,9 @@ struct P2PConnectorSchedulerConfig {
 struct P2PConnectorWorkerConfig {
     transfer::TransferBackendConfig transfer_backend_config;
 
+    int p2p_prefill_sender_thread_count = 4;
+    int p2p_prefill_sender_queue_size   = 10000;
+
     int64_t p2p_cancelled_keys_ttl_ms                = 3600 * 1000;
 
     int64_t  tp_size       = 1;
@@ -74,6 +77,8 @@ struct P2PConnectorWorkerConfig {
                                            uint32_t                 layer_all_num,
                                            bool                     is_mla = false) {
         P2PConnectorWorkerConfig config;
+        config.p2p_prefill_sender_thread_count = cache_store_config.p2p_prefill_sender_thread_count;
+        config.p2p_prefill_sender_queue_size   = cache_store_config.p2p_prefill_sender_queue_size;
         config.transfer_backend_config.cache_store_rdma_mode         = pd_sep_config.cache_store_rdma_mode;
         config.transfer_backend_config.messager_io_thread_count      = cache_store_config.messager_io_thread_count;
         config.transfer_backend_config.messager_worker_thread_count  = cache_store_config.messager_worker_thread_count;

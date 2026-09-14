@@ -912,6 +912,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("p2p_rdma_enable_h2d_copy", &CacheStoreConfig::p2p_rdma_enable_h2d_copy)
         .def_readwrite("p2p_rdma_staging_block_count", &CacheStoreConfig::p2p_rdma_staging_block_count)
         .def_readwrite("p2p_rdma_staging_block_size_bytes", &CacheStoreConfig::p2p_rdma_staging_block_size_bytes)
+        .def_readwrite("p2p_prefill_sender_thread_count", &CacheStoreConfig::p2p_prefill_sender_thread_count)
+        .def_readwrite("p2p_prefill_sender_queue_size", &CacheStoreConfig::p2p_prefill_sender_queue_size)
         .def("to_string", &CacheStoreConfig::to_string)
         .def(py::pickle(
             [](const CacheStoreConfig& self) {
@@ -939,10 +941,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.rdma_transfer_worker_queue_size,
                                       self.p2p_rdma_enable_h2d_copy,
                                       self.p2p_rdma_staging_block_count,
-                                      self.p2p_rdma_staging_block_size_bytes);
+                                      self.p2p_rdma_staging_block_size_bytes,
+                                      self.p2p_prefill_sender_thread_count,
+                                      self.p2p_prefill_sender_queue_size);
             },
             [](py::tuple t) {
-                if (t.size() != 25) {
+                if (t.size() != 27) {
                     throw std::runtime_error("Invalid CacheStoreConfig state");
                 }
                 CacheStoreConfig c;
@@ -971,6 +975,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.p2p_rdma_enable_h2d_copy = t[22].cast<bool>();
                 c.p2p_rdma_staging_block_count = t[23].cast<int>();
                 c.p2p_rdma_staging_block_size_bytes = t[24].cast<int64_t>();
+                c.p2p_prefill_sender_thread_count = t[25].cast<int>();
+                c.p2p_prefill_sender_queue_size = t[26].cast<int>();
                 return c;
             }));
 

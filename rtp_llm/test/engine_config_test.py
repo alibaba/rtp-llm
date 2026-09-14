@@ -198,13 +198,19 @@ class EngineConfigTest(TestCase):
 
     def test_cache_store_config_roundtrip_after_timeout_cleanup(self):
         config = CacheStoreConfig()
+        self.assertEqual(config.p2p_prefill_sender_thread_count, 4)
+        self.assertEqual(config.p2p_prefill_sender_queue_size, 10000)
+        config.p2p_prefill_sender_thread_count = 8
+        config.p2p_prefill_sender_queue_size = 20000
         state = config.__getstate__()
-        self.assertEqual(len(state), 25)
+        self.assertEqual(len(state), 27)
         restored = CacheStoreConfig()
         maybe_restored = restored.__setstate__(state)
         if maybe_restored is not None:
             restored = maybe_restored
         self.assertEqual(restored.__getstate__(), state)
+        self.assertEqual(restored.p2p_prefill_sender_thread_count, 8)
+        self.assertEqual(restored.p2p_prefill_sender_queue_size, 20000)
         for removed in ("p2p_prefill_resource_hold_ms", "p2p_max_transfer_deadline_ms",
                         "p2p_layer_cache_buffer_store_timeout_ms"):
             self.assertFalse(hasattr(restored, removed))

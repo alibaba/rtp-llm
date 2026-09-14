@@ -19,9 +19,6 @@ namespace rtp_llm {
 
 namespace {
 
-constexpr size_t kSenderPoolThreadCount = 4;
-constexpr size_t kSenderPoolQueueSize   = 10000;
-
 std::string describeRoutes(const P2PWorkerRoutePlan& worker_plan) {
     std::string result = "[";
     for (size_t i = 0; i < worker_plan.routes.size(); ++i) {
@@ -71,6 +68,13 @@ P2PConnectorWorkerPrefill::~P2PConnectorWorkerPrefill() {
 }
 
 bool P2PConnectorWorkerPrefill::init() {
+    if (config_.p2p_prefill_sender_thread_count <= 0 || config_.p2p_prefill_sender_queue_size <= 0) {
+        RTP_LLM_LOG_ERROR("init failed: p2p_prefill_sender_thread_count=%d and p2p_prefill_sender_queue_size=%d "
+                          "must both be positive",
+                          config_.p2p_prefill_sender_thread_count,
+                          config_.p2p_prefill_sender_queue_size);
+        return false;
+    }
     store_wait_context_checker_ = std::make_shared<StoreWaitContextChecker>(metrics_reporter_, computed_buffers_);
 
     if (config_.topology) {
@@ -89,7 +93,7 @@ bool P2PConnectorWorkerPrefill::init() {
     // See PrefillRpcServerNew2.h / P2PConnectorWorkerPrefill.h comments and
     // the OPT-0 analysis for full rationale.
     auto             sender_pool            = std::make_shared<autil::LockFreeThreadPool>(
-        kSenderPoolThreadCount, kSenderPoolQueueSize, nullptr, "P2PWorkerAsyncSender");
+        config_.p2p_prefill_sender_thread_count, config_.p2p_prefill_sender_queue_size, nullptr, "P2PWorkerAsyncSender");
     if (!sender_pool->start()) {
         RTP_LLM_LOG_ERROR("init failed: async_sender_pool start failed");
         return false;

@@ -218,3 +218,19 @@ def init_cache_store_group_args(parser, cache_store_config):
         default=0,
         help="单个 P2P RDMA H2D staging 槽位容量，必须为 4096 字节的倍数。",
     )
+    cache_store_group.add_argument(
+        "--p2p_prefill_sender_thread_count",
+        env_name="P2P_PREFILL_SENDER_THREAD_COUNT",
+        bind_to=(cache_store_config, "p2p_prefill_sender_thread_count"),
+        type=int,
+        default=4,
+        help="P2P Prefill 异步发送线程池的线程数，必须大于 0。",
+    )
+    cache_store_group.add_argument(
+        "--p2p_prefill_sender_queue_size",
+        env_name="P2P_PREFILL_SENDER_QUEUE_SIZE",
+        bind_to=(cache_store_config, "p2p_prefill_sender_queue_size"),
+        type=int,
+        default=10000,
+        help="P2P Prefill 异步发送线程池的队列容量，必须大于 0。",
+    )

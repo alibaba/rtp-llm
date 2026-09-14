@@ -346,7 +346,9 @@ std::string CacheStoreConfig::to_string() const {
         << "rdma_transfer_worker_queue_size: " << rdma_transfer_worker_queue_size << "\n"
         << "p2p_rdma_enable_h2d_copy: " << p2p_rdma_enable_h2d_copy << "\n"
         << "p2p_rdma_staging_block_count: " << p2p_rdma_staging_block_count << "\n"
-        << "p2p_rdma_staging_block_size_bytes: " << p2p_rdma_staging_block_size_bytes << "\n";
+        << "p2p_rdma_staging_block_size_bytes: " << p2p_rdma_staging_block_size_bytes << "\n"
+        << "p2p_prefill_sender_thread_count: " << p2p_prefill_sender_thread_count << "\n"
+        << "p2p_prefill_sender_queue_size: " << p2p_prefill_sender_queue_size << "\n";
     return oss.str();
 }
 
