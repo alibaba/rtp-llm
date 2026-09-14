@@ -36,12 +36,22 @@ public:
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* response_writer);
 
+    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                   const BatchGenerateInputPB* request,
+                                   BatchGenerateOutputsPB*     response) override;
+
 private:
+    grpc::Status        preparePDRequest(const GenerateInputPB&          request,
+                                         int64_t                         deadline_ms,
+                                         std::shared_ptr<GenerateInput>& input,
+                                         GenerateInputPB&                prefill_request,
+                                         PrefillPeerInfo&                peer_info);
     static grpc::Status parsePrefillDpAddr(const std::string& addr, std::string* ip, uint32_t* port);
     void updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) override;
 
 private:
     std::atomic<int64_t>                 unique_key_id_{0};
+    std::atomic<int64_t>                 batch_dp_id_{0};
     std::shared_ptr<PrefillServerCaller> prefill_server_caller_;
 };
 

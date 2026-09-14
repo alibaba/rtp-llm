@@ -16,10 +16,13 @@ P2PConnectorSchedulerPrefill::P2PConnectorSchedulerPrefill(
     const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client):
     config_(std::move(config)), metrics_reporter_(metrics_reporter), tp_broadcast_client_(tp_broadcast_client) {}
 
-std::shared_ptr<const PlanResult> P2PConnectorSchedulerPrefill::planFor(int decode_tp_size) {
+std::shared_ptr<const PlanResult> P2PConnectorSchedulerPrefill::planFor(int                decode_tp_size,
+                                                                        const std::string& unique_key) {
+    const auto offset = KVCacheTransferPlanner::sourceReplicaOffset(unique_key, config_.parallelism_config.tp_size);
+    const auto key    = std::make_pair(decode_tp_size, offset);
     {
         std::lock_guard<std::mutex> lock(plan_cache_mutex_);
-        auto                        it = plan_cache_.find(decode_tp_size);
+        auto                        it = plan_cache_.find(key);
         if (it != plan_cache_.end()) {
             return it->second;
         }
@@ -32,15 +35,18 @@ std::shared_ptr<const PlanResult> P2PConnectorSchedulerPrefill::planFor(int deco
                                                       config_.parallelism_config.prefill_cp_config.kv_cache_sharded,
                                                       RoleType::DECODE);
     const auto tags   = ShardLayoutFactory::tagsOf(*config_.topology);
-    auto       result = std::make_shared<const PlanResult>(KVCacheTransferPlanner::plan(src_layout, dst_layout, tags));
+    auto       result =
+        std::make_shared<const PlanResult>(KVCacheTransferPlanner::plan(src_layout, dst_layout, tags, offset));
 
     std::lock_guard<std::mutex> lock(plan_cache_mutex_);
-    auto [it, inserted] = plan_cache_.emplace(decode_tp_size, result);
+    auto [it, inserted] = plan_cache_.emplace(key, result);
     (void)inserted;
     return it->second;
 }
 
-ErrorInfo P2PConnectorSchedulerPrefill::checkPlanDigest(int decode_tp_size, uint64_t decode_plan_digest) {
+ErrorInfo P2PConnectorSchedulerPrefill::checkPlanDigest(int                decode_tp_size,
+                                                        uint64_t           decode_plan_digest,
+                                                        const std::string& unique_key) {
     if (!config_.topology) {
         return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
                          "StartLoad plan digest check: cache topology is null");
@@ -49,7 +55,7 @@ ErrorInfo P2PConnectorSchedulerPrefill::checkPlanDigest(int decode_tp_size, uint
         return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
                          "StartLoad plan digest check: decode worker list is empty");
     }
-    auto plan = planFor(decode_tp_size);
+    auto plan = planFor(decode_tp_size, unique_key);
     if (!plan->ok()) {
         return ErrorInfo(plan->error.code(), "StartLoad plan digest check: " + plan->error.ToString());
     }
@@ -116,7 +122,7 @@ P2PConnectorSchedulerPrefill::sendKVCache(const std::string&                    
             report_metric_func(false);
             return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "worker list is empty");
         }
-        auto plan = planFor(static_cast<int>(decode_transfer_servers.size()));
+        auto plan = planFor(static_cast<int>(decode_transfer_servers.size()), unique_key);
         if (!plan->ok()) {
             RTP_LLM_LOG_WARNING("sendKVCache: transfer plan failed, unique_key=%s, error=%s",
                                 unique_key.c_str(),

@@ -1,6 +1,9 @@
 #pragma once
 
 #include <string>
+#include <atomic>
+#include <cstdint>
+#include <mutex>
 
 namespace rtp_llm {
 
@@ -204,6 +207,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "MM_EMPTY_ENGINE_ERROR";
         case ErrorCode::MM_NOT_SUPPORTED_ERROR:
             return "MM_NOT_SUPPORTED_ERROR";
+        case ErrorCode::MM_DOWNLOAD_FAILED:
+            return "MM_DOWNLOAD_FAILED";
         case ErrorCode::GET_PART_NODE_STATUS_FAILED:
             return "GET_PART_NODE_STATUS_FAILED";
         case ErrorCode::GET_ALL_NODE_STATUS_FAILED:
@@ -253,6 +258,37 @@ public:
 private:
     ErrorCode   code_ = ErrorCode::NONE_ERROR;
     std::string message_;
+};
+
+// Captures one failure. Ordering is local to this process, never a remote timestamp.
+class FirstError {
+public:
+    struct Snapshot {
+        ErrorInfo error;
+        uint64_t  order{0};
+    };
+
+    bool record(const ErrorInfo& error) {
+        if (error.ok())
+            return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (value_.order != 0)
+            return false;
+        value_ = {error, next_order_.fetch_add(1, std::memory_order_relaxed)};
+        return true;
+    }
+    Snapshot snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return value_;
+    }
+    static Snapshot earlier(const Snapshot& a, const Snapshot& b) {
+        return a.order != 0 && (b.order == 0 || a.order < b.order) ? a : b;
+    }
+
+private:
+    inline static std::atomic<uint64_t> next_order_{1};
+    mutable std::mutex                  mutex_;
+    Snapshot                            value_;
 };
 
 template<typename T>

@@ -11,7 +11,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheSender.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
-#include "autil/LoopThread.h"
+#include <thread>
 #include "autil/ThreadPool.h"
 #include <atomic>
 #include <condition_variable>
@@ -157,7 +157,8 @@ private:
     std::set<std::string>                                               expected_buffer_keys_;
     std::vector<std::string>                                            expected_buffer_tags_;
     std::shared_ptr<StoreWaitContextChecker>                            store_wait_context_checker_;
-    autil::LoopThreadPtr                                                store_wait_check_thread_;
+    std::thread                                                         store_wait_check_thread_;
+    std::atomic<bool>                                                   store_wait_stopping_{false};
     // Per in-flight sendKVCache, hold both the cancel signal and a weak handle
     // to its SendTransferResult. The weak handle lets cancelRequest() wake up the
     // wait_for loop in waitSendCallbacksWithTimeout via cv.notify_all() instead

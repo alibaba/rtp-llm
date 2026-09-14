@@ -49,14 +49,20 @@ public:
 
 private:
     struct ReadTaskGroup {
+        FirstError                                 first_error;
         std::vector<std::string>                   partition_keys;
         std::vector<transfer::IKVCacheRecvTaskPtr> tasks;
         std::atomic<bool>                          cancelled{false};
         std::shared_ptr<DecodeTargetWriteLease>    lease;
+        // Completion/cancellation notifications share this mutex with waiters,
+        // including completion before the request is published in lease_map_.
+        std::mutex              completion_mutex;
+        std::condition_variable completion_cv;
     };
 
     enum class ReadWaitOutcome {
         AllDone,
+        Failed,
         Cancelled,
         ReturnDeadlineIncomplete
     };

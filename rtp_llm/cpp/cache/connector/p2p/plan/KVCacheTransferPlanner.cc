@@ -455,9 +455,22 @@ KVCacheTransferPlanner::ranksWithCoord(const ShardLayout& side, const std::strin
     return out;
 }
 
+size_t KVCacheTransferPlanner::sourceReplicaOffset(const std::string& unique_key, int source_rank_count) {
+    if (source_rank_count <= 1) {
+        return 0;
+    }
+    // FNV-1a specifies the same byte-level result on both hosts; std::hash does not.
+    uint64_t hash = 14695981039346656037ULL;
+    for (unsigned char byte : unique_key) {
+        hash = (hash ^ byte) * 1099511628211ULL;
+    }
+    return hash % static_cast<size_t>(source_rank_count);
+}
+
 PlanResult KVCacheTransferPlanner::plan(const ShardLayout&              src,
                                         const ShardLayout&              dst,
-                                        const std::vector<std::string>& tags) {
+                                        const std::vector<std::string>& tags,
+                                        size_t                          source_replica_offset) {
     PlanResult result;
     if (src.rankCount() <= 0 || dst.rankCount() <= 0) {
         result.error = planError("rank count must be positive");
@@ -529,8 +542,10 @@ PlanResult KVCacheTransferPlanner::plan(const ShardLayout&              src,
                         return result;
                     }
                     // 副本类内按比例选举，把出口散开而非全压在第一个 rank 上。
-                    const size_t elected_index = (dst_index * src_class.size()) / dst_class_size;
-                    const int    src_rank       = src_class[std::min(elected_index, src_class.size() - 1)];
+                    const size_t elected_index =
+                        ((dst_index * src_class.size()) / dst_class_size + source_replica_offset % src_class.size())
+                        % src_class.size();
+                    const int src_rank = src_class[elected_index];
 
                     TransferRoute route;
                     route.route_id      = next_route_id++;

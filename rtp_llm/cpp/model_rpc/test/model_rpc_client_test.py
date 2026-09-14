@@ -39,6 +39,8 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateOutputsPB,
+    ErrorCodePB,
+    ErrorDetailsPB,
     GenerateInputPB,
     GenerateOutputsPB,
     TensorPB,
@@ -97,6 +99,7 @@ class FakeBatchStub:
     async def BatchGenerateCall(self, input, timeout=None):
         self.last_timeout = timeout
         self.last_batch_size = len(input.inputs)
+        self.last_item_timeouts = [item.generate_config.timeout_ms for item in input.inputs]
         response = BatchGenerateOutputsPB()
         for _ in input.inputs:
             result = response.results.add()
@@ -400,6 +403,54 @@ class ModelRpcClientTest(TestCase):
             "10.0.0.1",
         )
 
+    def test_decode_batch_preserves_individual_timeouts(self):
+        client = ModelRpcClient(["127.0.0.1:10101"], {}, 5000, True)
+        stub = FakeBatchStub()
+
+        async def fake_get(_):
+            return object()
+
+        client._channel_pool.get = fake_get
+        inputs = [
+            GenerateInput(
+                token_ids=torch.tensor([1, 2]),
+                generate_config=GenerateConfig(timeout_ms=timeout),
+                request_id=i,
+                mm_inputs=[],
+            )
+            for i, timeout in enumerate([100, 2000, 0])
+        ]
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=stub
+        ):
+            asyncio.run(client.batch_enqueue(inputs))
+        self.assertEqual(stub.last_item_timeouts, [100, 2000, 5000])
+        self.assertEqual(stub.last_timeout, 5.0)
+
+    def test_batch_rejects_wrong_result_count(self):
+        client = ModelRpcClient(["127.0.0.1:10101"], {}, 5000, True)
+
+        async def fake_get(_):
+            return object()
+
+        class ShortBatchStub:
+            async def BatchGenerateCall(self, request, timeout=None):
+                return BatchGenerateOutputsPB()
+
+        client._channel_pool.get = fake_get
+        input_obj = GenerateInput(
+            token_ids=torch.tensor([1]),
+            generate_config=GenerateConfig(),
+            request_id=1,
+            mm_inputs=[],
+        )
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=ShortBatchStub(),
+        ):
+            with self.assertRaisesRegex(FtRuntimeException, "batch result count mismatch"):
+                asyncio.run(client.batch_enqueue([input_obj]))
+
     def test_batch_enqueue_uses_first_selected_backend_for_multi_address_batch(self):
         client = ModelRpcClient(
             ["10.0.0.10:10101", "10.0.0.11:10111"],
@@ -647,7 +698,8 @@ class ModelRpcClientTest(TestCase):
         with self.assertRaises(FtRuntimeException) as cm:
             client._handle_grpc_error(_FakeRpcError(), "test-request")
         self.assertEqual(cm.exception.exception_type, ExceptionType.MALLOC_ERROR)
-        self.assertEqual(cm.exception.message, "LACK MEM")
+        self.assertIn("LACK MEM", cm.exception.message)
+        self.assertIn("RESOURCE_EXHAUSTED", cm.exception.message)
 
     def test_trans_input_serializes_unique_key(self):
         input_py = GenerateInput(
@@ -660,6 +712,79 @@ class ModelRpcClientTest(TestCase):
         input_pb = trans_input(input_py)
 
         self.assertEqual(input_pb.generate_config.unique_key, "decode-batch-unique-key")
+
+
+class FirstCauseRpcErrorTest(TestCase):
+    def rpc_error(self, metadata, code=grpc.StatusCode.UNAVAILABLE):
+        class Failure(grpc.RpcError):
+            def trailing_metadata(self):
+                return metadata
+
+            def code(self):
+                return code
+
+            def details(self):
+                return "connection reset by peer"
+
+        return Failure()
+
+    def test_structured_cause_survives_generic_grpc_status(self):
+        details = ErrorDetailsPB(error_code=903, error_message="Prefill VIT request=42 failed")
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        with self.assertRaises(FtRuntimeException) as caught:
+            client._handle_grpc_error(
+                self.rpc_error((("grpc-status-details-bin", details.SerializeToString()),)),
+                "relay",
+            )
+        self.assertEqual(caught.exception.exception_type, ExceptionType.MM_PROCESS_ERROR)
+        self.assertEqual(caught.exception.message, f"relay: {details.error_message}")
+
+    def test_unknown_application_code_keeps_numeric_code_and_original_reason(self):
+        details = ErrorDetailsPB(error_code=99999, error_message="original backend failure")
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        with self.assertRaises(FtRuntimeException) as caught:
+            client._handle_grpc_error(
+                self.rpc_error((("grpc-status-details-bin", details.SerializeToString()),)),
+                "relay",
+            )
+        self.assertEqual(caught.exception.exception_type, ExceptionType.UNKNOWN_ERROR)
+        self.assertIn("99999", caught.exception.message)
+        self.assertIn("original backend failure", caught.exception.message)
+
+    def test_missing_or_malformed_metadata_does_not_mask_transport_cause(self):
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        for metadata in (None, (), (("grpc-status-details-bin", b"\xff"),)):
+            with self.subTest(metadata=metadata), self.assertRaises(FtRuntimeException) as caught:
+                client._handle_grpc_error(self.rpc_error(metadata), "Decode peer=worker:9000")
+            self.assertEqual(caught.exception.exception_type, ExceptionType.CONNECT_FAILED)
+            self.assertIn("connection reset by peer", caught.exception.message)
+            self.assertIn("peer=worker:9000", caught.exception.message)
+
+    def test_batch_pb_preserves_new_and_existing_application_codes(self):
+        for code, expected in (
+            (ErrorCodePB.MM_PROCESS_ERROR, ExceptionType.MM_PROCESS_ERROR),
+            (ErrorCodePB.MALLOC_FAILED, ExceptionType.MALLOC_ERROR),
+            (ErrorCodePB.CANCELLED, ExceptionType.CANCELLED),
+            (
+                ErrorCodePB.P2P_CONNECTOR_WORKER_READ_CANCELED,
+                ExceptionType.P2P_CONNECTOR_WORKER_READ_CANCELLED,
+            ),
+        ):
+            with self.subTest(code=code), self.assertRaises(FtRuntimeException) as caught:
+                ModelRpcClient._raise_pb_error(
+                    SimpleNamespace(error_code=code, error_message="first cause"),
+                    "batch item 1",
+                )
+            self.assertEqual(caught.exception.exception_type, expected)
+            self.assertEqual(caught.exception.message, "batch item 1: first cause")
+
+    def test_batch_pb_error_without_message_is_still_failure(self):
+        with self.assertRaises(FtRuntimeException) as caught:
+            ModelRpcClient._raise_pb_error(
+                SimpleNamespace(error_code=ErrorCodePB.GENERATE_TIMEOUT, error_message=""),
+                "item 0",
+            )
+        self.assertEqual(caught.exception.exception_type, ExceptionType.GENERATE_TIMEOUT)
 
 
 if __name__ == "__main__":

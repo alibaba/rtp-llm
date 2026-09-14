@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
+#include <limits>
 
 namespace rtp_llm {
 namespace {
@@ -43,6 +45,28 @@ PDSupportDecision checkPDSupport(const GenerateInputPB& request) {
         return {false, "PD does not support multiple return sequences"};
     }
     return {true, ""};
+}
+
+ErrorInfo checkPDBatchSupport(const BatchGenerateInputPB& request, bool& pd_separation) {
+    pd_separation = request.inputs_size() > 0 && checkPDSupport(request.inputs(0)).supported;
+    for (const auto& input : request.inputs()) {
+        if (checkPDSupport(input).supported != pd_separation) {
+            return ErrorInfo(ErrorCode::INVALID_PARAMS,
+                             "mixing PD and non-PD requests in one atomic batch is not supported");
+        }
+    }
+    return ErrorInfo::OkStatus();
+}
+
+ErrorInfo validatePDHandoff(const GenerateInputPB& request) {
+    if (request.request_deadline_ms() <= currentTimeMs()
+        || request.request_deadline_ms() == std::numeric_limits<int64_t>::max()) {
+        return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "invalid or expired P2P request deadline");
+    }
+    if (request.generate_config().unique_key().empty()) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "decode_entrance handoff requires non-empty unique_key");
+    }
+    return ErrorInfo::OkStatus();
 }
 
 ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input, MultimodalProcessor* processor, bool is_mtp_eagle) {

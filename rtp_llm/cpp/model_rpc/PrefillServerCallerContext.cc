@@ -159,6 +159,7 @@ void PrefillServerCallerContext::handleReadChunkLocked(const GenerateOutputsPB& 
     if (response.has_error_info() && response.error_info().error_code() != ErrorCodePB::NONE_ERROR) {
         error_info_ =
             ErrorInfo(transRPCErrorCode(response.error_info().error_code()), response.error_info().error_message());
+        first_error_.record(error_info_);
         if (async_state) {
             async_state->status = grpc::Status(grpc::StatusCode::INTERNAL, error_info_.ToString());
         }
@@ -198,6 +199,7 @@ void PrefillServerCallerContext::checkDone() {
             RTP_LLM_LOG_WARNING("PrefillServerCallerContext::checkDone: completion_queue is null");
             finished_  = true;
             error_info_ = ErrorInfo(ErrorCode::UNKNOWN_ERROR, "completion_queue is null");
+            first_error_.record(error_info_);
             return;
         }
     }
@@ -232,10 +234,10 @@ void PrefillServerCallerContext::checkDone() {
 
     if (got_tag == reinterpret_cast<void*>(0)) {
         if (!ok) {
-            finished_ = true;
-            RTP_LLM_LOG_WARNING("PrefillServerCallerContext::checkDone: failed to start stream, unique_key: %s",
-                                unique_key_.c_str());
-            async_state->status = grpc::Status(grpc::StatusCode::INTERNAL, "failed to start async prefill stream");
+            if (!finish_started_ && async_state->reader) {
+                async_state->reader->Finish(&async_state->status, reinterpret_cast<void*>(2));
+                finish_started_ = true;
+            }
             return;
         }
         if (async_state->reader) {
@@ -264,27 +266,25 @@ void PrefillServerCallerContext::checkDone() {
 
     if (got_tag == reinterpret_cast<void*>(2)) {
         finished_ = true;
-        if (!ok) {
+        if (!ok && async_state->status.ok()) {
             async_state->status = grpc::Status(grpc::StatusCode::INTERNAL, "prefill stream finish event failed");
         }
         if (error_info_.hasError()) {
             return;
         }
+        if (async_state->status.ok() && !response_received_ && !cancel_requested_) {
+            error_info_ = ErrorInfo(ErrorCode::P2P_CONNECTOR_CALL_PREFILL_FAILED,
+                                    "Prefill GenerateStreamCall completed without output peer=" + prefill_addr_
+                                        + " key=" + unique_key_);
+            first_error_.record(error_info_);
+        }
         if (cancel_requested_ && async_state->status.ok()) {
             async_state->status = grpc::Status(grpc::StatusCode::CANCELLED, "prefill request cancelled");
         }
-        if (!async_state->status.ok() && !cancel_requested_) {
-            ErrorCode resolved_code = ErrorCode::UNKNOWN_ERROR;
-            if (!async_state->status.error_details().empty()) {
-                ErrorDetailsPB error_details;
-                if (error_details.ParseFromString(async_state->status.error_details())) {
-                    resolved_code = static_cast<ErrorCode>(error_details.error_code());
-                }
-            }
-            if (resolved_code == ErrorCode::UNKNOWN_ERROR) {
-                resolved_code = transGrpcStatusToErrorCode(async_state->status.error_code());
-            }
-            error_info_ = ErrorInfo(resolved_code, async_state->status.error_message());
+        if (!async_state->status.ok()) {
+            error_info_ = errorInfoFromGrpcStatus(
+                async_state->status, "Prefill GenerateStreamCall peer=" + prefill_addr_ + " key=" + unique_key_);
+            first_error_.record(error_info_);
         }
         if (!async_state->status.ok()) {
             RTP_LLM_LOG_WARNING(

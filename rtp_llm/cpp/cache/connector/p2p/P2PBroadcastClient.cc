@@ -123,38 +123,11 @@ void P2PBroadcastClient::genBroadcastRequest(FunctionRequestPB&                 
 }
 
 bool P2PBroadcastClient::Result::success() const {
-    if (locally_completed_) {
-        return true;
-    }
-    if (!tp_broadcast_result_ || !tp_broadcast_result_->success()) {
-        RTP_LLM_LOG_WARNING("P2PBroadcastClient::Result success is false, tp_broadcast_result failed");
-        return false;
-    }
-    auto responses = tp_broadcast_result_->responses();
-    for (const auto& response : responses) {
-        if (!response.has_p2p_response()) {
-            RTP_LLM_LOG_WARNING("P2PBroadcastClient::Result success is false, response has no p2p_response");
-            return false;
-        }
-        const auto& p2p_response = response.p2p_response();
-        if (p2p_response.error_code() != ErrorCodePB::NONE_ERROR) {
-            RTP_LLM_LOG_WARNING("P2PBroadcastClient::Result success is false, p2p_response error code: %s",
-                                ErrorCodeToString(transRPCErrorCode(p2p_response.error_code())).c_str());
-            return false;
-        }
-    }
-    return true;
+    return locally_completed_ || (tp_broadcast_result_ && tp_broadcast_result_->success());
 }
 
 void P2PBroadcastClient::Result::checkDone() {
-    if (locally_completed_) {
-        total_cost_time_us_ = currentTimeUs() - start_time_us_;
-        return;
-    }
-    tp_broadcast_result_->waitDone(1);  // wait 1ms
-    if (tp_broadcast_result_->done()) {
-        total_cost_time_us_ = currentTimeUs() - start_time_us_;
-    }
+    (void)done();  // Completion is advanced by the shared CQ consumer.
 }
 
 std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std::string&        unique_key,
@@ -203,50 +176,11 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
 }
 
 ErrorCode P2PBroadcastClient::Result::errorCode() const {
-    if (locally_completed_) {
-        return ErrorCode::NONE_ERROR;
-    }
-    if (!tp_broadcast_result_ || !tp_broadcast_result_->done()) {
-        return ErrorCode::UNKNOWN_ERROR;
-    }
-    auto responses = tp_broadcast_result_->responses();
-    for (const auto& response : responses) {
-        if (!response.has_p2p_response()) {
-            return ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED;
-        }
-        ErrorCodePB pb_error_code = response.p2p_response().error_code();
-        if (pb_error_code != ErrorCodePB::NONE_ERROR) {
-            return transRPCErrorCode(pb_error_code);
-        }
-    }
-    if (!tp_broadcast_result_->success()) {
-        return ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED;
-    }
-    return ErrorCode::NONE_ERROR;
+    return firstError().error.code();
 }
 
 std::string P2PBroadcastClient::Result::errorMessage() const {
-    if (locally_completed_) {
-        return "";
-    }
-    if (!tp_broadcast_result_ || !tp_broadcast_result_->done()) {
-        return "P2PBroadcastClient::Result not done yet";
-    }
-    auto responses = tp_broadcast_result_->responses();
-    for (size_t rank = 0; rank < responses.size(); ++rank) {
-        const auto& response = responses[rank];
-        if (!response.has_p2p_response()) {
-            return "RANK " + std::to_string(rank) + ": missing p2p_response";
-        }
-        const auto& p2p_response = response.p2p_response();
-        if (p2p_response.error_code() != ErrorCodePB::NONE_ERROR && !p2p_response.error_message().empty()) {
-            return "RANK " + std::to_string(rank) + ": " + p2p_response.error_message();
-        }
-    }
-    if (!tp_broadcast_result_->success()) {
-        return "P2PBroadcastClient broadcast failed";
-    }
-    return "";
+    return firstError().error.ToString();
 }
 
 P2PBroadcastClient::LeaseStatusResult P2PBroadcastClient::queryLeaseStatus(const std::string& unique_key,

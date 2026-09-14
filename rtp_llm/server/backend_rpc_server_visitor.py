@@ -1,5 +1,3 @@
-import asyncio
-import copy
 import logging
 import time
 from typing import AsyncGenerator, List, Optional
@@ -16,11 +14,7 @@ from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cac
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.misc import format_exception
-from rtp_llm.utils.base_model_datatypes import (
-    GenerateInput,
-    GenerateOutput,
-    GenerateOutputs,
-)
+from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
 from rtp_llm.utils.time_util import Timer
 
 route_logger = logging.getLogger("route_logger")
@@ -355,104 +349,6 @@ class BackendRPCServerVisitor:
         for input in inputs:
             self._validate_input(input)
             self.check_sp_supported(input)
-
-        if self.pd_sep_config.decode_entrance:
-            if self.host_service.service_available:
-                for input in inputs:
-                    await self.route_ips(input)
-
-            def _output_token_len(output: GenerateOutput) -> int:
-                if output.output_ids is None:
-                    return 0
-                return output.output_ids.shape[-1]
-
-            def _is_cumulative_output(output: GenerateOutput) -> bool:
-                if output.aux_info is None:
-                    return False
-                return (
-                    output.aux_info.output_len > 0
-                    and _output_token_len(output) == output.aux_info.output_len
-                )
-
-            def _is_delta_output(output: GenerateOutput) -> bool:
-                if output.aux_info is None:
-                    return False
-                return (
-                    output.aux_info.step_output_len > 0
-                    and _output_token_len(output) == output.aux_info.step_output_len
-                    and output.aux_info.output_len >= output.aux_info.step_output_len
-                )
-
-            def _merge_stream_outputs(chunks: list[GenerateOutputs]) -> GenerateOutputs:
-                if not chunks:
-                    return GenerateOutputs()
-                if len(chunks) == 1:
-                    return chunks[0]
-
-                merged = copy.deepcopy(chunks[-1])
-                for output_idx, final_output in enumerate(merged.generate_outputs):
-                    chunk_outputs = []
-                    chunk_output_ids = []
-                    for chunk in chunks:
-                        if output_idx >= len(chunk.generate_outputs):
-                            continue
-                        chunk_output = chunk.generate_outputs[output_idx]
-                        chunk_outputs.append(chunk_output)
-                        output_ids = chunk_output.output_ids
-                        if output_ids is not None:
-                            chunk_output_ids.append(output_ids)
-
-                    if not chunk_output_ids:
-                        continue
-
-                    # Decode-entrance fallback reuses the streaming RPC path, where
-                    # chunks are expected to be incremental by default. Only an
-                    # explicit aux_info cumulative marker should suppress concat.
-                    if _is_cumulative_output(final_output) and not _is_delta_output(
-                        final_output
-                    ):
-                        continue
-                    final_output.output_ids = torch.cat(chunk_output_ids, dim=-1)
-                return merged
-
-            async def _collect_final_output(
-                input: GenerateInput,
-            ) -> GenerateOutputs:
-                chunks = []
-                async for output in self.model_rpc_client.enqueue(input):
-                    chunks.append(output)
-                return _merge_stream_outputs(chunks)
-
-            # Decode-entrance needs the per-request prefill orchestration in
-            # GenerateStreamCall. The legacy BatchGenerateCall path skips that.
-            tasks = [
-                asyncio.create_task(_collect_final_output(input)) for input in inputs
-            ]
-            pending = set(tasks)
-
-            async def _cancel_unfinished_tasks() -> None:
-                unfinished_tasks = [task for task in tasks if not task.done()]
-                for task in unfinished_tasks:
-                    task.cancel()
-                if unfinished_tasks:
-                    await asyncio.gather(*unfinished_tasks, return_exceptions=True)
-
-            try:
-                while pending:
-                    done, pending = await asyncio.wait(
-                        pending, return_when=asyncio.FIRST_EXCEPTION
-                    )
-                    for task in done:
-                        if task.cancelled():
-                            raise asyncio.CancelledError()
-                        exception = task.exception()
-                        if exception is None:
-                            continue
-                        raise exception
-                return [task.result() for task in tasks]
-            except BaseException:
-                await _cancel_unfinished_tasks()
-                raise
 
         if not inputs:
             return []

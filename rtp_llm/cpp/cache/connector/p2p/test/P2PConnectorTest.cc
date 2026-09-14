@@ -147,7 +147,7 @@ protected:
             worker->set_cache_store_port(12345 + i);
         }
         P2PConnectorSchedulerPrefill scheduler(config_.scheduler_config, nullptr, nullptr);
-        const auto plan = scheduler.planFor(num_workers);
+        const auto                   plan = scheduler.planFor(num_workers, unique_key);
         RTP_LLM_CHECK_WITH_INFO(plan && plan->ok(), "test StartLoad plan must be valid");
         request.set_plan_digest(plan->plan.digest());
 
@@ -339,7 +339,7 @@ TEST_F(P2PConnectorTest, HandleReadAcceptsMatchingPlanDigestBeforeResourceWait) 
 TEST_F(P2PConnectorTest, HandleReadRejectsTailKeyPlanMismatchBeforeResourceWait) {
     auto request = createValidStartLoadRequest("plan-tail-mismatch", currentTimeMs() + 5000, 2);
     P2PConnectorSchedulerPrefill scheduler(config_.scheduler_config, nullptr, nullptr);
-    const auto result = scheduler.planFor(2);
+    const auto                   result = scheduler.planFor(2, request.unique_key());
     ASSERT_NE(result, nullptr);
     ASSERT_TRUE(result->ok()) << result->error.ToString();
     auto decode_plan = result->plan;

@@ -39,6 +39,9 @@ public:
     void
     notifyDone(bool success, TransferErrorCode error_code = TransferErrorCode::OK, const std::string& error_msg = "");
 
+    /// Record the first logical failure while outstanding DMA still owns the buffers.
+    void recordError(TransferErrorCode error_code, const std::string& error_message);
+
     /// @brief 原子地将任务从 PENDING 迁移到 TRANSFERRING 状态。
     /// @return false 表示任务已在 PENDING 阶段被 cancel，调用方应立即报告失败。
     bool startTransfer();
@@ -61,8 +64,8 @@ private:
     bool                      done_             = false;
     bool                      transferring_     = false;
     bool                      cancel_requested_ = false;
-    TransferErrorCode         error_code_       = TransferErrorCode::OK;
-    std::string               error_msg_;
+    mutable TransferErrorCode error_code_       = TransferErrorCode::OK;
+    mutable std::string       error_msg_;
     std::function<void()>     done_callback_;
 };
 

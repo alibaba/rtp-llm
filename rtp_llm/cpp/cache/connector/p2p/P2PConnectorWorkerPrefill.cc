@@ -58,8 +58,10 @@ P2PConnectorWorkerPrefill::P2PConnectorWorkerPrefill(P2PConnectorWorkerConfig   
     computed_buffers_(std::make_shared<ComputedLayerCacheBufferStore>()) {}
 
 P2PConnectorWorkerPrefill::~P2PConnectorWorkerPrefill() {
-    if (store_wait_check_thread_) {
-        store_wait_check_thread_->stop();
+    store_wait_stopping_.store(true);
+    computed_buffers_->notification()->notify();
+    if (store_wait_check_thread_.joinable()) {
+        store_wait_check_thread_.join();
     }
     if (async_sender_pool_) {
         async_sender_pool_->stop();
@@ -81,12 +83,22 @@ bool P2PConnectorWorkerPrefill::init() {
         buildExpectedBufferMetadata(*config_.topology, &expected_buffer_keys_, &expected_buffer_tags_);
     }
 
-    store_wait_check_thread_ = autil::LoopThread::createLoopThread(
-        std::bind(&P2PConnectorWorkerPrefill::loopCheckProc, this), 1000, "P2PPrefillStoreWaitCheck");
-    if (!store_wait_check_thread_) {
-        RTP_LLM_LOG_ERROR("init failed: store wait check thread is null");
-        return false;
-    }
+    store_wait_check_thread_ = std::thread([this] {
+        const auto notification = computed_buffers_->notification();
+        while (!store_wait_stopping_.load()) {
+            const auto generation = notification->generation();
+            loopCheckProc();
+            auto next = computed_buffers_->nextTimeoutMs();
+            if (store_wait_context_checker_->getContextCount() > 0) {
+                // torch::Event has no safe host notification here. Only genuinely
+                // pending GPU events need this fallback; ready layers bypass it.
+                next = std::min(next, currentTimeMs() + 1);
+            }
+            if (!store_wait_stopping_.load()) {
+                notification->waitUntil(generation, next);
+            }
+        }
+    });
 
     // OPT-A2: dedicated pool for sender_->send so the dispatcher thread does
     // not block on the synchronous cuda copy + sync inside TcpKVCacheSender.
@@ -329,14 +341,15 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
     auto mark_dispatch_failure = [transfer_result](ErrorCode error_code, const std::string& error_msg) {
         std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
         if (!transfer_result->dispatch_failed.load()) {
-            transfer_result->all_success.store(false);
-            transfer_result->error_code = error_code;
-            transfer_result->error_msg  = error_msg;
+            if (transfer_result->all_success.exchange(false)) {
+                transfer_result->error_code = error_code;
+                transfer_result->error_msg  = error_msg;
+            }
             transfer_result->dispatch_failed.store(true);
             transfer_result->result_cv.notify_all();
         }
     };
-    while (sent_count < total_transfers && !transfer_result->dispatch_failed.load() && !cancel_flag->load()
+    while (sent_count < total_transfers && transfer_result->all_success.load() && !cancel_flag->load()
            && currentTimeMs() < return_deadline_ms) {
         std::set<std::string> need_buffer_keys;
         for (const auto& key : expected_buffer_keys) {
@@ -398,12 +411,12 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
                 return_deadline_ms,
                 cancel_flag,
                 transfer_result);
-            if (transfer_result->dispatch_failed.load()) {
+            if (!transfer_result->all_success.load()) {
                 break;
             }
         }
 
-        if (transfer_result->dispatch_failed.load()) {
+        if (!transfer_result->all_success.load()) {
             break;
         }
         if (ready_layer_buffers.empty()) {
@@ -435,7 +448,8 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
                 std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
                 if (transfer_result->all_success.exchange(false)) {
                     transfer_result->error_code = transfer::toErrorCode(transfer_ec);
-                    transfer_result->error_msg  = cb_error_msg;
+                    transfer_result->error_msg  = "Prefill send key=" + partition_layer_key + " transfer_code="
+                                                 + std::to_string(static_cast<int>(transfer_ec)) + ": " + cb_error_msg;
                 }
             }
             transfer_result->done_count.fetch_add(1);
@@ -448,9 +462,10 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
     auto mark_dispatch_failure = [transfer_result](ErrorCode error_code, const std::string& error_msg) {
         std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
         if (!transfer_result->dispatch_failed.load()) {
-            transfer_result->all_success.store(false);
-            transfer_result->error_code = error_code;
-            transfer_result->error_msg  = error_msg;
+            if (transfer_result->all_success.exchange(false)) {
+                transfer_result->error_code = error_code;
+                transfer_result->error_msg  = error_msg;
+            }
             transfer_result->dispatch_failed.store(true);
             transfer_result->result_cv.notify_all();
         }
@@ -513,7 +528,8 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
         //
         // send_req is wrapped in shared_ptr so both the async task and the
         // inline fallback path can reference it without a stale move.
-        auto                              done_cb         = make_send_done_cb(partition_layer_key);
+        auto done_cb =
+            make_send_done_cb(partition_layer_key + " peer=" + route.dst_ip + ":" + std::to_string(route.dst_port));
         auto                              send_req_shared = std::make_shared<transfer::SendRequest>(std::move(send_req));
         auto task_state                   = std::make_shared<AsyncSendTaskState>();
         task_state->send_request          = send_req_shared;
@@ -580,7 +596,7 @@ bool P2PConnectorWorkerPrefill::waitSendCallbacksWithTimeout(const std::shared_p
                                                              int     sent_transfer_count,
                                                              int64_t return_deadline_ms,
                                                              const std::shared_ptr<std::atomic<bool>>& cancel_flag) const {
-    if (transfer_result->dispatch_failed.load()) {
+    if (!transfer_result->all_success.load()) {
         return false;
     }
     const int64_t callback_deadline_ms = return_deadline_ms;
@@ -591,7 +607,7 @@ bool P2PConnectorWorkerPrefill::waitSendCallbacksWithTimeout(const std::shared_p
         // and we'd block until return_deadline_ms (≈ business deadline, up to 1h).
         // determineSendResult() will see cancel_flag.load() and return
         // P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED instead of TIMEOUT.
-        if (transfer_result->dispatch_failed.load()) {
+        if (!transfer_result->all_success.load()) {
             return false;
         }
         if (cancel_flag && cancel_flag->load()) {
@@ -624,9 +640,9 @@ bool P2PConnectorWorkerPrefill::waitSendCallbacksWithTimeout(const std::shared_p
                 // requires cancelRequest() to notify result_cv
                 // after setting cancel_flag — see below.
                 return transfer_result->done_count.load(std::memory_order_relaxed) >= sent_transfer_count
-                       || transfer_result->dispatch_failed.load() || (cancel_flag && cancel_flag->load());
+                       || !transfer_result->all_success.load() || (cancel_flag && cancel_flag->load());
             });
-        if (transfer_result->dispatch_failed.load()) {
+        if (!transfer_result->all_success.load()) {
             return false;
         }
         if (cancel_flag && cancel_flag->load()) {
@@ -746,12 +762,11 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                   request_id,
         [weak_result = std::weak_ptr<SendTransferResult>(transfer_result)](const ErrorInfo& error) {
             if (auto result = weak_result.lock()) {
                 std::lock_guard<std::mutex> lock(result->result_mutex);
-                if (!result->dispatch_failed.load()) {
-                    result->all_success.store(false);
+                if (result->all_success.exchange(false)) {
                     result->error_code = error.code();
                     result->error_msg  = error.ToString();
-                    result->dispatch_failed.store(true);
                 }
+                result->dispatch_failed.store(true);
                 result->result_cv.notify_all();
             }
         });
@@ -767,6 +782,19 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                   request_id,
                                                                   expected_buffer_keys,
                                                                   sent_buffer_keys,
                                                                   total_transfers);
+    if (sent_transfer_count != total_transfers) {
+        std::lock_guard<std::mutex> lock(transfer_result->result_mutex);
+        if (transfer_result->all_success.exchange(false)) {
+            transfer_result->error_code =
+                cancel_flag->load() ?
+                    ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED :
+                    (currentTimeMs() >= deadline_ms ? ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT :
+                                                      ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED);
+            transfer_result->error_msg = "Prefill dispatch stopped key=" + unique_key
+                                         + " sent=" + std::to_string(sent_transfer_count)
+                                         + " planned=" + std::to_string(total_transfers);
+        }
+    }
     const int64_t dispatch_cost_us          = currentTimeUs() - dispatch_start_us;
     collector->last_layer_wait_time_us = currentTimeUs() - start_time_us;
 
@@ -784,6 +812,15 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                   request_id,
         !all_callbacks_received && !cancel_flag->load(std::memory_order_relaxed);
 
     if (timeout_cancelled_pending_tasks) {
+        {
+            std::lock_guard<std::mutex> lock(transfer_result->result_mutex);
+            if (transfer_result->all_success.exchange(false)) {
+                transfer_result->error_code = ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT;
+                transfer_result->error_msg  = "Prefill send callback deadline exceeded key=" + unique_key
+                                             + " sent=" + std::to_string(sent_transfer_count)
+                                             + " planned=" + std::to_string(total_transfers);
+            }
+        }
         cancel_flag->store(true, std::memory_order_relaxed);
         std::shared_ptr<SendTransferResult> wake_result = transfer_result;
         const int released_pending_task_count = releasePendingAsyncSendTasks(unique_key, &wake_result);
@@ -898,6 +935,13 @@ bool P2PConnectorWorkerPrefill::cancelRequest(int64_t            request_id,
         cancel_flag     = it->second.cancel_flag;
         transfer_result = it->second.transfer_result.lock();
     }
+    if (transfer_result) {
+        std::lock_guard<std::mutex> lock(transfer_result->result_mutex);
+        if (transfer_result->all_success.exchange(false)) {
+            transfer_result->error_code = ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED;
+            transfer_result->error_msg  = "Prefill send cancelled key=" + unique_key;
+        }
+    }
     cancel_flag->store(true, std::memory_order_relaxed);
     const int released_pending_task_count = releasePendingAsyncSendTasks(unique_key, &transfer_result);
     // Wake up waitSendCallbacksWithTimeout immediately so it sees the flag,
@@ -924,7 +968,7 @@ P2PConnectorWorkerPrefill::determineSendResult(const std::shared_ptr<SendTransfe
                                                const P2PWorkerRoutePlan&                  worker_plan,
                                                const std::string&                         unique_key) const {
 
-    if (transfer_result->dispatch_failed.load()) {
+    if (!transfer_result->all_success.load()) {
         std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
         return {false, transfer_result->error_code, transfer_result->error_msg};
     }

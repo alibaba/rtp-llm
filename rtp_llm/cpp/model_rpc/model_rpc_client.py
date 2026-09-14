@@ -4,12 +4,14 @@ from collections.abc import Sequence
 from typing import AsyncGenerator, Optional
 
 import grpc
+from google.protobuf.message import DecodeError
 from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
+    ErrorCodePB,
     ErrorDetailsPB,
     GenerateInputPB,
     GenerateOutputsPB,
@@ -561,38 +563,58 @@ class ModelRpcClient(object):
             return rpc_timeout_ms / 1000
         return timeout_ms / 1000
 
+    @staticmethod
+    def _raise_backend_error(code: int, message: str) -> None:
+        try:
+            error_type = ExceptionType(code)
+        except ValueError:
+            # Keep the original code visible even if this frontend has no enum name.
+            error_type = ExceptionType.UNKNOWN_ERROR
+            message = f"backend_error_code={code}: {message}"
+        raise FtRuntimeException(error_type, message)
+
+    @staticmethod
+    def _raise_pb_error(error, request_desc: str) -> None:
+        code = error.error_code
+        if code == 0:
+            code = ExceptionType.UNKNOWN_ERROR.value
+        elif 0 < code <= 25:
+            names = {
+                "P2P_CONNECTOR_WORKER_READ_CANCELED": "P2P_CONNECTOR_WORKER_READ_CANCELLED"
+            }
+            name = ErrorCodePB.Name(code)
+            name = names.get(name, name)
+            code = ExceptionType.__members__.get(
+                name, ExceptionType.UNKNOWN_ERROR
+            ).value
+        ModelRpcClient._raise_backend_error(code, f"{request_desc}: {error.error_message}")
+
     def _handle_grpc_error(self, e: grpc.RpcError, request_desc: str) -> None:
-        error_details = ErrorDetailsPB()
-        metadata = e.trailing_metadata()
-        if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
-            metadata["grpc-status-details-bin"]
-        ):
-            logging.error(
-                f"{request_desc} RPC failed: "
-                f"{e.code()}, {e.details()}, detail error code is "
-                f"{ExceptionType.from_value(error_details.error_code)}"
+        metadata = dict(e.trailing_metadata() or ())
+        details = ErrorDetailsPB()
+        try:
+            encoded = metadata.get("grpc-status-details-bin")
+            if encoded:
+                details.ParseFromString(encoded)
+        except (DecodeError, TypeError, ValueError):
+            # A malformed envelope must not hide the RPC failure itself.
+            details.Clear()
+        if details.error_code:
+            self._raise_backend_error(
+                details.error_code, f"{request_desc}: {details.error_message or e.details()}"
             )
-            raise FtRuntimeException(
-                ExceptionType(error_details.error_code), error_details.error_message
-            )
-        else:
-            logging.error(
-                f"{request_desc} RPC failed: "
-                f"error code is {e.code()}, detail is {e.details()}"
-            )
-            if e.code() == StatusCode.DEADLINE_EXCEEDED:
-                raise FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, e.details())
-            elif e.code() == StatusCode.CANCELLED:
-                raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, e.details())
-            elif e.code() == StatusCode.RESOURCE_EXHAUSTED:
-                # transErrorCodeToGrpc maps only MALLOC_FAILED / DECODE_MALLOC_FAILED
-                # to RESOURCE_EXHAUSTED, so reversing it back to MALLOC_ERROR is
-                # unambiguous. Needed so prefill's LACK MEM surfaces as
-                # 602_MALLOC_ERROR in the frontend error_qps metric rather than
-                # collapsing to UNKNOWN_ERROR when grpc-status-details-bin is missing.
-                raise FtRuntimeException(ExceptionType.MALLOC_ERROR, e.details())
-            else:
-                raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
+        codes = {
+            StatusCode.DEADLINE_EXCEEDED: ExceptionType.GENERATE_TIMEOUT,
+            StatusCode.CANCELLED: ExceptionType.CANCELLED,
+            StatusCode.RESOURCE_EXHAUSTED: ExceptionType.MALLOC_ERROR,
+            StatusCode.INVALID_ARGUMENT: ExceptionType.INVALID_PARAMS,
+            StatusCode.OUT_OF_RANGE: ExceptionType.LONG_PROMPT_ERROR,
+            StatusCode.UNAVAILABLE: ExceptionType.CONNECT_FAILED,
+        }
+        self._raise_backend_error(
+            codes.get(e.code(), ExceptionType.UNKNOWN_ERROR).value,
+            f"{request_desc} grpc_code={e.code().name}: {e.details()}",
+        )
 
     async def enqueue(
         self, input_py: GenerateInput
@@ -624,6 +646,10 @@ class ModelRpcClient(object):
             )
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
+                if response.error_info.error_code or response.error_info.error_message:
+                    self._raise_pb_error(
+                        response.error_info, f"request={input_pb.request_id} peer={target_address}"
+                    )
                 yield trans_output(
                     input_py,
                     response,
@@ -631,26 +657,38 @@ class ModelRpcClient(object):
                     response_role_addrs=response_role_addrs,
                 )
         except grpc.RpcError as e:
-            if response_iterator:
-                response_iterator.cancel()
-            self._handle_grpc_error(e, f"request: [{input_pb.request_id}]")
+            self._handle_grpc_error(e, f"request={input_pb.request_id} peer={target_address}")
+        except FtRuntimeException:
+            raise
         except Exception as e:
             logging.error(f"rpc unknown error:{str(e)}")
             raise e
         finally:
             if response_iterator:
-                response_iterator.cancel()
+                try:
+                    response_iterator.cancel()
+                except Exception:
+                    # Cleanup cannot replace the request's first cause.
+                    logging.debug("stream cancellation cleanup failed", exc_info=True)
 
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         if not inputs:
             return []
 
-        max_timeout_ms = max((inp.generate_config.timeout_ms or 0) for inp in inputs)
-        grpc_timeout_seconds = self._compute_grpc_timeout(max_timeout_ms)
+        item_timeouts = [
+            self._compute_grpc_timeout(inp.generate_config.timeout_ms) for inp in inputs
+        ]
+        if self._decode_entrance:
+            grpc_timeout_seconds = max(item_timeouts)
+        else:
+            max_timeout_ms = max((inp.generate_config.timeout_ms or 0) for inp in inputs)
+            grpc_timeout_seconds = self._compute_grpc_timeout(max_timeout_ms)
 
         batch_input_pb = BatchGenerateInputPB()
-        for inp in inputs:
-            inp.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
+        for inp, item_timeout in zip(inputs, item_timeouts):
+            inp.generate_config.timeout_ms = int(
+                (item_timeout if self._decode_entrance else grpc_timeout_seconds) * 1000
+            )
             input_pb = trans_input(inp)
             batch_input_pb.inputs.append(input_pb)
 
@@ -682,16 +720,21 @@ class ModelRpcClient(object):
                 batch_input_pb, timeout=grpc_timeout_seconds
             )
 
+            for i, result_pb in enumerate(response.results):
+                error = (
+                    result_pb.error_info
+                    if result_pb.HasField("error_info")
+                    else result_pb.final_output.error_info
+                )
+                if error.error_code or error.error_message:
+                    self._raise_pb_error(error, f"batch item {i}")
+            if len(response.results) != len(inputs):
+                raise FtRuntimeException(
+                    ExceptionType.UNKNOWN_ERROR,
+                    f"batch result count mismatch: expected {len(inputs)}, got {len(response.results)}",
+                )
             results = []
             for i, result_pb in enumerate(response.results):
-                if (
-                    result_pb.HasField("error_info")
-                    and result_pb.error_info.error_message
-                ):
-                    raise FtRuntimeException(
-                        ExceptionType.UNKNOWN_ERROR,
-                        f"batch item {i} failed: {result_pb.error_info.error_message}",
-                    )
                 stream_state = StreamState()
                 output = trans_output(
                     inputs[i],
@@ -703,7 +746,7 @@ class ModelRpcClient(object):
             return results
 
         except grpc.RpcError as e:
-            self._handle_grpc_error(e, f"batch request: [{len(inputs)} items]")
+            self._handle_grpc_error(e, f"batch_size={len(inputs)} peer={target_address}")
         except FtRuntimeException:
             raise
         except Exception as e:

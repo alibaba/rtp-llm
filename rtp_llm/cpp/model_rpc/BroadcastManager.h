@@ -2,12 +2,17 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <type_traits>
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/RpcCompletionQueue.h"
 
 namespace rtp_llm {
 
@@ -15,205 +20,148 @@ template<typename RequestPB, typename ResponsePB>
 class BroadcastResult {
 public:
     struct WorkerRpcContext {
-        std::shared_ptr<RpcService::Stub>    stub;
-        std::shared_ptr<grpc::ClientContext> client_context;
-        RequestPB                            request;
-        ResponsePB                           response;
-        grpc::CompletionQueue                completion_queue;
-        grpc::Status                         status;
-        std::string                          server_addr;
-        int                                  timeout_ms;
-        bool                                 call_started{false};
+        std::shared_ptr<RpcService::Stub>                            stub;
+        std::shared_ptr<grpc::ClientContext>                         client_context;
+        RequestPB                                                    request;
+        ResponsePB                                                   response;
+        std::unique_ptr<grpc::ClientAsyncResponseReader<ResponsePB>> reader;
+        grpc::Status                                                 status;
+        std::string                                                  server_addr;
+        int                                                          timeout_ms{0};
     };
 
-public:
-    explicit BroadcastResult(const std::vector<std::shared_ptr<WorkerRpcContext>>& worker_rpc_contexts):
-        worker_contexts_(worker_rpc_contexts), finished_(worker_rpc_contexts.size(), false) {
-        for (size_t rank = 0; rank < worker_contexts_.size(); ++rank) {
-            if (!worker_contexts_[rank] || !worker_contexts_[rank]->call_started) {
-                finished_[rank] = true;
-                ++finished_count_;
-                grpc_status_failure_seen_ = true;
-            }
-        }
-    }
+    explicit BroadcastResult(const std::vector<std::shared_ptr<WorkerRpcContext>>& contexts):
+        worker_contexts_(contexts), finished_(contexts.size(), false), remaining_(contexts.size()) {}
     ~BroadcastResult() {
-        std::unique_lock<std::mutex> lock(wait_done_mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         for (size_t rank = 0; rank < worker_contexts_.size(); ++rank) {
             if (!finished_[rank] && worker_contexts_[rank] && worker_contexts_[rank]->client_context) {
                 worker_contexts_[rank]->client_context->TryCancel();
             }
         }
-        for (const auto& worker_rpc_context : worker_contexts_) {
-            if (worker_rpc_context) {
-                worker_rpc_context->completion_queue.Shutdown();
-            }
-        }
-
-        constexpr int64_t kDrainBudgetMs = 100;
-        const auto        deadline       = std::chrono::system_clock::now() + std::chrono::milliseconds(kDrainBudgetMs);
-        bool              drain_timed_out = false;
-        for (const auto& worker_rpc_context : worker_contexts_) {
-            if (!worker_rpc_context) {
-                continue;
-            }
-            void* got_tag = nullptr;
-            bool  ok      = false;
-            while (true) {
-                auto next_status = worker_rpc_context->completion_queue.AsyncNext(&got_tag, &ok, deadline);
-                if (next_status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
-                    break;
-                }
-                if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
-                    drain_timed_out = true;
-                    break;
-                }
-            }
-            if (drain_timed_out) {
-                break;
-            }
-        }
-        if (drain_timed_out) {
-            RTP_LLM_LOG_WARNING("[PD-DIAG] BroadcastResult destructor timed out draining CQ, worker_count=%zu",
-                                worker_contexts_.size());
-            drainWorkerContextsAsync(std::move(worker_contexts_));
-        }
+        // CQ tags retain individual contexts through physical Finish, not this result.
     }
 
-public:
-    /// Snapshot of internal completion counters, not a live probe of RPC completion.
-    ///
-    /// Progress (polling gRPC completion queues and updating `finished_*`) happens only inside
-    /// `waitDone()` / `waitDone(int)`. This method does not poll or advance completion; it only
-    /// reflects state already updated by prior `waitDone()` work. Callers must not infer that
-    /// work is still in flight from `done() == false` without also driving `waitDone()`, nor
-    /// assume `done() == true` reflects anything that `waitDone()` has not yet observed.
     bool done() const {
-        return finished_count_.load() == static_cast<int>(worker_contexts_.size());
+        std::lock_guard<std::mutex> lock(mutex_);
+        return remaining_ == 0;
     }
-
-    /// Polls completion queues until every client RPC has a terminal Finish event or
-    /// `timeout_ms` elapses (0 = no limit). A terminal client event does not by itself
-    /// prove that a server handler has physically stopped when its gRPC status is non-OK.
-    bool waitDone(int timeout_ms) {
-        if (already_done_.load()) {
-            return true;
-        }
-
-        std::unique_lock<std::mutex> lock(wait_done_mutex_);
-        if (already_done_.load()) {
-            return true;
-        }
-
-        const int  worker_size = worker_contexts_.size();
-        const auto deadline    = (timeout_ms > 0) ?
-                                     std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms) :
-                                     std::chrono::steady_clock::time_point::max();
-
-        while (true) {
-            if (finished_count_.load() == worker_size) {
-                break;
-            }
-            if (timeout_ms > 0 && std::chrono::steady_clock::now() >= deadline) {
-                return false;
-            }
-            const int  once_timeout_ms = 1;
-            const auto once_deadline   = std::chrono::system_clock::now() + std::chrono::milliseconds(once_timeout_ms);
-            for (int rank = 0; rank < worker_size; ++rank) {
-                if (finished_[rank]) {
-                    continue;
-                }
-
-                auto& ctx         = worker_contexts_.at(rank);
-                void* got_tag     = nullptr;
-                bool  ok          = false;
-                auto  next_status = ctx->completion_queue.AsyncNext(&got_tag, &ok, once_deadline);
-                if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
-                    continue;
-                }
-                if (next_status != grpc::CompletionQueue::NextStatus::GOT_EVENT || !ok) {
-                    RTP_LLM_FAIL("broadcast rpc cq failed, rank=%d status=%d ok=%d addr=%s",
-                                 rank,
-                                 static_cast<int>(next_status),
-                                 static_cast<int>(ok),
-                                 ctx->server_addr.c_str());
-                }
-                ++finished_count_;
-                finished_[rank] = true;
-
-                const auto& status = ctx->status;
-                if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
-                    RTP_LLM_LOG_WARNING("broadcast rpc timeout, timeout_ms=%d rank=%d err=%d(%s) addr=%s",
-                                        ctx->timeout_ms,
-                                        rank,
-                                        status.error_code(),
-                                        status.error_message().c_str(),
-                                        ctx->server_addr.c_str());
-                    grpc_status_failure_seen_ = true;
-                } else if (!status.ok()) {
-                    RTP_LLM_LOG_WARNING("broadcast rpc failed, rank=%d err=%d(%s) addr=%s",
-                                        rank,
-                                        status.error_code(),
-                                        status.error_message().c_str(),
-                                        ctx->server_addr.c_str());
-                    grpc_status_failure_seen_ = true;
-                }
-            }
-        }
-
-        // Finalize after every rank's client-side Finish event has been observed.
-        all_request_success_.store(!grpc_status_failure_seen_);
-        already_done_.store(true);
-        return true;
-    }
-
-    /// Same as `waitDone(0)`; drives completion state for `done()` / `success()`.
-    void waitDone() {
-        (void)waitDone(/*timeout_ms=*/0);
-    }
-
-    /// Aggregated client-side gRPC result. It is meaningful only after `waitDone(int)`
-    /// returns true or `waitDone()` returns normally. True means every observed gRPC
-    /// status is OK; false does not prove that the server handlers have physically stopped.
     bool success() const {
-        return all_request_success_.load();
+        std::lock_guard<std::mutex> lock(mutex_);
+        return remaining_ == 0 && all_success_;
+    }
+    bool waitDone(int timeout_ms) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (timeout_ms <= 0) {
+            done_cv_.wait(lock, [this] { return remaining_ == 0; });
+            return true;
+        }
+        return done_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] { return remaining_ == 0; });
+    }
+    void waitDone() {
+        (void)waitDone(0);
+    }
+
+    void setDoneCallback(std::function<void()> callback) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (remaining_ != 0) {
+                done_callback_ = std::move(callback);
+                return;
+            }
+        }
+        if (callback) {
+            callback();
+        }
+    }
+
+    FirstError::Snapshot firstError() const {
+        return first_error_.snapshot();
+    }
+    void setProgressCallback(std::function<void()> callback) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            progress_callback_ = callback;
+        }
+        // Covers completion before registration without reading in-flight PBs.
+        if (callback)
+            callback();
+    }
+
+    // Only the registered Finish callback (or a rank that was never dispatched)
+    // may report completion. Non-OK client status does not prove server quiescence.
+    void complete(size_t rank, bool ok) {
+        std::function<void()> callback;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (finished_.at(rank)) {
+                return;
+            }
+            const auto&       ctx = worker_contexts_[rank];
+            ErrorInfo         error;
+            const std::string location =
+                "ExecuteFunction rank=" + std::to_string(rank) + " peer=" + (ctx ? ctx->server_addr : "<null>");
+            if (ctx && !ctx->status.ok()) {
+                error = errorInfoFromGrpcStatus(ctx->status, location);
+            } else if (!ok || !ctx) {
+                error = ErrorInfo(ErrorCode::RPC_FINISH_FAILED, location + ": Finish event failed");
+            } else if constexpr (std::is_same_v<ResponsePB, FunctionResponsePB>) {
+                if (ctx->request.has_p2p_request() || ctx->response.has_p2p_response()) {
+                    if (!ctx->response.has_p2p_response()) {
+                        error = ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                                          location + ": missing p2p_response");
+                    } else if (ctx->response.p2p_response().error_code() != ErrorCodePB::NONE_ERROR) {
+                        const auto& response = ctx->response.p2p_response();
+                        error                = ErrorInfo(transRPCErrorCode(response.error_code()),
+                                          location + " key=" + ctx->request.p2p_request().unique_key() + ": "
+                                              + response.error_message());
+                    }
+                }
+            }
+            first_error_.record(error);
+            all_success_    = all_success_ && error.ok();
+            finished_[rank] = true;
+            if (--remaining_ == 0) {
+                callback = std::move(done_callback_);
+            }
+        }
+        std::function<void()> progress;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            progress = progress_callback_;
+        }
+        done_cv_.notify_all();
+        if (progress)
+            progress();
+        if (callback) {
+            callback();
+        }
     }
 
     std::vector<ResponsePB> responses() const {
-        std::unique_lock<std::mutex> lock(wait_done_mutex_);
-        std::vector<ResponsePB>      responses;
+        std::lock_guard<std::mutex> lock(mutex_);
+        // gRPC may still be writing response buffers before Finish.
+        if (remaining_ != 0) {
+            return {};
+        }
+        std::vector<ResponsePB> responses;
         responses.reserve(worker_contexts_.size());
-        for (const auto& worker_rpc_context : worker_contexts_) {
-            responses.push_back(worker_rpc_context->response);
+        for (const auto& ctx : worker_contexts_) {
+            responses.push_back(ctx ? ctx->response : ResponsePB{});
         }
         return responses;
     }
 
 private:
-    static void drainWorkerContextsAsync(std::vector<std::shared_ptr<WorkerRpcContext>> worker_contexts) {
-        if (worker_contexts.empty()) {
-            return;
-        }
-        std::thread([contexts = std::move(worker_contexts)]() mutable {
-            for (const auto& worker_rpc_context : contexts) {
-                if (!worker_rpc_context) {
-                    continue;
-                }
-                void* got_tag = nullptr;
-                bool  ok      = false;
-                while (worker_rpc_context->completion_queue.Next(&got_tag, &ok)) {
-                }
-            }
-        }).detach();
-    }
-
     std::vector<std::shared_ptr<WorkerRpcContext>> worker_contexts_;
     std::vector<bool>                              finished_;
-    std::atomic<int>                               finished_count_{0};
-    std::atomic<bool>                              already_done_{false};
-    std::atomic<bool>                              all_request_success_{false};
-    bool                                           grpc_status_failure_seen_{false};
-    mutable std::mutex                             wait_done_mutex_;
+    size_t                                         remaining_;
+    bool                                           all_success_{true};
+    mutable std::mutex                             mutex_;
+    std::condition_variable                        done_cv_;
+    std::function<void()>                          done_callback_;
+    std::function<void()>                          progress_callback_;
+    FirstError                                     first_error_;
 };
 
 class BroadcastManager {
@@ -256,14 +204,16 @@ public:
         for (int rank = 0; rank < worker_size; ++rank) {
             const auto& addr        = worker_addrs_[rank];
             auto        conn_status = rpc_pool_->getConnection(addr);
-            if (!conn_status.ok()) {
-                RTP_LLM_LOG_WARNING("broadcast: getConnection failed rank=%d addr=%s", rank, addr.c_str());
-                return nullptr;
-            }
-
             contexts[rank]      = std::make_shared<CtxT>();
             auto& ctx           = contexts.at(rank);
-            ctx->stub           = conn_status.value().stub;
+            if (conn_status.ok()) {
+                ctx->stub = conn_status.value().stub;
+            } else {
+                ctx->status =
+                    grpcStatusFromErrorInfo(ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
+                                                      "ExecuteFunction getConnection rank=" + std::to_string(rank)
+                                                          + " peer=" + addr + ": " + conn_status.status().ToString()));
+            }
             ctx->request        = requests.at(rank);
             ctx->server_addr    = addr;
             ctx->timeout_ms     = timeout_ms;
@@ -281,21 +231,44 @@ public:
                 (long long)get_conn_loop_us);
         }
 
-        for (int rank = 0; rank < worker_size; ++rank) {
-            auto& ctx    = contexts.at(rank);
-            auto  reader = rpc_call(ctx->stub, ctx->client_context, ctx->request, &ctx->completion_queue);
-            if (!reader) {
-                RTP_LLM_LOG_WARNING("broadcast: create async reader failed rank=%d addr=%s", rank, ctx->server_addr.c_str());
-                // Calls for preceding ranks may already be in flight. Return a
-                // failed result that still owns and drains those calls instead
-                // of making the caller assume that nothing was dispatched.
-                return std::make_shared<BroadcastResult<RequestPB, ResponsePB>>(std::move(contexts));
+        using Result                      = BroadcastResult<RequestPB, ResponsePB>;
+        auto                  result      = std::make_shared<Result>(contexts);
+        std::weak_ptr<Result> weak_result = result;
+        for (size_t rank = 0; rank < worker_size; ++rank) {
+            const auto ctx = contexts[rank];
+            if (!ctx->status.ok()) {
+                result->complete(rank, false);
+                continue;
             }
-            reader->Finish(&ctx->response, &ctx->status, reinterpret_cast<void*>(static_cast<intptr_t>(rank)));
-            ctx->call_started = true;
+            const bool started = RpcCompletionQueue::instance().submit(
+                ctx->client_context,
+                [&](grpc::CompletionQueue* cq, void* tag) {
+                    ctx->reader = rpc_call(ctx->stub, ctx->client_context, ctx->request, cq);
+                    if (!ctx->reader) {
+                        return false;
+                    }
+                    ctx->reader->Finish(&ctx->response, &ctx->status, tag);
+                    return true;
+                },
+                [ctx, weak_result, rank](bool ok) {
+                    (void)ctx;  // Keep RPC buffers alive even if the result was abandoned.
+                    if (auto result = weak_result.lock()) {
+                        result->complete(rank, ok);
+                    }
+                });
+            if (!started) {
+                RTP_LLM_LOG_WARNING(
+                    "broadcast: create async reader failed rank=%zu addr=%s", rank, ctx->server_addr.c_str());
+                ctx->status = grpcStatusFromErrorInfo(ErrorInfo(
+                    ErrorCode::RPC_FINISH_FAILED,
+                    "ExecuteFunction async start failed rank=" + std::to_string(rank) + " peer=" + ctx->server_addr));
+                for (size_t pending = rank; pending < worker_size; ++pending) {
+                    result->complete(pending, false);
+                }
+                break;
+            }
         }
-
-        return std::make_shared<BroadcastResult<RequestPB, ResponsePB>>(std::move(contexts));
+        return result;
     }
 
     size_t workerNum() const {

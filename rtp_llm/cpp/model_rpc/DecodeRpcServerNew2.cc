@@ -1,4 +1,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
+#include <algorithm>
+#include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew2.h"
 #include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
@@ -48,6 +51,30 @@ bool parseGrpcPort(const std::string& port_text, uint32_t* port) {
     }
     *port = static_cast<uint32_t>(value);
     return true;
+}
+
+void updatePrefillRoleAddr(GenerateInput& input, GenerateInputPB& request, const std::string& ip, uint32_t port) {
+    for (auto& addr : input.generate_config->role_addrs) {
+        if (addr.role == RoleType::PREFILL) {
+            addr.ip        = ip;
+            addr.grpc_port = port;
+        }
+    }
+    for (auto& addr : *request.mutable_generate_config()->mutable_role_addrs()) {
+        if (addr.role() == RoleAddrPB::PREFILL) {
+            addr.set_ip(ip);
+            addr.set_grpc_port(port);
+        }
+    }
+}
+
+std::string prefillAddress(const GenerateInputPB& request) {
+    for (const auto& addr : request.generate_config().role_addrs()) {
+        if (addr.role() == RoleAddrPB::PREFILL) {
+            return formatGrpcHostPort(addr.ip(), addr.grpc_port());
+        }
+    }
+    return {};
 }
 
 }  // namespace
@@ -146,6 +173,40 @@ grpc::Status DecodeRpcServerNew2::init(const EngineInitParams&                  
     return grpc::Status::OK;
 }
 
+grpc::Status DecodeRpcServerNew2::preparePDRequest(const GenerateInputPB&          request,
+                                                   int64_t                         deadline_ms,
+                                                   std::shared_ptr<GenerateInput>& input,
+                                                   GenerateInputPB&                prefill_request,
+                                                   PrefillPeerInfo&                peer_info) {
+    input                              = QueryConverter::transQuery(&request);
+    input->request_deadline_ms         = deadline_ms;
+    input->generate_config->timeout_ms = clampRpcTimeoutMsToInt32(std::max<int64_t>(1, deadline_ms - currentTimeMs()));
+    auto status                        = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle());
+    if (!status.ok())
+        return serializeErrorMsg(std::to_string(request.request_id()), status);
+    prefill_request.CopyFrom(request);
+    prefill_request.mutable_pd_input_snapshot()->CopyFrom(snapshotPDInput(*input));
+    prefill_request.set_request_deadline_ms(deadline_ms);
+    prefill_request.mutable_generate_config()->set_timeout_ms(input->generate_config->timeout_ms);
+    const auto  address = prefillAddress(request);
+    std::string ip;
+    uint32_t    port         = 0;
+    auto        parse_status = parsePrefillDpAddr(address, &ip, &port);
+    if (!parse_status.ok())
+        return parse_status;
+    const auto remaining = deadline_ms - currentTimeMs();
+    if (remaining <= 0)
+        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "PD preprocessing deadline exceeded");
+    auto peer_result = prefill_server_caller_->getPrefillPeerInfo(ip, port, clampRpcTimeoutMsToInt32(remaining));
+    if (!peer_result.ok())
+        return grpcStatusFromErrorInfo(peer_result.status());
+    peer_info = std::move(peer_result.value());
+    if (peer_info.tp_size <= 0 || peer_info.cp_size <= 0 || peer_info.dp_addrs.empty()) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "prefill peer info is not available");
+    }
+    return grpc::Status::OK;
+}
+
 grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                      const GenerateInputPB*                 request,
                                                      grpc::ServerWriter<GenerateOutputsPB>* response_writer) {
@@ -197,81 +258,28 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, normalized_timeout_ms, server_context, metrics_reporter_, meta_);
-    auto input                         = QueryConverter::transQuery(effective_request);
-    input->generate_config->timeout_ms = normalized_timeout_ms_i32;
-    input->request_deadline_ms = request_entry_ms + normalized_timeout_ms;
-
-    auto preprocess_status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle());
-    if (!preprocess_status.ok()) {
-        generate_context.error_status = serializeErrorMsg(generate_context.request_key, preprocess_status);
+    std::shared_ptr<GenerateInput> input;
+    GenerateInputPB                prefill_request;
+    PrefillPeerInfo                peer_info;
+    auto                           prepare_status = preparePDRequest(
+        *effective_request, request_entry_ms + normalized_timeout_ms, input, prefill_request, peer_info);
+    if (!prepare_status.ok()) {
+        generate_context.error_status = prepare_status;
+        return prepare_status;
     }
-    CHECK_ERROR_STATUS(generate_context);
-    const auto pd_input_snapshot = snapshotPDInput(*input);
-
-    RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
-    auto stream                                  = engine_->makeStream(input);
-    generate_context.setStream(stream);
-
-    // 获取 prefill peer info（含 DP 地址列表），round-robin 选择目标 DP
-    std::string prefill_ip;
-    uint32_t    prefill_port = 0;
-    for (const auto& role_addr : request->generate_config().role_addrs()) {
-        if (role_addr.role() == RoleAddrPB::PREFILL) {
-            prefill_ip   = role_addr.ip();
-            prefill_port = role_addr.grpc_port();
-            break;
-        }
-    }
-    if (prefill_ip.empty() || prefill_port <= 0) {
-        RTP_LLM_LOG_WARNING("decode rpc server new2 generate failed: prefill addr unavailable, request_id=%ld",
-                            request_id);
-        return grpc::Status(grpc::StatusCode::INTERNAL, "prefill_ip or prefill_port is not available");
-    }
-
-    auto peer_info = prefill_server_caller_->getPrefillPeerInfo(prefill_ip, prefill_port, normalized_timeout_ms_i32);
-    if (peer_info.tp_size <= 0 || peer_info.cp_size <= 0 || peer_info.dp_addrs.empty()) {
-        RTP_LLM_LOG_WARNING("decode rpc server new2 generate failed: prefill peer info unavailable, "
-                            "request_id=%ld, prefill_addr=%s:%u",
-                            request_id,
-                            prefill_ip.c_str(),
-                            prefill_port);
-        return grpc::Status(grpc::StatusCode::INTERNAL, "prefill peer info is not available");
-    }
+    auto stream = engine_->makeStream(input);
     stream->setPrefillTpSize(peer_info.tp_size);
     stream->setPrefillCpSize(peer_info.cp_size);
+    generate_context.setStream(stream);
 
     std::shared_ptr<PrefillServerCallerContext> prefill_caller_ctx;
     PrefillContextGuard                         prefill_context_guard;
     const auto&                                 unique_key  = input->generate_config->unique_key;
     const auto request_deadline_ms = input->request_deadline_ms;
-    GenerateInputPB                             prefill_request;
-    prefill_request.CopyFrom(*effective_request);
-    prefill_request.mutable_pd_input_snapshot()->CopyFrom(pd_input_snapshot);
-    prefill_request.set_request_deadline_ms(request_deadline_ms);
-    prefill_request.mutable_generate_config()->set_timeout_ms(normalized_timeout_ms_i32);
-    prefill_request.mutable_generate_config()->set_unique_key(unique_key);
-
-    auto update_prefill_role_addr = [&](const std::string& target_ip, uint32_t target_port) {
-        // Keep StartLoad (P2P cache read) on the same prefill DP rank that runs GenerateStreamCall.
-        for (auto& role_addr : input->generate_config->role_addrs) {
-            if (role_addr.role == RoleType::PREFILL) {
-                role_addr.ip        = target_ip;
-                role_addr.grpc_port = static_cast<int>(target_port);
-                break;
-            }
-        }
-        for (auto& role_addr : *prefill_request.mutable_generate_config()->mutable_role_addrs()) {
-            if (role_addr.role() == RoleAddrPB::PREFILL) {
-                role_addr.set_ip(target_ip);
-                role_addr.set_grpc_port(static_cast<int>(target_port));
-                break;
-            }
-        }
-    };
-
     const auto& dp_addrs       = peer_info.dp_addrs;
     const auto  first_dp_index = selectDecodeEntranceDpIndex(dp_addrs.size(), handoff_id);
     std::string selected_addr;
+    FirstError                                  startup_error;
     for (size_t attempt = 0; attempt < dp_addrs.size(); ++attempt) {
         const auto dp_index = (first_dp_index + attempt) % dp_addrs.size();
         selected_addr       = dp_addrs[dp_index];
@@ -280,12 +288,17 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
         uint32_t    target_port = 0;
         auto        parse_status = parsePrefillDpAddr(selected_addr, &target_ip, &target_port);
         if (!parse_status.ok()) {
-            return parse_status;
+            startup_error.record(errorInfoFromGrpcStatus(parse_status));
+            return grpcStatusFromErrorInfo(startup_error.snapshot().error);
         }
-        update_prefill_role_addr(target_ip, target_port);
+        updatePrefillRoleAddr(*input, prefill_request, target_ip, target_port);
 
-        prefill_caller_ctx =
-            prefill_server_caller_->callPrefill(&prefill_request, target_ip, target_port, unique_key, request_deadline_ms);
+        auto started = prefill_server_caller_->callPrefill(
+            &prefill_request, target_ip, target_port, unique_key, request_deadline_ms);
+        if (started.ok())
+            prefill_caller_ctx = std::move(started.value());
+        else
+            startup_error.record(started.status());
         if (prefill_caller_ctx) {
             if (attempt > 0) {
                 RTP_LLM_LOG_WARNING("request [%ld] recovered async prefill by trying next DP, addr=%s",
@@ -302,8 +315,7 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
                             dp_addrs.size());
     }
     if (!prefill_caller_ctx) {
-        generate_context.error_info   = ErrorInfo(ErrorCode::P2P_CONNECTOR_CALL_PREFILL_FAILED,
-                                                "failed to start async prefill request to reported DP addrs");
+        generate_context.error_info   = startup_error.snapshot().error;
         generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.error_info);
         return generate_context.error_status;
     }
@@ -313,14 +325,152 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
 
     // Keep the async prefill RPC alive for the handoff lifecycle only. StartLoad applies the first token to the
     // decode stream, so client output must come exclusively from pollStreamOutput().
-    generate_context.error_status =
-        pollStreamOutput(server_context, generate_context.request_key, response_writer, generate_context.getStream());
+    generate_context.error_status = pollStreamOutput(
+        server_context, generate_context.request_key, response_writer, generate_context.getStream(), [&](bool& done) {
+            done = prefill_caller_ctx->done();
+            return prefill_caller_ctx->firstError();
+        });
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
 
     if (prefill_caller_ctx && (!generate_context.error_status.ok() || server_context->IsCancelled())) {
         prefill_caller_ctx->cancel();
     }
     return generate_context.error_status;
+}
+
+grpc::Status DecodeRpcServerNew2::BatchGenerateCall(grpc::ServerContext*        context,
+                                                    const BatchGenerateInputPB* request,
+                                                    BatchGenerateOutputsPB*     response) {
+    c10::InferenceMode inference_guard(true);
+    response->Clear();
+    if (request->inputs_size() == 0)
+        return grpc::Status::OK;
+    const int64_t entry_ms = currentTimeMs();
+    bool          pd       = false;
+    auto          support  = checkPDBatchSupport(*request, pd);
+    if (!support.ok())
+        return serializeErrorMsg("batch", support);
+    AtomicGuard          request_guard(onflight_requests_);
+    BatchGenerateInputPB forwarded;
+    forwarded.CopyFrom(*request);
+    const auto address = prefillAddress(request->inputs(0));
+    if (address.empty())
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "batch requires a prefill address");
+    int64_t rpc_deadline_ms = entry_ms;
+    // Fill only missing roles. Explicit routing conflicts must never be silently overwritten.
+    for (auto& item : *forwarded.mutable_inputs()) {
+        auto* config = item.mutable_generate_config();
+        for (const auto& first : request->inputs(0).generate_config().role_addrs()) {
+            bool found = false;
+            for (const auto& addr : config->role_addrs())
+                found |= addr.role() == first.role();
+            if (!found)
+                config->add_role_addrs()->CopyFrom(first);
+        }
+        if (prefillAddress(item) != address) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "batch routed to conflicting prefill backends");
+        }
+        const auto timeout =
+            normalizeRpcTimeoutMs(config->timeout_ms(), maga_init_params_.pd_sep_config.max_rpc_timeout_ms);
+        config->set_timeout_ms(clampRpcTimeoutMsToInt32(timeout));
+        item.set_request_deadline_ms(entry_ms + timeout);
+        rpc_deadline_ms = std::max(rpc_deadline_ms, item.request_deadline_ms());
+    }
+    std::vector<std::unique_ptr<GenerateContext>> contexts;
+    std::vector<GenerateStreamPtr>                streams;
+    std::vector<std::shared_ptr<GenerateInput>>   inputs;
+    PrefillPeerInfo                               batch_peer;
+    const int64_t                                 batch_dp_id = pd ? batch_dp_id_.fetch_add(1) : 0;
+    if (pd) {
+        for (int i = 0; i < forwarded.inputs_size(); ++i) {
+            if (context->IsCancelled())
+                return grpc::Status(grpc::StatusCode::CANCELLED, "batch cancelled by user");
+            auto&      item       = *forwarded.mutable_inputs(i);
+            const auto handoff_id = unique_key_id_.fetch_add(1);
+            const auto keys = buildDecodeEntranceKeys(item, autil::NetUtil::getBindIp(), handoff_id, currentTimeUs());
+            auto       effective = makeDecodeEntranceHandoffRequest(item, keys.handoff_unique_key);
+            std::shared_ptr<GenerateInput> input;
+            PrefillPeerInfo                peer;
+            auto status = preparePDRequest(effective, item.request_deadline_ms(), input, item, peer);
+            if (!status.ok())
+                return grpc::Status(status.error_code(),
+                                    "batch item " + std::to_string(i) + ": " + status.error_message(),
+                                    status.error_details());
+            if (i == 0)
+                batch_peer = peer;
+            if (peer.tp_size != batch_peer.tp_size || peer.cp_size != batch_peer.cp_size
+                || peer.dp_addrs != batch_peer.dp_addrs) {
+                return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                                    "prefill topology changed while preparing batch");
+            }
+            inputs.push_back(std::move(input));
+        }
+        // All preprocessing succeeds before creating or scheduling any stream.
+        for (const auto& input : inputs) {
+            auto stream = engine_->makeStream(input);
+            stream->setPrefillTpSize(batch_peer.tp_size);
+            stream->setPrefillCpSize(batch_peer.cp_size);
+            auto item_context = std::make_unique<GenerateContext>(
+                input->request_id, input->generate_config->timeout_ms, context, metrics_reporter_, meta_);
+            item_context->setStream(stream);
+            contexts.push_back(std::move(item_context));
+            streams.push_back(std::move(stream));
+        }
+    }
+    std::unique_ptr<PrefillBatchCallerContext> caller;
+    FirstError                                 startup_error;
+    const auto&                                addresses = pd ? batch_peer.dp_addrs : std::vector<std::string>{address};
+    const auto                                 first_dp  = selectDecodeEntranceDpIndex(addresses.size(), batch_dp_id);
+    for (size_t attempt = 0; attempt < addresses.size(); ++attempt) {
+        const auto& target = addresses[(first_dp + attempt) % addresses.size()];
+        if (pd) {
+            std::string ip;
+            uint32_t    port   = 0;
+            auto        status = parsePrefillDpAddr(target, &ip, &port);
+            if (!status.ok()) {
+                startup_error.record(errorInfoFromGrpcStatus(status));
+                return grpcStatusFromErrorInfo(startup_error.snapshot().error);
+            }
+            for (size_t i = 0; i < inputs.size(); ++i) {
+                updatePrefillRoleAddr(*inputs[i], *forwarded.mutable_inputs(i), ip, port);
+            }
+        }
+        for (const auto& item : forwarded.inputs()) {
+            if (item.request_deadline_ms() <= currentTimeMs()) {
+                startup_error.record(ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "batch preparation deadline exceeded"));
+                return grpcStatusFromErrorInfo(startup_error.snapshot().error);
+            }
+        }
+        if (context->IsCancelled()) {
+            startup_error.record(ErrorInfo(ErrorCode::CANCELLED, "batch cancelled by user"));
+            return grpcStatusFromErrorInfo(startup_error.snapshot().error);
+        }
+        auto started = prefill_server_caller_->callPrefillBatch(forwarded, target, rpc_deadline_ms);
+        if (started.ok())
+            caller = std::move(started.value());
+        else
+            startup_error.record(started.status());
+        if (caller)
+            break;
+    }
+    if (!caller)
+        return grpcStatusFromErrorInfo(startup_error.snapshot().error);
+    // Do not wait for the unary Prefill response: Decode must start loading KV first.
+    if (pd && engine_->batchEnqueue(streams) != streams) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "batchEnqueue changed prepared stream identity or order");
+    }
+    auto status = pollBatchStreamOutput(context, streams, response, [&](bool& done) {
+        done = caller->done();
+        return caller->firstError();
+    });
+    for (auto& item : contexts)
+        item->error_status = status;
+    if (!status.ok()) {
+        caller->cancel();
+    } else if (!pd) {
+        response->CopyFrom(caller->response());
+    }
+    return status;
 }
 
 void DecodeRpcServerNew2::updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) {

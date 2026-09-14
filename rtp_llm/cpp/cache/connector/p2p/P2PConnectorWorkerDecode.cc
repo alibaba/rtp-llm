@@ -133,11 +133,6 @@ ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&    
     return ErrorInfo::OkStatus();
 }
 
-namespace {
-constexpr int kBackoffInitialMs = 1;
-constexpr int kBackoffCapMs     = 8;
-}  // namespace
-
 void P2PConnectorWorkerDecode::cleanupRecvTaskStore(const std::shared_ptr<ReadTaskGroup>& task_group,
                                                     bool                                   cancel_pending_tasks) const {
     if (!task_group) {
@@ -146,7 +141,7 @@ void P2PConnectorWorkerDecode::cleanupRecvTaskStore(const std::shared_ptr<ReadTa
     const size_t cleanup_count = std::min(task_group->partition_keys.size(), task_group->tasks.size());
     for (size_t i = 0; i < cleanup_count; ++i) {
         const auto& task = task_group->tasks[i];
-        if (cancel_pending_tasks && task) {
+        if (cancel_pending_tasks && task && !task->done()) {
             task->cancel();
         }
         receiver_->stealTask(task_group->partition_keys[i]);
@@ -158,29 +153,34 @@ P2PConnectorWorkerDecode::waitRecvTasksWithReadDeadlinePolicy(const std::shared_
                                                               int64_t                               deadline_ms,
                                                               int64_t                               request_id,
                                                               const std::string&                    unique_key) const {
-    int sleep_ms = kBackoffInitialMs;
-
-    // D 前只等待完成或显式取消。到 D 后一次性阻止新匹配、封口并取消未完成任务。
-    while (true) {
+    const auto all_done = [&]() {
+        return std::all_of(
+            task_group->tasks.begin(), task_group->tasks.end(), [](const auto& task) { return task->done(); });
+    };
+    {
+        std::unique_lock<std::mutex> lock(task_group->completion_mutex);
+        task_group->completion_cv.wait_until(
+            lock, std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms)), [&]() {
+                return task_group->cancelled.load() || all_done()
+                       || task_group->first_error.snapshot().error.hasError();
+            });
         if (task_group->cancelled.load()) {
             return ReadWaitOutcome::Cancelled;
         }
-        bool all_tasks_done = true;
-        for (const auto& task : task_group->tasks) {
-            if (!task->done()) {
-                all_tasks_done = false;
-                break;
-            }
-        }
-        if (all_tasks_done) {
+        if (all_done()) {
             return ReadWaitOutcome::AllDone;
         }
-
-        const int64_t now = currentTimeMs();
-        if (now >= deadline_ms) {
-            for (const auto& key : task_group->partition_keys) {
-                receiver_->stealTask(key);
-            }
+        if (task_group->first_error.snapshot().error.hasError())
+            return ReadWaitOutcome::Failed;
+    }
+    task_group->first_error.record(ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE,
+                                             "Decode recv transfer deadline exceeded key=" + unique_key
+                                                 + " deadline_ms=" + std::to_string(deadline_ms)));
+    // Cancel outside completion_mutex: cancel() may synchronously invoke the
+    // completion callback, which takes that mutex to prevent a lost wakeup.
+    for (const auto& key : task_group->partition_keys) {
+        receiver_->stealTask(key);
+    }
             task_group->lease->seal();
             for (const auto& task : task_group->tasks) {
                 if (task && !task->done()) {
@@ -193,11 +193,6 @@ P2PConnectorWorkerDecode::waitRecvTasksWithReadDeadlinePolicy(const std::shared_
                                 unique_key.c_str(),
                                 deadline_ms);
             return ReadWaitOutcome::ReturnDeadlineIncomplete;
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
-        sleep_ms = std::min(sleep_ms * 2, kBackoffCapMs);
-    }
 }
 
 void P2PConnectorWorkerDecode::reportReadMetrics(int     total_block_count,
@@ -293,6 +288,8 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
     }
 
     if (pending_cancel) {
+        task_group->first_error.record(
+            ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED, "Decode recv cancelled key=" + unique_key));
         task_group->cancelled.store(true);
         for (const auto& task : task_group->tasks) {
             if (task) {
@@ -321,19 +318,20 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
             }
         }
         reportReadMetrics(total_block_count, false, read_start_time_us);
-        const std::string msg = "read: transfers not all done at transfer deadline";
+        const auto        first = task_group->first_error.snapshot().error;
+        const std::string msg   = first.ToString();
         RTP_LLM_LOG_WARNING("read failed, request_id: %ld, unique_key: %s, %s, done_tasks=%d/%zu",
                             request_id,
                             unique_key.c_str(),
                             msg.c_str(),
                             done_count,
                             task_group->tasks.size());
-        return ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE, msg);
+        return first;
     }
 
     // Seal the lease — no more recv tasks will be created.
     task_group->lease->seal();
-    cleanupRecvTaskStore(task_group, /*cancel_pending_tasks=*/false);
+    cleanupRecvTaskStore(task_group, /*cancel_pending_tasks=*/outcome == ReadWaitOutcome::Failed);
 
     // A completion callback may have arrived before seal(), so advance once more
     // after sealing to release an already-finished lease without a polling pass.
@@ -370,6 +368,9 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
 P2PConnectorWorkerDecode::RecvResultInfo
 P2PConnectorWorkerDecode::aggregateRecvTaskResults(const std::shared_ptr<ReadTaskGroup>& task_group) const {
     RecvResultInfo result;
+    const auto     first = task_group->first_error.snapshot().error;
+    if (first.hasError())
+        return {false, first.code(), first.ToString()};
     for (const auto& task : task_group->tasks) {
         if (!task->success()) {
             result.success = false;
@@ -379,7 +380,7 @@ P2PConnectorWorkerDecode::aggregateRecvTaskResults(const std::shared_ptr<ReadTas
             }
         }
     }
-    if (task_group->cancelled.load()) {
+    if (result.success && task_group->cancelled.load()) {
         result.success    = false;
         result.error_code = ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED;
         result.error_msg  = "read cancelled";
@@ -417,7 +418,13 @@ bool P2PConnectorWorkerDecode::cancelRead(const std::string& unique_key, int64_t
         task_group = it->second;
     }
 
-    task_group->cancelled.store(true);
+    {
+        std::lock_guard<std::mutex> lock(task_group->completion_mutex);
+        task_group->first_error.record(
+            ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED, "Decode recv cancelled key=" + unique_key));
+        task_group->cancelled.store(true);
+    }
+    task_group->completion_cv.notify_all();
     for (const auto& task : task_group->tasks) {
         task->cancel();
     }
@@ -445,7 +452,21 @@ void P2PConnectorWorkerDecode::registerTaskCompletionCallback(
     const std::shared_ptr<ReadTaskGroup>& task_group) {
     const auto callback_state = completion_callback_state_;
     const std::weak_ptr<ReadTaskGroup> weak_task_group = task_group;
-    task->setDoneCallback([callback_state, unique_key, weak_task_group]() {
+    const std::string task_key = task_group->partition_keys.empty() ? unique_key : task_group->partition_keys.back();
+    std::weak_ptr<transfer::IKVCacheRecvTask> weak_task = task;
+    task->setDoneCallback([callback_state, unique_key, weak_task_group, weak_task, task_key]() {
+        // This signal owns no worker pointer. It is safe even after worker
+        // teardown, and must also run before lease_map_ registration completes.
+        if (auto group = weak_task_group.lock()) {
+            if (auto completed = weak_task.lock(); completed && !completed->success()) {
+                group->first_error.record(ErrorInfo(transfer::toErrorCode(completed->errorCode()),
+                                                    "Decode recv key=" + task_key + " transfer_code="
+                                                        + std::to_string(static_cast<int>(completed->errorCode()))
+                                                        + ": " + completed->errorMessage()));
+            }
+            std::lock_guard<std::mutex> lock(group->completion_mutex);
+            group->completion_cv.notify_all();
+        }
         std::lock_guard<std::mutex> lock(callback_state->mutex);
         if (callback_state->owner) {
             callback_state->owner->onRecvTaskDone(unique_key, weak_task_group);

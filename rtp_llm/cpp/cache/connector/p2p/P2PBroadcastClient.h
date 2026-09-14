@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include <memory>
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -38,15 +39,30 @@ public:
         }
 
         bool done() const {
-            return locally_completed_ || (tp_broadcast_result_ && tp_broadcast_result_->done());
+            const bool completed = locally_completed_ || (tp_broadcast_result_ && tp_broadcast_result_->done());
+            if (completed) {
+                int64_t expected = 0;
+                total_cost_time_us_.compare_exchange_strong(expected, currentTimeUs() - start_time_us_);
+            }
+            return completed;
         }
         bool success() const;
         void checkDone();
-
-        int64_t totalCostTimeUs() const {
-            return total_cost_time_us_;
+        void setDoneCallback(std::function<void()> callback) {
+            if (tp_broadcast_result_) {
+                tp_broadcast_result_->setProgressCallback(std::move(callback));
+            } else if (callback) {
+                callback();
+            }
         }
 
+        int64_t totalCostTimeUs() const {
+            return total_cost_time_us_.load();
+        }
+
+        FirstError::Snapshot firstError() const {
+            return tp_broadcast_result_ ? tp_broadcast_result_->firstError() : FirstError::Snapshot{};
+        }
         ErrorCode   errorCode() const;
         std::string errorMessage() const;
 
@@ -54,7 +70,7 @@ public:
         std::string                        unique_key_;
         std::shared_ptr<TpBroadcastResult> tp_broadcast_result_;
         int64_t                            start_time_us_;
-        int64_t                            total_cost_time_us_{0};
+        mutable std::atomic<int64_t>       total_cost_time_us_{0};
         bool                               locally_completed_{false};
     };
 

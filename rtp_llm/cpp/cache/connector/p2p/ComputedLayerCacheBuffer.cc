@@ -128,6 +128,7 @@ std::shared_ptr<ComputedLayerCacheBuffer> ComputedLayerCacheBufferStore::addBuff
     auto new_computed_layer_cache_buffer =
         std::make_shared<ComputedLayerCacheBuffer>(request_id, layer_cache_buffer, deadline_ms);
     computed_buffers_[request_id] = new_computed_layer_cache_buffer;
+    notification_->notify();
     return new_computed_layer_cache_buffer;
 }
 
@@ -153,6 +154,9 @@ std::optional<int64_t> ComputedLayerCacheBufferStore::registerRequestHorizon(int
     if (result.first->second.request_deadline_ms != request_deadline_ms
         || currentTimeMs() >= result.first->second.horizon_ms) {
         return std::nullopt;
+    }
+    if (result.second) {
+        notification_->notify();
     }
     return result.first->second.horizon_ms;
 }
@@ -180,6 +184,7 @@ std::optional<int64_t> ComputedLayerCacheBufferStore::activateRequestHorizon(int
         // subsequent lookup.
         buffer_it->second->addBuffer(nullptr, it->second.horizon_ms);
     }
+    notification_->notify();
     return it->second.horizon_ms;
 }
 
@@ -213,6 +218,19 @@ void ComputedLayerCacheBufferStore::removeBuffer(int64_t request_id, int64_t req
     if (finite_request_deadline) {
         markRemovedLocked(request_id, *finite_request_deadline);
     }
+    notification_->notify();
+}
+
+int64_t ComputedLayerCacheBufferStore::nextTimeoutMs() const {
+    std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
+    auto                        next = std::numeric_limits<int64_t>::max();
+    for (const auto& entry : request_horizons_) {
+        next = std::min(next, entry.second.horizon_ms);
+    }
+    if (!removed_request_expiry_queue_.empty()) {
+        next = std::min(next, removed_request_expiry_queue_.top().expire_at_ms);
+    }
+    return next;
 }
 
 int64_t ComputedLayerCacheBufferStore::getBuffersCount() const {

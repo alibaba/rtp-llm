@@ -19,6 +19,8 @@ class StreamCacheResource;  // forward declaration
 // 线程安全说明：GenerateStateMachine 本身不提供同步机制，外部调用者需保证 reportEvent() 和 moveToNext()
 // 的调用串行化（通常通过 GenerateStream::mutex_ 保护）。
 struct GenerateStateMachine {
+    FirstError first_error;
+
 public:
     GenerateStateMachine(std::shared_ptr<StreamCacheResource> stream_cache_resource):
         stream_cache_resource_(stream_cache_resource) {}
@@ -30,6 +32,7 @@ public:
                      const std::string&      error_msg  = "") {
         if (error_info.ok() && event == StreamEvents::Error) {
             error_info = ErrorInfo(error_code, error_msg);
+            first_error.record(error_info);
         }
         events_.append(event);
     }

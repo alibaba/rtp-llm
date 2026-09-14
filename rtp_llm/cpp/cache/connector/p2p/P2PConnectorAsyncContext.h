@@ -7,13 +7,15 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
-#include "autil/LoopThread.h"
+#include "autil/LockFreeThreadPool.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PNotification.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -83,6 +85,10 @@ public:
     bool setCallResults(const std::shared_ptr<P2PBroadcastClient::Result>& tp_sync_result,
                         const std::shared_ptr<DecodeLoadHelper::Result>&  server_call_result);
     void markStartFailed(const ErrorInfo& error_info);
+    void    setNotification(const std::shared_ptr<P2PNotification>& notification);
+    int64_t nextWakeupMs(bool allow_control) const;
+    bool    needsControl() const;
+    void    runControl(const std::shared_ptr<P2PBroadcastClient>& client);
     bool cancelRequested() const {
         return cancel_requested_.load(std::memory_order_acquire);
     }
@@ -123,8 +129,8 @@ public:
 
     // Access side-channel payload parsed from Prefill response (for downstream apply in waitLoadCacheDone)
     const P2PSideChannelPayload* sideChannelPayload() const {
-        if (!calls_ready_.load(std::memory_order_acquire) || !server_call_result_
-            || !server_call_result_->side_channel_payload.has_data) {
+        if (!calls_ready_.load(std::memory_order_acquire) || !server_call_result_ || !server_call_result_->done()
+            || !server_call_result_->success() || !server_call_result_->side_channel_payload.has_data) {
             return nullptr;
         }
         return &server_call_result_->side_channel_payload;
@@ -152,6 +158,8 @@ private:
     MergedReadOutcome mergeReadResultsWhenBothDone() const;
     void              applyMergedReadOutcome(const MergedReadOutcome& outcome);
     void              beginLeaseHold();
+    std::function<void()> completionCallback() const;
+    void                  notify() const;
 
     const KVCacheResourcePtr                               resource_;
     const std::string                                      unique_key_;
@@ -164,6 +172,7 @@ private:
     const int64_t request_deadline_ms_;
     const int64_t transfer_deadline_ms_;
 
+    std::mutex                                   check_mutex_;
     mutable std::mutex      state_mutex_;
     std::condition_variable done_cv_;
     bool                    done_{false};
@@ -184,6 +193,8 @@ private:
     std::atomic<bool>    calls_ready_{false};
     std::atomic<bool>    cancel_requested_{false};
     KickoffState         kickoff_state_{KickoffState::QUEUED};  // guarded by state_mutex_
+    std::shared_ptr<P2PNotification> notification_;                         // accessed with atomic_load/store
+    std::atomic<int64_t>             control_retry_ms_{0};
 };
 
 /// @brief P2P 按层写入已被 worker 接收的上下文。
@@ -201,7 +212,7 @@ public:
 
 };
 
-/// @brief 后台线程定期检查 in-flight 异步 read 上下文，超时时自动取消
+/// @brief 完成事件唤醒状态检查；定时器只处理 deadline 和控制 RPC 重试
 class P2PConnectorAsyncReadContextChecker {
 public:
     P2PConnectorAsyncReadContextChecker() = default;
@@ -209,8 +220,9 @@ public:
 
 public:
     /// @brief 启动后台检查线程
-    bool init(const kmonitor::MetricsReporterPtr&        metrics_reporter,
-              const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client);
+    bool init(const kmonitor::MetricsReporterPtr&               metrics_reporter,
+              const std::shared_ptr<P2PBroadcastClient>&        tp_broadcast_client,
+              const std::shared_ptr<autil::LockFreeThreadPool>& control_pool);
     void stop();
     /// @brief 添加需要跟踪的异步 read 上下文
     void   addContext(const std::shared_ptr<P2PConnectorAsyncReadContext>& context);
@@ -224,8 +236,14 @@ private:
     std::shared_ptr<P2PBroadcastClient>                        tp_broadcast_client_;
     mutable std::mutex                                         async_contexts_mutex_;
     std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> async_contexts_;
-    autil::LoopThreadPtr                                       async_read_check_thread_;
+    std::thread                                                async_read_check_thread_;
+    std::atomic<bool>                                          stopping_{false};
+    std::shared_ptr<P2PNotification>                           notification_{std::make_shared<P2PNotification>()};
+    std::shared_ptr<autil::LockFreeThreadPool>                 control_pool_;
+    // At most one slow control job, leaving the other kickoff pool threads free.
+    std::shared_ptr<std::atomic<bool>> control_busy_{std::make_shared<std::atomic<bool>>(false)};
     size_t                                                     lease_poll_cursor_{0};
+    int64_t                                                    control_submit_retry_ms_{0};
 };
 
 }  // namespace rtp_llm

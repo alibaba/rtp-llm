@@ -12,6 +12,8 @@ struct PDSupportDecision {
 };
 
 PDSupportDecision checkPDSupport(const GenerateInputPB& request);
+ErrorInfo         checkPDBatchSupport(const BatchGenerateInputPB& request, bool& pd_separation);
+ErrorInfo         validatePDHandoff(const GenerateInputPB& request);
 
 // QueryConverter performs the common PB conversion before this step. Keep this
 // separate so the prefill-entrance path retains its RPC and MM timing stages.

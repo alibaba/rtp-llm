@@ -15,7 +15,7 @@
 namespace rtp_llm {
 namespace {
 // Keep kickoff bounded: connection acquisition/reconnection may block, while
-// completion polling remains isolated on P2PConnectorAsyncReadContextChecker.
+// completion events and deadlines remain isolated on the read context checker.
 constexpr size_t kAsyncReadThreadCount = 4;
 constexpr size_t kAsyncReadQueueSize   = 1024;
 }  // namespace
@@ -27,13 +27,13 @@ P2PConnectorSchedulerDecode::P2PConnectorSchedulerDecode(
     config_(std::move(config)), metrics_reporter_(metrics_reporter), tp_broadcast_client_(tp_broadcast_client) {}
 
 P2PConnectorSchedulerDecode::~P2PConnectorSchedulerDecode() {
+    if (checker_) {
+        checker_->stop();
+    }
     if (async_read_pool_) {
         async_read_pool_->stop(autil::ThreadPool::STOP_AFTER_QUEUE_EMPTY);
         async_read_pool_->join();
         async_read_pool_.reset();
-    }
-    if (checker_) {
-        checker_->stop();
     }
 }
 
@@ -49,7 +49,7 @@ bool P2PConnectorSchedulerDecode::init(const std::string& process_id) {
     async_read_pool_ = std::move(async_read_pool);
 
     checker_ = std::make_shared<P2PConnectorAsyncReadContextChecker>();
-    if (!checker_->init(metrics_reporter_, tp_broadcast_client_)) {
+    if (!checker_->init(metrics_reporter_, tp_broadcast_client_, async_read_pool_)) {
         RTP_LLM_LOG_ERROR("P2PConnectorSchedulerDecode init failed: checker init failed");
         async_read_pool_->stop();
         async_read_pool_.reset();
@@ -82,8 +82,10 @@ ErrorInfo P2PConnectorSchedulerDecode::checkPeerCpLayout(int prefill_tp_size, in
     return ErrorInfo::OkStatus();
 }
 
-std::shared_ptr<const PlanResult> P2PConnectorSchedulerDecode::planFor(int prefill_tp_size, int prefill_cp_size) {
-    const auto key = std::make_pair(prefill_tp_size, prefill_cp_size);
+std::shared_ptr<const PlanResult>
+P2PConnectorSchedulerDecode::planFor(int prefill_tp_size, int prefill_cp_size, const std::string& unique_key) {
+    const auto offset = KVCacheTransferPlanner::sourceReplicaOffset(unique_key, prefill_tp_size);
+    const auto key    = std::make_tuple(prefill_tp_size, prefill_cp_size, offset);
     {
         std::lock_guard<std::mutex> lock(plan_cache_mutex_);
         auto                        it = plan_cache_.find(key);
@@ -102,7 +104,8 @@ std::shared_ptr<const PlanResult> P2PConnectorSchedulerDecode::planFor(int prefi
                                                        RoleType::PREFILL);
     const auto tags = ShardLayoutFactory::tagsOf(*config_.topology);
 
-    auto result = std::make_shared<const PlanResult>(KVCacheTransferPlanner::plan(src_layout, dst_layout, tags));
+    auto result =
+        std::make_shared<const PlanResult>(KVCacheTransferPlanner::plan(src_layout, dst_layout, tags, offset));
 
     std::lock_guard<std::mutex> lock(plan_cache_mutex_);
     auto [it, inserted] = plan_cache_.emplace(key, result);
@@ -265,7 +268,7 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
             return {nullptr,
                     ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "worker list is empty")};
         }
-        auto plan = planFor(prefill_tp_size, prefill_cp_size);
+        auto plan = planFor(prefill_tp_size, prefill_cp_size, unique_key);
         if (!plan->ok()) {
             RTP_LLM_LOG_WARNING("asyncRead: transfer plan failed, unique_key=%s, error=%s",
                                 unique_key.c_str(),

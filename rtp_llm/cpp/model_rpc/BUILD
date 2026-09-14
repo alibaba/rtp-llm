@@ -90,6 +90,8 @@ cc_library(
     hdrs = ["BroadcastManager.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":rpc_error_code",
         ":model_rpc_pool",
+        "//rtp_llm/cpp/utils:rpc_completion_queue",
     ],
 )

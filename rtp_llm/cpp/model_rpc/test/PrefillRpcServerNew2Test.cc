@@ -56,7 +56,7 @@ TEST(PrefillRpcServerNew2Test, GetPeerInfoUsesPrecomputedDpGrpcAddrs) {
     EXPECT_EQ(response.dp_grpc_addrs(1), "[::1]:9002");
 }
 
-TEST(PrefillRpcServerNew2Test, GetPeerInfoReturnsEmptyDpAddrsWithoutPrecomputedAddresses) {
+TEST(PrefillRpcServerNew2Test, GetPeerInfoRejectsMissingDpAddresses) {
     PrefillRpcServerNew2 server;
     server.maga_init_params_.parallelism_config.tp_size = 4;
     server.maga_init_params_.parallelism_config.dp_size = 3;
@@ -70,11 +70,9 @@ TEST(PrefillRpcServerNew2Test, GetPeerInfoReturnsEmptyDpAddrsWithoutPrecomputedA
     GetPeerInfoResponsePB response;
 
     auto status = server.GetPeerInfo(&context, &request, &response);
-    ASSERT_TRUE(status.ok());
-    EXPECT_EQ(response.tp_size(), 4);
-    EXPECT_EQ(response.dp_size(), 3);
-    EXPECT_EQ(response.cp_size(), 1);
-    EXPECT_EQ(response.dp_grpc_addrs_size(), 0);
+    ASSERT_FALSE(status.ok());
+    EXPECT_NE(status.error_message().find("address_count=0"), std::string::npos);
+    EXPECT_NE(status.error_message().find("dp_size=3"), std::string::npos);
 }
 
 TEST(PrefillRpcServerNew2Test, OnflightScopeTracksStepAndCleansOnReturn) {
@@ -149,4 +147,18 @@ TEST(PrefillRpcServerNew2Test, GenerateStreamCallRejectsPdRequestWithoutUniqueKe
     EXPECT_EQ(status.error_message(), "decode_entrance handoff requires non-empty unique_key");
 }
 
+}  // namespace rtp_llm
+
+namespace rtp_llm {
+TEST(PrefillRpcServerNew2Test, GetPeerInfoPreservesAddressConfigurationFirstCause) {
+    PrefillRpcServerNew2 server;
+    server.peer_info_error_ =
+        ErrorInfo(ErrorCode::INVALID_PARAMS, "GetPeerInfo malformed p2p_worker_addrs entry=host:invalid index=2");
+    grpc::ServerContext   context;
+    GetPeerInfoRequestPB  request;
+    GetPeerInfoResponsePB response;
+    const auto            status = server.GetPeerInfo(&context, &request, &response);
+    ASSERT_FALSE(status.ok());
+    EXPECT_EQ(status.error_message(), server.peer_info_error_.ToString());
+}
 }  // namespace rtp_llm

@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <future>
+#include <set>
 #include <chrono>
 #include <thread>
 #include <gtest/gtest.h>
@@ -509,10 +511,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_UnconfirmedLeaseDeadlineAbortsRankZe
 
     auto tp_result = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
         std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{tp_ctx});
-    tp_result->finished_[0] = true;
-    tp_result->finished_count_.store(1);
-    tp_result->already_done_.store(true);
-    tp_result->all_request_success_.store(false);
+    tp_result->complete(0, true);
 
     auto broadcast_result = std::make_shared<P2PBroadcastClient::Result>("cancel-hold", tp_result);
 
@@ -545,10 +544,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_CompletedBeforeDeadlineObservationRe
 
     auto tp_result = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
         std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{tp_ctx});
-    tp_result->finished_[0] = true;
-    tp_result->finished_count_.store(1);
-    tp_result->already_done_.store(true);
-    tp_result->all_request_success_.store(true);
+    tp_result->complete(0, true);
 
     auto broadcast_result = std::make_shared<P2PBroadcastClient::Result>("completed-before-observation", tp_result);
     auto server_result     = std::make_shared<DecodeLoadHelper::Result>();
@@ -577,10 +573,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_DeadlineBroadcastsCancelWhenReadAlre
 
     auto tp_result = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
         std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{tp_ctx});
-    tp_result->finished_[0] = true;
-    tp_result->finished_count_.store(1);
-    tp_result->already_done_.store(true);
-    tp_result->all_request_success_.store(true);
+    tp_result->complete(0, true);
 
     auto collector = std::make_shared<DecodeSchedulerMetricsCollector>(nullptr);
     auto context = std::make_shared<P2PConnectorAsyncReadContext>(createValidKVCacheResource(1, 1),
@@ -772,7 +765,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_WaitDone_UnblocksWhenCheckDoneComple
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!async_context->done() && std::chrono::steady_clock::now() < deadline) {
-        async_context->checkDone();
+        // The background checker must wake from completion, with no test-side progress.
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
@@ -1049,7 +1042,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_TransferNotDone_CompletesRequestAndR
 
     EXPECT_TRUE(async_context->done());
     EXPECT_FALSE(async_context->success());
-    EXPECT_EQ(async_context->errorInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_EQ(async_context->errorInfo().code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE);
     EXPECT_TRUE(async_context->resourceHoldPending());
     EXPECT_TRUE(async_context->needCancel());
     EXPECT_FALSE(async_context->needLeasePoll());
@@ -1099,7 +1092,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_TransferNotDone_ZeroTimeoutStillReta
 
     ASSERT_TRUE(async_context->done());
     EXPECT_FALSE(async_context->success());
-    EXPECT_EQ(async_context->errorInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_EQ(async_context->errorInfo().code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE);
     EXPECT_TRUE(async_context->resourceHoldPending());
 }
 
@@ -1252,4 +1245,212 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_QueryTimeout_RetainsTargetUntilRetry
     EXPECT_TRUE(allBlockRefsEqual(allocated, 0));
 }
 
+TEST(P2PReadNotificationTest, GenerationRetainsNotificationBeforeWait) {
+    P2PNotification notification;
+    auto            observed = notification.generation();
+    notification.notify();
+    const auto start = currentTimeMs();
+    notification.waitUntil(observed, currentTimeMs() + 2000);
+    EXPECT_LT(currentTimeMs() - start, 1000);
+}
+
+TEST(P2PReadNotificationTest, CheckerWakesForBothRegistrationOrderings) {
+    auto pool = std::make_shared<autil::LockFreeThreadPool>(1, 16, nullptr, "P2PEventTest");
+    ASSERT_TRUE(pool->start());
+    P2PConnectorAsyncReadContextChecker checker;
+    ASSERT_TRUE(checker.init(nullptr, nullptr, pool));
+    for (const bool complete_before_add : {false, true}) {
+        const auto deadline = currentTimeMs() + 5000;
+        auto       context =
+            std::make_shared<P2PConnectorAsyncReadContext>(nullptr,
+                                                           "event-ready",
+                                                           std::make_shared<DecodeSchedulerMetricsCollector>(nullptr),
+                                                           1000,
+                                                           true,
+                                                           deadline,
+                                                           deadline);
+        auto server = std::make_shared<DecodeLoadHelper::Result>();
+        server->response.mutable_payload()->set_has_first_generate_token(true);
+        auto broadcast = std::make_shared<P2PBroadcastClient::Result>("event-ready");
+        ASSERT_TRUE(context->beginKickoff());
+        if (complete_before_add) {
+            server->complete(true);
+            context->setCallResults(broadcast, server);
+            checker.addContext(context);
+        } else {
+            checker.addContext(context);
+            context->setCallResults(broadcast, server);
+            server->complete(true);
+        }
+        auto done = std::async(std::launch::async, [context] { context->waitDone(); });
+        EXPECT_EQ(done.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        if (!context->done()) {
+            context->markStartFailed(ErrorInfo(ErrorCode::CANCELLED, "test cleanup"));
+        }
+        done.get();
+        EXPECT_TRUE(context->success());
+    }
+    checker.stop();
+    pool->stop();
+}
+
+TEST(P2PReadNotificationTest, DeadlineWakesWithoutAnyCompletion) {
+    auto pool = std::make_shared<autil::LockFreeThreadPool>(1, 16, nullptr, "P2PDeadlineTest");
+    ASSERT_TRUE(pool->start());
+    P2PConnectorAsyncReadContextChecker checker;
+    ASSERT_TRUE(checker.init(nullptr, nullptr, pool));
+    const auto deadline = currentTimeMs() + 50;
+    auto       context =
+        std::make_shared<P2PConnectorAsyncReadContext>(nullptr,
+                                                       "deadline",
+                                                       std::make_shared<DecodeSchedulerMetricsCollector>(nullptr),
+                                                       1000,
+                                                       false,
+                                                       deadline,
+                                                       deadline);
+    checker.addContext(context);  // Still queued: timeout must not create a lease hold.
+    auto done = std::async(std::launch::async, [context] { context->waitDone(); });
+    EXPECT_EQ(done.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    if (!context->done()) {
+        context->markStartFailed(ErrorInfo(ErrorCode::CANCELLED, "test cleanup"));
+    }
+    done.get();
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_FALSE(context->resourceHoldPending());
+    checker.stop();
+    pool->stop();
+}
+
+TEST(P2PReadNotificationTest, BusyControlJobDoesNotDelayDeadline) {
+    auto pool = std::make_shared<autil::LockFreeThreadPool>(1, 16, nullptr, "P2PBusyControlTest");
+    ASSERT_TRUE(pool->start());
+    P2PConnectorAsyncReadContextChecker checker;
+    ASSERT_TRUE(checker.init(nullptr, nullptr, pool));
+    auto entered        = std::make_shared<std::promise<void>>();
+    auto entered_future = entered->get_future();
+    auto release        = std::make_shared<std::promise<void>>();
+    auto gate           = release->get_future().share();
+    checker.control_busy_->store(true);
+    ASSERT_EQ(pool->pushTask(
+                  [entered, gate] {
+                      entered->set_value();
+                      gate.wait_for(std::chrono::seconds(3));
+                  },
+                  false),
+              autil::ThreadPoolBase::ERROR_NONE);
+    EXPECT_EQ(entered_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    const auto deadline = currentTimeMs() + 50;
+    auto       context =
+        std::make_shared<P2PConnectorAsyncReadContext>(nullptr,
+                                                       "busy-control",
+                                                       std::make_shared<DecodeSchedulerMetricsCollector>(nullptr),
+                                                       1000,
+                                                       false,
+                                                       deadline,
+                                                       deadline);
+    checker.addContext(context);
+    auto done = std::async(std::launch::async, [context] { context->waitDone(); });
+    EXPECT_EQ(done.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    release->set_value();
+    if (!context->done()) {
+        context->markStartFailed(ErrorInfo(ErrorCode::CANCELLED, "test cleanup"));
+    }
+    done.get();
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    checker.stop();
+    pool->stop();
+}
+
+TEST(P2PReadNotificationTest, LateCompletionAfterCheckerDestructionIsSafe) {
+    auto context = std::make_shared<P2PConnectorAsyncReadContext>(
+        nullptr, "late", std::make_shared<DecodeSchedulerMetricsCollector>(nullptr), 1000, true);
+    auto server = std::make_shared<DecodeLoadHelper::Result>();
+    server->response.mutable_payload()->set_has_first_generate_token(true);
+    context->setCallResults(std::make_shared<P2PBroadcastClient::Result>("late"), server);
+    {
+        P2PConnectorAsyncReadContextChecker checker;
+        checker.addContext(context);
+    }
+    std::weak_ptr<P2PConnectorAsyncReadContext> weak = context;
+    context.reset();
+    EXPECT_TRUE(weak.expired());  // No callback cycle keeps the read context alive.
+    server->complete(true);
+    EXPECT_TRUE(server->success());
+}
+
+TEST_F(P2PConnectorSchedulerTest, StartLoadFirstFailureSurvivesLaterReadCancelAndDeadline) {
+    auto worker = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
+    auto tp     = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
+        std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{worker});
+    auto broadcast = std::make_shared<P2PBroadcastClient::Result>("first-cause", tp);
+    auto prefill   = std::make_shared<DecodeLoadHelper::Result>();
+    prefill->response.set_error_code(ErrorCodePB::INVALID_PARAMS);
+    prefill->response.set_error_message("Prefill plan digest mismatch");
+    prefill->complete(true);
+    auto collector = std::make_shared<DecodeSchedulerMetricsCollector>(nullptr);
+    auto context   = std::make_shared<P2PConnectorAsyncReadContext>(createValidKVCacheResource(1, 1),
+                                                                  broadcast,
+                                                                  prefill,
+                                                                  collector,
+                                                                  1000,
+                                                                  false,
+                                                                  currentTimeMs() + 5000,
+                                                                  currentTimeMs() - 1);
+    context->checkDone();
+    EXPECT_TRUE(context->done());
+    EXPECT_TRUE(context->resourceHoldPending());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
+    worker->status = grpc::Status(grpc::StatusCode::CANCELLED, "later READ cancellation");
+    tp->complete(0, true);
+    context->checkDone();
+    EXPECT_FALSE(context->expireTransferDeadlineIfNeeded());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(context->errorInfo().ToString(), "Prefill plan digest mismatch");
+    EXPECT_TRUE(context->resourceHoldPending());
+}
+
+}  // namespace rtp_llm
+
+namespace rtp_llm {
+TEST(P2PReplicaPlanTest, BothSchedulersRotateMirrorPlansAndBoundCacheBySourceRanks) {
+    GroupBase group;
+    group.spec                           = test::makeResolvedMlaSpec(DataType::TYPE_FP16, 16, 8, 1);
+    group.kv_block_stride_bytes          = group.spec->block_size_bytes();
+    group.kv_scale_stride_bytes          = group.spec->scale_block_size_bytes();
+    group.policy                         = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.layer_ids                      = {0};
+    group.block_num                      = 16;
+    group.seq_size_per_block             = 1;
+    group.kernel_seq_size_per_block      = 1;
+    auto                        topology = test::makeIndexedTestTopology({group});
+    P2PConnectorSchedulerConfig prefill_config;
+    prefill_config.topology                   = topology;
+    prefill_config.parallelism_config.tp_size = 8;
+    P2PConnectorSchedulerConfig decode_config;
+    decode_config.topology                   = topology;
+    decode_config.parallelism_config.tp_size = 1;
+    P2PConnectorSchedulerPrefill prefill(prefill_config, nullptr, nullptr);
+    P2PConnectorSchedulerDecode  decode(decode_config, nullptr, nullptr);
+    std::set<int>                selected;
+    for (int i = 0; i < 64; ++i) {
+        const auto key    = "decode-dp-" + std::to_string(i);
+        const auto d_plan = decode.planFor(8, 1, key);
+        const auto p_plan = prefill.planFor(1, key);
+        ASSERT_TRUE(d_plan->ok()) << d_plan->error.ToString();
+        ASSERT_TRUE(p_plan->ok()) << p_plan->error.ToString();
+        ASSERT_EQ(d_plan->plan.routes.size(), 1u);
+        selected.insert(d_plan->plan.routes.front().src_rank);
+        EXPECT_EQ(d_plan->plan.digest(), p_plan->plan.digest());
+        EXPECT_TRUE(prefill.checkPlanDigest(1, d_plan->plan.digest(), key).ok());
+        EXPECT_EQ(decode.planFor(8, 1, key), d_plan);
+        EXPECT_EQ(prefill.planFor(1, key), p_plan);
+    }
+    EXPECT_EQ(selected.size(), 8u);
+    EXPECT_EQ(decode.plan_cache_.size(), 8u);
+    EXPECT_EQ(prefill.plan_cache_.size(), 8u);
+    const auto first = decode.planFor(8, 1, "decode-dp-0");
+    const auto error = prefill.checkPlanDigest(1, first->plan.digest(), "decode-dp-1");
+    EXPECT_EQ(error.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
+    EXPECT_NE(error.ToString().find("plan digest mismatch"), std::string::npos);
+}
 }  // namespace rtp_llm

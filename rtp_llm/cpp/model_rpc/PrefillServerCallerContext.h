@@ -2,6 +2,7 @@
 
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include <cstdint>
 #include <memory>
@@ -72,9 +73,19 @@ public:
         return response_;
     }
 
+    FirstError::Snapshot firstError() {
+        first_error_.record(errorInfo());
+        return first_error_.snapshot();
+    }
+
     ErrorInfo errorInfo() {
         checkDone();
-        std::shared_lock<std::shared_mutex> lock(state_mutex_);
+        std::unique_lock<std::shared_mutex> lock(state_mutex_);
+        if (error_info_.ok() && finished_ && async_state_ && !async_state_->status.ok()) {
+            error_info_ = errorInfoFromGrpcStatus(
+                async_state_->status, "Prefill GenerateStreamCall peer=" + prefill_addr_ + " key=" + unique_key_);
+            first_error_.record(error_info_);
+        }
         return error_info_;
     }
 
@@ -105,6 +116,7 @@ private:
     // Request/Response
     GenerateOutputsPB response_;
     ErrorInfo         error_info_;
+    FirstError        first_error_;
 
     // State
     bool              finished_          = false;

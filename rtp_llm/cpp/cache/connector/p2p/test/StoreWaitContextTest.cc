@@ -30,7 +30,7 @@ protected:
     std::shared_ptr<ComputedLayerCacheBufferStore> computed_buffers_;
 };
 
-TEST_F(StoreWaitContextTest, CheckerCheckOnce_NoEvent_TreatedAsReady) {
+TEST_F(StoreWaitContextTest, ReadyBufferPublishedBeforeAddContextReturns) {
     StoreWaitContextChecker checker(nullptr, computed_buffers_);
 
     int64_t request_id  = 3001;
@@ -43,13 +43,25 @@ TEST_F(StoreWaitContextTest, CheckerCheckOnce_NoEvent_TreatedAsReady) {
     computed_buffers_->registerRequestHorizon(request_id, deadline_ms, deadline_ms);
     checker.addContext(std::move(context));
 
-    EXPECT_EQ(checker.getContextCount(), 1);
-    checker.checkOnce();
+    // Fast path publishes/rejects before any background tick.
     EXPECT_EQ(checker.getContextCount(), 0);
 
     auto computed_buffer = computed_buffers_->getBuffer(request_id);
     ASSERT_NE(computed_buffer, nullptr);
 }
+
+#if USING_CUDA
+TEST_F(StoreWaitContextTest, ReadyGpuEventPublishesWithoutBackgroundCheck) {
+    StoreWaitContextChecker checker(nullptr, computed_buffers_);
+    auto                    event = std::make_shared<torch::Event>(torch::kCUDA);
+    ASSERT_TRUE(event->query());  // An unrecorded event is already complete.
+    const auto deadline = getDeadlineMs();
+    ASSERT_TRUE(computed_buffers_->registerRequestHorizon(3002, deadline, deadline));
+    checker.addContext(StoreWaitContext(3002, event, createLayerCacheBuffer(0), deadline, nullptr));
+    EXPECT_EQ(checker.getContextCount(), 0);
+    EXPECT_NE(computed_buffers_->getBuffer(3002), nullptr);
+}
+#endif
 
 TEST_F(StoreWaitContextTest, CheckerCheckOnce_Timeout) {
     StoreWaitContextChecker checker(nullptr, computed_buffers_);
@@ -64,8 +76,7 @@ TEST_F(StoreWaitContextTest, CheckerCheckOnce_Timeout) {
     computed_buffers_->registerRequestHorizon(request_id, deadline_ms, deadline_ms);
     checker.addContext(std::move(context));
 
-    EXPECT_EQ(checker.getContextCount(), 1);
-    checker.checkOnce();
+    // Fast path publishes/rejects before any background tick.
     EXPECT_EQ(checker.getContextCount(), 0);
 
     // Buffer should NOT be added (timeout, not success)
@@ -90,15 +101,37 @@ TEST_F(StoreWaitContextTest, CheckerUsesActivatedTransferHorizon) {
     EXPECT_NE(computed_buffers_->getBuffer(request_id), nullptr);
 }
 
-TEST_F(StoreWaitContextTest, TerminalRequestRejectsAlreadyQueuedEvent) {
+TEST_F(StoreWaitContextTest, TerminalRequestRejectsLateReadyEvent) {
     StoreWaitContextChecker checker(nullptr, computed_buffers_);
     const auto request_deadline_ms = currentTimeMs() + 5000;
     ASSERT_TRUE(computed_buffers_->registerRequestHorizon(3006, request_deadline_ms, request_deadline_ms).has_value());
-    checker.addContext(StoreWaitContext(3006, nullptr, createLayerCacheBuffer(0), request_deadline_ms, nullptr));
     computed_buffers_->removeBuffer(3006, request_deadline_ms);
+    checker.addContext(StoreWaitContext(3006, nullptr, createLayerCacheBuffer(0), request_deadline_ms, nullptr));
     checker.checkOnce();
     EXPECT_EQ(checker.getContextCount(), 0);
     EXPECT_EQ(computed_buffers_->getBuffer(3006), nullptr);
+}
+
+TEST_F(StoreWaitContextTest, HorizonChangesNotifyAndRescheduleNearestTimeout) {
+    auto       signal     = computed_buffers_->notification();
+    auto       generation = signal->generation();
+    const auto deadline   = currentTimeMs() + 5000;
+    ASSERT_TRUE(computed_buffers_->registerRequestHorizon(4001, deadline, deadline));
+    EXPECT_NE(signal->generation(), generation);
+    EXPECT_EQ(computed_buffers_->nextTimeoutMs(), deadline);
+    generation                   = signal->generation();
+    const auto transfer_deadline = deadline - 1000;
+    ASSERT_TRUE(computed_buffers_->activateRequestHorizon(4001, transfer_deadline, deadline));
+    EXPECT_NE(signal->generation(), generation);
+    EXPECT_EQ(computed_buffers_->nextTimeoutMs(), transfer_deadline);
+    generation = signal->generation();
+    computed_buffers_->removeBuffer(4001, deadline);
+    EXPECT_NE(signal->generation(), generation);
+    EXPECT_EQ(computed_buffers_->nextTimeoutMs(), deadline);  // Tombstone expiry.
+}
+
+TEST_F(StoreWaitContextTest, EmptyStoreHasNoPeriodicWakeupDeadline) {
+    EXPECT_EQ(computed_buffers_->nextTimeoutMs(), std::numeric_limits<int64_t>::max());
 }
 
 }  // namespace rtp_llm

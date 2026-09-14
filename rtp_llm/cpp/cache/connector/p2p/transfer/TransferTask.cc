@@ -29,13 +29,19 @@ void TransferTask::cancel() {
         if (!transferring_) {
             // PENDING: fast fail，立即终止
             done_               = true;
-            error_code_         = TransferErrorCode::CANCELLED;
-            error_msg_          = "TransferTask cancelled";
+            if (error_code_ == TransferErrorCode::OK) {
+                error_code_ = TransferErrorCode::CANCELLED;
+                error_msg_  = "TransferTask cancelled";
+            }
             total_cost_time_us_ = currentTimeUs() - start_time_us_;
             done_callback       = std::move(done_callback_);
         } else {
             // TRANSFERRING: 仅记录取消意图，等待 notifyDone() 真正结束
             cancel_requested_ = true;
+            if (error_code_ == TransferErrorCode::OK) {
+                error_code_ = TransferErrorCode::CANCELLED;
+                error_msg_  = "TransferTask cancelled during transfer";
+            }
         }
     }
     if (done_callback) {
@@ -60,8 +66,10 @@ void TransferTask::forceCancel() {
             return;
         }
         done_               = true;
-        error_code_         = TransferErrorCode::CANCELLED;
-        error_msg_          = "TransferTask force cancelled";
+        if (error_code_ == TransferErrorCode::OK) {
+            error_code_ = TransferErrorCode::CANCELLED;
+            error_msg_  = "TransferTask force cancelled";
+        }
         total_cost_time_us_ = currentTimeUs() - start_time_us_;
         done_callback       = std::move(done_callback_);
     }
@@ -71,9 +79,11 @@ void TransferTask::forceCancel() {
 }
 
 TransferErrorCode TransferTask::errorCode() const {
-    std::shared_lock<std::shared_mutex> lock(mutex_);
-    if (!done_ && currentTimeMs() >= deadline_ms_) {
-        return TransferErrorCode::TIMEOUT;
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (error_code_ == TransferErrorCode::OK && !done_ && currentTimeMs() >= deadline_ms_) {
+        // Capture an observed timeout without claiming physical completion.
+        error_code_ = TransferErrorCode::TIMEOUT;
+        error_msg_  = "TransferTask timed out";
     }
     return error_code_;
 }
@@ -81,6 +91,17 @@ TransferErrorCode TransferTask::errorCode() const {
 std::string TransferTask::errorMessage() const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     return error_msg_;
+}
+
+void TransferTask::recordError(TransferErrorCode error_code, const std::string& error_message) {
+    if (error_code == TransferErrorCode::OK) {
+        return;
+    }
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (!done_ && error_code_ == TransferErrorCode::OK) {
+        error_code_ = error_code;
+        error_msg_  = error_message;
+    }
 }
 
 void TransferTask::notifyDone(bool success, TransferErrorCode error_code, const std::string& error_msg) {
@@ -91,7 +112,12 @@ void TransferTask::notifyDone(bool success, TransferErrorCode error_code, const 
             return;
         }
         done_ = true;
-        if (currentTimeMs() >= deadline_ms_) {
+        if (error_code_ != TransferErrorCode::OK) {
+            // An earlier cancellation/failure already owns the result.
+        } else if (!success) {
+            error_code_ = error_code;
+            error_msg_  = error_msg;
+        } else if (currentTimeMs() >= deadline_ms_) {
             // deadline 已过，无论传输是否物理完成，对调用方均视为超时
             error_code_ = TransferErrorCode::TIMEOUT;
             error_msg_  = "TransferTask timed out";

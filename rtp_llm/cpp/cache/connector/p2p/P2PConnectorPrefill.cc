@@ -171,8 +171,8 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         decode_transfer_servers.emplace_back(worker.ip(), worker.cache_store_port());
     }
     if (!request.no_transfer()) {
-        const auto plan_error =
-            scheduler_->checkPlanDigest(static_cast<int>(decode_transfer_servers.size()), request.plan_digest());
+        const auto plan_error = scheduler_->checkPlanDigest(
+            static_cast<int>(decode_transfer_servers.size()), request.plan_digest(), unique_key);
         if (plan_error.hasError()) {
             RTP_LLM_LOG_WARNING("handleRead rejected StartLoad, unique_key=%s, error=%s",
                                 unique_key.c_str(),

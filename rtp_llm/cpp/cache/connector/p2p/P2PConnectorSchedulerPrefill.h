@@ -34,10 +34,10 @@ public:
     /// @brief 与 decode 侧用**同一个 planner 函数**算镜像 plan。
     /// decode 的 (tp_size, cp_size) 由本端推导：tp_size = decode_transfer_servers.size()，
     /// cp_size = kv_cache_sharded ? decode_tp_size : 1（部署级同配开关）。
-    std::shared_ptr<const PlanResult> planFor(int decode_tp_size);
+    std::shared_ptr<const PlanResult> planFor(int decode_tp_size, const std::string& unique_key);
 
     /// @brief StartLoad 建立前核对 Decode 传来的计划摘要，避免 plan 分歧退化为传输超时。
-    ErrorInfo checkPlanDigest(int decode_tp_size, uint64_t decode_plan_digest);
+    ErrorInfo checkPlanDigest(int decode_tp_size, uint64_t decode_plan_digest, const std::string& unique_key);
 
     /// @brief 把 plan 投影成每个 prefill worker 的 route 列表。
     /// prefill 方向不带 layer_blocks —— 在所有被允许的 CP 形态下 (src_rank, dst_rank, tag)
@@ -58,7 +58,7 @@ private:
 
 private:
     mutable std::mutex                                       plan_cache_mutex_;
-    std::map<int, std::shared_ptr<const PlanResult>>         plan_cache_;
+    std::map<std::pair<int, size_t>, std::shared_ptr<const PlanResult>> plan_cache_;
     const P2PConnectorSchedulerConfig   config_;
     kmonitor::MetricsReporterPtr        metrics_reporter_;
     std::shared_ptr<P2PBroadcastClient> tp_broadcast_client_;

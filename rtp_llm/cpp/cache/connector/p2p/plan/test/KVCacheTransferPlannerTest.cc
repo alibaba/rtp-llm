@@ -991,3 +991,51 @@ TEST(PlannerGroupD, D5_ReplicatedGroupElectionStructure) {
 }
 
 }  // namespace rtp_llm
+
+namespace rtp_llm {
+TEST(PlannerReplicaBalance, SingleRankDecodeRequestsUseAllPrefillReplicas) {
+    EXPECT_EQ(KVCacheTransferPlanner::sourceReplicaOffset("hello", 8), 3u);
+    const auto    src = mlaLayout(8);
+    const auto    dst = mlaLayout(1);
+    std::set<int> selected;
+    for (int i = 0; i < 8; ++i) {
+        const auto key    = "decode-dp-" + std::to_string(i);
+        const auto offset = KVCacheTransferPlanner::sourceReplicaOffset(key, src.rankCount());
+        ASSERT_LT(offset, 8u);
+        const auto decode  = KVCacheTransferPlanner::plan(src, dst, {kFullTag}, offset);
+        const auto prefill = KVCacheTransferPlanner::plan(
+            src, dst, {kFullTag}, KVCacheTransferPlanner::sourceReplicaOffset(key, src.rankCount()));
+        ASSERT_TRUE(decode.ok());
+        ASSERT_TRUE(prefill.ok());
+        ASSERT_EQ(decode.plan.routes.size(), 1u);
+        EXPECT_EQ(decode.plan.digest(), prefill.plan.digest());
+        selected.insert(decode.plan.routes.front().src_rank);
+    }
+    EXPECT_EQ(selected, (std::set<int>{0, 1, 2, 3, 4, 5, 6, 7}));
+    const auto first  = KVCacheTransferPlanner::plan(src, dst, {kFullTag}, 0);
+    const auto second = KVCacheTransferPlanner::plan(src, dst, {kFullTag}, 1);
+    EXPECT_NE(first.plan.digest(), second.plan.digest());
+}
+
+TEST(PlannerReplicaBalance, OffsetPreservesCpAndHeadOwnership) {
+    const auto src      = mlaLayout(8, CPRotateMethod::PREFILL_CP, true);
+    const auto dst      = mlaLayout(4);
+    const auto baseline = KVCacheTransferPlanner::plan(src, dst, {kFullTag});
+    ASSERT_TRUE(baseline.ok());
+    for (size_t offset = 0; offset < 8; ++offset) {
+        const auto rotated = KVCacheTransferPlanner::plan(src, dst, {kFullTag}, offset);
+        ASSERT_TRUE(rotated.ok());
+        ASSERT_EQ(rotated.plan.routes.size(), baseline.plan.routes.size());
+        for (size_t i = 0; i < rotated.plan.routes.size(); ++i) {
+            const auto& actual   = rotated.plan.routes[i];
+            const auto& expected = baseline.plan.routes[i];
+            EXPECT_EQ(src.cpRank(actual.src_rank), src.cpRank(expected.src_rank));
+            EXPECT_EQ(src.headShard(actual.src_rank, kFullTag), src.headShard(expected.src_rank, kFullTag));
+            EXPECT_EQ(actual.dst_rank, expected.dst_rank);
+            EXPECT_EQ(actual.src_keys, expected.src_keys);
+            EXPECT_EQ(actual.src_bytes, expected.src_bytes);
+            EXPECT_EQ(actual.dst_bytes, expected.dst_bytes);
+        }
+    }
+}
+}  // namespace rtp_llm

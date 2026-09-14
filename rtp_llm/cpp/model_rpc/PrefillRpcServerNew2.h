@@ -32,6 +32,10 @@ public:
     ::grpc::Status
     GetPeerInfo(::grpc::ServerContext* context, const GetPeerInfoRequestPB* request, GetPeerInfoResponsePB* response);
 
+    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                   const BatchGenerateInputPB* request,
+                                   BatchGenerateOutputsPB*     response) override;
+
 private:
     // Per-onflight tracker for [HANG-DIAG] watchdog. Each GenerateStreamCall
     // registers an entry on entry and removes it on return; the background
@@ -77,6 +81,7 @@ private:
     // Built once during init() from p2p_worker_addrs.
     // Format: "host:grpc_port" or "[IPv6]:grpc_port".
     std::vector<std::string> dp_grpc_addrs_;
+    ErrorInfo                peer_info_error_;
 };
 
 }  // namespace rtp_llm

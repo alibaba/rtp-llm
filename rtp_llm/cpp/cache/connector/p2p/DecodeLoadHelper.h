@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <grpc++/grpc++.h>
 #include <atomic>
+#include <functional>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -42,11 +43,9 @@ public:
     ~DecodeLoadHelper() = default;
 
 public:
-    struct Result: public std::enable_shared_from_this<Result> {
+    struct Result {
         Result(): success_(false), timeout_ms(0), request_id(0), start_time_us(currentTimeUs()) {}
-        ~Result() {
-            shutdownAndDrainCompletionQueue();
-        }
+        ~Result() = default;
 
         bool success() const {
             std::lock_guard<std::mutex> lock(state_mutex_);
@@ -56,28 +55,20 @@ public:
             std::lock_guard<std::mutex> lock(state_mutex_);
             return done_;
         }
-        void    checkDone();
+        FirstError::Snapshot firstError() const {
+            return first_error_.snapshot();
+        }
+        void    complete(bool ok);
+        void    setDoneCallback(std::function<void()> callback);
         void    cancel();
         int64_t totalCostTimeUs() const {
             std::lock_guard<std::mutex> lock(state_mutex_);
             return total_cost_time_us;
         }
-        void markCompletionQueueDrained();
 
     private:
-        void cancelLocked();
-        bool pollCompletionQueue();
+        FirstError first_error_;
         void updateStreamFromResponse();
-        /// Shutdown the CompletionQueue and drain remaining events.
-        ///
-        /// Drains with a bounded budget (≈100ms). If draining does not complete in time
-        /// (typical cause: prefill gRPC channel is unhealthy, TryCancel signal cannot
-        /// propagate quickly), the CQ + reader + context are handed off to a process-wide
-        /// background drainer so the calling thread is not blocked. This is the fix for
-        /// the 8-min decode-side stalls observed on 2026/05/22 (DingTalk doc §7).
-        ///
-        /// Safe to call multiple times (idempotent via completion_queue_shutdown_drained_).
-        void shutdownAndDrainCompletionQueue();
 
     public:
         bool                                                                              success_ = false;
@@ -86,7 +77,7 @@ public:
         std::shared_ptr<grpc::ClientContext>                                              client_context;
         P2PConnectorStartLoadRequestPB                                                    request;
         P2PConnectorStartLoadResponsePB                                                   response;
-        std::shared_ptr<grpc::CompletionQueue>                                            completion_queue;
+
         std::unique_ptr<grpc::ClientAsyncResponseReader<P2PConnectorStartLoadResponsePB>> reader;
         grpc::Status                                                                      status;
         std::string                                                                       server_addr;
@@ -101,11 +92,12 @@ public:
         // P2P bypass: parsed side-channel payload.
         P2PSideChannelPayload side_channel_payload;
 
-        bool completion_queue_shutdown_drained_{false};
+        // The shared CQ owns this result until physical Finish, even after cancel().
 
     private:
         std::atomic<bool>  cancel_requested_{false};
         mutable std::mutex state_mutex_;
+        std::function<void()> done_callback_;
     };
 
     /// @brief 向 Prefill server 发起异步 StartLoad RPC，通知其开始向 Decode 发送 KV cache

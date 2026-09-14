@@ -630,6 +630,10 @@ bool GenerateStream::isSubGenerateDoneWithoutLock(int batch_id) const {
     return getStatus() == StreamState::FINISHED || sub_generate_status_[batch_id] == StreamState::FINISHED;
 }
 
+FirstError::Snapshot GenerateStream::firstError() {
+    return generate_status_->first_error.snapshot();
+}
+
 ErrorInfo GenerateStream::statusInfo() {
     std::lock_guard<std::mutex> lock(*mutex_);
     return generate_status_->error_info;

@@ -16,11 +16,17 @@ namespace rtp_llm {
 /// worker 只执行下发的 route。
 ///
 /// plan() 是纯函数：不含 cache_keys、不含 block id、不含时间/随机源，因此可按
-/// (src.pc, dst.pc, topology) 缓存 —— 同一部署下每个 tag 只算一次。
+/// (src.pc, dst.pc, topology, source_replica_offset) 缓存。
 class KVCacheTransferPlanner {
 public:
     /// @brief 布局级编排：产出与请求无关的 route 集。
-    static PlanResult plan(const ShardLayout& src, const ShardLayout& dst, const std::vector<std::string>& tags);
+    static PlanResult plan(const ShardLayout&              src,
+                           const ShardLayout&              dst,
+                           const std::vector<std::string>& tags,
+                           size_t                          source_replica_offset = 0);
+
+    /// Stable across processes; offset is bounded so cached plans do not grow per request.
+    static size_t sourceReplicaOffset(const std::string& unique_key, int source_rank_count);
 
     /// @brief 请求级展开：把 route 上的键规则解析成具体逻辑位置。两侧执行期各调一次。
     ///

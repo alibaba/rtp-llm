@@ -1,4 +1,5 @@
 #include <thread>
+#include <future>
 #include <mutex>
 #include <unordered_map>
 #include <gtest/gtest.h>
@@ -34,17 +35,12 @@ protected:
         server_.reset();
     }
 
-    // 等待 Result 完成（封装 checkDone 的轮询逻辑）
+    // Completion must progress without a caller polling its CQ.
     bool waitDone(std::shared_ptr<DecodeLoadHelper::Result>& result, int timeout_ms = 5000) {
-        int waited_ms = 0;
-        while (!result->done() && waited_ms < timeout_ms) {
-            result->checkDone();
-            if (!result->done()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                waited_ms += 10;
-            }
-        }
-        return result->success();
+        auto completion = std::make_shared<std::promise<void>>();
+        auto ready      = completion->get_future();
+        result->setDoneCallback([completion] { completion->set_value(); });
+        return ready.wait_for(std::chrono::milliseconds(timeout_ms)) == std::future_status::ready && result->success();
     }
 
 protected:
@@ -221,30 +217,49 @@ TEST_F(DecodeLoadHelperTest, Load_ReturnNotNull_Timeout) {
     EXPECT_GE(server_->service()->getStartLoadCallCount(), 1);
 }
 
-TEST_F(DecodeLoadHelperTest, CancelIsSerializedWithCompletionQueuePolling) {
-    server_->service()->setSleepMillis(200);
-    const int64_t deadline_ms = currentTimeMs() + 5000;
-    auto result = client_->load(1005,
-                                "127.0.0.1",
-                                static_cast<uint32_t>(server_->listenPort()),
-                                "test_cancel_while_polling",
-                                deadline_ms,
-                                deadline_ms);
-    ASSERT_NE(result, nullptr);
+TEST_F(DecodeLoadHelperTest, CancelAndFinishNotifyExactlyOnce) {
+    for (int iteration = 0; iteration < 50; ++iteration) {
+        auto result = std::make_shared<DecodeLoadHelper::Result>();
+        result->response.mutable_payload()->set_has_first_generate_token(true);
+        auto callbacks = std::make_shared<std::atomic<int>>(0);
+        result->setDoneCallback([callbacks] { callbacks->fetch_add(1); });
+        std::promise<void> start;
+        auto               gate = start.get_future().share();
+        std::thread        finish([result, gate] {
+            gate.wait();
+            result->complete(true);
+        });
+        std::thread        cancel([result, gate] {
+            gate.wait();
+            result->cancel();
+        });
+        start.set_value();
+        finish.join();
+        cancel.join();
+        EXPECT_TRUE(result->done());
+        EXPECT_EQ(callbacks->load(), 1);
+    }
+}
 
-    std::atomic<bool> stop{false};
-    std::thread poller([&]() {
-        while (!stop.load(std::memory_order_acquire) && !result->done()) {
-            result->checkDone();
-        }
-    });
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+TEST_F(DecodeLoadHelperTest, LateFinishCannotOverwriteCancellation) {
+    auto result = std::make_shared<DecodeLoadHelper::Result>();
+    result->response.mutable_payload()->set_has_first_generate_token(true);
     result->cancel();
-    stop.store(true, std::memory_order_release);
-    poller.join();
-
+    result->complete(true);
     EXPECT_TRUE(result->done());
     EXPECT_FALSE(result->success());
+    EXPECT_EQ(result->error_code, ErrorCode::CANCELLED);
+    EXPECT_FALSE(result->side_channel_payload.has_data);
+}
+
+TEST_F(DecodeLoadHelperTest, CompletionBeforeCallbackRegistrationNotifiesImmediately) {
+    auto result = std::make_shared<DecodeLoadHelper::Result>();
+    result->response.mutable_payload()->set_has_first_generate_token(true);
+    result->complete(true);
+    int calls = 0;
+    result->setDoneCallback([&calls] { ++calls; });
+    EXPECT_EQ(calls, 1);
+    EXPECT_TRUE(result->success());
 }
 
 TEST_F(DecodeLoadHelperTest, Load_ReturnNull_InvalidServerAddr) {
@@ -280,7 +295,10 @@ TEST_F(DecodeLoadHelperTest, Load_NormalizesRawIpv6ServerAddr) {
 TEST_F(DecodeLoadHelperTest, Load_ReturnNull_InvalidTargetPort) {
     const int64_t deadline_ms = currentTimeMs() + 100;
     auto result = client_->load(1009, "::1", 0, "test_load_bad_port", deadline_ms, deadline_ms);
-    EXPECT_EQ(result, nullptr);
+    ASSERT_NE(result, nullptr);
+    EXPECT_TRUE(result->done());
+    EXPECT_EQ(result->error_code, ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(result->error_message.find("test_load_bad_port"), std::string::npos);
 }
 
 TEST_F(DecodeLoadHelperTest, Load_ParsesLegacyStartLoadResponse) {
@@ -359,8 +377,7 @@ TEST_F(DecodeLoadHelperTest, CheckDone_NotDoneInitially) {
     EXPECT_FALSE(result->done());
     EXPECT_FALSE(result->success());
 
-    // 多次调用 checkDone
-    result->checkDone();
+    // No caller-side CQ polling is required.
     // 由于服务器延迟，应该还没完成
     // 注意：这个测试可能有时间敏感性
 
@@ -438,7 +455,8 @@ TEST_F(DecodeLoadHelperTest, Cancel_Idempotent) {
 
     result->cancel();
     EXPECT_TRUE(result->done());
-    EXPECT_TRUE(result->completion_queue_shutdown_drained_);
+    EXPECT_FALSE(result->success());
+    EXPECT_EQ(result->error_code, ErrorCode::CANCELLED);
 
     // Second cancel is a no-op — should not crash or hang.
     const int64_t second_cancel_start_ms = currentTimeMs();

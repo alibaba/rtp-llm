@@ -1,6 +1,8 @@
-#include <limits>
+#include <unordered_set>
+#include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServerNew2.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <cerrno>
@@ -163,6 +165,8 @@ grpc::Status PrefillRpcServerNew2::init(const EngineInitParams&                 
     {
         const auto& pc    = maga_init_params_.parallelism_config;
         const auto& addrs = maga_init_params_.runtime_config.p2p_worker_addrs;
+        dp_grpc_addrs_.clear();
+        peer_info_error_ = ErrorInfo::OkStatus();
         if (!addrs.empty() && pc.tp_size > 0 && pc.dp_size > 0) {
             for (int64_t dp = 0; dp < pc.dp_size; ++dp) {
                 size_t idx = static_cast<size_t>(dp * pc.tp_size);
@@ -170,6 +174,11 @@ grpc::Status PrefillRpcServerNew2::init(const EngineInitParams&                 
                     RTP_LLM_LOG_WARNING("PrefillRpcServerNew2::init: p2p_worker_addrs has %zu entries "
                                         "but need index %zu for dp_rank=%ld (tp_size=%ld, dp_size=%ld)",
                                         addrs.size(), idx, dp, pc.tp_size, pc.dp_size);
+                    peer_info_error_ =
+                        ErrorInfo(ErrorCode::INVALID_PARAMS,
+                                  "GetPeerInfo invalid p2p_worker_addrs: dp=" + std::to_string(dp) + " index="
+                                      + std::to_string(idx) + " entries=" + std::to_string(addrs.size()) + " tp_size="
+                                      + std::to_string(pc.tp_size) + " dp_size=" + std::to_string(pc.dp_size));
                     dp_grpc_addrs_.clear();
                     break;
                 }
@@ -179,6 +188,11 @@ grpc::Status PrefillRpcServerNew2::init(const EngineInitParams&                 
                     RTP_LLM_LOG_WARNING("PrefillRpcServerNew2::init: malformed p2p_worker_addrs[%zu]='%s', "
                                         "expected host:p2p_port:grpc_port or [IPv6]:p2p_port:grpc_port",
                                         idx, entry.c_str());
+                    peer_info_error_ = ErrorInfo(
+                        ErrorCode::INVALID_PARAMS,
+                        "GetPeerInfo malformed p2p_worker_addrs entry=" + entry + " dp=" + std::to_string(dp)
+                            + " index=" + std::to_string(idx) + " entries=" + std::to_string(addrs.size())
+                            + " tp_size=" + std::to_string(pc.tp_size) + " dp_size=" + std::to_string(pc.dp_size));
                     dp_grpc_addrs_.clear();
                     break;
                 }
@@ -194,7 +208,7 @@ grpc::Status PrefillRpcServerNew2::init(const EngineInitParams&                 
                              addrs_str.c_str());
         } else {
             RTP_LLM_LOG_INFO("PrefillRpcServerNew2::init: p2p_worker_addrs empty or parallelism not set, "
-                             "GetPeerInfo will return an empty DP address list");
+                             "GetPeerInfo will reject requests until valid DP addresses are configured");
         }
     }
 
@@ -228,15 +242,9 @@ grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*      
         RTP_LLM_LOG_INFO("pd separation is disabled, call local rpc server");
         return LocalRpcServer::GenerateStreamCall(server_context, request, response_writer);
     }
-    if (request->request_deadline_ms() <= currentTimeMs()
-        || request->request_deadline_ms() == std::numeric_limits<int64_t>::max()) {
-        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "invalid or expired P2P request deadline");
-    }
-    if (request->generate_config().unique_key().empty()) {
-        RTP_LLM_LOG_WARNING("decode_entrance prefill handoff requires non-empty unique_key, request_id=%ld",
-                            request->request_id());
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
-                            "decode_entrance handoff requires non-empty unique_key");
+    auto handoff_status = validatePDHandoff(*request);
+    if (!handoff_status.ok()) {
+        return serializeErrorMsg(std::to_string(request->request_id()), handoff_status);
     }
 
     AtomicGuard request_guard(onflight_requests_);
@@ -329,6 +337,77 @@ grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*      
     return generate_context.error_status;
 }
 
+grpc::Status PrefillRpcServerNew2::BatchGenerateCall(grpc::ServerContext*        context,
+                                                     const BatchGenerateInputPB* request,
+                                                     BatchGenerateOutputsPB*     response) {
+    c10::InferenceMode inference_guard(true);
+    response->Clear();
+    if (request->inputs_size() == 0)
+        return grpc::Status::OK;
+    bool pd      = false;
+    auto support = checkPDBatchSupport(*request, pd);
+    if (!support.ok())
+        return serializeErrorMsg("batch", support);
+    if (!pd)
+        return LocalRpcServer::BatchGenerateCall(context, request, response);
+    AtomicGuard                                 request_guard(onflight_requests_);
+    std::vector<std::shared_ptr<GenerateInput>> inputs;
+    std::unordered_set<std::string>             keys;
+    for (int i = 0; i < request->inputs_size(); ++i) {
+        const auto& item   = request->inputs(i);
+        auto        status = validatePDHandoff(item);
+        if (!status.ok())
+            return serializeErrorMsg("batch item " + std::to_string(i), status);
+        if (!keys.insert(item.generate_config().unique_key()).second) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "duplicate batch handoff key");
+        }
+    }
+    for (int i = 0; i < request->inputs_size(); ++i) {
+        if (context->IsCancelled())
+            return grpc::Status(grpc::StatusCode::CANCELLED, "batch cancelled by user");
+        const auto& item   = request->inputs(i);
+        auto        input  = QueryConverter::transQuery(&item);
+        auto        status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle());
+        if (status.ok())
+            status = validatePDInput(*input, item);
+        if (!status.ok())
+            return serializeErrorMsg("batch item " + std::to_string(i), status);
+        inputs.push_back(std::move(input));
+    }
+    std::vector<GenerateStreamPtr>                streams;
+    std::vector<std::unique_ptr<GenerateContext>> contexts;
+    std::vector<std::unique_ptr<OnflightScope>>   scopes;
+    for (const auto& input : inputs) {
+        auto stream = engine_->makeStream(input);
+        auto item   = std::make_unique<GenerateContext>(
+            input->request_id, input->generate_config->timeout_ms, context, metrics_reporter_, meta_);
+        item->setStream(stream);
+        streams.push_back(std::move(stream));
+        contexts.push_back(std::move(item));
+        scopes.emplace_back(std::make_unique<OnflightScope>(this, input->request_id));
+        scopes.back()->markStep(GenerateStreamStep::kAfterTransQuery);
+    }
+    // Recheck the whole batch after MM processing, before queue admission.
+    for (const auto& item : request->inputs()) {
+        auto status = validatePDHandoff(item);
+        if (!status.ok())
+            return serializeErrorMsg(std::to_string(item.request_id()), status);
+    }
+    if (context->IsCancelled())
+        return grpc::Status(grpc::StatusCode::CANCELLED, "batch cancelled by user");
+    if (engine_->batchEnqueue(streams) != streams) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "batchEnqueue changed prepared stream identity or order");
+    }
+    for (auto& scope : scopes)
+        scope->markStep(GenerateStreamStep::kAfterEngineEnqueue);
+    auto status = pollBatchStreamOutput(context, streams, response);
+    for (auto& item : contexts)
+        item->error_status = status;
+    for (auto& scope : scopes)
+        scope->markStep(GenerateStreamStep::kAfterPollStream);
+    return status;
+}
+
 ::grpc::Status PrefillRpcServerNew2::StartLoad(::grpc::ServerContext*                context,
                                                const P2PConnectorStartLoadRequestPB* request,
                                                P2PConnectorStartLoadResponsePB*      response) {
@@ -362,6 +441,15 @@ grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*      
                                                  const GetPeerInfoRequestPB* request,
                                                  GetPeerInfoResponsePB*      response) {
     const auto& pc = maga_init_params_.parallelism_config;
+    if (peer_info_error_.hasError()) {
+        return grpcStatusFromErrorInfo(peer_info_error_);
+    }
+    if (pc.tp_size <= 0 || pc.dp_size <= 0 || dp_grpc_addrs_.size() != static_cast<size_t>(pc.dp_size)) {
+        return grpcStatusFromErrorInfo(
+            ErrorInfo(ErrorCode::INVALID_PARAMS,
+                      "GetPeerInfo invalid p2p_worker_addrs: address_count=" + std::to_string(dp_grpc_addrs_.size())
+                          + " tp_size=" + std::to_string(pc.tp_size) + " dp_size=" + std::to_string(pc.dp_size)));
+    }
     response->set_tp_size(static_cast<int32_t>(pc.tp_size));
     response->set_dp_size(static_cast<int32_t>(pc.dp_size));
     response->set_cp_size(static_cast<int32_t>(pc.prefill_cp_config.kv_cache_sharded ? pc.tp_size : 1));

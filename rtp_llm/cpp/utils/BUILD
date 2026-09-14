@@ -137,6 +137,14 @@ cc_library(
 )
 
 cc_library(
+    name = "rpc_completion_queue",
+    hdrs = ["RpcCompletionQueue.h"],
+    deps = ["@grpc//:grpc++"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "deferred_completion_queue_drainer",
     hdrs = [
         "DeferredCompletionQueueDrainer.h",

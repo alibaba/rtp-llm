@@ -97,6 +97,7 @@ cc_test(
         "PrefillRpcServerTest.cc",
         "PrefillServerCallerTest.cc",
         "PDRequestUtilsTest.cc",
+        "PDBatchRpcTest.cc",
         "RpcTimeoutUtilsTest.cc",
     ],
     copts = test_copts,

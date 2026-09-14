@@ -4,7 +4,6 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
-#include "autil/LoopThread.h"
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -51,6 +50,9 @@ public:
     void checkOnce();
 
 private:
+    // Called with contexts_mutex_ held; true means the context is terminal.
+    bool checkContext(StoreWaitContext& context);
+
     kmonitor::MetricsReporterPtr                   metrics_reporter_;
     std::shared_ptr<ComputedLayerCacheBufferStore> computed_buffers_;
 

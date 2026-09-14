@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PNotification.h"
 #include <atomic>
 #include <functional>
 #include <condition_variable>
@@ -74,6 +75,10 @@ public:
     void removeBuffer(int64_t request_id, int64_t request_deadline_ms = 0);
     void                   checkTimeout();
     int64_t                getBuffersCount() const;
+    int64_t                nextTimeoutMs() const;
+    const std::shared_ptr<P2PNotification>& notification() const {
+        return notification_;
+    }
 
 private:
     struct RemovedRequestExpiry {
@@ -88,6 +93,7 @@ private:
     };
 
     void markRemovedLocked(int64_t request_id, int64_t expire_at_ms);
+    const std::shared_ptr<P2PNotification> notification_{std::make_shared<P2PNotification>()};
 
     struct RequestHorizon {
         int64_t horizon_ms;

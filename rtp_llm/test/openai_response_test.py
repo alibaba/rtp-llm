@@ -2567,64 +2567,94 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Exception, "missing backend role addresses"):
             await visitor.route_ips(input_obj)
 
-    async def test_batch_enqueue_decode_entrance_uses_single_request_path(self):
-        pd_sep_config = PDSepConfig()
-        pd_sep_config.role_type = RoleType.FRONTEND
-        pd_sep_config.decode_entrance = True
+    def _decode_batch_visitor_and_inputs(self):
+        config = PDSepConfig()
+        config.role_type = RoleType.FRONTEND
+        config.decode_entrance = True
         visitor = BackendRPCServerVisitor(
             max_seq_len=self.model_config.max_seq_len,
             seq_size_per_block=64,
-            pd_sep_config=pd_sep_config,
+            pd_sep_config=config,
             addresses=["localhost:8080"],
         )
         visitor.host_service.service_available = False
-
-        enqueue_calls = []
-
-        def _fake_enqueue(input_obj: GenerateInput):
-            enqueue_calls.append(input_obj.request_id)
-
-            async def _generator():
-                outputs = GenerateOutputs()
-                outputs.generate_outputs.append(
-                    GenerateOutput(
-                        output_ids=torch.tensor([[0]], dtype=torch.int32),
-                        finished=True,
-                        aux_info=AuxInfo(output_len=1),
-                    )
-                )
-                yield outputs
-
-            return _generator()
-
-        async def _unexpected_batch_enqueue(_inputs):
-            raise AssertionError(
-                "decode_entrance batch should not call BatchGenerateCall"
+        inputs = [
+            GenerateInput(
+                request_id=i,
+                token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+                mm_inputs=[],
+                generate_config=GenerateConfig(),
             )
+            for i in (11, 12)
+        ]
+        return visitor, inputs
 
-        visitor.model_rpc_client.enqueue = _fake_enqueue
-        visitor.model_rpc_client.batch_enqueue = _unexpected_batch_enqueue
+    async def test_batch_enqueue_decode_entrance_uses_one_batch_rpc(self):
+        visitor, inputs = self._decode_batch_visitor_and_inputs()
+        calls = []
+        outputs = [GenerateOutputs(), GenerateOutputs()]
 
-        results = await visitor.batch_enqueue(
-            [
-                GenerateInput(
-                    request_id=11,
-                    token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
-                    mm_inputs=[],
-                    generate_config=GenerateConfig(),
-                ),
-                GenerateInput(
-                    request_id=12,
-                    token_ids=torch.tensor([4, 5, 6], dtype=torch.int32),
-                    mm_inputs=[],
-                    generate_config=GenerateConfig(),
-                ),
-            ]
-        )
+        async def batch_enqueue(batch):
+            calls.append(batch)
+            return outputs
 
-        self.assertEqual(enqueue_calls, [11, 12])
-        self.assertEqual(len(results), 2)
-        self.assertTrue(results[0].generate_outputs[0].finished)
+        def unexpected_enqueue(_input):
+            raise AssertionError("batch must not be split into stream RPCs")
+
+        visitor.model_rpc_client.enqueue = unexpected_enqueue
+        visitor.model_rpc_client.batch_enqueue = batch_enqueue
+        self.assertIs(await visitor.batch_enqueue(inputs), outputs)
+        self.assertEqual(calls, [inputs])
+
+    async def test_batch_enqueue_decode_entrance_routes_once(self):
+        visitor, inputs = self._decode_batch_visitor_and_inputs()
+        visitor.host_service.service_available = True
+        routed = []
+
+        async def route(input_obj):
+            routed.append(input_obj.request_id)
+
+        async def batch_enqueue(batch):
+            return []
+
+        visitor.route_ips = route
+        visitor.model_rpc_client.batch_enqueue = batch_enqueue
+        await visitor.batch_enqueue(inputs)
+        self.assertEqual(routed, [11])
+
+    async def test_batch_enqueue_decode_entrance_propagates_batch_error(self):
+        visitor, inputs = self._decode_batch_visitor_and_inputs()
+
+        async def batch_enqueue(batch):
+            raise RuntimeError("batch item 1 failed")
+
+        visitor.model_rpc_client.batch_enqueue = batch_enqueue
+        with self.assertRaisesRegex(RuntimeError, "batch item 1 failed"):
+            await visitor.batch_enqueue(inputs)
+
+    async def test_batch_enqueue_decode_entrance_cancels_batch_rpc(self):
+        visitor, inputs = self._decode_batch_visitor_and_inputs()
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def batch_enqueue(batch):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        visitor.model_rpc_client.batch_enqueue = batch_enqueue
+        task = asyncio.create_task(visitor.batch_enqueue(inputs))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(cancelled.is_set())
+
+    async def test_batch_enqueue_decode_entrance_empty(self):
+        visitor, _ = self._decode_batch_visitor_and_inputs()
+        self.assertEqual(await visitor.batch_enqueue([]), [])
 
     async def test_batch_enqueue_routes_only_first_request_for_batch_infer(self):
         pd_sep_config = PDSepConfig()
@@ -2679,294 +2709,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(results, [])
-
-    async def test_batch_enqueue_decode_entrance_merges_stream_chunks(self):
-        pd_sep_config = PDSepConfig()
-        pd_sep_config.role_type = RoleType.FRONTEND
-        pd_sep_config.decode_entrance = True
-        visitor = BackendRPCServerVisitor(
-            max_seq_len=self.model_config.max_seq_len,
-            seq_size_per_block=64,
-            pd_sep_config=pd_sep_config,
-            addresses=["localhost:8080"],
-        )
-        visitor.host_service.service_available = False
-
-        def _fake_enqueue(_input_obj: GenerateInput):
-            async def _generator():
-                outputs1 = GenerateOutputs()
-                outputs1.generate_outputs.append(
-                    GenerateOutput(
-                        output_ids=torch.tensor([[10]], dtype=torch.int32),
-                        finished=False,
-                        aux_info=AuxInfo(output_len=1),
-                    )
-                )
-                yield outputs1
-
-                outputs2 = GenerateOutputs()
-                outputs2.generate_outputs.append(
-                    GenerateOutput(
-                        output_ids=torch.tensor([[11]], dtype=torch.int32),
-                        finished=False,
-                        aux_info=AuxInfo(output_len=2),
-                    )
-                )
-                yield outputs2
-
-                outputs3 = GenerateOutputs()
-                outputs3.generate_outputs.append(
-                    GenerateOutput(
-                        output_ids=torch.tensor([[12]], dtype=torch.int32),
-                        finished=True,
-                        aux_info=AuxInfo(output_len=3),
-                    )
-                )
-                yield outputs3
-
-            return _generator()
-
-        visitor.model_rpc_client.enqueue = _fake_enqueue
-
-        results = await visitor.batch_enqueue(
-            [
-                GenerateInput(
-                    request_id=21,
-                    token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
-                    mm_inputs=[],
-                    generate_config=GenerateConfig(),
-                )
-            ]
-        )
-
-        self.assertEqual(
-            results[0].generate_outputs[0].output_ids.tolist(), [[10, 11, 12]]
-        )
-        self.assertTrue(results[0].generate_outputs[0].finished)
-
-    async def test_batch_enqueue_decode_entrance_merges_multi_token_delta_chunks(self):
-        pd_sep_config = PDSepConfig()
-        pd_sep_config.role_type = RoleType.FRONTEND
-        pd_sep_config.decode_entrance = True
-        visitor = BackendRPCServerVisitor(
-            max_seq_len=self.model_config.max_seq_len,
-            seq_size_per_block=64,
-            pd_sep_config=pd_sep_config,
-            addresses=["localhost:8080"],
-        )
-        visitor.host_service.service_available = False
-
-        def _fake_enqueue(_input_obj: GenerateInput):
-            async def _generator():
-                outputs1 = GenerateOutputs()
-                outputs1.generate_outputs.append(
-                    GenerateOutput(
-                        output_ids=torch.tensor([[10, 11]], dtype=torch.int32),
-                        finished=False,
-                        aux_info=AuxInfo(output_len=2, step_output_len=2),
-                    )
-                )
-                yield outputs1
-
-                outputs2 = GenerateOutputs()
-                outputs2.generate_outputs.append(
-                    GenerateOutput(
-                        output_ids=torch.tensor([[12, 13]], dtype=torch.int32),
-                        finished=True,
-                        aux_info=AuxInfo(output_len=4, step_output_len=2),
-                    )
-                )
-                yield outputs2
-
-            return _generator()
-
-        visitor.model_rpc_client.enqueue = _fake_enqueue
-
-        results = await visitor.batch_enqueue(
-            [
-                GenerateInput(
-                    request_id=22,
-                    token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
-                    mm_inputs=[],
-                    generate_config=GenerateConfig(),
-                )
-            ]
-        )
-
-        self.assertEqual(
-            results[0].generate_outputs[0].output_ids.tolist(), [[10, 11, 12, 13]]
-        )
-        self.assertTrue(results[0].generate_outputs[0].finished)
-
-    async def test_batch_enqueue_decode_entrance_merges_multi_token_delta_chunks_without_aux_info(
-        self,
-    ):
-        pd_sep_config = PDSepConfig()
-        pd_sep_config.role_type = RoleType.FRONTEND
-        pd_sep_config.decode_entrance = True
-        visitor = BackendRPCServerVisitor(
-            max_seq_len=self.model_config.max_seq_len,
-            seq_size_per_block=64,
-            pd_sep_config=pd_sep_config,
-            addresses=["localhost:8080"],
-        )
-        visitor.host_service.service_available = False
-
-        def _fake_enqueue(_input_obj: GenerateInput):
-            async def _generator():
-                outputs1 = GenerateOutputs()
-                outputs1.generate_outputs.append(
-                    GenerateOutput(
-                        output_ids=torch.tensor([[10, 11]], dtype=torch.int32),
-                        finished=False,
-                        aux_info=None,
-                    )
-                )
-                yield outputs1
-
-                outputs2 = GenerateOutputs()
-                outputs2.generate_outputs.append(
-                    GenerateOutput(
-                        output_ids=torch.tensor([[12, 13]], dtype=torch.int32),
-                        finished=True,
-                        aux_info=None,
-                    )
-                )
-                yield outputs2
-
-            return _generator()
-
-        visitor.model_rpc_client.enqueue = _fake_enqueue
-
-        results = await visitor.batch_enqueue(
-            [
-                GenerateInput(
-                    request_id=23,
-                    token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
-                    mm_inputs=[],
-                    generate_config=GenerateConfig(),
-                )
-            ]
-        )
-
-        self.assertEqual(
-            results[0].generate_outputs[0].output_ids.tolist(), [[10, 11, 12, 13]]
-        )
-        self.assertTrue(results[0].generate_outputs[0].finished)
-
-    async def test_batch_enqueue_decode_entrance_cancels_other_streams_on_error(self):
-        pd_sep_config = PDSepConfig()
-        pd_sep_config.role_type = RoleType.FRONTEND
-        pd_sep_config.decode_entrance = True
-        visitor = BackendRPCServerVisitor(
-            max_seq_len=self.model_config.max_seq_len,
-            seq_size_per_block=64,
-            pd_sep_config=pd_sep_config,
-            addresses=["localhost:8080"],
-        )
-        visitor.host_service.service_available = False
-
-        started = asyncio.Event()
-        cancelled = asyncio.Event()
-
-        def _fake_enqueue(input_obj: GenerateInput):
-            async def _generator():
-                if input_obj.request_id == 31:
-                    yield GenerateOutputs()
-                    raise RuntimeError("decode entrance stream failed")
-                started.set()
-                try:
-                    await asyncio.Event().wait()
-                except asyncio.CancelledError:
-                    cancelled.set()
-                    raise
-                yield GenerateOutputs()
-
-            return _generator()
-
-        visitor.model_rpc_client.enqueue = _fake_enqueue
-
-        with self.assertRaisesRegex(RuntimeError, "decode entrance stream failed"):
-            await visitor.batch_enqueue(
-                [
-                    GenerateInput(
-                        request_id=31,
-                        token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
-                        mm_inputs=[],
-                        generate_config=GenerateConfig(),
-                    ),
-                    GenerateInput(
-                        request_id=32,
-                        token_ids=torch.tensor([4, 5, 6], dtype=torch.int32),
-                        mm_inputs=[],
-                        generate_config=GenerateConfig(),
-                    ),
-                ]
-            )
-
-        self.assertTrue(started.is_set())
-        await asyncio.wait_for(cancelled.wait(), timeout=1)
-
-    async def test_batch_enqueue_decode_entrance_cancels_child_streams_on_cancel(self):
-        pd_sep_config = PDSepConfig()
-        pd_sep_config.role_type = RoleType.FRONTEND
-        pd_sep_config.decode_entrance = True
-        visitor = BackendRPCServerVisitor(
-            max_seq_len=self.model_config.max_seq_len,
-            seq_size_per_block=64,
-            pd_sep_config=pd_sep_config,
-            addresses=["localhost:8080"],
-        )
-        visitor.host_service.service_available = False
-
-        started = asyncio.Event()
-        cancelled = [asyncio.Event(), asyncio.Event()]
-        started_count = 0
-
-        def _fake_enqueue(input_obj: GenerateInput):
-            async def _generator():
-                nonlocal started_count
-                started_count += 1
-                if started_count == 2:
-                    started.set()
-                try:
-                    await asyncio.Event().wait()
-                except asyncio.CancelledError:
-                    cancelled[input_obj.request_id - 41].set()
-                    raise
-                yield GenerateOutputs()
-
-            return _generator()
-
-        visitor.model_rpc_client.enqueue = _fake_enqueue
-
-        batch_task = asyncio.create_task(
-            visitor.batch_enqueue(
-                [
-                    GenerateInput(
-                        request_id=41,
-                        token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
-                        mm_inputs=[],
-                        generate_config=GenerateConfig(),
-                    ),
-                    GenerateInput(
-                        request_id=42,
-                        token_ids=torch.tensor([4, 5, 6], dtype=torch.int32),
-                        mm_inputs=[],
-                        generate_config=GenerateConfig(),
-                    ),
-                ]
-            )
-        )
-
-        await asyncio.wait_for(started.wait(), timeout=1)
-        batch_task.cancel()
-
-        with self.assertRaises(asyncio.CancelledError):
-            await batch_task
-
-        await asyncio.wait_for(cancelled[0].wait(), timeout=1)
-        await asyncio.wait_for(cancelled[1].wait(), timeout=1)
 
     async def test_think_label_real_situation_union(self):
         tokenizer = TokenizerFactory.create(

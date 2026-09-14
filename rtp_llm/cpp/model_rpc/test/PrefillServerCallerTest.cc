@@ -35,7 +35,7 @@ TEST(RpcErrorCodeReverseMapping, UnmappedStatusesFallToUnknownError) {
     // INTERNAL is the catch-all on the prefill side too — the original
     // ErrorCode is genuinely lost, so UNKNOWN_ERROR is the right answer.
     EXPECT_EQ(transGrpcStatusToErrorCode(grpc::StatusCode::INTERNAL), ErrorCode::UNKNOWN_ERROR);
-    EXPECT_EQ(transGrpcStatusToErrorCode(grpc::StatusCode::UNAVAILABLE), ErrorCode::UNKNOWN_ERROR);
+    EXPECT_EQ(transGrpcStatusToErrorCode(grpc::StatusCode::UNAVAILABLE), ErrorCode::CONNECT_FAILED);
     EXPECT_EQ(transGrpcStatusToErrorCode(grpc::StatusCode::UNAUTHENTICATED), ErrorCode::UNKNOWN_ERROR);
 }
 
@@ -222,9 +222,7 @@ public:
         return grpc::Status::OK;
     }
 
-    void setPeerInfoResponses(int                                   tp_size,
-                              std::vector<std::vector<std::string>> dp_addr_responses,
-                              int                                   cp_size = 0) {
+    void setPeerInfoResponses(int tp_size, std::vector<std::vector<std::string>> dp_addr_responses, int cp_size = 1) {
         std::lock_guard<std::mutex> lock(mutex_);
         peer_info_tp_size_           = tp_size;
         peer_info_cp_size_           = cp_size;
@@ -266,7 +264,7 @@ private:
     std::condition_variable cancel_cv_;
     GenerateInputPB         captured_request_;
     int                     peer_info_tp_size_{1};
-    int                     peer_info_cp_size_{0};
+    int                                   peer_info_cp_size_{1};
     int                     peer_info_call_count_{0};
     bool                                  peer_info_fail_{false};
     std::vector<std::vector<std::string>> peer_info_dp_addr_responses_;
@@ -333,7 +331,8 @@ protected:
         request.add_token_ids(1);
         request.mutable_generate_config()->set_timeout_ms(5000);
         request.set_request_deadline_ms(currentTimeMs() + deadline_us / 1000);
-        return caller_.callPrefill(&request, "127.0.0.1", server.port(), unique_key, request.request_deadline_ms());
+        return caller_.callPrefill(&request, "127.0.0.1", server.port(), unique_key, request.request_deadline_ms())
+            .value();
     }
 
     bool waitDone(const std::shared_ptr<PrefillServerCallerContext>& context,
@@ -452,7 +451,9 @@ TEST_F(PrefillServerCallerTest, AsyncDecodeEntrancePrefillPreservesPdSeparationR
     request.mutable_generate_config()->set_can_use_pd_separation(true);
 
     request.set_request_deadline_ms(currentTimeMs() + 5000);
-    auto context = caller_.callPrefill(&request, "127.0.0.1", server.port(), "decode-entrance-key", request.request_deadline_ms());
+    auto context =
+        caller_.callPrefill(&request, "127.0.0.1", server.port(), "decode-entrance-key", request.request_deadline_ms())
+            .value();
     ASSERT_NE(context, nullptr);
     ASSERT_TRUE(waitDone(context));
     ASSERT_TRUE(context->success());
@@ -486,7 +487,7 @@ TEST_F(PrefillServerCallerTest, UnstartedContextDoneReturnsImmediately) {
     EXPECT_FALSE(context->failed());
 }
 
-TEST_F(PrefillServerCallerTest, AsyncReaderCreationFailureReturnsNullContext) {
+TEST_F(PrefillServerCallerTest, AsyncReaderCreationFailurePreservesCause) {
     caller_.async_reader_factory_ = [](const std::shared_ptr<RpcService::Stub>&,
                                        grpc::ClientContext*,
                                        const GenerateInputPB&,
@@ -500,8 +501,11 @@ TEST_F(PrefillServerCallerTest, AsyncReaderCreationFailureReturnsNullContext) {
     request.mutable_generate_config()->set_timeout_ms(5000);
 
     request.set_request_deadline_ms(currentTimeMs() + 5000);
-    auto context = caller_.callPrefill(&request, "127.0.0.1", 1, "null-reader", request.request_deadline_ms());
-    EXPECT_EQ(context, nullptr);
+    auto result = caller_.callPrefill(&request, "127.0.0.1", 1, "null-reader", request.request_deadline_ms());
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), ErrorCode::RPC_FINISH_FAILED);
+    EXPECT_NE(result.status().ToString().find("null-reader"), std::string::npos);
+    EXPECT_NE(result.status().ToString().find("127.0.0.1:1"), std::string::npos);
 }
 
 TEST_F(PrefillServerCallerTest, AsyncPrefillNormalizesRawIpv6TargetAddress) {
@@ -511,7 +515,7 @@ TEST_F(PrefillServerCallerTest, AsyncPrefillNormalizesRawIpv6TargetAddress) {
     request.mutable_generate_config()->set_timeout_ms(1);
 
     request.set_request_deadline_ms(currentTimeMs() + 5000);
-    auto context = caller_.callPrefill(&request, "::1", 65535, "ipv6-target", request.request_deadline_ms());
+    auto context = caller_.callPrefill(&request, "::1", 65535, "ipv6-target", request.request_deadline_ms()).value();
     ASSERT_NE(context, nullptr);
     EXPECT_EQ(context->prefill_addr_, "[::1]:65535");
     context->cancel();
@@ -523,7 +527,11 @@ TEST_F(PrefillServerCallerTest, AsyncPrefillRejectsInvalidTargetPort) {
     request.add_token_ids(1);
     request.mutable_generate_config()->set_timeout_ms(1);
 
-    EXPECT_EQ(caller_.callPrefill(&request, "::1", 0, "bad-port", 1000), nullptr);
+    request.set_request_deadline_ms(currentTimeMs() + 5000);
+    auto result = caller_.callPrefill(&request, "::1", 0, "bad-port", request.request_deadline_ms());
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(result.status().ToString().find("bad-port"), std::string::npos);
 }
 
 TEST_F(PrefillServerCallerTest, PeerInfoCallsRpcEveryTimeAndUsesLatestResponse) {
@@ -532,19 +540,19 @@ TEST_F(PrefillServerCallerTest, PeerInfoCallsRpcEveryTimeAndUsesLatestResponse) 
     FakePrefillRpcServer server(std::move(service));
     ASSERT_TRUE(server.start());
 
-    auto first = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0);
+    auto first = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0).value();
     ASSERT_EQ(first.tp_size, 2);
     ASSERT_EQ(first.cp_size, 1);
     ASSERT_EQ(first.dp_addrs.size(), 1);
     EXPECT_EQ(first.dp_addrs[0], "127.0.0.1:1111");
     EXPECT_EQ(server.service()->peerInfoCallCount(), 1);
 
-    auto second = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0);
+    auto second = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0).value();
     ASSERT_EQ(second.dp_addrs.size(), 1);
     EXPECT_EQ(second.dp_addrs[0], "127.0.0.1:2222");
     EXPECT_EQ(server.service()->peerInfoCallCount(), 2);
 
-    auto third = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0);
+    auto third = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0).value();
     ASSERT_EQ(third.tp_size, 2);
     ASSERT_EQ(third.dp_addrs.size(), 1);
     EXPECT_EQ(third.dp_addrs[0], "127.0.0.1:3333");
@@ -557,18 +565,19 @@ TEST_F(PrefillServerCallerTest, PeerInfoFailureDoesNotReusePreviousSuccessAndNex
     FakePrefillRpcServer server(std::move(service));
     ASSERT_TRUE(server.start());
 
-    ASSERT_EQ(caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0).tp_size, 2);
+    ASSERT_EQ(caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0).value().tp_size, 2);
     EXPECT_EQ(server.service()->peerInfoCallCount(), 1);
 
     server.service()->setPeerInfoFailure(true);
     auto failed = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0);
-    EXPECT_EQ(failed.tp_size, -1);
-    EXPECT_EQ(failed.cp_size, -1);
-    EXPECT_TRUE(failed.dp_addrs.empty());
+    ASSERT_FALSE(failed.ok());
+    EXPECT_EQ(failed.status().code(), ErrorCode::CONNECT_FAILED);
+    EXPECT_NE(failed.status().ToString().find("GetPeerInfo"), std::string::npos);
+    EXPECT_NE(failed.status().ToString().find("peer info unavailable"), std::string::npos);
     EXPECT_EQ(server.service()->peerInfoCallCount(), 2);
 
     server.service()->setPeerInfoFailure(false);
-    auto recovered = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0);
+    auto recovered = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0).value();
     EXPECT_EQ(recovered.tp_size, 2);
     ASSERT_EQ(recovered.dp_addrs.size(), 1);
     EXPECT_EQ(recovered.dp_addrs[0], "127.0.0.1:2222");
@@ -581,7 +590,7 @@ TEST_F(PrefillServerCallerTest, PeerInfoCarriesCpSizeIndependentlyFromTpSize) {
     FakePrefillRpcServer server(std::move(service));
     ASSERT_TRUE(server.start());
 
-    auto info = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0);
+    auto info = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0).value();
     EXPECT_EQ(info.tp_size, 4);
     EXPECT_EQ(info.cp_size, 2);
 }
@@ -597,7 +606,7 @@ TEST_F(PrefillServerCallerTest, RpcFailureWithoutAnyChunkStaysUnsuccessful) {
     EXPECT_FALSE(context->success());
     EXPECT_TRUE(context->failed());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::UNKNOWN_ERROR);
-    EXPECT_EQ(context->errorInfo().ToString(), "prefill failed before any response");
+    EXPECT_NE(context->errorInfo().ToString().find("prefill failed before any response"), std::string::npos);
     EXPECT_FALSE(context->response().has_error_info());
 }
 
@@ -635,4 +644,29 @@ TEST_F(PrefillServerCallerTest, SyncFallbackClientCancelCancelsPrefillRpc) {
     EXPECT_TRUE(server.service()->waitCancelled(std::chrono::seconds(1)));
 }
 
+}  // namespace rtp_llm::test
+
+namespace rtp_llm::test {
+TEST_F(PrefillServerCallerTest, PeerInfoRejectsMissingCpSizeWithoutFallback) {
+    auto service = std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kCaptureForwardedRequest);
+    service->setPeerInfoResponses(4, {{"127.0.0.1:1111"}}, 0);
+    FakePrefillRpcServer server(std::move(service));
+    ASSERT_TRUE(server.start());
+    auto result = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(result.status().ToString().find("cp_size=0"), std::string::npos);
+    EXPECT_NE(result.status().ToString().find(std::to_string(server.port())), std::string::npos);
+}
+
+TEST_F(PrefillServerCallerTest, PeerInfoRejectsEmptyDpAddressesWithoutFallback) {
+    auto service = std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kCaptureForwardedRequest);
+    service->setPeerInfoResponses(4, {{}});
+    FakePrefillRpcServer server(std::move(service));
+    ASSERT_TRUE(server.start());
+    auto result = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(result.status().ToString().find("empty DP address list"), std::string::npos);
+}
 }  // namespace rtp_llm::test

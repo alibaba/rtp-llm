@@ -7,6 +7,7 @@
 
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/PrefillServerCallerContext.h"
+#include "rtp_llm/cpp/model_rpc/PrefillBatchCallerContext.h"
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 
@@ -26,18 +27,21 @@ class PrefillServerCaller {
 public:
     explicit PrefillServerCaller(const std::string& process_id);
 
-    std::shared_ptr<PrefillServerCallerContext> callPrefill(const GenerateInputPB* request,
-                                                            const std::string&     ip,
-                                                            uint32_t               port,
-                                                            const std::string&     unique_key,
-                                                            int64_t                request_deadline_ms);
+    ErrorResult<std::shared_ptr<PrefillServerCallerContext>> callPrefill(const GenerateInputPB* request,
+                                                                         const std::string&     ip,
+                                                                         uint32_t               port,
+                                                                         const std::string&     unique_key,
+                                                                         int64_t                request_deadline_ms);
 
     grpc::Status callPrefill(grpc::ServerContext*                   server_context,
                              const GenerateInputPB*                 request,
                              grpc::ServerWriter<GenerateOutputsPB>* response_writer);
 
+    ErrorResult<std::unique_ptr<PrefillBatchCallerContext>>
+    callPrefillBatch(const BatchGenerateInputPB& request, const std::string& address, int64_t deadline_ms);
+
     // Fetch once for each PD request; only the RPC connection is reused.
-    PrefillPeerInfo getPrefillPeerInfo(const std::string& ip, uint32_t port, int32_t request_timeout_ms);
+    ErrorResult<PrefillPeerInfo> getPrefillPeerInfo(const std::string& ip, uint32_t port, int32_t request_timeout_ms);
 
     int getPrefillTpSize(const std::string& ip, uint32_t port, int32_t request_timeout_ms);
 

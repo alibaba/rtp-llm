@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <tuple>
 #include <vector>
 
 namespace autil {
@@ -76,9 +77,8 @@ private:
     /// 把配置漂移 / 版本不一致从传输期的疑难杂症变成首个请求上的确定性报错。
     ErrorInfo checkPeerCpLayout(int prefill_tp_size, int prefill_cp_size) const;
 
-    /// @brief 取（并缓存）本请求形态对应的传输计划。plan 与请求无关，只依赖两侧布局，
-    /// 故按 (prefill_tp_size, prefill_cp_size) 缓存 —— 同一部署下通常只算一次。
-    std::shared_ptr<const PlanResult> planFor(int prefill_tp_size, int prefill_cp_size);
+    /// @brief 按两侧布局和有界副本偏移缓存计划，避免跨 Decode DP 固定选中同一源。
+    std::shared_ptr<const PlanResult> planFor(int prefill_tp_size, int prefill_cp_size, const std::string& unique_key);
 
     /// @brief 把 plan 投影成「每个 decode worker 的 route 列表 + 具体 block」。
     ///
@@ -93,10 +93,9 @@ private:
 
 private:
     const P2PConnectorSchedulerConfig                    config_;
-    // plan 缓存：key = (prefill_tp_size, prefill_cp_size)。plan() 是纯函数，
-    // 不含 cache_keys / block id / 时间源，因此可跨请求复用。
+    // 每种布局最多 prefill_tp_size 个偏移，不能按 unique_key 无界缓存。
     mutable std::mutex                                                       plan_cache_mutex_;
-    std::map<std::pair<int, int>, std::shared_ptr<const PlanResult>>         plan_cache_;
+    std::map<std::tuple<int, int, size_t>, std::shared_ptr<const PlanResult>> plan_cache_;
     kmonitor::MetricsReporterPtr                         metrics_reporter_;
     std::shared_ptr<P2PBroadcastClient>                  tp_broadcast_client_;
     std::shared_ptr<DecodeLoadHelper>                   server_caller_;

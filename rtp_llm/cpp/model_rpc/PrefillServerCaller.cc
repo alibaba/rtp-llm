@@ -88,13 +88,19 @@ PrefillServerCaller::PrefillServerCaller(const std::string& process_id):
         return stub->AsyncGenerateStreamCall(client_context, request, completion_queue, reinterpret_cast<void*>(0));
     }) {}
 
-std::shared_ptr<PrefillServerCallerContext> PrefillServerCaller::callPrefill(const GenerateInputPB* request,
-                                                                             const std::string&     ip,
-                                                                             uint32_t               port,
-                                                                             const std::string&     unique_key,
-                                                                             int64_t                request_deadline_ms) {
-    if (request_deadline_ms <= currentTimeMs() || request_deadline_ms != request->request_deadline_ms()) {
-        return nullptr;
+ErrorResult<std::shared_ptr<PrefillServerCallerContext>>
+PrefillServerCaller::callPrefill(const GenerateInputPB* request,
+                                 const std::string&     ip,
+                                 uint32_t               port,
+                                 const std::string&     unique_key,
+                                 int64_t                request_deadline_ms) {
+    if (request_deadline_ms != request->request_deadline_ms()) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS,
+                         "Prefill GenerateStreamCall inconsistent request deadline key=" + unique_key);
+    }
+    if (request_deadline_ms <= currentTimeMs()) {
+        return ErrorInfo(ErrorCode::GENERATE_TIMEOUT,
+                         "Prefill GenerateStreamCall request deadline exceeded key=" + unique_key);
     }
     std::string prefill_addr = formatGrpcHostPort(ip, port);
     if (prefill_addr.empty()) {
@@ -102,14 +108,18 @@ std::shared_ptr<PrefillServerCallerContext> PrefillServerCaller::callPrefill(con
                             request->request_id(),
                             ip.c_str(),
                             port);
-        return nullptr;
+        return ErrorInfo(ErrorCode::INVALID_PARAMS,
+                         "Prefill GenerateStreamCall invalid peer=" + ip + ":" + std::to_string(port)
+                             + " key=" + unique_key);
     }
     auto        connect_status = rpc_pool_->getConnection(prefill_addr);
     if (!connect_status.ok()) {
         RTP_LLM_LOG_WARNING("request [%lld] get grpc connection to prefill failed, addr: %s",
                             request->request_id(),
                             prefill_addr.c_str());
-        return nullptr;
+        return ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
+                         "Prefill GenerateStreamCall getConnection peer=" + prefill_addr + " key=" + unique_key + ": "
+                             + connect_status.status().ToString());
     }
 
     auto stub = connect_status.value().stub;
@@ -136,12 +146,47 @@ std::shared_ptr<PrefillServerCallerContext> PrefillServerCaller::callPrefill(con
         RTP_LLM_LOG_WARNING("request [%lld] create async prefill reader failed, addr: %s",
                             request->request_id(),
                             prefill_addr.c_str());
-        return nullptr;
+        return ErrorInfo(ErrorCode::RPC_FINISH_FAILED,
+                         "Prefill GenerateStreamCall async reader creation failed peer=" + prefill_addr
+                             + " key=" + unique_key);
     }
     context->rpc_started_ = true;
     context->startPolling();
 
-    return context;
+    return std::move(context);
+}
+
+ErrorResult<std::unique_ptr<PrefillBatchCallerContext>> PrefillServerCaller::callPrefillBatch(
+    const BatchGenerateInputPB& request, const std::string& address, int64_t deadline_ms) {
+    if (request.inputs_size() == 0 || deadline_ms <= currentTimeMs()) {
+        return ErrorInfo(request.inputs_size() == 0 ? ErrorCode::INVALID_PARAMS : ErrorCode::GENERATE_TIMEOUT,
+                         "Prefill BatchGenerateCall empty batch or expired deadline peer=" + address);
+    }
+    auto connection = rpc_pool_->getConnection(address);
+    if (!connection.ok()) {
+        return ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
+                         "Prefill BatchGenerateCall getConnection peer=" + address + ": "
+                             + connection.status().ToString());
+    }
+    auto context      = std::make_unique<PrefillBatchCallerContext>();
+    context->address_ = address;
+    context->stub_    = connection.value().stub;
+    context->request_.CopyFrom(request);
+    for (auto& input : *context->request_.mutable_inputs()) {
+        input.set_client_id(process_id_);
+        input.set_start_time(currentTimeUs());
+    }
+    context->client_context_.set_deadline(
+        std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms)));
+    context->reader_ =
+        context->stub_->AsyncBatchGenerateCall(&context->client_context_, context->request_, &context->queue_);
+    if (!context->reader_) {
+        return ErrorInfo(ErrorCode::RPC_FINISH_FAILED,
+                         "Prefill BatchGenerateCall async reader creation failed peer=" + address);
+    }
+    context->reader_->Finish(&context->response_, &context->status_, context.get());
+    context->started_ = true;
+    return std::move(context);
 }
 
 grpc::Status PrefillServerCaller::callPrefill(grpc::ServerContext*                   server_context,
@@ -238,18 +283,19 @@ grpc::Status PrefillServerCaller::callPrefillToAddr(grpc::ServerContext*        
     return status;
 }
 
-PrefillPeerInfo
+ErrorResult<PrefillPeerInfo>
 PrefillServerCaller::getPrefillPeerInfo(const std::string& ip, uint32_t port, int32_t request_timeout_ms) {
     std::string addr = formatGrpcHostPort(ip, port);
     if (addr.empty()) {
         RTP_LLM_LOG_WARNING("getPrefillPeerInfo: invalid prefill grpc address, ip: %s, port: %u", ip.c_str(), port);
-        return {};
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "GetPeerInfo invalid peer=" + ip + ":" + std::to_string(port));
     }
 
     auto conn = rpc_pool_->getConnection(addr);
     if (!conn.ok()) {
         RTP_LLM_LOG_WARNING("getPrefillPeerInfo: getConnection failed for %s", addr.c_str());
-        return {};
+        return ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
+                         "GetPeerInfo getConnection peer=" + addr + ": " + conn.status().ToString());
     }
 
     const auto probe_timeout_ms = std::clamp(request_timeout_ms > 0 ? request_timeout_ms : kPeerInfoProbeDefaultMs,
@@ -265,25 +311,29 @@ PrefillServerCaller::getPrefillPeerInfo(const std::string& ip, uint32_t port, in
     if (!status.ok()) {
         RTP_LLM_LOG_ERROR(
             "getPrefillPeerInfo: GetPeerInfo RPC failed for %s: %s", addr.c_str(), status.error_message().c_str());
-        return {};
+        const auto error = errorInfoFromGrpcStatus(status);
+        return ErrorInfo(error.code(), "GetPeerInfo peer=" + addr + ": " + error.ToString());
     }
 
     PrefillPeerInfo info;
     info.tp_size = response.tp_size();
     if (info.tp_size <= 0) {
         RTP_LLM_LOG_ERROR("getPrefillPeerInfo: invalid tp_size=%d from %s", info.tp_size, addr.c_str());
-        return {};
+        return ErrorInfo(ErrorCode::INVALID_PARAMS,
+                         "GetPeerInfo peer=" + addr + " invalid tp_size=" + std::to_string(response.tp_size()));
     }
-    // Older peers do not carry cp_size. They predate CP-aware P2P transfer, so
-    // treating the missing field as the non-sharded layout preserves the
-    // existing non-CP rolling-upgrade path without guessing CP from TP.
-    info.cp_size = response.cp_size() > 0 ? response.cp_size() : 1;
+    if (response.cp_size() <= 0 || response.cp_size() > info.tp_size || info.tp_size % response.cp_size() != 0) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS,
+                         "GetPeerInfo peer=" + addr + " invalid cp_size=" + std::to_string(response.cp_size())
+                             + " tp_size=" + std::to_string(info.tp_size));
+    }
+    info.cp_size = response.cp_size();
 
     for (const auto& dp_addr : response.dp_grpc_addrs()) {
         info.dp_addrs.push_back(dp_addr);
     }
     if (info.dp_addrs.empty()) {
-        info.dp_addrs.push_back(addr);
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "GetPeerInfo peer=" + addr + " empty DP address list");
     }
 
     RTP_LLM_LOG_INFO("getPrefillPeerInfo: prefill %s tp_size=%d, cp_size=%d, dp_addrs=[%s]",
@@ -299,11 +349,12 @@ PrefillServerCaller::getPrefillPeerInfo(const std::string& ip, uint32_t port, in
                           return s;
                       }().c_str());
 
-    return info;
+    return std::move(info);
 }
 
 int PrefillServerCaller::getPrefillTpSize(const std::string& ip, uint32_t port, int32_t request_timeout_ms) {
-    return getPrefillPeerInfo(ip, port, request_timeout_ms).tp_size;
+    const auto result = getPrefillPeerInfo(ip, port, request_timeout_ms);
+    return result.ok() ? result.value().tp_size : -1;
 }
 
 }  // namespace rtp_llm
