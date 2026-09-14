@@ -65,14 +65,14 @@ struct ProposeModelEngineInitParams {
 
     bool draftModel() {
         return sp_type == SP_TYPE_VANILLA || sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE3
-               || sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_DSPARK;
+               || sp_type == SP_TYPE_EAGLE || isBlockDraftType(sp_type);
     }
 
     const EngineInitParams& getEngineInitParams() {
         if (sp_type == SP_TYPE_VANILLA) {
             return *vanilla_model_params;
         } else if (sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE3 || sp_type == SP_TYPE_EAGLE
-                   || sp_type == SP_TYPE_DSPARK) {
+                   || isBlockDraftType(sp_type)) {
             RTP_LLM_CHECK(!mtp_model_params_->empty());
             RTP_LLM_CHECK(mtp_model_params_->at(0) != nullptr);
             return *mtp_model_params_->at(0);
