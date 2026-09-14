@@ -151,7 +151,7 @@ protected:
     std::shared_ptr<EngineBase>           engine_;
     std::shared_ptr<MultimodalProcessor>  mm_processor_;
     EngineInitParams                      maga_init_params_;
-    ProposeModelEngineInitParams*         propose_maga_init_params_;
+    ProposeModelEngineInitParams*         propose_maga_init_params_{nullptr};
     kmonitor::MetricsReporterPtr          metrics_reporter_;
     std::atomic<size_t>                   onflight_requests_{0};
     std::shared_ptr<RpcServerRuntimeMeta> meta_;

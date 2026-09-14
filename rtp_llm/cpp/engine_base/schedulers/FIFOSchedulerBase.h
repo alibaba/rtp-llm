@@ -51,10 +51,10 @@ public:
     int64_t runningStreamsSize();
 
 protected:
-    virtual const char* schedulerName() const                                            = 0;
+    virtual const char* schedulerName() const                                      = 0;
     virtual bool        evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
                                               const GenerateStreamPtr&            new_stream) = 0;
-    virtual bool        waitPredicate()                                                  = 0;
+    virtual bool        waitPredicate()                                            = 0;
     virtual void        onRunningStream(const GenerateStreamPtr& stream) {}
     virtual void        cancelExtraStreams() {}
     virtual bool        hasExtraStreams() const {
@@ -68,7 +68,7 @@ protected:
     bool   checkInputLength(const GenerateStreamPtr& stream);
     void   cancelStreams(std::list<GenerateStreamPtr>& streams);
     size_t evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
-    void   evaluateWaitingStreams(std::list<GenerateStreamPtr>& waiting_streams);
+    void   evaluateWaitingStreams(std::list<GenerateStreamPtr>& waiting_streams, bool include_running_mode = true);
     void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
     size_t countInitedKVCacheStreams() const;
 
@@ -80,17 +80,17 @@ protected:
     std::list<GenerateStreamPtr>    running_streams_;
     std::list<GenerateStreamPtr>    new_streams_;
     std::shared_ptr<KVCacheManager> cache_manager_;
-    std::atomic<int64_t>            last_schedule_time_      = autil::TimeUtility::currentTimeInMilliSeconds();
-    size_t                          max_seq_len_             = 0;
-    size_t                          max_batch_tokens_size_   = 0;
-    size_t                          max_generate_batch_size_ = 1;
+    std::atomic<int64_t>            last_schedule_time_          = autil::TimeUtility::currentTimeInMilliSeconds();
+    size_t                          max_seq_len_                 = 0;
+    size_t                          max_batch_tokens_size_       = 0;
+    size_t                          max_generate_batch_size_     = 1;
     size_t                          max_inited_kv_cache_streams_ = 0;
-    bool                            need_fill_fake_stream_   = false;
-    std::atomic<bool>               stop_                    = false;
-    bool                            schedule_trigger_        = false;
+    bool                            need_fill_fake_stream_       = false;
+    std::atomic<bool>               stop_                        = false;
+    bool                            schedule_trigger_            = false;
     std::mutex                      lock_;
     std::condition_variable         cond_;
-    kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
+    kmonitor::MetricsReporterPtr    metrics_reporter_                 = nullptr;
     int64_t                         last_admitted_context_batch_size_ = 0;
     int64_t                         last_admitted_context_token_size_ = 0;
     int64_t                         last_waiting_oldest_age_us_       = 0;

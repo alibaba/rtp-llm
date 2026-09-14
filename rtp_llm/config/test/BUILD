@@ -30,6 +30,18 @@ py_library(
 )
 
 py_test(
+    name = "model_config_override_test",
+    srcs = ["model_config_override_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:config_ops",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:transformers",
+    ],
+)
+
+py_test(
     name = "grammar_tokenizer_info_test",
     srcs = [
         "grammar_tokenizer_info_test.py",
@@ -59,6 +71,14 @@ py_test(
 py_test(
     name = "output_vocab_config_test",
     srcs = ["output_vocab_config_test.py"],
+    deps = [
+        "//rtp_llm:config",
+    ],
+)
+
+py_test(
+    name = "quant_config_test",
+    srcs = ["quant_config_test.py"],
     deps = [
         "//rtp_llm:config",
     ],

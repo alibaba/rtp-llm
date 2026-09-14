@@ -8,6 +8,7 @@
 #define protected public
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
@@ -86,8 +87,159 @@ TEST_F(NormalBatchStreamProcessorTest, testWarmUpWithoutCacheManager) {
     TensorHolder holder;
     auto         model_input = processor.gatherModelInput(stream_groups, holder);
     ASSERT_TRUE(model_input.ok());
+    EXPECT_FALSE(model_input->skip_lm_head);
+    EXPECT_FALSE(model_input->capture_hidden_states);
     EXPECT_FALSE(model_input->kv_cache_block_id.defined());
     EXPECT_FALSE(model_input->kv_cache_kernel_block_id.defined());
+}
+
+TEST_F(NormalBatchStreamProcessorTest, prefillOnlySkipsLmHeadAndDispatchesOneEmptyOutput) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len      = 128;
+    model_config.vocab_size       = 128;
+    model_config.input_vocab_size = 128;
+    model_config.num_layers       = 1;
+    RuntimeConfig               runtime_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+
+    auto make_stream = [&](std::vector<int32_t> tokens) {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = hostIntBuffer(std::move(tokens));
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 0;
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+
+    auto                                                    stream1  = make_stream({1, 2});
+    auto                                                    stream2  = make_stream({3, 4, 5});
+    const std::vector<std::pair<GenerateStreamPtr, size_t>> expected = {{stream1, stream1->seqLength()},
+                                                                        {stream2, stream2->seqLength()}};
+    StreamGroups                                            stream_groups({stream1, stream2});
+    NormalBatchStreamProcessor                              processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, true);
+
+    TensorHolder holder;
+    auto         model_input = processor.gatherModelInput(stream_groups, holder);
+    ASSERT_TRUE(model_input.ok());
+    EXPECT_TRUE(model_input->skip_lm_head);
+    EXPECT_TRUE(model_input->capture_hidden_states);
+    EXPECT_EQ(model_input->combo_tokens.numel(), 5);
+
+    ASSERT_TRUE(processor.dispatchPrefillOnly(stream_groups).ok());
+    ASSERT_TRUE(processor.dispatchPrefillOnly(stream_groups).ok());
+    for (const auto& [stream, input_length] : expected) {
+        auto output = stream->nextOutput();
+        ASSERT_TRUE(output.ok());
+        ASSERT_EQ(output.value().generate_outputs.size(), 1);
+        EXPECT_TRUE(output.value().generate_outputs[0].finished);
+        EXPECT_EQ(output.value().generate_outputs[0].output_ids.sizes(), (torch::IntArrayRef{1, 0}));
+        EXPECT_EQ(stream->seqLength(), input_length);
+        EXPECT_FALSE(stream->hasOutput());
+
+        auto finished = stream->nextOutput();
+        ASSERT_FALSE(finished.ok());
+        EXPECT_EQ(finished.status().code(), ErrorCode::FINISHED);
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, gatherExecutionModesPreserveFlagsAndErrors) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len      = 128;
+    model_config.vocab_size       = 128;
+    model_config.input_vocab_size = 128;
+    model_config.num_layers       = 1;
+    RuntimeConfig               runtime_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+
+    auto make_stream = [&](std::vector<int32_t> tokens, int max_new_tokens) {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = hostIntBuffer(std::move(tokens));
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = max_new_tokens;
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, true);
+
+    struct StreamMode {
+        bool context;
+        int  max_new_tokens;
+    };
+    struct TestCase {
+        const char*             name;
+        std::vector<StreamMode> modes;
+        bool                    prefill_only;
+        bool                    mixed;
+        bool                    existing_error = false;
+    };
+    const std::vector<TestCase> cases = {
+        {"empty", {}, false, false},
+        {"decode-generation", {{false, 1}, {false, 2}}, false, false},
+        {"context-generation", {{true, 1}, {true, 2}}, false, false},
+        {"context-prefill-only", {{true, 0}, {true, 0}}, true, false},
+        {"decode-prefill-only", {{false, 0}}, true, false},
+        {"both-containers-generation", {{true, 1}, {false, 1}}, false, false},
+        {"both-containers-prefill-only", {{true, 0}, {false, 0}}, true, false},
+        {"context-mixed-prefill-first", {{true, 0}, {true, 1}}, true, true},
+        {"context-mixed-generation-first", {{true, 1}, {true, 0}}, false, true},
+        {"decode-mixed-prefill-first", {{false, 0}, {false, 1}}, true, true},
+        {"decode-mixed-generation-first", {{false, 1}, {false, 0}}, false, true},
+        {"cross-container-decode-generation-first", {{false, 1}, {true, 0}}, false, true},
+        {"cross-container-context-prefill-first", {{true, 0}, {false, 1}}, false, true},
+        {"cross-container-decode-prefill-first", {{false, 0}, {true, 1}}, true, true},
+        {"cross-container-context-generation-first", {{true, 1}, {false, 0}}, true, true},
+        {"mixed-context-behind-generation-decode", {{false, 1}, {true, 1}, {true, 0}}, false, true},
+        {"mixed-decode-ahead-of-generation-context", {{true, 1}, {false, 1}, {false, 0}}, false, true},
+        {"existing-error-prefill-still-defines-mode", {{true, 0}, {true, 1}}, true, true, true},
+        {"existing-error-in-cross-container-batch", {{true, 0}, {false, 1}}, false, true, true},
+        {"existing-error-in-homogeneous-batch", {{true, 1}, {false, 1}}, false, false, true},
+    };
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        std::list<GenerateStreamPtr> streams;
+        int64_t                      expected_tokens = 0;
+        for (const auto& mode : test_case.modes) {
+            auto stream = make_stream({1, 2}, mode.max_new_tokens);
+            stream->setIsContextStream(mode.context);
+            streams.push_back(stream);
+            expected_tokens += mode.context ? 2 : 1;
+        }
+        if (test_case.existing_error) {
+            streams.front()->reportError(ErrorCode::EXECUTION_EXCEPTION, "existing request error");
+        }
+        StreamGroups stream_groups(streams);
+        TensorHolder holder;
+        auto         model_input = processor.gatherModelInput(stream_groups, holder);
+        // Mixed batches still reach TP sync; flags follow the first decode stream,
+        // or the first context stream when there are no decode streams.
+        ASSERT_TRUE(model_input.ok());
+        EXPECT_EQ(model_input->combo_tokens.numel(), expected_tokens);
+        EXPECT_EQ(model_input->skip_lm_head, test_case.prefill_only);
+        EXPECT_EQ(model_input->capture_hidden_states, test_case.prefill_only);
+        for (const auto& stream : streams) {
+            if (test_case.existing_error && stream == streams.front()) {
+                EXPECT_EQ(stream->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+                EXPECT_EQ(stream->stopReason(), "existing request error");
+            } else if (test_case.mixed) {
+                EXPECT_TRUE(stream->hasError());
+                EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                EXPECT_EQ(stream->stopReason(), kMixedExecutionModeBatchError);
+            } else {
+                EXPECT_FALSE(stream->hasError());
+            }
+        }
+    }
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable) {

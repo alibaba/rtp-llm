@@ -341,6 +341,7 @@ def forward_layers(
     attn_inputs: Optional[PyAttentionInputs] = None,
     attention_inputs: Any = None,
     prepare_hidden_fn: Optional[Any] = None,
+    capture_context: Optional[Any] = None,
 ) -> torch.Tensor:
     """Flat per-layer loop — vLLM-aligned layout.
 
@@ -643,6 +644,8 @@ def forward_layers(
                     )  # [T, hc, dim]
                     if layer_idx in capture_ids:
                         v4.capture_aux_hidden(layer_idx, h)
+                    if capture_context is not None:
+                        capture_context.capture_layer(layer_idx, h)
                     if _rt_on:
                         _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
                     if write_cache_store_impl_by_tag:
@@ -725,7 +728,13 @@ def forward_layers(
         h = v4._hc_head_reduce(h)  # [T, dim]
         if _rt_on:
             _rt.record("prefill_hc_reduced", h)
-        h = v4.norm(h)  # [T, dim]
+        final_hidden_size = h.size(-1)
+        if capture_context is None:
+            h = v4.norm(h)  # [T, dim]
+            packed_hidden_states = h
+        else:
+            packed_hidden_states = capture_context.finalize(h).hidden_states
+            h = packed_hidden_states[..., -final_hidden_size:]
     if _rt_on:
         _rt.record("prefill_final_norm", h)
         if cp_ctx is None:
@@ -803,7 +812,7 @@ def forward_layers(
     # forward (which runs right after the main model on a near-full card) can
     # borrow it. No explicit reset needed — the per-layer ``common.workspace``
     # references were cleared by ``clear_prefill_meta_shared_fp8`` above.
-    return h  # [T, dim]
+    return packed_hidden_states
 
 
 def forward_prefill(
@@ -812,6 +821,7 @@ def forward_prefill(
     parallelism_config: Optional[ParallelismConfig],
     inputs: PyModelInputs,
     prepare_hidden_fn: Optional[Any] = None,
+    capture_context: Optional[Any] = None,
 ) -> PyModelOutputs:
     """Prefill dispatcher — single :func:`forward_layers` call on the full
     flat ``[T_total]`` batch (vLLM-aligned).
@@ -870,26 +880,28 @@ def forward_prefill(
         framework_cu_seqlens = cu_seqlens_device
     elif framework_cu_seqlens is None or framework_cu_seqlens.numel() < 2:
         framework_cu_seqlens = cu_seqlens_device
-    input_lengths_device = attn.input_lengths_device
-    rebuild_input_lengths = input_lengths_device
-    if rebuild_input_lengths is None or rebuild_input_lengths.numel() == 0:
-        rebuild_input_lengths = attn.input_lengths
-    if framework_cu_seqlens is not None and framework_cu_seqlens.numel() >= 2:
-        capture_uses_device_mirror = framework_cu_seqlens.is_cuda and is_capturing
-        cu_seqlens_target_device = (
-            framework_cu_seqlens.device
-            if capture_uses_device_mirror
-            else torch.device("cpu")
-        )
-    else:
-        cu_seqlens_target_device = (
-            rebuild_input_lengths.device if rebuild_input_lengths is not None else None
-        )
-    cu_seqlens = _resolve_prefill_cu_seqlens(
-        framework_cu_seqlens,
-        rebuild_input_lengths,
-        cu_seqlens_target_device,
+    if framework_cu_seqlens is None or framework_cu_seqlens.numel() < 2:
+        raise RuntimeError("DSV4 prefill: no usable cu_seqlens (host or device mirror)")
+    input_lengths = attn.input_lengths_device
+    if input_lengths is None or input_lengths.numel() == 0:
+        input_lengths = attn.input_lengths
+    if input_lengths is not None and input_lengths.numel() > 0:
+        required_cu_seqlens = int(input_lengths.numel()) + 1
+        if framework_cu_seqlens.numel() < required_cu_seqlens:
+            raise RuntimeError(
+                "DSV4 prefill: cu_seqlens has "
+                f"{framework_cu_seqlens.numel()} entries; batch size "
+                f"{input_lengths.numel()} requires at least {required_cu_seqlens}"
+            )
+        if framework_cu_seqlens.numel() > required_cu_seqlens:
+            framework_cu_seqlens = framework_cu_seqlens[:required_cu_seqlens]
+    capture_uses_device_mirror = framework_cu_seqlens.is_cuda and is_capturing
+    cu_seqlens_target_device = (
+        framework_cu_seqlens.device
+        if capture_uses_device_mirror
+        else torch.device("cpu")
     )
+    cu_seqlens = _resolve_prefill_cu_seqlens(framework_cu_seqlens, cu_seqlens_target_device)
     positions = getattr(attn, "combo_position_ids", None)
     # warmup / cudagraph capture path doesn't populate combo_position_ids —
     # synthesize from (prefix_lengths, input_lengths). Prefer ``*_device``
@@ -925,5 +937,6 @@ def forward_prefill(
         attn_inputs=attn,
         attention_inputs=attn_inputs,
         prepare_hidden_fn=prepare_hidden_fn,
-    )  # [T_total, dim]
+        capture_context=capture_context,
+    )  # [T_total, dim] or [T_total, (num_capture_layers + 1) * dim]
     return PyModelOutputs(hidden)

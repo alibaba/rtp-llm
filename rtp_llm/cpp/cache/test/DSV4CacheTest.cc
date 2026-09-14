@@ -1247,32 +1247,36 @@ TEST(HybridPoolConfigCreatorTest, DSV4StateSwaPoolsFollowGlobalBlocks) {
     EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, 0u);
 }
 
-TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksOverridesOnlyHcaState) {
-    auto              mc = makeProModelConfig();
-    ParallelismConfig pc;
-    RuntimeConfig     runtime_config;
-    KVCacheConfig     kv_cache_config;
-    kv_cache_config.test_block_num = 100;
-    setDsv4ExplicitPoolBlocks(mc, "hca_state", 350);
-    runtime_config.max_generate_batch_size                      = 5;
-    runtime_config.fifo_scheduler_config.max_context_batch_size = 3;
+TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksUsesDefaultOrExplicitOverride) {
+    for (const uint32_t override_blocks : {0u, 172u}) {
+        auto              mc = makeProModelConfig();
+        ParallelismConfig pc;
+        RuntimeConfig     runtime_config;
+        KVCacheConfig     kv_cache_config;
+        kv_cache_config.test_block_num                              = 100;
+        kv_cache_config.dsv4_hca_state_pool_blocks                  = override_blocks;
+        runtime_config.max_generate_batch_size                      = 5;
+        runtime_config.fifo_scheduler_config.max_context_batch_size = 3;
 
-    auto config = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
+        auto config = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
 
-    ASSERT_EQ(config.groupBlockNumsSnapshot().size(), static_cast<size_t>(kDsv4PoolNum));
-    const auto hca_state_gid = gidForTag(config, "hca_state");
-    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        const uint32_t expected = gid == hca_state_gid ? 350u : 100u;
-        EXPECT_EQ(config.blockNumForGroup(gid), expected) << "gid=" << gid;
-    }
+        ASSERT_EQ(config.groupBlockNumsSnapshot().size(), static_cast<size_t>(kDsv4PoolNum));
+        const auto     hca_state_gid       = gidForTag(config, "hca_state");
+        const uint32_t expected_hca_blocks = override_blocks > 0 ? override_blocks : 256u;
+        for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+            const uint32_t expected = gid == hca_state_gid ? expected_hca_blocks : 100u;
+            EXPECT_EQ(config.blockNumForGroup(gid), expected)
+                << "gid=" << gid << " override_blocks=" << override_blocks;
+        }
 
-    const size_t expected_reserve = 350u * config.blockSizeBytesForGroup(hca_state_gid);
-    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, expected_reserve);
-    ASSERT_EQ(config.groupPoliciesSnapshot().size(), static_cast<size_t>(kDsv4PoolNum));
-    EXPECT_EQ(config.policyForGroup(hca_state_gid).explicit_block_num, 350u);
-    for (size_t gid = 0; gid < config.groupPoliciesSnapshot().size(); ++gid) {
-        if (gid != hca_state_gid) {
-            EXPECT_EQ(config.policyForGroup(gid).explicit_block_num, 0u) << "gid=" << gid;
+        const size_t expected_reserve = expected_hca_blocks * config.blockSizeBytesForGroup(hca_state_gid);
+        EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, expected_reserve);
+        ASSERT_EQ(config.groupPoliciesSnapshot().size(), static_cast<size_t>(kDsv4PoolNum));
+        EXPECT_EQ(config.policyForGroup(hca_state_gid).explicit_block_num, expected_hca_blocks);
+        for (size_t gid = 0; gid < config.groupPoliciesSnapshot().size(); ++gid) {
+            if (gid != hca_state_gid) {
+                EXPECT_EQ(config.policyForGroup(gid).explicit_block_num, 0u) << "gid=" << gid;
+            }
         }
     }
 }

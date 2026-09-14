@@ -224,6 +224,12 @@ class Qwen35Moe(Qwen3NextBase):
 
     @classmethod
     def _parse_mm_config(cls, config_json: dict, config: ModelConfig):
+        language_model_only = config_json.get("language_model_only")
+        if language_model_only is True or (
+            isinstance(language_model_only, int) and language_model_only == 1
+        ):
+            return
+
         config.mm_model_config.is_multimodal = True
         config.mm_model_config.mm_sep_tokens = [
             [config_json["vision_start_token_id"], config_json["vision_end_token_id"]]
