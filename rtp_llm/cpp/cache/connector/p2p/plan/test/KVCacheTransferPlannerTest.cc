@@ -859,6 +859,25 @@ TEST(PlannerGroupD, D3_IdempotentAndStable) {
     EXPECT_EQ(a.plan.digest(), b.plan.digest());
 }
 
+TEST(PlannerGroupD, DigestDistinguishesTailKeySelection) {
+    const auto result = KVCacheTransferPlanner::plan(mhaLayout(1), mhaLayout(1), {kFullTag});
+    ASSERT_TRUE(result.ok()) << result.error.ToString();
+    ASSERT_EQ(result.plan.routes.size(), 1u);
+
+    auto last_one = result.plan;
+    auto last_two = result.plan;
+    last_one.routes[0].src_keys.tail_count = 1;
+    last_two.routes[0].src_keys.tail_count = 2;
+
+    EXPECT_EQ(KVCacheTransferPlanner::resolveKeys(last_one.routes[0].src_keys, 4),
+              (std::vector<size_t>{3}));
+    EXPECT_EQ(KVCacheTransferPlanner::resolveKeys(last_two.routes[0].src_keys, 4),
+              (std::vector<size_t>{2, 3}));
+    EXPECT_NE(last_one.digest(), last_two.digest());
+    EXPECT_NE(result.plan.digest(), last_one.digest());
+    EXPECT_NE(result.plan.digest(), last_two.digest());
+}
+
 // 用例 D4: 两端独立求值结果一致（「跨端协议零改动」的正确性根据）
 TEST(PlannerGroupD, D4_MirrorConsistencyAcrossSides) {
     const auto candidates = propertyCandidates();

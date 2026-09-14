@@ -97,7 +97,7 @@ TEST(P2PKeyUtilTest, RouteLayerKeyIsStableAndDiscriminating) {
     };
     EXPECT_EQ(keys.size(), 5u);
 
-    // digest 分歧 ⇒ key 不匹配 ⇒ 退化为 TIMEOUT 而不是拷错字节
+    // StartLoad 提前拒绝 digest 分歧；传输 key 仍保留摘要以隔离不同计划。
     EXPECT_NE(P2PKeyUtil::makeRouteLayerKey(base, 3, "full", 7, digest),
               P2PKeyUtil::makeRouteLayerKey(base, 3, "full", 7, digest + 1));
 

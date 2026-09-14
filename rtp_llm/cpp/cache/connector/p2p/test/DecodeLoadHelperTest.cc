@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/utils/Exception.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/TestRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 
 namespace rtp_llm {
 
@@ -110,7 +111,7 @@ TEST_F(DecodeLoadHelperTest, Load_ReturnNotNull_RequestSuccess) {
 TEST_F(DecodeLoadHelperTest, LoadCarriesRequestDeadlineButUsesTransferTimeout) {
     const int64_t request_deadline_ms  = currentTimeMs() + 5000;
     const int64_t transfer_deadline_ms = currentTimeMs() + 500;
-    constexpr uint64_t plan_digest     = 0x12345678ULL;
+    constexpr uint64_t plan_digest     = 0xfedcba9876543210ULL;
 
     auto result = client_->load(1010,
                                 "127.0.0.1",
@@ -128,6 +129,30 @@ TEST_F(DecodeLoadHelperTest, LoadCarriesRequestDeadlineButUsesTransferTimeout) {
     EXPECT_GT(result->timeout_ms, 0);
     EXPECT_LE(result->timeout_ms, 500);
     EXPECT_TRUE(waitDone(result));
+    EXPECT_EQ(server_->service()->getLastStartLoadRequest().plan_digest(), plan_digest);
+}
+
+TEST_F(DecodeLoadHelperTest, LoadReturnsPlanDigestMismatchBeforeTransferDeadline) {
+    const auto error_code = ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED;
+    const std::string message = "StartLoad plan digest mismatch: decode=1 prefill=2 decode_tp_size=1";
+    server_->service()->setStartLoadApplicationError(transErrorCodeToRPC(error_code), message);
+    const int64_t deadline_ms = currentTimeMs() + 60000;
+
+    auto result = client_->load(1012,
+                                "127.0.0.1",
+                                static_cast<uint32_t>(server_->listenPort()),
+                                "test_plan_digest_mismatch",
+                                deadline_ms,
+                                deadline_ms,
+                                false,
+                                1);
+    ASSERT_NE(result, nullptr);
+    EXPECT_FALSE(waitDone(result, 1000));
+    ASSERT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+    EXPECT_EQ(result->error_code, error_code);
+    EXPECT_EQ(result->error_message, message);
+    EXPECT_EQ(server_->service()->getLastStartLoadRequest().plan_digest(), 1);
 }
 
 TEST_F(DecodeLoadHelperTest, LoadRejectsSuccessfulResponseWithoutFirstToken) {

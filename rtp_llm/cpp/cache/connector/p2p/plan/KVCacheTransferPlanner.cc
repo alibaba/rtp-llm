@@ -585,6 +585,7 @@ uint64_t TransferPlan::digest() const {
         mix(static_cast<uint64_t>(r.src_keys.modulus));
         mix(static_cast<uint64_t>(r.src_keys.residue));
         mix(static_cast<uint64_t>(r.src_keys.include_final_key ? 1 : 0));
+        mix(static_cast<uint64_t>(r.src_keys.tail_count));
         mix(static_cast<uint64_t>(r.src_keys.replica_split_count));
         mix(static_cast<uint64_t>(r.src_keys.replica_split_index));
         mix(static_cast<uint64_t>(r.src_partition.count));

@@ -281,16 +281,83 @@ TEST_F(P2PConnectorTest, HandleReadRejectsEmptyUniqueKeyWithoutWaiting) {
 
 TEST_F(P2PConnectorTest, HandleReadRejectsPlanDigestMismatchBeforeResourceWait) {
     auto request = createValidStartLoadRequest("plan-digest-mismatch", currentTimeMs() + 5000, 2);
-    request.set_plan_digest(request.plan_digest() + 1);
+    const auto prefill_digest = request.plan_digest();
+    request.set_plan_digest(prefill_digest ^ (uint64_t{1} << 63));
 
     P2PConnectorStartLoadResponsePB response;
-    const int64_t                   start_ms = currentTimeMs();
-    connector_->handleRead(request, response);
+    bool resource_wait_reached = false;
+    connector_->handleRead(request, response, [&] {
+        resource_wait_reached = true;
+        return true;
+    });
 
     EXPECT_EQ(response.error_code(),
               transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
     EXPECT_NE(response.error_message().find("plan digest mismatch"), std::string::npos);
-    EXPECT_LT(currentTimeMs() - start_ms, 100);
+    EXPECT_NE(response.error_message().find("decode=" + std::to_string(request.plan_digest())), std::string::npos);
+    EXPECT_NE(response.error_message().find("prefill=" + std::to_string(prefill_digest)), std::string::npos);
+    EXPECT_FALSE(resource_wait_reached);
+    EXPECT_TRUE(connector_->streamStore()->isMarkedCancelled(request.unique_key()));
+    for (const auto& server : tp_broadcast_servers_) {
+        EXPECT_EQ(server->service()->getBroadcastTpCallCount(), 0);
+    }
+}
+
+TEST_F(P2PConnectorTest, HandleReadRejectsMissingPlanDigestBeforeResourceWait) {
+    auto request = createValidStartLoadRequest("plan-digest-missing", currentTimeMs() + 5000, 2);
+    ASSERT_NE(request.plan_digest(), 0);
+    request.clear_plan_digest();
+
+    P2PConnectorStartLoadResponsePB response;
+    bool resource_wait_reached = false;
+    connector_->handleRead(request, response, [&] {
+        resource_wait_reached = true;
+        return true;
+    });
+
+    EXPECT_EQ(response.error_code(),
+              transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
+    EXPECT_NE(response.error_message().find("plan digest mismatch"), std::string::npos);
+    EXPECT_FALSE(resource_wait_reached);
+}
+
+TEST_F(P2PConnectorTest, HandleReadAcceptsMatchingPlanDigestBeforeResourceWait) {
+    auto request = createValidStartLoadRequest("plan-digest-match", currentTimeMs() + 5000, 2);
+
+    P2PConnectorStartLoadResponsePB response;
+    bool resource_wait_reached = false;
+    connector_->handleRead(request, response, [&] {
+        resource_wait_reached = true;
+        return true;
+    });
+
+    EXPECT_TRUE(resource_wait_reached);
+    EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::CANCELLED));
+    EXPECT_NE(response.error_message().find("waitForResourceEntry"), std::string::npos);
+}
+
+TEST_F(P2PConnectorTest, HandleReadRejectsTailKeyPlanMismatchBeforeResourceWait) {
+    auto request = createValidStartLoadRequest("plan-tail-mismatch", currentTimeMs() + 5000, 2);
+    P2PConnectorSchedulerPrefill scheduler(config_.scheduler_config, nullptr, nullptr);
+    const auto result = scheduler.planFor(2);
+    ASSERT_NE(result, nullptr);
+    ASSERT_TRUE(result->ok()) << result->error.ToString();
+    auto decode_plan = result->plan;
+    ASSERT_FALSE(decode_plan.routes.empty());
+    ++decode_plan.routes[0].src_keys.tail_count;
+    request.set_plan_digest(decode_plan.digest());
+
+    P2PConnectorStartLoadResponsePB response;
+    bool resource_wait_reached = false;
+    connector_->handleRead(request, response, [&] {
+        resource_wait_reached = true;
+        return true;
+    });
+
+    EXPECT_EQ(response.error_code(),
+              transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
+    EXPECT_NE(response.error_message().find("plan digest mismatch"), std::string::npos);
+    EXPECT_FALSE(resource_wait_reached);
 }
 
 // 测试: waitForResourceEntry 被取消，返回 CANCELLED 错误
@@ -748,6 +815,7 @@ TEST_F(P2PConnectorTest, HandleRead_NoTransferSkipsDataTransferAndReturnsSideCha
     }
     auto request = createValidStartLoadRequest(unique_key, deadline_ms, 1);
     request.set_no_transfer(true);
+    request.clear_plan_digest();  // No KV transfer plan is required for the side-channel-only path.
 
     P2PConnectorStartLoadResponsePB response;
     connector_->handleRead(request, response);

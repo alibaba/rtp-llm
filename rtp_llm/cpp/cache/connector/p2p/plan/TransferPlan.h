@@ -133,7 +133,7 @@ struct TransferPlan {
         return out;
     }
 
-    /// 稳定摘要，仅用于日志 / metric / 一致性自检，不上协议。
+    /// 稳定的 route 摘要，通过 StartLoad 传递，在资源等待和传输派发前校验两侧计划。
     uint64_t digest() const;
 };
 
