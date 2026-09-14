@@ -95,51 +95,27 @@ class DispatcherE2ETest {
             /batch_infer | {"prompt_batch":["a","b"]} | bad | bad | 400 | 404 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_client_error"]}
             /batch_infer | {"prompt_batch":["a","b"]} | [] | bad | 200 | 500 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["malformed_sub_batch","fe_server_error"]}
             /batch_infer | {"prompt_batch":["a","b"]} | {} | bad | 200 | 500 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["malformed_sub_batch","fe_server_error"]}
+            /v1/reranker | {"query":"cape pants","documents":["文档🧥0","文档🧥1","文档🧥2","文档🧥3"],"top_k":2} | {"results":[{"index":0,"document":"文档🧥0","relevance_score":0.2},{"index":1,"document":"文档🧥1","relevance_score":0.9}],"total_tokens":11} | {"results":[{"index":0,"document":"文档🧥2","relevance_score":0.9},{"index":1,"document":"文档🧥3","relevance_score":0.4}],"total_tokens":17} | 200 | 200 | 200 | {"results":[{"index":1,"document":"文档🧥1","relevance_score":0.9},{"index":2,"document":"文档🧥2","relevance_score":0.9}],"total_tokens":28}
+            /v1/reranker | {"query":"cape pants","documents":["文档🧥0","文档🧥1","文档🧥2","文档🧥3"],"top_k":2} | {"results":[{"index":0,"document":"文档🧥0","relevance_score":0.2},{"index":1,"document":"文档🧥1","relevance_score":0.9}],"total_tokens":11} | {"results":[{"index":0,"document":"文档🧥2","relevance_score":0.9},{"index":1,"document":"文档🧥3","relevance_score":0.4}],"total_tokens":17} | 200 | 500 | 500 | {"error":"sub_batch_failed","failed_count":2,"total_count":4,"total_chunks":2,"failed_reasons":["fe_server_error"]}
             """)
     void realHttpFanoutPreservesWireSchemas(String path, String input, String first, String second,
                                            int firstStatus, int secondStatus, int status, String expected) throws Exception {
         reply(0, firstStatus, first);
         reply(1, secondStatus, second);
-        startDispatcher(1);
-        assertEquals(JSON.parseObject(expected), post(path, input, status));
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get(path);
         JSONArray items = JSON.parseObject(input).getJSONArray(spec.getRequestArrayField());
+        int chunkSize = items.size() / 2;
+        startDispatcher(chunkSize);
+        JSONArray preview = preview(path, input, "split", 2);
+        assertEquals(JSON.parseObject(expected), post(path, input, status));
         for (int i = 0; i < 2; i++) {
-            JSONObject chunk = takeChunk(i, path, spec.getRequestArrayField(), 1);
-            assertEquals(items.subList(i, i + 1), chunk.getJSONArray(spec.getRequestArrayField()));
-        }
-        assertEquals(0, frontends.get(2).getRequestCount());
-    }
-
-    @ParameterizedTest
-    @CsvSource({"false,200", "true,500"})
-    void rerankerSortsGloballyAndFailsClosed(boolean failSecond, int status) throws Exception {
-        reply(0, 200, """
-                {"results":[{"index":0,"document":"文档🧥0","relevance_score":0.2},{"index":1,"document":"文档🧥1","relevance_score":0.9}],"total_tokens":11}
-                """);
-        reply(1, failSecond ? 500 : 200, """
-                {"results":[{"index":0,"document":"文档🧥2","relevance_score":0.9},{"index":1,"document":"文档🧥3","relevance_score":0.4}],"total_tokens":17}
-                """);
-        startDispatcher(2);
-        JSONObject out = post("/v1/reranker", "{\"query\":\"cape pants\",\"documents\":[\"文档🧥0\",\"文档🧥1\",\"文档🧥2\",\"文档🧥3\"],\"top_k\":2}", status);
-        if (failSecond) {
-            assertEquals("sub_batch_failed", out.getString("error"));
-            assertEquals(2, out.getInteger("failed_count"));
-            assertEquals(4, out.getInteger("total_count"));
-            assertEquals(2, out.getInteger("total_chunks"));
-        } else {
-            JSONArray results = out.getJSONArray("results");
-            assertEquals(2, results.size());
-            for (int i = 0; i < 2; i++) {
-                assertEquals(i + 1, results.getJSONObject(i).getInteger("index"));
-                assertEquals("文档🧥" + (i + 1), results.getJSONObject(i).getString("document"));
+            JSONObject chunk = takeChunk(i, path, spec.getRequestArrayField(), chunkSize);
+            assertEquals(items.subList(i * chunkSize, (i + 1) * chunkSize), chunk.getJSONArray(spec.getRequestArrayField()));
+            if (spec == BatchEndpointSpec.RERANKER) {
+                assertFalse(chunk.getBoolean("sorted"));
+                assertFalse(chunk.containsKey("top_k"));
             }
-            assertEquals(28L, out.getLong("total_tokens"));
-        }
-        for (int i = 0; i < 2; i++) {
-            JSONObject chunk = takeChunk(i, "/v1/reranker", "documents", 2);
-            assertFalse(chunk.getBoolean("sorted"));
-            assertFalse(chunk.containsKey("top_k"));
+            assertEquals(preview.getJSONObject(i), chunk);
         }
         assertEquals(0, frontends.get(2).getRequestCount());
     }
@@ -156,6 +132,12 @@ class DispatcherE2ETest {
     void passthroughPreservesRequestAndResponseBytes(String path, String json, String upstream) throws Exception {
         reply(0, 200, upstream);
         startDispatcher(2);
+        if (BatchEndpointSpec.BY_PATH.containsKey(path)) {
+            assertEquals(JSONArray.of(JSON.parseObject(json)), preview(path, json, "passthrough", 1));
+        } else {
+            post("/_dryrun" + path, json, 400);
+            assertNoFeTraffic();
+        }
         byte[] response = send(path, json, 200);
         assertArrayEquals(upstream.getBytes(StandardCharsets.UTF_8), response);
         RecordedRequest received = frontends.getFirst().takeRequest(5, TimeUnit.SECONDS);
@@ -184,9 +166,12 @@ class DispatcherE2ETest {
             reply(i, 200, "{\"response_batch\":[\"ok\"]}");
         }
         startDispatcher(1);
+        JSONArray preview = preview("/batch_infer", "{\"prompt_batch\":[\"a\",\"b\"]}", "split", 2);
+        assertFalse(preview.toJSONString().contains("role_addrs"));
         post("/batch_infer", "{\"prompt_batch\":[\"a\",\"b\",\"c\"]}", 200);
         for (int i = 0; i < 3; i++) {
             JSONObject chunk = takeChunk(i, "/batch_infer", "prompt_batch", 1);
+            assertEquals(String.valueOf((char) ('a' + i)), chunk.getJSONArray("prompt_batch").getString(0));
             assertFalse(chunk.containsKey("pre_assigned_be"));
             Object expected = preassign && !policy ? JSONArray.of(JSONObject.of("role", "PDFUSION", "ip", "10.0.0." + (i + 1),
                     "http_port", 23840, "grpc_port", 23841)) : null;
@@ -210,7 +195,9 @@ class DispatcherE2ETest {
             """)
     void invalidRequestsFailBeforeAnyFrontendIsContacted(String body) {
         startDispatcher(1);
+        post("/_dryrun/batch_infer", body, 400);
         post("/batch_infer", body, 400);
+        verifyNoInteractions(coordinator);
         assertNoFeTraffic();
     }
 
@@ -227,6 +214,13 @@ class DispatcherE2ETest {
             cfg.setMaxAggregateRequestBytes(1);
         }
         startDispatcher(1);
+        post("/_dryrun/batch_infer", "{\"prompt_batch\":[\"a\",\"b\"]}", responseLimit ? 200 : 413);
+        if (limit.equals("request")) {
+            post("/_dryrun", "{}", 413);
+            post("/_dryrun/", "{\"prompt_batch\":[]}", 413);
+        }
+        verifyNoInteractions(coordinator);
+        assertNoFeTraffic();
         post("/batch_infer", "{\"prompt_batch\":[\"a\",\"b\"]}", 413);
         assertEquals(responseLimit ? 1 : 0, frontends.get(0).getRequestCount());
         assertEquals(0, frontends.get(1).getRequestCount());
@@ -235,6 +229,8 @@ class DispatcherE2ETest {
     @Test
     void emptyRequestsAndBatchesContactNoFe() {
         startDispatcher(2);
+        post("/_dryrun/batch_infer", "", 400);
+        preview("/batch_infer", "{\"prompt_batch\":[]}", "split", 0);
         assertEquals("invalid_batch_request", post("/batch_infer", "", 400).getString("error"));
         assertEquals(JSON.parseObject("{\"response_batch\":[]}"), post("/batch_infer", "{\"prompt_batch\":[]}", 200));
         assertEquals(JSON.parseObject("{\"object\":\"list\",\"model\":\"\",\"data\":[],\"usage\":{\"prompt_tokens\":0,\"total_tokens\":0}}"),
@@ -247,19 +243,19 @@ class DispatcherE2ETest {
     @Test
     void allocationFailureContactsNoFe() {
         allocationFails = true;
-        cfg.setTrustedRoutingToken("snapshot-secret");
+        cfg.setTrustedRoutingToken("dryrun-secret");
         startDispatcher(2);
+        assertFalse(preview("/v1/batch/chat/completions", "{\"requests\":[{},{}]}", "split", 1).toJSONString().contains("dryrun-secret"));
+        client.get().uri("/dispatcher/_dryrun").exchange().expectStatus().isBadRequest();
+        post("/_dryrun/unknown", "{}", 400);
+        verifyNoInteractions(coordinator);
         assertEquals("batch_schedule_failed", post("/v1/batch/chat/completions", "{\"requests\":[{},{}]}", 503).getString("error"));
-        client.get().uri("/dispatcher/_snapshot").exchange().expectStatus().isOk().expectBody()
-                .jsonPath("$.fePool.size").isEqualTo(3).jsonPath("$.fePool.hosts[0].alive").isEqualTo(true)
-                .jsonPath("$.fePool.hosts[0].consecFails").isEqualTo(0).jsonPath("$.subBatch").isEqualTo("size:2")
-                .consumeWith(response -> assertFalse(new String(response.getResponseBody(), StandardCharsets.UTF_8).contains("snapshot-secret")));
         verify(coordinator).schedule(any());
         assertNoFeTraffic();
     }
 
     private void startDispatcher(int chunkSize) {
-        List<String> urls = frontends.stream().map(DispatcherE2ETest::url).toList();
+        List<String> urls = frontends.stream().map(fe -> fe.url("/").toString().replaceAll("/$", "")).toList();
         FePool pool = DispatcherTestSupport.fePool(urls, cfg);
         cfg.setBatchTimeoutMs(5000);
         cfg.setFePoolServiceId("e2e.fe.publish");
@@ -282,9 +278,8 @@ class DispatcherE2ETest {
             return Mono.just(BatchScheduleResponse.success(targets));
         });
         PassthroughClient passthrough = new PassthroughClient(WebClient.create(), pool, metrics, cfg);
-        var configService = DispatcherTestSupport.configService(lb);
-        BatchHandler handler = new BatchHandler(fanout, cfg, coordinator, passthrough, metrics, configService, pool, Schedulers.immediate());
-        DispatchRouter router = new DispatchRouter(handler, passthrough, pool);
+        BatchHandler handler = new BatchHandler(fanout, cfg, coordinator, passthrough, metrics, DispatcherTestSupport.configService(lb), pool, Schedulers.immediate());
+        DispatchRouter router = new DispatchRouter(handler, passthrough);
         // A real transport is required to exercise lazy DataBuffer bodies and their ownership.
         server = HttpServer.create().port(0).handle(new ReactorHttpHandlerAdapter(RouterFunctions.toHttpHandler(router.routes()))).bindNow();
         client = WebTestClient.bindToServer().baseUrl("http://localhost:" + server.port()).responseTimeout(Duration.ofSeconds(10)).build();
@@ -318,11 +313,17 @@ class DispatcherE2ETest {
         return body;
     }
 
-    private void assertNoFeTraffic() {
-        frontends.forEach(fe -> assertEquals(0, fe.getRequestCount()));
+    private JSONArray preview(String path, String body, String mode, int count) {
+        JSONObject result = post("/_dryrun" + path, body, 200);
+        assertEquals(mode, result.getString("mode"));
+        assertEquals(count, result.getInteger("chunk_count"));
+        assertEquals(count, result.getJSONArray("chunks").size());
+        verifyNoInteractions(coordinator);
+        assertNoFeTraffic();
+        return result.getJSONArray("chunks");
     }
 
-    private static String url(MockWebServer server) {
-        return server.url("/").toString().replaceAll("/$", "");
+    private void assertNoFeTraffic() {
+        frontends.forEach(fe -> assertEquals(0, fe.getRequestCount()));
     }
 }

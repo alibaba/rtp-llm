@@ -16,20 +16,21 @@ public class DispatchRouter {
 
     private final BatchHandler batchHandler;
     private final PassthroughClient passthroughClient;
-    private final FePool fePool;
 
     public RouterFunction<ServerResponse> routes() {
         RouterFunctions.Builder b = RouterFunctions.route();
         for (BatchEndpointSpec spec : BatchEndpointSpec.SPECS) {
             String path = "/dispatcher" + spec.getPath();
-            b.POST(path, req -> batchHandler.handle(req, spec));
+            b.POST("/dispatcher/_dryrun" + spec.getPath(), req -> batchHandler.handle(req, spec, true));
+            b.POST(path, req -> batchHandler.handle(req, spec, false));
             // Both /dispatcher and /dispatcher/ must split root batches.
             if (path.endsWith("/")) {
-                String bare = path.substring(0, path.length() - 1);
-                b.POST(bare, req -> batchHandler.handle(req, spec));
+                b.POST(path.substring(0, path.length() - 1), req -> batchHandler.handle(req, spec, false));
+                b.POST("/dispatcher/_dryrun", req -> batchHandler.handle(req, spec, true));
             }
         }
-        return b.GET("/dispatcher/_snapshot", req -> ServerResponse.ok().bodyValue(fePool.snapshot()))
+        return b.route(RequestPredicates.path("/dispatcher/_dryrun/**"),
+                        req -> DispatcherResponses.error(400, "invalid_batch_request", "unknown dry-run endpoint or method"))
                 .route(RequestPredicates.path("/dispatcher/**"), passthroughClient::forward)
                 .build();
     }

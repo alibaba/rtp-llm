@@ -58,13 +58,13 @@ public class BatchHandler {
         this.cpuScheduler = cpuScheduler;
     }
 
-    public Mono<ServerResponse> handle(ServerRequest request, BatchEndpointSpec spec) {
+    public Mono<ServerResponse> handle(ServerRequest request, BatchEndpointSpec spec, boolean dryRun) {
         long start = System.currentTimeMillis();
         AtomicInteger status = new AtomicInteger(499);
         AtomicBoolean delegatedToPassthrough = new AtomicBoolean(false);
         return request.bodyToMono(byte[].class).defaultIfEmpty(new byte[0])
                 .flatMap(bytes -> Mono.defer(
-                                () -> handleBody(request, spec, bytes, delegatedToPassthrough))
+                                () -> handleBody(request, spec, bytes, dryRun, delegatedToPassthrough))
                         .subscribeOn(cpuScheduler))
                 .onErrorResume(e -> {
                     String errMsg = e.toString();
@@ -89,15 +89,14 @@ public class BatchHandler {
                 })
                 .doOnNext(response -> status.set(response.rawStatusCode()))
                 .doFinally(signal -> {
-                    if (!delegatedToPassthrough.get()) {
+                    if (!dryRun && !delegatedToPassthrough.get()) {
                         metricsReporter.reportRequest("batch", spec.getPath(), status.get(), System.currentTimeMillis() - start);
                     }
                 });
     }
 
-    private Mono<ServerResponse> handleBody(ServerRequest request, BatchEndpointSpec spec,
-                                        byte[] bytes,
-                                        AtomicBoolean delegatedToPassthrough) {
+    private Mono<ServerResponse> handleBody(ServerRequest request, BatchEndpointSpec spec, byte[] bytes,
+                                          boolean dryRun, AtomicBoolean delegatedToPassthrough) {
         JSONObject body = BatchBodyParser.parseObject(bytes);
         if (body == null) {
             return badRequest("expected a JSON object body");
@@ -109,6 +108,9 @@ public class BatchHandler {
         }
         JSONArray arr = body.get(spec.getRequestArrayField()) instanceof JSONArray value ? value : null;
         if (!spec.isSplittableBatch(body, arr)) {
+            if (dryRun) {
+                return preview("passthrough", List.of(body));
+            }
             delegatedToPassthrough.set(true);
             return passthroughClient.forward(request, bytes);
         }
@@ -116,13 +118,14 @@ public class BatchHandler {
         if (validationError != null) {
             return badRequest(validationError);
         }
-        if (arr.isEmpty()) {
+        if (arr.isEmpty() && !dryRun) {
             JSONObject emptyEnvelope = JSONObject.of(spec.getResponseArrayField(), new JSONArray());
             spec.finishMerge(emptyEnvelope, List.of(), List.of(), body);
             return DispatcherResponses.jsonBytes(200, BatchBodyParser.serialize(emptyEnvelope));
         }
 
-        boolean atomicBatchAllowed = !hasActiveTrafficPolicy();
+        TrafficPolicyConfig policy = loadBalanceConfig.getRouter().getGroupSelector();
+        boolean atomicBatchAllowed = policy == null || (policy.getRules().isEmpty() && policy.getDefaultTargets().isEmpty());
         BatchChunkAssembler batch = new BatchChunkAssembler(body, spec, cfg.getSubBatchSpec(), atomicBatchAllowed);
         int chunkCount = batch.chunkCount();
 
@@ -134,6 +137,10 @@ public class BatchHandler {
         // Charge repeated envelopes before allocating targets or materializing chunks.
         if (batch.projectedBytes() + 1024L * chunkCount > cfg.getMaxAggregateRequestBytes()) {
             throw new AggregateRequestTooLargeException(cfg.getMaxAggregateRequestBytes());
+        }
+
+        if (dryRun) {
+            return preview("split", batch.chunks(List.of()));
         }
 
         boolean assignBe = cfg.isPreAssignBe() && spec.isPreAssignable() && atomicBatchAllowed;
@@ -169,9 +176,13 @@ public class BatchHandler {
                 });
     }
 
-    private boolean hasActiveTrafficPolicy() {
-        TrafficPolicyConfig policy = loadBalanceConfig.getRouter().getGroupSelector();
-        return policy != null && (!policy.getRules().isEmpty() || !policy.getDefaultTargets().isEmpty());
+    /** Preview uses the outbound byte budget and stops before any target allocation. */
+    private Mono<ServerResponse> preview(String mode, List<JSONObject> chunks) {
+        byte[] body = BatchBodyParser.serialize(JSONObject.of("mode", mode, "chunk_count", chunks.size(), "chunks", chunks));
+        if (body.length > cfg.getMaxAggregateRequestBytes()) {
+            throw new AggregateRequestTooLargeException(cfg.getMaxAggregateRequestBytes());
+        }
+        return DispatcherResponses.jsonBytes(200, body);
     }
 
     private List<String> localFeUrls(int count) {

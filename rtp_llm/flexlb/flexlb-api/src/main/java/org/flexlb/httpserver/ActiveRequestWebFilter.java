@@ -19,7 +19,7 @@ public final class ActiveRequestWebFilter implements WebFilter {
         String path = exchange.getRequest().getPath().pathWithinApplication().value();
         boolean serving = path.equals("/rtp_llm/batch_schedule")
                 || path.equals("/dispatcher")
-                || (path.startsWith("/dispatcher/") && !path.equals("/dispatcher/_snapshot"));
+                || (path.startsWith("/dispatcher/") && !path.equals("/dispatcher/_dryrun") && !path.startsWith("/dispatcher/_dryrun/"));
         if (!serving) {
             return chain.filter(exchange);
         }
