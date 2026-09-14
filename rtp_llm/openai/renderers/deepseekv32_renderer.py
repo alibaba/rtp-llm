@@ -162,7 +162,8 @@ class DeepseekV32Renderer(ReasoningToolBaseRenderer):
 
         # Add tools from request level to the first system message
         # According to encoding_dsv32 format, tools must be attached to a system message
-        if request.tools:
+        active_tools = self._effective_tools(request)
+        if active_tools:
             tools_data = [
                 {
                     "type": "function",
@@ -172,7 +173,7 @@ class DeepseekV32Renderer(ReasoningToolBaseRenderer):
                         "parameters": tool.function.parameters,
                     },
                 }
-                for tool in request.tools
+                for tool in active_tools
             ]
 
             # Find the first system message and add tools to it
@@ -251,7 +252,7 @@ class DeepseekV32Renderer(ReasoningToolBaseRenderer):
         Returns:
             DeepSeekV32Detector if tools are present, None otherwise
         """
-        if request.tools:
+        if self._effective_tools(request):
             # Determine thinking_mode based on whether request is in thinking mode
             thinking_mode = "thinking" if self.in_think_mode(request) else "chat"
 

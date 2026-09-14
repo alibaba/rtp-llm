@@ -11,8 +11,11 @@ from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
     FinisheReason,
+    GPTFunctionDefinition,
+    GPTToolDefinition,
     RoleEnum,
 )
+from rtp_llm.openai.renderers.chatglm45_renderer import ChatGlm45Renderer
 from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
     RendererParams,
@@ -995,14 +998,16 @@ class NeedsReasoningToolStatusTest(TestCase):
     def _make_renderer(self, in_think_mode):
         renderer = Mock(spec=CustomChatRenderer)
         renderer.in_think_mode = Mock(return_value=in_think_mode)
+        renderer._effective_tools = CustomChatRenderer._effective_tools.__get__(renderer)
         renderer.needs_reasoning_tool_status = (
             CustomChatRenderer.needs_reasoning_tool_status.__get__(renderer)
         )
         return renderer
 
-    def _make_request(self, recorded_anchor=None, tools=None):
+    def _make_request(self, recorded_anchor=None, tools=None, tool_choice=None):
         request = Mock()
         request.tools = tools
+        request.tool_choice = tool_choice
         request.prompt_has_think_anchor = Mock(return_value=recorded_anchor)
         return request
 
@@ -1026,6 +1031,15 @@ class NeedsReasoningToolStatusTest(TestCase):
             )
         )
 
+    def test_disabled_tools_do_not_open_the_gate(self):
+        # tool_choice=none 时工具不可用，门控只应看 think 与锚点。
+        renderer = self._make_renderer(in_think_mode=False)
+        self.assertFalse(
+            renderer.needs_reasoning_tool_status(
+                self._make_request(tools=["a tool"], tool_choice="none")
+            )
+        )
+
     def test_plain_request_keeps_the_gate_shut(self):
         renderer = self._make_renderer(in_think_mode=False)
         for recorded in (None, False):
@@ -1042,6 +1056,188 @@ class NeedsReasoningToolStatusTest(TestCase):
         renderer = self._make_renderer(in_think_mode=False)
         request = self._make_request(recorded_anchor=None)
         self.assertFalse(renderer.needs_reasoning_tool_status(request))
+
+
+def _weather_tool() -> GPTToolDefinition:
+    return GPTToolDefinition(
+        type="function",
+        function=GPTFunctionDefinition(
+            name="get_weather",
+            description="Get weather",
+            parameters={"type": "object", "properties": {}},
+        ),
+    )
+
+
+class RenderChatRecordsThinkAnchorTest(TestCase):
+    """渲染即记录锚点：门控只认渲染时写下的标记，非 endpoint 链路不能漏。"""
+
+    THINK_START_TAG = "<think>\n"
+
+    def _make_renderer(self, prompt):
+        renderer = Mock(spec=ReasoningToolBaseRenderer)
+        renderer.think_start_tag = self.THINK_START_TAG
+        for name in (
+            "_prompt_ends_with_think_anchor",
+            "_record_prompt_think_anchor",
+            "_effective_tools",
+            "needs_reasoning_tool_status",
+        ):
+            setattr(
+                renderer, name, getattr(CustomChatRenderer, name).__get__(renderer)
+            )
+        renderer._build_prompt = Mock(return_value=prompt)
+        renderer.tokenizer = Mock()
+        renderer.tokenizer.encode = Mock(return_value=[1, 2, 3])
+        renderer.render_chat = ReasoningToolBaseRenderer.render_chat.__get__(renderer)
+        return renderer
+
+    def _make_request(self):
+        return ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hi")]
+        )
+
+    def test_render_chat_records_anchored_prompt(self):
+        request = self._make_request()
+        self._make_renderer(f"user hi\n{self.THINK_START_TAG}").render_chat(request)
+
+        self.assertIs(request.prompt_has_think_anchor(), True)
+
+    def test_render_chat_records_unanchored_prompt(self):
+        request = self._make_request()
+        self._make_renderer("user hi\nassistant").render_chat(request)
+
+        self.assertIs(request.prompt_has_think_anchor(), False)
+
+    def test_render_chat_does_not_overwrite_recorded_anchor(self):
+        # endpoint 在 prepopulation 之后记录的值是权威，renderer 不得覆盖。
+        request = self._make_request()
+        request.set_prompt_has_think_anchor(False)
+        self._make_renderer(f"user hi\n{self.THINK_START_TAG}").render_chat(request)
+
+        self.assertIs(request.prompt_has_think_anchor(), False)
+
+    def test_recorded_anchor_opens_the_gate_without_a_second_render(self):
+        renderer = self._make_renderer(f"user hi\n{self.THINK_START_TAG}")
+        renderer.in_think_mode = Mock(return_value=False)
+        request = self._make_request()
+
+        self.assertFalse(renderer.needs_reasoning_tool_status(request))
+        renderer.render_chat(request)
+        self.assertTrue(renderer.needs_reasoning_tool_status(request))
+        renderer._build_prompt.assert_called_once()
+
+
+class ToolChoiceNoneTest(TestCase):
+    """tool_choice=none 表示模型不得调用任何工具：提示词、检测器与门控都不应再
+    看到被禁用的工具列表。"""
+
+    def _make_request(self, tool_choice):
+        return ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hi")],
+            tools=[_weather_tool()],
+            tool_choice=tool_choice,
+        )
+
+    def _make_prompt_renderer(self):
+        renderer = Mock(spec=ReasoningToolBaseRenderer)
+        renderer.chat_template = "{% if tools %}HAS_TOOLS{% else %}NO_TOOLS{% endif %}"
+        for name in (
+            "_effective_tools",
+            "_preprocess_messages",
+            "_customize_jinja_env",
+            "_build_prompt",
+        ):
+            setattr(
+                renderer,
+                name,
+                getattr(ReasoningToolBaseRenderer, name).__get__(renderer),
+            )
+        return renderer
+
+    def test_effective_tools_hide_disabled_tools(self):
+        renderer = Mock(spec=CustomChatRenderer)
+        renderer._effective_tools = CustomChatRenderer._effective_tools.__get__(
+            renderer
+        )
+
+        self.assertIsNone(renderer._effective_tools(self._make_request("none")))
+        for tool_choice in (None, "auto", "required"):
+            with self.subTest(tool_choice=tool_choice):
+                tools = renderer._effective_tools(self._make_request(tool_choice))
+                self.assertEqual(len(tools), 1)
+
+    def test_prompt_context_hides_disabled_tools(self):
+        renderer = self._make_prompt_renderer()
+
+        self.assertEqual(
+            renderer._build_prompt(self._make_request("none")), "NO_TOOLS"
+        )
+        self.assertEqual(
+            renderer._build_prompt(self._make_request("auto")), "HAS_TOOLS"
+        )
+
+    def test_glm_detector_is_absent_when_tools_are_disabled(self):
+        renderer = Mock(spec=ChatGlm45Renderer)
+        renderer._effective_tools = CustomChatRenderer._effective_tools.__get__(
+            renderer
+        )
+        renderer._create_detector = ChatGlm45Renderer._create_detector.__get__(renderer)
+
+        self.assertIsNotNone(renderer._create_detector(self._make_request("auto")))
+        self.assertIsNone(renderer._create_detector(self._make_request("none")))
+
+    def test_gate_ignores_disabled_tools(self):
+        renderer = Mock(spec=CustomChatRenderer)
+        renderer.in_think_mode = Mock(return_value=False)
+        for name in ("_effective_tools", "needs_reasoning_tool_status"):
+            setattr(
+                renderer, name, getattr(CustomChatRenderer, name).__get__(renderer)
+            )
+
+        self.assertTrue(
+            renderer.needs_reasoning_tool_status(self._make_request("auto"))
+        )
+        self.assertFalse(
+            renderer.needs_reasoning_tool_status(self._make_request("none"))
+        )
+
+
+class GlmTojsonFilterTest(TestCase):
+    """GLM4.5 renderer 不再覆盖 _customize_jinja_env：基类提供的 tojson 必须与被
+    删除的覆盖行为一致——字符串原样返回（不加引号），其余按 json.dumps 序列化。"""
+
+    def test_renderer_relies_on_the_base_filter(self):
+        self.assertIs(
+            ChatGlm45Renderer._customize_jinja_env,
+            ReasoningToolBaseRenderer._customize_jinja_env,
+        )
+
+    def _render_value(self, value):
+        renderer = Mock(spec=ReasoningToolBaseRenderer)
+        renderer.chat_template = "{{ value | tojson }}"
+        for name in (
+            "_effective_tools",
+            "_preprocess_messages",
+            "_customize_jinja_env",
+            "_build_prompt",
+        ):
+            setattr(
+                renderer,
+                name,
+                getattr(ReasoningToolBaseRenderer, name).__get__(renderer),
+            )
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hi")],
+            chat_template_kwargs={"value": value},
+        )
+        return renderer._build_prompt(request)
+
+    def test_string_value_is_rendered_unquoted(self):
+        self.assertEqual(self._render_value("plain"), "plain")
+
+    def test_non_string_value_is_serialized_without_sorted_keys(self):
+        self.assertEqual(self._render_value({"b": 1, "a": 2}), '{"b": 1, "a": 2}')
 
 
 if __name__ == "__main__":

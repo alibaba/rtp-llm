@@ -9,6 +9,7 @@ from typing_extensions import override
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.grammar_constraint import GrammarConstraint
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
@@ -336,9 +337,9 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
                 "tool_choice forced tool-call decoding conflicts with existing "
                 f"grammar constraint(s): {', '.join(conflicts)}",
             )
-        config.structural_tag = json.dumps(
-            structural_tag, ensure_ascii=False, separators=(",", ":")
-        )
+        # 经 GrammarConstraint 写入规范化字典：引擎序列化前会断言约束已规范化
+        # （字符串形式会在 trans_input 的 validate_engine_ready 处被拒绝）。
+        GrammarConstraint("structural_tag", structural_tag).apply_to_config(config)
 
     def _build_prompt(self, request: ChatCompletionRequest) -> str:
         """

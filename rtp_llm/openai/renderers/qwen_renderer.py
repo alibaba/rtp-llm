@@ -241,7 +241,13 @@ class QwenRenderer(CustomChatRenderer):
             pass
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        if request.tools or self.in_think_mode(request):
+        rendered_input = self._render_chat_impl(request)
+        # 渲染即记录锚点：响应侧的门控只认这个标记，非 endpoint 链路也必须填。
+        self._record_prompt_think_anchor(request, rendered_input.rendered_prompt)
+        return rendered_input
+
+    def _render_chat_impl(self, request: ChatCompletionRequest) -> RenderedInputs:
+        if self._effective_tools(request) or self.in_think_mode(request):
             return self.qwen_reasoning_tool_renderer.render_chat(request)
 
         if (self.template_chat_renderer != None) and (

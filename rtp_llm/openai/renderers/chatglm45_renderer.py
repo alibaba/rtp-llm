@@ -66,7 +66,7 @@ class ChatGlm45Renderer(ReasoningToolBaseRenderer):
         self, request: ChatCompletionRequest
     ) -> Optional[BaseFormatDetector]:
         """创建GLM45检测器"""
-        if request.tools:
+        if self._effective_tools(request):
             return Glm4MoeDetector()
         else:
             return None

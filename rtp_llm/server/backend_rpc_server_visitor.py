@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
 
 import torch
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.exceptions import ExceptionCategory, ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
@@ -55,6 +55,18 @@ _TERMINAL_ROUTE_EXCEPTION_TYPES = frozenset(
         # Retrying it with a new request id silently starts a second admission
         # attempt with a fresh identity and can hide the original timeout.
         ExceptionType.BATCH_SLO_EXPIRED,
+    }
+)
+# 8xxx 里的取消与永久性请求错误不是瞬态路由故障：换个 request id 重试会违背取消
+# 语义（CANCELLED / ROUTER_REQUEST_CANCELLED），或把注定失败的请求再提交一遍
+# （MASTER_INVALID_REQUEST 等 BAD_REQUEST）。
+_NON_RETRYABLE_ROUTE_CATEGORIES = frozenset(
+    {
+        ExceptionCategory.CANCELLED,
+        ExceptionCategory.BAD_REQUEST,
+        ExceptionCategory.UNSUPPORTED,
+        ExceptionCategory.TOO_LONG,
+        ExceptionCategory.INVALID_OUTPUT,
     }
 )
 
@@ -177,6 +189,15 @@ class BackendRPCServerVisitor:
                     exception_type == int(terminal_type)
                     for terminal_type in _TERMINAL_ROUTE_EXCEPTION_TYPES
                 ):
+                    return False
+                # Cancellation and permanent request errors carry 8xxx codes too,
+                # but they are not transient: a retry under a new request id
+                # would defeat the cancel or re-submit a doomed request.
+                try:
+                    category = ExceptionType(exception_type).category
+                except ValueError:
+                    category = None
+                if category in _NON_RETRYABLE_ROUTE_CATEGORIES:
                     return False
                 return exception_type >= 8000
             except (TypeError, ValueError):
@@ -590,14 +611,22 @@ class BackendRPCServerVisitor:
         # 结束标记」的兜底永远不成立，模型会被 think 语法约束卡住直到撞上序列上限。
         # 结束标记是逐 token 强制写入的，所以要为它留出长度：收敛到恰好等于可生成
         # 空间会让强制收尾落在最后一步，标记写不完，think 块照旧闭合不了。
-        end_tag_len = len(input.generate_config.end_think_token_ids)
+        # 字段在未经 pydantic 校验的构造路径上可能缺席或为 None，按未配置处理；
+        # 这个 clamp 绝不能成为请求失败的原因。
+        end_think_token_ids = (
+            getattr(input.generate_config, "end_think_token_ids", None) or []
+        )
+        max_thinking_tokens = getattr(
+            input.generate_config, "max_thinking_tokens", None
+        )
+        end_tag_len = len(end_think_token_ids)
         think_budget_cap = max(max_new_tokens - end_tag_len, 1)
-        if input.generate_config.max_thinking_tokens > think_budget_cap:
+        if max_thinking_tokens is not None and max_thinking_tokens > think_budget_cap:
             logging.warning(
                 "max_thinking_tokens %d exceeds generatable tokens %d minus the "
                 "%d-token think end tag (max_seq_len=%d, prompt_length=%d), "
                 "clamping to %d",
-                input.generate_config.max_thinking_tokens,
+                max_thinking_tokens,
                 max_new_tokens,
                 end_tag_len,
                 self.max_seq_len,
