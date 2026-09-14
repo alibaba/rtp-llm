@@ -32,7 +32,7 @@ from rtp_llm.openai.api_datatype import ChatCompletionRequest, GenerateConfig
 from rtp_llm.openai.api_datatype import ResponseFormat as OpenAIResponseFormat
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer
-from rtp_llm.ops import SpecialTokens
+from rtp_llm.ops import SpecialTokens, SpeculativeType
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.base_model_datatypes import GenerateInput
@@ -1829,6 +1829,7 @@ class MaxThinkingTokensClampTest(TestCase):
     def setUp(self):
         self.visitor = Mock()
         self.visitor.max_seq_len = 100
+        self.visitor.sp_config = None
         self.visitor._validate_input = BackendRPCServerVisitor._validate_input.__get__(
             self.visitor
         )
@@ -1850,7 +1851,7 @@ class MaxThinkingTokensClampTest(TestCase):
                 max_thinking_tokens=max_thinking_tokens,
                 in_think_mode=in_think_mode,
                 end_think_token_ids=(
-                    [] if end_think_token_ids is None else end_think_token_ids
+                    [101] if end_think_token_ids is None else end_think_token_ids
                 ),
             ),
         )
@@ -1861,10 +1862,10 @@ class MaxThinkingTokensClampTest(TestCase):
         with patch("rtp_llm.server.backend_rpc_server_visitor.logging") as mock_logging:
             self.visitor._validate_input(generate_input)
 
-        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 60)
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 58)
         self.assertTrue(
             any(
-                "exceeds generatable tokens" in str(call)
+                "exceeds the safe thinking budget" in str(call)
                 for call in mock_logging.warning.call_args_list
             )
         )
@@ -1880,7 +1881,7 @@ class MaxThinkingTokensClampTest(TestCase):
         generate_input = self._make_input(max_new_tokens=80, max_thinking_tokens=75)
         self.visitor._validate_input(generate_input)
 
-        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 60)
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 58)
 
     def test_zero_budget_keeps_thinking_disabled(self):
         generate_input = self._make_input(max_new_tokens=80, max_thinking_tokens=0)
@@ -1897,8 +1898,8 @@ class MaxThinkingTokensClampTest(TestCase):
         generate_input = self._make_input(end_think_token_ids=[101, 102, 103])
         self.visitor._validate_input(generate_input)
 
-        # room = 60，结束标记 3 个 token，故上限为 57。
-        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 57)
+        # room = 60，结束标记 3 个 token，再为 EOS/最终内容留 1 个 token。
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 56)
 
     def test_budget_exactly_at_room_is_pulled_back_for_the_end_tag(self):
         generate_input = self._make_input(
@@ -1906,16 +1907,139 @@ class MaxThinkingTokensClampTest(TestCase):
         )
         self.visitor._validate_input(generate_input)
 
-        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 59)
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 58)
 
-    def test_clamp_stays_positive_when_the_end_tag_exceeds_the_room(self):
-        # 余量比结束标记还短时不能收敛出 0：0 在 C++ 侧等于关闭 think 处理器。
+    def test_request_is_rejected_when_the_end_tag_exceeds_the_room(self):
         generate_input = self._make_input(
             prompt_length=98, max_new_tokens=80, end_think_token_ids=[1, 2, 3, 4, 5]
         )
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self.visitor._validate_input(generate_input)
+
+        self.assertEqual(ctx.exception.exception_type, ExceptionType.LONG_PROMPT_ERROR)
+        self.assertIn("cannot fit", str(ctx.exception))
+
+    def test_enabled_thinking_requires_end_token_ids(self):
+        generate_input = self._make_input(end_think_token_ids=[])
+
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self.visitor._validate_input(generate_input)
+
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
+        )
+        self.assertIn("end_think_token_ids", str(ctx.exception))
+
+    def test_clamp_rebuilds_the_structural_reasoning_budget(self):
+        generate_input = self._make_input(end_think_token_ids=[101, 102])
+        config = generate_input.generate_config
+        config.thinking_mode = ThinkingMode.ENABLED
+        config.finalize_response_format(
+            reasoning_format=ReasoningFormat(tag_begin="", tag_end="</think>")
+        )
+        original_budget = config.structural_tag["format"]["elements"][0]["content"][
+            "max_tokens"
+        ]
+
         self.visitor._validate_input(generate_input)
 
-        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 1)
+        rebuilt_budget = config.structural_tag["format"]["elements"][0]["content"][
+            "max_tokens"
+        ]
+        self.assertEqual(original_budget, 32000)
+        self.assertEqual(config.max_thinking_tokens, 57)
+        self.assertEqual(rebuilt_budget, 57)
+
+    def test_adaptive_reasoning_grammar_is_clamped_and_rebuilt(self):
+        generate_input = self._make_input(
+            end_think_token_ids=[101, 102], in_think_mode=False
+        )
+        config = generate_input.generate_config
+        config.thinking_mode = ThinkingMode.ADAPTIVE
+        config.begin_think_token_ids = [100]
+        config.finalize_response_format(
+            reasoning_format=ReasoningFormat(tag_begin="<think>", tag_end="</think>")
+        )
+        original_budget = config.structural_tag["format"]["elements"][0]["elements"][0][
+            "content"
+        ]["max_tokens"]
+
+        self.visitor._validate_input(generate_input)
+
+        rebuilt_budget = config.structural_tag["format"]["elements"][0]["elements"][0][
+            "content"
+        ]["max_tokens"]
+        self.assertEqual(original_budget, 32000)
+        self.assertEqual(config.max_thinking_tokens, 57)
+        self.assertEqual(rebuilt_budget, 57)
+
+    def test_speculative_reserve_is_removed_before_clamping(self):
+        self.visitor.sp_config = SimpleNamespace(
+            model_type="mtp", type=SpeculativeType.MTP, gen_num_per_cycle=3
+        )
+        generate_input = self._make_input(end_think_token_ids=[101])
+
+        with patch.dict(os.environ, {"RTP_LLM_STREAM_ASYNC": "0"}):
+            self.visitor._validate_input(generate_input)
+
+        # room 60 - engine reserve (gamma + 1) - end tag 1 - final/EOS token 1
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 54)
+
+    def test_stream_async_reserves_two_draft_windows(self):
+        self.visitor.sp_config = SimpleNamespace(
+            model_type="mtp", type=SpeculativeType.MTP, gen_num_per_cycle=3
+        )
+        generate_input = self._make_input(end_think_token_ids=[101])
+
+        with patch.dict(os.environ, {"RTP_LLM_STREAM_ASYNC": "1"}):
+            self.visitor._validate_input(generate_input)
+
+        # room 60 - (2 * gamma + 1) - end tag 1 - final/EOS token 1
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 51)
+
+    def test_dspark_reserves_three_draft_windows(self):
+        self.visitor.sp_config = SimpleNamespace(
+            model_type="dspark", type=SpeculativeType.DSPARK, gen_num_per_cycle=3
+        )
+        generate_input = self._make_input(end_think_token_ids=[101])
+
+        with patch.dict(os.environ, {"RTP_LLM_STREAM_ASYNC": "1"}):
+            self.visitor._validate_input(generate_input)
+
+        # room 60 - (3 * gamma) - end tag 1 - final/EOS token 1
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 49)
+
+    def test_force_disable_sp_run_keeps_engine_level_reserve(self):
+        self.visitor.sp_config = SimpleNamespace(
+            model_type="mtp", type=SpeculativeType.MTP, gen_num_per_cycle=3
+        )
+        generate_input = self._make_input(end_think_token_ids=[101])
+        generate_input.generate_config.force_disable_sp_run = True
+
+        with patch.dict(os.environ, {"RTP_LLM_STREAM_ASYNC": "0"}):
+            self.visitor._validate_input(generate_input)
+
+        # GenerateStream::reserveStep() remains active for the engine even when
+        # speculative execution is disabled for this individual request.
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 54)
+
+    def test_default_budget_is_clamped_without_warning(self):
+        config = GenerateConfig()
+        config.in_think_mode = True
+        config.thinking_mode = ThinkingMode.ENABLED
+        config.end_think_token_ids = [101]
+        generate_input = GenerateInput(
+            request_id=0,
+            token_ids=torch.zeros(1, 40, dtype=torch.int),
+            mm_inputs=[],
+            generate_config=config,
+        )
+
+        with patch("rtp_llm.server.backend_rpc_server_visitor.logging") as logging_mock:
+            self.visitor._validate_input(generate_input)
+
+        self.assertEqual(config.max_thinking_tokens, 58)
+        logging_mock.warning.assert_not_called()
 
     def _make_config_stub(self, **fields):
         """未经 pydantic 校验的最小配置对象：字段可能缺席，也可能为 None。"""

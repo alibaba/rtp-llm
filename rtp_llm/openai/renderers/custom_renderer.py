@@ -100,7 +100,7 @@ def _get_think_config(generate_env_config):
     return think_mode, think_start_tag, think_end_tag
 
 
-def _strip_boundary_special_ids(tokenizer, ids: List[int]) -> List[int]:
+def _strip_boundary_special_ids(tokenizer, word: str, ids: List[int]) -> List[int]:
     """去掉 legacy 回退编码包在词两端的特殊 token。
 
     旧式 encode() 默认会追加 BOS/EOS，包着特殊 token 的序列在生成输出中
@@ -112,7 +112,12 @@ def _strip_boundary_special_ids(tokenizer, ids: List[int]) -> List[int]:
     special_tokens = getattr(tokenizer, "all_special_tokens", None)
     if not isinstance(special_tokens, (list, tuple)) or not special_tokens:
         return ids
-    special_ids = set(tokenizer.convert_tokens_to_ids(list(special_tokens)))
+    special_token_ids = tokenizer.convert_tokens_to_ids(list(special_tokens))
+    special_ids = set(special_token_ids)
+    if word in special_tokens:
+        word_id = tokenizer.convert_tokens_to_ids(word)
+        if isinstance(word_id, int) and word_id in ids:
+            return [word_id]
     while len(ids) > 1 and ids[0] in special_ids:
         ids.pop(0)
     while len(ids) > 1 and ids[-1] in special_ids:
@@ -443,7 +448,7 @@ class CustomChatRenderer:
                         type(self.tokenizer).__name__,
                     )
                 ids = _strip_boundary_special_ids(
-                    self.tokenizer, list(self.tokenizer.encode(word))
+                    self.tokenizer, word, list(self.tokenizer.encode(word))
                 )
             if ids:
                 ids_list.append(list(ids))
@@ -1199,6 +1204,19 @@ class CustomChatRenderer:
         if getattr(request, "tool_choice", None) == "none":
             return None
         return request.tools
+
+    def _normalize_tools_context(
+        self, request: ChatCompletionRequest, context: Dict[str, Any]
+    ) -> None:
+        """Make the rendered tools match the request's effective tool policy."""
+
+        tools = self._effective_tools(request)
+        if not tools:
+            context.pop("tools", None)
+            return
+        context["tools"] = [
+            tool.model_dump(exclude_none=True, mode="json") for tool in tools
+        ]
 
     def needs_reasoning_tool_status(self, request: ChatCompletionRequest) -> bool:
         """Whether the response path needs the tool/reasoning-aware status object.

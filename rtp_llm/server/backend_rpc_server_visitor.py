@@ -7,13 +7,23 @@ from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
 
 import torch
 
-from rtp_llm.config.exceptions import ExceptionCategory, ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.config.exceptions import (
+    ExceptionCategory,
+    ExceptionType,
+    FtRuntimeException,
+)
+from rtp_llm.config.generate_config import RoleAddr, RoleType, ThinkingMode
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
+from rtp_llm.config.response_format_compiler import recompile_reasoning_envelope
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
-from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
+from rtp_llm.ops import (
+    SpeculativeExecutionConfig,
+    SpeculativeType,
+    VitSeparation,
+    get_block_cache_keys,
+)
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
@@ -31,6 +41,7 @@ from rtp_llm.utils.base_model_datatypes import (
     RequestInfo,
 )
 from rtp_llm.utils.time_util import Timer
+from rtp_llm.utils.util import str_to_bool
 
 if TYPE_CHECKING:
     from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -41,6 +52,31 @@ route_logger = logging.getLogger("route_logger")
 def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
     """Return the set of human-readable role names from a list of RoleAddr."""
     return {role_addr.role.name for role_addr in role_addrs}
+
+
+def _speculative_reserve_tokens(
+    sp_config: Optional[SpeculativeExecutionConfig],
+) -> int:
+    """Mirror the speculative token reserve in GenerateStream::maxTokenNum()."""
+
+    sp_type = (
+        getattr(sp_config, "type", SpeculativeType.NONE)
+        if sp_config is not None
+        else SpeculativeType.NONE
+    )
+    if (
+        sp_config is None
+        or not getattr(sp_config, "model_type", "")
+        or sp_type in (None, "", SpeculativeType.NONE)
+    ):
+        return 0
+
+    gamma = max(0, int(getattr(sp_config, "gen_num_per_cycle", 0) or 0))
+    if sp_type == SpeculativeType.DSPARK:
+        return 3 * gamma
+    if str_to_bool(os.environ.get("RTP_LLM_STREAM_ASYNC", "0") or "0"):
+        return 2 * gamma + 1
+    return gamma + 1
 
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
@@ -607,39 +643,70 @@ class BackendRPCServerVisitor:
                 f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
             )
 
-        # 预算只在 in_think_mode 下被引擎消费（ThinkModeLogitsProcessor 仅在
-        # in_think_mode 且预算 > 0 时才会创建），其余请求上该字段没有语义：未经
-        # 端点解析的构造路径会保留默认值 32000，逐请求触发无谓的告警与改写。
-        if not getattr(input.generate_config, "in_think_mode", False):
+        config = input.generate_config
+        thinking_mode = getattr(config, "thinking_mode", ThinkingMode.UNSPECIFIED)
+        uses_reasoning_grammar = thinking_mode in (
+            ThinkingMode.ENABLED,
+            ThinkingMode.ADAPTIVE,
+        ) or getattr(config, "in_think_mode", False)
+        if not uses_reasoning_grammar:
             return
 
-        # think 预算若超过实际可生成的 token 数，C++ 侧「预算耗尽即强制写入 think
-        # 结束标记」的兜底永远不成立，模型会被 think 语法约束卡住直到撞上序列上限。
-        # 结束标记是逐 token 强制写入的，所以要为它留出长度：收敛到恰好等于可生成
-        # 空间会让强制收尾落在最后一步，标记写不完，think 块照旧闭合不了。
-        # 字段在未经 pydantic 校验的构造路径上可能缺席或为 None，按未配置处理；
-        # 这个 clamp 绝不能成为请求失败的原因。
-        end_think_token_ids = (
-            getattr(input.generate_config, "end_think_token_ids", None) or []
+        # GenerateStream::maxTokenNum() reserves the current speculative draft
+        # window. Mirror that boundary here before rebuilding the grammar.
+        speculative_reserve = _speculative_reserve_tokens(self.sp_config)
+
+        max_new_tokens = min(
+            self.max_seq_len - input.prompt_length - speculative_reserve,
+            config.max_new_tokens,
         )
-        max_thinking_tokens = getattr(
-            input.generate_config, "max_thinking_tokens", None
-        )
-        end_tag_len = len(end_think_token_ids)
-        think_budget_cap = max(max_new_tokens - end_tag_len, 1)
-        if max_thinking_tokens is not None and max_thinking_tokens > think_budget_cap:
-            logging.warning(
-                "max_thinking_tokens %d exceeds generatable tokens %d minus the "
-                "%d-token think end tag (max_seq_len=%d, prompt_length=%d), "
-                "clamping to %d",
-                max_thinking_tokens,
-                max_new_tokens,
-                end_tag_len,
-                self.max_seq_len,
-                input.prompt_length,
-                think_budget_cap,
+        if max_new_tokens <= 0:
+            raise FtRuntimeException(
+                ExceptionType.LONG_PROMPT_ERROR,
+                f"model max tokens is {self.max_seq_len}, request length is "
+                f"{input.prompt_length}, speculative reserve is "
+                f"{speculative_reserve}, max_new_tokens is {max_new_tokens}",
             )
-            input.generate_config.max_thinking_tokens = think_budget_cap
+
+        end_think_token_ids = getattr(config, "end_think_token_ids", None) or []
+        if not end_think_token_ids:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "end_think_token_ids must be non-empty when thinking is enabled",
+            )
+
+        max_thinking_tokens = getattr(config, "max_thinking_tokens", None)
+        end_tag_len = len(end_think_token_ids)
+        # Reserve the complete end tag and one following token so the grammar
+        # can enter its final-answer branch and EOS remains reachable.
+        think_budget_cap = max_new_tokens - end_tag_len - 1
+        if think_budget_cap < 1:
+            raise FtRuntimeException(
+                ExceptionType.LONG_PROMPT_ERROR,
+                "remaining generation space cannot fit a positive thinking "
+                f"budget, the {end_tag_len}-token think end tag, and a final "
+                f"token (generatable_tokens={max_new_tokens})",
+            )
+        if max_thinking_tokens is not None and max_thinking_tokens > think_budget_cap:
+            budget_was_explicit = "max_thinking_tokens" in getattr(
+                config, "model_fields_set", set()
+            )
+            if budget_was_explicit:
+                logging.warning(
+                    "max_thinking_tokens %d exceeds the safe thinking budget "
+                    "%d (generatable_tokens=%d, think_end_tag_tokens=%d, "
+                    "speculative_reserve=%d, max_seq_len=%d, prompt_length=%d); "
+                    "clamping and rebuilding the reasoning grammar",
+                    max_thinking_tokens,
+                    think_budget_cap,
+                    max_new_tokens,
+                    end_tag_len,
+                    speculative_reserve,
+                    self.max_seq_len,
+                    input.prompt_length,
+                )
+            config.max_thinking_tokens = think_budget_cap
+            recompile_reasoning_envelope(config)
 
     @torch.inference_mode()
     async def enqueue(

@@ -1,7 +1,9 @@
+import hashlib
 import itertools
 import json
 import logging
 import threading
+from collections import OrderedDict
 from functools import partial
 from typing import Any, AsyncGenerator, List, Optional
 
@@ -64,6 +66,13 @@ _INT32_MAX = 2_147_483_647
 # check-then-set 的去重状态在共享 renderer 上可能被并发线程同时读写；
 # 这不是热路径（每个配置组合至多走一次），加锁的代价可以忽略。
 _ENABLED_WITHOUT_ANCHOR_WARN_LOCK = threading.Lock()
+_ENABLED_WITHOUT_ANCHOR_WARN_CACHE_SIZE = 128
+
+
+def _request_value_digest(value: Any) -> Optional[bytes]:
+    if value is None:
+        return None
+    return hashlib.sha256(str(value).encode("utf-8", errors="replace")).digest()
 
 
 def _enabled_without_anchor_warn_key(
@@ -76,9 +85,11 @@ def _enabled_without_anchor_warn_key(
     """
     return (
         think_start_tag,
-        getattr(request, "user_template", None),
-        getattr(request, "template_key", None),
+        _request_value_digest(getattr(request, "user_template", None)),
+        _request_value_digest(getattr(request, "template_key", None)),
         bool(getattr(request, "functions", None)),
+        bool(getattr(request, "tools", None)),
+        _request_value_digest(getattr(request, "tool_choice", None)),
     )
 
 
@@ -222,6 +233,53 @@ class OpenaiEndpoint(object):
 
         base_format = renderer.get_reasoning_format()
         think_start_tag = normalize_think_tag(self.generate_env_config.think_start_tag)
+        if config.thinking_mode == ThinkingMode.ENABLED:
+            anchor_state = (
+                request.prompt_has_think_anchor() if request is not None else None
+            )
+            if anchor_state is None:
+                begin_ids = config.begin_think_token_ids or self.tokenizer.encode(
+                    think_start_tag, add_special_tokens=False
+                )
+                anchored = bool(
+                    begin_ids
+                    and input_ids is not None
+                    and input_ids[-len(begin_ids) :] == begin_ids
+                )
+            else:
+                anchored = anchor_state
+
+            if anchored:
+                return base_format
+
+            # R1-style models may legitimately use fixed thinking without an
+            # anchor. Warn once per bounded template identity, without retaining
+            # request-controlled template bodies for the renderer lifetime.
+            warn_key = _enabled_without_anchor_warn_key(request, think_start_tag)
+            with _ENABLED_WITHOUT_ANCHOR_WARN_LOCK:
+                warned_keys = getattr(
+                    renderer, "_enabled_without_anchor_warned_keys", None
+                )
+                if not isinstance(warned_keys, OrderedDict):
+                    warned_keys = OrderedDict()
+                    renderer._enabled_without_anchor_warned_keys = warned_keys
+                should_warn = warn_key not in warned_keys
+                if should_warn:
+                    warned_keys[warn_key] = None
+                    if len(warned_keys) > _ENABLED_WITHOUT_ANCHOR_WARN_CACHE_SIZE:
+                        warned_keys.popitem(last=False)
+                else:
+                    warned_keys.move_to_end(warn_key)
+            if should_warn:
+                logging.warning(
+                    "thinking_mode=ENABLED but the rendered prompt does not end with "
+                    "the think start tag %r, so the model may never emit the think end "
+                    "tag. Pass enable_thinking=false in chat_template_kwargs, or use a "
+                    "template that injects the anchor.",
+                    think_start_tag,
+                )
+            return base_format
+
         begin_ids = config.begin_think_token_ids or self.tokenizer.encode(
             think_start_tag, add_special_tokens=False
         )
@@ -232,39 +290,6 @@ class OpenaiEndpoint(object):
             and input_ids is not None
             and input_ids[-len(begin_ids) :] == begin_ids
         )
-        if config.thinking_mode == ThinkingMode.ENABLED:
-            # 固定 ENABLED 按设计不要求模型自己吐 begin 标记（R1 风格模型无锚点也能
-            # think），所以这里只告警不拦截。模板未注入锚点通常意味着 think 被开在了
-            # 不支持 think 的模型上，模型可能永远吐不出结束标记。
-            #
-            # 用字符串锚点判定而非上面的 token 比较：DeepSeek 模板追加的是裸
-            # `<think>`，而 begin_ids 由 `<think>\n` 编码而来，token 比较会失配并
-            # 对一个配置正确的请求发出误导性告警。
-            anchored = prompt_has_begin
-            if request is not None and request.prompt_has_think_anchor() is not None:
-                anchored = request.prompt_has_think_anchor()
-            # 无锚点在 R1 风格模型上是合法配置，逐请求告警会刷屏：按 renderer
-            # 实例 + 模板 + tag 只提醒一次。
-            warn_key = _enabled_without_anchor_warn_key(request, think_start_tag)
-            with _ENABLED_WITHOUT_ANCHOR_WARN_LOCK:
-                warned_keys = getattr(
-                    renderer, "_enabled_without_anchor_warned_keys", None
-                )
-                if not isinstance(warned_keys, set):
-                    warned_keys = set()
-                    renderer._enabled_without_anchor_warned_keys = warned_keys
-                should_warn = not anchored and warn_key not in warned_keys
-                if should_warn:
-                    warned_keys.add(warn_key)
-            if should_warn:
-                logging.warning(
-                    "thinking_mode=ENABLED but the rendered prompt does not end with "
-                    "the think start tag %r, so the model may never emit the think end "
-                    "tag. Pass enable_thinking=false in chat_template_kwargs, or use a "
-                    "template that injects the anchor.",
-                    think_start_tag,
-                )
-            return base_format
         if config.thinking_mode == ThinkingMode.ADAPTIVE and prompt_has_begin:
             config.thinking_mode = ThinkingMode.ENABLED
             config.in_think_mode = True

@@ -178,11 +178,13 @@ class Qwen2VLRenderer(QwenRenderer):
             "tokenize": False,
             "add_generation_prompt": True,
             "add_vision_id": add_vision_id,
-            "tools": final_tools,
         }
         request_chat_template_kwargs = request.get_chat_template_kwargs()
         if request_chat_template_kwargs is not None:
             chat_template_kwargs.update(request_chat_template_kwargs)
+        # The request's effective tool policy is authoritative even when custom
+        # template kwargs also contain a tools field.
+        chat_template_kwargs["tools"] = final_tools
         prompt = self.tokenizer.apply_chat_template(
             final_messages, **chat_template_kwargs
         )

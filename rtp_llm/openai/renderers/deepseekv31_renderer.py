@@ -147,6 +147,8 @@ class DeepseekV31Renderer(ReasoningToolBaseRenderer):
         ):
             context.update(request.extra_configs.chat_template_kwargs)
 
+        self._normalize_tools_context(request, context)
+
         # 兼容一下enable_thinking的行为, 让用户指定enable_thinking时, thinking也能生效
         if context.get("enable_thinking") == True:
             context["thinking"] = context["enable_thinking"]
@@ -155,7 +157,7 @@ class DeepseekV31Renderer(ReasoningToolBaseRenderer):
             context["bos_token"] = self.tokenizer.bos_token
 
         # 带有tools的情况默认不开启thinking
-        if self._effective_tools(request):
+        if context.get("tools"):
             context["thinking"] = False
 
         # 创建Jinja2环境

@@ -120,6 +120,7 @@ class GenerateConfig(BaseModel):
     _ban_auto_downgraded: bool = PrivateAttr(default=False)
     _reasoning_envelope_applied: bool = PrivateAttr(default=False)
     _reasoning_final_constraint: Any = PrivateAttr(default=None)
+    _reasoning_format: Any = PrivateAttr(default=None)
 
     max_new_tokens: int = 32000
     # only for qwen agent fncall check max input tokens
