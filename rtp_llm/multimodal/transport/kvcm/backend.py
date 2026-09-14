@@ -16,6 +16,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
 )
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
 from rtp_llm.multimodal.transport.base import MMOutputResult, MMTransportBackend
+from rtp_llm.multimodal.transport.kvcm.client import RtpKvMetaObjectClient
 
 TRANSPORT_KVCM = "kvcm"
 _REMOVE_RETRY_SECONDS = 1.0
@@ -214,35 +215,7 @@ class KvcmOutputBackend(MMTransportBackend):
 
     @classmethod
     def create(cls, kvcm_config) -> "KvcmOutputBackend":
-        try:
-            from kv_cache_manager.client import (
-                KvMetaObjectClient,
-                KvMetaObjectClientConfig,
-            )
-        except ImportError as error:
-            raise RuntimeError(
-                "KVCM EMB storage requires the kvcm_py_client wheel with "
-                "KVMeta object support"
-            ) from error
-
-        try:
-            writer = KvMetaObjectClient(
-                KvMetaObjectClientConfig(
-                    addresses=tuple(kvcm_config.addresses),
-                    instance_id=kvcm_config.instance_id,
-                    instance_group=kvcm_config.instance_group,
-                    user_data=kvcm_config.user_data,
-                    transfer_client_config=kvcm_config.transfer_client_config,
-                    call_timeout_ms=kvcm_config.call_timeout_ms,
-                    write_timeout_seconds=kvcm_config.write_timeout_seconds,
-                    max_object_bytes=kvcm_config.max_object_bytes,
-                )
-            )
-        except ImportError as error:
-            raise RuntimeError(
-                "KVCM EMB storage requires the kvcm_py_client wheel with "
-                "KVMeta object support"
-            ) from error
+        writer = RtpKvMetaObjectClient(kvcm_config)
         try:
             return cls(writer, kvcm_config, _owns_writer=True)
         except Exception:

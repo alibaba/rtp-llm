@@ -13,8 +13,9 @@ KVCM 的 metadata 状态机、HA、动态容量和数据面安全语义，以 KV
 管理。KVCM 总体设计中的 generation/cleanup ledger、可续约 read/write lease、异构批量 allocation 和
 server-side object-set lease 是后续方案；在 client/server capability 明确协商前，RTP 不会推断或启用这些语义。
 
-RTP 的 ViT producer 使用 KVCM wheel 提供的 Python `KvMetaObjectClient`；LLM consumer 使用 C++
-`MMKvcmReader`/`MMKvcmClient`。两端共享同一 KVMeta object 契约，RTP 生产链路不依赖 v6d。
+RTP 的 ViT producer 使用仓库内的 `RtpKvMetaObjectClient`，由它把 RTP 启动配置映射到 KVCM wheel 的通用
+Python `KvMetaObjectClient`；LLM consumer 使用 C++ `MMKvcmReader`/`MMKvcmClient`。两端共享同一
+KVMeta object 契约，RTP 生产链路不依赖 v6d。
 
 ## 2. 背景、目标与非目标
 
@@ -45,7 +46,7 @@ flowchart LR
     request["LLM 请求\nsupport_kvcm=true"]
     vit["ViT Worker"]
     backend["KvcmOutputBackend"]
-    writer["KVCM Python client\nKvMetaObjectClient"]
+    writer["RTP Python client\nRtpKvMetaObjectClient"]
     kvcm["KVCM KvMetaObjectClient"]
     receipt["MultimodalOutputPB\n仅 receipt metadata"]
     reader["MMKvcmReader"]
@@ -73,6 +74,7 @@ flowchart LR
 |---|---|
 | `MMTransportConfig` / server args | 解析模式和大小上限，并从共享 `RECO_CLIENT_CONFIG` 派生 KVMeta client 配置，默认保持 `grpc` |
 | `KvcmOutputBackend` | 校验 ViT 输出、拼接逻辑 tensor、切片、生成 UUID key、构造 receipt、维护 release/GC |
+| RTP Python `RtpKvMetaObjectClient` | 接收一份 RTP `kvcm_config`，映射通用 client 参数，并负责 client 注册与生命周期 |
 | KVCM Python `KvMetaObjectClient` | 将连续 torch tensor 转为 caller-owned pointer descriptor，并按 64 keys/4 GiB 分批 Save/Remove |
 | `MMKvcmClientImpl` | LLM 侧 native object client，执行 Load/Remove 及对象边界校验 |
 | `MMKvcmReader` | 广告 capability、完整校验 receipt、分配 tensor、Load、重组并触发 release |
@@ -86,8 +88,9 @@ flowchart LR
 | 配置模型与参数入口 | `rtp_llm/config/mm_kvcm_config.py`、`rtp_llm/cpp/config/MMKvcmConfig.h`、`rtp_llm/config/py_config_modules.py`、`server/server_args/vit_group_args.py` |
 | receipt 协议 | `rtp_llm/cpp/model_rpc/proto/model_rpc_service.proto` |
 | ViT producer 与回收 | `rtp_llm/multimodal/transport/kvcm/backend.py` |
+| RTP Python client | `rtp_llm/multimodal/transport/kvcm/client.py` |
 | transport 选择与 proxy 路由 | `rtp_llm/multimodal/transport/factory.py`、`transport/proxy_router.py` |
-| ViT Python object client | KVCM wheel：`kv_cache_manager/client/kv_meta_object_client.py` |
+| 通用 Python object client | KVCM wheel：`kv_cache_manager/client/kv_meta_object_client.py` |
 | LLM native client/reader | `rtp_llm/cpp/multimodal_processor/transport/kvcm/MMKvcmClient*`、`MMKvcmReader*` |
 | 可选构建依赖 | `rtp_llm/cpp/multimodal_processor/transport/kvcm/BUILD`、`3rdparty/remote_kv_cache_manager/BUILD` |
 
@@ -108,7 +111,7 @@ runtime: MM_TRANSPORT_MODE=kvcm
 
 - 打开 flag 时为 LLM reader 编译 `MMKvcmClientKvcm.cc`，链接 KVCM client RPM 和 object-client headers；
 - 默认编译 `MMKvcmClientStub.cc`，没有 KVCM 链接依赖；
-- ViT Python 进程只在选择 `kvcm` backend 时延迟导入 KVCM wheel，不再要求 RTP writer pybind。
+- ViT Python 进程只在构造 `RtpKvMetaObjectClient` 时延迟导入 KVCM wheel，不再要求 RTP writer pybind。
 
 因此普通 RTP build、KV cache connector 和默认 multimodal gRPC transport 不导入或初始化 KVCM Python client。
 
@@ -145,6 +148,20 @@ producer 按 `EMBEDDING -> POS_ID -> EXTRA_INPUT` 排列 role；extra input 的 
 KVCM receipt 不能同时携带 inline tensor、RDMA slot 或其他数据面 payload；reader 会拒绝混合 receipt。
 
 ## 6. ViT 生产流程
+
+backend 只需把启动阶段已经派生、校验并写入 `MMTransportConfig` 的配置交给 RTP client：
+
+```python
+from rtp_llm.multimodal.transport.kvcm import RtpKvMetaObjectClient
+
+with RtpKvMetaObjectClient(transport_config.kvcm) as client:
+    client.save(keys, tensors)
+    client.remove(keys)
+```
+
+构造 client 时即完成通用配置校验和带 `kve_` 前缀 instance 的注册。业务调用方不再重复解析
+`RECO_CLIENT_CONFIG`，也不直接拼装 KVCM 通用 client 的连接、SDK 或超时参数；生产 backend 负责在异常路径和
+关闭路径回收 client。
 
 ### 6.1 写入前校验和布局
 

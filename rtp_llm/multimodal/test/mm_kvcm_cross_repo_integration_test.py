@@ -1,9 +1,9 @@
 """Manual RTP producer/control path -> KVCM -> live KVMeta integration test.
 
 This target is intentionally tagged ``manual`` in BUILD.  It validates the
-production RTP transport factory, output transport, proxy-routed release, and
-GC against KVCM's packaged Python object client and a real KVMeta service
-without adding KVCM to RTP's default test dependency graph.
+production RTP transport factory, RTP-specific Python client, proxy-routed
+release, and GC against KVCM's packaged generic client and a real KVMeta
+service without adding KVCM to RTP's default test dependency graph.
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
 )
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
 from rtp_llm.multimodal.transport.factory import create_mm_output_transport
+from rtp_llm.multimodal.transport.kvcm.client import RtpKvMetaObjectClient
 from rtp_llm.multimodal.transport.proxy_router import MMOutputProxyRouter
 
 _RUN_INTEGRATION = os.environ.get("RTP_KVCM_RUN_INTEGRATION") == "1"
@@ -575,7 +576,7 @@ def _load_receipt_tensors(store, receipt):
         torch.empty(tuple(obj.tensor.shape), dtype=dtype_by_proto[obj.tensor.data_type])
         for obj in objects
     ]
-    store.load_tensors(
+    store.load(
         [obj.key for obj in objects],
         tensors,
         trace_id=f"rtp-kvmeta-it-load-{uuid.uuid4().hex}",
@@ -606,7 +607,6 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
 
         from kv_cache_manager.client import (
             KV_META_OBJECT_API_VERSION,
-            KvMetaObjectClient,
             KvMetaObjectClientError,
         )
         from kv_cache_manager.client.pybind import kvcm_py_client
@@ -667,13 +667,13 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                     transport = create_mm_output_transport(transport_config)
                     backend = transport._backend
                     store = backend._writer
-                    self.assertIsInstance(store, KvMetaObjectClient)
+                    self.assertIsInstance(store, RtpKvMetaObjectClient)
                     self.assertEqual(
-                        store.config.instance_group,
+                        store.instance_group,
                         KVE_INSTANCE_PREFIX + instance_group,
                     )
                     self.assertEqual(
-                        store.config.instance_id,
+                        store.instance_id,
                         KVE_INSTANCE_PREFIX + instance_id,
                     )
                     legacy_info = legacy_stub.GetInstanceInfo(
@@ -757,7 +757,7 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                     )
                     wrong_size_snapshot = wrong_size_destination.clone()
                     with self.assertRaises(KvMetaObjectClientError) as mismatch:
-                        store.load_tensors(
+                        store.load(
                             [objects[0].key],
                             [wrong_size_destination],
                             trace_id="rtp-kvmeta-it-load-size-mismatch",
@@ -818,7 +818,7 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                     self.assertEqual(set(router._handle_routes), set(second_keys))
                     self.assertEqual(set(backend._pending), set(second_keys))
                     with self.assertRaises(KvMetaObjectClientError) as missing:
-                        store.load_tensors(
+                        store.load(
                             [released_key],
                             [torch.empty_like(loaded[0])],
                             trace_id="rtp-kvmeta-it-load-after-release",
@@ -846,7 +846,7 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                     self.assertEqual(router._handle_routes, {})
                     self.assertEqual(backend._pending, {})
                     with self.assertRaises(KvMetaObjectClientError) as second_missing:
-                        store.load_tensors(
+                        store.load(
                             second_keys,
                             [torch.empty_like(second_loaded[0])],
                             trace_id="rtp-kvmeta-it-second-load-after-release",
@@ -880,7 +880,7 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                     deadline = time.monotonic() + 5
                     while time.monotonic() < deadline:
                         try:
-                            store.load_tensors(
+                            store.load(
                                 [gc_object.key],
                                 [torch.empty(1, 4, dtype=torch.float32)],
                                 trace_id=f"rtp-kvmeta-it-gc-probe-{uuid.uuid4().hex}",

@@ -98,9 +98,19 @@ py_test(
     ],
 )
 
-# Explicit-only cross-repo test: production RTP factory/output transport,
-# proxy-routed release, KVCM's packaged Python object client, and a live KVMeta
-# service. See kvcm_emb_storage.md for the required artifacts and invocation.
+py_test(
+    name = "mm_kvcm_client_test",
+    srcs = [
+        "mm_kvcm_client_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+# Explicit-only cross-repo test: production RTP factory/client/output transport,
+# proxy-routed release, KVCM's packaged generic client, and a live KVMeta service.
+# See kvcm_emb_storage.md for the required artifacts and invocation.
 py_test(
     name = "mm_kvcm_cross_repo_integration_test",
     timeout = "long",

@@ -48,6 +48,7 @@ from rtp_llm.multimodal.transport.kvcm.backend import (
     _chunk_tensor,
     _concatenated_layout,
 )
+from rtp_llm.multimodal.transport.kvcm.client import RtpKvMetaObjectClient
 from rtp_llm.multimodal.transport.rdma.backend import TRANSPORT_RDMA, RdmaOutputBackend
 
 
@@ -284,12 +285,12 @@ class _FakeKvcmWriter:
         self.save_error = None
         self.remove_event = threading.Event()
 
-    def save(self, keys, tensors):
+    def save(self, keys, tensors, *, trace_id=None):
         self.saved.append((list(keys), list(tensors)))
         if self.save_error is not None:
             raise self.save_error
 
-    def remove(self, keys):
+    def remove(self, keys, *, trace_id=None):
         self.removed.append(list(keys))
         self.remove_event.set()
 
@@ -874,7 +875,8 @@ class KvcmOutputBackendTest(TestCase):
         ):
             created = KvcmOutputBackend.create(config)
         try:
-            self.assertIs(created._writer, writer)
+            self.assertIsInstance(created._writer, RtpKvMetaObjectClient)
+            self.assertIs(created._writer._client, writer)
             self.assertTrue(created._owns_writer)
             config_type.assert_called_once_with(
                 addresses=tuple(config.addresses),
