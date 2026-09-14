@@ -159,6 +159,10 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
                     vit_config.download_headers,
                     max_file_size_kb=vit_config.mm_video_max_file_size_kb,
                 )
+            import os
+
+            if os.environ.get("QWEN35_BENCH_NATIVE_VIDEO") == "1":
+                return _process_native_video_for_benchmark(video_data, processor)
             video = Qwen3_VLImageEmbedding.load_video(
                 video_data,
                 mm_input.mm_preprocess_config,
@@ -248,3 +252,55 @@ class Qwen3_VLMixin(Qwen2_5_VLMixin):
 
 register_multimodal_mixin(["qwen3_vl"], Qwen3_VLMixin)
 register_multimodal_mixin(["qwen3_vl_moe"], Qwen3_VLMixin)
+
+
+def _process_native_video_for_benchmark(video_data, processor):
+    """Opt-in fixed-workload probe; decode every request and resize only once."""
+    import json
+    import os
+    import time
+
+    import torch
+    from decord import VideoReader, cpu
+    from transformers.video_utils import VideoMetadata
+
+    started = time.time()
+    reader = VideoReader(video_data, ctx=cpu(0), num_threads=1)
+    total, fps = len(reader), reader.get_avg_fps()
+    count = min(max(int(total / fps * 6), 4), 180, total)
+    indices = torch.linspace(0, total - 1, count).round().long().tolist()
+    video = torch.from_numpy(reader.get_batch(indices).asnumpy()).permute(0, 3, 1, 2)
+    metadata = VideoMetadata(
+        total_num_frames=total, fps=fps, duration=total / fps, frames_indices=indices
+    )
+    result = processor.video_processor(
+        video,
+        return_tensors="pt",
+        do_resize=True,
+        do_sample_frames=False,
+        size={"longest_edge": 73728000, "shortest_edge": 2500000},
+        video_metadata=metadata,
+    )
+    grid = result["video_grid_thw"].tolist()
+    if count != 46 or grid != [[23, 44, 80]]:
+        raise ValueError(
+            f"Benchmark video contract mismatch: count={count}, grid={grid}"
+        )
+    audit = os.environ.get("QWEN35_BENCH_VIDEO_AUDIT")
+    if audit:
+        record = {
+            "pid": os.getpid(),
+            "start": started,
+            "end": time.time(),
+            "source_frames": total,
+            "source_fps": fps,
+            "indices": indices,
+            "timestamps": [i / fps for i in indices],
+            "native_shape": list(video.shape),
+            "grid": grid,
+            "visual_tokens": 20240,
+            "do_sample_frames": False,
+        }
+        with open(audit, "a") as stream:
+            stream.write(json.dumps(record) + "\n")
+    return result["pixel_values_videos"], result["video_grid_thw"]

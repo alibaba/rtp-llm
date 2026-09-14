@@ -1,3 +1,4 @@
+load(":qwen35_e2p4d2_repro.bzl", "qwen35_e2p4d2_repro_suite")
 package(default_visibility = ["//visibility:public"])
 
 # Framework source files for cross-package smoke tests.
@@ -91,3 +92,5 @@ test_suite(
         ":smoke_sm100_moe",
     ],
 )
+
+qwen35_e2p4d2_repro_suite()
