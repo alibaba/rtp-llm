@@ -24,35 +24,17 @@ class HippoHelper:
     app_workdir = os.environ.get("HIPPO_APP_WORKDIR", "")
 
     @staticmethod
-    def refresh_runtime_identity() -> Dict[str, str]:
-        """Refresh Hippo identity after SCR restores into a new Pod."""
-
-        from rtp_llm.utils.scr_runtime_fixup import get_restore_runtime_identity
-
-        identity = get_restore_runtime_identity()
+    def refresh_runtime_identity(pod_ip: str) -> Dict[str, str]:
+        """Refresh cached identity using the caller's current Pod IP."""
         HippoHelper.host_ip = os.environ.get("HIPPO_SLAVE_IP", "")
-        try:
-            hostname = socket.gethostname()
-            HippoHelper.container_ip = (
-                identity.pod_ip if identity is not None else socket.gethostbyname(hostname)
-            )
-            logging.info(
-                "refreshed container_ip:%s", HippoHelper.container_ip
-            )
-        except Exception:
-            HippoHelper.container_ip = os.environ.get(
-                "RequestedIP", HippoHelper.host_ip
-            )
-            logging.info(
-                "refresh container_ip from socket failed, use runtime identity:%s",
-                HippoHelper.container_ip,
-            )
+        HippoHelper.container_ip = pod_ip
         HippoHelper.role = os.environ.get(
             "HIPPO_ROLE_SHORT_NAME", os.environ.get("HIPPO_ROLE", "")
         )
         HippoHelper.app = os.environ.get("HIPPO_APP", "")
         HippoHelper.group = os.environ.get("HIPPO_SERVICE_NAME", "")
         HippoHelper.app_workdir = os.environ.get("HIPPO_APP_WORKDIR", "")
+        logging.info("refreshed container_ip:%s", HippoHelper.container_ip)
         return HippoHelper.get_hippo_tags()
 
     @staticmethod

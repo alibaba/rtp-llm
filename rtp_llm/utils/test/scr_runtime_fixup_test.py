@@ -437,7 +437,7 @@ class ScrRuntimeFixupTest(unittest.TestCase):
                 "socket.gethostbyname",
                 side_effect=AssertionError("must reuse fresh identity"),
             ):
-                tags = HippoHelper.refresh_runtime_identity()
+                tags = HippoHelper.get_hippo_tags()
                 native = NS(resume_kmonitor_after_scr=Mock(return_value=True))
                 with patch.dict(sys.modules, {"libth_transformer": native}):
                     scr._start_native_kmonitor("g1")

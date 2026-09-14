@@ -39,9 +39,9 @@ class ReportWorker(object):
     def __init__(self, *args):
         super(ReportWorker, self).__init__(*args)
         self._runtime_tags = HippoHelper.get_hippo_tags()
-        self._configured_tags = self.parse_kmon_tags(os.environ.get("kmonitorTags", ""))
+        self._runtime_tag_keys: set[str] = set()
         self.init_tags = self._runtime_tags.copy()
-        self.init_tags.update(self._configured_tags)
+        self.init_tags.update(self.parse_kmon_tags(os.environ.get("kmonitorTags", "")))
         logging.info(
             f"kmonitor report default tags: {json.dumps(self.init_tags, indent=4)}"
         )
@@ -54,7 +54,7 @@ class ReportWorker(object):
         if self._transport_deferred:
             logging.info("defer kmonitor transport until SCR steady-point returns")
         elif HippoHelper.is_hippo_env():
-            self._activate_hippo_transport(refresh_identity=False)
+            self._activate_hippo_transport()
         else:
             self.start()
             logging.info("test mode, kmonitor metrics not reported.")
@@ -83,10 +83,14 @@ class ReportWorker(object):
         self, metric_name: str, timestamp: int, data_point: MetricDataPoint
     ) -> ThriftFlumeEvent:
         value_str = str(data_point.value)
-        report_tags = data_point.tags.copy()
-        # Runtime identity is authoritative after restore. Metric instances can
-        # predate the restore and therefore still contain seed identity tags.
-        report_tags.update(self._runtime_tags)
+        report_tags = data_point.tags
+        if self._runtime_tag_keys:
+            # Registered metrics retain seed tags. Replace only runtime identity,
+            # including tags removed during fixup; ordinary startup is unaffected.
+            report_tags = {
+                k: v for k, v in report_tags.items() if k not in self._runtime_tag_keys
+            }
+            report_tags.update(self._runtime_tags)
         tag_str: str = " ".join(
             ["=".join([k, v]) for (k, v) in list(report_tags.items())]
         )
@@ -138,14 +142,7 @@ class ReportWorker(object):
     def stop(self) -> None:
         self.started = False
 
-    def _activate_hippo_transport(self, *, refresh_identity: bool = True) -> None:
-        if refresh_identity:
-            self._runtime_tags = HippoHelper.refresh_runtime_identity()
-            # KMonitor instances retain this dict by reference. Update it in
-            # place so metrics registered after restore also use fresh tags.
-            self.init_tags.clear()
-            self.init_tags.update(self._runtime_tags)
-            self.init_tags.update(self._configured_tags)
+    def _activate_hippo_transport(self) -> None:
         report_host = os.environ.get("HIPPO_SLAVE_IP", "localhost")
         self.flume = FlumeClient(
             report_host,
@@ -165,6 +162,14 @@ class ReportWorker(object):
         """Start the deferred reporter once, after process identity is refreshed."""
         if not self._transport_deferred:
             return
+        # The shared runtime fixup has already refreshed HippoHelper. Preserve
+        # custom defaults and the dict referenced by existing KMonitor instances.
+        runtime_tags = HippoHelper.get_hippo_tags()
+        self._runtime_tag_keys = self._runtime_tags.keys() | runtime_tags.keys()
+        self._runtime_tags = runtime_tags
+        for key in self._runtime_tag_keys:
+            self.init_tags.pop(key, None)
+        self.init_tags.update(runtime_tags)
         if HippoHelper.is_hippo_env():
             self._activate_hippo_transport()
         else:

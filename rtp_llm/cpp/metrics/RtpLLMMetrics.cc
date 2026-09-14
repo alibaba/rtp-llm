@@ -1146,7 +1146,7 @@ bool deferKmonitorTransportForScr() {
     return enabled && (phase == "checkpoint" || phase == "restore");
 }
 
-void fillKmonitorConfig(kmonitor::MetricsConfig& metricsConfig, const KmonParam& param, bool manuallyMode) {
+void fillKmonitorConfig(kmonitor::MetricsConfig& metricsConfig, const KmonParam& param) {
     metricsConfig.set_tenant_name(param.kmonitorTenant);
     metricsConfig.set_service_name(param.kmonitorServiceName);
     std::string sink_address = param.kmonitorSinkAddress;
@@ -1155,7 +1155,7 @@ void fillKmonitorConfig(kmonitor::MetricsConfig& metricsConfig, const KmonParam&
     }
     metricsConfig.set_sink_address(sink_address.c_str());
     metricsConfig.set_enable_log_file_sink(param.kmonitorEnableLogFileSink);
-    metricsConfig.set_manually_mode(manuallyMode);
+    metricsConfig.set_manually_mode(param.kmonitorManuallyMode);
     metricsConfig.set_inited(true);
     metricsConfig.AddGlobalTag("hippo_slave_ip", param.hippoSlaveIp);
     for (const auto& pair : param.kmonitorTags) {
@@ -1186,7 +1186,7 @@ bool initKmonitorFactory() {
 
     kmonitor::MetricsConfig metricsConfig;
     const bool deferTransport = deferKmonitorTransportForScr();
-    fillKmonitorConfig(metricsConfig, param, deferTransport || param.kmonitorManuallyMode);
+    fillKmonitorConfig(metricsConfig, param);
     if (!kmonitor::KMonitorFactory::Init(metricsConfig)) {
         RTP_LLM_LOG_ERROR("init kmonitor factory failed with");
         return false;
@@ -1223,10 +1223,13 @@ bool resumeKmonitorAfterScr() {
     KmonParam param;
     param.init();
     kmonitor::MetricsConfig resumedConfig;
-    fillKmonitorConfig(resumedConfig, param, param.kmonitorManuallyMode);
+    fillKmonitorConfig(resumedConfig, param);
     *factoryConfig = resumedConfig;
     auto* system = worker->getMetricsSystem();
-    worker->addCommonTags();
+    // Start refreshes common tags before MetricsSystem::Init creates transport.
+    // Only SCR needs to replace identity captured by registered metric handles.
+    system->SetOutputTagKeys({"hippo_slave_ip", "host_ip", "container_ip", "hippo_role", "hippo_app", "hippo_group",
+                             "host", "hippo_cluster"});
     kmonitor::KMonitorFactory::Start();
     if (!system->Started()) {
         return false;

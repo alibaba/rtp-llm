@@ -169,7 +169,7 @@ def fixup_runtime_after_restore(
         "rtp_llm.aios.kmonitor.python_client.kmonitor.utils.hippo_helper"
     )
     if hippo_module is not None:
-        hippo_module.HippoHelper.refresh_runtime_identity()
+        hippo_module.HippoHelper.refresh_runtime_identity(pod_ip=pod_ip)
     # Log only identity and key names, never the file body/environment values.
     LOGGER.info(
         "SCR runtime identity fixed generation=%s previous_runtime_ip=%s pod_ip=%s env_keys=%s",

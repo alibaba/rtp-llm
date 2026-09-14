@@ -10,6 +10,8 @@
 - Grammar：模板构造阶段不启动 sandbox 子进程；首次 grammar 校验创建 worker pool。
 - Python/native Kmonitor：保留指标注册，外部上报和 Python 报告线程延迟到 release 后首次启动。
 
+Kmonitor 的 Init、指标注册顺序和 manual mode 配置不变，只延迟 Start。release 复用统一 fixup 后的身份，补偿旧指标保存的 IP、role/app/group 等运行时标签，然后首次启动上报。标签补偿只在 SCR 模板恢复时启用；普通启动保留显式指标标签的原有优先级。
+
 因此，模板不包含旧的业务 channel、VIP 实例缓存、master 探测记录、grammar worker 或 Kmonitor sink。不需要对它们做关闭、缓存清理、线程重启等恢复操作。同一模板重复恢复仍从这些资源未启动的状态开始。
 
 ## 必要的 fixup 与统一接口
