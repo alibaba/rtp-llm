@@ -132,6 +132,50 @@ class IndexerGpuTest(unittest.TestCase):
             ),
         )
 
+    def test_shared_source_batch_and_global_positions(self):
+        from rtp_llm.models_py.modules.dsv41.source_indexer import (
+            prepare_index_source,
+            score_index_source,
+        )
+
+        query, weights, pages, table, requests = self.fixture(
+            [1] * 128 + [2] * 128 + [3] * 128, rows=127
+        )
+        lengths = torch.arange(127, dtype=torch.int32, device="cuda") * 3 % 385
+        source = prepare_index_source(pages, table, capacity=384)
+        offset = 1032192
+        result = score_index_source(
+            query, weights, source, lengths, layer=20, position_offset=offset
+        )
+        self.assertEqual(source.packed_kv_bytes, 16384 * 68)
+        for first in range(0, 127, QUERY_TILE):
+            last = min(first + QUERY_TILE, 127)
+            ids = torch.arange(CANDIDATE_BLOCKS, dtype=torch.int32, device="cuda")[
+                None, :
+            ]
+            candidates = torch.where(ids * 8 < lengths[first:last, None], ids, -1)
+            expected = score_candidate_tile(
+                query[first:last],
+                weights[first:last],
+                pages,
+                table,
+                requests[first:last],
+                lengths[first:last],
+                candidates,
+                layer=20,
+            )
+            self.equal(result.logits[first:last], expected.logits)
+            self.equal(result.status[first:last], expected.status)
+            self.equal(
+                result.positions[first:last],
+                torch.where(expected.positions >= 0, expected.positions + offset, -1),
+            )
+        table[0, 1] = 0
+        source = prepare_index_source(pages, table, capacity=384)
+        result = score_index_source(query, weights, source, lengths, layer=20)
+        self.equal(result.status, (lengths > 128).to(torch.int32))
+        self.assertTrue(torch.isneginf(result.logits[lengths > 128]).all())
+
     def test_all32_heads_mixed_signs_staged_bf16_numerical_diagnostic(self):
         generator = torch.Generator().manual_seed(130041)
         alphabet = torch.tensor(

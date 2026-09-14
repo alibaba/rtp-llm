@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
@@ -14,6 +15,23 @@ hc_pre = _math.hc_pre
 identity_pre_mix = _math.identity_pre_mix
 moe_gate = _math.moe_gate
 swiglu_activation = _math.swiglu_activation
+
+
+def reference_hc_mixes(hidden, weight, scale, base, iterations=20, eps=1e-6):
+    hc = hidden.shape[-2]
+    flat = hidden.flatten(-2).float()
+    mixes = F.linear(flat, weight.float()) * torch.rsqrt(
+        flat.square().mean(-1, keepdim=True) + 1e-20
+    )
+    pre = (mixes[..., :hc] * scale[0] + base[:hc]).sigmoid() + eps
+    post = (mixes[..., hc : 2 * hc] * scale[1] + base[hc : 2 * hc]).sigmoid() * 2
+    comb = (mixes[..., 2 * hc :] * scale[2] + base[2 * hc :]).unflatten(-1, (hc, hc))
+    comb = comb.softmax(-1) + eps
+    comb = comb / (comb.sum(-2, keepdim=True) + eps)
+    for _ in range(iterations - 1):
+        comb = comb / (comb.sum(-1, keepdim=True) + eps)
+        comb = comb / (comb.sum(-2, keepdim=True) + eps)
+    return pre, post, comb
 
 
 class MathTest(unittest.TestCase):
@@ -83,6 +101,74 @@ class MathTest(unittest.TestCase):
         )
         self.assertTrue(torch.equal(result[:, 3], hidden[:, 0]))
         self.assertTrue(torch.all(result[:, :3] == 0).item())
+
+    @torch.inference_mode()
+    def test_hc_split_sinkhorn_preserves_fp32_formula(self):
+        if self.device.type != "cuda":
+            self.skipTest("TileLang split/Sinkhorn requires CUDA")
+        torch.manual_seed(83)
+        with patch.dict(os.environ, {"DSV41_HC_SPLIT_SINKHORN": "1"}):
+            for shape, iterations, eps in (
+                ((1, 4, 5120), 20, 1e-6),
+                ((1, 31, 4, 5120), 20, 1e-6),
+                ((2, 3, 4, 5120), 1, 1e-6),
+                ((7, 4, 5120), 3, 1e-4),
+            ):
+                with self.subTest(shape=shape, iterations=iterations, eps=eps):
+                    hidden = torch.randn(shape, device=self.device).bfloat16()
+                    weight = torch.randn(24, 4 * 5120, device=self.device) * 0.02
+                    scale = torch.tensor([0.13, 0.27, 0.31], device=self.device)
+                    base = torch.randn(24, device=self.device)
+                    actual = _math.hc_mixes(
+                        hidden, weight, scale, base, iterations, hc_eps=eps
+                    )
+                    expected = reference_hc_mixes(
+                        hidden, weight, scale, base, iterations, eps
+                    )
+                    for left, right in zip(actual, expected):
+                        self.assertEqual(left.dtype, torch.float32)
+                        torch.testing.assert_close(left, right, atol=2e-6, rtol=2e-5)
+
+    @torch.inference_mode()
+    def test_hc_split_sinkhorn_graph_uses_updated_inputs(self):
+        if self.device.type != "cuda":
+            self.skipTest("CUDA Graph requires CUDA")
+        hidden = torch.randn(7, 4, 5120, device=self.device).bfloat16()
+        weight = torch.randn(24, 4 * 5120, device=self.device) * 0.02
+        scale = torch.tensor([0.13, 0.27, 0.31], device=self.device)
+        base = torch.randn(24, device=self.device)
+        with patch.dict(os.environ, {"DSV41_HC_SPLIT_SINKHORN": "1"}):
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                _math.hc_mixes(hidden, weight, scale, base)
+            torch.cuda.current_stream().wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                actual = _math.hc_mixes(hidden, weight, scale, base)
+            pointers = [value.data_ptr() for value in actual]
+            for step in range(3):
+                hidden.normal_()
+                weight.mul_(-1)
+                scale.fill_(0.5 + step)
+                base.fill_(step - 1)
+                graph.replay()
+                expected = reference_hc_mixes(hidden, weight, scale, base)
+                self.assertEqual([value.data_ptr() for value in actual], pointers)
+                for left, right in zip(actual, expected):
+                    torch.testing.assert_close(left, right, atol=2e-6, rtol=2e-5)
+
+    def test_hc_split_sinkhorn_preserves_gradient_fallback(self):
+        hidden = torch.randn(3, 4, 17, device=self.device, requires_grad=True)
+        weight = torch.randn(24, 4 * 17, device=self.device)
+        scale = torch.ones(3, device=self.device)
+        base = torch.zeros(24, device=self.device)
+        with patch.dict(os.environ, {"DSV41_HC_SPLIT_SINKHORN": "1"}):
+            actual = _math.hc_mixes(hidden, weight, scale, base)
+        expected = reference_hc_mixes(hidden, weight, scale, base)
+        for left, right in zip(actual, expected):
+            self.assertTrue(left.requires_grad)
+            torch.testing.assert_close(left, right, atol=0, rtol=0)
 
     def test_image_bias_selects_but_does_not_weight(self):
         hidden = torch.zeros(2, 5120, device=self.device).bfloat16()

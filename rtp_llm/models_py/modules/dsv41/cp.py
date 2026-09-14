@@ -72,6 +72,11 @@ from rtp_llm.models_py.modules.dsv41.indexer import (
     score_candidate_tile,
 )
 from rtp_llm.models_py.modules.dsv41.math import grouped_wo_a
+from rtp_llm.models_py.modules.dsv41.source_indexer import (
+    SOURCE_QUERY_TILE,
+    prepare_index_source,
+    score_index_source,
+)
 
 _PAIR_BYTES = 4112
 _SOURCE_ROWS = 512
@@ -1345,7 +1350,7 @@ def _score_queries(attention, hidden, qr, context):
     slot = RegionSlot(CacheRegion.INDEX_K, source.index_k_owner)
     top, blocks, status = {}, {}, {}
     calls = max_logits = max_packed = 0
-    query_tile = QUERY_TILE
+    query_tile = SOURCE_QUERY_TILE if layer <= 20 else QUERY_TILE
     source_tiles = (
         (0,)
         if layer > 20
@@ -1361,21 +1366,27 @@ def _score_queries(attention, hidden, qr, context):
             restored, lease = context.gather_paged(
                 slot, source_first, source_last, layer
             )
+            prepared_source = prepare_index_source(
+                restored.pages,
+                restored.page_table,
+                capacity=source_last - source_first,
+            )
         for first in range(0, hidden.shape[0], query_tile):
             last = min(first + query_tile, hidden.shape[0])
             local_visible = visible[first:last]
             if layer <= 20:
-                pages, table = restored.pages, restored.page_table
                 tile_visible = (local_visible - source_first).clamp(
                     0, source_last - source_first
                 )
-                ids = torch.arange(
-                    CANDIDATE_BLOCKS, dtype=torch.int32, device=hidden.device
-                )[None, :].expand(last - first, -1)
-                ids = torch.where(
-                    ids * SPARSE_BLOCK < tile_visible[:, None], ids, -1
-                ).contiguous()
-                request_ids = torch.zeros_like(tile_visible)
+                scores = score_index_source(
+                    query[first:last].contiguous(),
+                    weights[first:last].contiguous(),
+                    prepared_source,
+                    tile_visible,
+                    layer=layer,
+                    position_offset=source_first,
+                )
+                scores = replace(scores, visible_lengths=local_visible)
             else:
                 chosen = candidates[first:last]
                 row = torch.arange(
@@ -1430,30 +1441,16 @@ def _score_queries(attention, hidden, qr, context):
                 request_ids = torch.arange(
                     last - first, dtype=torch.int32, device=hidden.device
                 )
-            scores = score_candidate_tile(
-                query[first:last].contiguous(),
-                weights[first:last].contiguous(),
-                pages,
-                table,
-                request_ids,
-                tile_visible,
-                ids,
-                layer=layer,
-            )
-            if layer <= 20:
-                scores = replace(
-                    scores,
-                    positions=torch.where(
-                        scores.positions >= 0, scores.positions + source_first, -1
-                    ),
-                    candidate_blocks=torch.where(
-                        scores.candidate_blocks >= 0,
-                        scores.candidate_blocks + source_first // SPARSE_BLOCK,
-                        -1,
-                    ),
-                    visible_lengths=local_visible,
+                scores = score_candidate_tile(
+                    query[first:last].contiguous(),
+                    weights[first:last].contiguous(),
+                    pages,
+                    table,
+                    request_ids,
+                    tile_visible,
+                    ids,
+                    layer=layer,
                 )
-            else:
                 original = torch.full_like(scores.positions, -1)
                 original[:, : actual.shape[1]].copy_(actual)
                 scores = replace(
@@ -1477,7 +1474,7 @@ def _score_queries(attention, hidden, qr, context):
             del scores
         if lease is not None:
             context.release(lease, layer)
-            del restored, lease, pages, table
+            del restored, lease, prepared_source
     context.publish_selection(
         IndexSelection(
             torch.cat([value.ordered_positions() for value in top.values()]),

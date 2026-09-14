@@ -4,8 +4,41 @@ Quantized GEMM wrappers must preserve these conversion boundaries. These
 functions do not replace real checkpoint or GPU acceptance measurements.
 """
 
+import importlib
+import os
+
 import torch
 import torch.nn.functional as F
+
+_HC_SPLIT_SINKHORN_KERNELS = {}
+
+
+def _hc_split_sinkhorn(mixes, scale, base, iterations, eps):
+    key = (mixes.device.index, iterations, eps)
+    kernels = _HC_SPLIT_SINKHORN_KERNELS.get(key)
+    if kernels is None:
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("V4.1 HC split/Sinkhorn must be warmed before capture")
+        # Reuse the existing TileLang environment and forward-only kernels.
+        from rtp_llm.models_py.modules.dsv4 import tilelang_kernels  # noqa: F401
+
+        prefix = "rtp_llm.models_py.3rdparty.tile_kernels.mhc."
+        split = importlib.import_module(prefix + "pre_split_mixes_kernel")
+        sinkhorn = importlib.import_module(prefix + "sinkhorn_kernel")
+        kernels = (
+            split._mhc_pre_split_mixes_fwd(4, 2.0, eps, token_block_size=32),
+            sinkhorn._mhc_sinkhorn_fwd(4, 1, iterations, eps),
+        )
+        _HC_SPLIT_SINKHORN_KERNELS[key] = kernels
+    rows = mixes.numel() // 24
+    pre = mixes.new_empty(rows, 4)
+    post = mixes.new_empty(rows, 4)
+    comb_raw = mixes.new_empty(rows, 16)
+    comb = mixes.new_empty(rows, 4, 4)
+    kernels[0](mixes.view(rows, 24), scale, base, pre, post, comb_raw)
+    kernels[1](comb_raw.view(rows, 4, 4), comb)
+    batch = mixes.shape[:-1]
+    return pre.view(*batch, 4), post.view(*batch, 4), comb.view(*batch, 4, 4)
 
 
 def dequantize_block32(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
@@ -121,6 +154,22 @@ def hc_mixes(
     mixes = F.linear(flat, weight.float()) * torch.rsqrt(
         flat.square().mean(-1, keepdim=True) + norm_eps
     )
+    if (
+        os.environ.get("DSV41_HC_SPLIT_SINKHORN", "0") == "1"
+        and hc == 4
+        and iterations >= 1
+        and not torch.is_grad_enabled()
+        and mixes.is_cuda
+        and mixes.numel() > 0
+        and mixes.is_contiguous()
+        and scale.dtype == base.dtype == mixes.dtype == torch.float32
+        and scale.device == base.device == mixes.device
+        and scale.shape == (3,)
+        and base.shape == (24,)
+        and scale.is_contiguous()
+        and base.is_contiguous()
+    ):
+        return _hc_split_sinkhorn(mixes, scale, base, iterations, hc_eps)
     pre = (mixes[..., :hc] * scale[0] + base[:hc]).sigmoid() + hc_eps
     post = (mixes[..., hc : 2 * hc] * scale[1] + base[hc : 2 * hc]).sigmoid() * 2
     comb = (mixes[..., 2 * hc :] * scale[2] + base[2 * hc :]).unflatten(-1, (hc, hc))
