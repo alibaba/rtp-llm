@@ -15,7 +15,6 @@ namespace rtp_llm {
 constexpr int32_t kPeerInfoProbeDefaultMs = 1000;
 constexpr int32_t kPeerInfoProbeMaxMs     = 1000;
 constexpr int32_t kPeerInfoProbeMinMs     = 200;
-constexpr int64_t kPeerInfoCacheTtlMs     = 30000;
 
 namespace {
 
@@ -247,14 +246,6 @@ PrefillServerCaller::getPrefillPeerInfo(const std::string& ip, uint32_t port, in
         return {};
     }
 
-    {
-        std::shared_lock<std::shared_mutex> lock(prefill_peer_cache_mutex_);
-        auto                                it = prefill_peer_cache_.find(addr);
-        if (it != prefill_peer_cache_.end() && (currentTimeMs() - it->second.cached_at_ms) < kPeerInfoCacheTtlMs) {
-            return it->second;
-        }
-    }
-
     auto conn = rpc_pool_->getConnection(addr);
     if (!conn.ok()) {
         RTP_LLM_LOG_WARNING("getPrefillPeerInfo: getConnection failed for %s", addr.c_str());
@@ -308,23 +299,7 @@ PrefillServerCaller::getPrefillPeerInfo(const std::string& ip, uint32_t port, in
                           return s;
                       }().c_str());
 
-    info.cached_at_ms = currentTimeMs();
-    {
-        std::unique_lock<std::shared_mutex> lock(prefill_peer_cache_mutex_);
-        prefill_peer_cache_[addr] = info;
-    }
     return info;
-}
-
-void PrefillServerCaller::invalidatePrefillPeerInfo(const std::string& ip, uint32_t port) {
-    const auto addr = formatGrpcHostPort(ip, port);
-    if (addr.empty()) {
-        return;
-    }
-    std::unique_lock<std::shared_mutex> lock(prefill_peer_cache_mutex_);
-    if (prefill_peer_cache_.erase(addr) > 0) {
-        RTP_LLM_LOG_WARNING("invalidatePrefillPeerInfo: dropped cached peer info for %s", addr.c_str());
-    }
 }
 
 int PrefillServerCaller::getPrefillTpSize(const std::string& ip, uint32_t port, int32_t request_timeout_ms) {

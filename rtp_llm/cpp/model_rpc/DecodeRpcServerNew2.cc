@@ -295,7 +295,6 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
             break;
         }
 
-        prefill_server_caller_->invalidatePrefillPeerInfo(prefill_ip, prefill_port);
         RTP_LLM_LOG_WARNING("request [%ld] async prefill start failed for DP %s, attempt %zu/%zu",
                             request_id,
                             selected_addr.c_str(),
@@ -304,7 +303,7 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
     }
     if (!prefill_caller_ctx) {
         generate_context.error_info   = ErrorInfo(ErrorCode::P2P_CONNECTOR_CALL_PREFILL_FAILED,
-                                                "failed to start async prefill request to cached DP addrs");
+                                                "failed to start async prefill request to reported DP addrs");
         generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.error_info);
         return generate_context.error_status;
     }
@@ -318,9 +317,6 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
         pollStreamOutput(server_context, generate_context.request_key, response_writer, generate_context.getStream());
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
 
-    if (prefill_caller_ctx && prefill_caller_ctx->failed()) {
-        prefill_server_caller_->invalidatePrefillPeerInfo(prefill_ip, prefill_port);
-    }
     if (prefill_caller_ctx && (!generate_context.error_status.ok() || server_context->IsCancelled())) {
         prefill_caller_ctx->cancel();
     }

@@ -205,6 +205,9 @@ public:
     GetPeerInfo(grpc::ServerContext*, const GetPeerInfoRequestPB*, GetPeerInfoResponsePB* response) override {
         std::lock_guard<std::mutex> lock(mutex_);
         ++peer_info_call_count_;
+        if (peer_info_fail_) {
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE, "peer info unavailable");
+        }
         response->set_tp_size(peer_info_tp_size_);
         if (peer_info_cp_size_ > 0) {
             response->set_cp_size(peer_info_cp_size_);
@@ -234,6 +237,11 @@ public:
         return peer_info_call_count_;
     }
 
+    void setPeerInfoFailure(bool fail) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        peer_info_fail_ = fail;
+    }
+
     bool waitStarted(std::chrono::milliseconds timeout) {
         std::unique_lock<std::mutex> lock(mutex_);
         return started_cv_.wait_for(lock, timeout, [this]() { return started_.load(); });
@@ -260,6 +268,7 @@ private:
     int                     peer_info_tp_size_{1};
     int                     peer_info_cp_size_{0};
     int                     peer_info_call_count_{0};
+    bool                                  peer_info_fail_{false};
     std::vector<std::vector<std::string>> peer_info_dp_addr_responses_;
 };
 
@@ -517,9 +526,9 @@ TEST_F(PrefillServerCallerTest, AsyncPrefillRejectsInvalidTargetPort) {
     EXPECT_EQ(caller_.callPrefill(&request, "::1", 0, "bad-port", 1000), nullptr);
 }
 
-TEST_F(PrefillServerCallerTest, InvalidatePeerInfoDropsCacheAndReprobes) {
+TEST_F(PrefillServerCallerTest, PeerInfoCallsRpcEveryTimeAndUsesLatestResponse) {
     auto service = std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kCaptureForwardedRequest);
-    service->setPeerInfoResponses(2, {{"127.0.0.1:1111"}, {"127.0.0.1:2222"}});
+    service->setPeerInfoResponses(2, {{"127.0.0.1:1111"}, {"127.0.0.1:2222"}, {"127.0.0.1:3333"}});
     FakePrefillRpcServer server(std::move(service));
     ASSERT_TRUE(server.start());
 
@@ -530,18 +539,40 @@ TEST_F(PrefillServerCallerTest, InvalidatePeerInfoDropsCacheAndReprobes) {
     EXPECT_EQ(first.dp_addrs[0], "127.0.0.1:1111");
     EXPECT_EQ(server.service()->peerInfoCallCount(), 1);
 
-    auto cached = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0);
-    ASSERT_EQ(cached.dp_addrs.size(), 1);
-    EXPECT_EQ(cached.dp_addrs[0], "127.0.0.1:1111");
+    auto second = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0);
+    ASSERT_EQ(second.dp_addrs.size(), 1);
+    EXPECT_EQ(second.dp_addrs[0], "127.0.0.1:2222");
+    EXPECT_EQ(server.service()->peerInfoCallCount(), 2);
+
+    auto third = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0);
+    ASSERT_EQ(third.tp_size, 2);
+    ASSERT_EQ(third.dp_addrs.size(), 1);
+    EXPECT_EQ(third.dp_addrs[0], "127.0.0.1:3333");
+    EXPECT_EQ(server.service()->peerInfoCallCount(), 3);
+}
+
+TEST_F(PrefillServerCallerTest, PeerInfoFailureDoesNotReusePreviousSuccessAndNextCallReprobes) {
+    auto service = std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kCaptureForwardedRequest);
+    service->setPeerInfoResponses(2, {{"127.0.0.1:1111"}, {"127.0.0.1:2222"}});
+    FakePrefillRpcServer server(std::move(service));
+    ASSERT_TRUE(server.start());
+
+    ASSERT_EQ(caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0).tp_size, 2);
     EXPECT_EQ(server.service()->peerInfoCallCount(), 1);
 
-    caller_.invalidatePrefillPeerInfo("127.0.0.1", server.port());
-
-    auto refreshed = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0);
-    ASSERT_EQ(refreshed.tp_size, 2);
-    ASSERT_EQ(refreshed.dp_addrs.size(), 1);
-    EXPECT_EQ(refreshed.dp_addrs[0], "127.0.0.1:2222");
+    server.service()->setPeerInfoFailure(true);
+    auto failed = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0);
+    EXPECT_EQ(failed.tp_size, -1);
+    EXPECT_EQ(failed.cp_size, -1);
+    EXPECT_TRUE(failed.dp_addrs.empty());
     EXPECT_EQ(server.service()->peerInfoCallCount(), 2);
+
+    server.service()->setPeerInfoFailure(false);
+    auto recovered = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0);
+    EXPECT_EQ(recovered.tp_size, 2);
+    ASSERT_EQ(recovered.dp_addrs.size(), 1);
+    EXPECT_EQ(recovered.dp_addrs[0], "127.0.0.1:2222");
+    EXPECT_EQ(server.service()->peerInfoCallCount(), 3);
 }
 
 TEST_F(PrefillServerCallerTest, PeerInfoCarriesCpSizeIndependentlyFromTpSize) {

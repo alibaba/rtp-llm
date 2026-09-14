@@ -2,9 +2,7 @@
 
 #include <functional>
 #include <memory>
-#include <shared_mutex>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include "grpc++/grpc++.h"
@@ -22,7 +20,6 @@ struct PrefillPeerInfo {
     int                      tp_size = -1;
     int                      cp_size = -1;
     std::vector<std::string> dp_addrs;
-    int64_t                  cached_at_ms{0};
 };
 
 class PrefillServerCaller {
@@ -39,9 +36,8 @@ public:
                              const GenerateInputPB*                 request,
                              grpc::ServerWriter<GenerateOutputsPB>* response_writer);
 
+    // Fetch once for each PD request; only the RPC connection is reused.
     PrefillPeerInfo getPrefillPeerInfo(const std::string& ip, uint32_t port, int32_t request_timeout_ms);
-
-    void invalidatePrefillPeerInfo(const std::string& ip, uint32_t port);
 
     int getPrefillTpSize(const std::string& ip, uint32_t port, int32_t request_timeout_ms);
 
@@ -69,9 +65,6 @@ private:
     std::shared_ptr<RPCPool> rpc_pool_;
     std::string              process_id_;
     AsyncReaderFactory       async_reader_factory_;
-
-    mutable std::shared_mutex                              prefill_peer_cache_mutex_;
-    std::unordered_map<std::string, PrefillPeerInfo>       prefill_peer_cache_;
 };
 
 }  // namespace rtp_llm
