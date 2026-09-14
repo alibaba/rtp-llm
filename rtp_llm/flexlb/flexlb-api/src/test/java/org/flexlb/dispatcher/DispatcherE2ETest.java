@@ -247,14 +247,20 @@ class DispatcherE2ETest {
     @Test
     void allocationFailureContactsNoFe() {
         allocationFails = true;
+        cfg.setTrustedRoutingToken("snapshot-secret");
         startDispatcher(2);
         assertEquals("batch_schedule_failed", post("/v1/batch/chat/completions", "{\"requests\":[{},{}]}", 503).getString("error"));
+        client.get().uri("/dispatcher/_snapshot").exchange().expectStatus().isOk().expectBody()
+                .jsonPath("$.fePool.size").isEqualTo(3).jsonPath("$.fePool.hosts[0].alive").isEqualTo(true)
+                .jsonPath("$.fePool.hosts[0].consecFails").isEqualTo(0).jsonPath("$.subBatch").isEqualTo("size:2")
+                .consumeWith(response -> assertFalse(new String(response.getResponseBody(), StandardCharsets.UTF_8).contains("snapshot-secret")));
+        verify(coordinator).schedule(any());
         assertNoFeTraffic();
     }
 
     private void startDispatcher(int chunkSize) {
         List<String> urls = frontends.stream().map(DispatcherE2ETest::url).toList();
-        FePool pool = DispatcherTestSupport.fePool(urls);
+        FePool pool = DispatcherTestSupport.fePool(urls, cfg);
         cfg.setBatchTimeoutMs(5000);
         cfg.setFePoolServiceId("e2e.fe.publish");
         cfg.setSubBatch("size:" + chunkSize);
@@ -278,7 +284,7 @@ class DispatcherE2ETest {
         PassthroughClient passthrough = new PassthroughClient(WebClient.create(), pool, metrics, cfg);
         var configService = DispatcherTestSupport.configService(lb);
         BatchHandler handler = new BatchHandler(fanout, cfg, coordinator, passthrough, metrics, configService, pool, Schedulers.immediate());
-        DispatchRouter router = new DispatchRouter(handler, passthrough);
+        DispatchRouter router = new DispatchRouter(handler, passthrough, pool);
         // A real transport is required to exercise lazy DataBuffer bodies and their ownership.
         server = HttpServer.create().port(0).handle(new ReactorHttpHandlerAdapter(RouterFunctions.toHttpHandler(router.routes()))).bindNow();
         client = WebTestClient.bindToServer().baseUrl("http://localhost:" + server.port()).responseTimeout(Duration.ofSeconds(10)).build();

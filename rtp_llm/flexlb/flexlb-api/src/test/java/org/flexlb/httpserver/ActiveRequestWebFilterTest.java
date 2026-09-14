@@ -22,7 +22,7 @@ class ActiveRequestWebFilterTest {
     @ParameterizedTest
     @CsvSource({"/rtp_llm/batch_schedule,1", "/dispatcher,1", "/dispatcher/batch_infer,1",
             "/dispatcher/v1/models,1", "/dispatcher/other,1",
-            "/rtp_llm/master/info,0", "/health,0"})
+            "/rtp_llm/master/info,0", "/health,0", "/dispatcher/_snapshot,0"})
     void countsOnlyServingRequestsUntilCompletion(String path, long expected) {
         MockServerWebExchange exchange = MockServerWebExchange.from(MockServerHttpRequest.get(path));
         Sinks.Empty<Void> completed = Sinks.empty();

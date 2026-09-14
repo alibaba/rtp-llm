@@ -18,7 +18,8 @@ public final class ActiveRequestWebFilter implements WebFilter {
     public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
         String path = exchange.getRequest().getPath().pathWithinApplication().value();
         boolean serving = path.equals("/rtp_llm/batch_schedule")
-                || path.equals("/dispatcher") || path.startsWith("/dispatcher/");
+                || path.equals("/dispatcher")
+                || (path.startsWith("/dispatcher/") && !path.equals("/dispatcher/_snapshot"));
         if (!serving) {
             return chain.filter(exchange);
         }

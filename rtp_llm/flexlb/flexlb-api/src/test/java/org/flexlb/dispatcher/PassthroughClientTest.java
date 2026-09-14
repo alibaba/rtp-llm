@@ -50,7 +50,7 @@ class PassthroughClientTest {
     private PassthroughClient proxy(List<String> hosts) {
         WebClient web = WebClient.builder().clientConnector(new ReactorClientHttpConnector(
                 HttpClient.create(connections))).build();
-        return new PassthroughClient(web, DispatcherTestSupport.fePool(hosts), metrics, cfg);
+        return new PassthroughClient(web, DispatcherTestSupport.fePool(hosts, cfg), metrics, cfg);
     }
 
     private WebTestClient http(PassthroughClient proxy) {

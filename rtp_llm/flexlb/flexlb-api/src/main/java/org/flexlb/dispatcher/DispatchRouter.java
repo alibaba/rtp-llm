@@ -16,6 +16,7 @@ public class DispatchRouter {
 
     private final BatchHandler batchHandler;
     private final PassthroughClient passthroughClient;
+    private final FePool fePool;
 
     public RouterFunction<ServerResponse> routes() {
         RouterFunctions.Builder b = RouterFunctions.route();
@@ -28,7 +29,8 @@ public class DispatchRouter {
                 b.POST(bare, req -> batchHandler.handle(req, spec));
             }
         }
-        return b.route(RequestPredicates.path("/dispatcher/**"), passthroughClient::forward)
+        return b.GET("/dispatcher/_snapshot", req -> ServerResponse.ok().bodyValue(fePool.snapshot()))
+                .route(RequestPredicates.path("/dispatcher/**"), passthroughClient::forward)
                 .build();
     }
 }

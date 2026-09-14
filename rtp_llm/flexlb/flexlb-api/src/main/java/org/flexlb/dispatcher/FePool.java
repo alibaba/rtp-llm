@@ -19,6 +19,7 @@ import javax.annotation.PreDestroy;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -129,6 +130,18 @@ public class FePool {
 
     public int currentSize() {
         return urls.get().size();
+    }
+
+    /** Reads the published pool without probing hosts or advancing the allocation cursor. */
+    public Map<String, Object> snapshot() {
+        List<String> snapshot = urls.get();
+        List<Map<String, Object>> hosts = snapshot.stream().map(url -> {
+            AtomicInteger failures = this.failures.get(url);
+            int count = failures == null ? 0 : failures.get();
+            return Map.<String, Object>of("url", url, "alive", count < 2, "consecFails", count);
+        }).toList();
+        return Map.of("fePool", Map.of("serviceId", cfg.getFePoolServiceId(), "size", snapshot.size(), "hosts", hosts),
+                "subBatch", cfg.getSubBatch(), "feAllocation", cfg.getFeAllocation(), "preAssignBe", cfg.isPreAssignBe());
     }
 
     boolean isAlive(String url) {

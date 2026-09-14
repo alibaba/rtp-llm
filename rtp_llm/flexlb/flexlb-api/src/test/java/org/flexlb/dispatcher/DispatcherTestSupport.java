@@ -24,8 +24,8 @@ final class DispatcherTestSupport {
         return service;
     }
 
-    static FePool fePool(List<String> urls) {
-        FePool pool = new FePool(mock(ServiceDiscovery.class), WebClient.create(), new DispatchConfig(), noopMetrics());
+    static FePool fePool(List<String> urls, DispatchConfig cfg) {
+        FePool pool = new FePool(mock(ServiceDiscovery.class), WebClient.create(), cfg, noopMetrics());
         pool.update(urls.stream().map(URI::create).map(uri -> WorkerHost.of(uri.getHost(), uri.getPort())).toList());
         return pool;
     }

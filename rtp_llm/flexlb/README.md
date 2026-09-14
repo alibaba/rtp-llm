@@ -442,5 +442,4 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 ## HTTP dispatcher
 
-See [dispatcher batch fanout and configuration](docs/fe-allocation-via-master.md) for
-FE allocation, `/rtp_llm/batch_schedule`, embedding worker discovery, and leader election.
+See [dispatcher batch fanout and configuration](docs/fe-allocation-via-master.md) for FE allocation, `/rtp_llm/batch_schedule`, embedding worker discovery, and leader election.
