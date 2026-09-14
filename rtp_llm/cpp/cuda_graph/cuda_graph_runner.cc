@@ -1334,7 +1334,9 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
     }
 
     size_t      copy_numel            = 0;
-    const auto& captured_position_ids = graph_it->second.mem_hold_.py_model_inputs_.combo_position_ids;
+    const auto& instance_position_ids = graph_it->second.mem_hold_.py_model_inputs_.combo_position_ids;
+    const auto& captured_position_ids =
+        instance_position_ids.defined() ? instance_position_ids : capture_mem_hold_.py_model_inputs_.combo_position_ids;
     if (!validateComboPositionIds(inputs, state, captured_position_ids, copy_numel)) {
         if (observe_fallback) {
             const FallbackTick tick = tickFallback(combo_position_fallback_count_);

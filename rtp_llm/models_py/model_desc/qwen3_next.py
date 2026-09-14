@@ -1752,6 +1752,7 @@ class Qwen3NextModel(GptModelBase):
             attention_inputs.is_prefill
             and not is_target_verify
             and not is_cp
+            and not is_cuda_graph
             and _is_aiter_flydsl_gdn_prefill_enabled()
         ):
             for layer_idx, layer in enumerate(self.layers):

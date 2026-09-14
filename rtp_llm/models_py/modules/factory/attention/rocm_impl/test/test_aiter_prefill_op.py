@@ -771,6 +771,47 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
     def _call_update(self, stub, attn_inputs):
         stub._refresh_prefill_fmha_params_for_cuda_graph(stub.fmha_params, attn_inputs)
 
+    @unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+    def test_graph_params_own_stable_prefill_seqlen_k(self):
+        from types import SimpleNamespace
+
+        device = torch.device("cuda")
+        block_ids = torch.zeros(2, 4, dtype=torch.int32, device=device)
+        capture_inputs = SimpleNamespace(
+            input_lengths=torch.tensor([8, 5], dtype=torch.int32),
+            prefix_lengths=torch.tensor([2, 6], dtype=torch.int32),
+            cu_seqlens_device=torch.tensor(
+                [0, 8, 13], dtype=torch.int32, device=device
+            ),
+            cu_kv_seqlens_device=torch.tensor(
+                [0, 10, 21], dtype=torch.int32, device=device
+            ),
+            kv_cache_kernel_block_id_device=block_ids,
+            prefix_lengths_device=torch.tensor(
+                [2, 6], dtype=torch.int32, device=device
+            ),
+            padding_offset=torch.zeros(16, dtype=torch.int32, device=device),
+        )
+        params = FMHAParams(
+            capture_inputs,
+            is_prefill=True,
+            enable_cuda_graph=True,
+            graph_max_seq_len=128,
+        )
+        captured_ptr = params.prefill_seqlen_k_int32.data_ptr()
+        self.assertEqual(params.prefill_seqlen_k_int32.cpu().tolist(), [10, 11])
+
+        replay_inputs = SimpleNamespace(
+            input_lengths=torch.tensor([5, 3], dtype=torch.int32),
+            prefix_lengths=torch.tensor([2, 4], dtype=torch.int32),
+            kv_cache_kernel_block_id_device=block_ids,
+        )
+        stub = AiterPrefillImplPaged.__new__(AiterPrefillImplPaged)
+        stub._refresh_prefill_fmha_params_for_cuda_graph(params, replay_inputs)
+
+        self.assertEqual(params.prefill_seqlen_k_int32.data_ptr(), captured_ptr)
+        self.assertEqual(params.prefill_seqlen_k_int32.cpu().tolist(), [7, 7])
+
     def test_rebuild_from_input_lengths_no_prefix(self):
         """Rebuild cu_seqlens from input_lengths, no prefix."""
         stub = self._make_stub(batch_size=4)
@@ -1672,24 +1713,49 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
         self.assertFalse(hasattr(fmha_params, "kv_scale"))
         self.assertFalse(hasattr(op, "_graph_output"))
 
-    def test_paged_graph_block_table_buffer_keeps_capture_address(self):
+    def test_paged_graph_workspace_keeps_capture_capacity_during_replay(self):
         from types import SimpleNamespace
 
         op = AiterPrefillAttnOpPaged(_make_attn_configs(4, 2, 8))
+        cu_seqlens_q = torch.tensor([0, 128], dtype=torch.int32)
+        cu_seqlens_k = torch.tensor([0, 2048], dtype=torch.int32)
+        block_table = torch.zeros(1, 128, dtype=torch.int32)
+        attn_inputs = SimpleNamespace(
+            cu_seqlens_device=cu_seqlens_q,
+            cu_kv_seqlens_device=cu_seqlens_k,
+            kv_cache_kernel_block_id_device=block_table,
+        )
         params = SimpleNamespace(
-            cu_seqlens_q=torch.zeros(3, dtype=torch.int32),
-            cu_seqlens_k=torch.zeros(3, dtype=torch.int32),
-            kv_cache_block_id_device=torch.zeros(2, 2, dtype=torch.int32),
+            max_seqlen_k=2048,
+            token_q_num=128,
+            graph_max_seqlen_k=2048,
+            graph_token_q_capacity=128,
         )
         infer_device = f"{AiterPrefillAttnOpPaged.__module__}._infer_cuda_graph_device"
         with patch(infer_device, return_value=torch.device("cpu")):
-            op.prepare_cuda_graph(params, SimpleNamespace())
-            captured = op.sanitized_bt_buf
-            op.prepare_cuda_graph(params, SimpleNamespace())
-            self.assertIs(op.sanitized_bt_buf, captured)
-            params.kv_cache_block_id_device = torch.zeros(2, 3, dtype=torch.int32)
-            with self.assertRaisesRegex(ValueError, "recapture required"):
-                op.prepare_cuda_graph(params, SimpleNamespace())
+            op.prepare_cuda_graph(params, attn_inputs)
+            captured_ptrs = (
+                op.sanitized_bt_buf.data_ptr(),
+                op.page_claims_buf.data_ptr(),
+                op.output_buf.data_ptr(),
+            )
+
+            cu_seqlens_q.copy_(torch.tensor([0, 20], dtype=torch.int32))
+            cu_seqlens_k.copy_(torch.tensor([0, 20], dtype=torch.int32))
+            params.max_seqlen_k = 20
+            params.token_q_num = 20
+            op.prepare_cuda_graph(params, attn_inputs)
+
+        self.assertEqual(op.sanitized_bt_buf.shape, (1, 136))
+        self.assertEqual(op.output_buf.shape, (128, 4, 8))
+        self.assertEqual(
+            captured_ptrs,
+            (
+                op.sanitized_bt_buf.data_ptr(),
+                op.page_claims_buf.data_ptr(),
+                op.output_buf.data_ptr(),
+            ),
+        )
 
     def test_generation_prefill_cuda_graph_allocates_only_stable_packed_output(self):
         from types import SimpleNamespace

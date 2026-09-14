@@ -193,6 +193,9 @@ class FMHAParams(ParamsBase):
                 self.max_seqlen_k = graph_max_seq_len
                 self.token_q_num = token_q_num
                 self.token_kv_num = token_q_num
+                self.graph_query_length = self.max_seq_len
+                self.graph_token_q_capacity = token_q_num
+                self.graph_max_seqlen_k = graph_max_seq_len
                 self.seq_lens = None
                 batch_size = self.cu_seqlens_q.numel() - 1
                 self.graph_metadata = _PrefillGraphMetadata(
@@ -203,9 +206,6 @@ class FMHAParams(ParamsBase):
                     dtype=torch.int32,
                     device=self.cu_seqlens_q.device,
                 )
-                self.graph_query_length = self.max_seqlen_q
-                self.graph_token_q_capacity = token_q_num
-                self.graph_max_seqlen_k = graph_max_seq_len
                 if alloc_scale:
                     self.kv_scale = torch.ones(
                         1, dtype=torch.float32, device=self.cu_seqlens_q.device
@@ -995,10 +995,13 @@ class AiterPrefillAttnOpPaged:
         batch_size = cu_seqlens_q.shape[0] - 1
         if graph_block_table.shape[0] != batch_size:
             raise ValueError("AIter graph prefill block table batch size changed")
-        extra_pages = (128 + self.tokens_per_block - 1) // self.tokens_per_block
         graph_max_seqlen_k = getattr(
             fmha_params, "graph_max_seqlen_k", fmha_params.max_seqlen_k
         )
+        graph_token_q_capacity = getattr(
+            fmha_params, "graph_token_q_capacity", fmha_params.token_q_num
+        )
+        extra_pages = (128 + self.tokens_per_block - 1) // self.tokens_per_block
         required_input_cols = (
             graph_max_seqlen_k + self.tokens_per_block - 1
         ) // self.tokens_per_block
@@ -1006,10 +1009,7 @@ class AiterPrefillAttnOpPaged:
             batch_size,
             max(graph_block_table.shape[1], required_input_cols + extra_pages),
         )
-        output_capacity = getattr(
-            fmha_params, "graph_token_q_capacity", fmha_params.token_q_num
-        )
-        output_shape = (output_capacity, self.head_num, self.head_dim)
+        output_shape = (graph_token_q_capacity, self.head_num, self.head_dim)
         output_dtype = self._graph_output_dtype()
         if self.seqlen_k_buf is None:
             self.seqlen_k_buf = torch.empty(
