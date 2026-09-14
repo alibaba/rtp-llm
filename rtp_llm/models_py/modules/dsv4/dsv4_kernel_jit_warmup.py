@@ -1429,7 +1429,7 @@ def _generate_dense_gemm_warmup_m_grid(
 def _mhc_prenorm_deepgemm_backend_enabled() -> bool:
     requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
     if requested in ("", "auto"):
-        return torch.cuda.get_device_capability()[0] < 12
+        return True
     if requested in ("deepgemm", "dg"):
         return True
     if requested in ("tilelang", "single", "tilelang_single", "tilelang_splitk"):
@@ -1440,11 +1440,7 @@ def _mhc_prenorm_deepgemm_backend_enabled() -> bool:
 def _mhc_prenorm_deepgemm_backend_name() -> str:
     requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
     if requested in ("", "auto"):
-        return (
-            "tilelang_single"
-            if torch.cuda.get_device_capability()[0] >= 12
-            else "deepgemm"
-        )
+        return "deepgemm"
     if requested in ("deepgemm", "dg"):
         return "deepgemm"
     if requested in ("tilelang", "single"):
