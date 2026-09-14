@@ -8,12 +8,13 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerRoute.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheReceiver.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
-#include "autil/LoopThread.h"
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -30,7 +31,7 @@ public:
 
 public:
     bool initialized() const {
-        return lease_cleanup_thread_ != nullptr;
+        return receiver_ != nullptr;
     }
 
     /// @brief 按编排层下发的 route 注册 recv task。worker 不再推导 partition 数或键集。
@@ -70,7 +71,7 @@ private:
                              const std::string&                    unique_key,
                              int64_t                               deadline_ms,
                              const std::shared_ptr<ReadTaskGroup>& task_group,
-                             int&                                  total_block_count) const;
+                             int&                                  total_block_count);
 
     /// 等待 recv 完成、cancel，或到达 D；到 D 时一次性 steal、seal 并取消未完成任务。
     ReadWaitOutcome waitRecvTasksWithReadDeadlinePolicy(const std::shared_ptr<ReadTaskGroup>& task_group,
@@ -84,6 +85,19 @@ private:
 
     void cleanupRecvTaskStore(const std::shared_ptr<ReadTaskGroup>& task_group, bool cancel_pending_tasks) const;
 
+    struct CompletionCallbackState {
+        std::mutex                 mutex;
+        P2PConnectorWorkerDecode* owner{nullptr};
+    };
+
+    void registerTaskCompletionCallback(const transfer::IKVCacheRecvTaskPtr& task,
+                                        const std::string&                    unique_key,
+                                        const std::shared_ptr<ReadTaskGroup>& task_group);
+    void onRecvTaskDone(const std::string& unique_key, const std::weak_ptr<ReadTaskGroup>& task_group);
+
+    void runPendingCancelExpiryLoop();
+    void schedulePendingCancelExpiryLocked();
+
 private:
     P2PConnectorWorkerConfig             config_;
     std::shared_ptr<LayerBlockConverter> layer_block_converter_;
@@ -96,9 +110,13 @@ private:
     // Cancellation can overtake READ because they are independent RPCs.
     // Keep a bounded terminal marker so a late READ cannot start transfers.
     std::unordered_map<std::string, int64_t>                         pending_cancel_keys_;
+    std::condition_variable                                            pending_cancel_cv_;
+    std::thread                                                        pending_cancel_expiry_thread_;
+    bool                                                               stopping_{false};
+    uint64_t                                                           pending_cancel_generation_{0};
 
     // Leases kept after read() returns so QUERY_LEASE_STATUS can observe physical completion.
-    // The local cleanup thread advances completion counters; queries only read them.
+    // recv task completion callbacks advance the counters; queries only read them.
     struct LeaseMapEntry {
         std::shared_ptr<ReadTaskGroup> task_group;
         int                            finish_counted{0};  // how many tasks have been counted as finished so far
@@ -106,10 +124,9 @@ private:
 
     // Requires lease_map_mutex_ to be held by caller.
     static void advanceLeaseProgress(LeaseMapEntry& entry);
-    void updateLeaseProgress();
     mutable std::mutex                             lease_map_mutex_;
     std::unordered_map<std::string, LeaseMapEntry> lease_map_;
-    autil::LoopThreadPtr                           lease_cleanup_thread_;
+    std::shared_ptr<CompletionCallbackState>       completion_callback_state_;
 };
 
 }  // namespace rtp_llm

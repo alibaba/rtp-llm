@@ -163,7 +163,7 @@ private:
     std::set<std::string>                                               expected_buffer_keys_;
     std::vector<std::string>                                            expected_buffer_tags_;
     std::shared_ptr<StoreWaitContextChecker>                            store_wait_context_checker_;
-    autil::LoopThreadPtr                                                cleanup_thread_;
+    autil::LoopThreadPtr                                                store_wait_check_thread_;
     // Per in-flight sendKVCache, hold both the cancel signal and a weak handle
     // to its SendTransferResult. The weak handle lets cancelRequest() wake up the
     // wait_for loop in waitSendCallbacksWithTimeout via cv.notify_all() instead

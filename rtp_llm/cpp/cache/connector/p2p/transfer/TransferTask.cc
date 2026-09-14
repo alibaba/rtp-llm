@@ -20,19 +20,26 @@ bool TransferTask::success() const {
 }
 
 void TransferTask::cancel() {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
-    if (done_) {
-        return;
+    std::function<void()> done_callback;
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        if (done_) {
+            return;
+        }
+        if (!transferring_) {
+            // PENDING: fast fail，立即终止
+            done_               = true;
+            error_code_         = TransferErrorCode::CANCELLED;
+            error_msg_          = "TransferTask cancelled";
+            total_cost_time_us_ = currentTimeUs() - start_time_us_;
+            done_callback       = std::move(done_callback_);
+        } else {
+            // TRANSFERRING: 仅记录取消意图，等待 notifyDone() 真正结束
+            cancel_requested_ = true;
+        }
     }
-    if (!transferring_) {
-        // PENDING: fast fail，立即终止
-        done_               = true;
-        error_code_         = TransferErrorCode::CANCELLED;
-        error_msg_          = "TransferTask cancelled";
-        total_cost_time_us_ = currentTimeUs() - start_time_us_;
-    } else {
-        // TRANSFERRING: 仅记录取消意图，等待 notifyDone() 真正结束
-        cancel_requested_ = true;
+    if (done_callback) {
+        done_callback();
     }
 }
 
@@ -46,14 +53,21 @@ bool TransferTask::startTransfer() {
 }
 
 void TransferTask::forceCancel() {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
-    if (done_) {
-        return;
+    std::function<void()> done_callback;
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        if (done_) {
+            return;
+        }
+        done_               = true;
+        error_code_         = TransferErrorCode::CANCELLED;
+        error_msg_          = "TransferTask force cancelled";
+        total_cost_time_us_ = currentTimeUs() - start_time_us_;
+        done_callback       = std::move(done_callback_);
     }
-    done_               = true;
-    error_code_         = TransferErrorCode::CANCELLED;
-    error_msg_          = "TransferTask force cancelled";
-    total_cost_time_us_ = currentTimeUs() - start_time_us_;
+    if (done_callback) {
+        done_callback();
+    }
 }
 
 TransferErrorCode TransferTask::errorCode() const {
@@ -70,23 +84,45 @@ std::string TransferTask::errorMessage() const {
 }
 
 void TransferTask::notifyDone(bool success, TransferErrorCode error_code, const std::string& error_msg) {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
-    if (done_) {
-        return;
+    std::function<void()> done_callback;
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        if (done_) {
+            return;
+        }
+        done_ = true;
+        if (currentTimeMs() >= deadline_ms_) {
+            // deadline 已过，无论传输是否物理完成，对调用方均视为超时
+            error_code_ = TransferErrorCode::TIMEOUT;
+            error_msg_  = "TransferTask timed out";
+        } else if (cancel_requested_) {
+            error_code_ = TransferErrorCode::CANCELLED;
+            error_msg_  = "TransferTask cancelled during transfer";
+        } else {
+            error_code_ = success ? TransferErrorCode::OK : error_code;
+            error_msg_  = error_msg;
+        }
+        total_cost_time_us_ = currentTimeUs() - start_time_us_;
+        done_callback       = std::move(done_callback_);
     }
-    done_ = true;
-    if (currentTimeMs() >= deadline_ms_) {
-        // deadline 已过，无论传输是否物理完成，对调用方均视为超时
-        error_code_ = TransferErrorCode::TIMEOUT;
-        error_msg_  = "TransferTask timed out";
-    } else if (cancel_requested_) {
-        error_code_ = TransferErrorCode::CANCELLED;
-        error_msg_  = "TransferTask cancelled during transfer";
-    } else {
-        error_code_ = success ? TransferErrorCode::OK : error_code;
-        error_msg_  = error_msg;
+    if (done_callback) {
+        done_callback();
     }
-    total_cost_time_us_ = currentTimeUs() - start_time_us_;
+}
+
+void TransferTask::setDoneCallback(std::function<void()> callback) {
+    bool invoke_now = false;
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        if (done_) {
+            invoke_now = true;
+        } else {
+            done_callback_ = std::move(callback);
+        }
+    }
+    if (invoke_now && callback) {
+        callback();
+    }
 }
 
 // ==================== TransferTaskStore ====================

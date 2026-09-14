@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <shared_mutex>
 #include <string>
@@ -28,6 +29,7 @@ public:
     void              cancel() override;
     TransferErrorCode errorCode() const override;
     std::string       errorMessage() const override;
+    void              setDoneCallback(std::function<void()> callback) override;
 
 public:
     // 内部使用（TcpTransferService / RdmaTransferService 通知完成）
@@ -61,6 +63,7 @@ private:
     bool                      cancel_requested_ = false;
     TransferErrorCode         error_code_       = TransferErrorCode::OK;
     std::string               error_msg_;
+    std::function<void()>     done_callback_;
 };
 
 /// @brief 内部 task store，被 TcpKVCacheReceiver / RdmaKVCacheReceiver 私有持有

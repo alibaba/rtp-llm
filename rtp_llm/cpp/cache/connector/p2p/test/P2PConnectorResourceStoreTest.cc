@@ -337,12 +337,40 @@ TEST_F(P2PConnectorResourceStoreTest, ResourceTimeout_AutoRemoval) {
 
     stream_store_->addResource(meta, resource);
 
-    // Wait for the timeout check to run (check interval is 100ms)
+    // Wait past the request deadline for the deadline waiter to release the resource.
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
     // Resource should have been removed due to timeout
     auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 10, deadline_ms);
     EXPECT_EQ(entry, nullptr);
+}
+
+TEST(P2PConnectorResourceStoreDeadlineTest, ResourceTimeoutUsesRequestDeadlineNotPollingInterval) {
+    std::mutex              mutex;
+    std::condition_variable released_cv;
+    bool                    released = false;
+    {
+        P2PConnectorResourceStore store(nullptr, 10 * 1000);
+        ASSERT_TRUE(store.init());
+        store.setOnRequestReleased([&](int64_t, int64_t) {
+            std::lock_guard<std::mutex> lock(mutex);
+            released = true;
+            released_cv.notify_one();
+        });
+
+        const std::string unique_key  = "event_driven_timeout";
+        const int64_t     deadline_ms = currentTimeMs() + 50;
+        auto              meta        = std::make_shared<MockMeta>();
+        meta->setUniqueKey(unique_key);
+        meta->setRequestId(1010);
+        meta->setDeadlineMs(deadline_ms);
+        meta->setPrefillAddr("127.0.0.1", 12345);
+        meta->setPrefillTpSize(1);
+        ASSERT_TRUE(store.addResource(meta, std::make_shared<KVCacheResource>()));
+
+        std::unique_lock<std::mutex> lock(mutex);
+        EXPECT_TRUE(released_cv.wait_for(lock, std::chrono::milliseconds(500), [&]() { return released; }));
+    }
 }
 
 TEST_F(P2PConnectorResourceStoreTest, SideChannelTimeout_AutoRemoval) {

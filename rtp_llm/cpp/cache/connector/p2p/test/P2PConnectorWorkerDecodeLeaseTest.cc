@@ -46,25 +46,39 @@ public:
     }
 
     void cancel() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (done_)
-            return;
-        if (!transferring_) {
-            done_       = true;
-            error_code_ = transfer::TransferErrorCode::CANCELLED;
-        } else {
-            cancel_requested_ = true;
+        std::function<void()> done_callback;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (done_)
+                return;
+            if (!transferring_) {
+                done_       = true;
+                error_code_ = transfer::TransferErrorCode::CANCELLED;
+                done_callback = std::move(done_callback_);
+            } else {
+                cancel_requested_ = true;
+            }
+            cv_.notify_all();
         }
-        cv_.notify_all();
+        if (done_callback) {
+            done_callback();
+        }
     }
 
     void forceCancel() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (done_)
-            return;
-        done_       = true;
-        error_code_ = transfer::TransferErrorCode::CANCELLED;
-        cv_.notify_all();
+        std::function<void()> done_callback;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (done_)
+                return;
+            done_       = true;
+            error_code_ = transfer::TransferErrorCode::CANCELLED;
+            done_callback = std::move(done_callback_);
+            cv_.notify_all();
+        }
+        if (done_callback) {
+            done_callback();
+        }
     }
 
     transfer::TransferErrorCode errorCode() const override {
@@ -77,6 +91,21 @@ public:
         return done_ ? (error_code_ == transfer::TransferErrorCode::OK ? "" : "inflight mock error") : "";
     }
 
+    void setDoneCallback(std::function<void()> callback) override {
+        bool invoke_now = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (done_) {
+                invoke_now = true;
+            } else {
+                done_callback_ = std::move(callback);
+            }
+        }
+        if (invoke_now && callback) {
+            callback();
+        }
+    }
+
     // --- Test control API ---
 
     void startTransfer() {
@@ -85,16 +114,23 @@ public:
     }
 
     void notifyDone(bool ok = true) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (done_)
-            return;
-        done_ = true;
-        if (cancel_requested_) {
-            error_code_ = transfer::TransferErrorCode::CANCELLED;
-        } else {
-            error_code_ = ok ? transfer::TransferErrorCode::OK : transfer::TransferErrorCode::UNKNOWN;
+        std::function<void()> done_callback;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (done_)
+                return;
+            done_ = true;
+            if (cancel_requested_) {
+                error_code_ = transfer::TransferErrorCode::CANCELLED;
+            } else {
+                error_code_ = ok ? transfer::TransferErrorCode::OK : transfer::TransferErrorCode::UNKNOWN;
+            }
+            done_callback = std::move(done_callback_);
+            cv_.notify_all();
         }
-        cv_.notify_all();
+        if (done_callback) {
+            done_callback();
+        }
     }
 
     bool isTransferring() const {
@@ -119,6 +155,7 @@ private:
     bool                        transferring_{false};
     bool                        cancel_requested_{false};
     transfer::TransferErrorCode error_code_{transfer::TransferErrorCode::OK};
+    std::function<void()>       done_callback_;
 };
 
 // =============================================================================
@@ -569,8 +606,8 @@ TEST_F(DecodeLeaseRaceTest, A3_CancelMixedPendingAndTransferring_LeaseWaitsForIn
 // works as expected in this scenario.
 // =============================================================================
 
-// B1: read() times out (TRANSFER_NOT_DONE), tasks complete later via queryLeaseStatus polling.
-TEST_F(DecodeLeaseRaceTest, B1_TransferNotDone_LeasePolledUntilAllComplete) {
+// B1: read() times out (TRANSFER_NOT_DONE), tasks complete later through completion callbacks.
+TEST_F(DecodeLeaseRaceTest, B1_TransferNotDone_LeaseTracksCallbacksUntilAllComplete) {
     const std::string key     = "b1_transfer_not_done";
     auto              buffers = makeBuffers(2);
     // Very short deadline so read() reaches D quickly.
@@ -679,8 +716,8 @@ TEST_F(DecodeLeaseRaceTest, B2_TransferNotDone_StolenTasksStillComplete) {
 // Verify QUERY_LEASE_STATUS does not need to advance counters itself.
 // =============================================================================
 
-// D1: queryLeaseStatus observes locally-counted task completion incrementally.
-TEST_F(DecodeLeaseRaceTest, D1_QueryLeaseStatus_IncrementalFinishCounting) {
+// D1: queryLeaseStatus observes callback-driven task completion incrementally.
+TEST_F(DecodeLeaseRaceTest, D1_QueryLeaseStatus_CallbackDrivenFinishCounting) {
     const std::string key     = "d1_incremental";
     auto              buffers = makeBuffers(3);
     config_.layer_all_num     = 3;
@@ -714,24 +751,25 @@ TEST_F(DecodeLeaseRaceTest, D1_QueryLeaseStatus_IncrementalFinishCounting) {
 
     // Complete task 0
     inflight_receiver_->getInflightTask(task_keys[0])->notifyDone(true);
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     decode_->queryLeaseStatus(key, sealed, started_ops, finished_ops, stopped);
     EXPECT_EQ(finished_ops, 1);
     EXPECT_FALSE(stopped);
 
     // Complete task 1
     inflight_receiver_->getInflightTask(task_keys[1])->notifyDone(true);
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     decode_->queryLeaseStatus(key, sealed, started_ops, finished_ops, stopped);
     EXPECT_EQ(finished_ops, 2);
     EXPECT_FALSE(stopped);
 
     // Complete task 2 → all done → stopped
     inflight_receiver_->getInflightTask(task_keys[2])->notifyDone(true);
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     bool found = decode_->queryLeaseStatus(key, sealed, started_ops, finished_ops, stopped);
-    EXPECT_EQ(finished_ops, 3);
-    EXPECT_TRUE(stopped);
+    if (found) {
+        EXPECT_EQ(finished_ops, 3);
+        EXPECT_TRUE(stopped);
+    } else {
+        EXPECT_TRUE(stopped);
+    }
 
     // After stopped, entry is lazily removed
     found = decode_->queryLeaseStatus(key, sealed, started_ops, finished_ops, stopped);

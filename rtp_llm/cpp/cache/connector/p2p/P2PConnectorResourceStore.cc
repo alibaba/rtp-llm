@@ -48,19 +48,26 @@ bool waitWithBackoff(Lock&                                 lock,
 namespace rtp_llm {
 
 P2PConnectorResourceStore::P2PConnectorResourceStore(const kmonitor::MetricsReporterPtr& metrics_reporter,
-                                                   int timeout_check_interval_ms):
-    metrics_reporter_(metrics_reporter), timeout_check_interval_ms_(timeout_check_interval_ms) {}
+                                                   int /*timeout_check_interval_ms*/):
+    metrics_reporter_(metrics_reporter) {}
 
 P2PConnectorResourceStore::~P2PConnectorResourceStore() {
-    if (check_timeout_thread_) {
-        check_timeout_thread_->stop();
+    {
+        std::lock_guard<std::mutex> lock(resource_map_mutex_);
+        stopping_ = true;
+        ++deadline_generation_;
+    }
+    deadline_cv_.notify_one();
+    if (deadline_thread_.joinable()) {
+        deadline_thread_.join();
     }
 }
 
 bool P2PConnectorResourceStore::init() {
-    check_timeout_thread_ = autil::LoopThread::createLoopThread(
-        [this]() { checkTimeout(); }, timeout_check_interval_ms_, "P2PConnectorResourceStoreCheckTimeoutThread");
-    return check_timeout_thread_ != nullptr;
+    if (!deadline_thread_.joinable()) {
+        deadline_thread_ = std::thread(&P2PConnectorResourceStore::runDeadlineLoop, this);
+    }
+    return true;
 }
 
 void P2PConnectorResourceStore::setOnRequestReleased(std::function<void(int64_t, int64_t)> callback) {
@@ -98,6 +105,7 @@ bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>& meta,
             resource_map_.emplace(routing->unique_key, std::move(entry));
             accepted = true;
         }
+        scheduleDeadlineCheckLocked();
     }
     if (release_layers && on_request_released_) {
         on_request_released_(routing->request_id, routing->deadline_ms);
@@ -131,6 +139,7 @@ void P2PConnectorResourceStore::markTerminal(const std::string& unique_key, int6
             reportMetrics(false, true, resource->second->add_time_us);
             resource_map_.erase(resource);
         }
+        scheduleDeadlineCheckLocked();
     }
     retired.reset();
     resource_cv_.notify_all();
@@ -158,6 +167,7 @@ std::shared_ptr<P2PConnectorResourceEntry> P2PConnectorResourceStore::waitAndSte
     if (resource != resource_map_.end()) {
         resource->second->deadline_ms = state.deadlineMs();
     }
+    scheduleDeadlineCheckLocked();
     resource_cv_.notify_all();
     // Re-find state on each wake: the scanner may remove an expired request.
     const auto stopped = [&]() {
@@ -224,6 +234,46 @@ void P2PConnectorResourceStore::checkTimeout() {
     }
 }
 
+void P2PConnectorResourceStore::scheduleDeadlineCheckLocked() {
+    ++deadline_generation_;
+    deadline_cv_.notify_one();
+}
+
+std::optional<int64_t> P2PConnectorResourceStore::nextDeadlineMsLocked() const {
+    std::optional<int64_t> next_deadline_ms;
+    for (const auto& [unique_key, state] : request_states_) {
+        (void)unique_key;
+        const int64_t cleanup_deadline_ms = state.terminal ? state.request_deadline_ms : state.deadlineMs();
+        if (!next_deadline_ms || cleanup_deadline_ms < *next_deadline_ms) {
+            next_deadline_ms = cleanup_deadline_ms;
+        }
+    }
+    return next_deadline_ms;
+}
+
+void P2PConnectorResourceStore::runDeadlineLoop() {
+    while (true) {
+        checkTimeout();
+
+        std::unique_lock<std::mutex> lock(resource_map_mutex_);
+        if (stopping_) {
+            return;
+        }
+        const uint64_t observed_generation = deadline_generation_;
+        const auto     next_deadline_ms    = nextDeadlineMsLocked();
+        if (!next_deadline_ms) {
+            deadline_cv_.wait(lock, [this, observed_generation]() {
+                return stopping_ || deadline_generation_ != observed_generation;
+            });
+        } else {
+            deadline_cv_.wait_until(
+                lock,
+                std::chrono::system_clock::time_point(std::chrono::milliseconds(*next_deadline_ms)),
+                [this, observed_generation]() { return stopping_ || deadline_generation_ != observed_generation; });
+        }
+    }
+}
+
 void P2PConnectorResourceStore::notifySideChannelReady(const std::string&                           unique_key,
                                                        int64_t                                      request_deadline_ms,
                                                        P2PConnectorResourceEntry::SideChannelData&& data) {
@@ -241,6 +291,7 @@ void P2PConnectorResourceStore::notifySideChannelReady(const std::string&       
         }
         retired.swap(state.side_channel_data);
         state.side_channel_data.emplace(std::move(data));
+        scheduleDeadlineCheckLocked();
     }
     resource_cv_.notify_all();
 }

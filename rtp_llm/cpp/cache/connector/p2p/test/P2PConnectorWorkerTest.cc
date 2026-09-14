@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <iterator>
 #include <thread>
 #include <gtest/gtest.h>
@@ -239,6 +240,7 @@ public:
         success_.store(false);
         error_code_ = transfer::TransferErrorCode::CANCELLED;
         done_.store(true);
+        notifyDoneCallback();
     }
     void forceCancel() override {
         cancel();
@@ -249,6 +251,20 @@ public:
     std::string errorMessage() const override {
         return success_.load() ? "" : "mock recv task failed";
     }
+    void setDoneCallback(std::function<void()> callback) override {
+        bool invoke_now = false;
+        {
+            std::lock_guard<std::mutex> lock(callback_mutex_);
+            if (done_.load()) {
+                invoke_now = true;
+            } else {
+                done_callback_ = std::move(callback);
+            }
+        }
+        if (invoke_now && callback) {
+            callback();
+        }
+    }
 
     void setDone(bool success) {
         success_.store(success);
@@ -256,12 +272,26 @@ public:
             error_code_ = transfer::TransferErrorCode::UNKNOWN;
         }
         done_.store(true);
+        notifyDoneCallback();
     }
 
 private:
+    void notifyDoneCallback() {
+        std::function<void()> callback;
+        {
+            std::lock_guard<std::mutex> lock(callback_mutex_);
+            callback = std::move(done_callback_);
+        }
+        if (callback) {
+            callback();
+        }
+    }
+
     std::atomic<bool>           done_{false};
     std::atomic<bool>           success_{true};
     transfer::TransferErrorCode error_code_{transfer::TransferErrorCode::OK};
+    std::mutex                   callback_mutex_;
+    std::function<void()>        done_callback_;
 };
 
 // Mock IKVCacheReceiver for testing

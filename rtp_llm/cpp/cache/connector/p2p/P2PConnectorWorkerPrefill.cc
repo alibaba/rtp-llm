@@ -69,8 +69,8 @@ P2PConnectorWorkerPrefill::P2PConnectorWorkerPrefill(P2PConnectorWorkerConfig   
     computed_buffers_(std::make_shared<ComputedLayerCacheBufferStore>()) {}
 
 P2PConnectorWorkerPrefill::~P2PConnectorWorkerPrefill() {
-    if (cleanup_thread_) {
-        cleanup_thread_->stop();
+    if (store_wait_check_thread_) {
+        store_wait_check_thread_->stop();
     }
     if (async_sender_pool_) {
         async_sender_pool_->stop();
@@ -85,10 +85,10 @@ bool P2PConnectorWorkerPrefill::init() {
         buildExpectedBufferMetadata(*config_.topology, &expected_buffer_keys_, &expected_buffer_tags_);
     }
 
-    cleanup_thread_ = autil::LoopThread::createLoopThread(
-        std::bind(&P2PConnectorWorkerPrefill::loopCheckProc, this), 1000, "P2PConnectorWorkerCleanupThread");
-    if (!cleanup_thread_) {
-        RTP_LLM_LOG_ERROR("init failed: cleanup_thread is null");
+    store_wait_check_thread_ = autil::LoopThread::createLoopThread(
+        std::bind(&P2PConnectorWorkerPrefill::loopCheckProc, this), 1000, "P2PPrefillStoreWaitCheck");
+    if (!store_wait_check_thread_) {
+        RTP_LLM_LOG_ERROR("init failed: store wait check thread is null");
         return false;
     }
 

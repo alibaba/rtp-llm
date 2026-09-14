@@ -23,16 +23,24 @@ P2PConnectorWorkerDecode::P2PConnectorWorkerDecode(P2PConnectorWorkerConfig     
     layer_block_converter_(layer_block_converter),
     metrics_reporter_(metrics_reporter),
     receiver_(receiver) {
-    lease_cleanup_thread_ = autil::LoopThread::createLoopThread(
-        std::bind(&P2PConnectorWorkerDecode::updateLeaseProgress, this), 10 * 1000, "P2PDecodeLeaseProgress");
-    if (!lease_cleanup_thread_) {
-        RTP_LLM_LOG_ERROR("P2PConnectorWorkerDecode failed to start lease cleanup thread");
-    }
+    completion_callback_state_        = std::make_shared<CompletionCallbackState>();
+    completion_callback_state_->owner = this;
+    pending_cancel_expiry_thread_     = std::thread(&P2PConnectorWorkerDecode::runPendingCancelExpiryLoop, this);
 }
 
 P2PConnectorWorkerDecode::~P2PConnectorWorkerDecode() {
-    if (lease_cleanup_thread_) {
-        lease_cleanup_thread_->stop();
+    {
+        std::lock_guard<std::mutex> lock(completion_callback_state_->mutex);
+        completion_callback_state_->owner = nullptr;
+    }
+    {
+        std::lock_guard<std::mutex> lock(read_tasks_mutex_);
+        stopping_ = true;
+        ++pending_cancel_generation_;
+    }
+    pending_cancel_cv_.notify_one();
+    if (pending_cancel_expiry_thread_.joinable()) {
+        pending_cancel_expiry_thread_.join();
     }
 }
 
@@ -40,7 +48,7 @@ ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&    
                                                    const std::string&                    unique_key,
                                                    int64_t                               deadline_ms,
                                                    const std::shared_ptr<ReadTaskGroup>& task_group,
-                                                   int&                                  total_block_count) const {
+                                                   int&                                  total_block_count) {
     for (const auto& route : worker_plan.routes) {
         auto fail_registration = [&](const std::string& message) {
             cleanupRecvTaskStore(task_group, /*cancel_pending_tasks=*/true);
@@ -106,6 +114,7 @@ ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&    
             task_group->lease->onTransferStarted();
             task_group->partition_keys.push_back(partition_layer_key);
             task_group->tasks.push_back(task);
+            registerTaskCompletionCallback(task, unique_key, task_group);
             total_block_count += static_cast<int>(layer_cache_buffer->blockIdMap().size());
         }
     }
@@ -219,6 +228,7 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
         if (pending_cancel != pending_cancel_keys_.end()) {
             const bool still_valid = currentTimeMs() <= pending_cancel->second;
             pending_cancel_keys_.erase(pending_cancel);
+            schedulePendingCancelExpiryLocked();
             if (still_valid) {
                 return ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED,
                                  "read cancelled before recv registration");
@@ -234,11 +244,17 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
         {
             std::lock_guard<std::mutex> lock(read_tasks_mutex_);
             building_read_keys_.erase(unique_key);
-            pending_cancel_keys_.erase(unique_key);
+            if (pending_cancel_keys_.erase(unique_key) > 0) {
+                schedulePendingCancelExpiryLocked();
+            }
             if (has_inflight_task) {
                 task_group->lease->seal();
                 std::lock_guard<std::mutex> lease_lock(lease_map_mutex_);
-                lease_map_[unique_key] = LeaseMapEntry{task_group, 0};
+                auto& lease_entry      = lease_map_[unique_key] = LeaseMapEntry{task_group, 0};
+                advanceLeaseProgress(lease_entry);
+                if (lease_entry.task_group->lease->isStopped()) {
+                    lease_map_.erase(unique_key);
+                }
             }
         }
         if (has_inflight_task) {
@@ -254,10 +270,14 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
         building_read_keys_.erase(unique_key);
         read_tasks_[unique_key] = task_group;
         pending_cancel          = pending_cancel_keys_.erase(unique_key) > 0;
+        if (pending_cancel) {
+            schedulePendingCancelExpiryLocked();
+        }
         // Publish the lease before registration stops being visible. A lease
         // query after CANCEL_READ acknowledgement must always observe one of them.
         std::lock_guard<std::mutex> lease_lock(lease_map_mutex_);
-        lease_map_[unique_key] = LeaseMapEntry{task_group, 0};
+        auto& lease_entry      = lease_map_[unique_key] = LeaseMapEntry{task_group, 0};
+        advanceLeaseProgress(lease_entry);
     }
 
     if (pending_cancel) {
@@ -275,7 +295,9 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
         building_read_keys_.erase(unique_key);
-        pending_cancel_keys_.erase(unique_key);
+        if (pending_cancel_keys_.erase(unique_key) > 0) {
+            schedulePendingCancelExpiryLocked();
+        }
         read_tasks_.erase(unique_key);
     }
 
@@ -301,15 +323,20 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
     task_group->lease->seal();
     cleanupRecvTaskStore(task_group, /*cancel_pending_tasks=*/false);
 
-    if (outcome == ReadWaitOutcome::AllDone) {
-        // All tasks confirmed done. Safe to remove from lease_map immediately.
+    // A completion callback may have arrived before seal(), so advance once more
+    // after sealing to release an already-finished lease without a polling pass.
+    {
         std::lock_guard<std::mutex> lock(lease_map_mutex_);
-        lease_map_.erase(unique_key);
+        auto                        it = lease_map_.find(unique_key);
+        if (it != lease_map_.end() && it->second.task_group == task_group) {
+            advanceLeaseProgress(it->second);
+            if (it->second.task_group->lease->isStopped()) {
+                lease_map_.erase(it);
+            }
+        }
     }
-    // Cancelled path: some tasks may still be TRANSFERRING (cancel() only sets a flag,
-    // does NOT make done()=true). Keep the lease_map_ entry alive so that
-    // queryLeaseStatus can track in-flight ops and only report stopped once all
-    // transfers complete. This prevents premature block release.
+    // Cancelled path: TRANSFERRING tasks remain in lease_map_ until their completion
+    // callbacks report physical completion, preventing premature block release.
 
     auto recv_result = aggregateRecvTaskResults(task_group);
 
@@ -369,6 +396,7 @@ bool P2PConnectorWorkerDecode::cancelRead(const std::string& unique_key, int64_t
             pending_cancel_keys_[unique_key] = has_finite_request_deadline ?
                                                    std::max(request_deadline_ms, fallback_deadline) :
                                                    fallback_deadline;
+            schedulePendingCancelExpiryLocked();
             RTP_LLM_LOG_INFO("cancelRead: queued pending cancel, unique_key: %s, during_registration: %d",
                              unique_key.c_str(),
                              building_read_keys_.count(unique_key) > 0);
@@ -385,31 +413,6 @@ bool P2PConnectorWorkerDecode::cancelRead(const std::string& unique_key, int64_t
     return true;
 }
 
-void P2PConnectorWorkerDecode::updateLeaseProgress() {
-    const int64_t now_ms = currentTimeMs();
-    {
-        std::lock_guard<std::mutex> lock(read_tasks_mutex_);
-        for (auto it = pending_cancel_keys_.begin(); it != pending_cancel_keys_.end();) {
-            if (it->second < now_ms) {
-                it = pending_cancel_keys_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
-    {
-        std::lock_guard<std::mutex> lock(lease_map_mutex_);
-        for (auto it = lease_map_.begin(); it != lease_map_.end();) {
-            advanceLeaseProgress(it->second);
-            if (it->second.task_group->lease->isStopped()) {
-                it = lease_map_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
-}
-
 void P2PConnectorWorkerDecode::advanceLeaseProgress(LeaseMapEntry& entry) {
     int done_now = 0;
     for (const auto& task : entry.task_group->tasks) {
@@ -422,6 +425,78 @@ void P2PConnectorWorkerDecode::advanceLeaseProgress(LeaseMapEntry& entry) {
         entry.task_group->lease->onTransferFinished();
     }
     entry.finish_counted = std::max(entry.finish_counted, done_now);
+}
+
+void P2PConnectorWorkerDecode::registerTaskCompletionCallback(
+    const transfer::IKVCacheRecvTaskPtr& task,
+    const std::string&                    unique_key,
+    const std::shared_ptr<ReadTaskGroup>& task_group) {
+    const auto callback_state = completion_callback_state_;
+    const std::weak_ptr<ReadTaskGroup> weak_task_group = task_group;
+    task->setDoneCallback([callback_state, unique_key, weak_task_group]() {
+        std::lock_guard<std::mutex> lock(callback_state->mutex);
+        if (callback_state->owner) {
+            callback_state->owner->onRecvTaskDone(unique_key, weak_task_group);
+        }
+    });
+}
+
+void P2PConnectorWorkerDecode::onRecvTaskDone(const std::string& unique_key,
+                                               const std::weak_ptr<ReadTaskGroup>& weak_task_group) {
+    const auto task_group = weak_task_group.lock();
+    if (!task_group) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(lease_map_mutex_);
+    auto                        it = lease_map_.find(unique_key);
+    if (it == lease_map_.end() || it->second.task_group != task_group) {
+        return;
+    }
+    advanceLeaseProgress(it->second);
+    if (it->second.task_group->lease->isStopped()) {
+        lease_map_.erase(it);
+    }
+}
+
+void P2PConnectorWorkerDecode::schedulePendingCancelExpiryLocked() {
+    ++pending_cancel_generation_;
+    pending_cancel_cv_.notify_one();
+}
+
+void P2PConnectorWorkerDecode::runPendingCancelExpiryLoop() {
+    std::unique_lock<std::mutex> lock(read_tasks_mutex_);
+    while (!stopping_) {
+        const int64_t now_ms = currentTimeMs();
+        for (auto it = pending_cancel_keys_.begin(); it != pending_cancel_keys_.end();) {
+            if (it->second < now_ms) {
+                it = pending_cancel_keys_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        const uint64_t observed_generation = pending_cancel_generation_;
+        int64_t        next_expiry_ms      = std::numeric_limits<int64_t>::max();
+        for (const auto& [unique_key, expiry_ms] : pending_cancel_keys_) {
+            (void)unique_key;
+            if (expiry_ms < std::numeric_limits<int64_t>::max()) {
+                next_expiry_ms = std::min(next_expiry_ms, expiry_ms + 1);
+            }
+        }
+
+        if (next_expiry_ms == std::numeric_limits<int64_t>::max()) {
+            pending_cancel_cv_.wait(lock, [this, observed_generation]() {
+                return stopping_ || pending_cancel_generation_ != observed_generation;
+            });
+        } else {
+            pending_cancel_cv_.wait_until(
+                lock,
+                std::chrono::system_clock::time_point(std::chrono::milliseconds(next_expiry_ms)),
+                [this, observed_generation]() {
+                    return stopping_ || pending_cancel_generation_ != observed_generation;
+                });
+        }
+    }
 }
 
 bool P2PConnectorWorkerDecode::queryLeaseStatus(

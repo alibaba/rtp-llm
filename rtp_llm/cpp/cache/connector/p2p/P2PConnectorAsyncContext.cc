@@ -451,12 +451,12 @@ bool P2PConnectorAsyncReadContextChecker::init(const kmonitor::MetricsReporterPt
                                                const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client) {
     metrics_reporter_    = metrics_reporter;
     tp_broadcast_client_ = tp_broadcast_client;
-    check_done_thread_ =
+    async_read_check_thread_ =
         autil::LoopThread::createLoopThread(std::bind(&P2PConnectorAsyncReadContextChecker::checkOnce, this),
                                             5 * 1000,  // 5ms
-                                            "P2PConnectorAsyncReadContextCheckerThread");
-    if (!check_done_thread_) {
-        RTP_LLM_LOG_ERROR("P2PConnectorAsyncReadContextChecker init failed: check_done_thread is null");
+                                            "P2PAsyncReadCheck");
+    if (!async_read_check_thread_) {
+        RTP_LLM_LOG_ERROR("P2PConnectorAsyncReadContextChecker init failed: async read check thread is null");
         return false;
     }
     RTP_LLM_LOG_INFO("P2PConnectorAsyncReadContextChecker init success");
@@ -464,9 +464,9 @@ bool P2PConnectorAsyncReadContextChecker::init(const kmonitor::MetricsReporterPt
 }
 
 void P2PConnectorAsyncReadContextChecker::stop() {
-    if (check_done_thread_) {
-        check_done_thread_->stop();
-        check_done_thread_.reset();
+    if (async_read_check_thread_) {
+        async_read_check_thread_->stop();
+        async_read_check_thread_.reset();
     }
 }
 

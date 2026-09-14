@@ -224,7 +224,7 @@ private:
     std::shared_ptr<P2PBroadcastClient>                        tp_broadcast_client_;
     mutable std::mutex                                         async_contexts_mutex_;
     std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> async_contexts_;
-    autil::LoopThreadPtr                                       check_done_thread_;
+    autil::LoopThreadPtr                                       async_read_check_thread_;
     size_t                                                     lease_poll_cursor_{0};
 };
 

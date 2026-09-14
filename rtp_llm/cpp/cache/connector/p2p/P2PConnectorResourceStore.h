@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -11,7 +12,6 @@
 #include <vector>
 #include <condition_variable>
 #include <functional>
-#include "autil/LoopThread.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
@@ -96,6 +96,9 @@ public:
 
 private:
     void checkTimeout();
+    void runDeadlineLoop();
+    void scheduleDeadlineCheckLocked();
+    std::optional<int64_t> nextDeadlineMsLocked() const;
     void reportMetrics(bool timeout, bool cancelled, int64_t wait_start_time_us);
 
     struct RequestState {
@@ -112,14 +115,16 @@ private:
 
     mutable std::mutex resource_map_mutex_;
     std::condition_variable resource_cv_;
+    std::condition_variable deadline_cv_;
     std::map<std::string, std::shared_ptr<P2PConnectorResourceEntry>> resource_map_;
     // Lifecycle survives resource transfer without retaining the KV resource.
     std::map<std::string, RequestState> request_states_;
 
     kmonitor::MetricsReporterPtr metrics_reporter_;
 
-    autil::LoopThreadPtr check_timeout_thread_;
-    int                  timeout_check_interval_ms_;
+    std::thread deadline_thread_;
+    bool        stopping_{false};
+    uint64_t    deadline_generation_{0};
 
     std::function<void(int64_t, int64_t)> on_request_released_;
 
