@@ -66,4 +66,51 @@ TEST(StagePeerGroups, ValidateRejectsTotalMismatch) {
     EXPECT_THROW(validateStagePeerGroups(groups, 10), std::exception);
 }
 
+TEST(StagePeerGroups, PlanSlicesSymmetricTpCopiesWholeBlock) {
+    const auto slices = planStagePeerSlices(2, 2, 1, false);
+    ASSERT_EQ(slices.size(), 1u);
+    EXPECT_EQ(slices[0].peer_index, 1u);
+    EXPECT_EQ(slices[0].dst_partition_count, 1);
+    EXPECT_EQ(slices[0].dst_partition_id, 0);
+    EXPECT_EQ(slices[0].src_partition_count, 1);
+    EXPECT_EQ(slices[0].src_partition_id, 0);
+}
+
+TEST(StagePeerGroups, PlanSlicesFinerPrefillTpAssemblesPeerSlices) {
+    const auto slices = planStagePeerSlices(4, 2, 1, false);
+    ASSERT_EQ(slices.size(), 2u);
+    EXPECT_EQ(slices[0].peer_index, 2u);
+    EXPECT_EQ(slices[0].dst_partition_count, 2);
+    EXPECT_EQ(slices[0].dst_partition_id, 0);
+    EXPECT_EQ(slices[0].src_partition_count, 1);
+    EXPECT_EQ(slices[1].peer_index, 3u);
+    EXPECT_EQ(slices[1].dst_partition_id, 1);
+}
+
+TEST(StagePeerGroups, PlanSlicesFinerDecodeTpReadsSubSlice) {
+    const auto slices = planStagePeerSlices(1, 2, 1, false);
+    ASSERT_EQ(slices.size(), 1u);
+    EXPECT_EQ(slices[0].peer_index, 0u);
+    EXPECT_EQ(slices[0].dst_partition_count, 1);
+    EXPECT_EQ(slices[0].src_partition_count, 2);
+    EXPECT_EQ(slices[0].src_partition_id, 1);
+}
+
+TEST(StagePeerGroups, PlanSlicesReplicatedKvUsesSingleWholePeer) {
+    const auto slices = planStagePeerSlices(1, 2, 1, true);
+    ASSERT_EQ(slices.size(), 1u);
+    EXPECT_EQ(slices[0].peer_index, 0u);
+    EXPECT_EQ(slices[0].dst_partition_count, 1);
+    EXPECT_EQ(slices[0].src_partition_count, 1);
+    EXPECT_EQ(slices[0].src_partition_id, 0);
+}
+
+TEST(StagePeerGroups, PlanSlicesRejectsUnsupportedTpRatio) {
+    EXPECT_THROW(planStagePeerSlices(3, 2, 0, false), std::exception);
+}
+
+TEST(StagePeerGroups, PlanSlicesRejectsOutOfRangeLane) {
+    EXPECT_THROW(planStagePeerSlices(2, 2, 2, false), std::exception);
+}
+
 }  // namespace rtp_llm

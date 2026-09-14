@@ -40,6 +40,40 @@ std::vector<StagePeerGroup> buildStagePeerGroups(const ParallelismConfig&       
     return groups;
 }
 
+std::vector<StagePeerSlice> planStagePeerSlices(int prefill_tp, int decode_tp, int decode_tp_rank, bool replicated_kv) {
+    RTP_LLM_CHECK_WITH_INFO(
+        prefill_tp > 0 && decode_tp > 0, "invalid TP sizes: prefill=%d decode=%d", prefill_tp, decode_tp);
+    RTP_LLM_CHECK_WITH_INFO(decode_tp_rank >= 0 && decode_tp_rank < decode_tp,
+                            "decode tp_rank %d out of [0, %d)",
+                            decode_tp_rank,
+                            decode_tp);
+    if (replicated_kv) {
+        // Every lane owns the full block: one whole-block peer per stage suffices.
+        return {{static_cast<size_t>(decode_tp_rank % prefill_tp), 1, 0, 1, 0}};
+    }
+    RTP_LLM_CHECK_WITH_INFO(prefill_tp % decode_tp == 0 || decode_tp % prefill_tp == 0,
+                            "unsupported TP ratio prefill=%d decode=%d",
+                            prefill_tp,
+                            decode_tp);
+    if (prefill_tp == decode_tp) {
+        // Symmetric: the same lane index on the prefill stage owns my block.
+        return {{static_cast<size_t>(decode_tp_rank), 1, 0, 1, 0}};
+    }
+    if (prefill_tp > decode_tp) {
+        // Prefill TP finer: assemble consecutive peer slices into my block.
+        const int                   group_num = prefill_tp / decode_tp;
+        std::vector<StagePeerSlice> slices;
+        slices.reserve(static_cast<size_t>(group_num));
+        for (int j = 0; j < group_num; ++j) {
+            slices.push_back({static_cast<size_t>(decode_tp_rank * group_num + j), group_num, j, 1, 0});
+        }
+        return slices;
+    }
+    // Decode TP finer: read one sub-slice of a single prefill peer block.
+    const int group_num = decode_tp / prefill_tp;
+    return {{static_cast<size_t>(decode_tp_rank / group_num), 1, 0, group_num, decode_tp_rank % group_num}};
+}
+
 void validateStagePeerGroups(const std::vector<StagePeerGroup>& groups, int64_t total_layers) {
     RTP_LLM_CHECK_WITH_INFO(!groups.empty(), "stage peer groups must not be empty");
     uint32_t expected_begin = 0;

@@ -24,17 +24,18 @@ public:
 
     class LoadKVCacheContext {
     public:
-        LoadKVCacheContext(int64_t                          request_id,
-                           const std::string&               request_key,
-                           const std::vector<std::string>&  peer_addrs,
-                           const std::vector<CacheKeyType>& cache_keys,
-                           const GroupBlockIds&             block_ids_by_group,
-                           int64_t                          reuse_block_size,
-                           int64_t                          timeout_ms,
-                           int                              partition_count,
-                           int                              partition_id,
-                           grpc::ServerContext*             server_context,
-                           int32_t                          prefill_cp_size = 1):
+        LoadKVCacheContext(int64_t                            request_id,
+                           const std::string&                 request_key,
+                           const std::vector<std::string>&    peer_addrs,
+                           const std::vector<CacheKeyType>&   cache_keys,
+                           const GroupBlockIds&               block_ids_by_group,
+                           int64_t                            reuse_block_size,
+                           int64_t                            timeout_ms,
+                           int                                partition_count,
+                           int                                partition_id,
+                           grpc::ServerContext*               server_context,
+                           int32_t                            prefill_cp_size          = 1,
+                           const std::vector<StagePeerGroup>& remote_stage_peer_groups = {}):
             request_id(request_id),
             request_key(request_key),
             peer_addrs(peer_addrs),
@@ -45,7 +46,8 @@ public:
             partition_count(partition_count),
             partition_id(partition_id),
             server_context(server_context),
-            prefill_cp_size(prefill_cp_size) {}
+            prefill_cp_size(prefill_cp_size),
+            remote_stage_peer_groups(remote_stage_peer_groups) {}
         int64_t                          request_id;
         const std::string&               request_key;
         const std::vector<std::string>&  peer_addrs;
@@ -58,6 +60,8 @@ public:
 
         grpc::ServerContext* server_context;
         int32_t              prefill_cp_size;
+        // Prefill-side PP alloy groups; empty means pp_P=1 (flat peer_addrs).
+        std::vector<StagePeerGroup> remote_stage_peer_groups;
     };
 
 private:

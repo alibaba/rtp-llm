@@ -337,7 +337,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             const std::string cache_key = makeCacheKey(
                 cache_model_id,
                 std::to_string(cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(key_index)]),
-                layer_kv.layer_id,
+                cache_config.global_layer_begin + layer_kv.layer_id,
                 layer_kv.tag);
             const int32_t block_id = host_kv_cache_offset[input_index][static_cast<int64_t>(offset_index)];
             // Host block-offset tables use -1 as the null block sentinel.

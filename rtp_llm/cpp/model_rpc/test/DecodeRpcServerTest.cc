@@ -8,12 +8,13 @@ namespace rtp_llm {
 
 namespace {
 
-DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&               request_key,
-                                                    const std::vector<std::string>&  peer_addrs,
-                                                    const std::vector<CacheKeyType>& cache_keys,
-                                                    const GroupBlockIds&             block_ids_by_group,
-                                                    int32_t                          prefill_cp_size,
-                                                    int64_t                          reuse_block_size = 0) {
+DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&                 request_key,
+                                                    const std::vector<std::string>&    peer_addrs,
+                                                    const std::vector<CacheKeyType>&   cache_keys,
+                                                    const GroupBlockIds&               block_ids_by_group,
+                                                    int32_t                            prefill_cp_size,
+                                                    int64_t                            reuse_block_size  = 0,
+                                                    const std::vector<StagePeerGroup>& stage_peer_groups = {}) {
     return {/*request_id=*/42,
             request_key,
             peer_addrs,
@@ -24,7 +25,8 @@ DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&          
             /*partition_count=*/1,
             /*partition_id=*/0,
             /*server_context=*/nullptr,
-            prefill_cp_size};
+            prefill_cp_size,
+            stage_peer_groups};
 }
 
 GroupBase makeRpcGroup(std::string tag, std::vector<int> layer_ids) {
@@ -58,6 +60,7 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
     EXPECT_EQ(broadcast->FindFieldByName("partition_id")->number(), 11);
     EXPECT_EQ(broadcast->FindFieldByName("prefill_cp_size")->number(), 13);
     EXPECT_EQ(broadcast->FindFieldByName("tagged_group_block_ids")->number(), 14);
+    EXPECT_EQ(broadcast->FindFieldByName("stage_peer_groups")->number(), 15);
 
     const auto* remote = RemoteOperationRequestPB::descriptor();
     ASSERT_NE(remote, nullptr);
@@ -80,6 +83,111 @@ TEST(ModelRpcProtoTest, GenerateRequestCarriesPpTopologyFields) {
     EXPECT_EQ(group->FindFieldByName("layer_begin")->number(), 1);
     EXPECT_EQ(group->FindFieldByName("layer_count")->number(), 2);
     EXPECT_EQ(group->FindFieldByName("peer_addrs")->number(), 3);
+}
+
+TEST(DecodeRpcServerTest, PpLoadRequestCarriesStagePeerGroups) {
+    DecodeRpcServer server;
+    server.resource_.workers                            = {"decode-0", "decode-1", "decode-2", "decode-3"};
+    server.maga_init_params_.parallelism_config.tp_size = 2;
+
+    const std::string                 request_key = "request";
+    const std::vector<std::string>    peer_addrs  = {"prefill-0", "prefill-1", "prefill-2", "prefill-3"};
+    const std::vector<CacheKeyType>   cache_keys  = {101};
+    const GroupBlockIds               block_ids_by_group;
+    const std::vector<StagePeerGroup> groups = {{{0, 2}, {"prefill-0", "prefill-1"}},
+                                                {{2, 2}, {"prefill-2", "prefill-3"}}};
+    const auto                        load_context =
+        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1, /*reuse=*/0, groups);
+
+    const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/3, peer_addrs);
+
+    // PP routing ignores the flat fields and ships the stage groups instead.
+    EXPECT_EQ(request.partition_count(), 1);
+    EXPECT_EQ(request.partition_id(), 0);
+    EXPECT_EQ(request.peer_addrs_size(), 0);
+    ASSERT_EQ(request.stage_peer_groups_size(), 2);
+    EXPECT_EQ(request.stage_peer_groups(0).layer_begin(), 0);
+    EXPECT_EQ(request.stage_peer_groups(0).layer_count(), 2);
+    ASSERT_EQ(request.stage_peer_groups(0).peer_addrs_size(), 2);
+    EXPECT_EQ(request.stage_peer_groups(0).peer_addrs(1), "prefill-1");
+    EXPECT_EQ(request.stage_peer_groups(1).layer_begin(), 2);
+    EXPECT_EQ(request.stage_peer_groups(1).peer_addrs(0), "prefill-2");
+}
+
+TEST(DecodeRpcServerTest, PpMlaLoadRequestCarriesStagePeerGroups) {
+    DecodeRpcServer server;
+    server.resource_.workers                            = {"decode-0", "decode-1"};
+    server.maga_init_params_.parallelism_config.tp_size = 1;
+
+    const std::string                 request_key = "request";
+    const std::vector<std::string>    peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType>   cache_keys  = {101};
+    const GroupBlockIds               block_ids_by_group;
+    const std::vector<StagePeerGroup> groups = {{{0, 2}, {"prefill-0"}}, {{2, 2}, {"prefill-1"}}};
+    const auto                        load_context =
+        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1, /*reuse=*/0, groups);
+
+    const auto request = server.constructRemoteLoadRequestForMla(load_context, /*index=*/0, peer_addrs);
+
+    EXPECT_EQ(request.peer_addrs_size(), 0);
+    ASSERT_EQ(request.stage_peer_groups_size(), 2);
+    EXPECT_EQ(request.stage_peer_groups(1).peer_addrs(0), "prefill-1");
+}
+
+TEST(DecodeRpcServerTest, FlatLoadRequestMapsDecodeLaneToPrefillPeer) {
+    DecodeRpcServer server;
+    server.resource_.workers                            = {"decode-0", "decode-1", "decode-2", "decode-3"};
+    server.maga_init_params_.parallelism_config.tp_size = 2;
+
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101};
+    const GroupBlockIds             block_ids_by_group;
+    const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1);
+
+    // decode stage 1 lane 1 reads its whole block from the same-lane peer.
+    const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/3, peer_addrs);
+    ASSERT_EQ(request.peer_addrs_size(), 1);
+    EXPECT_EQ(request.peer_addrs(0), "prefill-1");
+    EXPECT_EQ(request.partition_count(), 1);
+    EXPECT_EQ(request.partition_id(), 0);
+    EXPECT_EQ(request.stage_peer_groups_size(), 0);
+}
+
+TEST(DecodeRpcServerTest, FlatLoadRequestSlicesSourceForFinerDecodeTp) {
+    DecodeRpcServer server;
+    server.resource_.workers                            = {"decode-0", "decode-1", "decode-2", "decode-3"};
+    server.maga_init_params_.parallelism_config.tp_size = 2;
+
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0"};
+    const std::vector<CacheKeyType> cache_keys  = {101};
+    const GroupBlockIds             block_ids_by_group;
+    const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1);
+
+    // decode stage 1 lane 1 reads slice 1 of 2 from the single prefill peer.
+    const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/3, peer_addrs);
+    ASSERT_EQ(request.peer_addrs_size(), 1);
+    EXPECT_EQ(request.peer_addrs(0), "prefill-0");
+    EXPECT_EQ(request.partition_count(), 2);
+    EXPECT_EQ(request.partition_id(), 1);
+}
+
+TEST(DecodeRpcServerTest, MlaFlatLoadRequestMapsDecodeLaneToPrefillPeer) {
+    DecodeRpcServer server;
+    server.resource_.workers                            = {"decode-0", "decode-1", "decode-2", "decode-3"};
+    server.maga_init_params_.parallelism_config.tp_size = 2;
+
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101};
+    const GroupBlockIds             block_ids_by_group;
+    const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1);
+
+    const auto request = server.constructRemoteLoadRequestForMla(load_context, /*index=*/2, peer_addrs);
+    ASSERT_EQ(request.peer_addrs_size(), 1);
+    EXPECT_EQ(request.peer_addrs(0), "prefill-0");
+    EXPECT_EQ(request.partition_count(), 1);
 }
 
 TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
