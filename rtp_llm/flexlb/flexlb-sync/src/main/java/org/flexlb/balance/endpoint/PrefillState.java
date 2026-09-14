@@ -578,7 +578,7 @@ public final class PrefillState {
                     batchId >= 0L ? batchId : other.batchId,
                     Math.max(executionTimeMs, other.executionTimeMs),
                     mergedError,
-                    strongerPreemptionProgress(
+                    PriorityPreemptionProgress.merge(
                             preemptionProgress, other.preemptionProgress),
                     workerObserved || other.workerObserved);
         }
@@ -1325,7 +1325,7 @@ public final class PrefillState {
                 || entry.isActive()
                 || !matchesObservedBatch(entry, task.batchId())
                 || entry.committedItem == null
-                || isPriorityCancelOverlayOnly(task)) {
+                || task.isPriorityCancelOverlayOnly()) {
             return null;
         }
         return WorkerStatusFact.active(entry.committedItem);
@@ -1382,12 +1382,12 @@ public final class PrefillState {
             }
             RequestEntry entry = requests.get(task.requestId());
             if (entry == null || !matchesObservedBatch(entry, task.batchId())) {
-                if (!isPriorityCancelOverlayOnly(task)) {
+                if (!task.isPriorityCancelOverlayOnly()) {
                     unknownDetailed.add(task.requestId());
                 }
                 continue;
             }
-            if (!isPriorityCancelOverlayOnly(task)) {
+            if (!task.isPriorityCancelOverlayOnly()) {
                 knownObserved.add(task.requestId());
                 if (activeFacts != null && !entry.isActive()) {
                     activeFacts.add(WorkerStatusFact.active(entry.committedItem));
@@ -2022,20 +2022,6 @@ public final class PrefillState {
                 entry.committedItem, kind, terminal.errorCode);
     }
 
-    private static PriorityPreemptionProgress strongerPreemptionProgress(
-            PriorityPreemptionProgress left,
-            PriorityPreemptionProgress right) {
-        if (left == PriorityPreemptionProgress.CANCELED
-                || right == PriorityPreemptionProgress.CANCELED) {
-            return PriorityPreemptionProgress.CANCELED;
-        }
-        if (left == PriorityPreemptionProgress.CANCELING
-                || right == PriorityPreemptionProgress.CANCELING) {
-            return PriorityPreemptionProgress.CANCELING;
-        }
-        return PriorityPreemptionProgress.NONE;
-    }
-
     private static boolean matchesObservedBatch(
             RequestEntry entry, long observedBatchId) {
         if (entry.batchWork == null) {
@@ -2048,15 +2034,6 @@ public final class PrefillState {
     private static Phase strongerEnginePhase(Phase left, Phase right) {
         return left == Phase.ENGINE_RUNNING || right == Phase.ENGINE_RUNNING
                 ? Phase.ENGINE_RUNNING : Phase.ENGINE_QUEUED;
-    }
-
-    private static boolean isPriorityCancelOverlayOnly(
-            WorkerStatus.TaskObservation task) {
-        PriorityPreemptionProgress progress =
-                task.priorityPreemptionProgress();
-        return (progress == PriorityPreemptionProgress.CANCELING
-                || progress == PriorityPreemptionProgress.CANCELED)
-                && task.phase() == TaskPhase.PENDING;
     }
 
     private IdentityHashMap<BatchWork, BatchReduction>

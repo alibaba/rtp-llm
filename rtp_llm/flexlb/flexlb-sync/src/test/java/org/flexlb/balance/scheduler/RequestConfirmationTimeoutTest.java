@@ -8,6 +8,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -90,7 +91,7 @@ class RequestConfirmationTimeoutTest {
             ScheduledRequest item = new ScheduledRequest(context, future, new Response(), prefillMetadata,
                     null, prefill, decode, reservation, slot.createdAtMs());
             AtomicReference<PrefillState.RouteReservation> routeReservation = new AtomicReference<>();
-            try (var mutation = requests.claimAdmissionMutation(REQUEST_ID, future);
+            try (var mutation = requests.claimAdmissionHandle(REQUEST_ID, future);
                  var pin = prefill.tryPinGeneration()) {
                 assertNotNull(mutation);
                 assertNotNull(pin);
@@ -104,13 +105,13 @@ class RequestConfirmationTimeoutTest {
             DeliveryClaim claim;
             try (var routeCommit = prefill.tryBeginRouteCommitAdmission()) {
                 assertNotNull(routeCommit);
-                claim = requests.tryClaimRouteDelivery(item, () -> {
+                claim = RequestLifecycleTestSupport.claimRouteWithoutPrediction(requests, item, () -> {
                     try (var handoff = routeCommit.commit(List.of(item), List.of(routeReservation.get()))) {
                         return true;
                     }
                 });
                 assertNotNull(claim);
-                claim.begin(new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L);
+                requests.setDeliveryPrediction(claim, new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L);
             }
             if (waiting == ConfirmationWait.UNCERTAIN_REPLY) {
                 claim.complete(DeliveryResult.uncertain(new IllegalStateException("reply was lost")));
@@ -145,8 +146,8 @@ class RequestConfirmationTimeoutTest {
                 assertTrue(acquired.permit().release());
                 decode.releaseReservationExact(next);
             }
-            requests.onPrefillFact(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
-            requests.onDecodeFact(decode, DecodeEndpoint.WorkerStatusFact.active(reservation));
+            requests.processPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
+            requests.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(reservation));
             assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(REQUEST_ID, 0L).state());
             assertEquals(0, requests.liveRequestCount());
             assertEquals(0L, prefill.observedRequestCount());

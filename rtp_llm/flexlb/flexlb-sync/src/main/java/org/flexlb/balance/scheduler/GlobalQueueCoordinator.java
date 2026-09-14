@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
@@ -307,9 +308,9 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                     CancelReason.DEADLINE_EXCEEDED);
             return Plan.done(entry, availabilitySequence);
         }
-        AdmissionMutation mutation = lifecycle.claimAdmissionMutation(
+        AdmissionHandle handle = lifecycle.claimAdmissionHandle(
                 entry.context.getRequestId(), entry.future);
-        if (mutation == null) {
+        if (handle == null) {
             return Plan.done(entry, availabilitySequence);
         }
         try {
@@ -319,12 +320,12 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                     router.select(entry.context, entry.routingGroup);
             if (result.status() == PlacementResult.Status.SUCCESS) {
                 return Plan.success(
-                        entry, mutation, result, availabilitySequence);
+                        entry, handle, result, availabilitySequence);
             }
-            mutation.close();
+            handle.close();
             return Plan.result(entry, result, availabilitySequence);
         } catch (Throwable failure) {
-            mutation.close();
+            handle.close();
             return Plan.failure(entry, failure, availabilitySequence);
         }
     }
@@ -387,7 +388,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         if (!priorityOrdering || entry.future.isDone()) {
             return false;
         }
-        plan.closeMutation();
+        plan.closeAdmissionHandle();
         RouteAdmission admission = plan.admission();
         if (admission == null || !evictionManager.tryAdmit(
                 entry.context, entry.future, admission, blockedEndpoint)) {
@@ -527,7 +528,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     }
 
     private static Response error(StrategyErrorType type, String detail) {
-        return RequestResponses.buildErrorResponse(type, detail);
+        return Response.buildErrorResponse(type, detail);
     }
 
     @Override
@@ -572,7 +573,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
     private static final class Plan implements AutoCloseable {
         private final GlobalQueueEntry entry;
-        private AdmissionMutation mutation;
+        private AdmissionHandle handle;
         // A successful result owns its admission until transfer or close.
         private PlacementResult<RouteAdmission, PlacementKey> result;
         private final Throwable failure;
@@ -582,12 +583,12 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
         private Plan(
                 GlobalQueueEntry entry,
-                AdmissionMutation mutation,
+                AdmissionHandle handle,
                 PlacementResult<RouteAdmission, PlacementKey> result,
                 Throwable failure,
                 long availabilitySequence) {
             this.entry = entry;
-            this.mutation = mutation;
+            this.handle = handle;
             this.result = result;
             this.failure = failure;
             this.availabilitySequence = availabilitySequence;
@@ -596,10 +597,10 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             }
         }
 
-        static Plan success(GlobalQueueEntry entry, AdmissionMutation mutation,
+        static Plan success(GlobalQueueEntry entry, AdmissionHandle handle,
                             PlacementResult<RouteAdmission, PlacementKey> result,
                             long availabilitySequence) {
-            return new Plan(entry, mutation, result, null,
+            return new Plan(entry, handle, result, null,
                     availabilitySequence);
         }
 
@@ -639,9 +640,9 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             return result == null ? null : result.value();
         }
 
-        void closeMutation() {
-            AdmissionMutation owned = mutation;
-            mutation = null;
+        void closeAdmissionHandle() {
+            AdmissionHandle owned = handle;
+            handle = null;
             if (owned != null) {
                 owned.close();
             }
@@ -657,7 +658,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                     Logger.warn("Failed to close abandoned route plan", failure);
                 }
             }
-            closeMutation();
+            closeAdmissionHandle();
         }
     }
 }

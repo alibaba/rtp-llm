@@ -12,6 +12,7 @@ import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -74,9 +75,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         ScheduledRequest head = candidates.get(0);
 
         CapacityBoundary.Attempt<BatchTransaction> groupAttempt =
-                requests.prepareIfOwned(head, () -> prepareAdmission(head))
-                        .orElseGet(() -> BatchDeliveryStrategy
-                                .<BatchTransaction>ownershipLost());
+                requests.prepareBatchDelivery(head, this);
         if (!groupAttempt.accepted()) {
             return BatchTransaction.blocked(
                     this,
@@ -92,10 +91,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             for (int index = 0; index < candidates.size(); index++) {
                 ScheduledRequest item = candidates.get(index);
                 CapacityBoundary.Attempt<ScheduledRequest> attempt =
-                        requests.prepareIfOwned(
-                                item, () -> transaction.append(item))
-                                .orElseGet(() -> BatchDeliveryStrategy
-                                        .<ScheduledRequest>ownershipLost());
+                        requests.prepareBatchMember(item, transaction);
                 if (attempt.accepted()) {
                     admitted.add(item);
                 } else {
@@ -134,7 +130,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
     }
 
-    private CapacityBoundary.Attempt<BatchTransaction> prepareAdmission(
+    CapacityBoundary.Attempt<BatchTransaction> prepareAdmission(
             ScheduledRequest head) {
         try {
             CapacityBoundary.Attempt<
@@ -218,16 +214,14 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 ScheduledRequest item = original.get(index);
                 try {
                     DeliveryClaim claim =
-                            requests.tryClaimBatchDelivery(
-                                    item,
-                                    batch.batchId(),
-                                    () -> batch.transferToEndpoint(item));
+                            requests.claimBatchDelivery(
+                                    item, batch);
                     if (claim == null) {
                         continue;
                     }
                     claimed.add(new ClaimedMember(item, claim));
                 } catch (Throwable claimFailure) {
-                    requests.failPrepared(item, claimFailure);
+                    requests.failDeliveryPreparation(item, claimFailure);
                 }
             }
 
@@ -245,7 +239,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                                             ScheduledRequest::hitCache));
                 }
                 for (ClaimedMember member : claimed) {
-                    member.claim().begin(precedingWork, deliveredPredictionMs);
+                    requests.setDeliveryPrediction(member.claim(), precedingWork, deliveredPredictionMs);
                 }
                 gate = new DispatchGate(
                         claimed, requests);
@@ -317,7 +311,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
         for (ScheduledRequest item : batch.items()) {
             try {
-                requests.failPrepared(item, cause);
+                requests.failDeliveryPreparation(item, cause);
             } catch (Throwable failure) {
                 cleanup = append(cleanup, failure);
             }
@@ -351,10 +345,6 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     private static <T> CapacityBoundary.Attempt<T> rejected(
             CapacityBoundary boundary) {
         return CapacityBoundary.Attempt.rejected(boundary);
-    }
-
-    private static <T> CapacityBoundary.Attempt<T> ownershipLost() {
-        return rejected(CapacityBoundary.OWNERSHIP_LOST);
     }
 
     private static <T> CapacityBoundary.Attempt<T> failed(Throwable cause) {
@@ -394,7 +384,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     /** One owner and one explicit state machine for the complete batch flow. */
-    private static final class BatchTransaction implements Transaction {
+    static final class BatchTransaction implements Transaction {
         private enum Phase {
             PREPARED,
             COMMITTED,
@@ -442,7 +432,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             return transaction;
         }
 
-        private synchronized CapacityBoundary.Attempt<ScheduledRequest> append(
+        synchronized CapacityBoundary.Attempt<ScheduledRequest> append(
                 ScheduledRequest exact) {
             requirePrepared("append");
             requireAdmissionPrepared("append");
@@ -615,7 +605,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             }
         }
 
-        private long batchId() {
+        long batchId() {
             return batchId;
         }
 
@@ -627,7 +617,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             return evaluator;
         }
 
-        private boolean transferToEndpoint(ScheduledRequest exactItem) {
+        boolean transferToEndpoint(ScheduledRequest exactItem) {
             requirePhase(Phase.COMMITTED, "transfer admission");
             return committedAdmission.transferToEndpoint(exactItem);
         }

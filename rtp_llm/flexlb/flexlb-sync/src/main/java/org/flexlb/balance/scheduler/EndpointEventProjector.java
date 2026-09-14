@@ -83,7 +83,7 @@ public final class EndpointEventProjector {
 
     public void onPreparedDeliveryFailure(
             ScheduledRequest exactItem, Throwable cause) {
-        scheduler.onPreparedDeliveryFailure(exactItem, cause);
+        scheduler.failDeliveryPreparation(exactItem, cause);
     }
 
     private void projectPrefillStatus(
@@ -92,7 +92,7 @@ public final class EndpointEventProjector {
             List<PrefillState.WorkerStatusFact> facts) {
         for (PrefillState.WorkerStatusFact fact : facts) {
             try {
-                scheduler.onPrefillFact(source, role, fact);
+                scheduler.processPrefillStatus(source, role, fact);
             } catch (Throwable failure) {
                 logErrorNoFail(
                         "Prefill status fact projection isolated: request_id={} engine={}",
@@ -107,7 +107,7 @@ public final class EndpointEventProjector {
             List<DecodeEndpoint.WorkerStatusFact> facts) {
         for (DecodeEndpoint.WorkerStatusFact fact : facts) {
             try {
-                scheduler.onDecodeFact(source, fact);
+                scheduler.processDecodeStatus(source, fact);
             } catch (Throwable failure) {
                 logErrorNoFail(
                         "Decode status fact projection isolated: request_id={} engine={}",

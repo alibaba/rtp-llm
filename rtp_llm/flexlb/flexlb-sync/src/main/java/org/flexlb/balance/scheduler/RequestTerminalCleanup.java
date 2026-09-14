@@ -8,11 +8,9 @@ import org.flexlb.util.Logger;
 /** Executes an already-owned terminal action, then commits its tombstone and publishes. */
 final class RequestTerminalCleanup {
     private final ExpirationTimer expirationTimer;
-    private final RequestCompletionPublisher completionPublisher;
 
-    RequestTerminalCleanup(ExpirationTimer timer, RequestCompletionPublisher publisher) {
+    RequestTerminalCleanup(ExpirationTimer timer) {
         this.expirationTimer = timer;
-        this.completionPublisher = publisher;
     }
     RequestSlot.PublicationPermit finishTerminal(
             TerminalAction action) {
@@ -65,8 +63,7 @@ final class RequestTerminalCleanup {
         }
         RequestSlot.PublicationPermit permit = finishTerminal(action);
         if (permit != null && action.response() != null) {
-            completionPublisher.submitTerminalResponse(
-                    permit, action.response());
+            action.slot().submitTerminalResponse(permit, action.response());
         }
     }
 
