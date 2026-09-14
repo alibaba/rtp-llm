@@ -17,6 +17,31 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class BucketSidReaderTest {
     @Test
+    void anomaliesProduceOneBoundedWarningAndKeepUsableSids() throws Exception {
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(BucketSidReader.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            var result = new BucketSidReader((k, l, t) -> CompletableFuture.completedFuture(List.of(
+                    new SidBucketClient.Row(k, "8001", "C1C2"),
+                    new SidBucketClient.Row(k, "not-numeric", "C3C4"))), numericSettings(4000, 2))
+                    .read(() -> true);
+            assertEquals(8000, result.itemCount());
+            assertEquals(java.util.Set.of("C1C2", "C3C4"), java.util.Set.copyOf(result.sids()));
+            assertEquals(1, appender.list.size());
+            var event = appender.list.getFirst();
+            assertEquals(ch.qos.logback.classic.Level.WARN, event.getLevel());
+            assertTrue(event.getFormattedMessage().contains("cappedBuckets=4000"));
+            assertTrue(event.getFormattedMessage().contains("cappedBucketSample=[0, 1, 2, 3, 4]"));
+            assertTrue(event.getFormattedMessage().contains("misplacedItems=7999"));
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+    }
+
+    @Test
     void failureSummaryIncludesRootCauseWithoutSdkRequestContext() {
         var reader = new BucketSidReader((k, l, t) -> CompletableFuture.failedFuture(
                 new RuntimeException("wait response exception with requestContext [query=private]",
@@ -56,7 +81,7 @@ class BucketSidReaderTest {
         var valid = new SidBucketClient.Row("0", "0", "C1C2");
         for (var bad : List.of(new SidBucketClient.Row("0", "2", null),
                 new SidBucketClient.Row("0", "2", " "), new SidBucketClient.Row("0", "2", "C1oops"),
-                new SidBucketClient.Row("1", "2", ""), new SidBucketClient.Row("0", "1", ""),
+                new SidBucketClient.Row("1", "2", ""),
                 new SidBucketClient.Row("0", "", ""), new SidBucketClient.Row("0", "0", ""))) {
             assertThrows(IllegalStateException.class, () -> new BucketSidReader((k, l, t) ->
                     CompletableFuture.completedFuture(List.of(valid, bad)), skipEmptySettings(2, 2000)).read(() -> true));
@@ -68,13 +93,15 @@ class BucketSidReaderTest {
     }
 
     @Test
-    void sourceCapIsCheckedBeforeSkippingEmptyMappings() {
+    void sourceCapDoesNotBlockSkippingEmptyMappings() throws Exception {
         var rows = new ArrayList<SidBucketClient.Row>();
         for (int i = 0; i < 2000; i++) { rows.add(new SidBucketClient.Row("0", "" + i, "")); }
         rows.set(0, new SidBucketClient.Row("0", "0", "C1C2"));
-        assertTrue(assertThrows(IllegalStateException.class, () -> new BucketSidReader((k, l, t) ->
-                CompletableFuture.completedFuture(rows), skipEmptySettings(1, 2000)).read(() -> true))
-                .getMessage().contains("possible truncation"));
+        var result = new BucketSidReader((k, l, t) -> CompletableFuture.completedFuture(rows),
+                skipEmptySettings(1, 2000)).read(() -> true);
+        assertEquals(2000, result.itemCount());
+        assertEquals(1999, result.skippedEmptySids());
+        assertEquals(List.of("C1C2"), result.sids());
     }
 
     @Test
@@ -113,17 +140,23 @@ class BucketSidReaderTest {
     }
 
     @Test
-    void rejectsWrongModuloBucketAndExactServerCap() throws Exception {
+    void acceptsWrongModuloBucketAndExactServerCap() throws Exception {
         var config = numericSettings(4000, 2000);
-        assertThrows(IllegalStateException.class, () -> new BucketSidReader((k, l, t) ->
+        assertEquals(List.of("C1C2"), new BucketSidReader((k, l, t) ->
                 CompletableFuture.completedFuture(k.equals("0")
-                        ? List.of(new SidBucketClient.Row(k, "1", "C1C2")) : List.of()), config).read(() -> true));
+                        ? List.of(new SidBucketClient.Row(k, "1", "C1C2")) : List.of()), config)
+                .read(() -> true).sids());
         var rows = new ArrayList<SidBucketClient.Row>();
         for (int i = 0; i < 2000; i++) { rows.add(new SidBucketClient.Row("0", "" + (i * 4000), "C1C2")); }
         var reader = new BucketSidReader((k, l, t) -> CompletableFuture.completedFuture(
                 k.equals("0") ? rows : List.of()), config);
-        assertTrue(assertThrows(IllegalStateException.class, () -> reader.read(() -> true))
-                .getMessage().contains("possible truncation"));
+        assertEquals(2000, reader.read(() -> true).itemCount());
+        rows.add(new SidBucketClient.Row("0", "8000001", "C3C4"));
+        assertEquals(2, reader.read(() -> true).sids().size());
+        rows.add(new SidBucketClient.Row("0", "8000002", "C5C6"));
+        assertThrows(IllegalStateException.class, () -> reader.read(() -> true));
+        rows.remove(rows.size() - 1);
+        rows.remove(rows.size() - 1);
         rows.remove(rows.size() - 1);
         assertEquals(1999, reader.read(() -> true).itemCount());
     }

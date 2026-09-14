@@ -26,9 +26,11 @@ export CONSTRAINT_TREE_RUN_SCALE_TEST=1
 cd "$flexlb_dir"
 "$maven_cmd" "${maven_args[@]}" -pl flexlb-common -am -DskipTests install
 cd "$repo_dir/internal_source/java"
+"$maven_cmd" "${maven_args[@]}" -pl vipserver -am \
+    -Dtest=VipServerDiscoveryTest -Dsurefire.failIfNoSpecifiedTests=false install
 "$maven_cmd" "${maven_args[@]}" -pl igraph -am \
     -Dtest=IgraphSidBucketClientTest -Dsurefire.failIfNoSpecifiedTests=false install
 cd "$flexlb_dir"
 "$maven_cmd" "${maven_args[@]}" -pl flexlb-api -am \
-    -Dtest=BucketSidReaderTest,IgraphConstraintTreePollerTest,IgraphConstraintTreeServerTest,ConstraintTreeMappedE2ETest,ConstraintTreeCrossLanguageE2ETest,ConstraintTreeScaleTest,ConstraintTreeBuilderTest,ConstraintTreeBuildServiceTest,ConstraintTreeSidMappingTest,WhaleConstraintTreePublisherTest,ConstraintTreeServerTest \
+    -Dtest=BucketSidReaderTest,IgraphConstraintTreePollerTest,IgraphConstraintTreeServerTest,ConstraintTreeMappedE2ETest,ConstraintTreeCrossLanguageE2ETest,ConstraintTreeScaleTest,ConstraintTreeBuilderTest,ConstraintTreeBuildServiceTest,ConstraintTreeSidMappingTest,WhaleConstraintTreePublisherTest,ConstraintTreeServerTest,ConstraintTreeDiscoveryTest \
     -Dsurefire.failIfNoSpecifiedTests=false -DargLine=-Xmx4g test

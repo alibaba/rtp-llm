@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/api_server/HttpApiServer.h"
 
 #include <limits>
+#include "autil/EnvUtil.h"
+#include "rtp_llm/cpp/models/logits_processor/ConstraintTreeCsr.h"
 
 #include "rtp_llm/cpp/api_server/ConstraintTreeService.h"
 #include "rtp_llm/cpp/api_server/Exception.h"
@@ -158,7 +160,16 @@ bool HttpApiServer::registerHealthService() {
         return false;
     }
 
-    health_service_.reset(new HealthService());
+    const bool tree_required = !is_embedding_ && autil::EnvUtil::getEnv("CONSTRAINT_TREE_REQUIRED", false);
+    const bool gpu_required =
+        engine_ && engine_->getDevice() && engine_->getDevice()->getDeviceProperties().type == DeviceType::Cuda;
+    health_service_.reset(new HealthService([tree_required, gpu_required] {
+        if (!tree_required) {
+            return true;
+        }
+        const auto snapshot = ConstraintTreeCsrManager::instance()->snapshot();
+        return snapshot && (!gpu_required || snapshot->deviceReady());
+    }));
     return registerHealthServiceStatic(*http_server_, health_service_);
 }
 

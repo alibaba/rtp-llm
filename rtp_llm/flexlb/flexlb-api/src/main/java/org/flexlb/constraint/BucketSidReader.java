@@ -1,6 +1,8 @@
 package org.flexlb.constraint;
 
 import org.flexlb.constraint.source.SidBucketClient;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.nio.charset.StandardCharsets;
@@ -15,6 +17,7 @@ import java.util.zip.CRC32;
 
 /** Bounded asynchronous point queries over a known keyspace; this is NOT a storage snapshot scan. */
 public final class BucketSidReader {
+    private static final Logger LOG = LoggerFactory.getLogger(BucketSidReader.class);
     private static final Pattern SID = Pattern.compile("(?:C[0-9]+)+");
     private final SidBucketClient client;
     private final Settings settings;
@@ -69,6 +72,9 @@ public final class BucketSidReader {
         long items = 0;
         long skippedEmptySids = 0;
         int maxBucketRows = 0;
+        long misplacedItems = 0;
+        int cappedBuckets = 0;
+        var cappedBucketSample = new ArrayList<String>();
         // Only one window is live at a time. Parsing/merging happens on the caller's background thread.
         for (int first = 0; first < settings.bucketCount(); first += settings.concurrency()) {
             check(mayContinue, deadline);
@@ -81,11 +87,13 @@ public final class BucketSidReader {
                 for (int i = 0; i < pending.size(); i++) {
                     String key = settings.key(first + i);
                     List<SidBucketClient.Row> rows = await(pending.get(i), key, mayContinue, deadline);
-                    if (rows == null || rows.size() > settings.maxRowsPerBucket()) {
+                    if (rows == null || rows.size() > settings.maxRowsPerBucket() + 1) {
                         throw new IllegalStateException("bucket " + key + " exceeds row limit or has invalid response");
                     }
-                    if (settings.sourceRowLimit() > 0 && rows.size() >= settings.sourceRowLimit()) {
-                        throw new IllegalStateException("bucket " + key + " reached source row limit; possible truncation");
+                    if (rows.size() >= settings.maxRowsPerBucket()
+                            || (settings.sourceRowLimit() > 0 && rows.size() >= settings.sourceRowLimit())) {
+                        cappedBuckets++;
+                        if (cappedBucketSample.size() < 5) { cappedBucketSample.add(key); }
                     }
                     maxBucketRows = Math.max(maxBucketRows, rows.size());
                     var uniqueItems = new HashSet<String>();
@@ -94,15 +102,18 @@ public final class BucketSidReader {
                                 || row.sid() == null) {
                             throw new IllegalStateException("invalid item/SID in bucket " + key);
                         }
-                        if (!key.equals(settings.key(bucketForItem(row.itemId(), settings.bucketCount(),
-                                settings.bucketAlgorithm())))) {
-                            throw new IllegalStateException("item is in the wrong hash bucket " + key);
+                        // Placement is diagnostic only: preserve usable SIDs even during source repair.
+                        try {
+                            if (bucketForItem(row.itemId(), settings.bucketCount(), settings.bucketAlgorithm())
+                                    != first + i) { misplacedItems++; }
+                        } catch (IllegalArgumentException e) {
+                            misplacedItems++;
                         }
                         if (!uniqueItems.add(row.itemId())) {
                             throw new IllegalStateException("duplicate item in bucket " + key);
                         }
                         // Only the explicitly confirmed empty mapping is skippable. Missing fields,
-                        // malformed SIDs and wrong/duplicate items remain errors in SKIP mode too.
+                        // malformed SIDs and duplicate items remain errors in SKIP mode too.
                         if (row.sid().isEmpty() && settings.emptySidPolicy() == EmptySidPolicy.SKIP) {
                             skippedEmptySids++;
                             continue;
@@ -119,6 +130,12 @@ public final class BucketSidReader {
             }
         }
         check(mayContinue, deadline);
+        if (cappedBuckets > 0 || misplacedItems > 0) {
+            LOG.warn("iGraph bucket read continued best-effort: cappedBuckets={}, cappedBucketSample={}, "
+                            + "misplacedItems={}, items={}, uniqueSids={}, skippedEmptySids={}; "
+                            + "source completeness/freshness NOT verified; SID dedup cannot recover truncated data",
+                    cappedBuckets, cappedBucketSample, misplacedItems, items, sids.size(), skippedEmptySids);
+        }
         if (sids.isEmpty()) {
             throw new IllegalStateException("empty source; retaining existing tree (empty-tree publication unsupported); "
                     + "items=" + items + "; skippedEmptySids=" + skippedEmptySids);

@@ -8,6 +8,8 @@
 
 #include "http_server/HttpServer.h"
 #include "rtp_llm/cpp/api_server/ConstraintTreeService.h"
+#include "rtp_llm/cpp/api_server/common/HealthService.h"
+#include "rtp_llm/cpp/models/logits_processor/ConstraintTreeCsr.h"
 
 int main(int argc, char** argv) {
     if (argc != 2 && argc != 3) {
@@ -33,6 +35,11 @@ int main(int argc, char** argv) {
     }
     auto service = std::make_shared<rtp_llm::ConstraintTreeService>(nullptr, mapping_json);
     auto server  = std::make_shared<http_server::HttpServer>(nullptr, 2, 50, std::numeric_limits<int>::max());
+    auto health  = std::make_shared<rtp_llm::HealthService>(
+        [] { return rtp_llm::ConstraintTreeCsrManager::instance()->snapshot() != nullptr; });
+    if (!rtp_llm::registerHealthServiceStatic(*server, health)) {
+        return 1;
+    }
     if (!server->RegisterRoute(
             "POST",
             "/update_constraint_tree",

@@ -40,6 +40,32 @@ TEST_F(HealthServiceTest, HealthCheck_ServerNotStopped) {
     writer_ptr.release();
 }
 
+TEST_F(HealthServiceTest, ReadinessDoesNotBlockLivenessOrRecovery) {
+    bool                                             ready = false;
+    HealthService                                    service([&ready] { return ready; });
+    auto                                             writer = std::make_unique<http_server::MockHttpResponseWriter>();
+    auto*                                            mock   = writer.get();
+    std::unique_ptr<http_server::HttpResponseWriter> response(std::move(writer));
+    http_server::HttpRequest                         request;
+    EXPECT_CALL(*mock, Write).WillRepeatedly(Return(true));
+    service.liveCheck(response, request);
+    EXPECT_NE(mock->_statusCode, 503);
+    service.healthCheck(response, request);
+    EXPECT_EQ(mock->_statusCode, 503);
+    ready             = true;
+    mock->_statusCode = 200;
+    service.healthCheck(response, request);
+    EXPECT_EQ(mock->_statusCode, 200);
+    service.healthCheck2(response, request);
+    EXPECT_EQ(mock->_statusCode, 200);
+    ready = false;
+    service.healthCheck2(response, request);
+    EXPECT_EQ(mock->_statusCode, 503);
+    service.stop();
+    service.liveCheck(response, request);
+    EXPECT_EQ(mock->_statusCode, 503);
+}
+
 TEST_F(HealthServiceTest, HealthCheck_ServerStopped) {
     health_service_->stop();
     EXPECT_TRUE(health_service_->is_stopped_.load());

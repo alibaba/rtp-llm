@@ -124,6 +124,7 @@ class BackendApp(object):
             )
 
         @app.get("/health")
+        @app.get("/live")
         @app.post("/health")
         @app.get("/GraphService/cm2_status")
         @app.post("/GraphService/cm2_status")

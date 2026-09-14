@@ -151,6 +151,18 @@ cc_binary(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/api_server:constraint_tree_service",
+        "//rtp_llm/cpp/api_server/common:common_service",
+    ],
+)
+
+cc_test(
+    name = "health_service_test",
+    srcs = ["HealthServiceTest.cc", "mock/MockHttpResponseWriter.h"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/api_server/common:common_service",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 

@@ -21,9 +21,9 @@ from rtp_llm.server.server_args.server_args import EnvArgumentParser, setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
 
 
-def check_server_health(server_port):
+def check_server_health(server_port, path="health"):
     try:
-        response = requests.get(f"http://localhost:{server_port}/health", timeout=60)
+        response = requests.get(f"http://localhost:{server_port}/{path}", timeout=60)
         logging.info(
             f"response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
         )
@@ -62,7 +62,9 @@ def start_backend_server_impl(global_controller):
             raise Exception("backend server is not alive")
 
         try:
-            if check_server_health(backend_server_port):
+            # Start the frontend/control plane before a required tree arrives.
+            # Traffic readiness remains gated by /health, not this liveness probe.
+            if check_server_health(backend_server_port, "live"):
                 logging.info(f"backend server is ready")
                 break
             else:
@@ -118,9 +120,10 @@ def start_frontend_server_impl(global_controller, backend_process):
             raise Exception("frontend server is not alive")
 
         try:
-            check_server_health(start_port)
-            logging.info(f"frontend server is ready")
-            break
+            if check_server_health(start_port):
+                logging.info(f"frontend server is ready")
+                break
+            time.sleep(retry_interval_seconds)
         except Exception as e:
             # 如果连接失败，等待一段时间后重试
             time.sleep(retry_interval_seconds)

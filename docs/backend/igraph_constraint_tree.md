@@ -52,8 +52,8 @@ CONSTRAINT_TREE_IGRAPH_EMPTY_SID_POLICY=SKIP
 ```
 
 The default `REJECT` preserves strict behavior. Unknown policy names fail startup.
-`SKIP` filters on the client **after** checking raw bucket row limits, pkey,
-item ID, bucket assignment and duplicate items. It does not change the Gremlin
+`SKIP` filters on the client after validating response pkey, nonblank item ID
+and duplicate items. Bucket assignment is diagnostic only. It does not change the Gremlin
 query or permit arbitrary query templates. Null/missing fields, whitespace-only
 and malformed non-empty SIDs still fail the round. No default SID is invented.
 An all-empty/all-skipped round fails and retains the old tree; deny-all empty
@@ -141,11 +141,17 @@ Writer/reader agreement for this implementation:
   build failure, never a partial tree.
 
 4096 buckets give an average of about 488 rows for 2 million items; this is
-not a per-bucket bound. The default accepted maximum is 2000 rows, with a query
-for 2001 rows to detect overflow. Tune using actual distribution and measured RT.
+not a per-bucket bound. The default row warning threshold is 2000, with a query
+for 2001 rows. All returned rows (including the extra row) are processed.
+Tune using actual distribution and measured RT.
 Set `SOURCE_ROW_LIMIT` to the known server/index cap (e.g. `2000`): reaching
-that number, including exact equality, rejects the round. Default `0` disables
-this extra guard for legacy sources. Fewer rows do NOT prove completeness after
+that number, including exact equality, emits a warning but does not reject the round.
+Default `0` disables this extra warning threshold for legacy sources.
+Wrong bucket assignments also warn without discarding usable SIDs. One bounded
+summary per completed read reports capped buckets (up to five sample keys),
+misplaced items and SID counts. This is best-effort input: SID deduplication
+neither removes distinct stale SIDs nor recovers truncated data.
+Fewer rows do NOT prove completeness after
 historical index truncation and deletes; reconcile against an authoritative source.
 
 ## Completeness and freshness limits (deployment prerequisites)
@@ -157,8 +163,11 @@ historical index truncation and deletes; reconcile against an authoritative sour
    and query/seek/response limits allow the configured maximum **plus one**.
    The sentinel detects our requested limit, NOT hidden lower server-side caps.
 3. All configured buckets must succeed. One error, timeout, malformed row,
-   wrong configured bucket, duplicate item, reported hot-key/degradation, or overflow
-   aborts the round. No partial input is submitted. Empty individual buckets
+   response pkey mismatch, duplicate item, reported hot-key/degradation, or a response
+   larger than the requested row count aborts the round. The failure is logged at
+   ERROR and source status becomes FAILED; the existing tree remains active.
+   Bucket assignment mismatch and row thresholds are warnings only, so a successful
+   read does not certify source completeness. Empty individual buckets
    are legitimate; an all-empty round retains the old tree and reports failure.
    A valid empty pool cannot currently be published as a deny-all tree.
 4. Reads happen at different times, so this is eventually consistent input,
@@ -172,6 +181,31 @@ historical index truncation and deletes; reconcile against an authoritative sour
    10-minute bound or strict current-pool enforcement from this input path.
 
 ## Master configuration
+
+### Worker startup and model rollout
+
+With `CONSTRAINT_TREE_REQUIRED=true`, native Worker `/health` and its legacy
+health aliases return HTTP 503 until a CSR snapshot is active (with GPU buffers
+on CUDA). The frontend preserves this not-ready result instead of wrapping it
+in HTTP 200. Existing active snapshots keep readiness during background updates
+and failed replacements. This does not remove in-request fail-closed checks.
+
+`GET /live` is process liveness, independent of tree readiness. The launcher uses
+backend liveness to start the frontend before the first tree arrives. If the
+deployment has a restart-on-failure liveness probe, point that probe at `/live`;
+keep traffic admission/readiness on `/health`. Do not use `/live` for traffic.
+
+Deploy the matching Master **before** the Worker change. Tree publication uses
+registered instances including unready ones (`VIPClient.getAllHosts`), while
+normal inference discovery continues using `srvHosts`. Instances must be
+registered during initialization and reachable on the tree management port;
+if the platform only registers healthy instances, readiness cannot bootstrap
+through this discovery path alone. Existing reconciliation pushes the current
+tree to restarted instances without rebuilding it manually.
+
+This fixes the missing-tree startup window, not all rollout errors. Tokenizer
+mapping changes still require a coordinated rollout: old-tree fingerprints
+must not be bypassed to make a new Worker healthy.
 
 The feature is disabled unless `CONSTRAINT_TREE_IGRAPH_ENABLED=true`. Environment
 variables map to Spring properties `constraint.tree.igraph.*`.

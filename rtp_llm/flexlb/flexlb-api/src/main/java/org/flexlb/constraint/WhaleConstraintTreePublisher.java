@@ -131,8 +131,8 @@ public class WhaleConstraintTreePublisher implements ConstraintTreePublisher {
 
     private Map<String, URI> discoverTargets(String model) {
         Map<String, URI> targets = new LinkedHashMap<>();
-        addTargets(targets, workerAddressService.getEngineWorkerList(model, RoleType.DECODE));
-        addTargets(targets, workerAddressService.getEngineWorkerList(model, RoleType.PDFUSION));
+        addTargets(targets, workerAddressService.getAllEngineWorkerList(model, RoleType.DECODE));
+        addTargets(targets, workerAddressService.getAllEngineWorkerList(model, RoleType.PDFUSION));
         return targets;
     }
 

@@ -29,6 +29,12 @@ py_test(
 )
 
 py_test(
+    name = "frontend_health_test",
+    srcs = ["frontend_health_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "frontend_worker_test",
     srcs = ["frontend_worker_test.py"],
     data = [

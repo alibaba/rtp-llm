@@ -131,6 +131,29 @@ class FrontendApp(object):
                     detail="inference service is not ready",
                 )
 
+        async def backend_health(method, path, expected):
+            try:
+                result = await asyncio.wait_for(
+                    async_request_server(
+                        method, g_worker_info.backend_server_port, path, {}
+                    ),
+                    timeout=5,
+                )
+            except asyncio.TimeoutError:
+                result = None
+            if result != expected:
+                raise HTTPException(
+                    status_code=503, detail="inference service is not ready"
+                )
+            return result
+
+        @app.get("/live")
+        async def live():
+            if self.separated_frontend:
+                await check_all_health()
+                return "ok"
+            return await backend_health("get", "live", "ok")
+
         @app.get("/health")
         @app.post("/health")
         @app.get("/GraphService/cm2_status")
@@ -144,18 +167,14 @@ class FrontendApp(object):
             if self.separated_frontend:
                 await check_all_health()
                 return "ok"
-            return await async_request_server(
-                "post", g_worker_info.backend_server_port, "health_check", {}
-            )
+            return await backend_health("post", "health_check", "ok")
 
         @app.get("/")
         async def health():
             if self.separated_frontend:
                 await check_all_health()
                 return {"status": "home"}
-            return await async_request_server(
-                "get", g_worker_info.backend_server_port, "", {}
-            )
+            return await backend_health("get", "", {"status": "home"})
 
         @app.get("/cache_status")
         @app.post("/cache_status")

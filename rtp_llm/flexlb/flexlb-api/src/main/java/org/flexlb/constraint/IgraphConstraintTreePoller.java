@@ -123,7 +123,7 @@ public class IgraphConstraintTreePoller {
             // In particular, a transient failure of the leader/status lookup must not stop polling.
             status = new Status("FAILED", 0, clock.millis(), 0, 0, 0, 0,
                     "refresh eligibility check failed; existing tree retained: " + e.getMessage());
-            log.warn("iGraph refresh eligibility check failed; will retry next interval", e);
+            log.error("iGraph refresh eligibility check failed; will retry next interval", e);
         }
     }
 
@@ -175,7 +175,7 @@ public class IgraphConstraintTreePoller {
         } catch (Exception e) {
             status = new Status("FAILED", started, clock.millis(), 0, 0, 0, 0,
                     "source read/submission failed; existing tree retained: " + e.getMessage());
-            log.warn("iGraph tree refresh failed; existing tree retained", e);
+            log.error("iGraph tree refresh failed; existing tree retained", e);
         } finally {
             running.set(false);
         }

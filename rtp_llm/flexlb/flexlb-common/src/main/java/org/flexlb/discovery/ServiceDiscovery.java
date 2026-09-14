@@ -19,6 +19,9 @@ public interface ServiceDiscovery {
      */
     List<WorkerHost> getHosts(String address);
 
+    /** Control-plane targets, including registered instances not yet traffic-ready. */
+    default List<WorkerHost> getAllHosts(String address) { return getHosts(address); }
+
     /**
      * 监听服务地址的主机变化
      *

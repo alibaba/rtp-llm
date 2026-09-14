@@ -42,8 +42,8 @@ class WhaleConstraintTreePublisherTest {
     void deliversToCppHttpPortsAndDefersSuccessUntilReconciliationObservesActivation() {
         WorkerHost first = new WorkerHost("10.0.0.1", 8000, 8001, 8005, "hz", "default");
         WorkerHost second = new WorkerHost("10.0.0.2", 9000, 9001, 9005, "sh", "default");
-        when(addresses.getEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of(first));
-        when(addresses.getEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of(first, second));
+        when(addresses.getAllEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of(first));
+        when(addresses.getAllEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of(first, second));
         when(http.get(any(URI.class), eq(WhaleConstraintTreePublisher.STATUS_PATH),
                 eq(WorkerUpdateResponse.class))).thenReturn(Mono.empty());
         when(http.requestRawBytes(any(byte[].class), any(URI.class),
@@ -63,8 +63,8 @@ class WhaleConstraintTreePublisherTest {
 
     @Test
     void reportsNoTargetsWithoutFailingTheBuild() {
-        when(addresses.getEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of());
-        when(addresses.getEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of());
+        when(addresses.getAllEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of());
+        when(addresses.getAllEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of());
 
         PublicationResult result = publisher.publish(artifact());
 
@@ -75,8 +75,8 @@ class WhaleConstraintTreePublisherTest {
     @Test
     void statusProbeSkipsPayloadWhenWorkerAlreadyHasVersion() {
         WorkerHost worker = new WorkerHost("10.0.0.1", 8000, 8001, 8005, "hz", "default");
-        when(addresses.getEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of(worker));
-        when(addresses.getEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of());
+        when(addresses.getAllEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of(worker));
+        when(addresses.getAllEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of());
         when(http.get(URI.create("http://10.0.0.1:8005"), WhaleConstraintTreePublisher.STATUS_PATH,
                 WorkerUpdateResponse.class))
                 .thenReturn(Mono.just(new WorkerUpdateResponse("ready", 7, 7, "ready", true, 4, 5)));
@@ -91,8 +91,8 @@ class WhaleConstraintTreePublisherTest {
     @Test
     void newerWorkerVersionIsReportedAsConflictWithoutOverwritingIt() {
         WorkerHost worker = new WorkerHost("10.0.0.1", 8000, 8001, 8005, "hz", "default");
-        when(addresses.getEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of(worker));
-        when(addresses.getEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of());
+        when(addresses.getAllEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of(worker));
+        when(addresses.getAllEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of());
         when(http.get(URI.create("http://10.0.0.1:8005"), WhaleConstraintTreePublisher.STATUS_PATH,
                 WorkerUpdateResponse.class))
                 .thenReturn(Mono.just(new WorkerUpdateResponse("ready", 8, 8, "ready", true, 4, 5)));
@@ -108,8 +108,8 @@ class WhaleConstraintTreePublisherTest {
     @Test
     void statusProbeDoesNotResendVersionThatWorkerIsAlreadyLoading() {
         WorkerHost worker = new WorkerHost("10.0.0.1", 8000, 8001, 8005, "hz", "default");
-        when(addresses.getEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of(worker));
-        when(addresses.getEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of());
+        when(addresses.getAllEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of(worker));
+        when(addresses.getAllEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of());
         when(http.get(URI.create("http://10.0.0.1:8005"), WhaleConstraintTreePublisher.STATUS_PATH,
                 WorkerUpdateResponse.class))
                 .thenReturn(Mono.just(new WorkerUpdateResponse("loading", 6, 7, "loading", true, 3, 4)));
@@ -132,8 +132,8 @@ class WhaleConstraintTreePublisherTest {
     void probesFingerprintsEveryBuildAndFetchesMappingOnlyWhenChanged() {
         WorkerHost worker = new WorkerHost("10.0.0.1", 8000, 8001, 8005, "hz", "default");
         URI uri = URI.create("http://10.0.0.1:8005");
-        when(addresses.getEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of(worker));
-        when(addresses.getEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of());
+        when(addresses.getAllEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of(worker));
+        when(addresses.getAllEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of());
         var first = ConstraintTreeSidMappingTest.mapping(java.util.Map.of("C1", 17));
         var second = ConstraintTreeSidMappingTest.mapping(java.util.Map.of("C1", 19));
         when(http.get(uri, "/constraint_tree_mapping_status", ConstraintTreeSidMapping.class))
@@ -151,8 +151,8 @@ class WhaleConstraintTreePublisherTest {
     void mismatchedWorkersBlockConversionBeforeAnyFullMappingFetch() {
         WorkerHost first = new WorkerHost("10.0.0.1", 8000, 8001, 8005, "hz", "default");
         WorkerHost second = new WorkerHost("10.0.0.2", 9000, 9001, 9005, "sh", "default");
-        when(addresses.getEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of(first, second));
-        when(addresses.getEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of());
+        when(addresses.getAllEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of(first, second));
+        when(addresses.getAllEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of());
         when(http.get(any(URI.class), eq("/constraint_tree_mapping_status"), eq(ConstraintTreeSidMapping.class)))
                 .thenReturn(Mono.just(ConstraintTreeSidMappingTest.mapping(java.util.Map.of("C1", 17))),
                         Mono.just(ConstraintTreeSidMappingTest.mapping(java.util.Map.of("C1", 19))));

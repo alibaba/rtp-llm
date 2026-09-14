@@ -126,16 +126,17 @@ class IgraphConstraintTreePollerTest {
     }
 
     @Test
-    void serverCapFailureRetainsTreeEvenWithPublicationEnabled() {
+    void serverCapContinuesThroughExistingPublicationPipeline() {
         var builds = builds();
         var reader = new BucketSidReader((k, l, t) -> CompletableFuture.completedFuture(
                 List.of(new SidBucketClient.Row(k, k, "C1C2"))), BucketSidReaderTest.numericSettings(4000, 1));
         var poller = new IgraphConstraintTreePoller(reader, builds, () -> true, "gul_item", true, true, 600, CLOCK);
         try {
             poller.pollOnce();
-            assertEquals("FAILED", poller.getStatus().state());
-            assertTrue(poller.getStatus().message().contains("possible truncation"));
-            verify(builds, never()).submit(any());
+            assertEquals("SUBMITTED", poller.getStatus().state());
+            assertEquals(4000, poller.getStatus().items());
+            assertEquals(1, poller.getStatus().uniqueSids());
+            verify(builds).submit(argThat(r -> r.sids().equals(List.of("C1C2"))));
         } finally { poller.close(); }
     }
 

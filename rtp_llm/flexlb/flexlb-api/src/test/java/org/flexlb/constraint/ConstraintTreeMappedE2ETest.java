@@ -39,6 +39,15 @@ class ConstraintTreeMappedE2ETest {
 
     @Test
     void bucketInputBuildsCsrAndPublishesToNativeWorkerWhileReadFailureKeepsOldTree() throws Exception {
+        bucketInputRoundTrip(false);
+    }
+
+    @Test
+    void cappedMisplacedInputStillPublishesAndReadFailureKeepsOldTree() throws Exception {
+        bucketInputRoundTrip(true);
+    }
+
+    private void bucketInputRoundTrip(boolean bestEffort) throws Exception {
         String binary = System.getenv("CONSTRAINT_TREE_CPP_WORKER_BINARY");
         assumeTrue(binary != null && Files.isExecutable(Path.of(binary)), "requires compiled C++ test Worker");
         var mapping = ConstraintTreeSidMappingTest.mapping(Map.of("C1", 17, "C2", 19, "C3", 23)).validated();
@@ -51,9 +60,12 @@ class ConstraintTreeMappedE2ETest {
         IgraphConstraintTreePoller poller = null;
         try {
             worker = worker(binary, port, manifest);
+            assertEquals(503, http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/health"))
+                    .GET().build(), HttpResponse.BodyHandlers.ofString()).statusCode());
+            assertEquals("ok", get(port, "/live").asText());
             var addresses = mock(WorkerAddressService.class);
-            when(addresses.getEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of());
-            when(addresses.getEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of(
+            when(addresses.getAllEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of());
+            when(addresses.getAllEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of(
                     new WorkerHost("127.0.0.1", port - 5, port - 4, port, "local", "default")));
             var transport = new GeneralHttpNettyService(new HttpNettyConfig().createNettyClientHandler());
             publisher = new WhaleConstraintTreePublisher(addresses, transport, 2, Duration.ofSeconds(5));
@@ -64,12 +76,13 @@ class ConstraintTreeMappedE2ETest {
                 if (failRead.get()) {
                     return java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("source unavailable"));
                 }
-                int bucket = 123 % 4000;
+                int bucket = bestEffort ? 0 : 123 % 4000;
                 return java.util.concurrent.CompletableFuture.completedFuture(key.equals(Integer.toString(bucket))
                         ? List.of(new org.flexlb.constraint.source.SidBucketClient.Row(key, "123", sid.get()),
                                 new org.flexlb.constraint.source.SidBucketClient.Row(key, "4123", "")) : List.of());
             };
-            poller = new IgraphConstraintTreePoller(new BucketSidReader(client, BucketSidReaderTest.skipEmptySettings(4000, 2000)),
+            poller = new IgraphConstraintTreePoller(new BucketSidReader(client,
+                    BucketSidReaderTest.skipEmptySettings(4000, bestEffort ? 2 : 2000)),
                     builds, () -> true, "gul_item", true, true, 600,
                     java.time.Clock.fixed(java.time.Instant.ofEpochMilli(100), java.time.ZoneOffset.UTC));
             poller.pollOnce();
@@ -80,6 +93,7 @@ class ConstraintTreeMappedE2ETest {
             assertEquals(1, poller.getStatus().eligibleItems());
             awaitState(builds, ConstraintTreeModels.BuildState.READY);
             assertEquals(100, get(port, "/constraint_tree_status").path("version").asLong());
+            assertEquals("ok", get(port, "/health").asText());
             var firstArtifact = builds.getCurrentArtifact().orElseThrow();
             assertEquals(1, ConstraintTreeCsrCodec.decode(firstArtifact.payload()).sidCount());
 
@@ -87,6 +101,7 @@ class ConstraintTreeMappedE2ETest {
             poller.pollOnce();
             assertEquals("FAILED", poller.getStatus().state());
             assertSame(firstArtifact, builds.getCurrentArtifact().orElseThrow());
+            assertEquals("ok", get(port, "/health").asText());
             assertEquals(100, get(port, "/constraint_tree_status").path("version").asLong());
 
             failRead.set(false);
@@ -130,8 +145,8 @@ class ConstraintTreeMappedE2ETest {
             first = worker(binary, firstPort, manifest);
             second = worker(binary, secondPort, manifest);
             var addresses = mock(WorkerAddressService.class);
-            when(addresses.getEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of());
-            when(addresses.getEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of(
+            when(addresses.getAllEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of());
+            when(addresses.getAllEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of(
                     new WorkerHost("127.0.0.1", firstPort - 5, firstPort - 4, firstPort, "local", "default"),
                     new WorkerHost("127.0.0.1", secondPort - 5, secondPort - 4, secondPort, "local", "default")));
             var transport = new GeneralHttpNettyService(new HttpNettyConfig().createNettyClientHandler());
