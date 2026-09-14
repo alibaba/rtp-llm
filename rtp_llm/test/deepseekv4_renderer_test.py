@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, Mock
 
 from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
+from rtp_llm.config.py_config_modules import GenerateEnvConfig
+from rtp_llm.config.response_format import normalize_think_tag
 from rtp_llm.config.response_format_compiler import validate_engine_ready
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
@@ -79,6 +81,11 @@ def _make_renderer(encoding_module):
     renderer.tokenizer = FakeTokenizer()
     renderer.think_mode = False
     renderer.default_thinking_mode = ThinkingMode.DISABLED
+    # render_chat 记录模板锚点时会读取构造期注入的 think tag；本测试绕过 __init__，
+    # 需要按构造契约补齐，否则记录锚点时报 AttributeError。
+    env_config = GenerateEnvConfig()
+    renderer.think_start_tag = normalize_think_tag(env_config.think_start_tag)
+    renderer.think_end_tag = normalize_think_tag(env_config.think_end_tag)
     return renderer
 
 
