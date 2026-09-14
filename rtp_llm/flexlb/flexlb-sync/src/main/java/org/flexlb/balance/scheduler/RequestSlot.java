@@ -1040,7 +1040,7 @@ public final class RequestSlot {
      * cancellation owner before releasing the slot lock. The lifecycle was
      * already moved to {@code CANCEL_REQUESTED} when the cause was deferred;
      * this transfer prevents a later cancel from replacing it while the
-     * coordinator resumes the cancellation effects outside the lock.
+     * admission event handler resumes cancellation effects outside the lock.
      */
     private CancelReason promoteAdmissionCancellation(CancelReason pending) {
         requireSlotLock("admission cancellation promotion");
@@ -2516,8 +2516,7 @@ public final class RequestSlot {
         }
     }
 
-    /** Registry has resolved identity; all subsequent request decisions stay here. */
-
+    /** Reduce one exact preemption event before executing detached effects. */
     private boolean onPreemption(PreemptionRegistration claim, boolean cleanCounterpart,
                          Function<RequestSlot, PreemptionReduction> reduction) {
         Runnable work;
