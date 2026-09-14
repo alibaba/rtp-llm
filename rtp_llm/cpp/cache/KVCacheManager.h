@@ -181,6 +181,10 @@ private:
     const SpeculativeExecutionConfig   sp_config_;
     const PDSepConfig                  pd_sep_config_;
     const bool                         use_cuda_malloc_block_pool_;
+    const bool                         warmup_;
+    KVCacheEventPublisherPtr           cache_event_publisher_;
+    void                               initCacheEventPublisher();
+    void                               stopCacheEventPublisher();
 
     std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
     std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;

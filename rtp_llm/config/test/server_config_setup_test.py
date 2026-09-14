@@ -107,9 +107,7 @@ class KVCacheEventHostIdentityTest(TestCase):
 
         configure_kv_cache_event_host_ip_port(py_env_configs)
 
-        self.assertEqual(
-            py_env_configs.kv_cache_config.kv_cache_event_host_ip_port, ""
-        )
+        self.assertEqual(py_env_configs.kv_cache_config.kv_cache_event_host_ip_port, "")
 
 
 class SingleGpuBackendRankTest(TestCase):
@@ -169,9 +167,7 @@ class SingleGpuBackendRankTest(TestCase):
         return result, py_env_configs
 
     def test_single_gpu_nonzero_dp_rank_starts_publisher(self):
-        result, py_env_configs = self._start_rank(
-            tp_size=1, dp_size=2, world_rank=1
-        )
+        result, py_env_configs = self._start_rank(tp_size=1, dp_size=2, world_rank=1)
 
         self.assertEqual(result, 1)
         self.assertEqual(py_env_configs.parallelism_config.tp_rank, 0)
@@ -182,16 +178,12 @@ class SingleGpuBackendRankTest(TestCase):
         )
 
     def test_single_gpu_nonzero_tp_rank_does_not_start_publisher(self):
-        result, py_env_configs = self._start_rank(
-            tp_size=2, dp_size=1, world_rank=1
-        )
+        result, py_env_configs = self._start_rank(tp_size=2, dp_size=1, world_rank=1)
 
         self.assertEqual(result, 1)
         self.assertEqual(py_env_configs.parallelism_config.tp_rank, 1)
         self.assertEqual(py_env_configs.parallelism_config.dp_rank, 0)
-        self.assertEqual(
-            py_env_configs.kv_cache_config.kv_cache_event_host_ip_port, ""
-        )
+        self.assertEqual(py_env_configs.kv_cache_config.kv_cache_event_host_ip_port, "")
 
 
 class GenerateConfigTest(TestCase):
@@ -377,8 +369,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 64)
-        self.assertEqual(state[:2], ("KVCacheConfig", 6))
+        self.assertEqual(len(state), 69)
+        self.assertEqual(state[:2], ("KVCacheConfig", 7))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -412,11 +404,13 @@ class GenerateConfigTest(TestCase):
             value.__setstate__(pickle_state)
             return value
 
+        event_state = state
+        state = (state[0], 6, *state[2:-5])
         version_five_state = (state[0], 5, *state[2:], True)
-        self.assertEqual(restore(version_five_state).__getstate__(), state)
+        self.assertEqual(restore(version_five_state).__getstate__(), event_state)
         version_four_state = (state[0], 4, *state[2:50], 123, *state[50:], True)
         restored_version_four = restore(version_four_state)
-        self.assertEqual(restored_version_four.__getstate__(), state)
+        self.assertEqual(restored_version_four.__getstate__(), event_state)
 
         legacy_state = (
             state[0],
@@ -426,7 +420,7 @@ class GenerateConfigTest(TestCase):
             *version_four_state[20:],
         )
         restored_legacy = restore(legacy_state)
-        self.assertEqual(restored_legacy.__getstate__(), state)
+        self.assertEqual(restored_legacy.__getstate__(), event_state)
 
         source_extended_state = (state[0], 1, *legacy_state[2:-1])
         restored_source_extended = restore(source_extended_state)

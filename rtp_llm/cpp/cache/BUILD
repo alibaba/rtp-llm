@@ -378,6 +378,7 @@ cc_library(
     }),
     visibility = ["//visibility:public"],
     deps = [
+        "//rtp_llm/cpp/cache/events:kv_cache_event_publisher",
         ":cache_async_context",
         ":cache_core",
         ":cp_slot_mapper",
