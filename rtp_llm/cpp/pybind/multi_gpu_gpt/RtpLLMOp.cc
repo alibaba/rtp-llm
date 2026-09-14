@@ -560,6 +560,10 @@ void RtpLLMOp::stop() {
         // this avoids the detached-thread lifetime race during CRIU restore
         // and shutdown.
         if (grpc_server_thread_.joinable()) {
+            // The normal-start listener thread reacquires the GIL to release
+            // its Python captures before exiting.  Joining with the GIL held
+            // deadlocks even when SCR is disabled.
+            pybind11::gil_scoped_release release;
             grpc_server_thread_.join();
         }
         {

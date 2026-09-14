@@ -22,7 +22,6 @@ class ScrAdvertiseIpTest(unittest.TestCase):
         self.env = patch.dict(
             os.environ,
             {
-                "RTP_LLM_SCR_LOCAL_COMM": "1",
                 "RTPLLM_ENABLE_SCR": "1",
                 "SCR_PHASE": "restore",
             },
@@ -44,11 +43,18 @@ class ScrAdvertiseIpTest(unittest.TestCase):
         self.assertEqual(self.world.self.ip, "192.0.2.1")
         self.assertEqual([m.ip for m in self.world.members], ["127.0.0.1"] * 2)
 
-    def test_disabled_mode_does_not_require_local_topology_or_resolve(self):
-        with patch.dict(os.environ, {"RTP_LLM_SCR_LOCAL_COMM": "0"}), patch(
+    def test_disabled_scr_does_not_resolve_advertisement(self):
+        with patch.dict(os.environ, {"RTPLLM_ENABLE_SCR": "0"}), patch(
             "socket.gethostbyname"
         ) as resolve:
-            self.assertIsNone(cache_store_advertise_ip(None, None))
+            self.assertIsNone(cache_store_advertise_ip(self.world, self.pc))
+        resolve.assert_not_called()
+
+    def test_multi_node_advertisement_preserves_worker_addresses(self):
+        self.pc.world_size, self.pc.local_world_size = 4, 2
+        self.world.num_nodes = 2
+        with patch("socket.gethostbyname") as resolve:
+            self.assertIsNone(cache_store_advertise_ip(self.world, self.pc))
         resolve.assert_not_called()
 
     def test_explicit_manifest_host_preserved(self):

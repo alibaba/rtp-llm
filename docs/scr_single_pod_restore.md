@@ -1,57 +1,38 @@
 # Single-Pod SCR restore
 
-This branch adds opt-in stable loopback communication for ranks that share one
-Pod network namespace. It builds on `feat/dsv4_on_dev_scr` at
-`888476cf150c924b249d62b52afcd41753430e6b`, retaining its control-plane
-lifecycle and endpoint restore support.
+The RTP-LLM participation switch is `RTPLLM_ENABLE_SCR=1`; the external
+controller supplies `SCR_PHASE` and drives checkpoint/restore. RTP-LLM registers
+its resources and waits at the template barrier before starting service and the
+engine computation loop.
 
-Set `RTP_LLM_SCR_LOCAL_COMM=1` on both the checkpoint seed and restore workload.
-Set `LOCAL_WORLD_SIZE` to `WORLD_SIZE`. RPC fan-out, TCPStore and NCCL rendezvous
-then use `127.0.0.1`; the actual worker addresses remain available for discovery.
-The mode rejects multiple nodes, incomplete rank sets and mixed member addresses.
-After restore, the saved `self.ip` may differ from newly resolved member addresses;
-that difference alone must not invalidate the topology.
+Loopback is selected automatically when SCR is enabled, `SCR_PHASE` is
+`checkpoint` or `restore`, and the configured `WORLD_SIZE` equals
+`LOCAL_WORLD_SIZE` (both positive). The dump phase uses the existing protocol
+value `checkpoint`. No separate local-communication environment switch is used.
+For this single-Pod template, TCPStore, NCCL rendezvous, rank registration and
+local RPC fan-out use `127.0.0.1`. Normal startup and multi-node services retain
+their configured/discovered addresses. A topology identified as local still
+requires a complete, consistent rank set before publishing local routes.
 
-Loopback is only a control-channel address. Cache-store endpoints sent to a
-remote PD peer use the current Pod IP, resolved again during restore fixup;
-otherwise Decode would connect to its own loopback when fetching Prefill KV.
-Explicit non-loopback endpoint-manifest addresses remain unchanged. Failure to
-resolve a usable Pod IPv4 address rejects fixup instead of advertising the seed
-IP. The frontend request identity is refreshed at the same boundary. Acceptance
-must include a real cross-Pod KV transfer after the Pod IP changes; readiness
-and successful CRIU restore alone do not establish that this route works.
+External PD peers must receive a routable KV endpoint. For loopback members,
+`cache_store_advertise_ip()` supplies the current Pod IP while local RPC addresses
+stay on loopback. This address conversion is part of the feature. Explicit
+non-loopback endpoint-manifest addresses retain their authority. Local health
+polling always targets the local server using numeric loopback.
 
-Local health polling uses numeric loopback to avoid transient resolver netlink
-sockets during checkpoint. Grammar workers participate in the upstream template lifecycle; their sandbox
-pool is quiesced before the barrier and recreated when the template is released.
-The public integration switch is `RTPLLM_ENABLE_SCR=1`; the external controller
-selects `SCR_PHASE`.
+After a successful barrier, process identity is refreshed before component fixup
+and release. See [runtime fixup and audit](scr_runtime_fixup.md) for supported
+restore inputs. Grammar workers are first created by validation requests after
+release. The restore environment reader does not rewrite NCCL variables or
+inject transport libraries.
 
-Process-local identity repair now runs through `fixup_runtime_after_restore`
-before component fixups and release. See [runtime fixup and audit](scr_runtime_fixup.md)
-for Logger repair, the future restore-environment provider contract, and remaining
-host/routing/transport risks. Rereading the restored process environment alone
-does not establish that host identity is fresh.
-
-The internal entrypoint sets `NCCL_SOCKET_IFNAME=lo` in this mode and preloads the
-SCR-injected NCCL interposer for the checkpoint phase. The interposer and the
-underlying NCCL implementation must exist before startup. The image retains the
-GCC 12 library search path needed by runtime JIT compilation.
-
-The fused RoPE call site supports both legacy and current rtp-kernel wrappers:
-the current API takes `position_ids` in prefill and separate position IDs plus
-sequence lengths in decode. Kernel feature detection is cached, uses the Python
-signature, and does not change tensors or native modules at runtime. The paired
-image pins a kernel wheel using the current API, so this compatibility adapter
-is required even though the upstream branch removed it.
+Endpoint manifests refresh application routing; they do not rebuild existing
+TCPStore/NCCL objects. Single-Pod P/D creates CacheStore and external RPC
+connections for the first time after release; it does not require an additional
+transport-ready manifest. Existing multi-node readiness checks remain separate.
+Acceptance must include actual GPU collectives and cross-Pod KV transfer.
 
 ## Validation and acceptance boundary
-
-The preceding runtime-overlay experiment completed a two-rank DeepSeek V4 Flash
-Prefill checkpoint and restore with a changed Pod IP. Restored startup warmup
-passed, followed by the same 31 output token IDs as the normal and seed baselines.
-This is evidence for the fixes; the new source-built image still needs acceptance.
-It is not a claim about multi-node, Decode/PD, throughput, or arbitrary grammars.
 
 For acceptance, use the final image directly through its packaged entrypoint.
 Remove bootstrap source rewriting and the hostPath kernel wheel. Retain the SCR
@@ -61,14 +42,15 @@ outside dumped writable paths. Provision enough checkpoint storage for both rank
 
 Require all of the following for the same attempt:
 
-1. Seed startup warmup and semantic baseline succeed.
+1. Seed model/executor initialization reaches the pre-service barrier.
 2. Checkpoint reaches completion for the exact seed container.
 3. Restore uses a distinct container, preferably with a changed Pod IP.
 4. All participants restore; startup warmup and readiness pass without restarts.
 5. Restored semantic output matches the baseline token IDs.
 
-The environment flag is opt-in because loopback only works for ranks sharing one
-network namespace. Leave it unset for multi-node deployments.
+The automatic topology check limits rank loopback communication to services
+whose ranks share one Pod network namespace. Multi-node services retain their
+normal transport configuration; they still require separate restore acceptance.
 
 ## Monitoring connections at the checkpoint boundary
 
@@ -80,33 +62,27 @@ in manual mode and accepts metric registration, but does not start its metrics
 system or create the configured sink.
 
 The upstream template lifecycle releases both reporters after the Epsilon
-barrier and restore fixup; its abort path also resumes prepared reporters.
+barrier and restore fixup. A failed barrier leaves deferred reporters inactive.
 The main parent participates through the same lifecycle wrapper as its children,
 so its deferred Python reporter is also released. Both reporters then activate
 their external transport. They reread the Hippo
-runtime environment and rebuild the sink and identity tags so a restored process
+runtime environment and construct the sink with current identity tags so a restored process
 does not report with the seed Pod's host or container IP. Python also replaces
 stale runtime tags when rendering data points that were registered before the
 checkpoint. Native reporting applies the refreshed runtime identity at the
 publish boundary, so a metric declared before the checkpoint can retain its
 existing handle while its emitted records use the restored Pod's IP tags. The
 native library must provide the matching lifecycle hooks; mixing new Python
-helpers with an older loaded native library rejects checkpoint participation
-rather than silently retaining sockets. Ordinary serving without SCR keeps the
+helpers with an older loaded native library cannot complete identity fixup and
+reporter activation. Ordinary serving without SCR keeps the
 original eager reporting behavior.
 
-CRIU can preserve `RequestedIP` from the seed even when the new Pod's hostname
-resolves to its new IP. Before native reporting resumes, the SCR helper resolves
-that hostname and refreshes `RequestedIP` in the process environment. If resolution
-fails, it logs the failure and leaves the existing value in place; that case still
-needs explicit monitoring validation. Rebuilding the native configuration also
-replaces its common tag map: otherwise the insert-only `host` tag would retain the
-seed value despite rerunning hostname resolution. Fresh-image acceptance checks
-both `container_ip` and `host` on actual emitted native records.
+CRIU can preserve `RequestedIP` from the seed. The unified restore fixup reads
+fresh identity inputs (or resolves the current Pod hostname) before metrics
+start. Failure to obtain a usable Pod IP rejects normal release. Rebuilding the
+native configuration also replaces its common tag map. Fresh-image acceptance
+checks both `container_ip` and `host` on actual emitted native records.
 
-CPU validation covers deferred Python transport activation, real TCP
-closure/reconnection, refreshed runtime identity, and native metric registration
-retention across sink replacement. Full acceptance must additionally verify
-dump/restore, restored inference, and resumed reporting in a fresh image.
-These hooks address the configured built-in sink; custom sinks and independently
-retained sink references require their own external-connection lifecycle checks.
+CPU validation covers deferred Python/native transport activation, current
+runtime identity and metric registration retention. Full acceptance must also
+verify real dump/restore, restored inference and reporting in a fresh image.

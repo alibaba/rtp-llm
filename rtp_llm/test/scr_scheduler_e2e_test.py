@@ -115,17 +115,24 @@ class ScrSchedulerE2ETest(unittest.TestCase):
         ), mock.patch.object(scr, "_load_epsilon", return_value=epsilon):
             controller_thread = threading.Thread(target=controller.run, daemon=True)
             controller_thread.start()
+            # Threads model separate participating processes in this test.
+            # Production startup always uses the synchronous barrier directly.
             threads = [
-                scr.start_scr_checkpoint_arrival_thread(
-                    worker_id=worker_id,
-                    worker_num=4,
-                    generation="e2e-generation-1",
-                    timeout=2,
-                    inactivity_timeout=1,
-                    name=f"e2e-arrival-{worker_id}",
+                threading.Thread(
+                    target=scr.arrive_scr_checkpoint_barrier,
+                    kwargs=dict(
+                        worker_id=worker_id,
+                        worker_num=4,
+                        generation="e2e-generation-1",
+                        timeout=2,
+                        inactivity_timeout=1,
+                    ),
+                    daemon=True,
                 )
                 for worker_id in range(4)
             ]
+            for thread in threads:
+                thread.start()
             for thread in threads:
                 self.assertIsNotNone(thread)
                 thread.join(timeout=3)

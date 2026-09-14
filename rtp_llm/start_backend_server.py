@@ -1,8 +1,8 @@
 import logging
 import multiprocessing
 import os
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -37,19 +37,20 @@ from rtp_llm.utils.process_manager import (
     ProcessManager,
 )
 from rtp_llm.utils.scr_template_utils import (
+    SCR_GENERATION_ENV,
+    SCR_INACTIVITY_TIMEOUT_ENV,
+    SCR_TIMEOUT_ENV,
+    SCR_WORKER_NUM_ENV,
     ScrParticipantManifest,
-    # Keep this module-level name for older callers/tests.  It points to the
-    # lifecycle-aware wrapper, so backend ranks still quiesce registered hooks.
+)
+from rtp_llm.utils.scr_template_utils import (
     arrive_scr_template_barrier as arrive_scr_checkpoint_barrier,
+)
+from rtp_llm.utils.scr_template_utils import (
     configure_scr_environment,
-    is_scr_enabled,
     is_scr_template_phase_active,
     register_for_scr,
     resolve_scr_worker_mapping,
-    SCR_GENERATION_ENV,
-    SCR_TIMEOUT_ENV,
-    SCR_INACTIVITY_TIMEOUT_ENV,
-    SCR_WORKER_NUM_ENV,
 )
 from rtp_llm.utils.util import copy_gemm_config
 
@@ -162,7 +163,6 @@ def _register_scr_resources(backend_manager, py_env_configs):
         )
         registered = register_for_scr(
             engine,
-            rank=getattr(py_env_configs.parallelism_config, "world_rank", None),
             local_rank=local_rank,
         )
         if not registered:
@@ -454,11 +454,8 @@ def local_rank_start(
             backend_manager, py_env_configs, scr_manifest=scr_manifest, world_rank=world_rank
         )
         if defer_service_start:
-            # TODO(scr-restore-fixup): Before cross-host serving, add an externally
-            # driven fix-up hook for TCPStore/NCCL, TP IPC and PD/RDMA peers;
-            # apply the same gate to frontend/DashSc HostService/discovery.
-            # Validate generation, log fix-up duration/failures, and wait for
-            # final release before binding listeners; keep SCR-disabled startup unchanged.
+            # Runtime identity and advertised endpoints are fixed above.
+            # CacheStore and network listeners are first created after release.
             backend_manager.start_service()
         # Enter service loop to keep the process alive
         logging.info("Entering service loop to keep backend_manager alive")

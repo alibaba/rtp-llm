@@ -12,8 +12,9 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Callable, Protocol
 
+from rtp_llm.utils.scr_restore_context import RestoreContext
 
 LOGGER = logging.getLogger(__name__)
 
@@ -28,12 +29,16 @@ def template_phase_active() -> bool:
     }
 
 
-class TemplateLifecycleHook(Protocol):
+class RestoreFixup(Protocol):
+    """Repair one component using this attempt's shared, fresh inputs."""
+
+    def restore_fixup(self, context: RestoreContext) -> None: ...
+
+
+class TemplateLifecycleHook(RestoreFixup, Protocol):
     """Optional operations run around one template barrier."""
 
     def prepare_for_template(self, generation: str) -> None: ...
-
-    def restore_fixup(self, generation: str) -> None: ...
 
     def release_template(self, generation: str) -> None: ...
 
@@ -59,18 +64,39 @@ class TemplateLifecycle:
         self._lock = threading.RLock()
         self._hooks: dict[str, TemplateLifecycleHook] = {}
         self._state: TemplateLifecycleState | None = None
+        self._fixup_complete = False
 
     def register(self, name: str, hook: TemplateLifecycleHook) -> None:
         if not name:
             raise ValueError("template lifecycle hook name must be non-empty")
         with self._lock:
             existing = self._hooks.get(name)
+            if existing is hook:
+                return
+            if self._state is not None:
+                raise RuntimeError("cannot register hooks during a template lifecycle")
             if existing is not None and existing is not hook:
                 raise ValueError(f"template lifecycle hook already registered: {name}")
             self._hooks[name] = hook
 
+    def register_fixup(self, name: str, fixup: RestoreFixup) -> None:
+        """Register a fixup-only component without three empty lifecycle methods.
+
+        Fixups run in registration order. Register local identity/address repairs
+        before service discovery or registration, and register before prepare.
+        """
+        with self._lock:
+            existing = self._hooks.get(name)
+            if isinstance(existing, _FixupHook) and existing.target is fixup:
+                return
+            self.register(name, _FixupHook(fixup))
+
     def unregister(self, name: str) -> None:
         with self._lock:
+            if self._state is not None:
+                raise RuntimeError(
+                    "cannot unregister hooks during a template lifecycle"
+                )
             self._hooks.pop(name, None)
 
     def _snapshot(self) -> list[tuple[str, TemplateLifecycleHook]]:
@@ -87,10 +113,13 @@ class TemplateLifecycle:
                     f"generation={self._state.generation} phase={self._state.phase}"
                 )
             self._state = TemplateLifecycleState(generation, phase)
+            self._fixup_complete = False
         completed: list[tuple[str, TemplateLifecycleHook]] = []
         try:
             for name, hook in self._snapshot():
-                LOGGER.info("template hook prepare name=%s generation=%s", name, generation)
+                LOGGER.info(
+                    "template hook prepare name=%s generation=%s", name, generation
+                )
                 hook.prepare_for_template(generation)
                 completed.append((name, hook))
         except BaseException:
@@ -103,27 +132,40 @@ class TemplateLifecycle:
                 self._state = None
             raise
 
-    def restore_fixup(self, generation: str) -> None:
+    def restore_fixup(self, context: RestoreContext) -> None:
+        generation = context.generation
         with self._lock:
             state = self._state
+            self._fixup_complete = False
         if state is None or state.generation != generation:
-            raise RuntimeError(f"template lifecycle fixup without prepare: {generation}")
+            raise RuntimeError(
+                f"template lifecycle fixup without prepare: {generation}"
+            )
         for name, hook in self._snapshot():
             LOGGER.info("template hook fixup name=%s generation=%s", name, generation)
-            hook.restore_fixup(generation)
+            hook.restore_fixup(context)
+        with self._lock:
+            self._fixup_complete = True
 
     def release_template(self, generation: str) -> None:
         with self._lock:
             state = self._state
+            fixed = self._fixup_complete
         if state is None or state.generation != generation:
-            raise RuntimeError(f"template lifecycle release without prepare: {generation}")
-        try:
-            for name, hook in self._snapshot():
-                LOGGER.info("template hook release name=%s generation=%s", name, generation)
-                hook.release_template(generation)
-        finally:
-            with self._lock:
-                self._state = None
+            raise RuntimeError(
+                f"template lifecycle release without prepare: {generation}"
+            )
+        if not fixed:
+            raise RuntimeError(
+                f"template lifecycle release before successful fixup: {generation}"
+            )
+        for name, hook in self._snapshot():
+            LOGGER.info("template hook release name=%s generation=%s", name, generation)
+            hook.release_template(generation)
+        # Keep the state on release failure so the barrier can still abort.
+        with self._lock:
+            self._state = None
+            self._fixup_complete = False
 
     def abort_template(self, generation: str) -> None:
         with self._lock:
@@ -137,6 +179,7 @@ class TemplateLifecycle:
                 LOGGER.exception("template hook abort failed name=%s", name)
         with self._lock:
             self._state = None
+            self._fixup_complete = False
 
     @property
     def active(self) -> bool:
@@ -157,7 +200,7 @@ class CallbackHook:
     def __init__(
         self,
         prepare: Callable[[str], None] | None = None,
-        fixup: Callable[[str], None] | None = None,
+        fixup: Callable[[RestoreContext], None] | None = None,
         release: Callable[[str], None] | None = None,
         abort: Callable[[str], None] | None = None,
     ) -> None:
@@ -169,11 +212,17 @@ class CallbackHook:
     def prepare_for_template(self, generation: str) -> None:
         self._prepare(generation)
 
-    def restore_fixup(self, generation: str) -> None:
-        self._fixup(generation)
+    def restore_fixup(self, context: RestoreContext) -> None:
+        self._fixup(context)
 
     def release_template(self, generation: str) -> None:
         self._release(generation)
 
     def abort_template(self, generation: str) -> None:
         self._abort(generation)
+
+
+class _FixupHook(CallbackHook):
+    def __init__(self, target: RestoreFixup) -> None:
+        super().__init__(fixup=target.restore_fixup)
+        self.target = target

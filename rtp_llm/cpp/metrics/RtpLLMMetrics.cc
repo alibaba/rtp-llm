@@ -1142,9 +1142,7 @@ bool kmonitorTransportDeferred = false;
 
 bool deferKmonitorTransportForScr() {
     const auto phase = autil::EnvUtil::getEnv("SCR_PHASE", "");
-    const bool enabled = autil::EnvUtil::getEnv("RTPLLM_ENABLE_SCR", false)
-                         || autil::EnvUtil::getEnv("RTP_LLM_ENABLE_SCR", false)
-                         || autil::EnvUtil::getEnv("SCR_ENABLE", false);
+    const bool enabled = autil::EnvUtil::getEnv("RTPLLM_ENABLE_SCR", false);
     return enabled && (phase == "checkpoint" || phase == "restore");
 }
 
@@ -1213,45 +1211,9 @@ void stopKmonitorFactory() {
     kmonitor::KMonitorFactory::Shutdown();
 }
 
-bool pauseKmonitorForScr() {
-    if (kmonitorTransportDeferred) {
-        RTP_LLM_LOG_INFO("SCR native Kmonitor transport is already deferred");
-        return true;
-    }
-    if (!kmonitor::KMonitorFactory::IsStarted()) {
-        return false;
-    }
-    auto* worker = kmonitor::KMonitorFactory::GetWorker();
-    if (worker == nullptr || worker->getMetricsSystem() == nullptr) {
-        return false;
-    }
-    auto* system = worker->getMetricsSystem();
-    if (!system->Started()) {
-        return false;
-    }
-    auto*                   config = kmonitor::KMonitorFactory::GetConfig();
-    if (config == nullptr) {
-        return false;
-    }
-    kmonitor::MetricsConfig paused_config;
-    paused_config = *config;
-    paused_config.set_manually_mode(true);
-    // Join the sampling/sending threads before replacing their sink. Init
-    // preserves registered metric sources; replacing the sink destroys its
-    // transport and closes the external socket. Shutdown deletes the sources.
-    system->Stop();
-    system->Init(&paused_config);
-    if (!system->Started()) {
-        system->Init(config);
-        return false;
-    }
-    RTP_LLM_LOG_INFO("SCR native Kmonitor paused; metric registrations retained");
-    return true;
-}
-
 bool resumeKmonitorAfterScr() {
-    if (!kmonitorTransportDeferred && !kmonitor::KMonitorFactory::IsStarted()) {
-        return false;
+    if (!kmonitorTransportDeferred) {
+        return true;
     }
     auto* worker = kmonitor::KMonitorFactory::GetWorker();
     auto* factoryConfig = kmonitor::KMonitorFactory::GetConfig();
@@ -1264,22 +1226,12 @@ bool resumeKmonitorAfterScr() {
     fillKmonitorConfig(resumedConfig, param, param.kmonitorManuallyMode);
     *factoryConfig = resumedConfig;
     auto* system = worker->getMetricsSystem();
-    if (kmonitorTransportDeferred) {
-        worker->addCommonTags();
-        kmonitor::KMonitorFactory::Start();
-        if (!system->Started()) {
-            return false;
-        }
-        kmonitorTransportDeferred = false;
-        RTP_LLM_LOG_INFO("SCR native Kmonitor activated with refreshed runtime identity");
-        return true;
-    }
-    system->Stop();
     worker->addCommonTags();
-    system->Init(factoryConfig);
+    kmonitor::KMonitorFactory::Start();
     if (!system->Started()) {
         return false;
     }
+    kmonitorTransportDeferred = false;
     RTP_LLM_LOG_INFO("SCR native Kmonitor activated with refreshed runtime identity");
     return true;
 }

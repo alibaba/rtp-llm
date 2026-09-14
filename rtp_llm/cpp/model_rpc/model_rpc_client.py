@@ -455,9 +455,6 @@ class ModelRpcClient(object):
 
     def update_addresses(self, addresses: list[str]) -> None:
         self._addresses = list(addresses)
-        reset = getattr(self._channel_pool, "reset", None)
-        if reset is not None:
-            reset()
         logging.info("model RPC addresses refreshed: %s", self._addresses)
 
     async def close(self):

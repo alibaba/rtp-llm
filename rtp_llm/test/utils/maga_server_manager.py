@@ -4,7 +4,6 @@ import os
 import random
 import shlex
 import signal as signal_mod
-import socket
 import subprocess
 import sys
 import threading
@@ -177,14 +176,6 @@ class MagaServerManager(object):
             current_env["CUDA_VISIBLE_DEVICES"] = ",".join(
                 [str(_) for _ in self._device_ids]
             )
-
-        # Keep SCR's NCCL interposer out of the Bazel test/launcher process.
-        # When explicitly requested, inject it only into the actual server
-        # subprocess.  This avoids making the test runner's CUDA discovery
-        # call block while still letting each model rank register with SCR.
-        rank_preload = os.environ.get("RTP_SCR_RANK_LD_PRELOAD")
-        if rank_preload:
-            current_env["LD_PRELOAD"] = rank_preload
 
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         cwd_path = os.environ.get("MAGA_SERVER_WORK_DIR", bazel_outputs_dir)

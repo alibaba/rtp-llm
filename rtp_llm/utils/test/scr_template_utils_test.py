@@ -42,10 +42,6 @@ class _FakeEpsilon:
         self.before_callback = callback
         return 0
 
-    def register_after_restore_func(self, callback):
-        self.calls.append(("after", callback))
-        return 0
-
     def snapstart_checkpoint(self, **kwargs):
         self.calls.append(("checkpoint", kwargs))
         return 0
@@ -98,7 +94,6 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         self.assertTrue(hasattr(scr, "ScrParticipantManifest"))
         self.assertTrue(hasattr(scr, "build_scr_participant_manifest"))
         self.assertTrue(hasattr(scr, "arrive_scr_checkpoint_barrier"))
-        self.assertTrue(hasattr(scr, "start_scr_checkpoint_arrival_thread"))
 
     def test_full_process_manifest_is_stable_and_contiguous(self) -> None:
         manifest = scr.build_scr_participant_manifest(
@@ -353,41 +348,6 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             self.assertTrue(scr.register_for_scr(engine))
             epsilon.before_callback()
         synchronize.assert_called_once_with(device=5)
-
-    def test_after_restore_callback_is_only_registered(self) -> None:
-        epsilon = _FakeEpsilon()
-        tensor = _FakeTensor(1)
-        model = SimpleNamespace(kv_cache=SimpleNamespace(kv_cache_base_by_layer=[[tensor]]))
-        engine = SimpleNamespace(model=SimpleNamespace(py_model=model))
-        callback = mock.Mock()
-        with mock.patch.dict(os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True), mock.patch.object(
-            scr.importlib, "import_module", return_value=epsilon
-        ), mock.patch.object(
-            scr, "_is_tensor", side_effect=lambda value: isinstance(value, _FakeTensor)
-        ):
-            self.assertTrue(scr.register_for_scr(engine, after_restore=callback))
-        self.assertEqual([call[0] for call in epsilon.calls], ["cache", "before", "after"])
-        callback.assert_not_called()
-
-    def test_external_shim_after_restore_callback_is_not_treated_as_ready(self) -> None:
-        epsilon = _FakeEpsilon()
-        epsilon._EXTERNAL_DIR = "/etc/scr/epsilon"
-        tensor = _FakeTensor(1)
-        model = SimpleNamespace(kv_cache=SimpleNamespace(kv_cache_base_by_layer=[[tensor]]))
-        engine = SimpleNamespace(model=SimpleNamespace(py_model=model))
-        callback = mock.Mock()
-        with mock.patch.dict(
-            os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True
-        ), mock.patch.object(
-            scr.importlib, "import_module", return_value=epsilon
-        ), mock.patch.object(
-            scr, "_is_tensor", side_effect=lambda value: isinstance(value, _FakeTensor)
-        ):
-            self.assertFalse(scr.register_for_scr(engine, after_restore=callback))
-
-        registration = scr._registrations[id(engine)]
-        self.assertIsNone(registration.after_restore_result)
-        callback.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,8 @@
 # SCR / Epsilon / RTP-LLM 集成调研与端到端 dump/restore 方案
 
+> 历史调研记录（2026-09-06），其中的 feature gate 别名、异步 arrival 和恢复建议不代表当前实现。当前服务前模板边界及已实现的修正见 [SCR 运行时修正](scr_runtime_fixup.md)。
+
+
 > 调研对象：e01-cn-xp54kwggb06-a0002 上的 serina.wzq.dev.new.worker0 与 serina.wzq.dev.new.scr-scheduler。  
 > 调研时间：2026-09-06（Asia/Shanghai）。  
 > 第三方 SCR/Epsilon 没有源代码，本文把可执行文件帮助、日志、Python shim、挂载、历史命令和 RTP-LLM 工作树结合起来，区分实测事实和基于行为的推断。

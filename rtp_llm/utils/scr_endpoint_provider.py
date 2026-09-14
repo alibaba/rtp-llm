@@ -9,21 +9,52 @@ from typing import Any
 
 from rtp_llm.distribute.distributed_server import WorldInfo
 from rtp_llm.distribute.worker_info import WorkerInfo
-
+from rtp_llm.utils.scr_local_comm import local_comm_enabled
 
 ENDPOINT_MANIFEST_ENV = "RTP_LLM_SCR_ENDPOINT_MANIFEST"
+_MANIFEST_UNSET = object()
 
 
 def _read_manifest() -> dict[str, Any] | None:
     value = os.environ.get(ENDPOINT_MANIFEST_ENV, "").strip()
     if not value:
         return None
-    path = Path(value)
-    raw = path.read_text() if path.exists() else value
+    # Inline manifests routinely exceed NAME_MAX.  Never stat JSON as a path.
+    raw = value if value.startswith("{") else Path(value).read_text()
     manifest = json.loads(raw)
     if not isinstance(manifest, dict):
         raise ValueError("SCR endpoint manifest must be a JSON object")
     return manifest
+
+
+def read_restore_manifest(generation: str) -> dict[str, Any] | None:
+    """Read the controller-owned file after the barrier, not snapshotted env.
+
+    Controllers may atomically replace the file with phase=restore.  CRIU does
+    not update Python's os.environ when restoring a process into a new Pod.
+    """
+    manifest = _read_manifest()
+    if manifest is not None:
+        actual = str(manifest.get("generation", ""))
+        if generation and actual and actual != generation:
+            raise RuntimeError(
+                f"SCR endpoint manifest generation mismatch expected={generation} actual={actual}"
+            )
+        if "phase" in manifest and manifest["phase"] not in {"checkpoint", "restore"}:
+            raise ValueError(
+                "SCR endpoint manifest phase must be checkpoint or restore"
+            )
+    return manifest
+
+
+def is_restore_phase(manifest: dict[str, Any] | None) -> bool:
+    # A restored process may retain SCR_PHASE=checkpoint from the snapshot.
+    # A controller-updated manifest can promote it to restore, but must never
+    # weaken a restore requirement already declared by the environment.
+    return (
+        os.environ.get("SCR_PHASE", "").strip().lower() == "restore"
+        or (manifest or {}).get("phase") == "restore"
+    )
 
 
 def resolve_world_info(
@@ -32,6 +63,8 @@ def resolve_world_info(
     generation: str,
     require_manifest: bool = False,
     require_transport: bool = False,
+    expected_world_size: int | None = None,
+    manifest: Any = _MANIFEST_UNSET,
 ) -> WorldInfo:
     """Replace transport endpoints while preserving logical rank identity.
 
@@ -39,17 +72,23 @@ def resolve_world_info(
     ``RTP_LLM_SCR_ENDPOINT_MANIFEST``.  A missing manifest is tolerated during
     the initial checkpoint, but never during a restore of a multi-node world.
     """
-    manifest = _read_manifest()
+    if manifest is _MANIFEST_UNSET:
+        manifest = read_restore_manifest(generation)
     if manifest is None:
-        if require_manifest and current.num_nodes > 1:
+        if require_manifest or require_transport:
             raise RuntimeError(
-                "SCR restore requires a current endpoint manifest for a multi-node world"
+                "SCR restore requires a current endpoint manifest for distributed serving"
             )
-        if (
-            os.environ.get("RTP_LLM_SCR_LOCAL_COMM") == "1"
-            and current.num_nodes == 1
-            and sorted(member.local_rank for member in current.members)
-            == list(range(len(current.members)))
+        if local_comm_enabled(
+            (
+                expected_world_size
+                if expected_world_size is not None
+                else len(current.members)
+            ),
+            len(current.members),
+            current.num_nodes,
+        ) and sorted(member.local_rank for member in current.members) == list(
+            range(len(current.members))
         ):
             members = [
                 WorkerInfo(
@@ -94,6 +133,8 @@ def resolve_world_info(
             raise ValueError("SCR endpoint manifest member must be an object")
         rank = int(row["world_rank"])
         local_rank = int(row["local_rank"])
+        if rank < 0 or local_rank < 0:
+            raise ValueError("SCR endpoint manifest ranks must be non-negative")
         host = str(row.get("ip", row.get("host", ""))).strip()
         if not host:
             raise ValueError(f"SCR endpoint manifest rank {rank} has no host")
@@ -111,7 +152,24 @@ def resolve_world_info(
             ),
             remote_server_port=int(row.get("remote_server_port", base_port)),
         )
-    expected = set(range(len(current.members)))
+        member = by_rank[rank]
+        if any(
+            not 0 < port <= 65535
+            for port in (
+                member.server_port,
+                member.rpc_server_port,
+                member.cache_store_listen_port,
+                member.cache_store_rdma_listen_port,
+            )
+        ):
+            raise ValueError(
+                f"SCR endpoint manifest rank {rank} has an invalid port layout"
+            )
+    expected = (
+        set(range(expected_world_size))
+        if expected_world_size is not None
+        else {member.world_rank for member in current.members}
+    )
     if set(by_rank) != expected:
         raise ValueError(
             f"SCR endpoint manifest ranks {sorted(by_rank)} do not match world {sorted(expected)}"
@@ -120,6 +178,9 @@ def resolve_world_info(
     if manifest_nodes <= 0:
         raise ValueError("SCR endpoint manifest num_nodes must be positive")
     members = [by_rank[rank] for rank in sorted(by_rank)]
+    for previous in current.members:
+        if by_rank[previous.world_rank].local_rank != previous.local_rank:
+            raise ValueError("SCR restore cannot change logical/local rank identity")
     self_rank = current.self.world_rank if current.self is not None else 0
     master_rank = current.master.world_rank if current.master is not None else 0
     return WorldInfo(

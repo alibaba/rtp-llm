@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from rtp_llm.utils.scr_local_comm import current_pod_ip
+from rtp_llm.utils.scr_restore_context import RestoreContext
 
 if TYPE_CHECKING:
     from rtp_llm.utils.scr_template_lifecycle import TemplateLifecycle
@@ -182,5 +183,5 @@ def fixup_runtime_after_restore(
             "SCR restore input did not supply HIPPO_SLAVE_IP; "
             "host identity retained from environment, freshness unverified"
         )
-    lifecycle.restore_fixup(generation)
+    lifecycle.restore_fixup(RestoreContext(generation, pod_ip))
     return identity

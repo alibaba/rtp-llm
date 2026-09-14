@@ -5,9 +5,9 @@ initiated by the external control plane; a backend rank only registers state
 and announces its Epsilon barrier arrival.
 """
 
-from types import SimpleNamespace
 import os
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import rtp_llm.start_backend_server as backend
@@ -98,7 +98,7 @@ class BackendScrIntegrationTest(unittest.TestCase):
         ) as register:
             self.assertIs(backend._register_scr_resources(manager, config), manager.engine)
 
-        register.assert_called_once_with(manager.engine, rank=7, local_rank=2)
+        register.assert_called_once_with(manager.engine, local_rank=2)
         self.assertFalse(hasattr(manager, "_scr_checkpoint_arrival"))
 
     def test_rank_arrival_uses_local_rank_and_local_world_size(self):

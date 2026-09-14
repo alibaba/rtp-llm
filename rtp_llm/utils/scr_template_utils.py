@@ -20,132 +20,47 @@ import importlib
 import inspect
 import logging
 import os
-import socket
 import sys
 import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Mapping as TypingMapping, Optional
+from typing import Any, Callable, Iterator
+from typing import Mapping as TypingMapping
+from typing import Optional
 
-from rtp_llm.utils.scr_template_lifecycle import get_template_lifecycle
-from rtp_llm.utils.scr_runtime_fixup import (
-    fixup_runtime_after_restore,
-    get_restore_runtime_identity,
-)
-
+from rtp_llm.utils.scr_restore_context import RestoreContext
+from rtp_llm.utils.scr_runtime_fixup import fixup_runtime_after_restore
+from rtp_llm.utils.scr_template_lifecycle import CallbackHook, get_template_lifecycle
 
 LOGGER = logging.getLogger(__name__)
 
 
-class _NativeKmonitorTemplateHook:
-    """Pause native kmonitor without importing the CUDA extension eagerly."""
-
-    def __init__(self) -> None:
-        self._paused = False
-
-    @staticmethod
-    def _extension():
-        # The backend imports libth_transformer during engine construction. Do
-        # not import it in frontend/CPU-only processes just to register a hook.
-        return sys.modules.get("libth_transformer")
-
-    def prepare_for_template(self, generation: str) -> None:
-        extension = self._extension()
-        pause = getattr(extension, "pause_kmonitor_for_scr", None) if extension else None
-        if extension is not None and pause is None:
-            # A loaded extension must expose the native hook.  Silently
-            # continuing would capture an active metrics sink and can leave
-            # the restored process with duplicate/stale reporters.  Frontend
-            # and CPU-only processes simply have no extension and remain
-            # optional participants.
-            raise RuntimeError("loaded native library lacks SCR Kmonitor hooks")
-        self._paused = bool(pause()) if pause is not None else False
-        if self._paused:
-            LOGGER.info("native Kmonitor paused for SCR generation=%s", generation)
-
-    def restore_fixup(self, generation: str) -> None:
-        return None
-
-    def release_template(self, generation: str) -> None:
-        self._resume(generation)
-
-    def abort_template(self, generation: str) -> None:
-        self._resume(generation)
-
-    def _resume(self, generation: str) -> None:
-        if not self._paused:
-            return
-        extension = self._extension()
-        resume = getattr(extension, "resume_kmonitor_after_scr", None) if extension else None
-        # CRIU preserves seed environment values. Resolve the current namespace
-        # identity before native Kmonitor rebuilds its configuration.
-        if os.environ.get("HIPPO_ROLE"):
-            try:
-                identity = get_restore_runtime_identity()
-                os.environ["RequestedIP"] = (
-                    identity.pod_ip
-                    if identity is not None and identity.generation == generation
-                    else socket.gethostbyname(socket.gethostname())
-                )
-            except OSError:
-                LOGGER.warning(
-                    "Cannot resolve current container IP for native Kmonitor",
-                    exc_info=True,
-                )
-        if resume is None or not resume():
-            raise RuntimeError("native Kmonitor did not resume after SCR")
-        self._paused = False
-        LOGGER.info("native Kmonitor released for SCR generation=%s", generation)
+def _start_native_kmonitor(generation: str) -> None:
+    # Do not import CUDA in CPU/frontend processes just to start metrics.
+    extension = sys.modules.get("libth_transformer")
+    if extension is None:
+        return
+    start = getattr(extension, "resume_kmonitor_after_scr", None)
+    if start is None or not start():
+        raise RuntimeError("native Kmonitor did not start after SCR identity fixup")
 
 
-class _PythonKmonitorTemplateHook:
-    """Quiesce the already-loaded Python reporter during a template barrier."""
-
-    @staticmethod
-    def _worker() -> Any | None:
-        module = sys.modules.get(
-            "rtp_llm.aios.kmonitor.python_client.kmonitor.report_worker"
-        )
-        return getattr(module, "report_worker", None)
-
-    def __init__(self) -> None:
-        self._worker_ref: Any | None = None
-        self._was_started = False
-
-    def prepare_for_template(self, generation: str) -> None:
-        del generation
-        worker = self._worker()
-        self._worker_ref = worker
-        self._was_started = False
-        if worker is not None:
-            try:
-                self._was_started = bool(worker.pause_for_checkpoint())
-            except BaseException:
-                self._worker_ref = None
-                self._was_started = False
-                raise
-
-    def restore_fixup(self, generation: str) -> None:
-        del generation
-
-    def release_template(self, generation: str) -> None:
-        del generation
-        worker = self._worker_ref
-        was_started = self._was_started
-        self._worker_ref = None
-        self._was_started = False
-        if worker is not None:
-            worker.resume_after_checkpoint(was_started)
-
-    def abort_template(self, generation: str) -> None:
-        self.release_template(generation)
+def _start_python_kmonitor(generation: str) -> None:
+    module = sys.modules.get(
+        "rtp_llm.aios.kmonitor.python_client.kmonitor.report_worker"
+    )
+    worker = getattr(module, "report_worker", None)
+    if worker is not None:
+        worker.start_after_restore()
 
 
-_NATIVE_KMONITOR_HOOK = _NativeKmonitorTemplateHook()
-_PYTHON_KMONITOR_HOOK = _PythonKmonitorTemplateHook()
-get_template_lifecycle().register("native-kmonitor", _NATIVE_KMONITOR_HOOK)
-get_template_lifecycle().register("python-kmonitor", _PYTHON_KMONITOR_HOOK)
+get_template_lifecycle().register(
+    "native-kmonitor", CallbackHook(release=_start_native_kmonitor)
+)
+get_template_lifecycle().register(
+    "python-kmonitor", CallbackHook(release=_start_python_kmonitor)
+)
 
 
 class _BackendVisitorTemplateHook:
@@ -153,53 +68,29 @@ class _BackendVisitorTemplateHook:
         self.visitor = visitor
         self.configs = py_env_configs
 
-    def prepare_for_template(self, generation: str) -> None:
-        return None
-
-    def restore_fixup(self, generation: str) -> None:
+    def restore_fixup(self, context: RestoreContext) -> None:
         from rtp_llm.distribute.distributed_server import (
             get_dp_addrs_from_world_info,
             get_world_info,
         )
-        from rtp_llm.utils.scr_endpoint_provider import resolve_world_info
 
         current = get_world_info(
             self.configs.server_config,
             self.configs.distribute_config,
             self.configs.parallelism_config,
         )
-        role = self.configs.role_config.role_type
-        role_name = str(getattr(role, "name", role)).lower()
-        world_info = resolve_world_info(
-            current,
-            generation=generation,
-            require_manifest=os.environ.get("SCR_PHASE", "").strip().lower() == "restore"
-            and (current.num_nodes > 1 or role_name in {"prefill", "decode", "role_type.prefill", "role_type.decode"}),
-            require_transport=os.environ.get("SCR_PHASE", "").strip().lower() == "restore"
-            and (current.num_nodes > 1 or role_name in {"prefill", "decode", "role_type.prefill", "role_type.decode"}),
+        world_info = context.resolve_world_info(
+            current, self.configs.parallelism_config
         )
         self.visitor.update_addresses(
             get_dp_addrs_from_world_info(world_info, self.configs.parallelism_config)
         )
-        from rtp_llm.utils.scr_local_comm import current_pod_ip, local_comm_enabled
-
-        # Request correlation must identify the restored frontend in all
-        # topologies. Retain the legacy standalone local hook fallback.
-        identity = get_restore_runtime_identity()
-        if identity is not None and identity.generation == generation:
-            self.visitor.source_ip = identity.pod_ip
-        elif local_comm_enabled():
-            self.visitor.source_ip = current_pod_ip()
-
-    def release_template(self, generation: str) -> None:
-        return None
-
-    def abort_template(self, generation: str) -> None:
-        return None
+        self.visitor.source_ip = context.pod_ip
 
 
 def register_backend_visitor_template_hook(visitor: Any, py_env_configs: Any) -> None:
-    get_template_lifecycle().register(
+    lifecycle = get_template_lifecycle()
+    lifecycle.register_fixup(
         f"backend-visitor:{id(visitor)}",
         _BackendVisitorTemplateHook(visitor, py_env_configs),
     )
@@ -217,35 +108,21 @@ class _ServerConfigTemplateHook:
     def __init__(self, py_env_configs: Any) -> None:
         self.configs = py_env_configs
 
-    def prepare_for_template(self, generation: str) -> None:
-        return None
-
-    def restore_fixup(self, generation: str) -> None:
-        identity = get_restore_runtime_identity()
-        if identity is None or identity.generation != generation:
-            return
-        self.configs.server_config.ip = identity.pod_ip
-
-    def release_template(self, generation: str) -> None:
-        return None
-
-    def abort_template(self, generation: str) -> None:
-        return None
+    def restore_fixup(self, context: RestoreContext) -> None:
+        self.configs.server_config.ip = context.pod_ip
 
 
 def register_server_config_template_hook(py_env_configs: Any) -> None:
-    get_template_lifecycle().register(
+    get_template_lifecycle().register_fixup(
         f"server-config:{id(py_env_configs)}",
         _ServerConfigTemplateHook(py_env_configs),
     )
+
 
 # ``RTPLLM_ENABLE_SCR`` is RTP-LLM's own participation switch.  ``SCR_ENABLE``
 # and ``SCR_PHASE`` are external control-plane inputs and are never derived or
 # mutated here. Checkpoint versus restore is chosen by the controller/platform.
 RTPLLM_ENABLE_SCR_ENV = "RTPLLM_ENABLE_SCR"
-# Kept for callers that historically used this constant to refer to the
-# RTP-LLM gate; it is intentionally the same single switch, not a second gate.
-SCR_ENABLE_ENV = RTPLLM_ENABLE_SCR_ENV
 SCR_PHASE_ENV = "SCR_PHASE"
 
 SCR_PHASE_CHECKPOINT = "checkpoint"
@@ -279,9 +156,6 @@ SCR_INACTIVITY_TIMEOUT_ALIASES = (
 )
 DEFAULT_TIMEOUT_SECONDS = 900
 DEFAULT_INACTIVITY_TIMEOUT_SECONDS = 10
-# Compatibility names used by deployment/contract tests.
-DEFAULT_SCR_TIMEOUT_S = DEFAULT_TIMEOUT_SECONDS
-DEFAULT_SCR_INACTIVITY_TIMEOUT_S = DEFAULT_INACTIVITY_TIMEOUT_SECONDS
 
 def _flag(value: Optional[str]) -> bool:
     return value is not None and value.strip().lower() in {
@@ -589,7 +463,6 @@ class ScrRegistration:
     cache_result: int | None
     hook_result: int | None
     ok: bool
-    after_restore_result: int | None = None
     registration_duration_ms: float = 0.0
 
 
@@ -609,7 +482,6 @@ class EpsilonCapabilities:
     supports_timeout: bool
     supports_inactivity_timeout: bool
     supports_kv_registration: bool
-    supports_after_restore: bool
     signature_source: str
 
 
@@ -665,26 +537,11 @@ def _epsilon_capabilities(epsilon: Any) -> EpsilonCapabilities:
         )
 
     register_kv = getattr(epsilon, "register_kv_caches", None)
-    register_restore = getattr(epsilon, "register_after_restore_func", None)
-    supports_restore = _callable_accepts(register_restore, "callback")
-    if supports_restore is None:
-        supports_restore = bool(
-            explicit.get(
-                "supports_after_restore",
-                getattr(epsilon, "SUPPORTS_AFTER_RESTORE", False),
-            )
-        )
-    # The external compatibility shim currently accepts this registration but
-    # deliberately does not execute the callback.
-    if getattr(epsilon, "_EXTERNAL_DIR", ""):
-        supports_restore = False
-
     return EpsilonCapabilities(
         api_version=version,
         supports_timeout=bool(timeout),
         supports_inactivity_timeout=bool(inactivity_timeout),
         supports_kv_registration=callable(register_kv),
-        supports_after_restore=bool(supports_restore),
         signature_source="inspect" if checkpoint is not None else "missing",
     )
 
@@ -724,17 +581,6 @@ class EpsilonAdapter:
         if self.capabilities.supports_inactivity_timeout:
             kwargs["inactivity_timeout"] = inactivity_timeout
         return _call_result(checkpoint, **kwargs)
-
-    def register_after_restore(self, callback: Callable[..., Any]) -> int | None:
-        if not self.capabilities.supports_after_restore:
-            raise EpsilonProtocolError(
-                "Epsilon after-restore callback is unavailable or is a no-op"
-            )
-        function = getattr(self.epsilon, "register_after_restore_func", None)
-        if not callable(function):
-            raise EpsilonProtocolError("Epsilon after-restore API is unavailable")
-        return _call_result(function, callback)
-
 
 @dataclass(frozen=True)
 class ScrParticipantManifest:
@@ -979,11 +825,7 @@ def _restore_elapsed_ms() -> float | None:
 def register_for_scr(
     engine: Any,
     *,
-    model_name: str = "",
-    instance: int = 0,
-    rank: int | None = None,
     local_rank: int | None = None,
-    after_restore: Callable[..., Any] | None = None,
 ) -> bool:
     """Serialize lazy registration retries for one engine identity."""
 
@@ -996,22 +838,14 @@ def register_for_scr(
     with registration_lock:
         return _register_for_scr_once(
             engine,
-            model_name=model_name,
-            instance=instance,
-            rank=rank,
             local_rank=local_rank,
-            after_restore=after_restore,
         )
 
 
 def _register_for_scr_once(
     engine: Any,
     *,
-    model_name: str = "",
-    instance: int = 0,
-    rank: int | None = None,
     local_rank: int | None = None,
-    after_restore: Callable[..., Any] | None = None,
 ) -> bool:
     """Register one rank's KV cache and runtime hooks with Epsilon.
 
@@ -1020,7 +854,6 @@ def _register_for_scr_once(
     restore; the model pointer is deliberately not registered.
     """
 
-    del model_name, instance, rank  # metadata is optional in SCR shim
     started = time.monotonic()
     if not is_scr_enabled():
         return False
@@ -1049,7 +882,6 @@ def _register_for_scr_once(
 
     cache_result: int | None = None
     hook_result: int | None = None
-    after_restore_result: int | None = None
     ok = True
 
     try:
@@ -1087,51 +919,6 @@ def _register_for_scr_once(
         else:
             LOGGER.warning("sCR active but Epsilon before-checkpoint hook is unavailable")
             ok = False
-        if after_restore is not None:
-            if not adapter.capabilities.supports_after_restore:
-                LOGGER.warning(
-                    "sCR after-restore callback requested but Epsilon does not "
-                    "provide an executable register_after_restore_func"
-                )
-                ok = False
-            else:
-                callback_started = time.monotonic()
-
-                def _restore_fixup_with_timing(*args: Any, **kwargs: Any) -> Any:
-                    callback_started_at = time.monotonic()
-                    LOGGER.info(
-                        "sCR restore fixup callback started generation=%s phase=%s",
-                        _scr_generation(),
-                        os.environ.get(SCR_PHASE_ENV, "<unset>"),
-                    )
-                    try:
-                        result = after_restore(*args, **kwargs)
-                    except BaseException:
-                        LOGGER.exception(
-                            "sCR restore fixup callback failed generation=%s elapsed_ms=%.3f",
-                            _scr_generation(),
-                            (time.monotonic() - callback_started_at) * 1000.0,
-                        )
-                        raise
-                    LOGGER.info(
-                        "sCR restore fixup callback completed generation=%s elapsed_ms=%.3f",
-                        _scr_generation(),
-                        (time.monotonic() - callback_started_at) * 1000.0,
-                    )
-                    return result
-
-                after_restore_result = _call_result(
-                    adapter.register_after_restore, _restore_fixup_with_timing
-                )
-                ok = ok and after_restore_result in (None, 0)
-                LOGGER.info(
-                    "sCR restore callback registered generation=%s result=%s elapsed_ms=%.3f "
-                    "restore_elapsed_ms=%s",
-                    _scr_generation(),
-                    after_restore_result,
-                    (time.monotonic() - callback_started) * 1000.0,
-                    _restore_elapsed_ms(),
-                )
     except Exception:
         # Registration is an optimization hint; generic sCR dump remains a
         # valid fallback when registration is unavailable.
@@ -1144,7 +931,6 @@ def _register_for_scr_once(
         cache_result=cache_result,
         hook_result=hook_result,
         ok=ok,
-        after_restore_result=after_restore_result,
         registration_duration_ms=(time.monotonic() - started) * 1000.0,
     )
     with _registration_lock:
@@ -1541,7 +1327,10 @@ def arrive_scr_template_barrier(
             timeout=timeout,
             inactivity_timeout=inactivity_timeout,
             generation=generation,
-            fail_closed=fail_closed,
+            # A prepared template must never release after a failed arrival.
+            # Legacy Epsilon APIs return None on success, so enforce errors at
+            # the arrival boundary instead of interpreting None here.
+            fail_closed=True,
         )
         fixup_runtime_after_restore(actual_generation, lifecycle)
         lifecycle.release_template(actual_generation)
@@ -1549,81 +1338,6 @@ def arrive_scr_template_barrier(
     except BaseException:
         lifecycle.abort_template(actual_generation)
         raise
-
-
-def start_scr_checkpoint_arrival_thread(
-    *,
-    worker_id: int,
-    worker_num: int,
-    timeout: int | None = None,
-    inactivity_timeout: int | None = None,
-    generation: str | None = None,
-    name: str = "scr-checkpoint-arrival",
-) -> threading.Thread | None:
-    """Compatibility helper for non-startup callers.
-
-    This helper must not be used for a template participant's startup path:
-    the daemon would let the process create listeners or serve while it is
-    waiting at the barrier. Startup code must call
-    :func:`arrive_scr_checkpoint_barrier` synchronously instead. It remains
-    exported only for compatibility with isolated tests/legacy callers.
-    """
-
-    if not is_scr_enabled():
-        return None
-    if not _external_shim_phase_active():
-        LOGGER.info(
-            "sCR external shim inactive for phase=%s; skipping arrival thread",
-            os.environ.get(SCR_PHASE_ENV, "<unset>"),
-        )
-        return None
-
-    def _arrive() -> None:
-        try:
-            result = arrive_scr_checkpoint_barrier(
-                worker_id=worker_id,
-                worker_num=worker_num,
-                timeout=timeout,
-                inactivity_timeout=inactivity_timeout,
-                generation=generation,
-            )
-            if result is None:
-                # None means the optional integration was inactive or could
-                # not reach Epsilon. This is fail-open for normal serving, but
-                # the control plane must treat it as a missing quorum member.
-                LOGGER.warning(
-                    "sCR snapshot arrival did not complete "
-                    "generation=%s worker_id=%s worker_num=%s phase=%s",
-                    _scr_generation(),
-                    worker_id,
-                    worker_num,
-                    os.environ.get(SCR_PHASE_ENV, ""),
-                )
-            elif result != 0:
-                LOGGER.error(
-                    "sCR snapshot arrival returned non-zero result=%s "
-                    "generation=%s worker_id=%s worker_num=%s phase=%s",
-                    result,
-                    _scr_generation(),
-                    worker_id,
-                    worker_num,
-                    os.environ.get(SCR_PHASE_ENV, ""),
-                )
-            else:
-                LOGGER.info(
-                    "sCR snapshot arrival completed "
-                    "generation=%s worker_id=%s worker_num=%s phase=%s",
-                    _scr_generation(),
-                    worker_id,
-                    worker_num,
-                    os.environ.get(SCR_PHASE_ENV, ""),
-                )
-        except BaseException:
-            LOGGER.exception("sCR snapshot barrier arrival thread failed")
-
-    thread = threading.Thread(target=_arrive, name=name, daemon=True)
-    thread.start()
-    return thread
 
 
 def _reset_for_test() -> None:

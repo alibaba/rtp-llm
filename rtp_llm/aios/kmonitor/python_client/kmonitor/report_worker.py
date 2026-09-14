@@ -28,10 +28,7 @@ def _env_enabled(name: str) -> bool:
 
 
 def _defer_transport_for_scr() -> bool:
-    enabled = any(
-        _env_enabled(name)
-        for name in ("RTPLLM_ENABLE_SCR", "RTP_LLM_ENABLE_SCR", "SCR_ENABLE")
-    )
+    enabled = _env_enabled("RTPLLM_ENABLE_SCR")
     return enabled and os.environ.get("SCR_PHASE", "").strip().lower() in {
         "checkpoint",
         "restore",
@@ -52,16 +49,13 @@ class ReportWorker(object):
         self.metric_lock: Lock = Lock()
         self.started = False
         self._report_thread: Thread | None = None
-        self._transport_deferred = False
-        if HippoHelper.is_hippo_env():
-            self.flume = None
-            self._transport_deferred = _defer_transport_for_scr()
-            if self._transport_deferred:
-                logging.info("defer kmonitor transport until SCR steady-point returns")
-            else:
-                self._activate_hippo_transport(refresh_identity=False)
+        self.flume = None
+        self._transport_deferred = _defer_transport_for_scr()
+        if self._transport_deferred:
+            logging.info("defer kmonitor transport until SCR steady-point returns")
+        elif HippoHelper.is_hippo_env():
+            self._activate_hippo_transport(refresh_identity=False)
         else:
-            self.flume = None
             self.start()
             logging.info("test mode, kmonitor metrics not reported.")
 
@@ -153,8 +147,6 @@ class ReportWorker(object):
             self.init_tags.update(self._runtime_tags)
             self.init_tags.update(self._configured_tags)
         report_host = os.environ.get("HIPPO_SLAVE_IP", "localhost")
-        if self.flume is not None:
-            self.flume.close()
         self.flume = FlumeClient(
             report_host,
             _ReportWorker__REPORT_PORT,
@@ -169,32 +161,15 @@ class ReportWorker(object):
             HippoHelper.container_ip,
         )
 
-    def pause_for_checkpoint(self) -> bool:
-        was_started = self.started
-        self.stop()
-        if self._report_thread is not None:
-            self._report_thread.join(timeout=5)
-            if self._report_thread.is_alive():
-                self.started = was_started
-                raise RuntimeError("Kmonitor reporter did not quiesce before SCR")
-        try:
-            if self.flume is not None:
-                self.flume.close()
-        except Exception:
-            if was_started:
-                self.start()
-            raise
-        return was_started
-
-    def resume_after_checkpoint(self, was_started: bool) -> None:
-        if HippoHelper.is_hippo_env() and (was_started or self._transport_deferred):
+    def start_after_restore(self) -> None:
+        """Start the deferred reporter once, after process identity is refreshed."""
+        if not self._transport_deferred:
+            return
+        if HippoHelper.is_hippo_env():
             self._activate_hippo_transport()
-        elif was_started:
-            try:
-                if self.flume is not None:
-                    self.flume.reconnect()
-            finally:
-                self.start()
+        else:
+            self._transport_deferred = False
+            self.start()
 
 
 report_worker = ReportWorker()

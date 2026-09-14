@@ -114,17 +114,56 @@ class ScrRestoreEnvFileTest(unittest.TestCase):
         self.assertEqual(runtime.get_restore_runtime_identity().environment_keys, ())
 
     def test_full_environment_only_updates_supported_fields(self):
+        protected = {
+            "TP_SIZE": "2",
+            "NCCL_SOCKET_IFNAME": "eth0",
+            "NCCL_IB_HCA": "mlx5_0",
+            "NCCL_P2P_DISABLE": "0",
+            "GLOO_SOCKET_IFNAME": "eth0",
+            "LD_PRELOAD": "/existing/library.so",
+            "SCR_PHASE": "checkpoint",
+            "RTPLLM_ENABLE_SCR": "1",
+        }
         self.publish(
-            {"RequestedIP": "192.0.2.20", "kmonitorPort": "4141", "TP_SIZE": "99"}
+            {
+                **dict.fromkeys(protected, "changed"),
+                "RequestedIP": "192.0.2.20",
+                "kmonitorPort": "4141",
+            }
         )
-        with patch.dict(os.environ, {"TP_SIZE": "2"}):
+        with patch.dict(os.environ, protected):
             self.barrier([])
-            self.assertEqual(os.environ["TP_SIZE"], "2")
+            self.assertEqual({key: os.environ[key] for key in protected}, protected)
             self.assertEqual(os.environ["kmonitorPort"], "4141")
         self.assertEqual(
             runtime.get_restore_runtime_identity().environment_keys,
             ("RequestedIP", "kmonitorPort"),
         )
+
+    def test_restore_file_cannot_replace_or_remove_service_route_config(self):
+        route = json.dumps(
+            {
+                "service_id": "model",
+                "master_endpoint": {
+                    "type": "vipserver",
+                    "address": "master.vip",
+                    "protocol": "http",
+                    "path": "",
+                },
+            }
+        )
+        with patch.dict(os.environ, {"MODEL_SERVICE_CONFIG": route}):
+            for value in ("changed", None):
+                with self.subTest(value=value):
+                    self.publish(
+                        {"RequestedIP": "192.0.2.20", "MODEL_SERVICE_CONFIG": value}
+                    )
+                    self.barrier([])
+                    self.assertEqual(os.environ["MODEL_SERVICE_CONFIG"], route)
+                    self.assertNotIn(
+                        "MODEL_SERVICE_CONFIG",
+                        runtime.get_restore_runtime_identity().environment_keys,
+                    )
 
     def test_null_removes_seed_value_and_rediscovers_pod_ip(self):
         self.publish({"RequestedIP": None, "HIPPO_ROLE_SHORT_NAME": None})

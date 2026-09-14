@@ -43,6 +43,7 @@ from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.ops import TaskType
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
+from rtp_llm.utils.scr_template_lifecycle import get_template_lifecycle
 from rtp_llm.utils.scr_template_utils import (
     register_backend_visitor_template_hook,
     register_server_config_template_hook,
@@ -668,6 +669,9 @@ class DashScApp:
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
                     grammar_validator=grammar_validator,
+                )
+                get_template_lifecycle().register_fixup(
+                    f"dash-inference:{id(servicer)}", servicer
                 )
 
             loop = self._start_enqueue_loop()

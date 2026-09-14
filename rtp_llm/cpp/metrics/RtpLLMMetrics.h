@@ -1512,7 +1512,6 @@ private:
 
 bool initKmonitorFactory();
 void stopKmonitorFactory();
-bool pauseKmonitorForScr();
 bool resumeKmonitorAfterScr();
 
 void setHippoTags(kmonitor::MetricsConfig& config);

@@ -6,7 +6,6 @@ import tempfile
 import time
 import traceback
 
-from rtp_llm.utils.scr_local_comm import local_comm_enabled
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import str_to_bool
 
@@ -25,9 +24,11 @@ from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_VALUE,
     ProcessManager,
 )
+from rtp_llm.utils.scr_template_utils import ScrParticipantManifest
 from rtp_llm.utils.scr_template_utils import (
-    ScrParticipantManifest,
     arrive_scr_template_barrier as arrive_scr_checkpoint_barrier,
+)
+from rtp_llm.utils.scr_template_utils import (
     build_scr_participant_manifest,
     configure_scr_environment,
     is_scr_template_phase_active,
@@ -155,8 +156,8 @@ def check_server_health(server_port, path="/health"):
     try:
         import requests
 
-        # Numeric loopback avoids getaddrinfo's transient netlink sockets at dump.
-        host = "127.0.0.1" if local_comm_enabled() else "localhost"
+        # This probe always targets this process's local server.
+        host = "127.0.0.1"
         response = requests.get(f"http://{host}:{server_port}{path}", timeout=60)
         health_ok = False
         if response.status_code == 200:

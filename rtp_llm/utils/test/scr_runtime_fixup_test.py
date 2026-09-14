@@ -128,6 +128,8 @@ class ScrRuntimeFixupTest(unittest.TestCase):
         lifecycle = Mock()
         invalid = [
             {"TP_SIZE": "4"},
+            {"NCCL_SOCKET_IFNAME": "lo"},
+            {"LD_PRELOAD": "/scr/nccl.so"},
             {"SCR_PHASE": "restore"},
             {"RequestedIP": "127.0.0.1"},
             {"RequestedIP": "bad"},
@@ -222,12 +224,91 @@ class ScrRuntimeFixupTest(unittest.TestCase):
             scr.arrive_scr_template_barrier(worker_id=0, worker_num=1)
         provider.assert_not_called()
 
+    def test_real_arrival_failures_abort_even_with_default_fail_closed_argument(self):
+        for epsilon in (
+            None,
+            NS(
+                is_snapstart_enable=lambda: True,
+                snapstart_checkpoint=Mock(return_value=7),
+            ),
+            NS(
+                is_snapstart_enable=lambda: True,
+                snapstart_checkpoint=Mock(side_effect=TimeoutError("expired")),
+            ),
+        ):
+            with self.subTest(epsilon=epsilon):
+                events = []
+                provider = Mock(return_value={"RequestedIP": "192.0.2.20"})
+                runtime.register_restore_env_provider(provider)
+                with patch.dict(
+                    os.environ,
+                    {
+                        "RTPLLM_ENABLE_SCR": "1",
+                        "SCR_PHASE": "checkpoint",
+                        scr.SCR_GENERATION_ENV: "g1",
+                    },
+                    clear=True,
+                ), patch.object(
+                    scr, "get_template_lifecycle", return_value=self.lifecycle(events)
+                ), patch.object(
+                    scr, "_load_epsilon", return_value=epsilon
+                ), patch.object(
+                    scr, "_capture_cuda_device", return_value=None
+                ), patch.object(
+                    scr, "_prepare_cuda_for_arrival"
+                ):
+                    with self.assertRaises(scr.ScrArrivalError):
+                        scr.arrive_scr_template_barrier(
+                            worker_id=0, worker_num=1, generation="g1"
+                        )
+                self.assertEqual(events, ["prepare", "abort"])
+                provider.assert_not_called()
+
+    def test_real_arrival_accepts_legacy_none_and_zero_success(self):
+        for result in (None, 0):
+            with self.subTest(result=result):
+                events = []
+                checkpoint = Mock(return_value=result)
+                epsilon = NS(
+                    is_snapstart_enable=lambda: True, snapstart_checkpoint=checkpoint
+                )
+                runtime.register_restore_env_provider(
+                    lambda _g: {"RequestedIP": "192.0.2.20"}
+                )
+                with patch.dict(
+                    os.environ,
+                    {
+                        "RTPLLM_ENABLE_SCR": "1",
+                        "SCR_PHASE": "checkpoint",
+                        scr.SCR_GENERATION_ENV: "g1",
+                    },
+                    clear=True,
+                ), patch.object(
+                    scr, "get_template_lifecycle", return_value=self.lifecycle(events)
+                ), patch.object(
+                    scr, "_load_epsilon", return_value=epsilon
+                ), patch.object(
+                    scr, "_capture_cuda_device", return_value=None
+                ), patch.object(
+                    scr, "_prepare_cuda_for_arrival"
+                ):
+                    self.assertEqual(
+                        scr.arrive_scr_template_barrier(
+                            worker_id=0, worker_num=1, generation="g1"
+                        ),
+                        result,
+                    )
+                checkpoint.assert_called_once()
+                self.assertEqual(
+                    events, ["prepare", ("component", "192.0.2.20"), "release"]
+                )
+
     def test_frontend_identity_updates_outside_loopback_mode(self):
         visitor = Mock(source_ip="192.0.2.10")
         configs = NS(
             server_config=NS(),
             distribute_config=NS(),
-            parallelism_config=NS(world_size=1),
+            parallelism_config=NS(world_size=2, local_world_size=1),
             role_config=NS(role_type="PREFILL"),
         )
         endpoint_module = NS(
@@ -236,15 +317,15 @@ class ScrRuntimeFixupTest(unittest.TestCase):
             is_restore_phase=Mock(return_value=True),
         )
         distributed_module = NS(
-            get_world_info=Mock(return_value=NS(num_nodes=1)),
+            get_world_info=Mock(return_value=NS(num_nodes=2)),
             get_dp_addrs_from_world_info=Mock(return_value=["192.0.2.40:9000"]),
         )
         lifecycle = TemplateLifecycle()
-        lifecycle.register("visitor", scr._BackendVisitorTemplateHook(visitor, configs))
+        lifecycle.register_fixup(
+            "visitor", scr._BackendVisitorTemplateHook(visitor, configs)
+        )
         lifecycle.prepare_for_template("g1", "restore")
-        with patch.dict(
-            os.environ, {"RTP_LLM_SCR_LOCAL_COMM": "0", "SCR_PHASE": "restore"}
-        ), patch.dict(
+        with patch.dict(os.environ, {"SCR_PHASE": "restore"}), patch.dict(
             sys.modules,
             {
                 "rtp_llm.distribute.distributed_server": distributed_module,
@@ -264,7 +345,9 @@ class ScrRuntimeFixupTest(unittest.TestCase):
         configs = NS(server_config=NS(ip="192.0.2.10"))
         observed = []
         lifecycle = TemplateLifecycle()
-        lifecycle.register("server-config", scr._ServerConfigTemplateHook(configs))
+        lifecycle.register_fixup(
+            "server-config", scr._ServerConfigTemplateHook(configs)
+        )
         # A hook registered afterwards must observe the refreshed value.
         lifecycle.register(
             "consumer",
@@ -338,7 +421,7 @@ class ScrRuntimeFixupTest(unittest.TestCase):
         lifecycle.prepare_for_template("g1", "restore")
         with patch.dict(
             os.environ,
-            {"HIPPO_ROLE_SHORT_NAME": "seed-role", "RTP_LLM_SCR_LOCAL_COMM": "1"},
+            {"HIPPO_ROLE_SHORT_NAME": "seed-role"},
         ):
             runtime.fixup_runtime_after_restore(
                 "g1",
@@ -357,9 +440,7 @@ class ScrRuntimeFixupTest(unittest.TestCase):
                 tags = HippoHelper.refresh_runtime_identity()
                 native = NS(resume_kmonitor_after_scr=Mock(return_value=True))
                 with patch.dict(sys.modules, {"libth_transformer": native}):
-                    hook = scr._NativeKmonitorTemplateHook()
-                    hook._paused = True
-                    hook.release_template("g1")
+                    scr._start_native_kmonitor("g1")
                 world = NS(
                     num_nodes=1,
                     members=[

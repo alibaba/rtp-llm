@@ -7,11 +7,16 @@ from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
 from rtp_llm.config.engine_config import update_worker_addrs
-from rtp_llm.distribute.distributed_server import WorldInfo
+from rtp_llm.distribute.distributed_server import (
+    WorldInfo,
+    get_dp_addrs_from_world_info,
+)
 from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.ops import FfnDisAggregateConfig
 from rtp_llm.utils import scr_runtime_fixup as fixup
 from rtp_llm.utils import scr_template_utils as scr
+from rtp_llm.utils.scr_endpoint_provider import resolve_world_info
+from rtp_llm.utils.scr_restore_context import RestoreContext
 from rtp_llm.utils.scr_template_lifecycle import CallbackHook, TemplateLifecycle
 from rtp_llm.utils.scr_template_utils import _BackendVisitorTemplateHook
 
@@ -50,7 +55,6 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         self.env = patch.dict(
             os.environ,
             {
-                "RTP_LLM_SCR_LOCAL_COMM": "1",
                 "RTPLLM_ENABLE_SCR": "1",
                 "SCR_PHASE": "restore",
                 "RTP_LLM_SCR_ENDPOINT_MANIFEST": "",
@@ -58,6 +62,32 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         )
         self.env.start()
         self.addCleanup(self.env.stop)
+
+    def test_checkpoint_uses_loopback_control_and_routable_kv_advertisement(self):
+        self.pc.ffn_disaggregate_config = FfnDisAggregateConfig()
+        members = [
+            WorkerInfo("192.0.2.10", i, i, f"rank-{i}", 18630, 10) for i in range(2)
+        ]
+        current = WorldInfo(members, members[0], members[0], 1, True)
+        runtime = NS()
+        with patch.dict(os.environ, {"SCR_PHASE": "checkpoint"}), patch(
+            "socket.gethostbyname", return_value="192.0.2.20"
+        ):
+            local_world = resolve_world_info(current, generation="g1")
+            update_worker_addrs(runtime, self.pc, local_world)
+            self.assertEqual(
+                get_dp_addrs_from_world_info(local_world, self.pc), ["127.0.0.1:18631"]
+            )
+        self.assertEqual([member.ip for member in current.members], ["192.0.2.10"] * 2)
+        self.assertEqual(
+            [member.ip for member in local_world.members], ["127.0.0.1"] * 2
+        )
+        self.assertEqual(
+            runtime.worker_grpc_addrs, ["127.0.0.1:18631", "127.0.0.1:18641"]
+        )
+        self.assertEqual(
+            runtime.worker_addrs, ["192.0.2.20:18632:18634", "192.0.2.20:18642:18644"]
+        )
 
     def test_prefill_preserves_control_loopback_and_advertises_current_pod(self):
         runtime = NS()
@@ -99,7 +129,9 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         ), patch(
             "socket.gethostbyname", return_value="192.0.2.20"
         ):
-            _BackendVisitorTemplateHook(visitor, configs).restore_fixup("generation-2")
+            _BackendVisitorTemplateHook(visitor, configs).restore_fixup(
+                RestoreContext("generation-2", "192.0.2.20")
+            )
         self.assertEqual(visitor.source_ip, "192.0.2.20")
         visitor.update_addresses.assert_called_once_with(["127.0.0.1:18631"])
 
@@ -133,8 +165,12 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         runtime_config = NS()
         releases = []
         lifecycle = TemplateLifecycle()
-        lifecycle.register("server-config", scr._ServerConfigTemplateHook(configs))
-        lifecycle.register("visitor", scr._BackendVisitorTemplateHook(visitor, configs))
+        lifecycle.register_fixup(
+            "server-config", scr._ServerConfigTemplateHook(configs)
+        )
+        lifecycle.register_fixup(
+            "visitor", scr._BackendVisitorTemplateHook(visitor, configs)
+        )
         lifecycle.register(
             "kv",
             CallbackHook(
@@ -152,10 +188,11 @@ class ScrPdAdvertisementTest(unittest.TestCase):
             side_effect=[
                 {"RequestedIP": "192.0.2.20"},
                 {"RequestedIP": "192.0.2.30"},
+                {"RequestedIP": "192.0.2.40"},
             ]
         )
         fixup.register_restore_env_provider(provider)
-        # CRIU retains the checkpoint phase and generation across restores.
+        # Exercise the seed return and clones restored with the same generation.
         with patch.dict(os.environ, {"SCR_PHASE": "checkpoint"}), patch.dict(
             sys.modules,
             {
@@ -169,7 +206,12 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         ), patch(
             "rtp_llm.distribute.distributed_server.get_world_info", return_value=world
         ):
-            for ip in ("192.0.2.20", "192.0.2.30"):
+            for phase, ip in (
+                ("checkpoint", "192.0.2.20"),
+                ("restore", "192.0.2.30"),
+                ("restore", "192.0.2.40"),
+            ):
+                os.environ["SCR_PHASE"] = phase
                 self.assertEqual(
                     scr.arrive_scr_template_barrier(
                         worker_id=0, worker_num=1, generation="same-seed"
@@ -191,9 +233,9 @@ class ScrPdAdvertisementTest(unittest.TestCase):
                     runtime_config.worker_grpc_addrs,
                     [f"127.0.0.1:{member.rpc_server_port}" for member in members],
                 )
-                self.assertEqual(os.environ["SCR_PHASE"], "checkpoint")
-        self.assertEqual(provider.call_count, 2)
-        self.assertEqual(len(releases), 2)
+                self.assertEqual(os.environ["SCR_PHASE"], phase)
+        self.assertEqual(provider.call_count, 3)
+        self.assertEqual(len(releases), 3)
 
 
 if __name__ == "__main__":

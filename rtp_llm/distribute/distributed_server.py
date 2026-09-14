@@ -7,7 +7,7 @@ import socket
 import time
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, Optional
 
 from torch.distributed import TCPStore
 
@@ -19,20 +19,13 @@ from rtp_llm.config.py_config_modules import (
 )
 from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
-from rtp_llm.utils.scr_local_comm import (
-    local_comm_enabled,
-    validate_local_members,
-    validate_local_world,
-)
+from rtp_llm.utils.scr_local_comm import local_comm_enabled, validate_local_members
 
 
 def _template_loopback_enabled(parallelism_config: ParallelismConfig) -> bool:
-    """Use loopback only for an explicitly single-network-namespace template."""
-    return (
-        os.environ.get("RTP_LLM_SCR_LOCAL_COMM") == "1"
-        and os.environ.get("RTPLLM_ENABLE_SCR", "").strip().lower() in {"1", "true", "yes", "on"}
-        and os.environ.get("SCR_PHASE", "").strip().lower() in {"checkpoint", "restore"}
-        and parallelism_config.world_size == parallelism_config.local_world_size
+    """Select loopback automatically for a single-Pod SCR template."""
+    return local_comm_enabled(
+        parallelism_config.world_size, parallelism_config.local_world_size
     )
 
 
@@ -130,7 +123,11 @@ def get_dp_addrs_from_world_info(
             if (member.world_rank % parallelism_config.tp_size) == 0
         ]
 
-    if local_comm_enabled():
+    if local_comm_enabled(
+        parallelism_config.world_size,
+        parallelism_config.local_world_size,
+        world_info.num_nodes,
+    ):
         validate_local_members(world_info, parallelism_config)
         addresses = [f"127.0.0.1:{member.rpc_server_port}" for member in members]
     else:
@@ -260,14 +257,11 @@ class DistributedServer(object):
         else:
             self.master_server_port = int(master_server_port)
 
-        if local_comm_enabled():
-            validate_local_world(
-                pc.world_size, pc.local_world_size, self._world_info.num_nodes
-            )
+        if _template_loopback_enabled(pc):
             self.master_ip = "127.0.0.1"
 
         self._nccl_comm_config = _build_nccl_comm_config(
-            "127.0.0.1" if _template_loopback_enabled(pc) else self.master_ip,
+            self.master_ip,
             self.master_server_port,
             pc.dp_rank,
         )

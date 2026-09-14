@@ -54,7 +54,6 @@ void registerEmbeddingOutput(const py::module& m) {
 
 PYBIND11_MODULE(libth_transformer, m) {
     m.def("refresh_logger_after_scr", &Logger::refreshRuntimeIdentity, py::arg("pod_ip"));
-    m.def("pause_kmonitor_for_scr", &pauseKmonitorForScr, py::call_guard<py::gil_scoped_release>());
     m.def("resume_kmonitor_after_scr", &resumeKmonitorAfterScr, py::call_guard<py::gil_scoped_release>());
     registerRtpLLMOp(m);
     registerXGrammarBootstrap(m);

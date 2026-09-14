@@ -5,10 +5,10 @@ only register state and arrive at the native snapshot barrier; check/dump/
 restore are controller operations and are therefore not invoked here.
 """
 
-from concurrent.futures import ThreadPoolExecutor
 import os
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 from rtp_llm.utils import scr_template_utils as scr
@@ -167,7 +167,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             },
             clear=True,
         ), mock.patch.object(scr.LOGGER, "error") as log_error:
-            self.assertEqual(scr._scr_timeouts(), (scr.DEFAULT_SCR_TIMEOUT_S, scr.DEFAULT_SCR_INACTIVITY_TIMEOUT_S))
+            self.assertEqual(scr._scr_timeouts(), (scr.DEFAULT_TIMEOUT_SECONDS, scr.DEFAULT_INACTIVITY_TIMEOUT_SECONDS))
         self.assertEqual(log_error.call_count, 2)
 
     def test_arrival_passes_timeout_budget_and_restore_elapsed_is_observable(self):
@@ -284,24 +284,12 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         # the test-side double and are not reachable from production helpers.
         self.assertEqual(len(epsilon.arrivals), 1)
 
-    def test_arrival_thread_returns_without_joining_controller_lifecycle(self):
-        epsilon = _EpsilonDouble()
-        with self._enabled(), mock.patch.object(scr, "_load_epsilon", return_value=epsilon):
-            thread = scr.start_scr_checkpoint_arrival_thread(
-                worker_id=0, worker_num=1, name="test-scr-arrival"
-            )
-            self.assertIsNotNone(thread)
-            thread.join(timeout=2)
-
-        self.assertFalse(thread.is_alive())
-        self.assertEqual([item["worker_id"] for item in epsilon.arrivals], [0])
-
-    def test_scr_disabled_arrival_path_does_not_import_or_start_thread(self):
+    def test_scr_disabled_arrival_path_does_not_import_epsilon(self):
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
             scr, "_load_epsilon"
         ) as load_epsilon:
             self.assertIsNone(
-                scr.start_scr_checkpoint_arrival_thread(worker_id=0, worker_num=1)
+                scr.arrive_scr_checkpoint_barrier(worker_id=0, worker_num=1)
             )
         load_epsilon.assert_not_called()
 

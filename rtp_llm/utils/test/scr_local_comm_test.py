@@ -19,17 +19,47 @@ class ScrLocalCommTest(unittest.TestCase):
             members=[NS(ip="192.0.2.2", world_rank=i, local_rank=i) for i in range(2)],
         )
 
-    def test_requires_explicit_opt_in(self):
-        for value, expected in [
-            ("", False),
-            ("0", False),
-            ("true", False),
-            ("1", True),
+    def test_automatic_gate_uses_scr_phase_and_single_node_topology(self):
+        for enabled, phase, world_size, local_size, nodes, expected in [
+            ("1", "checkpoint", 2, 2, 1, True),
+            ("1", "restore", 2, 2, 1, True),
+            ("true", "restore", 1, 1, 1, True),
+            ("0", "checkpoint", 2, 2, 1, False),
+            ("1", "normal", 2, 2, 1, False),
+            ("1", "", 2, 2, 1, False),
+            ("1", "checkpoint", 4, 2, 2, False),
+            ("1", "restore", 4, 2, 1, False),
+            ("1", "restore", 2, 2, 2, False),
+            ("1", "checkpoint", 0, 0, 1, False),
         ]:
-            with self.subTest(value=value), patch.dict(
-                os.environ, {"RTP_LLM_SCR_LOCAL_COMM": value}
+            with self.subTest(
+                enabled=enabled,
+                phase=phase,
+                world_size=world_size,
+                local_size=local_size,
+                nodes=nodes,
+            ), patch.dict(
+                os.environ,
+                {"RTPLLM_ENABLE_SCR": enabled, "SCR_PHASE": phase},
+                clear=True,
             ):
-                self.assertEqual(local_comm_enabled(), expected)
+                self.assertEqual(
+                    local_comm_enabled(world_size, local_size, nodes), expected
+                )
+
+    def test_removed_extra_switch_cannot_enable_or_disable_loopback(self):
+        for old_value in ("0", "1"):
+            for enabled in ("0", "1"):
+                with self.subTest(old_value=old_value, enabled=enabled), patch.dict(
+                    os.environ,
+                    {
+                        "RTP_LLM_SCR_LOCAL_COMM": old_value,
+                        "RTPLLM_ENABLE_SCR": enabled,
+                        "SCR_PHASE": "checkpoint",
+                    },
+                    clear=True,
+                ):
+                    self.assertEqual(local_comm_enabled(2, 2), enabled == "1")
 
     def test_restored_ip_may_differ_from_seed(self):
         validate_local_members(self.world, self.pc)

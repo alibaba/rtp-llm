@@ -1,12 +1,20 @@
-"""Opt-in communication for SCR ranks sharing one Pod network namespace."""
+"""Automatic loopback communication for single-Pod SCR templates."""
 
 import ipaddress
-import os
 import socket
 
 
-def local_comm_enabled():
-    return os.environ.get("RTP_LLM_SCR_LOCAL_COMM") == "1"
+def local_comm_enabled(
+    world_size: int, local_world_size: int, num_nodes: int = 1
+) -> bool:
+    from rtp_llm.utils.scr_template_lifecycle import template_phase_active
+
+    return (
+        template_phase_active()
+        and world_size > 0
+        and world_size == local_world_size
+        and num_nodes == 1
+    )
 
 
 def current_pod_ip():
@@ -21,11 +29,15 @@ def current_pod_ip():
 def cache_store_advertise_ip(world_info, parallelism_config):
     """Keep local control addresses separate from cross-Pod KV advertisements.
 
-    Return an override only for the opt-in single-Pod loopback topology. Explicit
+    Return an override only for the single-Pod SCR loopback topology. Explicit
     routable manifest addresses retain their authority. Resolve on every fixup
     because both the seed environment and server configuration survive CRIU.
     """
-    if not local_comm_enabled():
+    if not local_comm_enabled(
+        parallelism_config.world_size,
+        parallelism_config.local_world_size,
+        world_info.num_nodes,
+    ):
         return None
     validate_local_members(world_info, parallelism_config)
     if world_info.members[0].ip != "127.0.0.1":
@@ -40,7 +52,7 @@ def cache_store_advertise_ip(world_info, parallelism_config):
 
 def validate_local_world(world_size, local_world_size, num_nodes):
     if world_size < 1 or local_world_size != world_size or num_nodes != 1:
-        raise ValueError("RTP_LLM_SCR_LOCAL_COMM requires all ranks in one Pod")
+        raise ValueError("SCR loopback communication requires all ranks in one Pod")
 
 
 def validate_local_members(world_info, parallelism_config):
@@ -57,5 +69,5 @@ def validate_local_members(world_info, parallelism_config):
         != list(range(pc.local_world_size))
     ):
         raise ValueError(
-            "RTP_LLM_SCR_LOCAL_COMM requires a complete local rank topology"
+            "SCR loopback communication requires a complete local rank topology"
         )

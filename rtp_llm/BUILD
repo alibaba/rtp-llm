@@ -91,6 +91,7 @@ requirement(names = [
     "tiktoken",
     "protobuf",
     "grpcio-tools",
+    "requests",
     "setuptools",
     "Pillow",
     "pillow-heif",
@@ -340,6 +341,7 @@ py_library(
     srcs = glob([
         "vipserver/*.py",
     ]),
+    deps = [":requests"],
 )
 
 filegroup(
