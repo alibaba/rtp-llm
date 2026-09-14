@@ -19,6 +19,8 @@ loaded lazily at forward — there is no slow Python reference fallback.
 
 from __future__ import annotations
 
+import os
+
 import importlib
 import logging
 from typing import Any, Optional
@@ -269,6 +271,16 @@ class SparseAttnV4DecodeFp8Op:
             if extra_k_cache is not None and extra_indices is not None
             else None
         )
+        # Optional donor compact-cache path; the established direct-paged path
+        # and wide-window reference remain the default on this integration line.
+        if os.environ.get("DSV4_SM120_PACK_DECODE_SLOTS", "0") == "1" and not generic_fallback:
+            from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import pack_slots_to_paged
+            swa_decode_cache, swa_indices = pack_slots_to_paged(kv_cache, swa_indices, 64)
+            if extra_decode_cache is not None:
+                extra_page = 2 if int(extra_decode_cache.shape[1]) <= 2 else 64
+                extra_decode_cache, extra_indices = pack_slots_to_paged(
+                    extra_decode_cache, extra_indices, extra_page
+                )
         flat_q = q.reshape(batch * q_len, heads, dim).contiguous()
         flat_out = torch.empty_like(flat_q)
         sparse_runner = run_chunked_reference if generic_fallback else run

@@ -675,6 +675,122 @@ def gather_k_cache_slots_packed(
     return out
 
 
+# 576B token data is 72 x uint64; 8B scale is 1 x uint64. Both footer
+# offsets (pos * 576, page * 576 + pos * 8) are 8-byte aligned.
+_PACK_SLOTS_DATA_U64 = TOKEN_DATA_SIZE // 8  # 72
+_PACK_SLOTS_U64_N = 128
+
+
+@triton.jit
+def _pack_slots_to_paged_kernel(
+    src_ptr,
+    dst_ptr,
+    slots_ptr,
+    remap_ptr,
+    n_slots,
+    num_pool_slots,
+    src_page: tl.constexpr,
+    dst_page: tl.constexpr,
+    src_stride,
+    dst_stride,
+    token_data_size: tl.constexpr,
+    n_data_u64: tl.constexpr,
+    n_u64: tl.constexpr,
+):
+    """Gather selected footer-layout slots into a compact paged cache.
+
+    One program per dest slot. Invalid or tail slots write zeros; valid
+    slots remap to their local index.
+    """
+    row = tl.program_id(0).to(tl.int64)
+    dst_block = row // dst_page
+    dst_pos = row - dst_block * dst_page
+    dst_block_ptr = dst_ptr + dst_block * dst_stride.to(tl.int64)
+    in_slots = row < n_slots
+    slot = tl.load(slots_ptr + row, mask=in_slots, other=-1).to(tl.int64)
+    valid = in_slots & (slot >= 0) & (slot < num_pool_slots)
+    safe_slot = tl.where(valid, slot, tl.zeros_like(slot))
+    src_block = safe_slot // src_page
+    src_pos = safe_slot - src_block * src_page
+    src_block_ptr = src_ptr + src_block * src_stride.to(tl.int64)
+
+    src_data = (src_block_ptr + src_pos * token_data_size).to(
+        tl.pointer_type(tl.uint64)
+    )
+    dst_data = (dst_block_ptr + dst_pos * token_data_size).to(
+        tl.pointer_type(tl.uint64)
+    )
+    data_off = tl.arange(0, n_u64)
+    data_mask = data_off < n_data_u64
+    data = tl.load(src_data + data_off, mask=data_mask & valid, other=0)
+    tl.store(dst_data + data_off, data, mask=data_mask)
+
+    src_scale = (
+        src_block_ptr + src_page * token_data_size + src_pos * 8
+    ).to(tl.pointer_type(tl.uint64))
+    dst_scale = (
+        dst_block_ptr + dst_page * token_data_size + dst_pos * 8
+    ).to(tl.pointer_type(tl.uint64))
+    scale = tl.load(src_scale, mask=valid, other=0)
+    tl.store(dst_scale, scale)
+    if in_slots:
+        remapped = tl.where(valid, row.to(tl.int32), tl.zeros((), dtype=tl.int32))
+        tl.store(remap_ptr + row, remapped)
+
+
+def pack_slots_to_paged(
+    k_cache: torch.Tensor,
+    slot_indices: torch.Tensor,
+    page_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """One-launch gather of selected slots into a page-aligned footer cache.
+
+    ``k_cache`` is ``[num_blocks, src_page, 584]`` uint8 (TMA-padded stride
+    allowed). ``slot_indices`` are global slot ids; ``-1`` is invalid.
+    Returns ``(paged, remapped)`` where ``paged`` is
+    ``[dst_pages, page_size, 584]`` and ``remapped`` matches
+    ``slot_indices`` shape, with invalid slots forced to 0.
+    """
+    assert k_cache.dim() == 3 and k_cache.shape[-1] == ENTRY_BYTES
+    assert k_cache.dtype == torch.uint8
+    assert k_cache.stride(2) == 1 and k_cache.stride(1) == ENTRY_BYTES
+    assert k_cache.stride(0) % 8 == 0 and k_cache.storage_offset() % 8 == 0
+    assert slot_indices.dtype in (torch.int32, torch.int64)
+    assert slot_indices.device == k_cache.device
+    assert page_size > 0
+    slots = slot_indices.reshape(-1)
+    if not slots.is_contiguous():
+        slots = slots.contiguous()
+    slot_count = int(slots.numel())
+    assert slot_count <= 2147483647, "remapped slot ids require int32"
+    dst_pages = max((slot_count + page_size - 1) // page_size, 1)
+    packed = torch.empty(
+        (dst_pages, page_size, ENTRY_BYTES),
+        dtype=torch.uint8,
+        device=k_cache.device,
+    )
+    remapped = torch.empty((slot_count,), dtype=torch.int32, device=k_cache.device)
+    n_dst = dst_pages * page_size
+    _pack_slots_to_paged_kernel[(n_dst,)](
+        k_cache,
+        packed,
+        slots,
+        remapped,
+        slot_count,
+        int(k_cache.shape[0] * k_cache.shape[1]),
+        src_page=int(k_cache.shape[1]),
+        dst_page=int(page_size),
+        src_stride=int(k_cache.stride(0)),
+        dst_stride=int(packed.stride(0)),
+        token_data_size=TOKEN_DATA_SIZE,
+        n_data_u64=_PACK_SLOTS_DATA_U64,
+        n_u64=_PACK_SLOTS_U64_N,
+        num_warps=1,
+        num_stages=1,
+    )
+    return packed, remapped.view(slot_indices.shape)
+
+
 @triton.jit
 def _dequantize_packed_k_cache_flat_kernel(
     out_ptr,
