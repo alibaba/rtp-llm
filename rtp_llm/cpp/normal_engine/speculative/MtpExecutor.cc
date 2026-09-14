@@ -33,6 +33,7 @@
 #include <limits>
 #include <cstdlib>
 #include <memory>
+#include <numeric>
 #include <thread>
 #include <string>
 #include <vector>

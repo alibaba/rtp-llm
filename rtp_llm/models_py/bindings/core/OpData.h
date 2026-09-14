@@ -35,15 +35,15 @@ struct GptModelInputs {
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
     // shape [decoder_batch_size], int32
-    mutable torch::Tensor combo_tokens;             // [cumulated_seq_len]
-    torch::Tensor         input_lengths;            // [batch_size]
-    torch::Tensor         sequence_lengths;         // [decoder_batch_size]
-    torch::Tensor         lm_output_indexes;        // selected output rows
+    mutable torch::Tensor combo_tokens;       // [cumulated_seq_len]
+    torch::Tensor         input_lengths;      // [batch_size]
+    torch::Tensor         sequence_lengths;   // [decoder_batch_size]
+    torch::Tensor         lm_output_indexes;  // selected output rows
     // Kept for ModelInputsLogger/legacy micro-batch consumers; the async
     // scheduling redesign no longer populates it (stays undefined).
-    torch::Tensor         lm_output_lengths;        // [total_batch_size]
-    torch::Tensor         prefix_lengths;           // [context_batch_size]
-    torch::Tensor         sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
+    torch::Tensor lm_output_lengths;        // [total_batch_size]
+    torch::Tensor prefix_lengths;           // [context_batch_size]
+    torch::Tensor sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]
@@ -58,8 +58,9 @@ struct GptModelInputs {
     torch::Tensor kv_cache_block_id;
     torch::Tensor kv_cache_kernel_block_id;  // [group, batch, kernel_blocks], int32
 
-    torch::Tensor kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
-    torch::Tensor kv_cache_update_mapping;  // [block_copy_num, 3]: group_id, src block, dst block
+    std::vector<std::string> kv_cache_group_tags;      // Local payload row -> group identity; not transmitted by TP.
+    torch::Tensor            kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
+    torch::Tensor            kv_cache_update_mapping;  // [block_copy_num, 3]: payload row, src/dst physical block IDs
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
     torch::Tensor text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]

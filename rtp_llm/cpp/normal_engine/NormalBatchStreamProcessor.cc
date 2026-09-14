@@ -63,9 +63,9 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
     return sampler_input_gatherer_->gather(stream_groups, model_inputs, model_output);
 }
 
-absl::StatusOr<torch::Tensor> NormalBatchStreamProcessor::gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
-                                                                                     TensorHolder& host_holder) const {
-    return model_input_gatherer_->gatherKvCacheKernelBlockId(stream_groups, host_holder);
+absl::StatusOr<torch::Tensor> NormalBatchStreamProcessor::gatherKvCacheKernelBlockId(
+    const StreamGroups& stream_groups, const std::vector<std::string>& group_tags, TensorHolder& host_holder) const {
+    return model_input_gatherer_->gatherKvCacheKernelBlockId(stream_groups, group_tags, host_holder);
 }
 
 SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGroups& stream_groups,

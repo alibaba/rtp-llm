@@ -46,11 +46,12 @@ public:
 
     absl::StatusOr<GptModelInputs> gather(const StreamGroups& stream_groups, TensorHolder& host_holder) const;
 
-    // Build only the CUDA kv_cache_kernel_block_id tensor in 3-D layout.
+    // Build only the CUDA kv_cache_kernel_block_id tensor in group_tags row order.
     // Read-only over streams: no step(), no sibling kv_cache_block_id, no
     // other gather sub-step. Empty input returns an undefined tensor.
-    absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
-                                                             TensorHolder&       host_holder) const;
+    absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups&             stream_groups,
+                                                             const std::vector<std::string>& group_tags,
+                                                             TensorHolder&                   host_holder) const;
 
 private:
     GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups) const;

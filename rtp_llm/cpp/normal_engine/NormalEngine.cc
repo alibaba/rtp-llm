@@ -52,8 +52,7 @@ void releaseHostMemoryCache() {
 #endif
 }
 
-bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig& pd_sep_config,
-                                         const CacheStoreConfig& cache_store_config) {
+bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const CacheStoreConfig& cache_store_config) {
     // Only PD cache-store RDMA registers KV cache as user MR.  Keep the
     // raw device allocation backing out of direct KVCacheManager users and non-RDMA
     // paths so PyTorch allocator behavior is unchanged elsewhere.
@@ -400,8 +399,11 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
     executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
+    auto previous_cache_manager     = std::move(resource_context_.cache_manager);
+    resource_context_.cache_manager = cache_manager;
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
-    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
+    resource_context_.cache_manager = std::move(previous_cache_manager);
+    const auto max_consumed         = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
@@ -448,12 +450,11 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
 }
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
-    const bool use_device_malloc_block_pool =
-        shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config);
-    const ModelConfig* draft_model_config = propose_params_ && propose_params_->draftModel() ?
-                                                 &propose_params_->getEngineInitParams().model_config_ :
-                                                nullptr;
-    auto               config             = CacheConfigCreator::createConfig(model_config_,
+    const bool use_device_malloc_block_pool = shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config);
+    const ModelConfig* draft_model_config   = propose_params_ && propose_params_->draftModel() ?
+                                                  &propose_params_->getEngineInitParams().model_config_ :
+                                                  nullptr;
+    auto               config               = CacheConfigCreator::createConfig(model_config_,
                                                    parallelism_config,
                                                    runtime_config,
                                                    kv_cache_config,
@@ -469,10 +470,10 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                     kv_cache_config,
                                     parallelism_config,
                                     runtime_config,
-                                     draft_model_config ? sp_config : SpeculativeExecutionConfig{},
-                                     pd_sep_config,
-                                     cache_store_config,
-                                     use_device_malloc_block_pool);
+                                    draft_model_config ? sp_config : SpeculativeExecutionConfig{},
+                                    pd_sep_config,
+                                    cache_store_config,
+                                    use_device_malloc_block_pool);
     resource_context_.role_type = pd_sep_config.role_type;
     if (!resource_context_.cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed");
