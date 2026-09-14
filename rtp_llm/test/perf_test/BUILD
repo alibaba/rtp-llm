@@ -871,7 +871,11 @@ py_test(
         "--input_len", "8192",
         "--partial", "1",
         "--decode_test_length", "8",
-        "--seq_size_per_block", "128",
+        # SM120 fp8_paged_mqa_logits requires block_kv==64; the indexer pool
+        # entries_per_block = kernel_seq_size_per_block / 4, so pin kernel block
+        # to 256 (physical must be >= kernel and divisible -> seq_size 256, bpk=1).
+        "--seq_size_per_block", "256",
+        "--kernel_seq_size_per_block", "256",
         "--max_seq_len", "16384",
         "--tp_size", "1",
         "--dp_size", "4",
