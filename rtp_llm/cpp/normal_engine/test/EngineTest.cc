@@ -1,6 +1,7 @@
 #include "c10/util/intrusive_ptr.h"
 #include "torch/all.h"
 #include <cstdlib>
+#include <algorithm>
 
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -24,6 +25,58 @@ namespace rtp_llm {
 class NormalEngineTest: public DeviceTestBase {
 public:
 };
+
+TEST_F(NormalEngineTest, testEmptyTpSleepRoundKeepsSkipInputWithoutFakeForward) {
+    class RecordingExecutor: public Executor {
+    public:
+        absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t) override {
+            ++calls;
+            stream_count = streams.size();
+            all_fake = std::all_of(streams.begin(), streams.end(), [](const auto& stream) {
+                return stream->isFakeStream();
+            });
+            return absl::OkStatus();
+        }
+        int calls = 0;
+        size_t stream_count = 0;
+        bool all_fake = false;
+    };
+
+    auto engine = createMockEngine(CustomConfig{});
+    // Join the real single-GPU loop before changing its test-only topology.
+    // Do not stop the round fence: step() below must exercise ON admission.
+    engine->running_ = false;
+    ASSERT_TRUE(engine->scheduler_->stop().ok());
+    engine->loop_thread_->join();
+    auto recorder = std::make_unique<RecordingExecutor>();
+    auto* observed = recorder.get();
+    engine->executor_ = std::move(recorder);
+    engine->running_ = true;
+
+    for (bool sleep_enabled : {false, true}) {
+        engine->sleep_controller_.setEnabled(sleep_enabled);
+        for (int dp_size : {1, 2}) {
+            for (int ep_size : {1, 2}) {
+                SCOPED_TRACE(::testing::Message() << "sleep=" << sleep_enabled
+                             << " dp=" << dp_size << " ep=" << ep_size);
+                engine->parallelism_config.dp_size = dp_size;
+                engine->parallelism_config.tp_size = 2 / dp_size;
+                engine->parallelism_config.ep_size = ep_size;
+                engine->parallelism_config.world_size = 2;
+                engine->parallelism_config.tp_rank = 0;
+                const int previous_calls = observed->calls;
+                ASSERT_TRUE(engine->step().ok());
+                // TP-only must still call process() to broadcast skip_run.
+                // Cross-DP peers must keep their pre-existing fake forward.
+                EXPECT_EQ(observed->calls, previous_calls + 1);
+                EXPECT_EQ(observed->stream_count, dp_size > 1 ? 1u : 0u);
+                if (dp_size > 1) {
+                    EXPECT_TRUE(observed->all_fake);
+                }
+            }
+        }
+    }
+}
 
 TEST_F(NormalEngineTest, testInt8KVCache) {
     CustomConfig config;

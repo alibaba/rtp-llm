@@ -810,13 +810,13 @@ absl::Status NormalEngine::step() {
         // Admit before scheduling/fake-stream construction as well as process():
         // a prepared next batch must not retain GPU tensors across sleep. A
         // ticket blocked in schedule() is still counted; drain's force-poll lets
-        // it complete with the same fake forward as its already-started peers.
+        // it complete the same executor round as its already-started peers.
         if (collective_sleep_quiesce && !acquireSleepRound()) {
             return absl::OkStatus();
         }
 
-        // Empty DP/EP peers must execute the same full forward sequence as busy
-        // peers, including during drain and bounded sleep-round catch-up.
+        // Independent DP peers must execute the same full forward sequence as
+        // busy peers, including during drain and bounded sleep-round catch-up.
         int64_t                 tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         list<GenerateStreamPtr> streams;
         if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
@@ -824,7 +824,10 @@ absl::Status NormalEngine::step() {
                 RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
                 CHECK_AND_ASSIGN(streams, scheduler_->schedule());
             }
-            if (parallelism_config.dp_size > 1 || (collective_sleep_quiesce && parallelism_config.ep_size > 1)) {
+            // With DP=1 all supported sleep peers share the TP input broadcast.
+            // An empty round broadcasts skip_run, including during catch-up;
+            // adding a fake here needlessly runs a full model between requests.
+            if (parallelism_config.dp_size > 1) {
                 RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
                 mayAddFakeStream(streams);
             }
