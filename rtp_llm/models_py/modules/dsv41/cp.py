@@ -72,6 +72,7 @@ from rtp_llm.models_py.modules.dsv41.indexer import (
     score_candidate_tile,
 )
 from rtp_llm.models_py.modules.dsv41.math import grouped_wo_a
+from rtp_llm.models_py.modules.dsv41.decode_compressor import normalize_empty_pair_checkpoint
 from rtp_llm.models_py.modules.dsv41.source_indexer import (
     SOURCE_QUERY_TILE,
     prepare_index_source,
@@ -700,14 +701,22 @@ class V41CPAttentionContext(V41AttentionContext):
             self.publish_swa(layer, binding, encoded, first=first)
         return row_map, result
 
-    def restore_pair(self, owner):
+    def restore_pair(self, owner, *, restored_state_ready=False):
         if not self.start:
             return PairCarry.empty(owner, self.cache.request_id, self.cache.identity)
         received = self._fixed_receive(
             self.pair_pools[owner], self.pair_tables[owner], self.previous
         )
         first = (self._pair_snapshots[owner] - 1) * _PAIR_BYTES
-        raw = received[:, 1].contiguous().view(-1)[first : first + _PAIR_BYTES]
+        region = received[:, 1].contiguous().view(-1)
+        raw = region[first : first + _PAIR_BYTES]
+        normalize_empty_pair_checkpoint(
+            region[None, :],
+            raw[None, :],
+            torch.tensor([self.start], dtype=torch.int64, device=self.query_device),
+            torch.tensor([restored_state_ready], dtype=torch.bool, device=self.query_device),
+            reuse_unit=self.cache.layout.reuse_unit,
+        )
         position = int(raw[4096:4104].view(torch.int64).item())
         valid = int(raw[4104:4108].view(torch.int32).item())
         if position != self.start or valid != position % 2:
@@ -1121,6 +1130,7 @@ def begin_cp_request(
     pair_tables,
     epoch=0,
     decoder_ready_end=None,
+    restored_state_ready=False,
 ):
     """Bind one real request, including ranks with zero real zigzag rows.
 
@@ -1143,6 +1153,7 @@ def begin_cp_request(
             ReplayConfig(ReplayMode.BOUNDED).fingerprint,
         )
         or not request_id
+        or type(restored_state_ready) is not bool
     ):
         raise ValueError(
             "CP prefill requires CP8 target-only or gamma5/three-draft layout and replay policy"
@@ -1227,7 +1238,7 @@ def begin_cp_request(
                     "CP pair state must match the layout's complete byte-sliced snapshots"
                 )
             context._physical(table, context.current, pool)
-            pair = context.restore_pair(owner)
+            pair = context.restore_pair(owner, restored_state_ready=restored_state_ready)
             context._pair_initials[owner] = pair
         cache.owners[owner] = AttentionOwnerCache(
             GlobalBinding(

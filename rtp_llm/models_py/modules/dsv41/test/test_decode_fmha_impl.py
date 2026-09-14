@@ -212,10 +212,17 @@ class DecodeFmhaGpuTest(unittest.TestCase):
                             pages.data[3:5].copy_(pages.data[1:3])
                             pages.data[1:3].zero_()
                         for pool in model._pair_pools.values():
-                            pool[3:5].copy_(pool[1:3])
+                            # Native memory recovery restores canonical empty
+                            # pair regions at the aligned128 boundary.
+                            pool[3:5].zero_()
                             pool[1:3].zero_()
                     inputs = self.inputs(model, width, start, token, reload)
                     impl.prepare_model_inputs(inputs)
+                    if reload:
+                        for owner, pool in model._pair_pools.items():
+                            self.assertFalse(bool(pool[3:5].any()))
+                            self.assertEqual(int(impl._pair_states[owner].positions[0]), start)
+                            self.assertEqual(int(impl._pair_states[owner].valid[0]), 0)
                     graph.replay()
                     self.assertEqual(int(impl.rows.token_ids[0]), token)
                     self.assertFalse(bool(output[:, width:].any()))

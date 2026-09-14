@@ -29,6 +29,7 @@ from rtp_llm.models_py.modules.dsv41.decode_compressor import (
     PAIR_SNAPSHOT_BYTES,
     V41DecodePairState,
     _tensor,
+    normalize_empty_pair_checkpoint,
 )
 from rtp_llm.models_py.modules.dsv41.inputs import V41GraphInputBuffers, V41ModelRows
 from rtp_llm.models_py.modules.dsv41.linear import is_supported
@@ -514,6 +515,16 @@ class V41DecodeFmhaImpl:
                 source_offset=(self._snapshot_count - 1) * PAIR_SNAPSHOT_BYTES,
                 destination_min=0,
                 zero_inactive=True,
+            )
+            # Active requests have passed ready and exact execution/SWA boundary
+            # validation above; zero memory checkpoints omit the absolute header.
+            previous = self._previous_pages[group]
+            normalize_empty_pair_checkpoint(
+                pool.index_select(0, previous.clamp(0, pool.shape[0] - 1).long()),
+                state.storage,
+                padded_starts,
+                active & (previous > 0) & (previous < pool.shape[0]),
+                reuse_unit=self.layout.reuse_unit,
             )
         self.context.prepare(
             padded_starts,

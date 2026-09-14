@@ -27,6 +27,13 @@ class FlashMLACompactTest(unittest.TestCase):
     def setUpClass(cls):
         FlashMLAGpuTest.setUpClass()
 
+    def setUp(self):
+        # Native byte-staging comparisons require the same native arithmetic.
+        # The guard tests below explicitly select and verify the mixed reader.
+        native = patch.dict(os.environ, {"DSV41_FLASHMLA_PRECISION_GUARD": "0"})
+        native.start()
+        self.addCleanup(native.stop)
+
     def _case(self):
         swa, global_kv = FlashMLAGpuTest.bindings(self)
         query, requests, positions, floors, selected, sinks = FlashMLAGpuTest.data(self)

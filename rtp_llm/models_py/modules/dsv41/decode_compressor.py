@@ -61,6 +61,36 @@ class V41DecodePairState:
         return self.storage[..., 4104:4108].view(torch.int32).squeeze(-1)
 
 
+def normalize_empty_pair_checkpoint(
+    region, snapshot, positions, state_ready, *, reuse_unit
+):
+    """Materialize the position omitted by a canonical empty memory checkpoint.
+
+    The caller validates execution metadata and supplies the entire pair region,
+    including speculative snapshots and padding. Only its private snapshot is
+    updated; malformed/nonempty input retains the normal reader's strict checks.
+    """
+    if (
+        region.ndim != 2
+        or region.dtype != torch.uint8
+        or region.shape[1] < PAIR_SNAPSHOT_BYTES
+        or region.stride(1) != 1
+        or type(reuse_unit) is not int
+        or reuse_unit <= 0
+        or reuse_unit % 2
+    ):
+        raise ValueError("empty pair normalization requires a complete pair region")
+    rows, device = region.shape[0], region.device
+    _tensor(snapshot, (rows, PAIR_SNAPSHOT_BYTES), torch.uint8, device, "pair snapshot")
+    _tensor(positions, (rows,), torch.int64, device, "restored pair positions")
+    _tensor(state_ready, (rows,), torch.bool, device, "restored pair readiness")
+    empty = state_ready & (positions > 0) & (positions <= 1048576)
+    empty &= positions % reuse_unit == 0
+    empty &= (region == 0).all(-1)
+    state = V41DecodePairState(snapshot)
+    state.positions.copy_(torch.where(empty, positions, state.positions))
+
+
 def _inverse_frequencies(device):
     rope = CompressorRoPE()
     dimensions = torch.arange(0, rope.dimension, 2, dtype=torch.float32, device=device)

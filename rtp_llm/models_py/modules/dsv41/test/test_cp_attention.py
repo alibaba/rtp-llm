@@ -28,7 +28,7 @@ from rtp_llm.models_py.modules.dsv41.cache_layout import (
     layer_sources,
 )
 from rtp_llm.models_py.modules.dsv41.ced import ReplayConfig, ReplayMode
-from rtp_llm.models_py.modules.dsv41.compressor import OwnerCompressor
+from rtp_llm.models_py.modules.dsv41.compressor import OwnerCompressor, PairCarry
 from rtp_llm.models_py.modules.dsv41.cp import begin_cp_request
 
 _LAYERS = (0, 2, 3, 8, 9, 14, 15, 20, 21, 24, 25, 28, 29, 32, 33, 36, 39)
@@ -240,6 +240,90 @@ def _compare_pages(layout, context, reference):
 
 
 @torch.inference_mode()
+def _pair_checkpoint_restore(rank, device):
+    observations = []
+    for speculative in (0, 5):
+        layout = CacheLayout(
+            cp_size=8, speculative_tokens=speculative, draft_enabled=bool(speculative)
+        )
+        identity = ReplayConfig(ReplayMode.FULL).cache_identity("pair-memory", layout)
+        framework = _framework_pages(layout, rank, device)
+        for name in ("tables", "pair_tables"):
+            for slot in framework[name]:
+                framework[name][slot] = torch.arange(
+                    1, 18, dtype=torch.int32, device=device
+                )[None, :].contiguous()
+
+        def begin(start, end, ready=False):
+            cp = _metadata((end - start,), (start,), rank, device)
+            return begin_cp_request(
+                cp, 0, request_id="pair-memory", identity=identity, layout=layout,
+                max_tokens=16384, restored_state_ready=ready, **framework,
+            )
+
+        published = begin(0, 15360)
+        for owner in PAIR_OWNERS:
+            published.publish_pair(
+                owner, PairCarry.empty(owner, "pair-memory", identity, 15360)
+            )
+        # Native aligned D2H canonicalizes the entire pair region to zero.
+        # Restore into a different physical page on each rank, as H2D does.
+        for owner, pool in framework["pair_pools"].items():
+            host = pool[14].cpu().clone().zero_()
+            pool[30 - rank].copy_(host)
+            framework["pair_tables"][owner][0, 14] = 30 - rank
+        restored = begin(15360, 15361, True)
+        for owner in PAIR_OWNERS:
+            pair = restored.cache.owners[owner].pair
+            assert pair.next_position == 15360
+            assert pair.partial_kv is pair.partial_score is None
+            page = int(framework["pair_tables"][owner][0, 14])
+            assert not bool(framework["pair_pools"][owner][page].any())
+            values = torch.arange(512, dtype=torch.float32, device=device) + owner
+            restored.publish_pair(
+                owner, PairCarry(owner, "pair-memory", identity, 15361, values, -values)
+            )
+        odd = begin(15361, 15362, True)
+        for owner in PAIR_OWNERS:
+            pair = odd.cache.owners[owner].pair
+            expected = torch.arange(512, dtype=torch.float32, device=device) + owner
+            assert pair.next_position == 15361
+            _equal(pair.partial_kv, expected, "restored odd KV")
+            _equal(pair.partial_score, -expected, "restored odd scores")
+        rejected = []
+        for label, start, ready, dirty_byte in (
+            ("not_ready", 15360, False, None),
+            ("unaligned_even", 15362, True, None),
+            ("odd_missing_payload", 15361, True, None),
+            ("other_snapshot_nonzero", 15360, True, 0),
+            ("trailing_padding_nonzero", 15360, True, -1),
+            ("stale_position", 15360, True, (speculative + 1) * 4112 + 4096),
+            ("invalid_flag", 15360, True, (speculative + 1) * 4112 + 4104),
+        ):
+            for pool in framework["pair_pools"].values():
+                pool.zero_()
+            if dirty_byte is not None:
+                pool = framework["pair_pools"][2]
+                full_bytes = pool.shape[1] * 8
+                byte = dirty_byte % full_bytes
+                peer, offset = divmod(byte, pool.shape[1])
+                if peer == rank:
+                    page = int(framework["pair_tables"][2][0, (start - 1) // 1024])
+                    pool[page, offset] = 1
+            try:
+                begin(start, start + 1, ready)
+            except ValueError as error:
+                assert "restored execution boundary" in str(error)
+                rejected.append(label)
+            else:
+                raise AssertionError("malformed pair state accepted: " + label)
+            torch.distributed.barrier()
+        observations.append({"speculative_tokens": speculative, "restored_start":15360,
+                             "odd_continuation":15361,"rejected":rejected})
+    return observations
+
+
+@torch.inference_mode()
 def _run_rank():
     rank, device = int(os.environ["RANK"]), torch.device(
         "cuda", int(os.environ["LOCAL_RANK"])
@@ -260,6 +344,7 @@ def _run_rank():
     )
     collective_torch._initialized = True
     torch.backends.cuda.matmul.allow_tf32 = False
+    pair_checkpoints = _pair_checkpoint_restore(rank, device)
     layout = CacheLayout(cp_size=8, speculative_tokens=0, draft_enabled=False)
     identity = ReplayConfig(ReplayMode.FULL).cache_identity(
         "cp8-attention-integration", layout
@@ -349,6 +434,7 @@ def _run_rank():
         rank=rank,
         gpu=str(torch.cuda.get_device_properties(device).uuid),
         cases=records,
+        pair_checkpoints=pair_checkpoints,
     )
     destination = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
     if destination:

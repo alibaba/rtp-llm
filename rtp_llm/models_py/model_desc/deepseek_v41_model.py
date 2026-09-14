@@ -35,6 +35,7 @@ from rtp_llm.models_py.modules.dsv41.compact_reader import (
     SwaBinding,
 )
 from rtp_llm.models_py.modules.dsv41.compressor import PairCarry
+from rtp_llm.models_py.modules.dsv41.decode_compressor import normalize_empty_pair_checkpoint
 from rtp_llm.models_py.modules.dsv41.inputs import V41ModelRows
 from rtp_llm.models_py.modules.dsv41.linear import warmup_block32_linears
 from rtp_llm.models_py.modules.dsv41.moe import V41MoE
@@ -95,7 +96,19 @@ def _pair_view(pool, page, snapshot):
     return pool[page, begin : begin + _PAIR_BYTES]
 
 
-def _read_pair(raw, owner, request_id, identity, position):
+def _read_pair(
+    raw, owner, request_id, identity, position, *,
+    checkpoint_region=None, state_ready=False, reuse_unit=None,
+):
+    if checkpoint_region is not None:
+        raw = raw.clone()
+        normalize_empty_pair_checkpoint(
+            checkpoint_region[None, :],
+            raw[None, :],
+            torch.tensor([position], dtype=torch.int64, device=raw.device),
+            torch.tensor([state_ready], dtype=torch.bool, device=raw.device),
+            reuse_unit=reuse_unit,
+        )
     stored_position = int(raw[4096:4104].view(torch.int64).item())
     valid = int(raw[4104:4108].view(torch.int32).item())
     if stored_position != position or valid != position % 2:
@@ -518,6 +531,9 @@ class DeepSeekV41Model(GptModelBase):
                             request_id,
                             self.identity,
                             start,
+                            checkpoint_region=pool[source],
+                            state_ready=ready[batch],
+                            reuse_unit=self.layout.reuse_unit,
                         )
                     pair_outputs[layer] = _pair_view(pool, destination, 1)
                     pair_initials[layer] = (_pair_view(pool, destination, 0), pair)
@@ -676,6 +692,7 @@ class DeepSeekV41Model(GptModelBase):
                 pair_tables=pair_tables,
                 epoch=self._forward_epoch,
                 decoder_ready_end=start,
+                restored_state_ready=ready[batch],
             )
             requests.append(_Request(first, last, context, {}, {}, batch))
             first = last

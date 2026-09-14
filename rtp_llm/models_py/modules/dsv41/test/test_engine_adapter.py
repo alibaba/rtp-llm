@@ -299,6 +299,39 @@ class EngineAdapterContractTest(unittest.TestCase):
                 self.assertTrue(bool((pages.data[1] == 71).all()))
                 self.assertTrue(bool((pages.data[2] == 71).all()))
 
+    def test_canonical_memory_pair_requires_ready_aligned_complete_zero_region(self):
+        model, _ = framework_fixture()
+        region = model._pair_pools[2][1]
+        raw = _pair_view(model._pair_pools[2], 1, 1)
+        args = dict(checkpoint_region=region, state_ready=True, reuse_unit=1024)
+        pair = _read_pair(raw, 2, "101", model.identity, 1024, **args)
+        self.assertEqual(pair.next_position, 1024)
+        self.assertIsNone(pair.partial_kv)
+        self.assertFalse(bool(region.any()))
+        for position, ready, byte in ((1024, False, None), (1026, True, None),
+                                      (1025, True, None), (1024, True, 0),
+                                      (1024, True, -1), (1024, True, 8208)):
+            region.zero_()
+            if byte is not None:
+                region[byte] = 1
+            with self.assertRaisesRegex(ValueError, "execution boundary"):
+                _read_pair(raw, 2, "101", model.identity, position,
+                           checkpoint_region=region, state_ready=ready, reuse_unit=1024)
+
+    def test_standard_adapter_restores_canonical_memory_pair(self):
+        model, _ = framework_fixture()
+        inputs, rows = request_fixture(starts=(1024,), ready=(True,))
+        for gid in range(4):
+            inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group[gid] = (
+                torch.tensor([[1] * 8 + [2]], dtype=torch.int32)
+            )
+        requests = model._requests(inputs, rows)
+        for owner in PAIR_OWNERS:
+            pair = requests[0].context.cache.owners[owner].pair
+            self.assertEqual(pair.next_position, 1024)
+            self.assertIsNone(pair.partial_kv)
+            self.assertFalse(bool(model._pair_pools[owner][1].any()))
+
     def test_requests_cannot_alias_writable_owner_pages(self):
         model, _ = framework_fixture()
         inputs, rows = request_fixture(
