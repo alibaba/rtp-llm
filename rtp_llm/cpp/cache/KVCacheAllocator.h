@@ -27,12 +27,12 @@ struct KVCacheTokenCapacity {
 };
 
 struct KVCachePoolMetricsSnapshot {
-    size_t      pool_index             = 0;
-    std::string pool_name              = "unnamed";
-    size_t      block_size_bytes       = 0;
-    size_t      free_blocks            = 0;
-    size_t      used_blocks            = 0;
-    size_t      active_blocks          = 0;
+    size_t      pool_index                 = 0;
+    std::string pool_name                  = "unnamed";
+    size_t      block_size_bytes           = 0;
+    size_t      free_blocks                = 0;
+    size_t      used_blocks                = 0;
+    size_t      active_blocks              = 0;
     size_t      available_blocks           = 0;
     size_t      total_blocks               = 0;
     size_t      reserve_blocks             = 0;
@@ -58,10 +58,10 @@ public:
     virtual ~KVCacheAllocator() = default;
 
     bool                           init();
-    virtual void                   free(const FreeInfo& free_info)                        = 0;
+    virtual void                   free(const FreeInfo& free_info)                                                = 0;
     virtual void                   insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) = 0;
-    virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const   = 0;
-    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const = 0;
+    virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const                           = 0;
+    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const                         = 0;
     virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const = 0;
     virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int group_id, int block_id) const;
@@ -74,22 +74,16 @@ public:
         int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const;
     virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
                                                             const CacheKeysType&   cache_keys,
-                                                            bool                   is_connector = false) = 0;
-    std::shared_ptr<KVCacheResource>
-    incrKVCacheRefWithReleaseCallback(const KVCacheResource& kvcache_resource,
-                                      const CacheKeysType&   cache_keys,
-                                      bool                   is_connector,
-                                      std::function<void()>  release_callback);
-
-    virtual GroupedCacheLayerLayout allLayerCacheBase() const                                           = 0;
-    virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
-                                                  const std::vector<int>&         block_src_batch,
-                                                  bool                            copy_last_block,
-                                                  std::vector<TaggedBlockIdPair>& block_update_mapping) = 0;
-    virtual int                     seqSizePerBlock() const                                             = 0;
-    virtual int                     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                                          int                            seq_len,
-                                                          int                            reserve_step) const                       = 0;
+                                                            bool                   is_connector = false)                           = 0;
+    virtual GroupedCacheLayerLayout          allLayerCacheBase() const                                           = 0;
+    virtual bool                             updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
+                                                           const std::vector<int>&         block_src_batch,
+                                                           bool                            copy_last_block,
+                                                           std::vector<TaggedBlockIdPair>& block_update_mapping) = 0;
+    virtual int                              seqSizePerBlock() const                                             = 0;
+    virtual int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                      int                            seq_len,
+                                      int                            reserve_step) const                                                    = 0;
     // Common-prefix growth is charged once; non-common growth is charged once per target sequence.
     int estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                     int                            seq_len,
@@ -224,7 +218,7 @@ protected:
     DeviceBlockPoolPtr                 block_pool_;
     BlockTreeCachePtr                  block_tree_cache_;
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
-    const kmonitor::MetricsReporterPtr metrics_reporter_           = nullptr;
+    const kmonitor::MetricsReporterPtr metrics_reporter_             = nullptr;
     bool                               use_device_malloc_block_pool_ = false;
 
     size_t  reserve_block_num_{0};

@@ -209,7 +209,9 @@ cc_test(
     ],
     copts = test_copts,
     deps = [
-        "//rtp_llm/cpp/cache:block_pool",
+        "//rtp_llm/cpp/cache:device_block_pool_config_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
+        ":cache_config_test_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

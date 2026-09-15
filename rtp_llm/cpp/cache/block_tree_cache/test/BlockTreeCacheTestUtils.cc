@@ -161,11 +161,11 @@ DeviceBlockPoolPtr
 makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs, size_t usable_count, const std::string& pool_name) {
     const auto physical_block_count = usable_count + 1;
 
-    auto config                     = std::make_shared<DeviceBlockPoolConfig>();
-    config->pool_type               = BlockPoolType::DEVICE;
-    config->pool_name               = pool_name;
-    config->physical_block_count    = physical_block_count;
-    config->use_cuda_malloc_backing = true;
+    auto config                       = std::make_shared<DeviceBlockPoolConfig>();
+    config->pool_type                 = BlockPoolType::DEVICE;
+    config->pool_name                 = pool_name;
+    config->physical_block_count      = physical_block_count;
+    config->use_device_malloc_backing = true;
 
     size_t offset = 0;
     for (const auto& spec : specs) {
@@ -353,13 +353,13 @@ DeviceBlockPoolPtr makeStructuralDevicePool(size_t group_set_id) {
     layout.seq_size_per_block         = 1;
     layout.kernel_blocks_per_kv_block = 1;
 
-    auto config                     = std::make_shared<DeviceBlockPoolConfig>();
-    config->pool_type               = BlockPoolType::DEVICE;
-    config->pool_name               = "block_tree_cache_test_" + std::to_string(group_set_id);
-    config->physical_block_count    = physical_block_count;
-    config->total_size_bytes        = layout.total_size_bytes;
-    config->memory_layouts          = {layout};
-    config->use_cuda_malloc_backing = true;
+    auto config                       = std::make_shared<DeviceBlockPoolConfig>();
+    config->pool_type                 = BlockPoolType::DEVICE;
+    config->pool_name                 = "block_tree_cache_test_" + std::to_string(group_set_id);
+    config->physical_block_count      = physical_block_count;
+    config->total_size_bytes          = layout.total_size_bytes;
+    config->memory_layouts            = {layout};
+    config->use_device_malloc_backing = true;
 
     auto pool = std::make_shared<DeviceBlockPool>(config);
     // Structural tree/eviction tests only exercise block-id ownership and do not
@@ -453,22 +453,20 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
         };
     }
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));
-    auto per_rank_engine =
-        std::make_shared<PerRankBlockTransferEngine>(group_sets,
-                                                     config.enable_disk_cache,
-                                                     DeviceHostCopyOptions{},
-                                                     config.device_disk_staging_block_count,
-                                                     config.max_descriptors_per_transfer_batch,
-                                                     config.transfer_worker_count,
-                                                     config.transfer_queue_max_size,
-                                                     cache_metrics_reporter);
+    auto per_rank_engine        = std::make_shared<PerRankBlockTransferEngine>(group_sets,
+                                                                        config.enable_disk_cache,
+                                                                        DeviceHostCopyOptions{},
+                                                                        config.device_disk_staging_block_count,
+                                                                        config.max_descriptors_per_transfer_batch,
+                                                                        config.transfer_worker_count,
+                                                                        config.transfer_queue_max_size,
+                                                                        cache_metrics_reporter);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
     }
-    auto transfer_dispatcher =
-        std::make_unique<BlockTransferDispatcher>(
-            std::move(per_rank_engine), std::move(multi_rank_engine), config.max_descriptors_per_transfer_batch);
+    auto transfer_dispatcher = std::make_unique<BlockTransferDispatcher>(
+        std::move(per_rank_engine), std::move(multi_rank_engine), config.max_descriptors_per_transfer_batch);
     auto task_pool =
         std::make_unique<BlockTreeTaskPool>(static_cast<size_t>(config.task_pool_size), 1000, "BlockTreeCacheTaskPool");
     auto tree  = std::make_unique<BlockTree>(std::move(group_sets));

@@ -26,7 +26,7 @@ struct DeviceBlockPoolConfig: public BlockPoolConfigBase {
     size_t                          total_size_bytes{0};
     std::vector<MemoryLayoutConfig> memory_layouts;
     bool                            use_pinned_cpu_backing{false};
-    bool                            use_cuda_malloc_backing{false};
+    bool                            use_device_malloc_backing{false};
 };
 
 class DeviceBlockPool;
@@ -92,7 +92,7 @@ private:
          normalizeConfig(const std::shared_ptr<const DeviceBlockPoolConfig>& config);
     void initializeCacheBuffer();
     void initializePinnedCpuBuffer();
-    void initializeCudaMallocBuffer();
+    void initializeDeviceMallocBuffer();
     void initializeLayerMappings();
     void initializeLayoutStrategies();
 

@@ -50,7 +50,9 @@ bool SingleTypeKVCacheAllocator::doInit() {
     RTP_LLM_CHECK_WITH_INFO(is_full_attention, "SingleTypeKVCacheAllocator requires one FULL MHA/MLA cache group");
 
     auto pool_config = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(config_));
-    pool_config->use_cuda_malloc_backing = use_cuda_malloc_block_pool_;
+    pool_config->use_pinned_cpu_backing = allocation_type_ == AllocationType::HOST;
+    pool_config->use_device_malloc_backing =
+        use_device_malloc_block_pool_ && allocation_type_ == AllocationType::DEVICE;
     block_pool_ = std::make_shared<DeviceBlockPool>(std::shared_ptr<const DeviceBlockPoolConfig>(pool_config));
     if (!block_pool_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize block pool for SingleTypeKVCacheAllocator");
@@ -254,8 +256,9 @@ bool SingleTypeKVCacheAllocator::materializeInitialBlocks(const MallocInfo& mall
 LoadMatchResult SingleTypeKVCacheAllocator::finishDeferredMalloc(const MallocInfo& malloc_info,
                                                                  LoadAsyncContext& context,
                                                                  size_t            matched_blocks) {
-    MallocStatus materialize_status = MallocStatus::NONE;
-    bool         success = materializeInitialBlocks(malloc_info, &context, matched_blocks, materialize_status);
+    std::lock_guard<std::mutex> lock(malloc_mutex_);
+    MallocStatus                materialize_status = MallocStatus::NONE;
+    bool success = materializeInitialBlocks(malloc_info, &context, matched_blocks, materialize_status);
     if (success) {
         const auto incr_result = incrMalloc(malloc_info);
         success                = incr_result.success;

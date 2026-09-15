@@ -74,19 +74,20 @@ bool HybridPoolKVCacheAllocator::doInit() {
             DeviceBlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(group_id));
         const CacheGroupPolicy policy = config_.policyForGroup(static_cast<size_t>(group_id));
         if (policy.memory_placement == CacheMemoryPlacement::DEVICE) {
-            pool_config.use_pinned_cpu_backing  = false;
-            pool_config.use_cuda_malloc_backing = use_cuda_malloc_block_pool_;
+            pool_config.use_pinned_cpu_backing = allocation_type_ == AllocationType::HOST;
+            pool_config.use_device_malloc_backing =
+                use_device_malloc_block_pool_ && allocation_type_ == AllocationType::DEVICE;
         } else if (policy.memory_placement == CacheMemoryPlacement::HOST_PINNED) {
-            pool_config.use_pinned_cpu_backing  = true;
-            pool_config.use_cuda_malloc_backing = false;
+            pool_config.use_pinned_cpu_backing    = true;
+            pool_config.use_device_malloc_backing = false;
         } else {
             RTP_LLM_LOG_ERROR("unsupported cache memory placement=%d for group=%d",
                               static_cast<int>(policy.memory_placement),
                               group_id);
             return false;
         }
-        const auto tag                      = config_.tagForGroup(static_cast<size_t>(group_id));
-        const auto group_type               = config_.typeForGroup(static_cast<size_t>(group_id));
+        const auto tag        = config_.tagForGroup(static_cast<size_t>(group_id));
+        const auto group_type = config_.typeForGroup(static_cast<size_t>(group_id));
         appendPoolSummary(pool_summary, has_pool, group_id, tag, group_type, pool_config);
         pool_total_bytes += pool_config.total_size_bytes;
         pool_total_blocks += pool_config.physical_block_count;
