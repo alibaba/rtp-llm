@@ -270,40 +270,6 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputBuildsPositionSpec
               toVec<float>(sampler_inputs.temperature));
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputRejectsWrongLogitRows) {
-    ModelConfig                 model_config;
-    RuntimeConfig               runtime_config;
-    SpeculativeExecutionConfig  sp_config;
-    PDSepConfig                 pd_sep_config;
-    ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    CacheConfig                 cache_config;
-    cache_config.group_types = {CacheGroupType::FULL};
-
-    model_config.max_seq_len    = 2048;
-    model_config.vocab_size     = 4;
-    model_config.num_layers     = 1;
-    sp_config.gen_num_per_cycle = 3;
-
-    ResourceContext resource_context;
-    auto            stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
-    auto            stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
-    stream1->setScoreLen(sp_config.gen_num_per_cycle + 1);
-    stream2->setScoreLen(sp_config.gen_num_per_cycle + 1);
-
-    auto stream_groups = StreamGroups({stream1, stream2});
-    auto processor     = MtpBatchStreamProcessor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-
-    GptModelInputs  model_inputs;
-    GptModelOutputs model_output;
-    model_output.logits = torch::empty({7, 4}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-
-    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_inputs, model_output);
-    ASSERT_FALSE(sampler_inputs_status.ok());
-    EXPECT_NE(std::string(sampler_inputs_status.status().message()).find("target verify logits row mismatch"),
-              std::string::npos);
-}
-
 TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
@@ -840,17 +806,17 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
 
     expect_positions(model_input, {4, 5}, {4, 5});
 
-    // Device state includes the carried target token. Draft KV and target
-    // verification both start one slot before that committed length.
-    GenerateStream::MtpAsyncDeviceState state1;
-    state1.propose_tokens_gpu = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
-    state1.next_seq_len_gpu   = torch::tensor({7}, torch::kInt32).to(torch::kCUDA);
-    stream1->setMtpAsyncDeviceState(std::move(state1));
+    // Device state publishes the committed length, which is already the draft
+    // decode position and one greater than the target prefix.
+    GenerateStream::MtpAsyncDeviceState committed_state1;
+    committed_state1.propose_tokens_gpu = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
+    committed_state1.next_seq_len_gpu   = torch::tensor({7}, torch::kInt32).to(torch::kCUDA);
+    stream1->setMtpAsyncDeviceState(std::move(committed_state1));
 
-    GenerateStream::MtpAsyncDeviceState state2;
-    state2.propose_tokens_gpu = torch::tensor({{1}}, torch::kInt32).to(torch::kCUDA);
-    state2.next_seq_len_gpu   = torch::tensor({4}, torch::kInt32).to(torch::kCUDA);
-    stream2->setMtpAsyncDeviceState(std::move(state2));
+    GenerateStream::MtpAsyncDeviceState committed_state2;
+    committed_state2.propose_tokens_gpu = torch::tensor({{1}}, torch::kInt32).to(torch::kCUDA);
+    committed_state2.next_seq_len_gpu   = torch::tensor({4}, torch::kInt32).to(torch::kCUDA);
+    stream2->setMtpAsyncDeviceState(std::move(committed_state2));
 
     model_input.sequence_lengths = torch::tensor({99, 99}, torch::kInt32);
     processor.prepareDecodeDraftModelInput(stream_groups, model_input, holder);

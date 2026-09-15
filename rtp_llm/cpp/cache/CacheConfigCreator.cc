@@ -253,7 +253,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                const KVCacheConfig&               kv_cache_config,
                                                const SpeculativeExecutionConfig&  sp_config,
                                                const std::optional<WarmUpResult>& warm_up_result,
-                                               bool                               is_mtp) {
+                                               bool                               is_mtp,
+                                               bool                               is_eagle) {
     CacheConfig score_config =
         score_model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
             HybridPoolConfigCreator::createConfig(
@@ -276,10 +277,18 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
     int num_mtp_modules = 1;
     if (is_mtp) {
-        const bool uses_recurrent_draft_model = sp_config.type == SP_TYPE_EAGLE || sp_config.type == SP_TYPE_EAGLE3;
-        num_mtp_modules                       = propose_model_config.physical_mtp_module_num > 0 ?
-                                                    static_cast<int>(propose_model_config.physical_mtp_module_num) :
-                                                    (uses_recurrent_draft_model ? 1 : sp_config.gen_num_per_cycle);
+        num_mtp_modules = sp_config.gen_num_per_cycle;
+        if (is_eagle || sp_config.type == SP_TYPE_DSPARK) {
+            // DSpARK is one multi-layer block-draft model; gamma is its
+            // proposal width, not a count of independent one-layer modules.
+            num_mtp_modules = 1;
+        }
+        if (propose_model_config.physical_mtp_module_num > 0) {
+            // A recurrent native MTP checkpoint declares its physical module
+            // count explicitly (one physical module may be reused across
+            // several proposal steps), overriding the derivation above.
+            num_mtp_modules = static_cast<int>(propose_model_config.physical_mtp_module_num);
+        }
         RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0 && num_mtp_modules <= sp_config.gen_num_per_cycle,
                                 "physical MTP module count must be in [1, gen_num_per_cycle]: modules=%d steps=%d",
                                 num_mtp_modules,

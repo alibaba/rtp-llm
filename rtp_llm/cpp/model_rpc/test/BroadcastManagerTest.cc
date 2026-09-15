@@ -304,7 +304,7 @@ TEST_F(BroadcastManagerTest, Broadcast_MemoryDeadline_ExitsWithoutCore) {
         mem_request->set_copy_direction(MemoryOperationRequestPB::H2D);
         auto* item = mem_request->add_copy_items();
         item->set_mem_block(7);
-        item->add_gpu_blocks(11);
+        item->add_tagged_gpu_blocks()->set_block_id(11);
     }
     auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
                        const std::shared_ptr<grpc::ClientContext>& ctx,
