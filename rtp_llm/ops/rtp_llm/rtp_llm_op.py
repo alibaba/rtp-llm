@@ -46,6 +46,3 @@ class RtpLLMOp:
 
     def stop(self):
         self.ft_op.stop()  # type: ignore
-
-    def request_stop(self):
-        self.ft_op.request_stop()  # type: ignore
