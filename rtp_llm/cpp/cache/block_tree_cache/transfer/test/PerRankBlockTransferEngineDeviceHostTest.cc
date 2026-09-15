@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <cstdlib>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -259,6 +260,47 @@ private:
     bool                    released_{false};
 };
 
+// Keep process environment changes local to each test.
+class ScopedCopyPriorityEnv {
+public:
+    explicit ScopedCopyPriorityEnv(const char* value) {
+        const char* original = std::getenv("BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY");
+        had_original_ = original != nullptr;
+        if (had_original_) {
+            original_ = original;
+        }
+        set(value);
+    }
+    ~ScopedCopyPriorityEnv() {
+        set(had_original_ ? original_.c_str() : nullptr);
+    }
+    static void set(const char* value) {
+        if (value != nullptr) {
+            setenv("BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY", value, 1);
+        } else {
+            unsetenv("BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY");
+        }
+    }
+
+private:
+    bool        had_original_{false};
+    std::string original_;
+};
+
+static std::string copyStrategyOrder(const DeviceHostTransferExecutor& executor) {
+    std::string result;
+    for (const auto& strategy : executor.strategies_) {
+        if (dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(strategy.get())) {
+            result += 'B';
+        } else if (dynamic_cast<StagedSmDeviceHostCopyStrategy*>(strategy.get())) {
+            result += 'S';
+        } else if (dynamic_cast<GenericMultiCopyDeviceHostCopyStrategy*>(strategy.get())) {
+            result += 'G';
+        }
+    }
+    return result;
+}
+
 static void installStrategyRecorders(DeviceHostTransferExecutor& executor, std::array<StrategyCounters, 3>& counters) {
     RTP_LLM_CHECK(executor.strategies_.size() == counters.size());
     for (size_t i = 0; i < counters.size(); ++i) {
@@ -267,6 +309,7 @@ static void installStrategyRecorders(DeviceHostTransferExecutor& executor, std::
 }
 
 TEST(DeviceHostTransferExecutorConfigTest, PrefersCudaBatchThenStagedSmThenGeneric) {
+    ScopedCopyPriorityEnv priority(nullptr);
     BlockTreeTaskPool          task_pool(1, 8, "DeviceHostExecutorConfigTest");
     DeviceHostTransferExecutor executor(task_pool, 8);
     EXPECT_TRUE(executor.options_.cuda_batch_copy_enabled);
@@ -275,6 +318,27 @@ TEST(DeviceHostTransferExecutorConfigTest, PrefersCudaBatchThenStagedSmThenGener
     EXPECT_NE(dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(executor.strategies_[0].get()), nullptr);
     EXPECT_NE(dynamic_cast<StagedSmDeviceHostCopyStrategy*>(executor.strategies_[1].get()), nullptr);
     EXPECT_NE(dynamic_cast<GenericMultiCopyDeviceHostCopyStrategy*>(executor.strategies_[2].get()), nullptr);
+}
+
+TEST(DeviceHostTransferExecutorConfigTest, PromotesOnlyExistingSelectedStrategyAtInitialization) {
+    const std::pair<const char*, const char*> cases[] = {
+        {nullptr, "BSG"},       {"", "BSG"},           {"cuda_batch", "BSG"},
+        {"sm", "SBG"},         {"generic", "GBS"},    {"cuda_3d_batch", "BSG"},
+        {"unknown", "BSG"},    {"SM", "BSG"}};
+    BlockTreeTaskPool task_pool(1, 8, "CopyPriorityTest");
+    for (const auto& [value, expected] : cases) {
+        SCOPED_TRACE(value != nullptr ? value : "<unset>");
+        ScopedCopyPriorityEnv priority(value);
+        DeviceHostCopyOptions options;
+        options.staged_sm_min_tile_count = 123;
+        DeviceHostTransferExecutor executor(task_pool, 8, options);
+        EXPECT_EQ(copyStrategyOrder(executor), expected);
+        EXPECT_EQ(executor.options_.staged_sm_min_tile_count, 123u);
+        ScopedCopyPriorityEnv::set("generic");
+        EXPECT_EQ(copyStrategyOrder(executor), expected);
+        DeviceHostTransferExecutor later(task_pool, 8, options);
+        EXPECT_EQ(copyStrategyOrder(later), "GBS");
+    }
 }
 
 // ---- PerRankBlockTransferEngine submit() tests (real CUDA) ----
@@ -1405,6 +1469,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceSameLaneTasksMayUseAva
 
 class PerRankBlockTransferEngineStrategyTest: public ::testing::Test {
 protected:
+    ScopedCopyPriorityEnv copy_priority_{nullptr};
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
 
