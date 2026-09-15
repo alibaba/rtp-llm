@@ -1,13 +1,17 @@
 import queue
 import threading
 import time
+from collections import Counter
 from concurrent import futures
+from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import MagicMock, patch
 
 import grpc
+import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
@@ -23,6 +27,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceStub,
     add_MultimodalRpcServiceServicer_to_server,
 )
+from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.mm_scheduler import (
     MMSchedulerOverloadError,
     MMSchedulerRequestTooLargeError,
@@ -40,9 +45,7 @@ from rtp_llm.server.vit_proxy_server import (
     _resolve_rpc_timeout_seconds,
     resolve_default_rpc_timeout_seconds,
 )
-from rtp_llm.server.vit_rpc_server import (
-    MultimodalRpcServer,
-)
+from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
 
 
 class FakeContext:
@@ -161,8 +164,137 @@ class FailingEngine:
     def __init__(self, error):
         self.error = error
 
-    def mm_embedding_rpc(self, request):
+    def get_embedding_result(self, inputs, **kwargs):
         raise self.error
+
+    def cancel_queued_request(self, request_id):
+        pass
+
+    def report_vit_error(self, error):
+        pass
+
+
+class RpcAsyncEmbeddingTest(TestCase):
+    def make_engine(self, cache_bytes):
+        class CpuEmbedding:
+            def __init__(self):
+                self.calls = Counter()
+
+            def get_preprocess_params(self):
+                return {}
+
+            @staticmethod
+            def preprocess_input(inputs, config):
+                return inputs[0].url
+
+            @staticmethod
+            def estimate_work(data, mm_type):
+                return None
+
+            def batched_embedding(self, data_list, mm_types):
+                results = []
+                for url in data_list:
+                    self.calls[url] += 1
+                    value = 1 if url == "fake://a" else 2
+                    results.append(
+                        (
+                            torch.full((2, 4), float(value)),
+                            torch.full((2, 3), value, dtype=torch.int32),
+                            torch.tensor([value], dtype=torch.int32),
+                        )
+                    )
+                return results
+
+        config = VitConfig()
+        config.use_local_preprocess = True
+        config.disable_access_log = True
+        config.mm_cache_item_num = 0
+        config.url_cache_item_num = 0
+        config.mm_cache_cpu_max_bytes = cache_bytes
+        config.mm_hash_key_cache_max_bytes = cache_bytes
+        config.vit_concurrency = 2
+        config.vit_max_queue_size = 4
+        config.gpu_max_batch_size = 2
+        config.gpu_batch_wait_ms = 5
+        config.mm_timeout_ms = 1000
+        model_config = SimpleNamespace(
+            mm_model_config=SimpleNamespace(mm_position_ids_style=2),
+            mm_related_params=SimpleNamespace(preprocess_batch_size=1),
+        )
+        embedding = CpuEmbedding()
+        engine = MMProcessEngine(
+            embedding, model_config, config, ProfilingDebugLoggingConfig(), device="cpu"
+        )
+        self.addCleanup(engine.stop)
+        return engine, embedding
+
+    @staticmethod
+    def make_request():
+        request = MultimodalInputsPB(request_id=123)
+        for url in ("fake://a", "fake://a", "fake://b"):
+            item = request.multimodal_inputs.add()
+            item.multimodal_url = url
+            item.multimodal_type = 1
+            item.mm_preprocess_config.mm_timeout_ms = 1000
+        return request
+
+    def assert_outputs_in_input_order(self, result):
+        self.assertEqual(list(result.split_size), [2, 2, 2])
+        values = torch.frombuffer(
+            bytearray(result.multimodal_embedding.fp32_data), dtype=torch.float32
+        ).reshape(6, 4)
+        self.assertEqual(values[:, 0].tolist(), [1, 1, 1, 1, 2, 2])
+        positions = torch.frombuffer(
+            bytearray(result.multimodal_pos_id.int32_data), dtype=torch.int32
+        ).reshape(6, 3)
+        self.assertEqual(positions[:, 0].tolist(), [1, 1, 1, 1, 2, 2])
+        self.assertEqual(len(result.multimodal_extra_input), 3)
+        self.assertEqual(
+            [
+                torch.frombuffer(bytearray(item.int32_data), dtype=torch.int32).item()
+                for item in result.multimodal_extra_input
+            ],
+            [1, 1, 2],
+        )
+        self.assertEqual(result.feature_hash_version, 1)
+        hashes = torch.frombuffer(
+            bytearray(result.multimodal_feature_hash.int32_data), dtype=torch.int32
+        ).reshape(3, 2)
+        self.assertTrue(torch.equal(hashes[0], hashes[1]))
+        self.assertFalse(torch.equal(hashes[0], hashes[2]))
+
+    def run_duplicate_request(self, cache_bytes):
+        with patch("rtp_llm.server.vit_rpc_server.kmonitor.report"):
+            engine, embedding = self.make_engine(cache_bytes)
+            context = MagicMock()
+            context.add_callback.return_value = True
+            context.abort.side_effect = AbortCalled()
+            server = MultimodalRpcServer(engine)
+            self.addCleanup(server._transport.close)
+            result = server.RemoteMultimodalEmbedding(self.make_request(), context)
+            context.abort.assert_not_called()
+            self.assert_outputs_in_input_order(result)
+            return embedding.calls
+
+    def test_duplicate_media_with_cache_completes_once_per_unique_input(self):
+        self.assertEqual(
+            self.run_duplicate_request(4096), {"fake://a": 1, "fake://b": 1}
+        )
+
+    def test_disabled_cache_computes_each_media_occurrence(self):
+        self.assertEqual(self.run_duplicate_request(0), {"fake://a": 2, "fake://b": 1})
+
+    def test_cancelled_rpc_does_not_start_media_computation(self):
+        with patch("rtp_llm.server.vit_rpc_server.kmonitor.report"):
+            engine, embedding = self.make_engine(4096)
+            context = RpcBoundaryFakeContext()
+            server = MultimodalRpcServer(engine)
+            self.addCleanup(server._transport.close)
+            with self.assertRaises(AbortCalled):
+                server.RemoteMultimodalEmbedding(self.make_request(), context)
+            self.assertEqual(context.code, grpc.StatusCode.CANCELLED)
+            self.assertEqual(embedding.calls, {})
+            self.assertEqual(engine._embedding_cache.stats()["pending_entries"], 0)
 
 
 class LoadBalancerRoundRobinTest(TestCase):
@@ -989,6 +1121,14 @@ class VitProxyRpcServerForwardingTest(TestCase):
 
 
 class RuntimeExceptionStatusTest(TestCase):
+    def test_cache_wait_timeout_maps_to_deadline_exceeded(self):
+        context = RpcBoundaryFakeContext()
+        with patch("rtp_llm.server.vit_rpc_server.kmonitor.report"):
+            with self.assertRaises(AbortCalled):
+                server = MultimodalRpcServer(FailingEngine(TimeoutError("cache wait")))
+                server.RemoteMultimodalEmbedding(MultimodalInputsPB(), context)
+        self.assertEqual(context.code, grpc.StatusCode.DEADLINE_EXCEEDED)
+
     def test_runtime_exception_mapping_is_applied_at_rpc_boundary(self):
         cases = (
             (ExceptionType.MM_WRONG_FORMAT_ERROR, grpc.StatusCode.INVALID_ARGUMENT),
@@ -1104,7 +1244,11 @@ class MMOutputProxyRouterTest(TestCase):
         router.release(ReleaseLeasePB(lease_id=["same"]), FakeContext([1.0]))
 
         connection_pool.get_stub.assert_not_called()
-        reasons = [call.args[2].get("reason") for call in report.call_args_list if len(call.args) > 2]
+        reasons = [
+            call.args[2].get("reason")
+            for call in report.call_args_list
+            if len(call.args) > 2
+        ]
         self.assertIn("rdma_handle_collision", reasons)
         self.assertIn("release_handle_collision", reasons)
 
@@ -1119,7 +1263,11 @@ class MMOutputProxyRouterTest(TestCase):
         router.release(ReleaseLeasePB(lease_id=["handle"]), FakeContext([0.0]))
 
         connection_pool.get_stub.assert_not_called()
-        reasons = [call.args[2].get("reason") for call in report.call_args_list if len(call.args) > 2]
+        reasons = [
+            call.args[2].get("reason")
+            for call in report.call_args_list
+            if len(call.args) > 2
+        ]
         self.assertIn("release_deadline_exhausted", reasons)
 
     def test_unknown_expired_and_repeated_handles_are_idempotent(self):
@@ -1158,9 +1306,7 @@ class MMOutputProxyRouterTest(TestCase):
             MultimodalOutputPB(output_rdma_slots=[_rdma_slot("handle-b")]),
         )
 
-        router.release(
-            ReleaseLeasePB(lease_id=["handle-a", "handle-b"]), MagicMock()
-        )
+        router.release(ReleaseLeasePB(lease_id=["handle-a", "handle-b"]), MagicMock())
 
         forwarded = stub_b.ReleaseRdmaLease.call_args.args[0]
         self.assertEqual(list(forwarded.lease_id), ["handle-b"])

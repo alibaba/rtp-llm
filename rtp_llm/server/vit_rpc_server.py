@@ -1,3 +1,5 @@
+import logging
+import threading
 import time
 from concurrent import futures
 
@@ -28,9 +30,23 @@ from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
 from rtp_llm.multimodal.mm_scheduler import (
     MMSchedulerOverloadError,
     MMSchedulerRequestTooLargeError,
-    MMSchedulerTimeoutError,
 )
+from rtp_llm.multimodal.multimodal_util import trans_mm_input
 from rtp_llm.multimodal.transport import create_mm_output_transport
+
+
+def merge_embedding_results(results: list[MMEmbeddingRes]) -> MMEmbeddingRes:
+    embeddings, position_ids, extra_input = [], [], []
+    hashes = [] if all(res.feature_hashes is not None for res in results) else None
+    for res in results:
+        embeddings.extend(res.embeddings)
+        if res.position_ids:
+            position_ids.extend(res.position_ids)
+        if res.extra_input:
+            extra_input.extend(res.extra_input)
+        if hashes is not None:
+            hashes.extend(res.feature_hashes)
+    return MMEmbeddingRes(embeddings, position_ids or None, extra_input or None, hashes)
 
 
 def _now_us() -> int:
@@ -69,6 +85,23 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         self.engine = mm_process_engine
         self._transport = create_mm_output_transport(transport_config, local_device_id)
 
+    def _register_queue_cancellation(self, request_id: int, context):
+        rpc_done = threading.Event()
+
+        def cancel_queued_work() -> None:
+            rpc_done.set()
+            try:
+                self.engine.cancel_queued_request(request_id)
+            except Exception as error:
+                # Cancellation runs in gRPC's callback thread, after the
+                # handler may have returned; report failures here as well.
+                self.engine.report_vit_error(error)
+                logging.exception("Failed to cancel queued ViT work")
+
+        if not context.add_callback(cancel_queued_work):
+            cancel_queued_work()
+        return rpc_done
+
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         tags = {"source": "vit_server"}
         start_us = _now_us()
@@ -100,7 +133,16 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 len(multimodal_inputs.multimodal_inputs),
                 tags,
             )
-            res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
+            converted_inputs = trans_mm_input(multimodal_inputs)
+            cancellation_event = self._register_queue_cancellation(
+                multimodal_inputs.request_id, context
+            )
+            results = self.engine.get_embedding_result(
+                converted_inputs,
+                request_id=multimodal_inputs.request_id,
+                cancellation_event=cancellation_event,
+            )
+            res = merge_embedding_results(results)
             output_pb = self._transport.transfer(multimodal_inputs, res)
             if res.feature_hashes:
                 from rtp_llm.utils.grpc_util import trans_from_tensor
@@ -132,8 +174,8 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                     FtRuntimeException(ExceptionType.MM_PROCESS_ERROR, str(e))
                 ),
             )
-        except MMSchedulerTimeoutError as e:
-            # Scheduler wait exceeded its embedding timeout.
+        except TimeoutError as e:
+            # Includes both scheduler waits and asynchronous cache-entry waits.
             kmonitor.report(
                 AccMetrics.VIT_RPC_SERVER_ERROR_QPS_METRIC,
                 1,
