@@ -262,7 +262,6 @@ void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
     if (!blocks_to_free.empty()) {
         block_pool_->decRef(blocks_to_free);
         block_ids.remove(pos_to_remove);
-        checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
     }
     checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
 }

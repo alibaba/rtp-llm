@@ -4,6 +4,7 @@
 #include <chrono>
 #include <memory>
 #include <thread>
+#include <stdexcept>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 
@@ -11,13 +12,13 @@ namespace rtp_llm {
 namespace {
 
 TEST(TransferBatchAsyncContextTest, WaitersWakeAfterCompletion) {
-    auto context = std::make_shared<TransferBatchAsyncContext>();
+    auto                context = std::make_shared<TransferBatchAsyncContext>();
     std::atomic<size_t> completed_waiters{0};
-    std::thread first([&] {
+    std::thread         first([&] {
         context->waitDone();
         ++completed_waiters;
     });
-    std::thread second([&] {
+    std::thread         second([&] {
         context->waitDone();
         ++completed_waiters;
     });
@@ -52,8 +53,8 @@ TEST(TransferBatchAsyncContextTest, FirstCompletionWins) {
 }
 
 TEST(TransferBatchAsyncContextTest, CompletionReleasesGuard) {
-    auto guard = std::make_shared<int>(1);
-    std::weak_ptr<int> weak_guard = guard;
+    auto                      guard      = std::make_shared<int>(1);
+    std::weak_ptr<int>        weak_guard = guard;
     TransferBatchAsyncContext context(guard);
     guard.reset();
     ASSERT_FALSE(weak_guard.expired());
@@ -65,8 +66,8 @@ TEST(TransferBatchAsyncContextTest, CompletionReleasesGuard) {
 
 TEST(TransferBatchAsyncContextTest, CallbackRegisteredBeforeCompletionRunsOnce) {
     TransferBatchAsyncContext context;
-    std::atomic<size_t> callback_count{0};
-    ErrorCode           callback_code = ErrorCode::INVALID_PARAMS;
+    std::atomic<size_t>       callback_count{0};
+    ErrorCode                 callback_code = ErrorCode::INVALID_PARAMS;
 
     context.onDone([&](ErrorInfo error) {
         callback_code = error.code();
@@ -103,8 +104,36 @@ TEST(TransferBatchAsyncContextTest, CallbackCanReadContextWithoutDeadlock) {
     context.complete(ErrorInfo::OkStatus());
 }
 
+TEST(TransferBatchAsyncContextTest, ThrowingCallbackDoesNotDropLaterCallbacks) {
+    TransferBatchAsyncContext context;
+    size_t                    first_calls  = 0;
+    size_t                    second_calls = 0;
+    size_t                    last_calls   = 0;
+    context.onDone([&](ErrorInfo) {
+        ++first_calls;
+        throw std::runtime_error("first callback");
+    });
+    context.onDone([&](ErrorInfo) {
+        ++second_calls;
+        throw std::logic_error("second callback");
+    });
+    context.onDone([&](ErrorInfo error) {
+        ++last_calls;
+        EXPECT_EQ(error.code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_TRUE(context.done());
+    });
+
+    EXPECT_THROW(context.complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "transfer failed")), std::runtime_error);
+    context.waitDone();
+    EXPECT_EQ(context.errorInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NO_THROW(context.complete(ErrorInfo::OkStatus()));
+    EXPECT_EQ(first_calls, 1u);
+    EXPECT_EQ(second_calls, 1u);
+    EXPECT_EQ(last_calls, 1u);
+}
+
 TEST(TransferBatchAsyncContextTest, MultipleCallbacksAndWaiterObserveSameTerminalResult) {
-    auto context = std::make_shared<TransferBatchAsyncContext>();
+    auto                context = std::make_shared<TransferBatchAsyncContext>();
     std::atomic<size_t> callback_count{0};
 
     context->onDone([&](ErrorInfo error) {

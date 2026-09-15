@@ -84,6 +84,7 @@ public:
     bool         done() const override;
     bool         success() const override;
     MallocStatus mallocStatus() const;
+    ErrorInfo    errorInfo() const override;
 
 private:
     void markAborted();

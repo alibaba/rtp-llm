@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostStagingBlockPool.h"
 
 #include <exception>
+#include <algorithm>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -8,11 +10,23 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+namespace {
+size_t checkedStagingBytes(size_t count, size_t stride) {
+    // AlignedHostMemory adds alignment bytes and passes the result to an int64 tensor dimension.
+    const size_t max_bytes =
+        std::min(std::numeric_limits<size_t>::max() - HostStagingBlockPool::kAlignment,
+                 static_cast<size_t>(std::numeric_limits<int64_t>::max()) - HostStagingBlockPool::kAlignment);
+    if (stride != 0 && count > max_bytes / stride) {
+        throw std::length_error("host staging capacity exceeds supported allocation size");
+    }
+    return count * stride;
+}
+}  // namespace
 
 HostStagingBlockPool::HostStagingBlockPool(size_t block_count, size_t stride_bytes):
     block_count_(block_count),
     stride_bytes_(stride_bytes),
-    backing_(block_count_ * stride_bytes_, kAlignment, "host staging block pool") {
+    backing_(checkedStagingBytes(block_count_, stride_bytes_), kAlignment, "host staging block pool") {
     const size_t total_bytes = block_count_ * stride_bytes_;
     free_id_list_.reserve(block_count_);
     for (size_t block_id = 0; block_id < block_count_; ++block_id) {

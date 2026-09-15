@@ -3,6 +3,8 @@
 #include <deque>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <stdexcept>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -86,11 +88,17 @@ public:
     PendingPerRankEngine(): PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}) {}
 
     std::shared_ptr<AsyncContext> execute(TransferTask task) override {
-        const auto&                 descriptors = task.descriptors();
-        std::lock_guard<std::mutex> lock(mutex_);
-        batches_.push_back(descriptors);
-        auto context = std::make_shared<TransferBatchAsyncContext>();
-        contexts_.push_back(context);
+        auto context  = std::make_shared<TransferBatchAsyncContext>();
+        bool released = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            batches_.push_back(task.descriptors());
+            contexts_.push_back(context);
+            released = released_;
+        }
+        if (released) {
+            context->complete(ErrorInfo::OkStatus());
+        }
         return context;
     }
 
@@ -103,7 +111,10 @@ public:
         std::vector<std::shared_ptr<TransferBatchAsyncContext>> contexts;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            contexts = contexts_;
+            // Release future submissions too: timeout cleanup must unblock queued
+            // outer workers even if runTransfer regresses to waiting synchronously.
+            released_ = true;
+            contexts  = contexts_;
         }
         for (const auto& context : contexts) {
             context->complete(ErrorInfo::OkStatus());
@@ -115,7 +126,20 @@ public:
 
 private:
     mutable std::mutex mutex_;
+    bool               released_{false};
 };
+
+TEST(LoadTaskRunnerTest, PendingEngineReleaseAllAlsoCompletesFutureSubmissions) {
+    PendingPerRankEngine engine;
+    auto first = engine.execute(TransferTask({TransferDescriptor::hostToDevice(0, 1, {1})}, std::chrono::seconds(30)));
+    EXPECT_FALSE(first->done());
+    engine.completeAll();
+    EXPECT_TRUE(first->done());
+    auto later = engine.execute(TransferTask({TransferDescriptor::hostToDevice(0, 2, {2})}, std::chrono::seconds(30)));
+    EXPECT_TRUE(later->done());
+    EXPECT_TRUE(later->success());
+    EXPECT_NO_THROW(engine.completeAll());
+}
 
 TEST(LoadTaskRunnerTest, CreateTaskAllowsNoTransferDescriptors) {
     GroupSetPtr                    group = makeTaskRunnerTestGroupSet();
@@ -145,6 +169,19 @@ TEST(LoadTaskRunnerTest, CreateTaskSkipsDeviceDescriptors) {
     const std::shared_ptr<LoadAsyncContext> context = coordinator->create({device_desc}, {false}, 1);
     LoadTaskRunner::TaskPtr                 task    = runner.createTask(context);
     EXPECT_EQ(task, nullptr);
+}
+
+TEST(LoadTaskRunnerTest, CreateTaskRejectsUnsupportedSourceTiers) {
+    const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet()};
+    LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
+    auto coordinator = std::make_shared<LoadContextCoordinator>(LoadContextCoordinator::CommitCallback{},
+                                                                LoadContextCoordinator::AbortCallback{});
+    for (Tier tier : {Tier::REMOTE, Tier::NONE, static_cast<Tier>(255)}) {
+        auto desc        = TransferDescriptor::hostToDevice(0, 1, {1});
+        desc.source_tier = tier;
+        auto context     = coordinator->create({desc}, {false}, 1);
+        EXPECT_THROW((void)runner.createTask(context), std::invalid_argument);
+    }
 }
 
 TEST(LoadTaskRunnerTest, CreateTaskPartitionsHostAndDiskDescriptors) {
@@ -311,30 +348,38 @@ TEST(LoadTaskRunnerTest, PendingTransferDoesNotRetainOuterWorker) {
     BlockTreeTaskPool              outer_pool(1, 8, "AsyncLoadOuter");
     ASSERT_TRUE(outer_pool.start());
 
-    auto                first  = makeLoadTask({TransferDescriptor::hostToDevice(0, 1, {1})});
-    auto                second = makeLoadTask({TransferDescriptor::hostToDevice(0, 2, {2})});
-    std::atomic<size_t> started{0};
-    std::atomic<size_t> settled{0};
-    const auto          submit_task = [&](const LoadTaskRunner::TaskPtr& task) {
+    auto                    first  = makeLoadTask({TransferDescriptor::hostToDevice(0, 1, {1})});
+    auto                    second = makeLoadTask({TransferDescriptor::hostToDevice(0, 2, {2})});
+    std::atomic<size_t>     started{0};
+    std::atomic<size_t>     settled{0};
+    std::mutex              started_mutex;
+    std::condition_variable started_cv;
+    const auto              submit_task = [&](const LoadTaskRunner::TaskPtr& task) {
         return outer_pool.submit(BlockTreeTaskClass::LOAD, [&, task] {
             runner.runTransfer(task, dispatcher, metrics_reporter, [&](ErrorInfo) {
                 EXPECT_TRUE(outer_pool.submitCompletion([&] { settled.fetch_add(1); }));
             });
-            started.fetch_add(1);
+            {
+                std::lock_guard<std::mutex> lock(started_mutex);
+                started.fetch_add(1);
+            }
+            started_cv.notify_all();
         });
     };
 
-    ASSERT_TRUE(submit_task(first));
-    ASSERT_TRUE(submit_task(second));
-    for (size_t attempt = 0; attempt < 100 && started.load() != 2; ++attempt) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    EXPECT_TRUE(submit_task(first));
+    EXPECT_TRUE(submit_task(second));
+    {
+        std::unique_lock<std::mutex> lock(started_mutex);
+        EXPECT_TRUE(started_cv.wait_for(lock, std::chrono::seconds(5), [&] { return started.load() == 2; }));
     }
+    // The bounded predicate above proves runTransfer returned. Never drain
+    // outer workers before releasing mock transfers on the timeout path.
     EXPECT_EQ(started.load(), 2u);
-    ASSERT_EQ(engine->contexts_.size(), 2u);
+    EXPECT_EQ(engine->contextCount(), 2u);
     EXPECT_EQ(settled.load(), 0u);
 
-    engine->contexts_[0]->complete(ErrorInfo::OkStatus());
-    engine->contexts_[1]->complete(ErrorInfo::OkStatus());
+    engine->completeAll();
     outer_pool.waitForIdle();
     EXPECT_EQ(settled.load(), 2u);
 }
@@ -351,22 +396,32 @@ TEST(LoadTaskRunnerTest, HundredPendingTransfersAreNotCappedByFourOuterWorkers) 
                                  "AsyncLoadOuter");
     ASSERT_TRUE(outer_pool.start());
 
-    std::atomic<size_t> started{0};
-    std::atomic<size_t> settled{0};
+    std::atomic<size_t>     started{0};
+    std::atomic<size_t>     settled{0};
+    std::mutex              started_mutex;
+    std::condition_variable started_cv;
     for (size_t index = 0; index < kBusinessCount; ++index) {
         const BlockIdxType block_index = static_cast<BlockIdxType>(index + 1);
         auto               task = makeLoadTask({TransferDescriptor::hostToDevice(0, block_index, {block_index})});
-        ASSERT_TRUE(outer_pool.submit(BlockTreeTaskClass::LOAD, [&, task] {
+        EXPECT_TRUE(outer_pool.submit(BlockTreeTaskClass::LOAD, [&, task] {
             runner.runTransfer(task, dispatcher, metrics_reporter, [&](ErrorInfo) {
                 EXPECT_TRUE(outer_pool.submitCompletion([&] { settled.fetch_add(1); }));
             });
-            started.fetch_add(1);
+            {
+                std::lock_guard<std::mutex> lock(started_mutex);
+                started.fetch_add(1);
+            }
+            started_cv.notify_all();
         }));
     }
 
-    for (size_t attempt = 0; attempt < 200 && started.load() != kBusinessCount; ++attempt) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    {
+        std::unique_lock<std::mutex> lock(started_mutex);
+        EXPECT_TRUE(
+            started_cv.wait_for(lock, std::chrono::seconds(5), [&] { return started.load() == kBusinessCount; }));
     }
+    // The bounded predicate above proves runTransfer returned. Never drain
+    // outer workers before releasing mock transfers on the timeout path.
     EXPECT_EQ(started.load(), kBusinessCount);
     EXPECT_EQ(engine->contextCount(), kBusinessCount);
     EXPECT_EQ(settled.load(), 0u);

@@ -565,6 +565,28 @@ TEST(LoadAsyncContextTest, ImmediateTransferFailureAfterSuccessfulCommitKeepsFal
     coordinator->shutdown();
 }
 
+TEST(LoadAsyncContextTest, LocalTransferFailureReportsErrorWithoutChangingPrefillFallbackStatus) {
+    size_t             commits     = 0;
+    size_t             aborts      = 0;
+    auto               coordinator = makeCoordinator(commits, aborts);
+    TransferDescriptor descriptor;
+    descriptor.source_tier = Tier::HOST;
+    auto context           = coordinator->create({descriptor}, {false}, 1);
+    ASSERT_TRUE(coordinator->registerContext(context));
+    EXPECT_TRUE(context->errorInfo().ok());
+    ASSERT_TRUE(context->commit());
+    ASSERT_TRUE(context->completeTransfers(1, false));
+    ASSERT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_FALSE(context->errorInfo().ok());
+    // Post-allocation copy failure remains eligible for the PREFILL fallback.
+    EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
+    ErrorInfo callback_error = ErrorInfo::OkStatus();
+    context->onDone([&](ErrorInfo error) { callback_error = std::move(error); });
+    EXPECT_EQ(context->errorInfo().ToString(), callback_error.ToString());
+    coordinator->shutdown();
+}
+
 TEST(LoadAsyncContextTest, BackendReadFailureMarksCommittedContextFailedAndReleasesPin) {
     size_t commits     = 0;
     size_t aborts      = 0;

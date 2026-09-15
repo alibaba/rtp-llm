@@ -21,8 +21,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     ASSERT_EQ(manager_->cpSlotMapper(), cp_mapper);
     ASSERT_TRUE(cp_mapper->isSharded());
 
-    auto pausable_engine =
-        std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
+    auto pausable_engine = std::make_shared<PausableRecordingTransferEngine>(
+        cache->groupSets(), cache->isDiskCacheEnabled(), cache->config());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_engine);
     transfer_engine_.reset();
 
@@ -287,7 +287,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     }
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
     auto cache  = manager_->blockTreeCache();
-    auto engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
+    auto engine = std::make_shared<PausableRecordingTransferEngine>(
+        cache->groupSets(), cache->isDiskCacheEnabled(), cache->config());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, engine);
     transfer_engine_.reset();
     const auto initial_device = snapshotDevicePools(manager_);
@@ -680,7 +681,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
     auto             cache               = manager_->blockTreeCache();
     constexpr size_t staging_block_count = 2;
     auto             engine              = std::make_shared<PausableRecordingTransferEngine>(
-        cache->groupSets(), cache->isDiskCacheEnabled(), staging_block_count);
+        cache->groupSets(), cache->isDiskCacheEnabled(), cache->config());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, engine);
     transfer_engine_.reset();
     EXPECT_EQ(cache->config().device_disk_staging_block_count, staging_block_count);

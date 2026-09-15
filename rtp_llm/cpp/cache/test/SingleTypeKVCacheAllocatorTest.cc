@@ -354,6 +354,23 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConstructorAndInit) {
     EXPECT_EQ(snapshots[0].used_blocks, 0u);
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, FailedBlockTreeAttachmentCannotReinitializeBaseAllocator) {
+    auto config = createSingleTypeTestConfig();
+    allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
+    KVCacheConfig invalid;
+    invalid.enable_memory_cache  = true;
+    invalid.memory_cache_size_mb = 0;
+    allocator_->setBlockTreeCacheConfigForTest(invalid);
+    EXPECT_FALSE(allocator_->init());
+    EXPECT_EQ(allocator_->blockTreeCacheOwner(), nullptr);
+    const auto allocated_blocks = allocator_->totalBlocksNum();
+    EXPECT_EQ(allocated_blocks, config.block_num - 1);
+    allocator_->setBlockTreeCacheConfigForTest(KVCacheConfig{});
+    EXPECT_FALSE(allocator_->init());
+    EXPECT_EQ(allocator_->totalBlocksNum(), allocated_blocks);
+    EXPECT_EQ(allocator_->blockTreeCacheOwner(), nullptr);
+}
+
 TEST_F(SingleTypeKVCacheAllocatorTest, InitRejectsLinearGroupBeforeCreatingBlockPool) {
     auto config = makeSimpleLinearCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);

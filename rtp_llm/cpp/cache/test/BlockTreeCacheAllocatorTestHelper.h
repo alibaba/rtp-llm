@@ -20,7 +20,14 @@ public:
     explicit BlockTreeCacheTestAllocator(const CacheConfig& config, Args&&... args):
         Allocator(config, std::forward<Args>(args)...), config_(config) {}
 
+    // Like the production allocator, initialization is single-attempt.
+    // A failed BTC attachment keeps base resources owned until destruction;
+    // discard this helper instead of reinitializing a partially built allocator.
     bool init() {
+        if (init_attempted_) {
+            return false;
+        }
+        init_attempted_ = true;
         if (!Allocator::init()) {
             return false;
         }
@@ -50,13 +57,13 @@ public:
                                               std::vector<RequiredPositions> required_positions) const {
         typename Allocator::PreparedKVCache prepared;
         prepared.required_positions = std::move(required_positions);
-        return this->evaluatePreparedInitCapacity(
-            malloc_info, reserve_blocks, prepared, /*has_load_context=*/true);
+        return this->evaluatePreparedInitCapacity(malloc_info, reserve_blocks, prepared, /*has_load_context=*/true);
     }
 
 private:
-    CacheConfig   config_;
-    KVCacheConfig kv_cache_config_;
+    bool                            init_attempted_{false};
+    CacheConfig                     config_;
+    KVCacheConfig                   kv_cache_config_;
     std::shared_ptr<StorageBackend> storage_backend_;
 };
 
