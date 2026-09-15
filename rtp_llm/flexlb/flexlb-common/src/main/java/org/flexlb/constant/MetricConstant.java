@@ -52,6 +52,10 @@ public class MetricConstant {
 
     public static final String ENGINE_BALANCING_MASTER_DISPATCH_REASON = "app.engine.balancing.master.dispatch.reason";
 
+    public static final String ENGINE_BALANCING_MASTER_BATCH_QPS = "app.engine.balancing.master.batch.qps";
+
+    public static final String ENGINE_BALANCING_MASTER_BATCH_SCHEDULE_RT = "app.engine.balancing.master.batch.rt";
+
     /**
      * Batch dispatch size (number of requests per batch)
      */
@@ -477,6 +481,14 @@ public class MetricConstant {
      * Forward to master result QPS (status: success/failure)
      */
     public static final String FORWARD_TO_MASTER_RESULT = "app.forward.to.master.result";
+
+    /* ------------------------ Dispatcher (batch fanout) Monitoring -------------------------- */
+    public static final String DISPATCHER_ALL_QPS = "app.dispatcher.all.qps";
+    public static final String DISPATCHER_ALL_RT = "app.dispatcher.all.rt";
+    public static final String DISPATCHER_CHUNK_DETAIL_QPS = "app.dispatcher.chunk.detail.qps";
+    public static final String DISPATCHER_CHUNK_RT = "app.dispatcher.chunk.rt";
+    public static final String DISPATCHER_FEPOOL_SIZE = "app.dispatcher.fepool.size";
+    public static final String DISPATCHER_FEPOOL_ALIVE = "app.dispatcher.fepool.alive";
 
     /* ------------------------ gRPC Server Executor Monitoring -------------------------- */
 
