@@ -342,6 +342,10 @@ class ModelFactory:
             engine_config=engine_config,
             target_model=model,
         )
+        if propose_model is not None and torch.cuda.is_available():
+            # Return unused draft-loading allocations before KV cache sizing
+            # queries CUDA free memory rather than allocator-reusable memory.
+            torch.cuda.empty_cache()
 
         # Create engine using create_engine function (replaces AsyncModel)
         alog_conf_path = engine_config.profiling_debug_logging_config.ft_alog_conf_path
