@@ -185,6 +185,7 @@ def _build_decode_inputs(
     tags: list[str],
     values: dict[str, int],
     batch_size: int = 2,
+    block_count: int = 1,
 ) -> PyModelInputs:
     attention_inputs = PyAttentionInputs()
     attention_inputs.is_prefill = False
@@ -218,7 +219,7 @@ def _build_decode_inputs(
         values,
         batch_size=batch_size,
         token_count=batch_size,
-        block_count=1,
+        block_count=block_count,
     )
 
 
