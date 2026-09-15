@@ -78,6 +78,7 @@ def _validate_extension_contract(
         "max_m": MEGA_MOE_FRONT_CAPACITY,
         "scale_cols": dim // 128,
         "collapse_ssq_bits": 32,
+        "hash_input_id_bits": 32,
     }
     mismatches = {
         name: (geometry.get(name), value)
@@ -224,12 +225,8 @@ class MegaMoeFrontAdapter:
             )
 
         self.correction_bias = None
-        self.input_ids = None
         self.tid2eid = None
         if self.gate.hash:
-            self.input_ids = torch.empty(
-                (MEGA_MOE_FRONT_CAPACITY,), dtype=torch.int64, device=device
-            )
             self.tid2eid = self.gate.tid2eid.to(torch.int32).contiguous()
         else:
             if self.gate.bias is None:
@@ -263,7 +260,9 @@ class MegaMoeFrontAdapter:
             self._graph_plans[key] = plan
         return plan, False
 
-    def supports(self, residual: torch.Tensor) -> bool:
+    def supports(
+        self, residual: torch.Tensor, input_ids: torch.Tensor | None = None
+    ) -> bool:
         """Return whether ``M*S`` fits both the front ABI and MoE buffer."""
 
         if (
@@ -275,6 +274,12 @@ class MegaMoeFrontAdapter:
         ):
             return False
         tokens = reduce(mul, (int(value) for value in residual.shape[:-2]), 1)
+        if input_ids is not None and (
+            not input_ids.is_contiguous() or int(input_ids.numel()) != tokens
+        ):
+            return False
+        if self.gate.hash and (input_ids is None or input_ids.dtype != torch.int32):
+            return False
         mega_capacity = int(self.executor._mega_buf.num_max_tokens_per_rank)
         return 0 <= tokens <= min(MEGA_MOE_FRONT_CAPACITY, mega_capacity)
 
@@ -324,17 +329,17 @@ class MegaMoeFrontAdapter:
             plan, temporary_plan = self._plan_for(input_x, tokens)
             try:
                 if self.gate.hash:
-                    assert self.input_ids is not None and self.tid2eid is not None
-                    hash_input_ids = input_ids_flat
-                    if hash_input_ids.dtype != torch.int64:
-                        self.input_ids[:tokens].copy_(hash_input_ids)
-                        hash_input_ids = self.input_ids
+                    assert self.tid2eid is not None
+                    if input_ids_flat.dtype != torch.int32:
+                        raise RuntimeError(
+                            "DSV4 hash MoE front requires production int32 input_ids"
+                        )
                     plan.run_hash_out(
                         self.hc_base,
                         self.hc_scale,
                         self.ffn_norm_weight,
                         self.router_weight,
-                        hash_input_ids,
+                        input_ids_flat,
                         self.tid2eid,
                         self.collapsed,
                         self.collapse_ssq,

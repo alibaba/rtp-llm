@@ -101,7 +101,6 @@ def _fake_adapter(dim: int = 128) -> tuple[MegaMoeFrontAdapter, _FakePlan]:
     adapter.ffn_norm_weight = torch.empty((dim,), dtype=torch.bfloat16)
     adapter.router_weight = torch.empty((256, dim), dtype=torch.bfloat16)
     adapter.correction_bias = torch.empty((256,), dtype=torch.float32)
-    adapter.input_ids = None
     adapter.tid2eid = None
     adapter._workspace = object()
     plan = _FakePlan()
@@ -273,6 +272,15 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         self.assertTrue(adapter.supports(_TensorContract(16, 2, 4, adapter.dim)))
         self.assertFalse(adapter.supports(_TensorContract(17, 2, 4, adapter.dim)))
 
+        adapter.gate.hash = True
+        hash_residual = _TensorContract(16, 2, 4, adapter.dim)
+        self.assertTrue(
+            adapter.supports(hash_residual, torch.empty(32, dtype=torch.int32))
+        )
+        self.assertFalse(
+            adapter.supports(hash_residual, torch.empty(32, dtype=torch.int64))
+        )
+
     def test_validates_v3_sm103_extension_contract(self) -> None:
         geometry = {
             "abi_version": 1,
@@ -285,6 +293,7 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             "max_m": MEGA_MOE_FRONT_CAPACITY,
             "scale_cols": 32,
             "collapse_ssq_bits": 32,
+            "hash_input_id_bits": 32,
         }
         ops = SimpleNamespace(
             geometry_moe_front=lambda _hidden: geometry,

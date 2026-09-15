@@ -455,7 +455,7 @@ class Block(nn.Module):
         residual = x
         use_moe_front = (
             self._moe_front_adapter is not None
-            and self._moe_front_adapter.supports(x)
+            and self._moe_front_adapter.supports(x, input_ids)
         )
         if use_moe_front:
             ffn_out, x_pre, post, comb = self._moe_front_adapter.forward(x, input_ids)
