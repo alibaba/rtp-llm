@@ -165,3 +165,50 @@ def resize_video_to_shape(video: torch.Tensor, processor: Any, height: int, widt
         size=SizeDict(height=height, width=width),
         resample=processor.resample,
     )[0]
+
+
+def video_timestamps(frame_indices, source_fps, temporal_patch_size):
+    """Match vLLM Qwen3VLProcessingInfo._calculate_timestamps."""
+    indices = list(frame_indices)
+    if not indices or not math.isfinite(source_fps) or source_fps <= 0:
+        raise ValueError("video timestamps require frame indices and positive FPS")
+    if temporal_patch_size <= 0:
+        raise ValueError("temporal patch size must be positive")
+    padding = (-len(indices)) % temporal_patch_size
+    indices += [indices[-1]] * padding
+    seconds = [index / source_fps for index in indices]
+    return [
+        (seconds[i] + seconds[i + temporal_patch_size - 1]) / 2
+        for i in range(0, len(indices), temporal_patch_size)
+    ]
+
+
+def video_token_layout(grid_thw, frame_indices, source_fps, processor):
+    """Compact prompt replacement: token IDs plus -N for N vision features.
+
+    Each temporal patch gets its own timestamp and vision start/end pair.
+    Timestamp strings are encoded independently, as in vLLM get_video_repl.
+    """
+    if tuple(grid_thw.shape) != (1, 3):
+        raise ValueError("one video grid is required per video layout")
+    t, h, w = grid_thw[0].tolist()
+    video_processor = processor.video_processor
+    timestamps = video_timestamps(
+        frame_indices, source_fps, video_processor.temporal_patch_size
+    )
+    merge = video_processor.merge_size
+    if len(timestamps) != t or h <= 0 or w <= 0 or h % merge or w % merge:
+        raise ValueError("timestamps and video grid do not match")
+    tokens_per_frame = (h // merge) * (w // merge)
+    tokenizer = processor.tokenizer
+    start = tokenizer.convert_tokens_to_ids("<|vision_start|>")
+    end = tokenizer.convert_tokens_to_ids("<|vision_end|>")
+    if start is None or end is None:
+        raise ValueError("video tokenizer lacks vision delimiters")
+    layout = []
+    for timestamp in timestamps:
+        layout.extend(
+            tokenizer.encode(f"<{timestamp:.1f} seconds>", add_special_tokens=False)
+        )
+        layout.extend([start, -tokens_per_frame, end])
+    return torch.tensor(layout, dtype=torch.int32)

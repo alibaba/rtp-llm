@@ -216,6 +216,41 @@ class GrpcInlineOutputBackendTest(TestCase):
                 )
 
 
+class VideoTokenLayoutTransportTest(TestCase):
+    def test_grpc_and_rdma_preserve_per_media_inline_layouts(self):
+        from rtp_llm.utils.grpc_util import trans_from_tensor
+
+        layouts = [
+            torch.empty(0, dtype=torch.int32),
+            torch.tensor([10, 100, -4, 101, 11, 100, -4, 101], dtype=torch.int32),
+        ]
+        res = MMEmbeddingRes([_rows(2), _rows(8)], token_layouts=layouts)
+        exporter = MagicMock()
+        exporter.export_embedding.return_value = [_serialized_desc("video")]
+        for backend in (GrpcInlineOutputBackend(), RdmaOutputBackend(exporter)):
+            with _tensors_look_cuda():
+                receipt = backend.transfer(_rdma_request(), res).receipt
+            self.assertEqual(
+                list(receipt.multimodal_token_layout),
+                [trans_from_tensor(x) for x in layouts],
+            )
+            self.assertEqual(list(receipt.split_size), [2, 8])
+
+    def test_layout_serialization_failure_happens_before_rdma_export(self):
+        exporter = MagicMock()
+        backend = RdmaOutputBackend(exporter)
+        res = MMEmbeddingRes(
+            [_rows(4)], token_layouts=[torch.tensor([1, -4, 2], dtype=torch.int32)]
+        )
+        with _tensors_look_cuda(), patch(
+            "rtp_llm.multimodal.transport.rdma.backend.trans_from_tensor",
+            side_effect=ValueError("bad layout"),
+        ):
+            with self.assertRaisesRegex(ValueError, "bad layout"):
+                backend.transfer(_rdma_request(), res)
+        exporter.export_embedding.assert_not_called()
+
+
 class _FakeBackend(MMTransportBackend):
     name = "fake"
 

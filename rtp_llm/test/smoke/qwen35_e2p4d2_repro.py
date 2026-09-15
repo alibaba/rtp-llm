@@ -70,7 +70,7 @@ def request(url, p, index):
             and (not r["truncated"])
         )
         if r["ok"] and (
-            r["usage"].get("prompt_tokens") != 24422
+            r["usage"].get("prompt_tokens") != 24601
             or r["usage"].get("prompt_tokens_details", {}).get("video_tokens") != 20240
             or r.get("aux_info", {}).get("reuse_len") != 0
             or (not r.get("aux_info", {}).get("pd_sep"))
@@ -634,7 +634,7 @@ def run_benchmark_phase(
                 usage = row.get("usage", {})
                 aux = row.get("aux_info", {})
                 if row.get("ok") and (
-                    usage.get("prompt_tokens") != 24422
+                    usage.get("prompt_tokens") != 24601
                     or usage.get("prompt_tokens_details", {}).get("video_tokens")
                     != 20240
                     or aux.get("reuse_len") != 0

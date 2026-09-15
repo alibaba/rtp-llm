@@ -1116,7 +1116,24 @@ class MMProcessEngine:
                         if defer_feature_hashes
                         else [h for wi in work_items for h in wi.feature_hashes or []]
                     )
-                    result = MMEmbeddingRes(emb_res, pos_res, extra_input_res, hashes)
+                    layouts = []
+                    for wi in work_items:
+                        item = wi.embedding_result
+                        count = len(maybe_tensor_to_list(item[0], ndim_threshold=2))
+                        if len(item) > 3:
+                            values = maybe_tensor_to_list(item[3], ndim_threshold=1)
+                            if len(values) != count:
+                                raise ValueError(
+                                    "token layout count does not match media count"
+                                )
+                            layouts.extend(values)
+                        else:
+                            layouts.extend(
+                                torch.empty(0, dtype=torch.int32) for _ in range(count)
+                            )
+                    if not any(layout.numel() for layout in layouts):
+                        layouts = []
+                    result = MMEmbeddingRes(emb_res, pos_res, extra_input_res, hashes, layouts)
 
                 if not self.vit_config.disable_access_log:
                     self._access_logger.log_success_access(
@@ -1416,7 +1433,8 @@ class MMProcessEngine:
         extra_res = (
             maybe_tensor_to_list(result[2], ndim_threshold=1) if len(result) > 2 else []
         )
-        return MMEmbeddingRes(emb_res, pos_res, extra_res, feature_hashes)
+        layouts = maybe_tensor_to_list(result[3], ndim_threshold=1) if len(result) > 3 else []
+        return MMEmbeddingRes(emb_res, pos_res, extra_res, feature_hashes, layouts)
 
     @vit_media.request
     def async_submit(

@@ -121,7 +121,8 @@ ErrorResult<ExpandedOutput>
 MultimodalProcessor::expandTokenIds(const std::vector<torch::Tensor>&                mm_embedding,
                                     const torch::Tensor&                             token_ids,
                                     torch::Tensor                                    token_type_ids,
-                                    const std::optional<std::vector<torch::Tensor>>& feature_hashes) {
+                                    const std::optional<std::vector<torch::Tensor>>& feature_hashes,
+                                    const std::vector<std::pair<int32_t, int32_t>>* resolved_locs) {
     if (mm_embedding.size() == 0) {
         return ExpandedOutput(token_ids, token_type_ids);
     }
@@ -130,8 +131,14 @@ MultimodalProcessor::expandTokenIds(const std::vector<torch::Tensor>&           
     }
 
     assert(token_ids.dim() == 1);
-    int expanded_len = token_ids.size(0);
-    CHECK_AND_RETURN_REF(locs, getMultimodalTags(token_ids));
+    int                                      expanded_len = token_ids.size(0);
+    std::vector<std::pair<int32_t, int32_t>> locs;
+    if (resolved_locs) {
+        locs = *resolved_locs;
+    } else {
+        CHECK_AND_RETURN_REF(parsed_locs, getMultimodalTags(token_ids));
+        locs = std::move(parsed_locs);
+    }
     torch::Tensor expanded_token_type_ids;
     int           mm_num = mm_embedding.size();
     if (feature_hashes.has_value() && feature_hashes->size() != mm_embedding.size()) {
@@ -221,6 +228,136 @@ MultimodalProcessor::expandTokenIds(const std::vector<torch::Tensor>&           
                           std::move(cache_spans));
 }
 
+ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIdsWithLayout(MultimodalOutput&                   output,
+                                                                          const torch::Tensor&                token_ids,
+                                                                          const std::vector<MultimodalInput>& mm_inputs,
+                                                                          torch::Tensor token_type_ids) {
+    if (output.mm_token_layouts.empty()) {
+        return expandTokenIds(output.mm_features, token_ids, token_type_ids, output.mm_feature_hashes);
+    }
+    try {
+        CHECK_AND_RETURN_REF(locs, getMultimodalTags(token_ids));
+        const size_t count     = output.mm_features.size();
+        auto         malformed = [](const std::string& message) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "multimodal token layout: " + message);
+        };
+        if (locs.size() != count || output.mm_token_layouts.size() != count
+            || (output.mm_feature_hashes && output.mm_feature_hashes->size() != count)
+            || (output.mm_position_ids && output.mm_position_ids->size() != count)
+            || (output.mm_extra_input && output.mm_extra_input->size() != count)) {
+            return malformed("media count mismatch");
+        }
+        std::vector<int32_t>                     ids, types;
+        std::vector<std::pair<int32_t, int32_t>> compact_locs;
+        MultimodalOutput                         split;
+        if (output.mm_feature_hashes)
+            split.mm_feature_hashes.emplace();
+        if (output.mm_position_ids)
+            split.mm_position_ids.emplace();
+        if (output.mm_extra_input)
+            split.mm_extra_input.emplace();
+        auto        source   = token_ids.contiguous();
+        const auto* original = source.data_ptr<int32_t>();
+        if (token_type_ids.defined())
+            token_type_ids = token_type_ids.contiguous();
+        auto append_original = [&](int64_t begin, int64_t end) {
+            ids.insert(ids.end(), original + begin, original + end);
+            if (token_type_ids.defined()) {
+                auto* ptr = token_type_ids.data_ptr<int32_t>();
+                types.insert(types.end(), ptr + begin, ptr + end);
+            }
+        };
+        int64_t cursor = 0;
+        for (size_t i = 0; i < count; ++i) {
+            const auto& layout_tensor = output.mm_token_layouts[i];
+            const auto& features      = output.mm_features[i];
+            if (!layout_tensor.defined() || layout_tensor.numel() == 0) {
+                const int32_t start = ids.size() + locs[i].first - cursor;
+                compact_locs.emplace_back(start, start + locs[i].second - locs[i].first);
+                append_original(cursor, locs[i].second);
+                cursor = locs[i].second;
+                split.mm_features.push_back(features);
+                if (split.mm_feature_hashes)
+                    split.mm_feature_hashes->push_back(output.mm_feature_hashes->at(i));
+                if (mm_inputs.size() == count)
+                    split.mm_feature_types.push_back(mm_inputs[i].mm_type);
+                if (split.mm_position_ids)
+                    split.mm_position_ids->push_back(output.mm_position_ids->at(i));
+                if (split.mm_extra_input)
+                    split.mm_extra_input->push_back(output.mm_extra_input->at(i));
+                continue;
+            }
+            if (include_sep_tokens_ || locs[i].first <= cursor || locs[i].second >= source.numel()
+                || layout_tensor.dim() != 1 || layout_tensor.scalar_type() != torch::kInt32) {
+                return malformed("replacement requires int32 layout and enclosing vision tags");
+            }
+            const int64_t begin = locs[i].first - 1, end = locs[i].second + 1;
+            const int32_t start_tag = original[begin], end_tag = original[end - 1];
+            bool          paired = false;
+            for (const auto& tags : sep_token_ids_) {
+                paired |= tags.size() == 2 && tags[0] == start_tag && tags[1] == end_tag;
+            }
+            if (!paired || features.dim() < 1 || features.size(0) <= 0) {
+                return malformed("invalid vision tags or features");
+            }
+            if (output.mm_extra_input && output.mm_extra_input->at(i).numel() != 0) {
+                return malformed("per-frame replacement with opaque extra input is unsupported");
+            }
+            if (output.mm_position_ids && output.mm_position_ids->at(i).size(0) != features.size(0)) {
+                return malformed("position count differs from feature count");
+            }
+            // vLLM replaces the video placeholder inside the original outer
+            // vision pair, retaining that pair as text around timestamped frames.
+            append_original(cursor, locs[i].first);
+            auto        layout         = layout_tensor.to(torch::kCPU).contiguous();
+            const auto* values         = layout.data_ptr<int32_t>();
+            int64_t     feature_offset = 0;
+            for (int64_t j = 0; j < layout.numel(); ++j) {
+                const int32_t value = values[j];
+                if (value >= 0) {
+                    ids.push_back(value);
+                } else {
+                    const int64_t length = -static_cast<int64_t>(value);
+                    if (j == 0 || j + 1 == layout.numel() || values[j - 1] != start_tag || values[j + 1] != end_tag
+                        || length > features.size(0) - feature_offset) {
+                        return malformed("invalid visual span");
+                    }
+                    // Explicit spans distinguish frame features from the nested
+                    // outer vision tags, which remain ordinary text tokens.
+                    compact_locs.emplace_back(ids.size(), ids.size() + 1);
+                    ids.push_back(-1);
+                    split.mm_features.push_back(features.narrow(0, feature_offset, length));
+                    if (split.mm_feature_hashes)
+                        split.mm_feature_hashes->push_back(output.mm_feature_hashes->at(i).narrow(0, feature_offset, length));
+                    if (mm_inputs.size() == count)
+                        split.mm_feature_types.push_back(mm_inputs[i].mm_type);
+                    if (split.mm_position_ids) {
+                        split.mm_position_ids->push_back(
+                            output.mm_position_ids->at(i).narrow(0, feature_offset, length));
+                    }
+                    if (split.mm_extra_input)
+                        split.mm_extra_input->push_back(output.mm_extra_input->at(i));
+                    feature_offset += length;
+                }
+                if (token_type_ids.defined())
+                    types.push_back(token_type_ids.data_ptr<int32_t>()[begin]);
+            }
+            if (feature_offset != features.size(0))
+                return malformed("visual spans do not cover features");
+            cursor = locs[i].second;
+        }
+        append_original(cursor, source.numel());
+        auto compact_ids   = torch::tensor(ids, torch::kInt32);
+        auto compact_types = token_type_ids.defined() ? torch::tensor(types, torch::kInt32) : torch::Tensor();
+        CHECK_AND_RETURN_REF(expanded,
+                             expandTokenIds(split.mm_features, compact_ids, compact_types, split.mm_feature_hashes, &compact_locs));
+        output = std::move(split);
+        return std::move(expanded);
+    } catch (const std::exception& e) {
+        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, std::string("invalid multimodal token layout: ") + e.what());
+    }
+}
+
 ErrorResult<std::vector<std::pair<int32_t, int32_t>>>
 MultimodalProcessor::getMultimodalTags(const torch::Tensor& token_ids) {
     try {
@@ -268,13 +405,14 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     CHECK_AND_RETURN_REF(
         mm_embedding_res,
         MultimodalEmbedding(input->multimodal_inputs.value(), ip_port, input->request_id, server_context));
+    CHECK_AND_RETURN_REF(
+        expanded_ids, expandTokenIdsWithLayout(mm_embedding_res, input->input_ids, input->multimodal_inputs.value()));
     auto                       mm_features = std::move(mm_embedding_res.mm_features);
     std::vector<torch::Tensor> mm_extra_input;
     if (mm_embedding_res.mm_extra_input.has_value()) {
         mm_extra_input = std::move(mm_embedding_res.mm_extra_input.value());
     }
-    CHECK_AND_RETURN_REF(expanded_ids,
-                         expandTokenIds(mm_features, input->input_ids, {}, mm_embedding_res.mm_feature_hashes));
+    input->multimodal_feature_types = std::move(mm_embedding_res.mm_feature_types);
     RETURN_IF_STATUS_ERROR(checkExpandLength(expanded_ids));
     RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_features, "embedding"));
     RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_extra_input, "extra input"));
@@ -295,11 +433,9 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     CHECK_AND_RETURN_REF(mm_embedding_res,
                          MultimodalEmbedding(mm_inputs, vit_role_addr, input->request_id, server_context));
     MultimodalFeature mm_features;
-    mm_features.features = std::move(mm_embedding_res.mm_features);
     CHECK_AND_RETURN_REF(
-        expanded_ids,
-        expandTokenIds(
-            mm_features.features, input->token_ids, input->token_type_ids, mm_embedding_res.mm_feature_hashes));
+        expanded_ids, expandTokenIdsWithLayout(mm_embedding_res, input->token_ids, mm_inputs, input->token_type_ids));
+    mm_features.features         = std::move(mm_embedding_res.mm_features);
     mm_features.expanded_ids     = expanded_ids.expanded_ids;
     mm_features.text_tokens_mask = expanded_ids.text_tokens_mask;
     mm_features.locs             = expanded_ids.locs;
@@ -318,9 +454,8 @@ MultimodalProcessor::getMultimodalFeatures(const torch::Tensor&                 
                                            const std::vector<rtp_llm::MultimodalInput>& mm_inputs) {
     MultimodalFeature mm_features;
     CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs));
-    mm_features.features = std::move(mm_embedding_res.mm_features);
-    CHECK_AND_RETURN_REF(expanded_ids,
-                         expandTokenIds(mm_features.features, input_ids, {}, mm_embedding_res.mm_feature_hashes));
+    CHECK_AND_RETURN_REF(expanded_ids, expandTokenIdsWithLayout(mm_embedding_res, input_ids, mm_inputs));
+    mm_features.features         = std::move(mm_embedding_res.mm_features);
     mm_features.expanded_ids     = expanded_ids.expanded_ids;
     mm_features.text_tokens_mask = expanded_ids.text_tokens_mask;
     mm_features.locs             = expanded_ids.locs;

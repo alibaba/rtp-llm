@@ -39,9 +39,11 @@ class Qwen35VideoBatchTest(unittest.TestCase):
         self.part.visual = Qwen3_5MoeVisionModel(config).eval()
 
     def media(self, grid, offset=0.0):
-        return torch.randn((int(torch.tensor(grid).prod()), 24)) + offset, torch.tensor(
-            [grid]
+        pixels = torch.randn((int(torch.tensor(grid).prod()), 24)) + offset
+        layout = torch.tensor(
+            [10, 11, -(grid[1] * grid[2] // 4), 12] * grid[0], dtype=torch.int32
         )
+        return pixels, torch.tensor([grid]), layout
 
     def test_mixed_videos_and_image_share_one_forward_without_contamination(self):
         data = [
@@ -60,6 +62,9 @@ class Qwen35VideoBatchTest(unittest.TestCase):
         for actual, expected in zip(result, reference):
             torch.testing.assert_close(actual[0], expected[0], atol=2e-5, rtol=2e-4)
             torch.testing.assert_close(actual[1], expected[1], atol=0, rtol=0)
+        for item, actual in zip(data[:2], result[:2]):
+            self.assertEqual(actual[1][:, 0].count_nonzero().item(), 0)
+            torch.testing.assert_close(actual[3], item[2])
         reordered = self.part.batched_embedding(
             list(reversed(data)), list(reversed(kinds))
         )

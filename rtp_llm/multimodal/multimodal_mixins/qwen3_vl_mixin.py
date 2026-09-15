@@ -81,6 +81,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         vit_config: VitConfig,
         processor,
         factor: int = 32,
+        return_video_metadata: bool = False,
     ):
         assert len(mm_inputs) == 1
         mm_input = mm_inputs[0]
@@ -193,6 +194,8 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
                     do_sample_frames=False,
                     video_metadata=metadata,
                 )
+            if return_video_metadata:
+                return res["pixel_values_videos"], res["video_grid_thw"], metadata
             return res["pixel_values_videos"], res["video_grid_thw"]
         else:
             raise Exception("unknown mm url type")

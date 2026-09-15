@@ -24,6 +24,9 @@ struct MultimodalOutput {
     std::optional<std::vector<torch::Tensor>> mm_position_ids   = std::nullopt;
     std::optional<std::vector<torch::Tensor>> mm_extra_input    = std::nullopt;
     std::optional<std::vector<torch::Tensor>> mm_feature_hashes = std::nullopt;
+    std::vector<torch::Tensor> mm_token_layouts = {};
+    // Original modality for each feature span after timestamped video expansion.
+    std::vector<int>                          mm_feature_types = {};
 };
 
 class MultimodalFeature {

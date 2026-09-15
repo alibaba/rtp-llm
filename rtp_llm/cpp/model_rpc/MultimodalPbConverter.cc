@@ -70,6 +70,13 @@ ErrorResult<MultimodalOutput> MultimodalPbConverter::inlineOutputFromPb(const Mu
             }
             mm_output.mm_extra_input = std::move(extra_inputs);
         }
+        if (output_pb.multimodal_token_layout_size() != 0
+            && output_pb.multimodal_token_layout_size() != static_cast<int>(split_sizes.size())) {
+            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "multimodal token layout count mismatch");
+        }
+        for (const auto& layout : output_pb.multimodal_token_layout()) {
+            mm_output.mm_token_layouts.emplace_back(TensorPbConvert::pbToTorch(layout));
+        }
         return mm_output;
     } catch (const std::exception& e) {
         return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,

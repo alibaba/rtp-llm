@@ -111,7 +111,9 @@ class MMEmbeddingRes:
         position_ids: Optional[List[torch.Tensor]] = None,
         extra_input: Optional[List[torch.Tensor]] = None,
         feature_hashes: Optional[List[torch.Tensor]] = None,
+        token_layouts: Optional[List[torch.Tensor]] = None,
     ):
+        self.token_layouts = token_layouts if token_layouts is not None else []
         self.embeddings = embeddings
         self.position_ids = position_ids if position_ids is not None else []
         # Model-specific extra input, one opaque flat 1-D tensor per image (e.g. deepstack).

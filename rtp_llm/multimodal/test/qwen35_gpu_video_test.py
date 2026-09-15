@@ -125,6 +125,26 @@ class GpuVideoTest(unittest.TestCase):
             torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_resized_nvdec_input_matches_cpu_uint8_rounding(self):
+        processor = self.processor()
+        generator = torch.Generator().manual_seed(37)
+        frames = torch.randint(
+            256, (5, 3, 64, 96), dtype=torch.uint8, generator=generator
+        )
+        data = GpuVideoInput(b"", 5, tuple(range(5)), 64, 96, 32, 64, 16, 2)
+        resized = gpu_video.resize_video_to_shape(frames, processor, 32, 64)
+        expected = processor(
+            resized, return_tensors="pt", do_resize=False, do_sample_frames=False
+        )["pixel_values_videos"]
+        with mock.patch.object(
+            gpu_video, "decode_video_cuda", return_value=frames.cuda()
+        ):
+            actual = preprocess_video_cuda(data, processor, "cuda:0")
+        torch.testing.assert_close(
+            actual.cpu().to(torch.bfloat16), expected.to(torch.bfloat16), atol=0, rtol=0
+        )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_session_drains_reuses_and_discards_failure_without_frame_cache(self):
         device = torch.device("cuda", torch.cuda.current_device())
         codec = mock.MagicMock()
