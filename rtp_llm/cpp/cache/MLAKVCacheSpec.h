@@ -42,7 +42,20 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         const size_t rope       = static_cast<size_t>(attn.rope_head_dim);
         spec->nope_per_token = no_pe;
         spec->rope_per_token = rope;
-        spec->elems_per_token = is_fp8 ? no_pe + no_pe / 128 * 4 + rope * 2 : no_pe + rope;
+
+        bool use_compact_fp8_layout = false;
+#if USING_ROCM
+        use_compact_fp8_layout = is_fp8 && attn.is_sparse;
+#endif
+
+        if (is_fp8 && !use_compact_fp8_layout) {
+            RTP_LLM_CHECK_WITH_INFO(no_pe % 128 == 0,
+                                    "MLA fp8 KVCacheSpec tag=%s requires kv_lora_rank aligned to 128, got=%zu",
+                                    desc.tag.c_str(), no_pe);
+            spec->elems_per_token = no_pe + no_pe / 128 * 4 + rope * 2;
+        } else {
+            spec->elems_per_token = no_pe + rope;
+        }
 
         return spec;
     }
