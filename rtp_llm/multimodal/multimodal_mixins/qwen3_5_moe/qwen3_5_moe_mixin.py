@@ -8,6 +8,7 @@ from PIL import Image
 from transformers import AutoProcessor, Qwen2VLImageProcessor
 
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseVitWeights,
@@ -28,7 +29,8 @@ from rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin import (
     Qwen3_VLMixin,
 )
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
-from rtp_llm.multimodal.qwen3_vl_video import resolve_video_size, video_token_layout
+from rtp_llm.multimodal.qwen3_vl_video import resolve_video_size, video_timestamp_tokens
+from rtp_llm.multimodal.vit_metrics import vit_preprocess_timer
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.database import CkptDatabase
@@ -55,6 +57,13 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
             "QWEN35_VIT_ATTN_BACKEND", "auto"
         )
         self.visual = Qwen3_5MoeVisionModel._from_config(config_hf)
+        self.word_embedding_weight = None
+        tokenizer = self.mm_processor.tokenizer
+        self.vision_start_token_id = tokenizer.convert_tokens_to_ids("<|vision_start|>")
+        self.vision_end_token_id = tokenizer.convert_tokens_to_ids("<|vision_end|>")
+        if self.vision_start_token_id is None or self.vision_end_token_id is None:
+            raise ValueError("video tokenizer lacks vision delimiters")
+
         from .vision_graph import VisionGraphCache
 
         self._vision_graph_cache = VisionGraphCache(self.visual)
@@ -76,7 +85,7 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
 
     @staticmethod
     def preprocess_input(
-        mm_inputs, vit_config, processor, factor=32, video_backend="cpu"
+        mm_inputs, vit_config, processor, factor=32, video_backend="nvdec"
     ):
         if (
             video_backend == "nvdec"
@@ -84,11 +93,15 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
             and mm_inputs[0].mm_type == MMUrlType.VIDEO
         ):
             item = mm_inputs[0]
-            source = get_bytes_io_from_url(
-                item.url,
-                vit_config.download_headers,
-                max_file_size_kb=vit_config.mm_video_max_file_size_kb,
-            )
+            with vit_preprocess_timer(
+                GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC,
+                {"model": "qwen35", "mm_type": "video"},
+            ):
+                source = get_bytes_io_from_url(
+                    item.url,
+                    vit_config.download_headers,
+                    max_file_size_kb=vit_config.mm_video_max_file_size_kb,
+                )
             data, grid = prepare_gpu_video(
                 source.getvalue(),
                 item.mm_preprocess_config,
@@ -100,10 +113,10 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
                     vit_config.mm_video_total_max_pixels,
                 ),
             )
-            layout = video_token_layout(
+            timestamps = video_timestamp_tokens(
                 grid, data.frame_indices, data.source_fps, processor
             )
-            return data, grid, layout
+            return data, grid, timestamps
         data = Qwen3_VLImageEmbedding.preprocess_input(
             mm_inputs, vit_config, processor, factor, return_video_metadata=True
         )
@@ -112,7 +125,7 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
             return (
                 pixels,
                 grid,
-                video_token_layout(
+                video_timestamp_tokens(
                     grid, metadata.frames_indices, metadata.fps, processor
                 ),
             )
@@ -131,15 +144,26 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
         patches = sum(t * h * w for t, h, w in rows)
         if data[0].shape[0] != patches:
             raise ValueError("pixel_values length does not match grid_thw")
+        text_tokens = 0
+        if mm_type == MMUrlType.VIDEO:
+            if len(data) != 3 or len(rows) != 1 or len(data[2]) != rows[0][0]:
+                raise ValueError("video timestamps and grid do not match")
+            text_tokens = sum(len(ids) + 2 for ids in data[2])
         config = self.visual.config
         workspace_per_patch = torch.empty((), dtype=self._data_type).element_size() * (
             8 * config.hidden_size + 2 * config.intermediate_size
         )
         return MMWorkEstimate(
             input_patches=patches,
-            output_tokens=patches // merge**2,
+            output_tokens=patches // merge**2 + text_tokens,
             estimated_workspace_bytes=(
                 patches * workspace_per_patch
+                + text_tokens
+                * (
+                    config.out_hidden_size
+                    * torch.empty((), dtype=self._data_type).element_size()
+                    + 12
+                )
                 + (data[0].workspace_bytes if isinstance(data[0], GpuVideoInput) else 0)
             ),
             max_attention_segment=max(h * w for _, h, w in rows),
@@ -214,27 +238,131 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
             pixel_values, grid_thw, return_dict=True, **kwargs
         )
         per_item_embeds = embeds.split(
-            [estimate.output_tokens for estimate in estimates]
+            [
+                estimate.input_patches // self.visual.spatial_merge_size**2
+                for estimate in estimates
+            ]
         )
-        per_grid_positions = self.get_position_ids(grid_thw, device=self._device)
-        results, grid_offset = [], 0
+        # One CPU lookup and one H2D copy for every video's timestamp/tag tokens
+        # in this scheduler batch. The full vocabulary stays on CPU.
+        text_ids = [
+            token
+            for data, kind in zip(data_list, mm_types)
+            if kind == MMUrlType.VIDEO
+            for ids in data[2]
+            for token in [*ids, self.vision_start_token_id, self.vision_end_token_id]
+        ]
+        text_embeddings = None
+        if text_ids:
+            if self.word_embedding_weight is None:
+                raise RuntimeError(
+                    "Qwen3.5 video word embedding weights are not loaded"
+                )
+            text_embeddings = self.word_embedding_weight[
+                torch.tensor(text_ids, dtype=torch.long)
+            ].to(device=self._device, dtype=self._data_type)
+        text_offset = 0
+        results = []
         for data, embedding, mm_type in zip(data_list, per_item_embeds, mm_types):
-            count = data[1].shape[0]
-            positions = per_grid_positions[grid_offset : grid_offset + count]
-            position_ids = positions[0] if count == 1 else torch.cat(positions)
             if mm_type == MMUrlType.VIDEO:
-                if len(data) < 3:
-                    raise ValueError(
-                        "Qwen3.5 video is missing its timestamp token layout"
-                    )
-                # Each frame is a separate MRoPE image grid. The text between
-                # frames advances the base position in the language model.
-                position_ids[:, 0] = 0
-                results.append((embedding, position_ids, None, data[2]))
+                embedding, position_ids, text_offset = self._assemble_video(
+                    embedding, data[1], data[2], text_embeddings, text_offset
+                )
             else:
-                results.append((embedding, position_ids))
-            grid_offset += count
+                positions = self.get_position_ids(data[1], device=self._device)
+                position_ids = (
+                    positions[0] if len(positions) == 1 else torch.cat(positions)
+                )
+            results.append((embedding, position_ids))
         return results
+
+    def load_word_embedding(self, database: CkptDatabase):
+        # Load with the model database so both safetensors and supported legacy
+        # checkpoints work. Keep the vocabulary off the ViT GPU and out of its
+        # parameter-size probe.
+        candidates = (
+            "model.language_model.embed_tokens.weight",
+            "language_model.model.embed_tokens.weight",
+            "language_model.embed_tokens.weight",
+            "model.embed_tokens.weight",
+        )
+        names = set(database.get_pretrain_tensor_names())
+        key = next((key for key in candidates if key in names), None)
+        if key is None:
+            raise ValueError("Qwen3.5 checkpoint has no language word embedding")
+        weights = database.load_tensor(key, data_type=None)
+        if len(weights) != 1 or weights[0].ndim != 2:
+            raise ValueError(
+                "Qwen3.5 word embedding must be one full vocabulary matrix"
+            )
+        weight = weights[0]
+        if (
+            weight.shape[1] != self.visual.config.out_hidden_size
+            or weight.shape[0]
+            <= max(self.vision_start_token_id, self.vision_end_token_id)
+            or not weight.is_floating_point()
+        ):
+            raise ValueError(
+                "Qwen3.5 word embedding shape/dtype does not match the vision output"
+            )
+        self.word_embedding_weight = weight.detach().cpu()
+        logging.info(
+            "Loaded Qwen3.5 video word embedding %s on CPU: %s",
+            key,
+            tuple(weight.shape),
+        )
+
+    def _assemble_video(self, features, grid, timestamps, text_embeddings, text_offset):
+        """Return a whole video span and its relative 3D MRoPE positions.
+
+        The prompt's outer vision tags remain ordinary text. Inside the span,
+        each timestamp and frame tag uses a word embedding. Each frame's visual
+        tokens reset temporal coordinates to zero; following text advances past
+        the largest spatial coordinate, exactly as separate frame spans do.
+        """
+        t, h, w = grid[0].tolist()
+        h //= self.visual.spatial_merge_size
+        w //= self.visual.spatial_merge_size
+        frame_size = h * w
+        if features.shape[0] != t * frame_size:
+            raise ValueError("video features and grid do not match")
+        frame_positions = torch.stack(
+            (
+                torch.zeros(frame_size, dtype=torch.int32),
+                torch.arange(h, dtype=torch.int32).repeat_interleave(w),
+                torch.arange(w, dtype=torch.int32).repeat(h),
+            ),
+            dim=1,
+        )
+        chunks, positions = [], []
+        base = 0
+        for frame, ids in enumerate(timestamps):
+            prefix_length = len(ids) + 1  # timestamp and vision_start
+            chunks.extend(
+                (
+                    text_embeddings[text_offset : text_offset + prefix_length],
+                    features[frame * frame_size : (frame + 1) * frame_size],
+                    text_embeddings[
+                        text_offset + prefix_length : text_offset + prefix_length + 1
+                    ],
+                )
+            )
+            text_offset += prefix_length + 1
+            positions.append(
+                torch.arange(base, base + prefix_length, dtype=torch.int32)[
+                    :, None
+                ].expand(-1, 3)
+            )
+            base += prefix_length
+            positions.append(frame_positions + base)
+            base += max(h, w)
+            positions.append(torch.full((1, 3), base, dtype=torch.int32))
+            base += 1
+        return (
+            torch.cat(chunks, dim=0),
+            torch.cat(positions, dim=0).to(device=features.device),
+            text_offset,
+        )
 
     def get_position_ids(
         self, grid_thw: torch.Tensor = None, device=None
@@ -309,6 +437,7 @@ class Qwen3_5MoeMixin(Qwen3_VLMixin):
         vit_weights = self.mm_related_params.vit_weights
         if isinstance(vit_weights, Qwen3_5MoeVitWeight):
             vit_weights.detect_ckpt_prefix(database.get_pretrain_tensor_names())
+        self.mm_part.load_word_embedding(database)
 
     @classmethod
     def _get_mm_module(cls, mm_related_params: VitParameters, vit_config: VitConfig):

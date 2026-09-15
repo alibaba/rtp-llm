@@ -73,11 +73,6 @@ private:
     int64_t                           semantic_mm_token_id_;
     int64_t                           max_seq_len_;
 
-    ErrorResult<ExpandedOutput> expandTokenIdsWithLayout(MultimodalOutput&                   output,
-                                                         const torch::Tensor&                token_ids,
-                                                         const std::vector<MultimodalInput>& mm_inputs,
-                                                         torch::Tensor                       token_type_ids = {});
-
     virtual ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
                                                               std::string                                 ip_port = "",
                                                               int64_t              request_id                     = 0,
@@ -87,8 +82,7 @@ private:
     expandTokenIds(const std::vector<torch::Tensor>&                mm_embedding,
                    const torch::Tensor&                             token_ids,
                    torch::Tensor                                    token_type_ids = {},
-                   const std::optional<std::vector<torch::Tensor>>& feature_hashes = std::nullopt,
-                   const std::vector<std::pair<int32_t, int32_t>>* resolved_locs = nullptr);
+                   const std::optional<std::vector<torch::Tensor>>& feature_hashes = std::nullopt);
 
     ErrorResult<std::vector<std::pair<int32_t, int32_t>>> getMultimodalTags(const torch::Tensor& token_ids);
 

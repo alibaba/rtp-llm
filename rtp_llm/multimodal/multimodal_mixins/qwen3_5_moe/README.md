@@ -1,41 +1,28 @@
 # Qwen3.5 video preprocessing
 
-Qwen3.5 inherits Qwen3-VL's image preprocessing and always uses NVDEC for videos.
-Preprocessing workers fetch bytes and plan frame/grid metadata on CPU; the
-embedding worker decodes frames with NVDEC and resizes/normalizes them on GPU.
-Video decoding requires PyNvVideoCodec and the NVIDIA video driver libraries.
+Qwen3.5 inherits Qwen3-VL image preprocessing. Videos use NVDEC by default;
+set QWEN35_VIDEO_BACKEND=cpu to use the CPU decoder. NVDEC requires
+PyNvVideoCodec and matching NVIDIA video driver libraries.
 
-Configure each video through its request content item's preprocess_config:
+Workers fetch bytes and plan sampling/grid metadata on CPU. The embedding
+scheduler decodes with NVDEC, uses CPU uint8 resize to match the reference
+rounding, then normalizes and patchifies on GPU.
 
-```json
-{
-  "type": "video_url",
-  "video_url": {"url": "https://example.com/video.mp4"},
-  "preprocess_config": {
-    "fps": 6,
-    "max_frames": 180,
-    "min_pixels": 2500000,
-    "max_pixels": 73728000
-  }
-}
-```
+Sampling, resize and timestamp rules share qwen3_vl_video.py:
+- FPS defaults to 2, with 4–768 frames, bounded by source length.
+- Odd frame counts are retained; the final frame pads the temporal patch.
+- Request min_pixels/max_pixels are per-frame limits. Service options
+  mm_video_total_min_pixels/mm_video_total_max_pixels override total-video
+  budgets without changing processor defaults.
+- Explicit height/width must both be positive and align to patch size × merge size.
+- Each temporal patch's timestamp is the mean of its first and last frame time.
 
-- The loader uses fps and frame limits (defaults: 2 fps, 4–768 frames). It samples
-  uniformly across the source video, including endpoints, like vLLM's qwen3_vl
-  backend.
-- Request min_pixels/max_pixels bound total video pixels (T × H × W), overriding
-  the model's video_processor.size.shortest_edge/longest_edge respectively.
-  Unspecified pixel limits inherit the model's video processor configuration.
-- Explicit resized_height/resized_width are still supported, subject to that
-  total video budget.
-- The resize formula follows Qwen3-VL in Transformers 5.15, with spatial
-  alignment to patch_size × merge_size. Odd sampled frame counts are retained;
-  the processor repeats the final frame to align temporal patches.
-- Frames are already sampled and resized when passed to the processor, so it
-  runs with do_resize=False and do_sample_frames=False.
+The mixin loads the language word embedding on CPU during weight loading.
+Each scheduler batch looks up all timestamp and frame delimiter tokens together.
+It interleaves them with ViT features and returns one complete embedding and
+relative 3D MRoPE tensor per video. The prompt's outer vision delimiters remain
+text tokens. RPC carries the usual embeddings, positions and feature hashes.
 
-For a 1920×1080 video sampled to 180 frames, the above pixel budget produces
-832×480 frames. No video backend selection is required.
-
-The current NVDEC path accepts indexed videos with a known frame count and
-average frame rate, using limited-range 8-bit YUV420 and BT.601/709 color.
+Images and videos still share packed ViT forwards. Scheduling output-token
+estimates include timestamp and delimiter rows; splitting raw ViT output uses
+only visual-token counts.

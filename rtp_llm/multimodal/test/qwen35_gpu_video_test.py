@@ -16,9 +16,9 @@ from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.gpu_video import (
     prepare_gpu_video,
     preprocess_video_cuda,
 )
-from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.video_processing import (
-    video_frame_indices,
-    video_processor_size,
+from rtp_llm.multimodal.qwen3_vl_video import (
+    resolve_video_size,
+    sample_frame_indices,
     video_resize_shape,
 )
 from rtp_llm.utils.base_model_datatypes import MMUrlType
@@ -105,21 +105,38 @@ class GpuVideoTest(unittest.TestCase):
         ):
             with self.subTest(frames=frames):
                 self.assertEqual(
-                    video_resize_shape(configs, frames, 1080, 1920, processor),
+                    video_resize_shape(
+                        self.configs(),
+                        frames,
+                        1080,
+                        1920,
+                        processor,
+                        resolve_video_size(
+                            processor, configs.min_pixels, configs.max_pixels
+                        ),
+                    ),
                     expected,
                 )
         # The lower budget is also across frames; it is not 2.5M per frame.
         self.assertEqual(
-            video_resize_shape(configs, 180, 64, 64, processor), (128, 128)
+            video_resize_shape(
+                self.configs(),
+                180,
+                64,
+                64,
+                processor,
+                resolve_video_size(processor, configs.min_pixels, configs.max_pixels),
+            ),
+            (128, 128),
         )
 
     def test_request_sampling_controls(self):
         configs = self.configs()
         configs.fps = 6
         configs.max_frames = 180
-        self.assertEqual(len(video_frame_indices(configs, 900, 30)), 180)
+        self.assertEqual(len(sample_frame_indices(900, 30, configs)), 180)
         configs.max_frames = 5
-        self.assertEqual(video_frame_indices(configs, 80, 30), (0, 20, 40, 59, 79))
+        self.assertEqual(sample_frame_indices(80, 30, configs), [0, 20, 40, 59, 79])
 
     def test_request_pixel_budgets_do_not_mutate_model_defaults(self):
         processor = self.processor()
@@ -128,15 +145,19 @@ class GpuVideoTest(unittest.TestCase):
         configs.min_pixels = 2500000
         configs.max_pixels = 73728000
         self.assertEqual(
-            video_processor_size(processor, configs),
+            resolve_video_size(
+                processor, max(0, configs.min_pixels), max(0, configs.max_pixels)
+            ),
             {"shortest_edge": 2500000, "longest_edge": 73728000},
         )
         self.assertEqual(processor.size, original)
-        self.assertEqual(video_processor_size(processor, self.configs()), original)
+        self.assertEqual(resolve_video_size(processor), original)
         configs.min_pixels = -1
         configs.max_pixels = 4194304
         self.assertEqual(
-            video_processor_size(processor, configs),
+            resolve_video_size(
+                processor, max(0, configs.min_pixels), max(0, configs.max_pixels)
+            ),
             {"shortest_edge": original["shortest_edge"], "longest_edge": 4194304},
         )
 
@@ -164,6 +185,8 @@ class GpuVideoTest(unittest.TestCase):
             url="unused",
             mm_preprocess_config=preprocess_config,
         )
+        tokenizer = mock.Mock()
+        tokenizer.encode.return_value = [10, 20]
         with mock.patch("av.open", return_value=container), mock.patch.object(
             qwen35, "get_bytes_io_from_url", return_value=io.BytesIO(b"video")
         ), mock.patch.object(
@@ -173,15 +196,20 @@ class GpuVideoTest(unittest.TestCase):
         ), mock.patch(
             "torch.cuda.init", side_effect=AssertionError("CPU worker initialized CUDA")
         ):
-            gpu_input, grid = qwen35.Qwen3_5MoeImageEmbedding.preprocess_input(
-                [item], VitConfig(), SimpleNamespace(video_processor=processor)
+            gpu_input, grid, timestamps = (
+                qwen35.Qwen3_5MoeImageEmbedding.preprocess_input(
+                    [item],
+                    VitConfig(),
+                    SimpleNamespace(video_processor=processor, tokenizer=tokenizer),
+                )
             )
         self.assertIsInstance(gpu_input, GpuVideoInput)
         self.assertEqual(gpu_input.encoded, b"video")
         self.assertEqual(gpu_input.frame_indices, (0, 20, 40, 59, 79))
-        # Request pixel budget resizes 64x64 to 32x32; the fifth frame is padded.
-        self.assertEqual(grid.tolist(), [[3, 2, 2]])
-        self.assertEqual(gpu_input.shape, (12, 1536))
+        # Per-frame request budget retains 64x64; the fifth frame is padded.
+        self.assertEqual(grid.tolist(), [[3, 4, 4]])
+        self.assertEqual(gpu_input.shape, (48, 1536))
+        self.assertEqual(timestamps, [[10, 20]] * 3)
         self.assertEqual(grid.device.type, "cpu")
         self.assertEqual(pickle.loads(pickle.dumps(gpu_input)), gpu_input)
 
@@ -196,7 +224,9 @@ class GpuVideoTest(unittest.TestCase):
                 [item], config, processor
             )
         self.assertIs(actual, expected)
-        parent.assert_called_once_with([item], config, processor, 32)
+        parent.assert_called_once_with(
+            [item], config, processor, 32, return_video_metadata=True
+        )
 
     def test_unknown_frame_count_is_rejected_before_gpu(self):
         container = mock.MagicMock()

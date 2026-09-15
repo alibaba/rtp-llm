@@ -12,7 +12,6 @@
 #include <torch/python.h>
 
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
-#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/rdma_transport/RdmaTransport.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -74,13 +73,6 @@ bool assembleMMRdmaOutput(const std::vector<torch::Tensor>&      mm_tensors,
         }
         if (!extra_inputs.empty()) {
             assembled.mm_extra_input = std::move(extra_inputs);
-        }
-        if (output_pb->multimodal_token_layout_size() != 0
-            && output_pb->multimodal_token_layout_size() != static_cast<int>(split_sizes.size())) {
-            return false;
-        }
-        for (const auto& layout : output_pb->multimodal_token_layout()) {
-            assembled.mm_token_layouts.emplace_back(TensorPbConvert::pbToTorch(layout));
         }
         *mm_output = std::move(assembled);
         return true;

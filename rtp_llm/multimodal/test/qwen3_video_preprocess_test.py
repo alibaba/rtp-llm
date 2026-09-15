@@ -15,8 +15,8 @@ from rtp_llm.multimodal.qwen3_vl_video import (
     resolve_video_size,
     sample_frame_indices,
     video_resize_shape,
+    video_timestamp_tokens,
     video_timestamps,
-    video_token_layout,
 )
 
 
@@ -45,17 +45,16 @@ class Qwen3VideoPreprocessTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 video_timestamps([0], fps, 2)
 
-    def test_video_layout_encodes_each_timestamp_independently(self):
+    def test_video_timestamp_tokens_encode_each_timestamp_independently(self):
         tokenizer = mock.Mock()
-        tokenizer.convert_tokens_to_ids.side_effect = [100, 101]
         tokenizer.encode.side_effect = [[20, 21], [22, 23]]
         processor = SimpleNamespace(
             video_processor=self.processor(), tokenizer=tokenizer
         )
-        layout = video_token_layout(
+        tokens = video_timestamp_tokens(
             torch.tensor([[2, 4, 8]]), [0, 5, 10], 30, processor
         )
-        self.assertEqual(layout.tolist(), [20, 21, 100, -8, 101, 22, 23, 100, -8, 101])
+        self.assertEqual(tokens, [[20, 21], [22, 23]])
         self.assertEqual(
             tokenizer.encode.call_args_list,
             [
@@ -64,7 +63,7 @@ class Qwen3VideoPreprocessTest(unittest.TestCase):
             ],
         )
         with self.assertRaisesRegex(ValueError, "do not match"):
-            video_token_layout(torch.tensor([[3, 4, 8]]), [0, 5, 10], 30, processor)
+            video_timestamp_tokens(torch.tensor([[3, 4, 8]]), [0, 5, 10], 30, processor)
 
     def test_sampling_keeps_odd_frame_count(self):
         self.assertEqual(len(sample_frame_indices(233, 30, SimpleNamespace())), 15)
