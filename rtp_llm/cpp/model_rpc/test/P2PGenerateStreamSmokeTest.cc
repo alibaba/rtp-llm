@@ -295,8 +295,19 @@ private:
                         }
                     }
                     stream->step();
-                    StreamUpdateInfo update{tokens, 1, {}, {}, {}, {}, {}, {}, {}, {}, true, false, std::nullopt};
-                    update.cum_log_probs = torch::zeros({width}, torch::kFloat32);
+                    StreamUpdateInfo update{tokens,
+                                            1,
+                                            {},
+                                            {},
+                                            {},
+                                            torch::zeros({width}, torch::kFloat32),
+                                            {},
+                                            {},
+                                            {},
+                                            {},
+                                            true,
+                                            false,
+                                            std::nullopt};
                     stream->update(update);
                 } catch (const std::exception& error) {
                     {
