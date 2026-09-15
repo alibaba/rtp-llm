@@ -213,6 +213,51 @@ class Block(nn.Module):
             name="ffn",
         )
         self._prefill_fast_hc_impls_cached = self._resolve_prefill_fast_hc_impls()
+        self._moe_front_adapter = None
+
+    def enable_moe_front(self, *, required: bool = False) -> None:
+        """Attach the standalone CUDA-extension front to MegaMoE-SE."""
+
+        strategy_name = getattr(self.ffn, "strategy_name", "")
+        if strategy_name != "mega_moe_se":
+            if required:
+                raise RuntimeError(
+                    "DSV4 MoE front requires the mega_moe_se strategy, "
+                    f"got {strategy_name or 'unknown'!r}"
+                )
+            return
+        score_func = getattr(getattr(self.ffn, "gate", None), "score_func", None)
+        if score_func != "sqrtsoftplus":
+            if required:
+                raise RuntimeError(
+                    "DSV4 MoE front requires score_func='sqrtsoftplus', "
+                    f"got {score_func!r}"
+                )
+            logging.info(
+                "DSV4 MoE front disabled for unsupported score_func=%r; "
+                "using the ordinary MoE path",
+                score_func,
+            )
+            return
+
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.mega_front import (
+            MegaMoeFrontAdapter,
+        )
+
+        try:
+            self._moe_front_adapter = MegaMoeFrontAdapter(
+                self.ffn,
+                self.ffn_hc,
+                self.ffn_norm,
+            )
+        except (ImportError, RuntimeError) as exc:
+            if required:
+                raise
+            logging.warning(
+                "DSV4 MoE front auto mode is unavailable; using the ordinary "
+                "MoE path: %s",
+                exc,
+            )
 
     def _moe_observer(self, positions: Optional[torch.Tensor]):
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
@@ -406,17 +451,30 @@ class Block(nn.Module):
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_residual", x)
 
-        # FFN path — MoE has no per-step state, reuse existing forward
+        # The extension replaces only the FFN HC/norm/router/pack prefix.
         residual = x
-        x_pre, post, comb = self.ffn_hc.pre(
-            x,
-            dbg_tag=f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None,
+        use_moe_front = (
+            self._moe_front_adapter is not None
+            and self._moe_front_adapter.supports(x)
         )
-        bsz, q_len, dim_ = x_pre.shape
-        x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
+        if use_moe_front:
+            ffn_out, x_pre, post, comb = self._moe_front_adapter.forward(x, input_ids)
+        else:
+            x_pre, post, comb = self.ffn_hc.pre(
+                x,
+                dbg_tag=(
+                    f"L{self.layer_id:02d}_decode_ffn_hc_pre"
+                    if _dbg_layer
+                    else None
+                ),
+            )
+            bsz, q_len, dim_ = x_pre.shape
+            x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(
+                bsz, q_len, dim_
+            )
+            ffn_out = self.ffn(x_pre, input_ids, is_decode_forward=True)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
-        ffn_out = self.ffn(x_pre, input_ids, is_decode_forward=True)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
