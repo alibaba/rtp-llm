@@ -45,9 +45,7 @@ std::unique_ptr<ClientFactory>                    ClientWrapper::client_factory_
 
 ClientWrapper::~ClientWrapper() = default;
 
-bool ClientWrapper::init(const ConfigMap&                                  config_map,
-                         const kv_cache_manager::InitParams&               init_params,
-                         const kv_cache_manager::SharedMemoryRegistration* shared_memory_registration) {
+bool ClientWrapper::init(const ConfigMap& config_map, const kv_cache_manager::InitParams& init_params) {
     RTP_LLM_CHECK_WITH_INFO(!config_map.empty(), "no invalid config");
     init_params_ = init_params;
     // init all meta_client
@@ -80,12 +78,7 @@ bool ClientWrapper::init(const ConfigMap&                                  confi
         init_params_.role_type = kv_cache_manager::RoleType::WORKER;
     }
     const auto transfer_config = autil::legacy::ToJsonString(config_map_.begin()->second);
-    if (shared_memory_registration != nullptr) {
-        transfer_client_ =
-            client_factory_->CreateTransferClient(transfer_config, init_params_, *shared_memory_registration);
-    } else {
-        transfer_client_ = client_factory_->CreateTransferClient(transfer_config, init_params_);
-    }
+    transfer_client_ = client_factory_->CreateTransferClient(transfer_config, init_params_);
     if (!transfer_client_) {
         RTP_LLM_LOG_ERROR("init trasfer client failed");
         return false;

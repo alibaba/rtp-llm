@@ -18,9 +18,7 @@ class ClientWrapper: public std::enable_shared_from_this<ClientWrapper> {
 public:
     using ConfigMap = std::map<std::string, RemoteConnectorConfigPtr>;
     virtual ~ClientWrapper();
-    bool init(const ConfigMap&                                  config_str_map,
-              const kv_cache_manager::InitParams&               init_params,
-              const kv_cache_manager::SharedMemoryRegistration* shared_memory_registration = nullptr);
+    bool init(const ConfigMap& config_str_map, const kv_cache_manager::InitParams& init_params);
     // for meta client
     std::pair<bool, kv_cache_manager::Locations> match(const std::string&                      unique_id,
                                                        const std::string&                      trace_id,
