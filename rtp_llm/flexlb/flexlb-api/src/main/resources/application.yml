@@ -28,26 +28,6 @@ management:
     tags:
       application: flexlb-api
 
-trace:
-  otel:
-    web:
-      filter-order: 0x7fffffff
-      skip-pattern: ${OTEL_TRACE_SKIP_PATTERN}
-    config:
-      service-name: flexlb
-      instrumentation-name: trace
-    exporter:
-      otlp:
-        enabled: true
-        endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT}
-      logging:
-        enabled: true
-        format: json
-otel:
-  exporter:
-    otlp:
-      endpoint: none
-
 flexlb:
   monitor:
     # Default on. Set FLEXLB_MONITOR_ENABLED=false env var to disable.

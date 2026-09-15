@@ -308,7 +308,7 @@ FlexLB provides comprehensive monitoring through Spring Boot Actuator:
 - `/actuator/prometheus`: Prometheus metrics
 - `/actuator/info`: Application information
 
-OpenTelemetry integration for distributed tracing (configured via `OTEL_EXPORTER_OTLP_ENDPOINT`).
+OpenTelemetry integration for distributed tracing (configured via `RTP_LLM_TRACE_CONFIG`).
 
 Monitoring enhancements:
 - `BatchSchedulerReporter`: Reports canonical worker-queue size and wait-time metrics

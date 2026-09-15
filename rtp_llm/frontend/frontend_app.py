@@ -475,8 +475,7 @@ class FrontendApp(object):
         )
 
     def start(self):
-        # trace telemetry runtime: per-process init after spawn; no-op unless
-        # RTP_LLM_OTEL_TRACE_ENABLE is set
+        # spawn 后独立初始化；仅合法且启用的 JSON 配置会创建 Trace 运行时。
         init_telemetry("frontend", 0)
         self.frontend_server.start()
         app = self.create_app()
