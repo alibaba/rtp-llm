@@ -1,6 +1,6 @@
 import logging
 from enum import Enum
-from typing import Any, Dict, Union
+from typing import Any, Callable, Dict, Iterable, Optional, Protocol
 
 # Auto-TPM QoS priority header conveyed by the DashScope gateway; the same
 # value the engine forwards to FlexLB as ``Schedule.priority``.
@@ -157,15 +157,24 @@ class GaugeMetrics(Enum):
     )
 
 
+class Metric(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def value(self) -> str: ...
+
+
 class MetricReporter(object):
     def __init__(self, kmonitor: Any):
         self._kmon = kmonitor
         self._matic_map: Dict[str, Any] = {}
+        self._metric_types: Dict[str, str] = {}
         self._inited = False
 
     def report(
         self,
-        metric: Union[AccMetrics, GaugeMetrics],
+        metric: Metric,
         value: float = 1,
         tags: Dict[str, Any] = {},
     ):
@@ -178,15 +187,45 @@ class MetricReporter(object):
     def flush(self) -> None:
         self._kmon.flush()
 
-    def init(self):
+    def _register_metrics(
+        self,
+        metrics: Iterable[Metric],
+        register_fn: Callable[[str], Any],
+        metric_type: str,
+    ) -> None:
+        metrics = list(metrics)
+        if any(not isinstance(metric.value, str) for metric in metrics):
+            raise TypeError("metric enum values must be strings")
+        for metric in metrics:
+            previous_type = self._metric_types.get(metric.value)
+            if previous_type is not None and previous_type != metric_type:
+                raise ValueError(
+                    f"metric {metric.value!r} already registered as {previous_type}, cannot register as {metric_type}"
+                )
+        for metric in metrics:
+            if metric.value in self._matic_map:
+                continue
+            self._matic_map[metric.value] = register_fn(metric.value)
+            self._metric_types[metric.value] = metric_type
+
+    def init(
+        self,
+        *,
+        additional_acc_metrics: Optional[Iterable[Metric]] = None,
+        additional_gauge_metrics: Optional[Iterable[Metric]] = None,
+    ):
         if not self._inited:
             self._inited = True
-            for metric in AccMetrics:
-                self._matic_map[metric.value] = self._kmon.register_acc_metric(
-                    metric.value
-                )
+            self._register_metrics(AccMetrics, self._kmon.register_acc_metric, "acc")
+            self._register_metrics(
+                GaugeMetrics, self._kmon.register_gauge_metric, "gauge"
+            )
 
-            for metric in GaugeMetrics:
-                self._matic_map[metric.value] = self._kmon.register_gauge_metric(
-                    metric.value
-                )
+        if additional_acc_metrics is not None:
+            self._register_metrics(
+                additional_acc_metrics, self._kmon.register_acc_metric, "acc"
+            )
+        if additional_gauge_metrics is not None:
+            self._register_metrics(
+                additional_gauge_metrics, self._kmon.register_gauge_metric, "gauge"
+            )

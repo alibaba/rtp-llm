@@ -41,6 +41,19 @@ public:
         return local_server_->BatchGenerateCall(context, request, response);
     }
 
+    grpc::Status GenerateStreamWithInputEmbeddings(grpc::ServerContext*                   context,
+                                                   const GenerateInputPB*                 request,
+                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+        // Keep virtual dispatch: RemoteRpcServiceImpl routes this through Prefill.
+        return this->GenerateStreamCall(context, request, writer);
+    }
+
+    grpc::Status BatchGenerateWithInputEmbeddings(grpc::ServerContext*        context,
+                                                  const BatchGenerateInputPB* request,
+                                                  BatchGenerateOutputsPB*     response) override {
+        return this->BatchGenerateCall(context, request, response);
+    }
+
     grpc::Status EnqueueBatch(grpc::ServerContext*         context,
                               const EnqueueBatchRequestPB* request,
                               EnqueueBatchResponsePB*      response) override {
