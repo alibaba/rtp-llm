@@ -471,33 +471,25 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return evictExpiredBatches(ttlMs, ignored -> false);
     }
 
-    /** Evict only batches with no request generation still owned by the scheduler. */
+    /** Evict only batches whose member IDs are absent from the scheduler directory. */
     public int evictExpiredBatches(long ttlMs,
-                                   LongPredicate schedulerOwnsRequest) {
+                                   LongPredicate retainForSchedulerCleanup) {
         return prefillState.evictExpiredBatches(
-                ttlMs, schedulerOwnsRequest);
+                ttlMs, retainForSchedulerCleanup);
     }
 
-    /**
-     * Evict individually-accounted requests that have not appeared in WorkerStatus
-     * for longer than {@code ttlMs}.
-     *
-     * <p>The stale check is repeated while holding the request's stripe. Progress
-     * observation, explicit release, and TTL removal are therefore linearizable and
-     * an observation racing the first optimistic check cannot be evicted as stale.
-     */
-    /** Evict route-request entries which have no live scheduler generation. */
+    /** Evict stale individual requests whose IDs are absent from the scheduler directory. */
     public int evictExpiredRequests(long ttlMs,
-                                    LongPredicate schedulerOwnsRequest) {
+                                    LongPredicate retainForSchedulerCleanup) {
         return prefillState.evictExpiredIndividuals(
-                ttlMs, schedulerOwnsRequest);
+                ttlMs, retainForSchedulerCleanup);
     }
 
-    /** Evict endpoint orphans without racing scheduler-owned generations. */
+    /** Evict endpoint orphans while retaining IDs still registered by the scheduler. */
     public int evictExpiredInflight(long ttlMs,
-                                    LongPredicate schedulerOwnsRequest) {
-        return evictExpiredBatches(ttlMs, schedulerOwnsRequest)
-                + evictExpiredRequests(ttlMs, schedulerOwnsRequest);
+                                    LongPredicate retainForSchedulerCleanup) {
+        return evictExpiredBatches(ttlMs, retainForSchedulerCleanup)
+                + evictExpiredRequests(ttlMs, retainForSchedulerCleanup);
     }
 
     @Override

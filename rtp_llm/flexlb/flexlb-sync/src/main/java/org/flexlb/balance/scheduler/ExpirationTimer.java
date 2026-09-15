@@ -313,7 +313,7 @@ final class ExpirationTimer implements AutoCloseable {
         }
 
         try {
-            exactSweeper.accept(ttlMs, lifecycle::ownsRequestGeneration);
+            exactSweeper.accept(ttlMs, lifecycle::retainForSchedulerCleanup);
         } catch (RuntimeException | Error sweepFailure) {
             failure = append(failure, sweepFailure);
         }

@@ -1713,7 +1713,7 @@ public final class PrefillState {
     }
 
     public int evictExpiredIndividuals(
-            long ttlMs, java.util.function.LongPredicate schedulerOwnsRequest) {
+            long ttlMs, java.util.function.LongPredicate retainForSchedulerCleanup) {
         int evicted = 0;
         boolean capacityReleased = false;
         lock.lock();
@@ -1724,7 +1724,7 @@ public final class PrefillState {
                 if (entry.batchWork == null
                         && !entry.isActive()
                         && nowMs - entry.lastObservedAtMs >= Math.max(0L, ttlMs)
-                        && !schedulerOwnsRequest.test(entry.requestId)) {
+                        && !retainForSchedulerCleanup.test(entry.requestId)) {
                     candidates.add(entry);
                 }
             }
@@ -1744,7 +1744,7 @@ public final class PrefillState {
     }
 
     public int evictExpiredBatches(
-            long ttlMs, java.util.function.LongPredicate schedulerOwnsRequest) {
+            long ttlMs, java.util.function.LongPredicate retainForSchedulerCleanup) {
         int evicted = 0;
         boolean capacityReleased = false;
         lock.lock();
@@ -1755,7 +1755,7 @@ public final class PrefillState {
                 boolean retained = nowMs - reduction.batch.lastObservedAtMs
                         < Math.max(0L, ttlMs);
                 for (RequestEntry entry : reduction.members) {
-                    retained |= schedulerOwnsRequest.test(entry.requestId);
+                    retained |= retainForSchedulerCleanup.test(entry.requestId);
                 }
                 if (retained) {
                     continue;
