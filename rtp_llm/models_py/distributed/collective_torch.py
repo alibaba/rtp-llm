@@ -18,6 +18,9 @@ _CPP_PARALLEL_MODE_TP = 0
 _CPP_PARALLEL_MODE_DP = 1
 _CPP_PARALLEL_MODE_WORLD = 2
 _CPP_PARALLEL_MODE_STAGE = 6
+# P2PBackend enum values matching C++ rtp_llm::P2PBackend in ExecOps.h
+_CPP_P2P_BACKEND_NCCL = 0
+_CPP_P2P_BACKEND_GLOO = 1
 _UDS_SUN_PATH_LIMIT = 108
 
 
@@ -597,11 +600,8 @@ def register_pp_process_group(
     process_group: torch.distributed.ProcessGroup,
     cpu_process_group: torch.distributed.ProcessGroup,
 ) -> None:
-    """Register all PP communication callbacks in one call.
-
-    isend/irecv take global world ranks as peer and route by tensor device:
-    CUDA tensors go to the NCCL group, CPU tensors to the gloo group.
-    The snapshot exchange uses the gloo group.
+    """Register PP callbacks: isend/irecv(tensor, global_peer, backend).
+    backend is the C++ P2PBackend value selecting NCCL or gloo; snapshots use gloo.
     """
     import librtp_compute_ops
 
@@ -609,6 +609,15 @@ def register_pp_process_group(
         raise RuntimeError("register_pp_ops is not available")
 
     group_ranks = torch.distributed.get_process_group_ranks(process_group)
+    backend_to_group = {
+        _CPP_P2P_BACKEND_NCCL: process_group,
+        _CPP_P2P_BACKEND_GLOO: cpu_process_group,
+    }
+
+    def _get_p2p_group(backend: int) -> torch.distributed.ProcessGroup:
+        if backend not in backend_to_group:
+            raise ValueError(f"Unsupported P2P backend: {backend}")
+        return backend_to_group[backend]
 
     def _check_peer(global_peer: int) -> int:
         if global_peer not in group_ranks:
@@ -618,21 +627,21 @@ def register_pp_process_group(
             )
         return global_peer
 
-    def cpp_isend(tensor: torch.Tensor, global_peer: int):
+    def cpp_isend(tensor: torch.Tensor, global_peer: int, backend: int):
         work = torch.distributed.isend(
             tensor,
             dst=_check_peer(global_peer),
-            group=process_group if tensor.is_cuda else cpu_process_group,
+            group=_get_p2p_group(backend),
         )
         if work is None:
             raise RuntimeError("isend returned no work")
         return work
 
-    def cpp_irecv(tensor: torch.Tensor, global_peer: int):
+    def cpp_irecv(tensor: torch.Tensor, global_peer: int, backend: int):
         work = torch.distributed.irecv(
             tensor,
             src=_check_peer(global_peer),
-            group=process_group if tensor.is_cuda else cpu_process_group,
+            group=_get_p2p_group(backend),
         )
         if work is None:
             raise RuntimeError("irecv returned no work")

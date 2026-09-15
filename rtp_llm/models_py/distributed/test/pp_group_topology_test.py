@@ -185,6 +185,45 @@ def _run_topology(test, pp_size, dp_size, tp_size):
 
 
 class PPGroupTopologyTest(unittest.TestCase):
+    def test_p2p_callbacks_route_by_backend(self):
+        import torch
+
+        from rtp_llm.models_py.distributed import collective_torch as ct
+
+        device_group, cpu_group = object(), object()
+        callbacks = {}
+        cpp_ops = SimpleNamespace(
+            register_pp_ops=lambda isend, irecv, exchange: callbacks.update(
+                isend=isend, irecv=irecv
+            )
+        )
+        with patch.dict("sys.modules", {"librtp_compute_ops": cpp_ops}), patch.object(
+            torch.distributed, "get_process_group_ranks", return_value=[0, 1]
+        ):
+            ct.register_pp_process_group(device_group, cpu_group)
+
+        tensor = object()
+        for operation, peer_arg in (("isend", "dst"), ("irecv", "src")):
+            with patch.object(
+                torch.distributed, operation, return_value=object()
+            ) as p2p_op:
+                for backend, group in (
+                    (ct._CPP_P2P_BACKEND_NCCL, device_group),
+                    (ct._CPP_P2P_BACKEND_GLOO, cpu_group),
+                ):
+                    with self.subTest(operation=operation, backend=backend):
+                        p2p_op.reset_mock()
+                        work = callbacks[operation](tensor, 1, backend)
+                        p2p_op.assert_called_once_with(
+                            tensor, **{peer_arg: 1, "group": group}
+                        )
+                        self.assertIs(work, p2p_op.return_value)
+
+                p2p_op.reset_mock()
+                with self.assertRaisesRegex(ValueError, "Unsupported P2P backend"):
+                    callbacks[operation](tensor, 1, -1)
+                p2p_op.assert_not_called()
+
     @staticmethod
     def _merge(results):
         # Full topology is the union over all ranks' snapshots (each rank stores only its own groups).
