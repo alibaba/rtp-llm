@@ -23,6 +23,66 @@ except Exception as e:
     rope = None
 
 
+def _resolve_paged_indexer_inputs(
+    query_count: int, fmha_params: Any, attention_inputs: Any
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+    """Resolve per-query metadata for the paged TopK transform.
+
+    Both the decode phase and the MTP target-verification phase gather over the
+    full paged KV via ``_get_topk_paged``.  They deliberately describe the query
+    dimension with one ``cu_seqlens_q`` entry per query row plus one.  This
+    choice is load-bearing, not stylistic: ``fast_topk_transform_fused`` selects
+    between two transform kernels with
+    ``is_decode = row_starts is None and prefill_bs == B`` where
+    ``prefill_bs = cu_seqlens_q.numel() - 1`` and ``B`` is the score row count.
+    That entry count gives ``prefill_bs == B`` and, together with
+    ``row_starts=None`` (see ``_get_topk_paged``), forces the *decode* transform
+    kernel.  The decode kernel writes request-local positions (``dst[idx] =
+    pos``) and never dereferences either ``cu_seqlens_q``'s values or a
+    ``src_page_table``.  That is exactly the contract required here, because the
+    downstream ``SparseMlaOp._convert_topk_indices_to_global`` re-maps
+    request-local indices to global cache slots via ``batch_indice_d`` + block
+    table.  The prefill transform kernel would instead emit already-globalised
+    slots and demands a ``src_page_table`` the Python wrapper never passes, so it
+    must not be hit.  (``fast_topk.cu`` still carries a stale comment claiming
+    target verify invokes the prefill kernel.)
+
+    Returns ``(context_lens, request_indices, cu_seqlens_q)`` where
+    ``request_indices`` is ``None`` for decode and the per-row request id for
+    target verification.
+    """
+    if getattr(attention_inputs, "is_target_verify", False):
+        context_lens = fmha_params.expanded_seq_lens
+        request_indices = fmha_params.batch_indice_d
+        cu_seqlens_q = torch.arange(
+            query_count + 1,
+            dtype=torch.int32,
+            device=context_lens.device,
+        )
+    else:
+        context_lens = fmha_params.kvlen_d
+        request_indices = None
+        cu_seqlens_q = attention_inputs.decode_cu_seqlens_device
+
+    if context_lens.ndim != 1 or context_lens.numel() != query_count:
+        raise ValueError(
+            "paged indexer requires one context length per query row, got "
+            f"{tuple(context_lens.shape)} for {query_count} rows"
+        )
+    if request_indices is not None and (
+        request_indices.ndim != 1 or request_indices.numel() != query_count
+    ):
+        raise ValueError(
+            "target verification requires one request index per query row, got "
+            f"{tuple(request_indices.shape)} for {query_count} rows"
+        )
+    # fast_topk_transform_fused reads cu_seqlens_q through data_ptr<int32_t>(), which type-checks
+    # and raises on any other dtype, so an int64 decode tensor has to be converted rather than
+    # passed through. ``to`` is a no-op when the tensor is already int32.
+    cu_seqlens_q = cu_seqlens_q.to(torch.int32)
+    return context_lens, request_indices, cu_seqlens_q
+
+
 def _unpack_ue8m0_scale(sf_packed: torch.Tensor) -> torch.Tensor:
     """
     Unpack UE8M0 scale format.
@@ -381,12 +441,19 @@ class IndexerOp(nn.Module):
             kv_cache_fp8.shape[0], self.blocksize, num_heads_kv, head_dim_with_sf
         ).view(dtype=torch.uint8)
 
-        max_seq_len = (
-            attention_inputs.kv_cache_kernel_block_id_device.shape[1] * self.blocksize
+        block_tables = attention_inputs.kv_cache_kernel_block_id_device
+        max_seq_len = block_tables.shape[1] * self.blocksize
+        context_lens, request_indices, cu_seqlens_q = _resolve_paged_indexer_inputs(
+            q_fp8.shape[0], fmha_params, attention_inputs
         )
+        if request_indices is not None:
+            # batch_indice_d already carries each row's batch position, so it is in range by
+            # construction; checking it here would read device values and break graph capture.
+            request_indices = request_indices.to(dtype=torch.int64)
+            block_tables = torch.index_select(block_tables, 0, request_indices)
 
         schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-            fmha_params.kvlen_d,
+            context_lens,
             self.blocksize,
             deep_gemm.get_num_sms(),
         )
@@ -395,24 +462,43 @@ class IndexerOp(nn.Module):
             q_fp8.unsqueeze(1),
             kv_cache_fp8.view(dtype=torch.uint8),
             weights,
-            fmha_params.kvlen_d,
-            attention_inputs.kv_cache_kernel_block_id_device,
+            context_lens,
+            block_tables,
             schedule_metadata,
             max_seq_len,
             clean_logits=False,
         )
 
         assert (
-            fmha_params.expanded_seq_lens.device == logits.device
-        ), "expanded_seq_lens must be on the same device as logits"
+            context_lens.device == logits.device
+        ), "context_lens must be on the same device as logits"
         assert (
-            attention_inputs.decode_cu_seqlens_device.device == logits.device
-        ), "cu_seqlens must be on the same device as logits"
+            cu_seqlens_q.device == logits.device
+        ), "cu_seqlens_q must be on the same device as logits"
+        assert (
+            block_tables.device == logits.device
+        ), "block_tables must be on the same device as logits"
+
+        # Pin the load-bearing dispatch.  ``row_starts=None`` (below) plus one more cu_seqlens_q
+        # entry than there are score rows is exactly the
+        # ``is_decode = row_starts is None and prefill_bs == B`` condition inside
+        # fast_topk_transform_fused, where ``prefill_bs`` comes from cu_seqlens_q.size(0) alone.
+        # The entry count is therefore the whole dispatch input -- the decode kernel never
+        # dereferences the values -- so checking it is both necessary and sufficient.  Fail closed
+        # rather than silently fall into the prefill branch, which would require an (unsupplied)
+        # src_page_table and double-transform the indices.
+        if cu_seqlens_q.numel() != logits.size(0) + 1:
+            raise ValueError(
+                "paged indexer dispatch requires one cu_seqlens_q entry per score row plus one "
+                "so the decode transform kernel is selected; got "
+                f"{cu_seqlens_q.numel()} cu_seqlens entries for {logits.size(0)} "
+                "score rows"
+            )
 
         topk_result = fast_topk_transform_fused(
             score=logits,
-            lengths=fmha_params.expanded_seq_lens,  # expanded_seq_lens
-            cu_seqlens_q=attention_inputs.decode_cu_seqlens_device,  # bs + 1
+            lengths=context_lens,
+            cu_seqlens_q=cu_seqlens_q,
             topk=self.index_topk,
             row_starts=None,
         )
