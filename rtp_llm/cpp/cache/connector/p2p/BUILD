@@ -16,7 +16,7 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/utils:error_code",
-    ],
+    ] + torch_deps(),
 )
 
 cc_library(

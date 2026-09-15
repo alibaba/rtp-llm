@@ -206,6 +206,16 @@ static bool waitForBusinessTasksToReturn(BlockTreeCache& cache, std::chrono::mil
         lock, timeout, [&cache] { return cache.task_pool_->pending_tasks_.load() == 0; });
 }
 
+TEST(MultiRankBlockTransferEngineDeadlineTest, ExpiredTaskReturnsDeadlineBeforeEncodingOrBroadcast) {
+    MultiRankBlockTransferEngine engine({}, nullptr);
+    auto                         context =
+        engine.execute(TransferTask({TransferDescriptor::deviceToHost(0, {1}, 2)}, std::chrono::milliseconds(0)));
+    ASSERT_NE(context, nullptr);
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
+}
+
 class MultiRankBlockTransferEngineTest: public ::testing::Test {
 protected:
     void SetUp() override {

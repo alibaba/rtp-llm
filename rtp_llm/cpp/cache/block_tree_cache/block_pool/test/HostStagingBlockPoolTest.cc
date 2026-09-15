@@ -5,6 +5,7 @@
 #include <cstring>
 #include <future>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <thread>
@@ -14,6 +15,26 @@
 
 namespace rtp_llm {
 namespace {
+
+TEST(HostStagingBlockPoolTest, RejectsOverflowingCapacityBeforeAllocating) {
+    EXPECT_THROW((void)HostStagingBlockPool(2, std::numeric_limits<size_t>::max() / 2 + 1), std::length_error);
+    EXPECT_THROW((void)HostStagingBlockPool(1, static_cast<size_t>(std::numeric_limits<int64_t>::max())),
+                 std::length_error);
+}
+
+TEST(HostStagingBlockPoolTest, MovedFromLeaseRejectsAccessAndDestinationKeepsOwnership) {
+    HostStagingBlockPool pool(1, 64);
+    auto                 batch = pool.tryMallocBatch(1);
+    ASSERT_TRUE(batch.has_value());
+    {
+        auto lease = std::move(batch->front());
+        EXPECT_THROW((void)batch->front().blockBuffer(1), std::logic_error);
+        EXPECT_EQ(lease.blockBuffer(64).capacity_bytes, 64u);
+        batch.reset();
+        EXPECT_FALSE(pool.tryMallocBatch(1).has_value());
+    }
+    EXPECT_TRUE(pool.tryMallocBatch(1).has_value());
+}
 
 TEST(HostStagingBlockPoolTest, UsesCallerProvidedStride) {
     HostStagingBlockPool pool(1, 65);

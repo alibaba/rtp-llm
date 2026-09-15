@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 
+#include <exception>
 #include <utility>
 
 namespace rtp_llm {
@@ -57,8 +58,18 @@ void TransferBatchAsyncContext::complete(ErrorInfo error) {
         callbacks.swap(callbacks_);
     }
     done_cv_.notify_all();
+    std::exception_ptr callback_error;
     for (auto& callback : callbacks) {
-        callback(error_);
+        try {
+            callback(error_);
+        } catch (...) {
+            if (!callback_error) {
+                callback_error = std::current_exception();
+            }
+        }
+    }
+    if (callback_error) {
+        std::rethrow_exception(callback_error);
     }
 }
 

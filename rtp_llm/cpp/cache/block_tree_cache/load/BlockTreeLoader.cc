@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
 
+#include <stdexcept>
+
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -276,10 +278,10 @@ void BlockTreeLoader::shutdown() {
 
 bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& context) {
     std::lock_guard<std::mutex>            lock(mutex_);
-    const std::vector<TransferDescriptor>& load_descs               = context->loadDescs();
-    const std::vector<bool>&               joined_loads             = context->joinedLoads();
-    const uint64_t                         context_id               = context->contextId();
-    size_t                                 prepared_desc_count      = 0;
+    const std::vector<TransferDescriptor>& load_descs          = context->loadDescs();
+    const std::vector<bool>&               joined_loads        = context->joinedLoads();
+    const uint64_t                         context_id          = context->contextId();
+    size_t                                 prepared_desc_count = 0;
     block_tree_cache_detail::ScopeRollback rollback_guard(
         [this, &load_descs, &joined_loads, &prepared_desc_count, context_id]() {
             abortLoadLocked(load_descs,
@@ -308,7 +310,13 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
         ++prepared_desc_count;
     }
 
-    LoadTaskRunner::TaskPtr task = load_task_runner_.createTask(context);
+    LoadTaskRunner::TaskPtr task;
+    try {
+        task = load_task_runner_.createTask(context);
+    } catch (const std::invalid_argument& error) {
+        RTP_LLM_LOG_ERROR("invalid load task: %s", error.what());
+        return false;
+    }
     context->setSettlementReadyCallback([this, task](const std::shared_ptr<LoadAsyncContext>& ready_context) {
         scheduleContextSettlement(task, ready_context);
     });

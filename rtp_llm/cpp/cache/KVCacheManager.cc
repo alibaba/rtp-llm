@@ -286,6 +286,12 @@ bool KVCacheManager::init() {
         return false;
     }
 
+    if (kv_cache_config_.enable_remote_cache && parallelism_config_.tp_size > 1 && parallelism_config_.tp_rank == 0
+        && runtime_config_.worker_grpc_addrs.empty()) {
+        RTP_LLM_LOG_ERROR("remote cache on the TP controller requires worker gRPC addresses");
+        return false;
+    }
+
     const bool is_hybrid = config_.groupNums() > 1;
     if (config_.use_independent_block_pools) {
         allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(config_,

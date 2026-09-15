@@ -416,6 +416,12 @@ bool LoadAsyncContext::success() const {
     return state_.load() == State::SUCCEEDED;
 }
 
+ErrorInfo LoadAsyncContext::errorInfo() const {
+    return state_.load(std::memory_order_acquire) == State::FAILED ?
+               ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load async context failed") :
+               ErrorInfo::OkStatus();
+}
+
 MallocStatus LoadAsyncContext::mallocStatus() const {
     return malloc_status_.load(std::memory_order_acquire);
 }

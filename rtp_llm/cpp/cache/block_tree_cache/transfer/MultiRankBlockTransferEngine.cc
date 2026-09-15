@@ -148,19 +148,40 @@ MultiRankBlockTransferEngine::MultiRankBlockTransferEngine(std::vector<GroupSetP
     group_sets_(std::move(group_sets)), broadcast_manager_(std::move(broadcast_manager)) {}
 
 std::shared_ptr<AsyncContext> MultiRankBlockTransferEngine::execute(TransferTask task) const {
+    const auto deadline_exceeded = []() {
+        return std::make_shared<CompletedAsyncContext>(
+            ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before multi-rank submission"));
+    };
+    if (task.expired()) {
+        return deadline_exceeded();
+    }
     MemoryOperationRequestPB request;
     if (!BlockTransferRequestConverter::encodeTransfer(request, task, group_sets_)) {
+        if (task.expired()) {
+            return deadline_exceeded();
+        }
         RTP_LLM_LOG_WARNING("failed to encode transfer batch, item_count=%zu", task.descriptors().size());
         return std::make_shared<CompletedAsyncContext>(
             ErrorInfo(ErrorCode::INVALID_PARAMS, "failed to encode transfer batch"));
+    }
+    if (!broadcast_manager_) {
+        return std::make_shared<CompletedAsyncContext>(
+            ErrorInfo(ErrorCode::INVALID_PARAMS, "multi-rank transfer requires a broadcast manager"));
     }
     const size_t      worker_count = broadcast_manager_->workerNum();
     FunctionRequestPB function_request;
     function_request.mutable_mem_request()->CopyFrom(request);
     std::vector<FunctionRequestPB> requests(worker_count, function_request);
+    const auto                     remaining = task.remainingTimeout();
+    if (!remaining) {
+        return deadline_exceeded();
+    }
+    for (auto& rank_request : requests) {
+        rank_request.mutable_mem_request()->set_timeout_ms(remaining->count());
+    }
     auto broadcast_result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
         requests,
-        static_cast<int>(request.timeout_ms()),
+        static_cast<int>(remaining->count()),
         [](const std::shared_ptr<RpcService::Stub>&    stub,
            const std::shared_ptr<grpc::ClientContext>& context,
            const FunctionRequestPB&                    rpc_request,

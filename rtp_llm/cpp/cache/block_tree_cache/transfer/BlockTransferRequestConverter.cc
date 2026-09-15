@@ -61,7 +61,11 @@ bool BlockTransferRequestConverter::decodeDeviceBlocks(const CopyItem&          
 bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&       request,
                                                    const TransferTask&             task,
                                                    const std::vector<GroupSetPtr>& group_sets) {
-    request.set_timeout_ms(task.remainingTimeout().value().count());
+    const auto remaining = task.remainingTimeout();
+    if (!remaining || task.descriptors().empty()) {
+        return false;
+    }
+    request.set_timeout_ms(remaining->count());
     const auto&                             descriptors = task.descriptors();
     const TransferDescriptor&               first       = descriptors.front();
     MemoryOperationRequestPB::CopyDirection request_direction;
@@ -72,6 +76,9 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
 
     for (const TransferDescriptor& descriptor : descriptors) {
         if (descriptor.source_tier != first.source_tier || descriptor.target_tier != first.target_tier) {
+            return false;
+        }
+        if (descriptor.group_set_id >= group_sets.size() || !group_sets[descriptor.group_set_id]) {
             return false;
         }
         const GroupSet& group_set = *group_sets[descriptor.group_set_id];

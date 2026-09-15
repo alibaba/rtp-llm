@@ -168,8 +168,14 @@ class PausableRecordingTransferEngine: public PerRankBlockTransferEngine {
 public:
     explicit PausableRecordingTransferEngine(const std::vector<GroupSetPtr>& groups,
                                              bool                            enable_disk_cache,
-                                             size_t                          device_disk_staging_block_count = 4):
-        PerRankBlockTransferEngine(groups, enable_disk_cache, {}, device_disk_staging_block_count) {}
+                                             const BlockTreeCacheConfig&     config):
+        PerRankBlockTransferEngine(groups,
+                                   enable_disk_cache,
+                                   {},
+                                   config.device_disk_staging_block_count,
+                                   config.max_descriptors_per_transfer_batch,
+                                   config.transfer_worker_count,
+                                   config.transfer_queue_max_size) {}
 
     std::shared_ptr<AsyncContext> execute(TransferTask task) override {
         const auto& descriptors      = task.descriptors();
@@ -243,13 +249,35 @@ public:
             cv_.notify_all();
         }
         for (auto& submit : pending) {
+            const auto complete = [forwarded = submit.context](const ErrorInfo& result) {
+                try {
+                    forwarded->complete(result);
+                } catch (const std::exception& error) {
+                    ADD_FAILURE() << "paused transfer completion failed: " << error.what();
+                } catch (...) {
+                    ADD_FAILURE() << "paused transfer completion failed with unknown exception";
+                }
+            };
             if (!submit.success) {
-                submit.context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
+                complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
                 continue;
             }
-            auto context = PerRankBlockTransferEngine::execute(std::move(submit.task));
-            context->waitDone();
-            submit.context->complete(context->errorInfo());
+            try {
+                auto context = PerRankBlockTransferEngine::execute(std::move(submit.task));
+                if (!context) {
+                    throw std::runtime_error("real transfer returned a null context");
+                }
+                // Both explicit and scope release drain real IO before returning.
+                // A timeout cannot safely abandon buffers without cancellation.
+                context->waitDone();
+                complete(context->errorInfo());
+            } catch (const std::exception& error) {
+                ADD_FAILURE() << "paused transfer submission failed: " << error.what();
+                complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+            } catch (...) {
+                ADD_FAILURE() << "paused transfer submission failed with unknown exception";
+                complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer exception"));
+            }
         }
     }
 
@@ -292,8 +320,14 @@ public:
         engine_(std::move(engine)) {}
 
     ~ScopedTransferRelease() {
-        if (engine_ != nullptr) {
-            engine_->release();
+        try {
+            if (engine_ != nullptr) {
+                engine_->release();
+            }
+        } catch (const std::exception& error) {
+            ADD_FAILURE() << "transfer release failed: " << error.what();
+        } catch (...) {
+            ADD_FAILURE() << "transfer release failed with unknown exception";
         }
     }
 
@@ -1641,8 +1675,8 @@ protected:
         ASSERT_NE(manager_, nullptr);
         auto cache = manager_->blockTreeCache();
 
-        auto pausable_engine =
-            std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
+        auto pausable_engine = std::make_shared<PausableRecordingTransferEngine>(
+            cache->groupSets(), cache->isDiskCacheEnabled(), cache->config());
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_engine);
         transfer_engine_.reset();
 
@@ -1897,8 +1931,8 @@ protected:
         ASSERT_NE(manager_, nullptr);
         auto cache = manager_->blockTreeCache();
 
-        auto engine =
-            std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
+        auto engine = std::make_shared<PausableRecordingTransferEngine>(
+            cache->groupSets(), cache->isDiskCacheEnabled(), cache->config());
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, engine);
         transfer_engine_.reset();
 

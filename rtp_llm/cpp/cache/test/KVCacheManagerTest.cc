@@ -1764,6 +1764,23 @@ TEST_F(KVCacheManagerTest, NonZeroMultiRankHasNoLocalBroadcastManager) {
     EXPECT_EQ(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_, nullptr);
 }
 
+TEST_F(KVCacheManagerTest, RemoteControllerRejectsMissingWorkerAddressesBeforeAllocation) {
+    const auto    cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_remote_cache = true;
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size    = 2;
+    parallelism_config.tp_rank    = 0;
+    parallelism_config.world_size = 2;
+    auto manager                  = std::make_shared<KVCacheManager>(
+        cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, RuntimeConfig{});
+    bool initialized = true;
+    EXPECT_NO_THROW(initialized = manager->init());
+    EXPECT_FALSE(initialized);
+    EXPECT_EQ(manager->allocator_, nullptr);
+    EXPECT_EQ(manager->blockTreeCache(), nullptr);
+}
+
 TEST_F(KVCacheManagerTest, MultiRankZeroRejectsMismatchedBroadcastAddressCount) {
     auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig     kv_cache_config;

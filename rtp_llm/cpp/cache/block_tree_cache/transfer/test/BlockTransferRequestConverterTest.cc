@@ -140,6 +140,16 @@ TEST(BlockTransferRequestConverterTest, ConvertsDeviceToHost) {
     EXPECT_EQ(output.blocksAt(Tier::DEVICE), (std::vector<BlockIdxType>{11, 12}));
 }
 
+TEST(BlockTransferRequestConverterTest, EncodeRejectsExpiredEmptyAndInvalidGroupTasks) {
+    const auto               descriptor = TransferDescriptor::deviceToHost(0, {1}, 2);
+    MemoryOperationRequestPB request;
+    EXPECT_FALSE(BlockTransferRequestConverter::encodeTransfer(
+        request, TransferTask({descriptor}, std::chrono::milliseconds(0)), groupSets()));
+    EXPECT_FALSE(BlockTransferRequestConverter::encodeTransfer(request, makeTransferTask({}), groupSets()));
+    EXPECT_FALSE(BlockTransferRequestConverter::encodeTransfer(
+        request, makeTransferTask({TransferDescriptor::deviceToHost(groupSets().size(), {1}, 2)}), groupSets()));
+}
+
 TEST(BlockTransferRequestConverterTest, EncodesRemainingTaskTimeoutForRemoteAdmission) {
     MemoryOperationRequestPB request;
     TransferTask             task({TransferDescriptor::deviceToHost(0, {11}, 21)}, std::chrono::milliseconds(100));

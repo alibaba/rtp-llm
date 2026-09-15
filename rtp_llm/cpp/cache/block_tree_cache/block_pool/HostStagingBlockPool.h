@@ -6,6 +6,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -46,6 +47,9 @@ public:
         }
 
         HostBufferView blockBuffer(size_t payload_bytes) const {
+            if (pool_ == nullptr) {
+                throw std::logic_error("host staging lease has been moved from");
+            }
             return pool_->blockBuffer(block_id_, payload_bytes);
         }
 
