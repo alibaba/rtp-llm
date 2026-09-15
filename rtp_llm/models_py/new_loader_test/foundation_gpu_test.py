@@ -9,6 +9,7 @@ import torch.nn as nn
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.layers import activation
 from rtp_llm.models_py.layers.embedding import VocabParallelEmbedding
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.registry import register_model
@@ -57,6 +58,49 @@ register_model("foundation_gpu_alias_model")(_GpuAliasModel)
 
 
 class FoundationGpuTest(unittest.TestCase):
+    def test_aux_hidden_capture_defaults_off_for_lightweight_config(self):
+        for optional_fields in (
+            {},
+            {"capture_aux_hidden_layer_ids": None},
+            {"capture_aux_hidden_layer_ids": []},
+        ):
+            with self.subTest(optional_fields=optional_fields):
+                config = types.SimpleNamespace(
+                    num_layers=1, vocab_size=8, **optional_fields
+                )
+                model = GptModelBase(config, types.SimpleNamespace())
+                self.assertIsInstance(model, RtpModule)
+                model.begin_aux_hidden_capture(torch.ones(2, 4), False)
+                model.finish_aux_hidden_capture()
+                self.assertIsNone(model.get_mtp_target_hidden_states(2))
+
+    def test_aux_hidden_capture_preserves_main_buffer_contract(self):
+        config = types.SimpleNamespace(
+            num_layers=2, vocab_size=8, capture_aux_hidden_layer_ids=[0, 1]
+        )
+        model = GptModelBase(config, types.SimpleNamespace())
+        hidden = torch.arange(16, dtype=torch.float32).view(4, 4)
+        residual = torch.ones_like(hidden)
+
+        def capture(value, residual_value, graph):
+            model.begin_aux_hidden_capture(value, graph)
+            model.capture_aux_hidden(0, value)
+            model.capture_aux_hidden(1, value, residual_value)
+            model.finish_aux_hidden_capture()
+            result = model.get_mtp_target_hidden_states(value.shape[0])
+            torch.testing.assert_close(
+                result, torch.cat((value, value + residual_value), dim=-1)
+            )
+            return result
+
+        graph_buffer = capture(hidden, residual, True)
+        replay = capture(hidden[:2] + 10, residual[:2], True)
+        self.assertEqual(replay.data_ptr(), graph_buffer.data_ptr())
+        prompt = capture(hidden, residual, False)
+        self.assertNotEqual(prompt.data_ptr(), graph_buffer.data_ptr())
+        replay_again = capture(hidden[:1], residual[:1], True)
+        self.assertEqual(replay_again.data_ptr(), graph_buffer.data_ptr())
+
     @staticmethod
     def _tp_embedding(tp_rank):
         embedding = VocabParallelEmbedding(
