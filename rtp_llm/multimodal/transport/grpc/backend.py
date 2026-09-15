@@ -46,8 +46,6 @@ class GrpcInlineOutputBackend(MMTerminalBackend):
             len(res.extra_input) > 0
         )
         receipt = MultimodalOutputPB(split_size=[e.shape[0] for e in res.embeddings])
-        for layout in res.token_layouts:
-            trans_from_tensor(layout, receipt.multimodal_token_layout.add())
         trans_from_tensor(_concat(res.embeddings), receipt.multimodal_embedding)
         if contain_pos:
             trans_from_tensor(_concat(res.position_ids), receipt.multimodal_pos_id)

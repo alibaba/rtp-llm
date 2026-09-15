@@ -40,11 +40,6 @@ public:
         std::map<int, int> lengths;
         if (!multimodal_inputs.has_value() || !multimodal_features.has_value()) {
             return {};
-        } else if (!multimodal_feature_types.empty()) {
-            RTP_LLM_CHECK(multimodal_feature_types.size() == multimodal_features->size());
-            for (size_t i = 0; i < multimodal_feature_types.size(); ++i) {
-                lengths[multimodal_feature_types[i]] += multimodal_features->at(i).size(0);
-            }
         } else {
             RTP_LLM_CHECK(multimodal_inputs.value().size() == multimodal_features.value().size());
             int mm_num = multimodal_inputs.value().size();
@@ -87,7 +82,6 @@ public:
     // For multi-modality models
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;
     std::optional<std::vector<torch::Tensor>>   multimodal_features;
-    std::vector<int>                            multimodal_feature_types;
     std::optional<torch::Tensor>                text_tokens_mask;  // text part for 1 and multimodal part for 0
     std::optional<torch::Tensor>                mm_locs;           // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;

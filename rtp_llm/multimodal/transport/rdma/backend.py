@@ -10,7 +10,6 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
 )
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
 from rtp_llm.multimodal.transport.base import MMOutputResult, MMTransportBackend
-from rtp_llm.utils.grpc_util import trans_from_tensor
 
 if TYPE_CHECKING:
     from rtp_llm.ops import MMRdmaExporter
@@ -68,8 +67,6 @@ class RdmaOutputBackend(MMTransportBackend):
         if res.extra_input is not None and len(res.extra_input) > 0:
             extras = [e.to(device=emb.device).contiguous() for e in res.extra_input]
         receipt = MultimodalOutputPB(split_size=[e.shape[0] for e in res.embeddings])
-        for layout in res.token_layouts:
-            trans_from_tensor(layout, receipt.multimodal_token_layout.add())
         desc_bytes_list = self._exporter.export_embedding(emb, pos, extras)
 
         if not desc_bytes_list:

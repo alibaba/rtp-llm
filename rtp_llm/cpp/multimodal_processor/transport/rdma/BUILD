@@ -5,7 +5,6 @@ cc_library(
     srcs = ["MMRdmaReader.cc"],
     hdrs = ["MMRdmaReader.h"],
     deps = [
-        "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
