@@ -121,6 +121,13 @@ def _validate_extension_contract(
         raise RuntimeError(
             f"DSV4 MoE-front build has invalid source SHA256 {source_sha256!r}"
         )
+    for field in ("deepgemm_commit", "cutlass_commit"):
+        dependency_commit = str(build_info.get(field, ""))
+        if not re.fullmatch(r"[0-9a-f]{40}", dependency_commit):
+            raise RuntimeError(
+                "DSV4 MoE-front build has invalid dependency identity "
+                f"{field}={dependency_commit!r}"
+            )
     return dict(geometry)
 
 
