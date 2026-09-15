@@ -177,6 +177,22 @@ bool HttpApiServer::registerSysCmdService() {
                                                          const http_server::HttpRequest& request) -> void {
         sys_cmd_service->setLogLevel(writer, request);
     };
+    if (is_embedding_) {
+        auto start_profile_callback = [service = sys_cmd_service_, engine = embedding_engine_](
+                                          std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                          const http_server::HttpRequest&                  request) {
+            service->startProfile(
+                writer,
+                request,
+                [engine](const std::string& trace_name, int start_step, int num_steps, bool enable_all_rank) {
+                    engine->startTimelineProfiling(trace_name, start_step, num_steps, enable_all_rank);
+                });
+        };
+        if (!http_server_->RegisterRoute("POST", "/start_profile", start_profile_callback)
+            || !http_server_->RegisterRoute("POST", "/rtp_llm/start_profile", start_profile_callback)) {
+            return false;
+        }
+    }
     return http_server_->RegisterRoute("POST", "/set_log_level", set_log_level_callback);
 }
 

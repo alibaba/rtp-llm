@@ -132,4 +132,37 @@ TEST_F(SysCmdServiceTest, SetLogLevelSuccess) {
     writer_ptr.release();
 }
 
+TEST_F(SysCmdServiceTest, StartProfileParametersAndDefaults) {
+    for (const std::string body :
+         {std::string(""), std::string(R"({"trace_name":"embedding","start_step":2,"num_steps":4,"all_tp":true})")}) {
+        bool called = false;
+        EXPECT_CALL(*mock_writer_, Write(R"({"status":"ok"})")).WillOnce(Return(true));
+        std::unique_ptr<http_server::HttpResponseWriter> writer(mock_writer_.release());
+        http_server::HttpRequest                         request;
+        request._request = CreateHttpPacket(body);
+        cmd_service_->startProfile(writer, request, [&](const std::string& name, int start, int steps, bool all_rank) {
+            called = true;
+            EXPECT_EQ(name, body.empty() ? "" : "embedding");
+            EXPECT_EQ(start, body.empty() ? 0 : 2);
+            EXPECT_EQ(steps, body.empty() ? 0 : 4);
+            EXPECT_EQ(all_rank, !body.empty());
+        });
+        EXPECT_TRUE(called);
+        mock_writer_.reset(static_cast<http_server::MockHttpResponseWriter*>(writer.release()));
+    }
+}
+
+TEST_F(SysCmdServiceTest, StartProfileRejectsMalformedRequest) {
+    EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([](const std::string& body) {
+        EXPECT_NE(body.find("error"), std::string::npos);
+        return true;
+    }));
+    std::unique_ptr<http_server::HttpResponseWriter> writer(mock_writer_.release());
+    http_server::HttpRequest                         request;
+    request._request = CreateHttpPacket(R"({"num_steps":"invalid"})");
+    cmd_service_->startProfile(
+        writer, request, [](const std::string&, int, int, bool) { FAIL() << "unexpected start"; });
+    EXPECT_EQ(writer->_statusCode, 400);
+}
+
 }  // namespace rtp_llm
