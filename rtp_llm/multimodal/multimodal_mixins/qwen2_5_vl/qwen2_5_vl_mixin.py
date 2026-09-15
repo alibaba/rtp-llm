@@ -20,6 +20,11 @@ except ModuleNotFoundError:
     VideoReader = None
     cpu = None
 
+try:
+    import av
+except ModuleNotFoundError:
+    av = None
+
 import logging
 import math
 
@@ -29,7 +34,6 @@ import torch.nn as nn
 from PIL import Image
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
-
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
@@ -125,6 +129,50 @@ def video_resize_shape(
     return resized_height, resized_width
 
 
+def _load_video_with_pyav(data, configs):
+    if av is None:
+        raise ImportError(
+            "decord or PyAV is required for video processing in Qwen2.5-VL. "
+            "Install `decord` or `av`."
+        )
+
+    with av.open(data, mode="r") as container:
+        if not container.streams.video:
+            raise ValueError("video input does not contain a video stream")
+        stream = container.streams.video[0]
+        video_fps = float(stream.average_rate or stream.guessed_rate or 0)
+        if not math.isfinite(video_fps) or video_fps <= 0:
+            raise ValueError("video stream does not provide a valid frame rate")
+
+        total_frames = int(stream.frames or 0)
+        if total_frames <= 0:
+            total_frames = sum(1 for _ in container.decode(stream))
+            container.seek(0, stream=stream)
+        if total_frames <= 0:
+            raise ValueError("video input does not contain decodable frames")
+
+        nframes = smart_nframes(configs, total_frames=total_frames, video_fps=video_fps)
+        frame_indices = (
+            torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
+        )
+        sampled_frames = []
+        next_sample = 0
+        for frame_index, frame in enumerate(container.decode(stream)):
+            if frame_index != frame_indices[next_sample]:
+                continue
+            sampled_frames.append(torch.from_numpy(frame.to_ndarray(format="rgb24")))
+            next_sample += 1
+            if next_sample == len(frame_indices):
+                break
+
+        if len(sampled_frames) != nframes:
+            raise ValueError(
+                f"video metadata reports {total_frames} frames, but only "
+                f"{len(sampled_frames)} of {nframes} requested frames were decoded"
+            )
+        return torch.stack(sampled_frames).permute(0, 3, 1, 2)
+
+
 class Qwen2_5_VLImageEmbedding(Qwen2_VLImageEmbedding):
     def __init__(self, mm_related_params: VitParameters):
         self.mm_related_params = mm_related_params
@@ -144,11 +192,6 @@ class Qwen2_5_VLImageEmbedding(Qwen2_VLImageEmbedding):
 
     @staticmethod
     def load_video(data, configs, **kwargs):
-        if VideoReader is None:
-            raise ImportError(
-                "decord is required for video processing in Qwen2.5-VL. "
-                "Install it with `pip install decord`."
-            )
         vit_metrics_tags: Optional[Dict[str, str]] = kwargs.get("vit_metrics_tags")
         decode_timer = (
             vit_preprocess_timer(
@@ -158,16 +201,19 @@ class Qwen2_5_VLImageEmbedding(Qwen2_VLImageEmbedding):
             else contextlib.nullcontext()
         )
         with decode_timer:
-            vr = VideoReader(data, ctx=cpu(0), num_threads=1)
-            total_frames, video_fps = len(vr), vr.get_avg_fps()
-            nframes = smart_nframes(
-                configs, total_frames=total_frames, video_fps=video_fps
-            )
-            idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
-            height, width = vr[0].shape[:2]
-
-            video = torch.from_numpy(vr.get_batch(idx).asnumpy()).permute(0, 3, 1, 2)
-            del vr
+            if VideoReader is not None:
+                vr = VideoReader(data, ctx=cpu(0), num_threads=1)
+                total_frames, video_fps = len(vr), vr.get_avg_fps()
+                nframes = smart_nframes(
+                    configs, total_frames=total_frames, video_fps=video_fps
+                )
+                idx = (
+                    torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
+                )
+                video = torch.from_numpy(vr.get_batch(idx).asnumpy()).permute(0, 3, 1, 2)
+                del vr
+            else:
+                video = _load_video_with_pyav(data, configs)
 
         nframes, _, height, width = video.shape
         resized_height, resized_width = video_resize_shape(
