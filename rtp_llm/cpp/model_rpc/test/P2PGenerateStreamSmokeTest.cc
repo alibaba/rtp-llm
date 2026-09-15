@@ -109,6 +109,9 @@ std::vector<uint8_t> payload(int64_t request_id, int layer, size_t block, size_t
 void writeBytes(const BlockInfo& info, const std::vector<uint8_t>& bytes) {
     require(info.is_cuda && info.addr && info.size_bytes == bytes.size(), "expected a real GPU cache buffer");
     cudaCheck(cudaMemcpy(info.addr, bytes.data(), bytes.size(), cudaMemcpyHostToDevice));
+    // Pageable H2D cudaMemcpy may return after staging, before GPU DMA completes.
+    // Publish layer-ready only after the default-stream copy is visible to RDMA.
+    cudaCheck(cudaStreamSynchronize(nullptr));
 }
 
 std::vector<uint8_t> readBytes(const BlockInfo& info) {
@@ -305,7 +308,10 @@ private:
                             throw std::runtime_error("payload mismatch request=" + std::to_string(stream->streamId())
                                                      + " layer=" + std::to_string(layer) + " tag=default block="
                                                      + std::to_string(block) + " buffer=" + std::to_string(buffer)
-                                                     + " byte=" + std::to_string(mismatch.first - expected.begin()));
+                                                     + " byte=" + std::to_string(mismatch.first - expected.begin())
+                                                     + " expected=" + std::to_string(*mismatch.first)
+                                                     + " actual=" + std::to_string(*mismatch.second)
+                                                     + " physical_block=" + std::to_string(ids[block]));
                         }
                         checked_bytes += actual.size();
                     }
