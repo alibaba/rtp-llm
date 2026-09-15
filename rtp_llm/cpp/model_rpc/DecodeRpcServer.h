@@ -117,7 +117,6 @@ private:
     static size_t keyBlocksPerLogicalBlock(const CacheGroupPolicy& policy,
                                            size_t                  group_seq_size_per_block,
                                            size_t                  base_seq_size_per_block);
-    static ErrorInfo validateRemoteLoadTopology(size_t worker_size, size_t peer_size);
     static void   markCacheKeyRange(std::vector<size_t>& cache_key_counts,
                                     size_t               endpoint_key_index,
                                     size_t               block_offset_index,
@@ -126,6 +125,7 @@ private:
                                                const std::vector<size_t>& required_cache_key_counts,
                                                const std::vector<size_t>& transferred_cache_key_counts);
     static size_t minLoadedCacheBlockCount(const std::vector<size_t>& rank_loaded_cache_block_counts);
+    static ErrorInfo validateRemoteLoadTopology(size_t worker_size, size_t peer_size);
     static std::vector<size_t> completionQueueExpectedResponseCounts(size_t worker_size);
     static int                 markLoadedCacheReuse(const std::shared_ptr<GenerateStream>& stream,
                                                     const LoadCacheResult&                 load_result,
