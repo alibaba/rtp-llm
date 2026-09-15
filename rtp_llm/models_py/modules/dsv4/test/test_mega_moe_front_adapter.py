@@ -295,15 +295,18 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             "collapse_ssq_bits": 32,
             "hash_input_id_bits": 32,
         }
+        valid_build_info = {
+            "source_commit": "37c78f10b54fd37cab72d90f37cb89cd27e67e7e",
+            "source_sha256": "7" * 64,
+            "deepgemm_commit": "559d79fb6994a58b8a15b4b93bf13ccc16edf247",
+            "cutlass_commit": "f3fde58372d33e9a5650ba7b80fc48b3b49d40c8",
+            "target_arches": "sm_100a,sm_103a",
+            "production_arch": "sm_100a,sm_103a",
+            "kernel_count": 4,
+        }
         ops = SimpleNamespace(
             geometry_moe_front=lambda _hidden: geometry,
-            build_info_moe_front=lambda: {
-                "source_commit": "8bb15d3b",
-                "source_sha256": "7" * 64,
-                "target_arches": "sm_100a,sm_103a",
-                "production_arch": "sm_100a,sm_103a",
-                "kernel_count": 4,
-            },
+            build_info_moe_front=lambda: valid_build_info,
         )
         with mock.patch("torch.cuda.get_device_capability", return_value=(10, 3)):
             self.assertEqual(
@@ -340,6 +343,24 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             _validate_extension_contract(
                 ops, 4096, 256, 6, torch.device("cuda:0")
             )
+
+        ops.geometry_moe_front = lambda _hidden: geometry
+        for field in ("deepgemm_commit", "cutlass_commit"):
+            with self.subTest(field=field):
+                invalid_build_info = dict(valid_build_info)
+                invalid_build_info.pop(field)
+                ops.build_info_moe_front = (
+                    lambda value=invalid_build_info: value
+                )
+                with mock.patch(
+                    "torch.cuda.get_device_capability", return_value=(10, 3)
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError, f"invalid dependency identity {field}"
+                    ):
+                        _validate_extension_contract(
+                            ops, 4096, 256, 6, torch.device("cuda:0")
+                        )
 
     def test_learned_front_stages_and_launches_prepacked_mega(self) -> None:
         adapter, plan = _fake_adapter()
