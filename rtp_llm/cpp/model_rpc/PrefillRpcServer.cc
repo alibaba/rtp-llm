@@ -353,7 +353,10 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
         return;
     }
 
-    auto result = mm_processor_->updateMultimodalFeatures(input);
+    auto result = updateMultimodalFeaturesWithTrace(input,
+                                                    prefill_context.trace_span_guard ?
+                                                        prefill_context.trace_span_guard->sharedSpan() :
+                                                        opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{});
     if (!result.ok()) {
         prefill_context.setRetryable(isRetryableMultimodalError(result.code()));
         setContextError(prefill_context, result);

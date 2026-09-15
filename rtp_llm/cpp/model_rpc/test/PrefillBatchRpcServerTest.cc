@@ -14,6 +14,7 @@
 #include "opentelemetry/exporters/memory/in_memory_span_exporter_factory.h"
 #include "opentelemetry/sdk/trace/span_data.h"
 #include "rtp_llm/cpp/model_rpc/PrefillBatchRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 
@@ -80,6 +81,8 @@ public:
 
 class TestPrefillBatchRpcServer: public PrefillBatchRpcServer {
 public:
+    using LocalRpcServer::prepareInput;
+
     grpc::Status EnqueueGroup(grpc::ServerContext*,
                               const EnqueueGroupRequestPB* request,
                               EnqueueBatchResponsePB*      response) override {
@@ -292,6 +295,44 @@ protected:
 
     std::shared_ptr<memory_exporter::InMemorySpanData> span_data_;
 };
+
+class VitTraceProcessor: public MultimodalProcessor {
+public:
+    VitTraceProcessor(): MultimodalProcessor(py::object(), MMModelConfig{true, {{1}}, false}, 100) {}
+
+    ErrorCode result_code = ErrorCode::NONE_ERROR;
+    bool      throws      = false;
+    int       calls       = 0;
+
+private:
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput> inputs,
+                                                      std::string = "") override {
+        ++calls;
+        if (throws) {
+            throw std::runtime_error("embedding failed");
+        }
+        if (result_code != ErrorCode::NONE_ERROR) {
+            return ErrorInfo(result_code, "embedding failed");
+        }
+        MultimodalOutput output;
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            output.mm_features.push_back(torch::zeros({2, 1}));
+        }
+        return output;
+    }
+};
+
+GenerateInputPB makeVitRequest(int64_t request_id) {
+    GenerateInputPB request;
+    request.set_request_id(request_id);
+    request.mutable_generate_config();
+    for (const auto token : {0, 1, 2, 1, 3}) {
+        request.add_token_ids(token);
+    }
+    request.add_multimodal_inputs()->set_multimodal_url("image-one");
+    request.add_multimodal_inputs()->set_multimodal_url("image-two");
+    return request;
+}
 
 void buildReadySlots(PrefillBatchRpcServer&                         server,
                      const std::vector<int64_t>&                    request_ids,
@@ -1346,6 +1387,129 @@ TEST(PrefillBatchRpcServerTest, CancelAllClearsAndCancelsDeferredContexts) {
     const auto shutdown_status = contexts->store(3008, after_shutdown);
     EXPECT_EQ(shutdown_status.error_code(), grpc::StatusCode::UNAVAILABLE);
     EXPECT_EQ(shutdown_status.error_message(), "Prefill batch server is shutting down");
+}
+
+TEST_F(PrefillBatchTraceTest, VitCoversFusionPreparationIncludingTokenExpansion) {
+    TestPrefillBatchRpcServer server;
+    auto                      processor   = std::make_shared<VitTraceProcessor>();
+    server.mm_processor_                  = processor;
+    auto                           parent = telemetry::startRpcServerSpan("rtp_llm.generate_stream_call", nullptr);
+    std::shared_ptr<GenerateInput> input;
+    ASSERT_TRUE(server.prepareInput(makeVitRequest(4101), input, parent).ok());
+    EXPECT_EQ(processor->calls, 1);
+    ASSERT_TRUE(input->multimodal_features);
+    EXPECT_EQ(input->multimodal_features->size(), 2u);
+    EXPECT_EQ(input->input_ids.numel(), 7);
+    parent->End();
+
+    auto spans   = finishTelemetry();
+    auto vit     = findSpans(spans, "rtp_llm.vit");
+    auto parents = findSpans(spans, "rtp_llm.generate_stream_call");
+    ASSERT_EQ(vit.size(), 1u);
+    ASSERT_EQ(parents.size(), 1u);
+    EXPECT_EQ(vit[0]->GetParentSpanId(), parents[0]->GetSpanId());
+    EXPECT_EQ(vit[0]->GetTraceId(), parents[0]->GetTraceId());
+    EXPECT_EQ(vit[0]->GetResource().GetAttributes(), parents[0]->GetResource().GetAttributes());
+    EXPECT_EQ(vit[0]->GetSpanKind(), trace_api::SpanKind::kInternal);
+    EXPECT_EQ(vit[0]->GetStatus(), trace_api::StatusCode::kOk);
+    EXPECT_EQ(nostd::get<std::string>(vit[0]->GetAttributes().at("request_id")), "4101");
+    EXPECT_EQ(vit[0]->GetAttributes().count("rtp_llm.request_id"), 0u);
+    EXPECT_EQ(vit[0]->GetAttributes().count("rpc.system"), 0u);
+}
+
+TEST_F(PrefillBatchTraceTest, VitUsesEachBatchRequestParentAndDoesNotRepeatProcessedInputs) {
+    TestPrefillBatchRpcServer server;
+    server.meta_         = std::make_shared<RpcServerRuntimeMeta>();
+    auto processor       = std::make_shared<VitTraceProcessor>();
+    server.mm_processor_ = processor;
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots(2);
+    for (size_t i = 0; i < slots.size(); ++i) {
+        slots[i].input = std::make_shared<GenerateInputPB>(makeVitRequest(4201 + i));
+        setTraceContext(*slots[i].input, std::string(32, '1' + i), std::string(16, '3' + i));
+    }
+    server.buildSlotContexts(slots);
+    for (auto& slot : slots) {
+        auto& context          = *slot.deferred->context;
+        context.generate_input = QueryConverter::transQuery(slot.input.get());
+        server.multimodalProcess(context);
+        ASSERT_TRUE(context.error_status.ok());
+        EXPECT_TRUE(context.multimodalProcessed());
+        server.multimodalProcess(context);
+        slot.deferred->finishLogicalTrace();
+    }
+    EXPECT_EQ(processor->calls, 2);
+    auto spans   = finishTelemetry();
+    auto vit     = findSpans(spans, "rtp_llm.vit");
+    auto parents = findSpans(spans, "rtp_llm.prefill_batch_request");
+    ASSERT_EQ(vit.size(), 2u);
+    ASSERT_EQ(parents.size(), 2u);
+    EXPECT_NE(vit[0]->GetTraceId(), vit[1]->GetTraceId());
+    for (const auto* child : vit) {
+        const auto parent = std::find_if(parents.begin(), parents.end(), [&](const auto* candidate) {
+            return candidate->GetSpanId() == child->GetParentSpanId();
+        });
+        ASSERT_NE(parent, parents.end());
+        EXPECT_EQ(child->GetTraceId(), (*parent)->GetTraceId());
+        EXPECT_EQ(child->GetAttributes().at("request_id"), (*parent)->GetAttributes().at("request_id"));
+        EXPECT_EQ(child->GetStatus(), trace_api::StatusCode::kOk);
+    }
+}
+
+TEST_F(PrefillBatchTraceTest, VitPreservesErrorsAndEndsOnException) {
+    TestPrefillBatchRpcServer server;
+    auto                      processor = std::make_shared<VitTraceProcessor>();
+    server.mm_processor_                = processor;
+    auto                         parent = telemetry::startRpcServerSpan("rtp_llm.generate_stream_call", nullptr);
+    const std::vector<ErrorCode> errors = {
+        ErrorCode::MM_REMOTE_RPC_FAILED, ErrorCode::GENERATE_TIMEOUT, ErrorCode::CANCELLED};
+    std::shared_ptr<GenerateInput> input;
+    for (const auto code : errors) {
+        processor->result_code = code;
+        auto result            = server.prepareInput(makeVitRequest(static_cast<int64_t>(code)), input, parent);
+        EXPECT_EQ(result.code(), code);
+        EXPECT_EQ(result.ToString(), "embedding failed");
+    }
+    processor->throws = true;
+    EXPECT_THROW(server.prepareInput(makeVitRequest(4301), input, parent), std::runtime_error);
+    EXPECT_EQ(processor->calls, 4);
+    parent->End();
+    auto spans = finishTelemetry();
+    auto vit   = findSpans(spans, "rtp_llm.vit");
+    ASSERT_EQ(vit.size(), 4u);
+    for (const auto* span : vit) {
+        EXPECT_EQ(span->GetStatus(), trace_api::StatusCode::kError);
+        const auto& attrs = span->GetAttributes();
+        const auto& id    = nostd::get<std::string>(attrs.at("request_id"));
+        if (id == "4301") {
+            EXPECT_EQ(nostd::get<std::string>(attrs.at("error.type")), "Exception");
+        } else {
+            const auto code = static_cast<ErrorCode>(std::stoll(id));
+            EXPECT_EQ(nostd::get<int64_t>(attrs.at("rtp_llm.error.code")), static_cast<int64_t>(code));
+            EXPECT_EQ(nostd::get<std::string>(attrs.at("error.type")), ErrorCodeToString(code));
+            EXPECT_EQ(nostd::get<std::string>(attrs.at("rtp_llm.error.reason")), ErrorCodeToString(code));
+        }
+        EXPECT_EQ(attrs.count("rpc.response.status_code"), 0u);
+    }
+}
+
+TEST_F(PrefillBatchTraceTest, VitSkipsTextMissingParentAndDisabledTelemetry) {
+    TestPrefillBatchRpcServer server;
+    auto                      processor = std::make_shared<VitTraceProcessor>();
+    server.mm_processor_                = processor;
+    auto parent                         = telemetry::startRpcServerSpan("rtp_llm.generate_stream_call", nullptr);
+    auto text                           = makeVitRequest(4401);
+    text.clear_multimodal_inputs();
+    std::shared_ptr<GenerateInput> input;
+    ASSERT_TRUE(server.prepareInput(text, input, parent).ok());
+    EXPECT_EQ(processor->calls, 0);
+    ASSERT_TRUE(server.prepareInput(makeVitRequest(4402), input).ok());
+    EXPECT_EQ(processor->calls, 1);
+    parent->End();
+    auto spans = finishTelemetry();
+    EXPECT_TRUE(findSpans(spans, "rtp_llm.vit").empty());
+    ASSERT_TRUE(server.prepareInput(makeVitRequest(4403), input, parent).ok());
+    EXPECT_EQ(processor->calls, 2);
+    EXPECT_TRUE(span_data_->GetSpans().empty());
 }
 
 TEST_F(PrefillBatchTraceTest, PerRequestCarriersCreateIsolatedLogicalParentsAndP2dChild) {
