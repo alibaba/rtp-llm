@@ -98,7 +98,7 @@ public:
 
     virtual size_t onflightRequestNum();
 
-    virtual void stop() {
+    void stop() {
         (void)engine_->stop();
     }
 

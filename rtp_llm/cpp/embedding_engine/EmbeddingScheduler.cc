@@ -6,11 +6,14 @@
 using namespace std;
 namespace rtp_llm {
 
-EmbeddingScheduler::EmbeddingScheduler(const ModelConfig& model_config,
-                                       const ConcurrencyConfig& concurrency_config,
-                                       const RuntimeConfig& runtime_config,
+EmbeddingScheduler::EmbeddingScheduler(const ModelConfig&                 model_config,
+                                       const ConcurrencyConfig&           concurrency_config,
+                                       const RuntimeConfig&               runtime_config,
                                        const kmonitor::MetricsReporterPtr metrics_reporter):
-    model_config_(model_config), concurrency_config_(concurrency_config), runtime_config_(runtime_config), metrics_reporter_(metrics_reporter) {}
+    model_config_(model_config),
+    concurrency_config_(concurrency_config),
+    runtime_config_(runtime_config),
+    metrics_reporter_(metrics_reporter) {}
 
 EmbeddingScheduler::~EmbeddingScheduler() {
     (void)stop();
@@ -19,24 +22,14 @@ EmbeddingScheduler::~EmbeddingScheduler() {
 
 absl::Status EmbeddingScheduler::stop() {
     RTP_LLM_LOG_INFO("stop EmbeddingScheduler");
-    {
-        lock_guard<mutex> lock(lock_);
-        stop_ = true;
-        for (auto& stream : waiting_streams_) {
-            stream->setError("embedding scheduler stopped");
-        }
-        waiting_streams_.clear();
-    }
+    lock_guard<mutex> lock(lock_);
+    stop_ = true;
     cond_.notify_all();
     return absl::OkStatus();
 }
 
 absl::Status EmbeddingScheduler::enqueue(EmbeddingStreamPtr stream) {
     lock_guard<mutex> lock(lock_);
-    if (stop_) {
-        stream->setError("embedding scheduler stopped");
-        return absl::CancelledError("embedding scheduler stopped");
-    }
     waiting_streams_.emplace_back(stream);
     cond_.notify_all();
     return absl::OkStatus();
@@ -46,14 +39,12 @@ absl::StatusOr<list<EmbeddingStreamPtr>> EmbeddingScheduler::scheduleNew() {
     unique_lock<mutex> lock(lock_);
     cond_.wait(lock, [this] { return stop_ || !waiting_streams_.empty(); });
     std::list<EmbeddingStreamPtr> new_streams;
-    if (stop_) {
-        return new_streams;
-    }
     int                           total_len = 0;
     auto                          it        = waiting_streams_.begin();
     while (it != waiting_streams_.end()) {
         const auto& stream = *it;
-        if (total_len + stream->inputLength() > runtime_config_.fifo_scheduler_config.max_context_batch_size * model_config_.max_seq_len) {
+        if (total_len + stream->inputLength()
+            > runtime_config_.fifo_scheduler_config.max_context_batch_size * model_config_.max_seq_len) {
             break;
         }
         stream->setStart();

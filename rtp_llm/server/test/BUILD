@@ -64,7 +64,6 @@ py_test(
     ],
     tags = ["manual"],
 )
-
 py_test(
     name = "master_client_trace_test",
     srcs = ["master_client_trace_test.py"],
@@ -74,25 +73,5 @@ py_test(
         "//rtp_llm:telemetry",
         "//rtp_llm:testlib",
         "//rtp_llm/server:server",
-    ],
-)
-
-py_test(
-    name = "backend_manager_shutdown_test",
-    exec_properties = {"gpu": "A10"},
-    srcs = ["backend_manager_shutdown_test.py"],
-    deps = [
-        "//rtp_llm:testlib",
-        "//rtp_llm/models_py/distributed:deepep_wrapper",
-        "//rtp_llm/server:server",
-    ],
-)
-
-py_test(
-    name = "start_backend_server_shutdown_test",
-    srcs = ["start_backend_server_shutdown_test.py"],
-    deps = [
-        "//rtp_llm:sdk",
-        "//rtp_llm:testlib",
     ],
 )

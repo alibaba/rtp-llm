@@ -12,12 +12,12 @@ filegroup(
 )
 
 py_test(
-    name = "case_runner_keepalive_test",
+    name = "disk_path_preparation_test",
     srcs = glob(
         ["*.py"],
         exclude = ["entry.py"],
     ),
-    main = "case_runner_keepalive_test.py",
+    main = "disk_path_preparation_test.py",
     imports = [".."],
     deps = [
         "//rtp_llm/test/utils:device_resource",
