@@ -362,6 +362,31 @@ class TestProcessManager(unittest.TestCase):
             self.assertFalse(proc.is_alive())
         self.assertTrue(self.manager.failure_detected)
 
+    def test_collective_timeout_exit_stops_peers_and_fails_parent(self):
+        timed_out = multiprocessing.Process(target=os._exit, args=(124,))
+        peer = multiprocessing.Process(target=dummy_worker, args=(10,))
+        self.manager.add_processes([timed_out, peer])
+        self.manager.monitor_interval = 0.01
+        self.manager.POST_KILL_REAP_WINDOW = 0.05
+        timed_out.start()
+        peer.start()
+        timed_out.join(timeout=2)
+        self.assertEqual(timed_out.exitcode, 124)
+
+        with patch("logging.error") as error, patch(
+            "os._exit", side_effect=SystemExit(1)
+        ):
+            with self.assertRaises(SystemExit):
+                self.manager.monitor_and_release_processes()
+        self.assertFalse(peer.is_alive())
+        self.assertTrue(self.manager.failure_detected)
+        error.assert_any_call(
+            "Process %s (%s) died unexpectedly with exit code %s",
+            timed_out.pid,
+            timed_out.name,
+            124,
+        )
+
     def test_monitor_with_shutdown_signal(self):
         """Test monitoring with shutdown signal"""
         proc = multiprocessing.Process(target=dummy_worker, args=(5,))

@@ -4,6 +4,18 @@ _DSV4_TEST_DEPS = [
 ]
 
 py_test(
+    name = "mega_moe_static_buf_test",
+    srcs = ["mega_moe_static_buf_test.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
+    name = "test_sleep_computed_weights",
+    srcs = ["test_sleep_computed_weights.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
     name = "test_cp_context_build",
     srcs = ["test_cp_context_build.py"],
     deps = _DSV4_TEST_DEPS,

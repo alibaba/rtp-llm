@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/PrefixTreeMemoryBlockCache.h"
 
+#include <stdexcept>
+
 #include <algorithm>
 #include <mutex>
 
@@ -403,8 +405,32 @@ size_t PrefixTreeMemoryBlockCache::size() const {
     return count;
 }
 
-PrefixTreeMemoryBlockCache::Node&
-PrefixTreeMemoryBlockCache::upsertNodeLocked(CacheKeyType cache_key, const BlockDependency& dependency) {
+std::vector<PrefixTreeMemoryBlockCache::CacheItem> PrefixTreeMemoryBlockCache::clear() {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    std::vector<CacheItem>              removed;
+    for (const auto& [_, node] : nodes_) {
+        for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+            const auto index = kindIndex(kind);
+            if (node.kinds[index].in_flight_ref != 0 || !node.retired_items[index].empty()) {
+                throw std::runtime_error("cannot clear prefix cache before transfers drain");
+            }
+            if (auto item = toItemLocked(node, kind)) {
+                removed.push_back(*item);
+            }
+        }
+    }
+    nodes_.clear();
+    pending_children_by_parent_.clear();
+    for (auto& lru : leaf_lru_) {
+        lru.clear();
+    }
+    access_seq_     = 0;
+    generation_seq_ = 0;
+    return removed;
+}
+
+PrefixTreeMemoryBlockCache::Node& PrefixTreeMemoryBlockCache::upsertNodeLocked(CacheKeyType           cache_key,
+                                                                               const BlockDependency& dependency) {
     auto it = nodes_.find(cache_key);
     if (it == nodes_.end()) {
         Node node;

@@ -710,7 +710,12 @@ class ProcessManager:
                 # Unexpected death → escalate to failure shutdown.
                 for proc in self.processes:
                     if not proc.is_alive():
-                        logging.error(f"Process {proc.pid} died unexpectedly")
+                        logging.error(
+                            "Process %s (%s) died unexpectedly with exit code %s",
+                            proc.pid,
+                            proc.name,
+                            proc.exitcode,
+                        )
                 self.failure_detected = True
                 logging.error("Some processes died unexpectedly, terminating all...")
                 self._terminate_processes(drain_timeout=0, staged=False)

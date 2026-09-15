@@ -12,6 +12,25 @@ py_test(
 )
 
 py_test(
+    name = "sleep_routes_test",
+    srcs = [
+        "sleep_routes_test.py",
+    ],
+    deps = [
+        "//rtp_llm:fastapi",
+        "//rtp_llm:frontend_sleep_routes",
+        "//rtp_llm:frontend_worker_address_utils",
+        "//rtp_llm:protobuf",
+        "//rtp_llm:utils",
+        "//rtp_llm/cpp/model_rpc:grpcio",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+        "//rtp_llm/metrics:metrics",
+    ],
+    exec_properties = {'gpu': 'H20'},
+    tags = ["frontend"],
+)
+
+py_test(
     name = "frontend_start_test",
     srcs = [
         "frontend_app_test.py",

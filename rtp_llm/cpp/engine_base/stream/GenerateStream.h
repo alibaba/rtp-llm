@@ -254,7 +254,7 @@ public:
                                 ErrorCode               error_code = ErrorCode::NONE_ERROR,
                                 const std::string&      error_msg  = "");
 
-    void reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
+    virtual void reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
     // Caller must already hold mutex_. Use this only on state-machine paths entered through moveToNext().
     void         reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg);
     bool         hasEvent(StreamEvents::EventType event) const;

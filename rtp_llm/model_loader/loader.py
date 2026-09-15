@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.sleep_mode_compatibility import reject_dynamic_lora_mutation
 from rtp_llm.lora.lora_weights import LoRAWeights
 from rtp_llm.model_loader.ffn_weight import iter_stacked_moe_weights
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
@@ -18,6 +19,11 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeights,
 )
 from rtp_llm.model_loader.tensor_source import DatabaseTensorSource, TensorCollector
+from rtp_llm.model_loader.weight_memory_saver import (
+    is_enabled,
+    sleep_mode_level,
+    weights_region,
+)
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight, WeightModule
 from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
@@ -45,6 +51,7 @@ class ModelLoader:
         database: BaseDatabase,
         load_method: LoadMethod = LoadMethod.AUTO,
         force_cpu_load_weights: bool = False,
+        fastsafetensors_reserve_mb: int = 2048,
     ):
         self.model_config = model_config
         self._task_type = model_config.task_type
@@ -74,6 +81,7 @@ class ModelLoader:
             phy2log=self._phy2log,
             exported_device=get_current_device(),
             force_cpu_load_weights=force_cpu_load_weights,
+            fastsafetensors_reserve_mb=fastsafetensors_reserve_mb,
         )
 
     def get_load_config(self) -> LoadConfig:
@@ -108,15 +116,28 @@ class ModelLoader:
             weights = self._load_from_ft_style(device)
         else:
             weights = self._load_weight(device)
-            self.force_clean_cuda_memory()
 
-        # load dynamic weight
-        self._load_dynamic_weights(weights, device)
-        # load eplb weight
-        self._init_eplb_weight(weights, device)
+        # Dynamic lm_head/positional weights and static EPLB buffers may
+        # allocate new GPU tensors outside WeightModule.load().
+        with weights_region():
+            self._load_dynamic_weights(weights, device)
+            self._init_eplb_weight(weights, device)
+
+        # weights_region wraps the whole load pipeline, so the transient
+        # intermediates (raw read / dequant / TP-split / .to(device)) it
+        # produces get freed here but leave their caching-allocator segments
+        # cached. empty_cache() returns those freed segments to the driver so
+        # only the live resident weights stay resident -- and, under sleep mode,
+        # only they keep the "weights" tag (cudaFree untracks the rest in
+        # torch_memory_saver). One-time at load; covers scratch, fastsafetensors
+        # and the dynamic/eplb region alike.
+        self.force_clean_cuda_memory()
         return weights
 
     def load_lora_weights(self, adapter_name: str, lora_path: str, device: str = "cpu"):
+        reject_dynamic_lora_mutation(
+            enable_sleep_mode=is_enabled(), sleep_mode_level=sleep_mode_level()
+        )
         lora_weights = LoRAWeights(self._load_config.num_layers)
         # set lora rank
         self._load_config.database.load_lora(adapter_name, lora_path)
@@ -128,10 +149,12 @@ class ModelLoader:
         if self._weights_info.weight_style == WeightStyle.RTP_LLM_STYLE:
             raise ValueError("load_lora_weights only support non-ft-style weight")
 
-        for id in range(self._load_config.num_layers):
-            result = self._load_layer_lora_weights(adapter_name, id, device)
-            for name, tensor in result.items():
-                lora_weights.set_layer_weight(False, id, name, tensor)
+        # Cover LoRA tensors as pausable weight memory when loaded directly to GPU.
+        with weights_region():
+            for id in range(self._load_config.num_layers):
+                result = self._load_layer_lora_weights(adapter_name, id, device)
+                for name, tensor in result.items():
+                    lora_weights.set_layer_weight(False, id, name, tensor)
 
         lora_weights.apply_scale(lora_alpha / rank)  # apply scale
         self._load_config.database.remove_lora(adapter_name)
@@ -290,10 +313,37 @@ class ModelLoader:
             / (1024.0**2)
         )
         max_file_mem = max_file_size / (1024.0**2)
-        logging.debug(
-            f"free mem: {free_mem}, model mem: {model_mem}, max file mem: {max_file_mem}"
+        rtp_reserve_mem = self._load_config.fastsafetensors_reserve_mb
+        transient_mem = 3 * max_file_mem + rtp_reserve_mem
+        logging.info(
+            f"fastsafetensor memory check: free_mem={free_mem:.0f}MB, "
+            f"model_mem={model_mem:.0f}MB, max_file_mem={max_file_mem:.0f}MB, "
+            f"rtp_reserve_mem={rtp_reserve_mem:.0f}MB, "
+            f"enough={(free_mem - model_mem) > transient_mem}"
         )
-        return (free_mem - model_mem) > (3 * max_file_mem)
+        return (free_mem - model_mem) > transient_mem
+
+    @staticmethod
+    def _fastsafetensors_transient_budget_bytes(max_file_size: int) -> int:
+        """Return the configured bounded-loader peak or the legacy estimate.
+
+        New fastsafetensors versions expose queue/producer-aware batch-buffer
+        accounting. Keep the historical three-shard estimate when loading an
+        older wheel or when ``max_batch_bytes`` is unset.
+        """
+        legacy_budget = 3 * max_file_size
+        try:
+            from fastsafetensors import load_config
+
+            config = load_config()
+            estimate = getattr(config, "estimated_peak_device_bytes", None)
+            return legacy_budget if estimate is None else estimate
+        except (ImportError, ModuleNotFoundError, AttributeError, ValueError) as error:
+            logging.warning(
+                "failed to read bounded fastsafetensors memory config; "
+                f"use legacy estimate: {error}"
+            )
+            return legacy_budget
 
     @staticmethod
     def _build_stacked_key_config(weight_info_list) -> dict:
@@ -313,20 +363,88 @@ class ModelLoader:
         return stacked_key_config
 
     def _load_from_fastsafetensor(self, device: str):
-        logging.info(f"load weight by device: {device}")
         model_weights = self._create_model_weights(device)
+        # Sleep-mode residual fix: keep the raw fastsafetensors shard reads OUT
+        # of the torch_memory_saver "weights" region when the loader always
+        # re-materializes each resident weight via a TP/EP/DP split-clone
+        # (WeightModule._split -> __split_tensor().contiguous().clone()). The
+        # raw shards are allocated by the *iterator* (database.py) under
+        # ``allocation_context``, separately from WeightModule.load()'s region;
+        # they are pure transients consumed by _split and freed. Routing them
+        # through the region's private MemPool strands their freed blocks there
+        # forever (empty_cache cannot drain a live private pool, pause skips
+        # non-live blocks) -- this is the bulk of the sleep residual. The
+        # resident split-clones are still allocated INSIDE weight.load()'s
+        # weights_region, so they stay tagged/pausable. Only when every
+        # parallelism degree is 1 does _split pass the raw tensor through
+        # unchanged (it would then BE the resident weight and must keep the
+        # region tag), so fall back to region-scoped raw reads in that case.
+        lc = self._load_config
+        raw_in_region = lc.tp_size <= 1 and lc.dp_size <= 1 and lc.ep_size <= 1
+        for layer_id, name, tensor in self.prepare_weights_fastsafetensor(
+            device, in_weights_region=raw_in_region
+        ):
+            if layer_id is not None:
+                model_weights.set_layer_weight(layer_id, name, tensor)
+            else:
+                model_weights.set_global_weight(name, tensor)
+        return model_weights
+
+    def prepare_weights_fastsafetensor(
+        self, device: str, in_weights_region: bool = True, force_nogds: bool = False
+    ):
+        """Bulk fastsafetensors weight generator: yields ``(layer_id, name, tensor)``.
+
+        Streams checkpoint shards through the fastsafetensors iterator and emits
+        already-processed tensors (post dequant / MoE per-expert split / TP
+        split) — the same layout ``prepare_weights`` produces per-tensor, but via
+        the fast bulk shard path instead of per-tensor database reads. Shared by
+        the cold load (:meth:`_load_from_fastsafetensor`) and the level-2 wake
+        reload (:meth:`WeightManager.reload_weights_from_loader`).
+
+        ``in_weights_region`` controls whether the fastsafetensors allocations are
+        scoped into the torch_memory_saver "weights" region:
+
+        * Cold load (``True``): the emitted tensors *become* the resident weights,
+          so they must live in the weights region to be paused/resumed by sleep.
+        * Wake reload (``False``): the emitted tensors are only transient ``copy_``
+          sources into weights that are already resident at a fixed VA. Scoping
+          them into the region would commit them (and every dequant/split
+          intermediate) as region-backed physical pages that ``cudaFree`` /
+          ``empty_cache`` cannot return to the driver — leaving several GB stuck
+          (and *growing with weight count*) and starving the subsequent KV-cache
+          ``resume`` (observed OOM in ``cu_mem_create``). With ``nullcontext``
+          they are plain torch allocations freed per-tensor in the reload loop,
+          so the stuck footprint collapses from "scales with the model" to a
+          bounded, model-size-independent residual (~1GB order): the freed blocks
+          land in torch segments co-tenanted with resident engine allocations, so
+          ``empty_cache`` cannot return those segments, but peak simultaneous
+          transient is tiny (one tensor at a time) so the residual no longer
+          scales. Fully draining that last residual would need per-reload segment
+          isolation (a private ``MemPool``), which aborts under
+          torch_memory_saver — see ``mempool-destroy-crashes-under-tms``.
+
+        Loader backend and scheduling policy are selected by
+        ``FASTSAFETENSORS_CONFIG_JSON``. ``force_nogds`` remains a compatibility
+        switch for sleep reload and maps to the equivalent base/nogds config.
+        """
+        logging.info(f"load weight by device: {device}")
         tensor_to_weight_map, weight_info_list = self._generate_weight_info()
 
         stacked_key_config = self._build_stacked_key_config(weight_info_list)
         if stacked_key_config:
             logging.info(
-                f"fastsafetensors per-expert split enabled for {len(stacked_key_config)} stacked keys"
+                "fastsafetensors per-expert split enabled for %d stacked keys",
+                len(stacked_key_config),
             )
 
         all_tensors = self._load_config.database.fastsafetensors_weights_iterator(
             device,
             True,
             stacked_key_config=stacked_key_config,
+            allocation_context=weights_region if in_weights_region else None,
+            force_nogds=force_nogds,
+            local_copyout_filter=tensor_to_weight_map.__contains__,
         )
 
         for key, loaded_tensor in all_tensors:
@@ -343,12 +461,7 @@ class ModelLoader:
                     load_config=self._load_config,
                 )
                 for name, tensor in tensors.items():
-                    if weight_info.layer_id is not None:
-                        model_weights.set_layer_weight(
-                            weight_info.layer_id, name, tensor
-                        )
-                    else:
-                        model_weights.set_global_weight(name, tensor)
+                    yield (weight_info.layer_id, name, tensor)
                 weight_info.collector.clear()
 
         for weight_info in weight_info_list:
@@ -362,11 +475,48 @@ class ModelLoader:
                 load_config=self._load_config,
             )
             for name, tensor in tensors.items():
-                if weight_info.layer_id is not None:
-                    model_weights.set_layer_weight(weight_info.layer_id, name, tensor)
-                else:
-                    model_weights.set_global_weight(name, tensor)
-        return model_weights
+                yield (weight_info.layer_id, name, tensor)
+
+    def can_reload_from_fastsafetensor(self) -> bool:
+        """Whether the level-2 wake reload can use the fast bulk fastsafetensors path.
+
+        Distinct from the cold-start check (:meth:`_is_memory_enough_for_fastsafetensor`),
+        which sizes headroom for allocating a *second* full copy of the model.
+        Wake reload copies into weights that are ALREADY resident (blank pages
+        remapped by ``resume``), so only the transient loader buffers need
+        headroom. Bounded loading uses the configured batch/producer/queue peak;
+        legacy file loading keeps the historical three-max-shard estimate.
+        Returns False (caller falls back to the load-from-scratch per-tensor
+        reload) when fastsafetensors is unavailable or the checkpoint is not
+        fast-loadable (non-safetensors / duplicate tensor names).
+        """
+        if not has_module("fastsafetensors"):
+            logging.info("reload: fastsafetensors module unavailable, use scratch path")
+            return False
+        if not self._load_config.database.is_safetensor:
+            logging.info("reload: checkpoint is not safetensors, use scratch path")
+            return False
+        tensors_name = self._load_config.database.get_pretrain_tensor_names()
+        if len(set(tensors_name)) != len(tensors_name):
+            logging.info("reload: duplicate tensor names, use scratch path")
+            return False
+        device_mem_info = self._load_config.exported_device.get_mem_info()
+        if device_mem_info is not None:
+            free_bytes = device_mem_info.free
+            max_file_size = self._load_config.database.get_max_file_size()
+            transient_bytes = self._fastsafetensors_transient_budget_bytes(
+                max_file_size
+            )
+            if free_bytes <= transient_bytes:
+                free_mb = free_bytes / (1024.0**2)
+                transient_mb = transient_bytes / (1024.0**2)
+                logging.warning(
+                    "reload: insufficient transient headroom for fastsafetensors "
+                    f"(free={free_mb:.0f}MB <= configured peak={transient_mb:.0f}MB), "
+                    "use scratch path"
+                )
+                return False
+        return True
 
     def prepare_weights(self, device: str):
         if (
@@ -646,6 +796,38 @@ class ModelLoader:
                         dynamic_weight.name, dynamic_w.get(dynamic_weight.name)
                     )
 
+    def prepare_dynamic_weights(self, device: str):
+        """Regenerate computed dynamic weights as a ``(layer_id, name, tensor)`` stream.
+
+        The checkpoint-replay generators (:meth:`prepare_weights_fastsafetensor`
+        / :meth:`prepare_weights`) only emit tensors that physically exist in the
+        checkpoint. A few weights are *computed* at cold load by
+        :meth:`_load_dynamic_weights` — e.g. ``rotary_embedding.cos_sin_cache`` —
+        and are never read from disk. The level-2 wake reload must regenerate
+        them too: after ``resume("weights")`` remaps blank pages at the original
+        VA, an uncovered computed weight would stay blank and trip the coverage
+        assertion in :meth:`WeightManager.reload_weights_from_loader`. This
+        mirrors the ``create_dynamic_weights()`` branch of
+        :meth:`_load_dynamic_weights` but yields the tensors (as global weights,
+        ``layer_id=None``) instead of writing them into a ``ModelWeights``;
+        lm_head / positional_embedding come back through the checkpoint stream.
+        """
+        if self._load_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
+            return
+        if self._task_type != TaskType.LANGUAGE_MODEL:
+            return
+        dynamic_weights = self._weights_info.create_dynamic_weights()
+        if not dynamic_weights:
+            return
+        for dynamic_weight in dynamic_weights:
+            dynamic_w = dynamic_weight.load(
+                DatabaseTensorSource(self._load_config.database),
+                None,
+                device,
+                self._load_config,
+            )
+            yield (None, dynamic_weight.name, dynamic_w.get(dynamic_weight.name))
+
     def create_eplb(self):
         weights_info = self._weights_info
 
@@ -722,6 +904,7 @@ def get_model_loader(
     database: BaseDatabase,
     load_method: LoadMethod = LoadMethod.AUTO,
     force_cpu_load_weights: bool = False,
+    fastsafetensors_reserve_mb: int = 2048,
 ) -> ModelLoader:
     if weights_info._head_num % weights_info.tp_size != 0:
         raise Exception(
@@ -735,4 +918,5 @@ def get_model_loader(
         database,
         load_method=load_method,
         force_cpu_load_weights=force_cpu_load_weights,
+        fastsafetensors_reserve_mb=fastsafetensors_reserve_mb,
     )

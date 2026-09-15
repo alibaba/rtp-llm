@@ -67,6 +67,13 @@ public:
     std::vector<CacheKeyType> cacheKeys() const;
     std::vector<CacheKeyType> cacheKeysForStatus() const;
 
+    // Sleep/wake_up: discard the pinned host memory-cache buffer on sleep and
+    // reallocate it on wake. Drops the cache-key->block LRU (block_cache_) since it
+    // indexes into the freed buffer. Runs under malloc_mutex_. No-op-safe if the
+    // block pool was never created.
+    bool releaseMemoryCacheBacking();
+    bool restoreMemoryCacheBacking();
+
 private:
     struct LayerRegionSlot {
         int               layer_id{-1};
@@ -220,8 +227,11 @@ private:
     void releaseCacheBacking(const MemoryDiskBlockCache::CacheItem& item);
     void referenceCacheBacking(const MemoryDiskBlockCache::CacheItem& item);
     std::shared_ptr<BlockPool> memoryPoolFor(CacheBlockKind kind) const;
-    DiskBlockPoolPtr           diskPoolFor(CacheBlockKind kind) const;
-    size_t                     maxDiskSlotStrideBytes() const;
+    // All non-null pinned host pools across the active layout (single / dual / prefix-tree).
+    // Used by release/restoreMemoryCacheBacking to discard + rebuild the host KV tier on sleep.
+    std::vector<std::shared_ptr<BlockPool>> allHostPools() const;
+    DiskBlockPoolPtr                        diskPoolFor(CacheBlockKind kind) const;
+    size_t                                  maxDiskSlotStrideBytes() const;
 
     bool isDualPool() const;
     bool isFullOnlySlot(const LayerRegionSlot& slot) const;

@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/MemoryDiskBlockCache.h"
 
+#include <stdexcept>
+
 #include <algorithm>
 #include <mutex>
 
@@ -242,6 +244,25 @@ bool MemoryDiskBlockCache::empty() const {
 size_t MemoryDiskBlockCache::size() const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     return items_.size();
+}
+
+std::vector<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::clear() {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    std::vector<CacheItem>              removed;
+    removed.reserve(items_.size());
+    for (const auto& [_, item] : items_) {
+        if (item.in_flight_ref != 0) {
+            throw std::runtime_error("cannot clear memory/disk cache before transfers drain");
+        }
+        removed.push_back(item);
+    }
+    items_.clear();
+    memory_complete_lru_.clear();
+    memory_incomplete_lru_.clear();
+    disk_complete_lru_.clear();
+    disk_incomplete_lru_.clear();
+    access_seq_ = 0;
+    return removed;
 }
 
 std::vector<CacheKeyType> MemoryDiskBlockCache::cacheKeys() const {

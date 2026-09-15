@@ -2,6 +2,7 @@ import logging
 import os
 import unittest
 from typing import List
+from unittest import mock
 
 import torch
 
@@ -9,16 +10,41 @@ import rtp_llm.models
 from rtp_llm.cpp.cuda_graph.tests.cuda_graph_test_utils import (
     CudaGraphTestModelBuilder,
     ModelBuildConfig,
+    use_synthetic_cuda_graph_model,
 )
 from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs, get_typemeta
 
 
+def _resolve_model_path() -> str:
+    return os.environ.get(
+        "RTP_LLM_CUDA_GRAPH_PREFILL_MODEL_PATH",
+        os.environ.get(
+            "RTP_LLM_CUDA_GRAPH_TEST_MODEL_PATH",
+            "/mnt/nas1/hf/gte-Qwen2-7B-instruct/",
+        ),
+    )
+
+
 class TestCudaGraphPrefill(unittest.TestCase):
-    def __init__(self, methodName: str = "runTest") -> None:
-        super().__init__(methodName)
+
+    def setUp(self) -> None:
+        super().setUp()
         os.environ["RESERVER_RUNTIME_MEM_MB"] = "10240"
+
+        # Build model using shared model builder (only load 1 layer for test).
+        # The default path is an integration-test convention; local/Bazel runs
+        # can override it.
+        model_path = _resolve_model_path()
+        if not use_synthetic_cuda_graph_model() and not os.path.isdir(model_path):
+            raise unittest.SkipTest(
+                f"CUDA graph prefill test model path does not exist: {model_path}; "
+                "set RTP_LLM_CUDA_GRAPH_PREFILL_MODEL_PATH or "
+                "RTP_LLM_CUDA_GRAPH_TEST_MODEL_PATH, or set "
+                "RTP_LLM_CUDA_GRAPH_USE_SYNTHETIC_MODEL=1 for local "
+                "CudaGraphRunner coverage"
+            )
 
         # Set device first to ensure all tensors are created on the correct device
         self.device = "cuda:0"
@@ -32,10 +58,9 @@ class TestCudaGraphPrefill(unittest.TestCase):
         # Generate prefill_capture_seq_lens
         self.prefill_capture_seq_lens = self._generate_prefill_capture_seq_lens()
 
-        # Build model using shared model builder (only load 1 layer for test)
         self.model_builder = CudaGraphTestModelBuilder(
             ModelBuildConfig(
-                model_path="/mnt/nas1/hf/gte-Qwen2-7B-instruct/",
+                model_path=model_path,
                 tokens_per_block=self.tokens_per_block,
                 device=self.device,
                 act_type="BF16",
@@ -280,6 +305,30 @@ class TestCudaGraphPrefill(unittest.TestCase):
             print(f"start test for batch size: {bs}")
             self._test_single(bs)
             print(f"success for batch size: {bs}")
+
+
+class TestCudaGraphDiscovery(unittest.TestCase):
+    def test_missing_model_is_reported_as_skip_by_unittest_runner(self):
+        # Discovery must not allocate GPU resources or raise SkipTest itself.
+        with mock.patch(
+            __name__ + "._resolve_model_path", return_value="/missing-model"
+        ), mock.patch(__name__ + ".os.path.isdir", return_value=False), mock.patch(
+            __name__ + ".use_synthetic_cuda_graph_model", return_value=False
+        ), mock.patch.object(
+            torch.cuda, "set_device"
+        ) as set_device:
+            suite = unittest.defaultTestLoader.loadTestsFromTestCase(
+                TestCudaGraphPrefill
+            )
+            count = suite.countTestCases()
+            self.assertGreater(count, 0)
+            result = unittest.TestResult()
+            suite.run(result)
+            self.assertEqual(result.testsRun, count)
+            self.assertEqual(len(result.skipped), count)
+            self.assertEqual(result.errors, [])
+            self.assertEqual(result.failures, [])
+            set_device.assert_not_called()
 
 
 if __name__ == "__main__":
