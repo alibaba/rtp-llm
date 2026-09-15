@@ -1,0 +1,123 @@
+{
+    "model_type": "qwen35_dense",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-27B",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "<|im_start|>user\n用两句话解释什么是数据库的 CAP 定理。<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                "generate_config": {
+                    "max_new_tokens": 128,
+                    "top_k": 1,
+                    "return_output_ids": true
+                }
+            },
+            "result": {
+                "response": "CAP 定理指出，在分布式数据库系统中，一致性（Consistency）、可用性（Availability）和分区容错性（Partition tolerance）这三个核心属性无法同时完全满足，最多只能同时实现其中两项。\n\n由于网络分区在分布式环境中不可避免，系统设计者通常必须在保证分区容错性的前提下，根据业务需求在强一致性和高可用性之间做出权衡取舍。",
+                "output_ids": [
+                    [
+                        30368,
+                        220,
+                        121073,
+                        99489,
+                        3709,
+                        95772,
+                        112149,
+                        101756,
+                        111834,
+                        3709,
+                        128523,
+                        9616,
+                        14777,
+                        45522,
+                        62186,
+                        144342,
+                        9616,
+                        49961,
+                        7313,
+                        95793,
+                        111384,
+                        96170,
+                        96740,
+                        95911,
+                        9616,
+                        48296,
+                        23343,
+                        7313,
+                        115959,
+                        98144,
+                        103812,
+                        97996,
+                        97423,
+                        97898,
+                        97914,
+                        3709,
+                        108709,
+                        98640,
+                        97423,
+                        97318,
+                        98405,
+                        117133,
+                        1710,
+                        271,
+                        99121,
+                        97034,
+                        111384,
+                        95772,
+                        112149,
+                        111937,
+                        102746,
+                        3709,
+                        129126,
+                        96043,
+                        99151,
+                        112787,
+                        97630,
+                        111384,
+                        96170,
+                        96740,
+                        98125,
+                        124680,
+                        3709,
+                        97149,
+                        97192,
+                        97887,
+                        95772,
+                        96189,
+                        98696,
+                        98469,
+                        95883,
+                        144342,
+                        98252,
+                        101662,
+                        130274,
+                        134348,
+                        1710,
+                        248046
+                    ]
+                ]
+            }
+        },
+        {
+            "query": {
+                "prompt_batch": [
+                    "<|im_start|>user\nWhat is the capital of France? Answer in one sentence.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                    "<|im_start|>user\nWhat is 17 + 25? Answer with only the number.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 64,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": "The capital of France is Paris."
+                    },
+                    {
+                        "response": "42"
+                    }
+                ]
+            }
+        }
+    ]
+}

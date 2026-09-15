@@ -23,6 +23,68 @@ except Exception as e:
     rope = None
 
 
+_paged_mqa_context_lens_dim: Optional[int] = None
+
+
+def _fp8_paged_mqa_logits_compat(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_table: torch.Tensor,
+    block_kv: int,
+    max_context_len: int,
+) -> torch.Tensor:
+    """Call paged MQA with the context shape accepted by DeepGEMM.
+
+    DeepGEMM releases before the NextN interface consume ``[batch]`` while
+    newer releases require ``[batch, next_n]``. Decode uses ``next_n == 1``,
+    so both layouts describe the same data. Probe once and cache the accepted
+    rank only after the complete logits call succeeds, instead of coupling
+    RTP-LLM to a vendor package version string.
+    """
+    global _paged_mqa_context_lens_dim
+
+    # Keep this call's probing decision stable if another call populates the cache.
+    cached_dim = _paged_mqa_context_lens_dim
+    flat_context_lens = context_lens.reshape(-1).contiguous()
+    candidates = (cached_dim,) if cached_dim is not None else (2, 1)
+    first_error: Optional[Exception] = None
+    for context_lens_dim in candidates:
+        adapted_context_lens = (
+            flat_context_lens.view(-1, 1)
+            if context_lens_dim == 2
+            else flat_context_lens
+        )
+        try:
+            schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
+                adapted_context_lens,
+                block_kv,
+                deep_gemm.get_num_sms(),
+            )
+            logits = deep_gemm.fp8_paged_mqa_logits(
+                q,
+                kv_cache,
+                weights,
+                adapted_context_lens,
+                block_table,
+                schedule_metadata,
+                max_context_len,
+                clean_logits=False,
+            )
+        except (AssertionError, RuntimeError) as error:
+            if cached_dim is not None:
+                raise
+            if first_error is None:
+                first_error = error
+                continue
+            raise first_error from error
+        _paged_mqa_context_lens_dim = context_lens_dim
+        return logits
+
+    raise RuntimeError("DeepGEMM paged MQA context-lens probing failed")
+
+
 def _unpack_ue8m0_scale(sf_packed: torch.Tensor) -> torch.Tensor:
     """
     Unpack UE8M0 scale format.
@@ -385,21 +447,14 @@ class IndexerOp(nn.Module):
             attention_inputs.kv_cache_kernel_block_id_device.shape[1] * self.blocksize
         )
 
-        schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-            fmha_params.kvlen_d,
-            self.blocksize,
-            deep_gemm.get_num_sms(),
-        )
-
-        logits = deep_gemm.fp8_paged_mqa_logits(
+        logits = _fp8_paged_mqa_logits_compat(
             q_fp8.unsqueeze(1),
             kv_cache_fp8.view(dtype=torch.uint8),
             weights,
             fmha_params.kvlen_d,
             attention_inputs.kv_cache_kernel_block_id_device,
-            schedule_metadata,
+            self.blocksize,
             max_seq_len,
-            clean_logits=False,
         )
 
         assert (
@@ -468,7 +523,7 @@ class IndexerOp(nn.Module):
 
         # Compute logits
         weights = weights.squeeze(-1)
-        kv_fp8 = (k_fp8, k_scale.view(torch.float32))
+        kv_fp8 = (k_fp8, k_scale.view(torch.float32).view(-1))
 
         assert (
             fmha_params.ks is not None and fmha_params.ke is not None
@@ -575,7 +630,7 @@ class IndexerOp(nn.Module):
             attention_inputs.kv_cache_kernel_block_id_device,
             cu_kv_seqlens_global,
         )
-        kv_fp8_full = (k_fp8, k_scale.view(torch.float32))
+        kv_fp8_full = (k_fp8, k_scale.view(torch.float32).view(-1))
 
         def run_part_logits_topk(
             q_part: torch.Tensor,
@@ -603,9 +658,12 @@ class IndexerOp(nn.Module):
 
         if total_local_ids.size(0) > 0:
             topk = run_part_logits_topk(
-                q0, weights_sq0,
-                precomputed_ks, precomputed_ke,
-                precomputed_lengths, precomputed_topk_off,
+                q0,
+                weights_sq0,
+                precomputed_ks,
+                precomputed_ke,
+                precomputed_lengths,
+                precomputed_topk_off,
             )
         else:
             topk = None

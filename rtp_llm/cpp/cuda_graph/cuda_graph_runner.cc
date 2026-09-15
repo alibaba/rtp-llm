@@ -36,24 +36,39 @@ FallbackTick tickFallback(std::atomic<uint64_t>& counter) {
 class ScopedEnvFlag {
 public:
     ScopedEnvFlag(const char* name, const char* value): name_(name) {
-        const char* old_value = std::getenv(name_);
-        if (old_value != nullptr) {
+        // Python's os.environ is a cached mapping: changing the process
+        // environment with setenv() does not update the mapping that
+        // os.environ.get() reads.  The warmup signal is consumed by Python,
+        // so update os.environ itself (which also calls putenv()) while the
+        // GIL is held.  Otherwise the compiled SM120 MoE path is skipped
+        // during warmup and torch.compile first runs inside graph capture.
+        py::gil_scoped_acquire gil;
+        auto                   environ = py::module_::import("os").attr("environ");
+        auto                   py_name = py::str(name_);
+        if (environ.contains(py_name)) {
             had_old_value_ = true;
-            old_value_     = old_value;
+            old_value_     = py::cast<std::string>(environ[py_name]);
         }
-        setenv(name_, value, 1);
+        environ[py_name] = py::str(value);
     }
 
-    ~ScopedEnvFlag() {
-        if (had_old_value_) {
-            setenv(name_, old_value_.c_str(), 1);
-        } else {
-            unsetenv(name_);
+    ~ScopedEnvFlag() noexcept {
+        py::gil_scoped_acquire gil;
+        try {
+            auto environ = py::module_::import("os").attr("environ");
+            auto py_name = py::str(name_);
+            if (had_old_value_) {
+                environ[py_name] = py::str(old_value_);
+            } else {
+                environ.attr("pop")(py_name, py::none());
+            }
+        } catch (py::error_already_set& error) {
+            error.discard_as_unraisable("ScopedEnvFlag::~ScopedEnvFlag");
         }
     }
 
 private:
-    const char* name_;
+    std::string name_;
     bool        had_old_value_ = false;
     std::string old_value_;
 };
@@ -1932,6 +1947,10 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
     try {
+        // Run the same backend that will be captured for this exact key.  In
+        // particular, static torch.compile/Triton specializations must be
+        // materialized before graphCaptureBegin rather than during capture.
+        ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
         py_forward_method_(inputs, attn_pyobj);
         py_forward_method_(inputs, attn_pyobj);
     } catch (const py::error_already_set& e) {

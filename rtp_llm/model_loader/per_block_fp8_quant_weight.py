@@ -96,6 +96,54 @@ def ceil_div(a, b):
     return (a + b - 1) // b
 
 
+def _unpack_ue8m0_scale_bytes(
+    scale: torch.Tensor, k: int, group_size: int
+) -> torch.Tensor:
+    """Unpack per-weight-row UE8M0 exponent bytes along the K dimension."""
+    shifts = torch.arange(0, 32, 8, dtype=torch.int32, device=scale.device)
+    unpacked = ((scale.unsqueeze(-1) >> shifts) & 0xFF).flatten(-2)
+    return unpacked[..., : ceil_div(k, group_size)]
+
+
+def _pack_ue8m0_scale_bytes(scale: torch.Tensor) -> torch.Tensor:
+    """Pack per-weight-row exponent bytes into DeepGEMM's TMA layout."""
+    check_with_info(scale.dim() == 2, "packed UE8M0 scale must be 2D")
+    padding = (-scale.shape[-1]) % 4
+    if padding:
+        scale = torch.cat(
+            [
+                scale,
+                torch.zeros(
+                    (scale.shape[0], padding),
+                    dtype=scale.dtype,
+                    device=scale.device,
+                ),
+            ],
+            dim=-1,
+        )
+    groups = scale.to(torch.int32).reshape(scale.shape[0], -1, 4)
+    packed = (
+        groups[..., 0]
+        | (groups[..., 1] << 8)
+        | (groups[..., 2] << 16)
+        | (groups[..., 3] << 24)
+    )
+
+    # DeepGEMM consumes packed scales through TMA.  Keep the logical shape,
+    # but pad the underlying column-major storage to its required MN stride.
+    import deep_gemm
+
+    aligned_mn = deep_gemm.get_tma_aligned_size(packed.shape[0], packed.element_size())
+    packed_storage = torch.zeros(
+        (packed.shape[1], aligned_mn),
+        dtype=packed.dtype,
+        device=packed.device,
+    )
+    packed_aligned = packed_storage.T[: packed.shape[0]]
+    packed_aligned.copy_(packed)
+    return packed_aligned
+
+
 def cast_to_fp8(x: torch.Tensor):
     return x.to(torch.float8_e4m3fn)
 
@@ -842,7 +890,11 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             )
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
-            if is_deep_gemm_e8m0_used():
+            # Online SM100/SM120 loading can already produce the final packed
+            # UE8M0 representation directly from source weights.  Legacy/pre-quantized
+            # inputs still arrive with floating-point block scales and require
+            # the old dequantize/requantize conversion here.
+            if is_deep_gemm_e8m0_used() and scale_weight.dtype != torch.int32:
                 kernel_weight, scale_weight = requant_weight_ue8m0(
                     kernel_weight, scale_weight
                 )
@@ -896,6 +948,57 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         self.kernel = kernel
         self.scale = scale
 
+    def _split(
+        self,
+        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        load_config: LoadConfig,
+    ):
+        if (
+            not isinstance(tensor, dict)
+            or self.scale is None
+            or (
+                load_config.tp_size <= 1
+                and load_config.dp_size <= 1
+                and load_config.ep_size <= 1
+            )
+        ):
+            return super()._split(tensor, load_config)
+
+        kernel = tensor.get(self.kernel.name)
+        scale = tensor.get(self.scale.name)
+        if (
+            kernel is None
+            or scale is None
+            or kernel.dim() != 2
+            or scale.dim() != 2
+            or scale.dtype != torch.int32
+        ):
+            return super()._split(tensor, load_config)
+
+        # Packed UE8M0 stores four K-block scales in each int32 and repeats
+        # every logical MN-block scale for its physical weight rows.  Splitting
+        # the expanded rows preserves non-block-aligned sp_0 boundaries.
+        expanded_scale = _unpack_ue8m0_scale_bytes(
+            scale, kernel.shape[-1], self.group_size
+        )
+        local_kernel = self.kernel._split(kernel, load_config)[self.kernel.name]
+
+        if self.scale.name == W.attn_qkv_s:
+            # The QKV scale splitter addresses heads in 128-row blocks.
+            block_scale = expanded_scale[:: self.group_size]
+            local_scale = self.scale._split(block_scale, load_config)[self.scale.name]
+            local_scale = local_scale.repeat_interleave(self.group_size, dim=-2)[
+                : local_kernel.shape[-2]
+            ]
+        else:
+            local_scale = self.scale._split(expanded_scale, load_config)[
+                self.scale.name
+            ]
+        return {
+            self.kernel.name: local_kernel,
+            self.scale.name: _pack_ue8m0_scale_bytes(local_scale),
+        }
+
     def _load_raw_tensor(
         self,
         tensor_source: TensorSource,
@@ -907,9 +1010,39 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
             tensor_source, layer_id, device, load_config
         )
 
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+            is_deep_gemm_e8m0_used,
+        )
+
+        is_dense_weight = self.kernel.name not in (W.moe_w1, W.moe_w2)
+        direct_ue8m0 = (
+            self.scale is not None and is_dense_weight and is_deep_gemm_e8m0_used()
+        )
+        if direct_ue8m0 and self.group_size != 128:
+            raise ValueError(
+                "SM100/SM120 DeepGEMM packed UE8M0 requires group_size=128, "
+                f"got {self.group_size} for {self.kernel.name}"
+            )
+
         res = {}
         scale = None
-        if self.scale:
+        if direct_ue8m0:
+            from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+                quant_weight_ue8m0_packed,
+            )
+
+            source_weight = kernel.get(self.kernel.name)
+            if source_weight.dim() != 2:
+                raise ValueError(
+                    "Direct packed UE8M0 dense weight quantization requires a "
+                    f"2D tensor, got {tuple(source_weight.shape)} for "
+                    f"{self.kernel.name}"
+                )
+            source_weight = source_weight.T
+            quant_kernel, scale = quant_weight_ue8m0_packed(
+                source_weight.contiguous().to(device)
+            )
+        elif self.scale:
             quant_kernel, scale = per_block_cast_to_fp8(
                 kernel.get(self.kernel.name), self.group_size
             )
@@ -920,13 +1053,16 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
 
         if self.kernel.name == W.moe_w1 or self.kernel.name == W.moe_w2:
             pass
-        elif quant_kernel.dim() == 2:
+        elif quant_kernel.dim() == 2 and not direct_ue8m0:
             quant_kernel = quant_kernel.T
 
         res = {self.kernel.name: quant_kernel.contiguous().to(device)}
         if self.scale:
-            scale = scale.T if scale.dim() == 2 else scale
-            res.update({self.scale.name: scale.contiguous().to(device)})
+            scale = scale.T if scale.dim() == 2 and not direct_ue8m0 else scale
+            # Packed UE8M0 scales intentionally use a non-contiguous TMA
+            # layout (stride(-2) == 1).  Do not normalize that layout here.
+            scale = scale.to(device) if direct_ue8m0 else scale.contiguous().to(device)
+            res.update({self.scale.name: scale})
 
         return res
 

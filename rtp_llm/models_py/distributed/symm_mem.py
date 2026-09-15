@@ -155,7 +155,7 @@ class TorchSymmMemCommunicator:
         local_ok = True
         reason = ""
 
-        if self.device_capability < 9:
+        if self.device_capability not in TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES:
             local_ok = False
             reason = f"device capability {self.device_capability} not supported"
         elif (
@@ -166,9 +166,9 @@ class TorchSymmMemCommunicator:
             reason = f"world size {self.world_size} not supported"
 
         if local_ok:
-            self.max_size = TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES[
-                self.device_capability
-            ][self.world_size]
+            self.max_size = TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES[self.device_capability][
+                self.world_size
+            ]
             try:
                 self.buffer = torch_symm_mem.empty(
                     self.max_size // self.dtype.itemsize,
@@ -370,9 +370,7 @@ def init_symm_mem_communicator(
     """
     global _symm_mem_comm
     if not _custom_all_reduce_enabled():
-        logging.info(
-            "TorchSymmMemCommunicator disabled by FT_DISABLE_CUSTOM_AR"
-        )
+        logging.info("TorchSymmMemCommunicator disabled by FT_DISABLE_CUSTOM_AR")
         _symm_mem_comm = None
         return None
     symm_mem_comm = TorchSymmMemCommunicator(tp_group, torch.cuda.current_device())

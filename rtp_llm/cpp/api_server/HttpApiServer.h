@@ -53,6 +53,7 @@ public:
                   py::object                           custom_module):
         params_(params), metrics_reporter_(params.metrics_reporter) {
         is_embedding_       = true;
+        embedding_engine_   = embedding_engine;
         embedding_endpoint_ = std::make_shared<EmbeddingEndpoint>(embedding_engine, mm_processor, custom_module);
         active_request_count_.reset(new autil::AtomicCounter());
         request_counter_.reset(new autil::AtomicCounter());
@@ -99,6 +100,7 @@ private:
     std::shared_ptr<ConcurrencyController> controller_;
     std::shared_ptr<TokenProcessor>        token_processor_;
 
+    std::shared_ptr<EmbeddingEngine>   embedding_engine_;
     std::shared_ptr<EmbeddingEndpoint> embedding_endpoint_;
     std::shared_ptr<Tokenizer>         tokenizer_;
     std::shared_ptr<ChatRender>        render_;
