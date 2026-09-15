@@ -2522,9 +2522,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return reservedRequestCount.get();
     }
 
-    /** Evict only endpoint orphans which have no live scheduler generation. */
+    /** Evict only endpoint orphans whose IDs are absent from the scheduler directory. */
     public int evictExpiredRequests(long ttlMs,
-                                    LongPredicate schedulerOwnsRequest) {
+                                    LongPredicate retainForSchedulerCleanup) {
         int evicted;
         boolean capacityChanged;
         admissionLock.lock();
@@ -2532,7 +2532,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // Scheduler-owned requests expire through their exact local lease.
             // This pass only sweeps endpoint orphans.
             evicted = evictExpiredInflightLocked(
-                    ttlMs, schedulerOwnsRequest);
+                    ttlMs, retainForSchedulerCleanup);
             long cutoff = System.currentTimeMillis() - ttlMs;
             int trackedPurged = 0;
             java.util.Iterator<Map.Entry<Long, DecodeRequestState>> trackedEvictIt =
@@ -2541,7 +2541,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 Map.Entry<Long, DecodeRequestState> entry = trackedEvictIt.next();
                 if (entry.getValue().confirmed()
                         && entry.getValue().lastSeenMs() < cutoff
-                        && !schedulerOwnsRequest.test(entry.getKey())
+                        && !retainForSchedulerCleanup.test(entry.getKey())
                         && entry.getValue().preemptionClaim == null) {
                     trackedEvictIt.remove();
                     trackedPurged++;
@@ -2572,7 +2572,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Caller holds {@link #admissionLock}. */
     private int evictExpiredInflightLocked(
-            long ttlMs, LongPredicate schedulerOwnsRequest) {
+            long ttlMs, LongPredicate retainForSchedulerCleanup) {
         long nowMs = System.currentTimeMillis();
         int evicted = 0;
         for (Map.Entry<Long, DecodeRequestState> entry
@@ -2581,7 +2581,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             DecodeRequestState request = entry.getValue();
             if (!request.ownsRequest()
                     || nowMs - request.createdAtMs() <= ttlMs
-                    || schedulerOwnsRequest.test(requestId)
+                    || retainForSchedulerCleanup.test(requestId)
                     || request.preemptionClaim != null
                     || request.confirmed()
                     || !removeShadowExactLocked(requestId, request)) {
