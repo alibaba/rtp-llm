@@ -9,7 +9,11 @@ import torch
 from transformers import AutoTokenizer
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import ThinkingMode, thinking_mode_from_value
+from rtp_llm.config.generate_config import (
+    ThinkingMode,
+    _reset_sanitize_warn_state,
+    thinking_mode_from_value,
+)
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
@@ -919,20 +923,21 @@ class OpenaiGenerateConfigTest(TestCase):
             )
         )
 
-    def test_adaptive_thinking_requires_begin_token_ids(self):
-        """ADAPTIVE 靠 begin 标记探测思考是否开始；begin 标记为空意味着模型没有
-        任何合法路径结束思考，必须在 validate 阶段拒绝（案例二的结构性隐患）。"""
+    def test_adaptive_thinking_without_begin_token_ids_warns(self):
+        """ADAPTIVE 靠 begin 标记探测思考是否开始；标记为空时引擎侧的 think 起始
+        约束退化为 no-op，请求仍可服务，因此只告警而不拒绝，也不改配置。"""
         config = GenerateConfig(
             thinking_mode=ThinkingMode.ADAPTIVE,
             max_thinking_tokens=100,
             end_think_token_ids=[102],
         )
-        with self.assertRaises(FtRuntimeException) as ctx:
+        _reset_sanitize_warn_state()
+        with self.assertLogs("rtp_llm.config.generate_config", level="WARNING") as logs:
             config.validate()
-        self.assertEqual(
-            ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
+        self.assertTrue(
+            any("begin_think_token_ids is empty" in line for line in logs.output)
         )
-        self.assertIn("begin_think_token_ids must be non-empty", ctx.exception.message)
+        self.assertEqual(config.thinking_mode, ThinkingMode.ADAPTIVE)
 
     def test_thinking_not_adaptive_tolerates_empty_begin_token_ids(self):
         # ENABLED 不依赖 begin 标记（R1 风格模型无锚点也能 think），不得被误伤；

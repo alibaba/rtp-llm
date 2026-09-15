@@ -79,6 +79,8 @@ def _make_renderer(encoding_module):
     renderer.tokenizer = FakeTokenizer()
     renderer.think_mode = False
     renderer.default_thinking_mode = ThinkingMode.DISABLED
+    renderer.think_start_tag = "<think>\n"
+    renderer.think_end_tag = "</think>"
     return renderer
 
 
@@ -497,7 +499,7 @@ class DeepseekV4RendererTest(TestCase):
 
         rendered = self.renderer.render_chat(request)
         self.renderer.apply_chat_completion_constraints(request, config)
-        tag = json.loads(config.structural_tag)
+        tag = config.structural_tag
 
         self.assertIn("search", rendered.rendered_prompt)
         self.assertNotIn("get_weather", rendered.rendered_prompt)

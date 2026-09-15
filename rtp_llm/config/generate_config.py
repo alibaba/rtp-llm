@@ -105,13 +105,36 @@ _MAX_DIVERGE_DEPTH = 8
 _SANITIZE_WARN_INTERVAL = 300  # seconds
 _last_sanitize_warn_time: float = 0.0
 _last_downgrade_warn_time: float = 0.0
+_last_adaptive_anchor_warn_time: float = 0.0
 
 
 def _reset_sanitize_warn_state():
     """Reset rate-limiting state for testing. NOT for production use."""
     global _last_sanitize_warn_time, _last_downgrade_warn_time
+    global _last_adaptive_anchor_warn_time
     _last_sanitize_warn_time = 0.0
     _last_downgrade_warn_time = 0.0
+    _last_adaptive_anchor_warn_time = 0.0
+
+
+def _warn_adaptive_without_begin_think_ids():
+    """ADAPTIVE 缺 begin_think_token_ids 只告警不拦截。
+
+    引擎侧 firstTokenOrInvalid() 对空 vector 返回 invalid，think 起始 token 的
+    mask/bitmask 操作退化为 no-op；endpoint 也无法凭 prompt 锚点把请求升级为
+    ENABLED。即请求仍可服务，只是失去 think 起始约束，因此不能按输入非法拒绝。
+    """
+    global _last_adaptive_anchor_warn_time
+    now = time.monotonic()
+    if now - _last_adaptive_anchor_warn_time < _SANITIZE_WARN_INTERVAL:
+        return
+    _last_adaptive_anchor_warn_time = now
+    logging.getLogger(__name__).warning(
+        "thinking_mode=ADAPTIVE but begin_think_token_ids is empty: the engine cannot "
+        "bias the first token toward the think start tag and the prompt anchor cannot "
+        "upgrade the request to ENABLED. Set --think_start_tag or use a template that "
+        "injects the anchor."
+    )
 
 
 class GenerateConfig(BaseModel):
@@ -846,10 +869,7 @@ class GenerateConfig(BaseModel):
                     f"begin_think_token_ids {self.begin_think_token_ids} is wrong data type",
                 )
                 if not self.begin_think_token_ids:
-                    raise FtRuntimeException(
-                        ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                        "begin_think_token_ids must be non-empty when thinking_mode is ADAPTIVE",
-                    )
+                    _warn_adaptive_without_begin_think_ids()
 
             calculate_loss_list = [0, 1, 2]
             check_with_info(
