@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
@@ -40,7 +41,11 @@ _EXTENSION_SYMBOLS_BY_COMPONENT = {
         "q_rmsnorm_rope_cuda_",
         "wq_b_proj_gemm_merged_hca",
     ),
-    "moe_front": ("Dsv4MoeFrontPlan", "geometry_moe_front"),
+    "moe_front": (
+        "Dsv4MoeFrontPlan",
+        "build_info_moe_front",
+        "geometry_moe_front",
+    ),
 }
 _REQUIRED_EXTENSION_SYMBOLS = tuple(
     sorted(
@@ -181,6 +186,40 @@ def _moe_front_plan_abi_reason(dsv4_mega: Any) -> Optional[str]:
     return None
 
 
+def _moe_front_build_info_reason(
+    dsv4_mega: Any, capability: tuple[int, int]
+) -> Optional[str]:
+    try:
+        build_info = dsv4_mega.build_info_moe_front()
+    except Exception as exc:
+        return f"failed to query MoE-front build info: {exc}"
+    if not isinstance(build_info, Mapping):
+        return "MoE-front build info is not a mapping"
+
+    arch = {(10, 0): "sm_100a", (10, 3): "sm_103a"}[capability]
+    for field in ("target_arches", "production_arch"):
+        arches = {
+            item.strip()
+            for item in str(build_info.get(field, "")).split(",")
+            if item.strip()
+        }
+        if arch not in arches:
+            return f"MoE-front build does not contain {arch} in {field}"
+    if build_info.get("kernel_count") != 4:
+        return (
+            "MoE-front build must publish four kernels, got "
+            f"{build_info.get('kernel_count')!r}"
+        )
+
+    source_commit = str(build_info.get("source_commit", ""))
+    source_sha256 = str(build_info.get("source_sha256", ""))
+    if not re.fullmatch(r"[0-9a-f]{8,40}", source_commit):
+        return f"MoE-front build has invalid source commit {source_commit!r}"
+    if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
+        return "MoE-front build has an invalid source SHA256"
+    return None
+
+
 def _runtime_unavailable_reason(
     device: torch.device,
     components: Sequence[str],
@@ -235,6 +274,9 @@ def _runtime_unavailable_reason(
         reason = _moe_front_plan_abi_reason(dsv4_mega)
         if reason is not None:
             return "rtp-kernel DSV4 MoE-front ABI is incompatible: " + reason, None
+        reason = _moe_front_build_info_reason(dsv4_mega, capability)
+        if reason is not None:
+            return "rtp-kernel DSV4 MoE-front build is incompatible: " + reason, None
 
     try:
         import deep_gemm
