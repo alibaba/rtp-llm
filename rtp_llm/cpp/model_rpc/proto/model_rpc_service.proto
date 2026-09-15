@@ -124,7 +124,7 @@ message GenerateConfigPB {
     repeated int32 variable_num_beams = 48;
     google.protobuf.StringValue trace_id = 49;
     bool return_all_hidden_states = 50;
-    bool enable_host_cache = 51;
+    bool enable_memory_cache = 51;
     bool enable_device_cache = 52;
     bool enable_remote_cache = 53;
     string unique_key = 54;

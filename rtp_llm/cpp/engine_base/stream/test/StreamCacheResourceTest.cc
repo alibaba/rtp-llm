@@ -270,8 +270,8 @@ protected:
     prepareStorageBackendResource(bool block_matches, bool seed_host = false, RoleType role_type = RoleType::PDFUSION) {
         KVCacheConfig kv_cache_config;
         kv_cache_config.enable_remote_cache   = true;
-        kv_cache_config.enable_host_cache     = seed_host;
-        kv_cache_config.host_cache_size_mb    = seed_host ? 1 : 0;
+        kv_cache_config.enable_memory_cache   = seed_host;
+        kv_cache_config.memory_cache_size_mb  = seed_host ? 1 : 0;
         KVCacheConfig manager_kv_cache_config = kv_cache_config;
         // The manager must not construct a real KVCM client before this test
         // replaces its BlockTreeCache with the controllable fake backend.
@@ -558,7 +558,7 @@ TEST_F(StreamCacheResourceTest, testCacheLookupIgnoresPerRequestTierSwitches) {
 
     request.reuse_cache         = true;
     request.enable_device_cache = false;
-    request.enable_host_cache   = false;
+    request.enable_memory_cache = false;
     request.enable_disk_cache   = false;
     request.enable_remote_cache = false;
 
@@ -569,7 +569,7 @@ TEST_F(StreamCacheResourceTest, testCacheLookupIgnoresPerRequestTierSwitches) {
                     SCOPED_TRACE("L1=" + std::to_string(device_on) + " L2=" + std::to_string(host_on)
                                  + " L3=" + std::to_string(disk_on) + " remote=" + std::to_string(remote_on));
                     deployment.enable_device_cache = device_on;
-                    deployment.enable_host_cache   = host_on;
+                    deployment.enable_memory_cache = host_on;
                     deployment.enable_disk_cache   = disk_on;
                     deployment.enable_remote_cache = remote_on;
                     EXPECT_EQ(resource.enableCacheLookup(), device_on || host_on || disk_on || remote_on);
@@ -612,11 +612,11 @@ TEST_F(StreamCacheResourceTest, testStoreTargetUsesDeploymentLocalTiers) {
         SCOPED_TRACE(remote_on);
         for (const auto& test_case : cases) {
             deployment.enable_device_cache = test_case.device;
-            deployment.enable_host_cache   = test_case.host;
+            deployment.enable_memory_cache = test_case.host;
             deployment.enable_disk_cache   = test_case.disk;
             for (unsigned request_mask = 0; request_mask < 16; ++request_mask) {
                 request.enable_device_cache = (request_mask & 1) != 0;
-                request.enable_host_cache   = (request_mask & 2) != 0;
+                request.enable_memory_cache = (request_mask & 2) != 0;
                 request.enable_disk_cache   = (request_mask & 4) != 0;
                 request.enable_remote_cache = (request_mask & 8) != 0;
                 for (const bool ignore_request_switches : {false, true}) {
@@ -627,7 +627,7 @@ TEST_F(StreamCacheResourceTest, testStoreTargetUsesDeploymentLocalTiers) {
                     request.reuse_cache                      = true;
                     EXPECT_EQ(resource.storeTarget(), test_case.target);
                     EXPECT_EQ(resource.enableDeviceCache(), test_case.device);
-                    EXPECT_EQ(resource.enableHostCache(), test_case.host);
+                    EXPECT_EQ(resource.enableMemoryCache(), test_case.host);
                     EXPECT_EQ(resource.enableDiskCache(), test_case.disk);
 
                     request.reuse_cache = false;
@@ -647,17 +647,17 @@ TEST_F(StreamCacheResourceTest, testStoreTargetPreservesReuseCacheOverride) {
     deployment.ignore_request_cache_switches = true;
     request.reuse_cache                      = false;
     request.enable_device_cache              = false;
-    request.enable_host_cache                = false;
+    request.enable_memory_cache              = false;
     request.enable_disk_cache                = false;
     deployment.enable_device_cache           = true;
-    deployment.enable_host_cache             = true;
+    deployment.enable_memory_cache           = true;
     deployment.enable_disk_cache             = true;
     EXPECT_EQ(resource.storeTarget(), Tier::DEVICE);
 
     deployment.enable_device_cache = false;
     EXPECT_EQ(resource.storeTarget(), Tier::HOST);
 
-    deployment.enable_host_cache = false;
+    deployment.enable_memory_cache = false;
     EXPECT_EQ(resource.storeTarget(), Tier::DISK);
 
     deployment.enable_disk_cache   = false;

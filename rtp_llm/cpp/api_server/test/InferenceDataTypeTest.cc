@@ -44,20 +44,18 @@ TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_TopK) {
     ASSERT_EQ(req.generate_config.value().top_k, 1);
 }
 
-TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_LegacyMemoryCacheMapsToHost) {
+TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_MemoryCacheField) {
     RawRequest req;
     FromJsonString(req, R"({"request_id":1,"generate_config":{"enable_memory_cache":false}})");
     ASSERT_TRUE(req.generate_config.has_value());
-    EXPECT_FALSE(req.generate_config.value().enable_host_cache);
+    EXPECT_FALSE(req.generate_config.value().enable_memory_cache);
 }
 
-TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_CanonicalHostCacheWinsLegacy) {
+TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_HostCacheDoesNotOverrideMemory) {
     RawRequest req;
-    FromJsonString(
-        req,
-        R"({"request_id":1,"generate_config":{"enable_memory_cache":false,"enable_host_cache":true}})");
+    FromJsonString(req, R"({"request_id":1,"generate_config":{"enable_memory_cache":false,"enable_host_cache":true}})");
     ASSERT_TRUE(req.generate_config.has_value());
-    EXPECT_TRUE(req.generate_config.value().enable_host_cache);
+    EXPECT_FALSE(req.generate_config.value().enable_memory_cache);
 }
 
 TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_HiddenStates_False) {
@@ -124,12 +122,12 @@ TEST(InferenceDataTypeTest, RawRequest_Prompt) {
 
 TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     AuxInfo aux_info;
-    aux_info.cost_time_us                        = 1000;
-    aux_info.disk_reuse_len                      = 128;
-    aux_info.prefill_disk_reuse_len              = 256;
-    aux_info.decode_disk_reuse_len               = 64;
-    aux_info.speculative_draft_rounds            = 4;
-    aux_info.speculative_accepted_tokens_per_pos = {3, 2, 1};
+    aux_info.cost_time_us                         = 1000;
+    aux_info.disk_reuse_len                       = 128;
+    aux_info.prefill_disk_reuse_len               = 256;
+    aux_info.decode_disk_reuse_len                = 64;
+    aux_info.speculative_draft_rounds             = 4;
+    aux_info.speculative_accepted_tokens_per_pos  = {3, 2, 1};
     aux_info.generation_prefill_cuda_graph_status = "attention_backend_unsupported";
     AuxInfoAdapter aux_info_adapter(aux_info);
     std::string    jsonStr = ToJsonString(aux_info_adapter, true);

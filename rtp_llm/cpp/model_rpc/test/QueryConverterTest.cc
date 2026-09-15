@@ -104,6 +104,16 @@ TEST_F(QueryConverterTest, EnableDiskCacheIsPreservedWhenExplicitlyEnabled) {
     ASSERT_TRUE(generate_input->generate_config->enable_disk_cache);
 }
 
+TEST_F(QueryConverterTest, EnableMemoryCacheIsPreservedFromProto) {
+    EXPECT_EQ(GenerateConfigPB::kEnableMemoryCacheFieldNumber, 51);
+    EXPECT_TRUE(GenerateConfig().enable_memory_cache);
+    for (const bool enabled : {false, true}) {
+        GenerateConfigPB config;
+        config.set_enable_memory_cache(enabled);
+        EXPECT_EQ(QueryConverter::transGenerateConfig(&config)->enable_memory_cache, enabled);
+    }
+}
+
 TEST_F(QueryConverterTest, TransGenerateConfigResolvesThinkingState) {
     using Case = std::tuple<GenerateConfigPB::ThinkingModePB, bool, ThinkingMode, bool>;
     const std::array<Case, 5> cases{{

@@ -37,7 +37,7 @@ Reused KV cache can live in three local tiers, each controlled by its own indepe
 | Tier | Location | Switch | Required companion settings |
 |------|----------|--------|-----------------------------|
 | L1 | GPU device memory | `ENABLE_DEVICE_CACHE` (default on) | — |
-| L2 | Pinned host memory | `ENABLE_HOST_CACHE` (default off) | `HOST_CACHE_SIZE_MB` |
+| L2 | Pinned host memory | `ENABLE_MEMORY_CACHE` (default off) | `MEMORY_CACHE_SIZE_MB` |
 | L3 | Local disk | `ENABLE_DISK_CACHE` (default off) | `DISK_CACHE_SIZE_MB`, `DISK_CACHE_PATHS` |
 
 Device free-block headroom is managed by `BLOCK_TREE_DEVICE_EVICT_HIGH_WATERMARK_RATIO` (default 0.90)
@@ -62,7 +62,7 @@ or store its KV for later reuse.
 ### Lookup and store targets
 
 The deployment switches select the local tiers used for lookup and storage. The per-request
-`enable_device_cache`, `enable_host_cache` and `enable_disk_cache` fields remain accepted for
+`enable_device_cache`, `enable_memory_cache` and `enable_disk_cache` fields remain accepted for
 protocol compatibility, but do not change this local-tier policy.
 
 - **Lookup** may use any enabled local tier, plus the configured remote backend.

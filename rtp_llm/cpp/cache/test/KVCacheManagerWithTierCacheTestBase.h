@@ -375,9 +375,9 @@ inline KVCacheConfig makeTierConfig(TierLayout layout, const std::string& disk_p
     config.reuse_cache                    = true;
     config.reserve_block_ratio            = 0;
     config.enable_device_cache            = true;
-    config.enable_host_cache              = true;
-    config.host_cache_size_mb             = lower_cache_size_mb;
-    config.host_cache_sync_timeout_ms     = 5000;
+    config.enable_memory_cache            = true;
+    config.memory_cache_size_mb           = lower_cache_size_mb;
+    config.memory_cache_sync_timeout_ms   = 5000;
     config.enable_disk_cache              = layout == TierLayout::HOST_DISK;
     config.disk_cache_paths               = layout == TierLayout::HOST_DISK ? disk_path : "";
     config.disk_cache_size_mb             = layout == TierLayout::HOST_DISK ? lower_cache_size_mb : 0;

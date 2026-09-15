@@ -501,9 +501,9 @@ bool StreamCacheResource::reuseCache() const {
     return resource_context_.reuse_cache && (resource_context_.ignore_request_cache_switches || stream_->reuseCache());
 }
 
-bool StreamCacheResource::enableHostCache() const {
+bool StreamCacheResource::enableMemoryCache() const {
     // Local tiers are deployment policy; request fields remain wire-compatible only.
-    return resource_context_.enable_host_cache;
+    return resource_context_.enable_memory_cache;
 }
 
 bool StreamCacheResource::enableDeviceCache() const {
@@ -515,7 +515,7 @@ bool StreamCacheResource::enableDiskCache() const {
 }
 
 bool StreamCacheResource::enableCacheLookup() const {
-    const bool any_global_tier = resource_context_.enable_device_cache || resource_context_.enable_host_cache
+    const bool any_global_tier = resource_context_.enable_device_cache || resource_context_.enable_memory_cache
                                  || resource_context_.enable_disk_cache || resource_context_.enable_remote_cache;
     return reuseCache() && any_global_tier;
 }
@@ -527,7 +527,7 @@ Tier StreamCacheResource::storeTarget() const {
     if (enableDeviceCache()) {
         return Tier::DEVICE;
     }
-    if (enableHostCache()) {
+    if (enableMemoryCache()) {
         return Tier::HOST;
     }
     if (enableDiskCache()) {

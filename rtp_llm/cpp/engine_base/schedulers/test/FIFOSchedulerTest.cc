@@ -26,9 +26,8 @@ namespace rtp_llm {
 namespace {
 
 bool enqueueIndividually(FIFOScheduler& scheduler, const vector<GenerateStreamPtr>& streams) {
-    return std::all_of(streams.begin(), streams.end(), [&scheduler](const auto& stream) {
-        return scheduler.enqueue(stream).ok();
-    });
+    return std::all_of(
+        streams.begin(), streams.end(), [&scheduler](const auto& stream) { return scheduler.enqueue(stream).ok(); });
 }
 
 }  // namespace
@@ -75,7 +74,7 @@ TEST_F(FIFOSchedulerTest, testSimple) {
         make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
 
-    // Single schedule: stream calls initKVBlock and asyncLoadCache (returns false without enable_host_cache)
+    // Single schedule: stream calls initKVBlock and asyncLoadCache (returns false without enable_memory_cache)
     // Since no cache loading is needed, stream transitions directly to RUNNING in one schedule call
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
@@ -484,7 +483,7 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
         make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(stream1).ok());
 
-    // Single schedule: stream calls initKVBlock and asyncLoadCache (returns false without enable_host_cache)
+    // Single schedule: stream calls initKVBlock and asyncLoadCache (returns false without enable_memory_cache)
     // Since no cache loading is needed, stream transitions directly to RUNNING in one schedule call
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
@@ -693,9 +692,9 @@ TEST_F(FIFOSchedulerTest, testCpForceSinglePrefillConfig) {
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
-        runtime_config.max_generate_batch_size                         = 100;
-        runtime_config.fifo_scheduler_config.max_batch_tokens_size     = 8192;
-        runtime_config.fifo_scheduler_config.cp_force_single_prefill   = cp_force_single_prefill;
+        runtime_config.max_generate_batch_size                       = 100;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
+        runtime_config.fifo_scheduler_config.cp_force_single_prefill = cp_force_single_prefill;
         PDSepConfig         pd_sep_config;
         ParallelismConfig   parallelism_config;
         ModelSpecificConfig model_specific_config;
@@ -2127,7 +2126,6 @@ TEST_F(FIFOSchedulerTest, testPrefillRoundDoesNotAccountHeldDecodeAsBatchedWithP
     ASSERT_EQ(held->batch_with_prefill_len_, 0);
 }
 
-
 // ---------------------------------------------------------------------------
 // FIFOScheduler per-round token-budget and retryable-admission cases
 // ---------------------------------------------------------------------------
@@ -2408,8 +2406,8 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesPostAllocationContextLengthAndSto
     auto tail_stream               = make_stream(1);
     auto errored_tail_stream       = make_stream(1);
     errored_tail_stream->reportError(ErrorCode::CANCELLED, "cancelled before admission");
-    ASSERT_TRUE(enqueueIndividually(
-        scheduler, {cached_stream, threshold_crossing_stream, tail_stream, errored_tail_stream}));
+    ASSERT_TRUE(
+        enqueueIndividually(scheduler, {cached_stream, threshold_crossing_stream, tail_stream, errored_tail_stream}));
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -2688,7 +2686,6 @@ TEST_F(FIFOSchedulerTest, explicitGroupResidualPrecedesFollowingExplicitGroup) {
     EXPECT_EQ(following_group[0]->getStatus(), StreamState::RUNNING);
 }
 
-
 TEST_F(FIFOSchedulerTest, testEnqueueGroup) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
@@ -2811,8 +2808,7 @@ TEST_F(FIFOSchedulerTest, prefillShapeIncludesReusedPrefixLength) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    auto cached_stream =
-        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(60, 1));
+    auto cached_stream = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(60, 1));
     cached_stream->reportEvent(StreamEvents::CanRun);
     ASSERT_EQ(cached_stream->moveToNext(), StreamState::RUNNING);
     cached_stream->setReuseLength(59);
@@ -2820,8 +2816,7 @@ TEST_F(FIFOSchedulerTest, prefillShapeIncludesReusedPrefixLength) {
     ASSERT_EQ(cached_stream->contextLength(), 1);
     ASSERT_EQ(cached_stream->prefixLength(), 59);
 
-    auto short_stream =
-        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(39, 1));
+    auto short_stream = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(39, 1));
     ASSERT_TRUE(enqueueIndividually(scheduler, {cached_stream, short_stream}));
 
     auto result = scheduler.schedule();
@@ -2849,9 +2844,8 @@ TEST_F(FIFOSchedulerTest, prefillShapeUsesCurrentBatchSizeAsWidth) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    auto long_single =
-        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(40, 1));
-    auto batched_query                                   = std::make_shared<GenerateInput>();
+    auto long_single   = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(40, 1));
+    auto batched_query = std::make_shared<GenerateInput>();
     batched_query->input_ids                             = torch::ones({10}, torch::kInt32);
     batched_query->generate_config                       = std::make_shared<GenerateConfig>();
     batched_query->generate_config->num_return_sequences = 3;
@@ -3505,8 +3499,7 @@ TEST_F(FIFOSchedulerTest, blockedNormalLaneLeavesResidualCapacityToExplicitGroup
 
     // This ordinary stream is permanently too large for the per-round token
     // budget but valid against the Engine's total KV capacity.
-    auto blocked_normal = makeSingleStream(
-        model_config, runtime_config, resource_context, std::vector<int>(6, 1));
+    auto blocked_normal = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(6, 1));
     vector<GenerateStreamPtr> small_group = {
         makeSingleStream(model_config, runtime_config, resource_context, {1}),
         makeSingleStream(model_config, runtime_config, resource_context, {2}),

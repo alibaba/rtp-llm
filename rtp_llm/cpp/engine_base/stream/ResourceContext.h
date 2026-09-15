@@ -19,12 +19,12 @@ struct ResourceContext {
     RoleType role_type{RoleType::PDFUSION};
     bool     decode_entrance{false};  // PD反转模式：Decode侧作为请求入口
 
-    bool    reuse_cache{false};
-    bool    enable_device_cache{true};
-    bool    enable_host_cache{false};
-    bool    enable_disk_cache{false};
-    bool    enable_remote_cache{false};
-    bool    ignore_request_cache_switches{false};
+    bool reuse_cache{false};
+    bool enable_device_cache{true};
+    bool enable_memory_cache{false};
+    bool enable_disk_cache{false};
+    bool enable_remote_cache{false};
+    bool ignore_request_cache_switches{false};
 
     void initCacheConfig(const KVCacheConfig& kv_cache_config);
 };

@@ -205,17 +205,17 @@ class GenerateConfigTest(TestCase):
             "DISK_CACHE_BUFFERED_IO": "0",
             "DISK_CACHE_SYNC_TIMEOUT_MS": "12345",
             "DISK_CACHE_STAGING_BLOCK_COUNT": "8",
-            "ENABLE_HOST_CACHE": "1",
-            "HOST_CACHE_SIZE_MB": "2048",
-            "HOST_CACHE_SYNC_TIMEOUT_MS": "6789",
+            "ENABLE_MEMORY_CACHE": "1",
+            "MEMORY_CACHE_SIZE_MB": "2048",
+            "MEMORY_CACHE_SYNC_TIMEOUT_MS": "6789",
             "BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS": "30000",
             "BLOCK_TREE_TRANSFER_WORKER_COUNT": "7",
             "BLOCK_TREE_BUSINESS_QUEUE_MAX_SIZE": "211",
             "BLOCK_TREE_TRANSFER_QUEUE_MAX_SIZE": "307",
             "BLOCK_TREE_DEVICE_EVICT_LOW_WATERMARK_RATIO": "0.71",
             "BLOCK_TREE_DEVICE_EVICT_HIGH_WATERMARK_RATIO": "0.81",
-            "BLOCK_TREE_HOST_EVICT_LOW_WATERMARK_RATIO": "0.72",
-            "BLOCK_TREE_HOST_EVICT_HIGH_WATERMARK_RATIO": "0.82",
+            "BLOCK_TREE_MEMORY_EVICT_LOW_WATERMARK_RATIO": "0.72",
+            "BLOCK_TREE_MEMORY_EVICT_HIGH_WATERMARK_RATIO": "0.82",
             "BLOCK_TREE_DISK_EVICT_LOW_WATERMARK_RATIO": "0.73",
             "BLOCK_TREE_DISK_EVICT_HIGH_WATERMARK_RATIO": "0.83",
         },
@@ -231,27 +231,27 @@ class GenerateConfigTest(TestCase):
         self.assertFalse(config.disk_cache_buffered_io)
         self.assertEqual(config.disk_cache_sync_timeout_ms, 12345)
         self.assertEqual(config.disk_cache_staging_block_count, 8)
-        self.assertTrue(config.enable_host_cache)
-        self.assertEqual(config.host_cache_size_mb, 2048)
-        self.assertEqual(config.host_cache_sync_timeout_ms, 6789)
+        self.assertTrue(config.enable_memory_cache)
+        self.assertEqual(config.memory_cache_size_mb, 2048)
+        self.assertEqual(config.memory_cache_sync_timeout_ms, 6789)
         self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 30000)
         self.assertEqual(config.block_tree_transfer_worker_count, 7)
         self.assertEqual(config.block_tree_business_queue_max_size, 211)
         self.assertEqual(config.block_tree_transfer_queue_max_size, 307)
         self.assertEqual(config.block_tree_device_evict_low_watermark_ratio, 0.71)
         self.assertEqual(config.block_tree_device_evict_high_watermark_ratio, 0.81)
-        self.assertEqual(config.block_tree_host_evict_low_watermark_ratio, 0.72)
-        self.assertEqual(config.block_tree_host_evict_high_watermark_ratio, 0.82)
+        self.assertEqual(config.block_tree_memory_evict_low_watermark_ratio, 0.72)
+        self.assertEqual(config.block_tree_memory_evict_high_watermark_ratio, 0.82)
         self.assertEqual(config.block_tree_disk_evict_low_watermark_ratio, 0.73)
         self.assertEqual(config.block_tree_disk_evict_high_watermark_ratio, 0.83)
 
     def test_kv_cache_strategy_defaults_are_rollback_safe(self):
         config = PyEnvConfigs().kv_cache_config
 
-        self.assertFalse(config.enable_host_cache)
+        self.assertFalse(config.enable_memory_cache)
         self.assertEqual(config.disk_cache_staging_block_count, 128)
         self.assertEqual(config.device_eviction_policy, "lru")
-        self.assertEqual(config.host_eviction_policy, "lru")
+        self.assertEqual(config.memory_eviction_policy, "lru")
         self.assertEqual(config.disk_eviction_policy, "fifo")
         self.assertEqual(config.reserve_block_ratio, 5)
         self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 0)
@@ -278,26 +278,35 @@ class GenerateConfigTest(TestCase):
                 config = setup_args(args).kv_cache_config
                 self.assertEqual(config.reserve_block_ratio, expected_ratio)
 
-    def test_legacy_kv_cache_cli_aliases(self):
+    def test_canonical_kv_cache_cli_names(self):
         config = setup_args(
             [
                 "--enable_memory_cache",
                 "1",
                 "--memory_cache_size_mb",
                 "2048",
-                "--enable_memory_cache_disk",
+                "--memory_cache_sync_timeout_ms",
+                "6789",
+                "--block_tree_memory_evict_low_watermark_ratio",
+                "0.72",
+                "--block_tree_memory_evict_high_watermark_ratio",
+                "0.82",
+                "--enable_disk_cache",
                 "1",
-                "--memory_cache_disk_paths",
-                "/tmp/legacy-cache",
-                "--memory_cache_disk_size_mb",
+                "--disk_cache_paths",
+                "/tmp/host-cache",
+                "--disk_cache_size_mb",
                 "4096",
             ]
         ).kv_cache_config
 
-        self.assertTrue(config.enable_host_cache)
-        self.assertEqual(config.host_cache_size_mb, 2048)
+        self.assertTrue(config.enable_memory_cache)
+        self.assertEqual(config.memory_cache_size_mb, 2048)
+        self.assertEqual(config.memory_cache_sync_timeout_ms, 6789)
+        self.assertEqual(config.block_tree_memory_evict_low_watermark_ratio, 0.72)
+        self.assertEqual(config.block_tree_memory_evict_high_watermark_ratio, 0.82)
         self.assertTrue(config.enable_disk_cache)
-        self.assertEqual(config.disk_cache_paths, "/tmp/legacy-cache")
+        self.assertEqual(config.disk_cache_paths, "/tmp/host-cache")
         self.assertEqual(config.disk_cache_size_mb, 4096)
         self.assertFalse(hasattr(config, "write_cache_sync"))
 
@@ -308,19 +317,19 @@ class GenerateConfigTest(TestCase):
             "MODEL_TYPE": "fake_model",
             "ENABLE_MEMORY_CACHE": "1",
             "MEMORY_CACHE_SIZE_MB": "1024",
-            "ENABLE_MEMORY_CACHE_DISK": "1",
-            "MEMORY_CACHE_DISK_PATHS": "/tmp/legacy-disk",
-            "MEMORY_CACHE_DISK_SIZE_MB": "2048",
+            "ENABLE_DISK_CACHE": "1",
+            "DISK_CACHE_PATHS": "/tmp/disk-cache",
+            "DISK_CACHE_SIZE_MB": "2048",
         },
         clear=True,
     )
-    def test_legacy_kv_cache_env_aliases(self):
+    def test_canonical_kv_cache_env_names(self):
         config = setup_args().kv_cache_config
 
-        self.assertTrue(config.enable_host_cache)
-        self.assertEqual(config.host_cache_size_mb, 1024)
+        self.assertTrue(config.enable_memory_cache)
+        self.assertEqual(config.memory_cache_size_mb, 1024)
         self.assertTrue(config.enable_disk_cache)
-        self.assertEqual(config.disk_cache_paths, "/tmp/legacy-disk")
+        self.assertEqual(config.disk_cache_paths, "/tmp/disk-cache")
         self.assertEqual(config.disk_cache_size_mb, 2048)
 
     @patch.dict(
@@ -328,18 +337,18 @@ class GenerateConfigTest(TestCase):
         {
             **_PINNED_DEVICES,
             "MODEL_TYPE": "fake_model",
-            "ENABLE_HOST_CACHE": "0",
-            "ENABLE_MEMORY_CACHE": "1",
-            "HOST_CACHE_SIZE_MB": "512",
-            "MEMORY_CACHE_SIZE_MB": "1024",
+            "ENABLE_MEMORY_CACHE": "0",
+            "MEMORY_CACHE_SIZE_MB": "0",
+            "DISK_CACHE_PATHS": "",
         },
         clear=True,
     )
-    def test_canonical_kv_cache_env_wins_over_legacy_alias(self):
+    def test_canonical_kv_cache_env_preserves_false_zero_and_empty(self):
         config = setup_args().kv_cache_config
 
-        self.assertFalse(config.enable_host_cache)
-        self.assertEqual(config.host_cache_size_mb, 512)
+        self.assertFalse(config.enable_memory_cache)
+        self.assertEqual(config.memory_cache_size_mb, 0)
+        self.assertEqual(config.disk_cache_paths, "")
 
     def test_kv_cache_config_pickle_round_trip_includes_eviction_fields(self):
         import pickle
@@ -350,7 +359,7 @@ class GenerateConfigTest(TestCase):
         config.disk_cache_staging_block_count = 8
         config.enable_disk_cache = False
         config.device_eviction_policy = "fifo"
-        config.host_eviction_policy = "lfu"
+        config.memory_eviction_policy = "lfu"
         config.disk_eviction_policy = "lru"
         config.reserve_block_ratio = 7
         config.dsv4_fixed_pool_blocks = 512
@@ -363,8 +372,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_transfer_queue_max_size = 307
         config.block_tree_device_evict_low_watermark_ratio = 0.71
         config.block_tree_device_evict_high_watermark_ratio = 0.81
-        config.block_tree_host_evict_low_watermark_ratio = 0.72
-        config.block_tree_host_evict_high_watermark_ratio = 0.82
+        config.block_tree_memory_evict_low_watermark_ratio = 0.72
+        config.block_tree_memory_evict_high_watermark_ratio = 0.82
         config.block_tree_disk_evict_low_watermark_ratio = 0.73
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
@@ -376,7 +385,7 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
         self.assertFalse(restored.enable_disk_cache)
         self.assertEqual(restored.device_eviction_policy, "fifo")
-        self.assertEqual(restored.host_eviction_policy, "lfu")
+        self.assertEqual(restored.memory_eviction_policy, "lfu")
         self.assertEqual(restored.disk_eviction_policy, "lru")
         self.assertEqual(restored.reserve_block_ratio, 7)
         self.assertEqual(restored.dsv4_fixed_pool_blocks, 512)
@@ -389,8 +398,8 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(restored.block_tree_transfer_queue_max_size, 307)
         self.assertEqual(restored.block_tree_device_evict_low_watermark_ratio, 0.71)
         self.assertEqual(restored.block_tree_device_evict_high_watermark_ratio, 0.81)
-        self.assertEqual(restored.block_tree_host_evict_low_watermark_ratio, 0.72)
-        self.assertEqual(restored.block_tree_host_evict_high_watermark_ratio, 0.82)
+        self.assertEqual(restored.block_tree_memory_evict_low_watermark_ratio, 0.72)
+        self.assertEqual(restored.block_tree_memory_evict_high_watermark_ratio, 0.82)
         self.assertEqual(restored.block_tree_disk_evict_low_watermark_ratio, 0.73)
         self.assertEqual(restored.block_tree_disk_evict_high_watermark_ratio, 0.83)
         self.assertFalse(hasattr(restored, "write_cache_sync"))
@@ -475,8 +484,8 @@ class GenerateConfigTest(TestCase):
             "block_tree_transfer_queue_max_size": "int",
             "block_tree_device_evict_low_watermark_ratio": "float",
             "block_tree_device_evict_high_watermark_ratio": "float",
-            "block_tree_host_evict_low_watermark_ratio": "float",
-            "block_tree_host_evict_high_watermark_ratio": "float",
+            "block_tree_memory_evict_low_watermark_ratio": "float",
+            "block_tree_memory_evict_high_watermark_ratio": "float",
             "block_tree_disk_evict_low_watermark_ratio": "float",
             "block_tree_disk_evict_high_watermark_ratio": "float",
         }
