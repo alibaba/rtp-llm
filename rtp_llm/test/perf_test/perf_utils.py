@@ -37,8 +37,9 @@ def filter_bs_by_kvcache(
 def query_engine_status(port: int) -> Dict[str, Any]:
     """Query /cache_status and /worker_status, return unified engine info.
 
-    Returns dict with keys: max_kv_tokens, total_kv_cache, block_size,
-    concurrency_limit, dp_size.  Returns empty dict on failure.
+    Returns dict with keys: max_kv_tokens, total_kv_cache,
+    total_kv_cache_blocks, block_size, concurrency_limit, dp_size.
+    Returns empty dict on failure.
     """
     result: Dict[str, Any] = {}
     try:
@@ -50,12 +51,15 @@ def query_engine_status(port: int) -> Dict[str, Any]:
             logging.warning(f"Engine status error: cache={cache}, worker={worker}")
             return result
 
-        cache_results = cache.get("results", [cache])
-        per_dp_kv = [
-            int(c.get("total_kv_cache", 0)) * int(c.get("block_size", 1))
-            for c in cache_results
-        ]
-        result["max_kv_tokens"] = min(per_dp_kv) if per_dp_kv else 0
+        cache_results = cache.get("results") or [cache]
+        # Native cache_status already reports capacity in tokens. Every DP
+        # shard must fit the per-DP batch; only the display converts to blocks.
+        per_dp_kv = [int(c.get("total_kv_cache", 0)) for c in cache_results]
+        result["max_kv_tokens"] = min(per_dp_kv)
+        result["total_kv_cache_blocks"] = min(
+            tokens // max(int(shard.get("block_size", 1)), 1)
+            for tokens, shard in zip(per_dp_kv, cache_results)
+        )
         result["total_kv_cache"] = int(cache.get("total_kv_cache", 0))
         result["block_size"] = int(cache.get("block_size", 1))
         result["dp_size"] = int(cache.get("dp_size", 1))
@@ -148,7 +152,10 @@ def print_config_table(
             ["KV Cache Tokens (per DP)", engine_status.get("max_kv_tokens", "N/A")]
         )
         model_table.add_row(
-            ["KV Cache Blocks (per DP)", engine_status.get("total_kv_cache", "N/A")]
+            [
+                "KV Cache Blocks (per DP)",
+                engine_status.get("total_kv_cache_blocks", "N/A"),
+            ]
         )
         model_table.add_row(["Block Size", engine_status.get("block_size", "N/A")])
         model_table.add_row(

@@ -9,6 +9,10 @@ import pytest
 from rtp_llm.test.perf_test.batch_perf_impl import BatchPerfImpl
 from rtp_llm.test.perf_test.dataclass import ResponseInfo
 from rtp_llm.test.perf_test.perf_runner import _validate_grid_results, run_perf_test
+from rtp_llm.test.perf_test.perf_utils import (
+    filter_bs_by_kvcache,
+    query_engine_status,
+)
 
 
 def _metric(seq=65536, bs=128, success_rate=1.0, latency=12.0):
@@ -101,6 +105,54 @@ def test_benchmark_requests_the_full_per_dp_batch(is_decode):
         },
         timeout=60,
     )
+
+
+def _query_cache_status(cache):
+    cache_response = Mock()
+    cache_response.json.return_value = cache
+    worker_response = Mock()
+    worker_response.json.return_value = {"frontend_concurrency_limit": 1024}
+    with patch(
+        "rtp_llm.test.perf_test.perf_utils.requests.get",
+        side_effect=[cache_response, worker_response],
+    ):
+        return query_engine_status(1234)
+
+
+@pytest.mark.parametrize("shape", ["direct", "wrapped", "empty_results"])
+def test_grid_cache_status_preserves_native_token_units(shape):
+    cache = {"total_kv_cache": "3854336", "block_size": "2048"}
+    if shape == "wrapped":
+        cache["results"] = [cache.copy()]
+    elif shape == "empty_results":
+        cache["results"] = []
+    status = _query_cache_status(cache)
+    assert status["max_kv_tokens"] == 3_854_336
+    assert status["total_kv_cache_blocks"] == 1882
+
+
+def test_grid_capacity_uses_the_smallest_dp_shard():
+    status = _query_cache_status({
+        "results": [
+            {"total_kv_cache": "8192", "block_size": "2048"},
+            {"total_kv_cache": "2048", "block_size": "1024"},
+        ],
+    })
+    assert status["max_kv_tokens"] == 2048
+    assert status["total_kv_cache_blocks"] == 2
+
+
+@pytest.mark.parametrize("batches", [[16, 32], [64, 128]])
+def test_capacity_filter_cannot_turn_an_incomplete_ppu_grid_green(tmp_path, batches):
+    original_batches = batches.copy()
+    status = _query_cache_status(
+        {"total_kv_cache": "3854336", "block_size": "2048"}
+    )
+    runnable = filter_bs_by_kvcache(batches, 131072, status["max_kv_tokens"])
+    _write_result(tmp_path, [_metric(seq=131072, bs=bs) for bs in runnable])
+    with pytest.raises(AssertionError, match="Empty|Missing"):
+        _validate_grid_results(tmp_path, [131072], batches, is_decode=True)
+    assert batches == original_batches
 
 
 @pytest.mark.parametrize("is_decode", [True, False])
