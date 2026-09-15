@@ -130,7 +130,7 @@ class ForceBatchFrontendWorkerTest(TestCase):
                 )
 
     def test_batch_endpoint_preserves_config_identity_and_headers(self):
-        for force in (True, False):
+        for force in (True, False, None):
             with self.subTest(force=force):
                 worker = FrontendWorker.__new__(FrontendWorker)
                 expected = BatchPipelineResponse(response_batch=[])
@@ -168,6 +168,7 @@ class ForceBatchFrontendWorkerTest(TestCase):
             (RoleType.FRONTEND, True, True, [RoleType.PREFILL, RoleType.DECODE], False),
             (RoleType.PREFILL, True, True, [], False),
             (RoleType.PDFUSION, False, False, [], False),
+            (RoleType.PDFUSION, False, None, [], False),
         ]
         for role, scheduling, force, assignments, atomic in cases:
             with self.subTest(

@@ -223,9 +223,9 @@ class GenerateConfig(BaseModel):
     sp_advice_prompt: str = ""
     sp_advice_prompt_token_ids: List[int] = []
     sp_edit: bool = False
-    # Use one BatchGenerateCall when topology permits; false keeps per-item scheduling.
+    # Use one BatchGenerateCall when topology permits; false/null keep per-item scheduling.
     # Direct prompt_batch defaults off; /batch_infer defaults on.
-    force_batch: bool = False
+    force_batch: Optional[bool] = False
     force_disable_sp_run: bool = False
     force_sp_accept: bool = False
     return_cum_log_probs: bool = False
