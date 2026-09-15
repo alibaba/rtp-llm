@@ -15,7 +15,7 @@ import signal
 import threading
 import time
 import traceback
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 from rtp_llm.config.engine_config import derive_grammar_compile_threads
 from rtp_llm.config.grammar_tokenizer_info import (
@@ -42,6 +42,11 @@ from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.ops import SpeculativeType, TaskType
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
+from rtp_llm.utils.scr_template_lifecycle import get_template_lifecycle
+from rtp_llm.utils.scr_template_utils import (
+    register_backend_visitor_template_hook,
+    register_server_config_template_hook,
+)
 
 _PROXY_MODE_ENV_KEY = "DASH_SC_GRPC_PROXY_MODE"
 _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
@@ -468,7 +473,12 @@ class DashScApp:
         except Exception as e:
             logging.warning("[DashScApp] servicer cleanup failed: %s", e, exc_info=True)
 
-    def start(self, ready_pipe_writer=None) -> None:
+    def start(
+        self,
+        ready_pipe_writer=None,
+        on_prebind: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Initialize locally, then run the optional SCR gate before binding."""
         servicer: Any = None
         try:
             port = self.server_config.dash_sc_grpc_server_port
@@ -494,6 +504,9 @@ class DashScApp:
                     model_config=model_config,
                     source_role="dash",
                 )
+                # Refresh ServerConfig.ip before the visitor hook reads it during fixup.
+                register_server_config_template_hook(self.py_env_configs)
+                register_backend_visitor_template_hook(backend_visitor, self.py_env_configs)
 
                 base_tok = TokenizerFactory.create(
                     model_config.ckpt_path,
@@ -568,6 +581,9 @@ class DashScApp:
                     speculative_steps=speculative_steps,
                     grammar_validator=grammar_validator,
                 )
+                get_template_lifecycle().register_fixup(
+                    f"dash-inference:{id(servicer)}", servicer
+                )
 
             loop = self._start_enqueue_loop()
             if is_proxy:
@@ -589,6 +605,9 @@ class DashScApp:
             # so dashboards/alerts see gRPC and HTTP paths under the same metric family
             # (split via the ``protocol`` tag ``grpc_metrics`` injects).
             kmonitor.init()
+
+            if on_prebind is not None:
+                on_prebind()
 
             logging.info(
                 "[DashScApp] starting gRPC server rank_id=%s server_id=%s port=%s mode=%s",

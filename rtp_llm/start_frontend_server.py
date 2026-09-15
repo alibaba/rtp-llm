@@ -18,6 +18,11 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
+from rtp_llm.utils.scr_template_utils import (
+    ScrParticipantManifest,
+    arrive_scr_template_barrier,
+    is_scr_template_phase_active,
+)
 
 setup_logging()
 
@@ -38,6 +43,7 @@ def start_frontend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     service_draining=None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     from rtp_llm.metrics import kmonitor
 
@@ -73,7 +79,25 @@ def start_frontend_server(
         set_global_controller(global_controller)
         separated_frontend = py_env_configs.role_config.role_type == RoleType.FRONTEND
         app = FrontendApp(py_env_configs, separated_frontend)
-        app.start()
+
+        def on_prebind() -> None:
+            if scr_manifest is None or not is_scr_template_phase_active():
+                return
+            worker_id = scr_manifest.worker_id("frontend", f"{rank_id}:{server_id}")
+            result = arrive_scr_template_barrier(
+                worker_id=worker_id,
+                worker_num=scr_manifest.worker_num,
+                generation=scr_manifest.generation or None,
+                fail_closed=True,
+            )
+            logging.info(
+                "sCR frontend reached prebind arrival worker_id=%d worker_num=%d result=%r",
+                worker_id,
+                scr_manifest.worker_num,
+                result,
+            )
+
+        app.start(on_prebind=on_prebind)
     except BaseException as e:
         logging.error(
             f"start frontend server error: {e}, trace: {traceback.format_exc()}"

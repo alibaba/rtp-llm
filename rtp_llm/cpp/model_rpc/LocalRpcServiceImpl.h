@@ -18,6 +18,23 @@ public:
     void prepareLocalServer() {
         if (!local_server_) {
             local_server_ = std::make_shared<LocalRpcServer>();
+            local_server_->setDeferServiceStart(defer_service_start_);
+        }
+    }
+    virtual void setDeferServiceStart(bool defer) {
+        if (local_server_) {
+            local_server_->setDeferServiceStart(defer);
+        }
+        defer_service_start_ = defer;
+    }
+    virtual void updateRuntimeEndpoints(const RuntimeConfig& runtime_config) {
+        if (local_server_) {
+            local_server_->updateRuntimeEndpoints(runtime_config);
+        }
+    }
+    virtual void startDeferredServices() {
+        if (local_server_) {
+            local_server_->startDeferredServices();
         }
     }
     virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
@@ -243,6 +260,7 @@ protected:
     }
 
     std::shared_ptr<LocalRpcServer> local_server_;
+    bool defer_service_start_{false};
 };
 
 typedef LocalRpcServiceImpl RpcServiceImpl;
