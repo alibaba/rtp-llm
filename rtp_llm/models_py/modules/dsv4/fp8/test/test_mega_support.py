@@ -101,6 +101,13 @@ def _supported_extension():
         "topk": 6,
         "max_m": MAX_BATCH,
     }
+    extension.build_info_moe_front = lambda: {
+        "source_commit": "8bb15d3b",
+        "source_sha256": "7" * 64,
+        "target_arches": "sm_100a,sm_103a",
+        "production_arch": "sm_100a,sm_103a",
+        "kernel_count": 4,
+    }
     return extension
 
 
@@ -332,6 +339,30 @@ class MegaSupportTest(unittest.TestCase):
             )
 
         self.assertIn("Dsv4MoeFrontPlan.run_hash_out", reason or "")
+
+    def test_stale_moe_front_build_is_rejected_at_startup(self) -> None:
+        extension = _supported_extension()
+        extension.build_info_moe_front = lambda: {
+            "source_commit": "unknown",
+            "source_sha256": "7" * 64,
+            "target_arches": "sm_100a,sm_103a",
+            "production_arch": "sm_100a,sm_103a",
+            "kernel_count": 4,
+        }
+        fake_rtp_kernel = SimpleNamespace(dsv4_mega=extension)
+        fake_deep_gemm = _module_with_symbols(_REQUIRED_DEEP_GEMM_SYMBOLS)
+        with patch.object(
+            torch.cuda, "get_device_capability", return_value=(10, 3)
+        ), patch.dict(
+            sys.modules,
+            {"rtp_kernel": fake_rtp_kernel, "deep_gemm": fake_deep_gemm},
+        ):
+            reason = mega_decode_unavailable_reason(
+                V4Args(ep_size=8), torch.device("cuda:0")
+            )
+
+        self.assertIn("MoE-front build is incompatible", reason or "")
+        self.assertIn("invalid source commit", reason or "")
 
     def test_moe_front_plan_signature_is_checked_when_available(self) -> None:
         class IncompletePlan(_FakeMoeFrontPlan):
