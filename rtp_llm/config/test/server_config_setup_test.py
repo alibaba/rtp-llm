@@ -105,9 +105,7 @@ class KVCacheEventHostIdentityTest(TestCase):
 
         configure_kv_cache_event_host_ip_port(py_env_configs)
 
-        self.assertEqual(
-            py_env_configs.kv_cache_config.kv_cache_event_host_ip_port, ""
-        )
+        self.assertEqual(py_env_configs.kv_cache_config.kv_cache_event_host_ip_port, "")
 
 
 class SingleGpuBackendRankTest(TestCase):
@@ -167,9 +165,7 @@ class SingleGpuBackendRankTest(TestCase):
         return result, py_env_configs
 
     def test_single_gpu_nonzero_dp_rank_starts_publisher(self):
-        result, py_env_configs = self._start_rank(
-            tp_size=1, dp_size=2, world_rank=1
-        )
+        result, py_env_configs = self._start_rank(tp_size=1, dp_size=2, world_rank=1)
 
         self.assertEqual(result, 1)
         self.assertEqual(py_env_configs.parallelism_config.tp_rank, 0)
@@ -180,16 +176,12 @@ class SingleGpuBackendRankTest(TestCase):
         )
 
     def test_single_gpu_nonzero_tp_rank_does_not_start_publisher(self):
-        result, py_env_configs = self._start_rank(
-            tp_size=2, dp_size=1, world_rank=1
-        )
+        result, py_env_configs = self._start_rank(tp_size=2, dp_size=1, world_rank=1)
 
         self.assertEqual(result, 1)
         self.assertEqual(py_env_configs.parallelism_config.tp_rank, 1)
         self.assertEqual(py_env_configs.parallelism_config.dp_rank, 0)
-        self.assertEqual(
-            py_env_configs.kv_cache_config.kv_cache_event_host_ip_port, ""
-        )
+        self.assertEqual(py_env_configs.kv_cache_config.kv_cache_event_host_ip_port, "")
 
 
 class GenerateConfigTest(TestCase):
@@ -485,6 +477,56 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(py_env_configs.moe_config.use_deepep_moe, True)
         self.assertEqual(py_env_configs.moe_config.use_deepep_low_latency, False)
         self.assertEqual(py_env_configs.moe_config.use_deepep_internode, True)
+        self.assertEqual(py_env_configs.moe_config.ll_num_max_token, 32)
+
+    @patch.dict(
+        "os.environ",
+        {
+            **_PINNED_DEVICES,
+            "TP_SIZE": "4",
+            "PP_SIZE": "1",
+            "WORLD_SIZE": "4",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "4",
+            "CONCURRENCY_LIMIT": "32",
+            "START_PORT": "20000",
+            "MODEL_TYPE": "fake_model",
+            "USE_MORI_EP": "1",
+            "ENABLE_CUDA_GRAPH": "1",
+            "PREFILL_CAPTURE_CONFIG": "128,256,512,1024,2048,4096",
+        },
+        clear=True,
+    )
+    def test_mori_capacity_includes_prefill_graph_bucket(self):
+        py_env_configs: PyEnvConfigs = setup_args()
+        setup_and_configure_server(py_env_configs)
+
+        self.assertTrue(py_env_configs.moe_config.use_mori_ep)
+        self.assertEqual(py_env_configs.moe_config.ll_num_max_token, 4096)
+
+    @patch.dict(
+        "os.environ",
+        {
+            **_PINNED_DEVICES,
+            "TP_SIZE": "4",
+            "PP_SIZE": "1",
+            "WORLD_SIZE": "4",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "4",
+            "CONCURRENCY_LIMIT": "32",
+            "START_PORT": "20000",
+            "MODEL_TYPE": "fake_model",
+            "USE_MORI_EP": "1",
+            "ENABLE_CUDA_GRAPH": "0",
+            "PREFILL_CAPTURE_CONFIG": "128,256,512,1024,2048,4096",
+        },
+        clear=True,
+    )
+    def test_mori_capacity_unchanged_without_graph(self):
+        py_env_configs: PyEnvConfigs = setup_args()
+        setup_and_configure_server(py_env_configs)
+
+        self.assertTrue(py_env_configs.moe_config.use_mori_ep)
         self.assertEqual(py_env_configs.moe_config.ll_num_max_token, 32)
 
     @patch.dict(

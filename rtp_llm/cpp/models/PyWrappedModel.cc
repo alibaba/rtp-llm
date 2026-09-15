@@ -82,6 +82,22 @@ private:
     bool                                   track_store_completions_{false};
 };
 
+#if USING_CUDA || USING_ROCM
+// Mori EP low-latency dispatch is not re-entrant across concurrent forwards on
+// the same rank. Serialize graph replays and record a completion event so the
+// next forward can wait on the previous one's device work.
+struct MoriExecutionState {
+    std::mutex   mutex;
+    torch::Event forward_event = cuda_graph::makeGraphEvent();
+    bool         forward_event_recorded{false};
+};
+
+MoriExecutionState& moriExecutionState() {
+    static MoriExecutionState state;
+    return state;
+}
+#endif
+
 }  // namespace
 
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
@@ -755,9 +771,9 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
         fusedCopy(d2d_copies_);
     }
 
-    graph_state_                         = CudaGraphState();
+    graph_state_                          = CudaGraphState();
     generation_prefill_cuda_graph_state_ = CudaGraphState();
-    auto empty                           = torch::Tensor();
+    auto empty                            = torch::Tensor();
     // buildPyAttentionInputs() has already copied combo_position_ids to the
     // device.  Keep the top-level PyModelInputs field consistent with the
     // nested attention field: CudaGraphRunner validates and copies the
@@ -834,11 +850,32 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         return outputs;
     };
 
+#if USING_CUDA || USING_ROCM
+    MoriExecutionState*          mori_execution_state = nullptr;
+    std::unique_lock<std::mutex> mori_execution_lock;
+    auto                         record_mori_completion = [&]() {
+        if (mori_execution_lock.owns_lock()) {
+            mori_execution_state->forward_event.record(cuda_graph::graphGetCurrentStream());
+            mori_execution_state->forward_event_recorded = true;
+        }
+    };
+    if (use_mori_ep_) {
+        mori_execution_state = &moriExecutionState();
+        mori_execution_lock  = std::unique_lock<std::mutex>(mori_execution_state->mutex);
+        if (mori_execution_state->forward_event_recorded) {
+            mori_execution_state->forward_event.block(cuda_graph::graphGetCurrentStream());
+        }
+    }
+#endif
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
         if (int(device_props_.enable_layer_micro_batch)) {
-            return with_generation_prefill_cuda_graph_status(forwardMicroBatched(inputs));
+            auto outputs = forwardMicroBatched(inputs);
+#if USING_CUDA || USING_ROCM
+            record_mori_completion();
+#endif
+            return with_generation_prefill_cuda_graph_status(std::move(outputs));
         }
         PyContextParallelParams cp_params;
         if (device_props_.enable_prefill_cp && has_context_request) {
@@ -901,7 +938,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
-        // Cast the Python object to PyModelOutputs and extract hidden states
+        // Select the role-specific runner while preserving main's independent
+        // generation-prefill state and status reporting.
         auto*      graph_runner = selectGraphRunner(py_model_inputs.attention_inputs);
         auto&      graph_state  = selectGraphState(py_model_inputs.attention_inputs);
         const bool is_generation_prefill_runner =
@@ -910,15 +948,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             && !is_generation_prefill_runner) {
             generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED;
         }
-        const bool can_run_graph =
-            enable_cuda_graph_ && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
-        if (is_generation_prefill_runner && !can_run_graph) {
+        GraphRunDecision graph_decision = GraphRunDecision::Eager;
+        if (enable_cuda_graph_ && graph_runner != nullptr) {
+            graph_decision = graph_runner->plan(py_model_inputs, graph_state);
+        }
+        if (is_generation_prefill_runner && graph_decision != GraphRunDecision::Replay) {
             generation_prefill_cuda_graph_status =
                 graph_state.generation_prefill_status == GenerationPrefillCudaGraphStatus::NOT_REQUESTED ?
-                    GenerationPrefillCudaGraphStatus::GRAPH_INPUT_SHAPE_MISMATCH :
+                    GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE :
                     graph_state.generation_prefill_status;
         }
-        if (can_run_graph) {
+        if (graph_decision == GraphRunDecision::Replay) {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");
@@ -948,6 +988,20 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
 
         cache_store_write_cycle.finish();
+
+        // Lazy capture hook: the current request was just served eagerly. Now that its forward
+        // (and any pending cache-store writes) are done, capture the selected bucket using the
+        // reserved scratch storage / KV block 0. Capture runs collectively on all TP ranks because
+        // plan() made the same decision on every rank for this request shape. On success the next
+        // request that hits this bucket will replay; on failure the bucket is marked Failed and
+        // served eagerly forever (no retry, no server hang).
+        if (graph_decision == GraphRunDecision::CaptureAfterEager) {
+            RTP_LLM_PROFILE_SCOPE("py_model.forward(lazy_capture)");
+            graph_runner->captureCurrentBucket(graph_state);
+        }
+#if USING_CUDA || USING_ROCM
+        record_mori_completion();
+#endif
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
         auto attach_mtp_target_hidden_states = [&py_model_outputs](GptModelOutputs outputs) {
@@ -986,12 +1040,21 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true)));
 
     } catch (const py::error_already_set& e) {
+#if USING_CUDA || USING_ROCM
+        record_mori_completion();
+#endif
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
         throw std::runtime_error(std::string("pybind11 error during forward call on Python instance: ") + e.what());
     } catch (const std::exception& e) {
+#if USING_CUDA || USING_ROCM
+        record_mori_completion();
+#endif
         RTP_LLM_LOG_ERROR("C++ error during forward call on Python instance: %s", e.what());
         throw std::runtime_error(std::string("C++ error during forward call on Python instance: ") + e.what());
     } catch (...) {
+#if USING_CUDA || USING_ROCM
+        record_mori_completion();
+#endif
         RTP_LLM_LOG_ERROR("An unknown error occurred during forward call on Python instance.");
         throw std::runtime_error("An unknown error occurred during forward call on Python instance.");
     }
