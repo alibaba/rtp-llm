@@ -97,6 +97,7 @@ cc_test(
     copts = test_copts,
     tags = ["exclusive-if-local"],
     deps = test_deps + [
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
         "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
         "//rtp_llm/cpp/cache:cache_async_context",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",

@@ -119,6 +119,48 @@ TEST(TransferDescriptorTest, IsExecutableRequiresResolvedEndpointsPerDirection) 
     EXPECT_FALSE(disk_to_host.isExecutable());
 }
 
+TEST(BlockTransferRequestConverterTest, RejectsNullGroupAndMalformedDeviceMembers) {
+    auto                     valid = makeGroupSets();
+    MemoryOperationRequestPB request;
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
+        request, makeTransferTask({TransferDescriptor::deviceToHost(0, {1}, 2)}), valid));
+    auto null_group = valid;
+    null_group[0].reset();
+    std::vector<TransferDescriptor> decoded;
+    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(request, decoded, null_group));
+
+    const auto&                                        original  = valid[0];
+    const auto                                         pool      = original->devicePools()[0];
+    const std::vector<std::vector<DeviceBlockPoolPtr>> malformed = {{}, {nullptr}, {pool, pool}};
+    for (const auto& pools : malformed) {
+        auto groups = valid;
+        groups[0] =
+            makeTestGroupSet(0, original->topologyPtr(), {0}, pools, original->hostPool(), original->diskPool());
+        decoded.clear();
+        EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(request, decoded, groups));
+        MemoryOperationRequestPB encoded;
+        EXPECT_FALSE(BlockTransferRequestConverter::encodeTransfer(
+            encoded, makeTransferTask({TransferDescriptor::deviceToHost(0, {1}, 2)}), groups));
+    }
+}
+
+TEST(BlockTransferRequestConverterTest, EncodeRejectsIncompleteOrOversizedEndpoints) {
+    const std::vector<TransferDescriptor> invalid = {
+        TransferDescriptor::deviceToHost(1, {1}, 2),
+        TransferDescriptor::deviceToHost(0, {1, 2}, 3),
+        TransferDescriptor::hostToDevice(0, 1, {}),
+    };
+    for (const auto& descriptor : invalid) {
+        MemoryOperationRequestPB request;
+        EXPECT_FALSE(
+            BlockTransferRequestConverter::encodeTransfer(request, makeTransferTask({descriptor}), groupSets()));
+    }
+    auto missing_host = TransferDescriptor::deviceToHost(0, {1}, 2);
+    missing_host.target_blocks.clear();
+    MemoryOperationRequestPB request;
+    EXPECT_FALSE(BlockTransferRequestConverter::encodeTransfer(request, makeTransferTask({missing_host}), groupSets()));
+}
+
 TEST(BlockTransferRequestConverterTest, ConvertsDeviceToHost) {
     const TransferDescriptor input = TransferDescriptor::deviceToHost(2, {11, 12}, 21);
     MemoryOperationRequestPB request;

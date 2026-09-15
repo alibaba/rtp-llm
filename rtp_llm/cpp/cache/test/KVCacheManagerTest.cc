@@ -1625,6 +1625,36 @@ public:
     size_t submitted_descriptor_count{0};
 };
 
+TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesTimeoutBeforeSubmittingTransfer) {
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(manager->init());
+    auto engine                                      = std::make_shared<RecordingBatchTransferEngine>();
+    manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+    FunctionRequestPB request;
+    appendValidGroupedTransfer(manager, request);
+    ASSERT_EQ(request.mem_request().copy_items_size(), 1);
+    for (const int64_t timeout :
+         {static_cast<int64_t>(std::numeric_limits<int>::max()) + 1, std::numeric_limits<int64_t>::max()}) {
+        request.mutable_mem_request()->set_timeout_ms(timeout);
+        FunctionResponsePB response;
+        EXPECT_TRUE(manager->executeFunction(request, response));
+        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
+        EXPECT_EQ(engine->submitted_batch_count, 0u);
+    }
+    size_t submitted = 0;
+    for (const int64_t timeout : {int64_t{0}, int64_t{-1}, static_cast<int64_t>(std::numeric_limits<int>::max())}) {
+        request.mutable_mem_request()->set_timeout_ms(timeout);
+        FunctionResponsePB response;
+        EXPECT_TRUE(manager->executeFunction(request, response));
+        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::OK);
+        EXPECT_EQ(engine->submitted_batch_count, ++submitted);
+    }
+}
+
 TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesAllGroupedMemoryItemsOnlyToTieredBlockTree) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;

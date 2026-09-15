@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <unordered_map>
 #include <utility>
@@ -8,6 +9,13 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+namespace {
+bool validDeviceMembers(const GroupSet& group_set) {
+    const auto& pools = group_set.devicePools();
+    return !group_set.groupIds().empty() && group_set.groupIds().size() == pools.size()
+           && std::all_of(pools.begin(), pools.end(), [](const auto& pool) { return pool != nullptr; });
+}
+}  // namespace
 
 bool BlockTransferRequestConverter::directionFor(const TransferDescriptor&                descriptor,
                                                  MemoryOperationRequestPB::CopyDirection& request_direction) {
@@ -41,6 +49,9 @@ bool BlockTransferRequestConverter::directionFor(const TransferDescriptor&      
 bool BlockTransferRequestConverter::decodeDeviceBlocks(const CopyItem&            item,
                                                        const GroupSet&            group_set,
                                                        std::vector<BlockIdxType>& blocks) {
+    if (!validDeviceMembers(group_set)) {
+        return false;
+    }
     const auto&                              device_pools = group_set.devicePools();
     const auto&                              group_ids    = group_set.groupIds();
     std::unordered_map<size_t, BlockIdxType> blocks_by_group_id;
@@ -75,7 +86,8 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
     request.set_copy_direction(request_direction);
 
     for (const TransferDescriptor& descriptor : descriptors) {
-        if (descriptor.source_tier != first.source_tier || descriptor.target_tier != first.target_tier) {
+        if (!descriptor.isExecutable() || descriptor.source_tier != first.source_tier
+            || descriptor.target_tier != first.target_tier) {
             return false;
         }
         if (descriptor.group_set_id >= group_sets.size() || !group_sets[descriptor.group_set_id]) {
@@ -94,6 +106,9 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
         if (descriptor.source_tier == Tier::DEVICE || descriptor.target_tier == Tier::DEVICE) {
             const auto& blocks    = descriptor.blocksAt(Tier::DEVICE);
             const auto& group_ids = group_set.groupIds();
+            if (!validDeviceMembers(group_set) || blocks.size() != group_ids.size()) {
+                return false;
+            }
             for (size_t i = 0; i < blocks.size(); ++i) {
                 auto* group_block = item.add_group_blocks();
                 group_block->set_group_id(static_cast<int32_t>(group_ids[i]));
@@ -114,7 +129,7 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
 
     for (const CopyItem& item : request.copy_items()) {
         const size_t group_set_id = item.group_set_id();
-        if (group_set_id >= group_sets.size()) {
+        if (group_set_id >= group_sets.size() || !group_sets[group_set_id]) {
             RTP_LLM_LOG_WARNING("cannot resolve BlockTree GroupSet id=%" PRIu64,
                                 static_cast<uint64_t>(item.group_set_id()));
             return false;

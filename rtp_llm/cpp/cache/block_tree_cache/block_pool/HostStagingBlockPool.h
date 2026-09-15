@@ -67,7 +67,8 @@ public:
     std::optional<HostStagingBlockBatch> tryMallocBatch(size_t count);
 
     // Fair, all-or-nothing allocation; existing async waiters are never bypassed.
-    // Invokes callback outside mutex_. A null result means expiration, cancellation, or an invalid request.
+    // Invokes callback outside mutex_. A null result means expiration, cancellation,
+    // an invalid request, or allocation failure while admitting a queued waiter.
     void requestBatch(size_t count, Clock::time_point deadline, BatchReadyCallback callback);
 
     // Shutdown boundary: every queued waiter is notified even if another
@@ -76,6 +77,7 @@ public:
 
 private:
     friend class HostStagingBlockLease;
+    friend struct HostStagingBlockPoolTestPeer;
 
     struct BatchWaiter {
         size_t             count{0};
@@ -88,9 +90,8 @@ private:
         std::optional<HostStagingBlockBatch> leases;
     };
 
-    HostStagingBlockBatch   allocateBatchLocked(size_t count);
-    std::vector<ReadyBatch> collectReadyBatchesLocked();
-    static void             dispatchReadyBatches(std::vector<ReadyBatch> ready_batches);
+    HostStagingBlockBatch allocateBatchLocked(size_t count);
+    static void           dispatchReadyBatch(ReadyBatch ready);
 
     void free(size_t block_id);
 
@@ -102,6 +103,8 @@ private:
     std::vector<size_t>     free_id_list_;
     std::deque<BatchWaiter> batch_waiters_;
     std::mutex              mutex_;
+    // Narrow fault-injection seam; null in production.
+    void (*before_batch_allocation_for_test_)() = nullptr;
 };
 
 }  // namespace rtp_llm

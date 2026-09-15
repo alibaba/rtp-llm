@@ -7,6 +7,7 @@
 #include <memory>
 #include <limits>
 #include <optional>
+#include <new>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -14,6 +15,14 @@
 #include <gtest/gtest.h>
 
 namespace rtp_llm {
+struct HostStagingBlockPoolTestPeer {
+    static void failNextAllocation(HostStagingBlockPool& pool) {
+        pool.before_batch_allocation_for_test_ = [] { throw std::bad_alloc(); };
+    }
+    static void clearAllocationFailure(HostStagingBlockPool& pool) {
+        pool.before_batch_allocation_for_test_ = nullptr;
+    }
+};
 namespace {
 
 TEST(HostStagingBlockPoolTest, RejectsOverflowingCapacityBeforeAllocating) {
@@ -34,6 +43,33 @@ TEST(HostStagingBlockPoolTest, MovedFromLeaseRejectsAccessAndDestinationKeepsOwn
         EXPECT_FALSE(pool.tryMallocBatch(1).has_value());
     }
     EXPECT_TRUE(pool.tryMallocBatch(1).has_value());
+}
+
+TEST(HostStagingBlockPoolTest, AllocationFailureDuringReleaseRejectsWaiterWithoutLosingBlocks) {
+    auto pool = std::make_shared<HostStagingBlockPool>(1, 64);
+    auto held = pool->tryMallocBatch(1);
+    ASSERT_TRUE(held.has_value());
+    auto       calls    = std::make_shared<std::vector<int>>(2, 0);
+    const auto deadline = HostStagingBlockPool::Clock::now() + std::chrono::seconds(30);
+    HostStagingBlockPoolTestPeer::failNextAllocation(*pool);
+    pool->requestBatch(1, deadline, [calls, raw_pool = pool.get()](auto leases) {
+        EXPECT_FALSE(leases.has_value());
+        ++(*calls)[0];
+        HostStagingBlockPoolTestPeer::clearAllocationFailure(*raw_pool);
+    });
+    pool->requestBatch(1, deadline, [calls](auto leases) {
+        EXPECT_TRUE(leases.has_value());
+        ++(*calls)[1];
+    });
+    EXPECT_NO_THROW(held.reset());
+    EXPECT_EQ((*calls)[0], 1);
+    EXPECT_EQ((*calls)[1], 1);
+    auto recovered = pool->tryMallocBatch(1);
+    EXPECT_TRUE(recovered.has_value());
+    EXPECT_FALSE(pool->tryMallocBatch(1).has_value());
+    pool->cancelAllBatchWaiters();
+    EXPECT_EQ((*calls)[0], 1);
+    EXPECT_EQ((*calls)[1], 1);
 }
 
 TEST(HostStagingBlockPoolTest, UsesCallerProvidedStride) {

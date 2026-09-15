@@ -783,7 +783,11 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
     }
 
     const int64_t timeout_ms = request.mem_request().timeout_ms();
-    const auto    timeout =
+    if (timeout_ms > std::numeric_limits<int>::max()) {
+        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: transfer timeout exceeds supported range");
+        return true;
+    }
+    const auto timeout =
         timeout_ms > 0 ? std::chrono::milliseconds(timeout_ms) : BlockTreeTaskPool::kDefaultQueueWaitTimeout;
     const bool transfer_success = block_tree_cache_->executeTransfer(TransferTask(std::move(descriptors), timeout));
     if (!transfer_success) {

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <stdexcept>
 
@@ -84,17 +85,44 @@ void HostStagingBlockPool::cancelAllBatchWaiters() noexcept {
 }
 
 void HostStagingBlockPool::free(size_t block_id) {
-    std::vector<ReadyBatch> ready_batches;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        // Valid leases return into the capacity reserved by the constructor.
         free_id_list_.push_back(block_id);
-        ready_batches = collectReadyBatchesLocked();
     }
-    dispatchReadyBatches(std::move(ready_batches));
+    while (true) {
+        ReadyBatch ready;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (batch_waiters_.empty()) {
+                return;
+            }
+            auto& waiter = batch_waiters_.front();
+            if (Clock::now() < waiter.deadline) {
+                if (free_id_list_.size() < waiter.count) {
+                    return;
+                }
+                try {
+                    // Reserve before consuming IDs or moving the waiter. After
+                    // reserve, noexcept lease moves cannot allocate or throw.
+                    ready.leases.emplace(allocateBatchLocked(waiter.count));
+                } catch (const std::bad_alloc&) {
+                    // Fail this admission with the existing null result contract.
+                    // No blocks were consumed, and later waiters still get notified.
+                }
+            }
+            ready.callback = std::move(waiter.callback);
+            batch_waiters_.pop_front();
+        }
+        dispatchReadyBatch(std::move(ready));
+    }
 }
 
 HostStagingBlockPool::HostStagingBlockBatch HostStagingBlockPool::allocateBatchLocked(size_t count) {
     HostStagingBlockBatch leases;
+    if (before_batch_allocation_for_test_ != nullptr) {
+        before_batch_allocation_for_test_();
+    }
     leases.reserve(count);
     for (size_t index = 0; index < count; ++index) {
         const size_t block_id = free_id_list_.back();
@@ -104,37 +132,14 @@ HostStagingBlockPool::HostStagingBlockBatch HostStagingBlockPool::allocateBatchL
     return leases;
 }
 
-std::vector<HostStagingBlockPool::ReadyBatch> HostStagingBlockPool::collectReadyBatchesLocked() {
-    std::vector<ReadyBatch> ready_batches;
-    const auto              now = Clock::now();
-    while (!batch_waiters_.empty()) {
-        if (now >= batch_waiters_.front().deadline) {
-            BatchWaiter waiter = std::move(batch_waiters_.front());
-            batch_waiters_.pop_front();
-            ready_batches.push_back(ReadyBatch{std::move(waiter.callback), std::nullopt});
-            continue;
-        }
-        if (free_id_list_.size() < batch_waiters_.front().count) {
-            break;
-        }
-        BatchWaiter waiter = std::move(batch_waiters_.front());
-        batch_waiters_.pop_front();
-        ready_batches.push_back(ReadyBatch{std::move(waiter.callback), allocateBatchLocked(waiter.count)});
-    }
-    return ready_batches;
-}
-
-void HostStagingBlockPool::dispatchReadyBatches(std::vector<ReadyBatch> ready_batches) {
-    for (auto& ready : ready_batches) {
-        // Dispatch can run from a lease destructor or noexcept move assignment.
-        // An observer failure must not unwind that boundary or suppress waiters.
-        try {
-            ready.callback(std::move(ready.leases));
-        } catch (const std::exception& error) {
-            RTP_LLM_LOG_ERROR("staging ready callback failed: %s", error.what());
-        } catch (...) {
-            RTP_LLM_LOG_ERROR("staging ready callback failed with unknown exception");
-        }
+void HostStagingBlockPool::dispatchReadyBatch(ReadyBatch ready) {
+    // Dispatch runs outside mutex_, including lease destruction after callbacks.
+    try {
+        ready.callback(std::move(ready.leases));
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_ERROR("staging ready callback failed: %s", error.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("staging ready callback failed with unknown exception");
     }
 }
 

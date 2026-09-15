@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <future>
 #include <mutex>
+#include <limits>
 #include <sys/resource.h>
 #include <thread>
 
@@ -16,6 +17,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
@@ -184,13 +186,13 @@ static void expectSingleGroupBlock(const MemoryOperationRequestPB::CopyItem& ite
     EXPECT_EQ(item.group_blocks(0).block_id(), block);
 }
 
-static void waitForEvictionSettlement(BlockTreeCache& cache) {
+static bool waitForEvictionSettlement(BlockTreeCache& cache) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(cache) != 0
            && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    ASSERT_EQ(BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(cache), 0u);
+    return BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(cache) == 0;
 }
 
 static bool waitForRpcRequests(const std::shared_ptr<MultiRankBlockTransferRpcState>& state,
@@ -266,6 +268,34 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferSucceedsForAllWorkers)
 
     EXPECT_TRUE(executeAndWait(
         *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500));
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastClampsOversizedTimeoutForWireAndDeadline) {
+    auto                                               state   = std::make_shared<MultiRankBlockTransferRpcState>();
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto                                                          manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(manager, nullptr);
+    auto       cache   = makeBroadcastCache(manager);
+    const auto timeout = std::chrono::milliseconds(static_cast<int64_t>(std::numeric_limits<int>::max()) + 60000);
+    auto       context =
+        cache->transfer_dispatcher_->multi_rank_engine_->execute(TransferTask(makeBroadcastDescriptors(), timeout));
+    BoundedThread<bool> completion(
+        [context = std::move(context), cache = std::move(cache), servers = std::move(servers)]() mutable {
+            context->waitDone();
+            const bool success = context->success();
+            context.reset();
+            cache.reset();
+            servers.clear();
+            return success;
+        });
+    ASSERT_EQ(completion.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    ASSERT_TRUE(completion.get());
+    std::lock_guard<std::mutex> lock(state->mutex);
+    ASSERT_EQ(state->requests.size(), 1u);
+    EXPECT_EQ(state->requests.front().timeout_ms(), std::numeric_limits<int>::max());
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, ExecuteReturnsBeforeSlowWorkersFinish) {
@@ -723,7 +753,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsTask) {
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    waitForEvictionSettlement(*cache);
+    ASSERT_TRUE(waitForEvictionSettlement(*cache)) << "eviction settlement did not finish within 5 seconds";
 
     auto after = cache->tree()->findNode({100});
     ASSERT_FALSE(after.empty());
@@ -789,10 +819,14 @@ TEST_F(MultiRankBlockTransferEngineTest, CacheShutdownWaitsForLateMultiRankEvict
         ASSERT_EQ(host_pool->freeBlocksNum(), kPoolSize - 1);
         ASSERT_EQ(disk_pool->freeBlocksNum(), kPoolSize - 1);
 
-        auto destroy = std::async(std::launch::async, [cache = std::move(cache)]() mutable { cache.reset(); });
-        EXPECT_EQ(destroy.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
-        const bool destroyed = destroy.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
-        EXPECT_TRUE(destroyed);
+        // On a regression timeout the worker retains its cache and RPC servers.
+        // std::async would still block in the future destructor after an early return.
+        BoundedThread<void> destroy([cache = std::move(cache), servers = std::move(servers)]() mutable {
+            cache.reset();
+            servers.clear();
+        });
+        EXPECT_EQ(destroy.waitFor(std::chrono::milliseconds(50)), std::future_status::timeout);
+        ASSERT_EQ(destroy.waitFor(std::chrono::seconds(5)), std::future_status::ready);
         destroy.get();
 
         EXPECT_EQ(host_pool->freeBlocksNum(), kPoolSize);
@@ -840,7 +874,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWith
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    waitForEvictionSettlement(*cache);
+    ASSERT_TRUE(waitForEvictionSettlement(*cache)) << "eviction settlement did not finish within 5 seconds";
 
     auto after = cache->tree()->findNode({100});
     ASSERT_FALSE(after.empty());
@@ -897,7 +931,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    waitForEvictionSettlement(*cache);
+    ASSERT_TRUE(waitForEvictionSettlement(*cache)) << "eviction settlement did not finish within 5 seconds";
 
     auto after = cache->tree()->findNode({100});
     ASSERT_FALSE(after.empty());
@@ -956,7 +990,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastBatchEvictionFailureOnOneRankR
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    waitForEvictionSettlement(*cache);
+    ASSERT_TRUE(waitForEvictionSettlement(*cache)) << "eviction settlement did not finish within 5 seconds";
 
     for (size_t index = 0; index < host_blocks.size(); ++index) {
         auto after = cache->tree()->findNode({100 + static_cast<int64_t>(index)});

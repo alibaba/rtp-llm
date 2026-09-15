@@ -115,7 +115,7 @@ TEST(TransferBatchAsyncContextTest, ThrowingCallbackDoesNotDropLaterCallbacks) {
     });
     context.onDone([&](ErrorInfo) {
         ++second_calls;
-        throw std::logic_error("second callback");
+        throw 42;
     });
     context.onDone([&](ErrorInfo error) {
         ++last_calls;
@@ -123,13 +123,29 @@ TEST(TransferBatchAsyncContextTest, ThrowingCallbackDoesNotDropLaterCallbacks) {
         EXPECT_TRUE(context.done());
     });
 
-    EXPECT_THROW(context.complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "transfer failed")), std::runtime_error);
+    std::thread worker(
+        [&] { EXPECT_NO_THROW(context.complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "transfer failed"))); });
+    worker.join();
     context.waitDone();
     EXPECT_EQ(context.errorInfo().code(), ErrorCode::INVALID_PARAMS);
     EXPECT_NO_THROW(context.complete(ErrorInfo::OkStatus()));
     EXPECT_EQ(first_calls, 1u);
     EXPECT_EQ(second_calls, 1u);
     EXPECT_EQ(last_calls, 1u);
+}
+
+TEST(TransferBatchAsyncContextTest, LateThrowingCallbacksAreIsolated) {
+    TransferBatchAsyncContext context;
+    context.complete(ErrorInfo::OkStatus());
+    EXPECT_NO_THROW(context.onDone([](ErrorInfo) { throw std::runtime_error("late callback"); }));
+    EXPECT_NO_THROW(context.onDone([](ErrorInfo) { throw 42; }));
+    size_t calls = 0;
+    context.onDone([&](ErrorInfo error) {
+        ++calls;
+        EXPECT_TRUE(error.ok());
+    });
+    EXPECT_EQ(calls, 1u);
+    EXPECT_TRUE(context.success());
 }
 
 TEST(TransferBatchAsyncContextTest, MultipleCallbacksAndWaiterObserveSameTerminalResult) {

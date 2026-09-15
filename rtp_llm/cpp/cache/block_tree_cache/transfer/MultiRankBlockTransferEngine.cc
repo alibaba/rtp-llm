@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 
+#include <algorithm>
+#include <limits>
 #include <condition_variable>
 #include <exception>
 #include <mutex>
@@ -176,12 +178,14 @@ std::shared_ptr<AsyncContext> MultiRankBlockTransferEngine::execute(TransferTask
     if (!remaining) {
         return deadline_exceeded();
     }
+    const int broadcast_timeout_ms =
+        static_cast<int>(std::min<int64_t>(remaining->count(), std::numeric_limits<int>::max()));
     for (auto& rank_request : requests) {
-        rank_request.mutable_mem_request()->set_timeout_ms(remaining->count());
+        rank_request.mutable_mem_request()->set_timeout_ms(broadcast_timeout_ms);
     }
     auto broadcast_result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
         requests,
-        static_cast<int>(remaining->count()),
+        broadcast_timeout_ms,
         [](const std::shared_ptr<RpcService::Stub>&    stub,
            const std::shared_ptr<grpc::ClientContext>& context,
            const FunctionRequestPB&                    rpc_request,
