@@ -38,13 +38,16 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from ..expert import Expert
+from rtp_llm.model_loader.weight_memory_saver import feature_weights_region
+
 from ...quant_layouts import prepare_fp4_weight_scale_for_deepgemm
+from ..expert import Expert
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 
 # Block sizes for FP8 / FP4 (mirror values in qlinear.py)
 _FP8_BLOCK = 128
 _FP4_BLOCK = 32
+
 
 # Toggle for the bs=1 fast path. Default ON. Set DSV4_LOCALLOOP_BS1_FAST=0 to disable.
 def _bs1_fast_enabled() -> bool:
@@ -136,15 +139,16 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         self._W2_s = stacked_routed["w2_s"]
         self._W3_w = stacked_routed["w3_w"]
         self._W3_s = stacked_routed["w3_s"]
-        self._W1_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W1_s, cfg.moe_inter_dim, cfg.dim, self._W1_s.shape[0]
-        )
-        self._W2_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W2_s, cfg.dim, cfg.moe_inter_dim, self._W2_s.shape[0]
-        )
-        self._W3_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W3_s, cfg.moe_inter_dim, cfg.dim, self._W3_s.shape[0]
-        )
+        with feature_weights_region():
+            self._W1_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W1_s, cfg.moe_inter_dim, cfg.dim, self._W1_s.shape[0]
+            )
+            self._W2_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W2_s, cfg.dim, cfg.moe_inter_dim, self._W2_s.shape[0]
+            )
+            self._W3_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W3_s, cfg.moe_inter_dim, cfg.dim, self._W3_s.shape[0]
+            )
         # Per-expert DeepGEMM scales are MN-major: a direct
         # self._W*_s_gemm[i] view has stride (1, mn).  torch.index_select on
         # the grouped tensor returns a row-major copy, which fails
@@ -203,7 +207,9 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
           - eager: ``_forward_eager`` (only iterates routed tokens per expert)
         """
         return self._forward_into_buf(
-            x, weights, indices,
+            x,
+            weights,
+            indices,
             local_start=self.cfg.local_expert_start,
             local_end=self.cfg.local_expert_end,
         )
@@ -236,10 +242,12 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             # Conditioned on ep_size==1 (so all experts are local — no per-rank
             # filter needed) and T (=N) small enough that N×K < E.
             topk_max_n = _topk_dispatch_max_n()
-            if (_bs1_fast_enabled()
+            if (
+                _bs1_fast_enabled()
                 and self.cfg.ep_size == 1
                 and topk_max_n > 0
-                and T <= topk_max_n):
+                and T <= topk_max_n
+            ):
                 if T == 1:
                     self._forward_topk_bs1(x, weights, indices, y)
                 else:
@@ -350,7 +358,9 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             * input quant runs ONCE per layer (vs. once per expert call → 256x)
         """
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_fp4_gemm_nt
-        from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            sgl_per_token_group_quant_fp8,
+        )
 
         cfg = self.cfg
         D = cfg.dim
@@ -374,7 +384,10 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
 
         # Lazy import the fused SiLU+clamp+mul (matches Expert.forward path)
         try:
-            from rtp_llm.models_py.modules.dsv4._silu_mul_split_triton import silu_mul_split
+            from rtp_llm.models_py.modules.dsv4._silu_mul_split_triton import (
+                silu_mul_split,
+            )
+
             _have_silu_mul_split = True
         except Exception:  # pragma: no cover
             silu_mul_split = None
@@ -399,7 +412,8 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
                 (x_fp8, x_scale),
                 (w1_w, w1_s),
                 gate,
-                recipe_a=(1, _FP8_BLOCK), recipe_b=(1, _FP4_BLOCK),
+                recipe_a=(1, _FP8_BLOCK),
+                recipe_b=(1, _FP4_BLOCK),
             )
             # up = w3 @ x
             up = torch.empty(1, inter, dtype=torch.bfloat16, device=device)
@@ -407,7 +421,8 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
                 (x_fp8, x_scale),
                 (w3_w, w3_s),
                 up,
-                recipe_a=(1, _FP8_BLOCK), recipe_b=(1, _FP4_BLOCK),
+                recipe_a=(1, _FP8_BLOCK),
+                recipe_b=(1, _FP4_BLOCK),
             )
 
             # SiLU + (optional clamp) + mul, in fp32 (matches Expert.forward).
@@ -444,7 +459,8 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
                 (sm_fp8, sm_scale),
                 (w2_w, w2_s),
                 delta,
-                recipe_a=(1, _FP8_BLOCK), recipe_b=(1, _FP4_BLOCK),
+                recipe_a=(1, _FP8_BLOCK),
+                recipe_b=(1, _FP4_BLOCK),
             )
             # Accumulate (router_w already folded into sm above).
             y.add_(delta.float())
@@ -488,7 +504,9 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
               proportionally. The dispatch caps at `_topk_dispatch_max_n()`.
         """
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_fp4_gemm_nt
-        from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            sgl_per_token_group_quant_fp8,
+        )
 
         cfg = self.cfg
         D = cfg.dim
@@ -504,7 +522,10 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             x_2d = x_2d.to(torch.bfloat16)
 
         try:
-            from rtp_llm.models_py.modules.dsv4._silu_mul_split_triton import silu_mul_split
+            from rtp_llm.models_py.modules.dsv4._silu_mul_split_triton import (
+                silu_mul_split,
+            )
+
             _have_silu_mul_split = True
         except Exception:  # pragma: no cover
             silu_mul_split = None
@@ -546,7 +567,8 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
                     (x_fp8_n, x_scale_n),
                     (w1_w, w1_s),
                     gate,
-                    recipe_a=(1, _FP8_BLOCK), recipe_b=(1, _FP4_BLOCK),
+                    recipe_a=(1, _FP8_BLOCK),
+                    recipe_b=(1, _FP4_BLOCK),
                 )
                 # up = w3 @ x_n
                 up = torch.empty(1, inter, dtype=torch.bfloat16, device=device)
@@ -554,7 +576,8 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
                     (x_fp8_n, x_scale_n),
                     (w3_w, w3_s),
                     up,
-                    recipe_a=(1, _FP8_BLOCK), recipe_b=(1, _FP4_BLOCK),
+                    recipe_a=(1, _FP8_BLOCK),
+                    recipe_b=(1, _FP4_BLOCK),
                 )
 
                 gate_f = gate.float()
@@ -587,7 +610,8 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
                     (sm_fp8, sm_scale),
                     (w2_w, w2_s),
                     delta,
-                    recipe_a=(1, _FP8_BLOCK), recipe_b=(1, _FP4_BLOCK),
+                    recipe_a=(1, _FP8_BLOCK),
+                    recipe_b=(1, _FP4_BLOCK),
                 )
                 # Accumulate into y[n]
                 y[n : n + 1].add_(delta.float())

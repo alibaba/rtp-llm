@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <list>
 #include <map>
 #include <memory>
@@ -46,6 +47,7 @@ public:
                          bool                                           warm_up                 = false);
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
+    void         drainAsyncRunners() override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
 
     void setTargetModel(std::unique_ptr<ModelBase> model) {

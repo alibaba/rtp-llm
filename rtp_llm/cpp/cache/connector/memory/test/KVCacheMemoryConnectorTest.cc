@@ -1,5 +1,6 @@
 // Copyright (c) RTP-LLM
 
+#include <atomic>
 #include <csignal>
 #include <chrono>
 #include <cstdio>
@@ -809,6 +810,72 @@ TEST_F(KVCacheMemoryConnectorTest, initDiskBlockPool_RejectsInvalidDiskConfig) {
                                                              server_addrs_,
                                                              nullptr);
         EXPECT_THROW(conn->init(), std::runtime_error);
+    }
+}
+
+TEST_F(KVCacheMemoryConnectorTest, SleepReturnsDiskSlotsAcrossRepeatedCycles) {
+    DiskTempDir disk;
+    auto        kv_cfg = makeDiskKvConfig({disk.path()});
+    auto        conn   = std::make_shared<KVCacheMemoryConnector>(
+        cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+    auto pool = conn->complete_disk_pool_;
+    ASSERT_NE(pool, nullptr);
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        auto slot = pool->malloc();
+        ASSERT_TRUE(slot.has_value());
+        MemoryDiskBlockCache::CacheItem item;
+        item.cache_key    = 123;
+        item.backing_type = CacheBackingType::DISK;
+        item.disk_slot    = *slot;
+        item.block_size   = pool->blockSizeBytes();
+        item.is_resident  = true;  // Sleep discards resident entries too.
+        ASSERT_TRUE(conn->block_cache_->putCommitted(item).first);
+        pool->blockCacheReference(*slot);
+        pool->requestFree(*slot);
+        EXPECT_EQ(pool->freeSlots(), pool->totalSlots() - 1);
+        ASSERT_TRUE(conn->releaseMemoryCacheBacking());
+        EXPECT_TRUE(conn->cacheKeys().empty());
+        EXPECT_EQ(pool->freeSlots(), pool->totalSlots());
+        ASSERT_TRUE(conn->restoreMemoryCacheBacking());
+        EXPECT_EQ(pool->freeSlots(), pool->totalSlots());
+    }
+}
+
+TEST_F(KVCacheMemoryConnectorTest, SleepReturnsPrefixDiskSlotsAcrossRepeatedCycles) {
+    DiskTempDir disk;
+    auto        cfg                        = createDsv4TypedConnectorConfig();
+    auto        kv_cfg                     = makeDiskKvConfig({disk.path()});
+    kv_cfg.memory_cache_size_mb            = 1;
+    kv_cfg.enable_prefix_tree_memory_cache = true;
+    auto conn                              = std::make_shared<KVCacheMemoryConnector>(
+        cfg, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+            auto pool = conn->diskPoolFor(kind);
+            ASSERT_NE(pool, nullptr);
+            auto slot = pool->malloc();
+            ASSERT_TRUE(slot.has_value());
+            PrefixTreeMemoryBlockCache::CacheItem item;
+            item.cache_key    = 123;
+            item.kind         = kind;
+            item.backing_type = CacheBackingType::DISK;
+            item.disk_slot    = *slot;
+            item.block_size   = pool->blockSizeBytes();
+            item.is_resident  = true;
+            ASSERT_TRUE(conn->prefix_block_cache_->putCommitted(123, BlockDependency{}, item).first);
+            pool->blockCacheReference(*slot);
+            pool->requestFree(*slot);
+            EXPECT_EQ(pool->freeSlots(), pool->totalSlots() - 1);
+        }
+        ASSERT_TRUE(conn->releaseMemoryCacheBacking());
+        EXPECT_TRUE(conn->cacheKeys().empty());
+        for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+            auto pool = conn->diskPoolFor(kind);
+            EXPECT_EQ(pool->freeSlots(), pool->totalSlots());
+        }
+        ASSERT_TRUE(conn->restoreMemoryCacheBacking());
     }
 }
 
@@ -3729,6 +3796,47 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_IncompletePoolTracksCompletePool
     // BlockPool reserves block 0 in each pool, while initBlockPool sizes the
     // incomplete pool from the complete pool's configured block_num.
     EXPECT_EQ(incomplete, (complete + 1) * static_cast<size_t>(linear_step - 1) - 1);
+}
+
+// Sleep flips the memory-cache backing on/off via release/restore while a
+// GetCacheStatus caller can concurrently read the cache keys (cacheKeys() is
+// lock-free w.r.t. malloc_mutex_). The backing object address stays stable and
+// clear() takes MemoryBlockCache's internal write lock, so concurrent readers
+// must never crash or read a torn pointer. This test hammers that overlap.
+TEST_F(KVCacheMemoryConnectorTest, cacheKeys_ConcurrentWithReleaseRestore_NoCrash) {
+    const size_t mem_block_size = memoryCacheBlockBytes();
+    putItemsToCache({1001, 1002, 1003, 1004}, mem_block_size);
+    ASSERT_FALSE(connector_->cacheKeys().empty());
+
+    std::atomic<bool> stop{false};
+    std::atomic<int>  reads{0};
+
+    // Reader mirrors GetCacheStatus: spin on the lock-free cacheKeys() path.
+    std::thread reader([&]() {
+        while (!stop.load(std::memory_order_relaxed)) {
+            auto keys = connector_->cacheKeys();
+            // Size may be 0 (released) or non-empty (running); either is valid.
+            (void)keys;
+            reads.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+
+    // Writer flips the sleep backing many times.
+    for (int i = 0; i < 200; ++i) {
+        ASSERT_TRUE(connector_->releaseMemoryCacheBacking());
+        // After release the cache is empty in place.
+        EXPECT_TRUE(connector_->cacheKeys().empty());
+        ASSERT_TRUE(connector_->restoreMemoryCacheBacking());
+    }
+
+    stop.store(true, std::memory_order_relaxed);
+    reader.join();
+
+    EXPECT_GT(reads.load(), 0);
+    // Ends in the restored (running) state with an empty, usable cache.
+    EXPECT_TRUE(connector_->cacheKeys().empty());
+    putItemsToCache({2001, 2002}, mem_block_size);
+    EXPECT_EQ(connector_->cacheKeys().size(), 2u);
 }
 
 }  // namespace rtp_llm::test

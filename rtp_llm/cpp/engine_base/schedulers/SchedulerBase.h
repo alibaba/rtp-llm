@@ -29,10 +29,16 @@ public:
     virtual absl::StatusOr<std::list<GenerateStreamPtr>> scheduleConservative(int /*propose_step*/) {
         return schedule();
     }
-    virtual absl::Status stop()             = 0;
-    virtual bool         empty()            = 0;
-    virtual int64_t      lastScheduleTime() = 0;
-    virtual int64_t      onflightStreams()  = 0;
+    virtual absl::Status stop() = 0;
+    virtual void         wake() {}
+    // When enabled, schedule() must NOT block indefinitely on an empty queue: it polls with a
+    // short timeout so empty peers can match busy peers during all-rank sleep drain
+    // and catch up to the common stopping round. The engine parks at the round fence
+    // before scheduling again; wake/cancel clears forced polling. No-op by default.
+    virtual void    setForcePoll(bool /*enable*/) {}
+    virtual bool    empty()            = 0;
+    virtual int64_t lastScheduleTime() = 0;
+    virtual int64_t onflightStreams()  = 0;
 
     virtual std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList() {
         return {};
@@ -41,7 +47,6 @@ public:
         return {};
     }
     virtual void updateSchedulerInfo(const std::string& scheduler_info) {}
-
 };
 
 }  // namespace rtp_llm

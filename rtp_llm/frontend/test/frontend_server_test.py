@@ -2,11 +2,15 @@ import asyncio
 import json
 from typing import Any
 from unittest import TestCase, main
+from unittest.mock import MagicMock, patch
 
 from pydantic import BaseModel
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.frontend.frontend_server import FrontendServer
+from rtp_llm.openai.api_datatype import ChatCompletionRequest
+from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -101,5 +105,74 @@ class FrontendServerTest(TestCase):
         visitor = self.frontend_server._frontend_worker.backend_rpc_server_visitor
         self.assertEqual(visitor.refresh_calls, [False])
 
+    def test_engine_unavailable_http_contract(self):
+        for openai in (False, True):
+            for streaming in (False, True):
+                with self.subTest(openai=openai, streaming=streaming):
+                    error = FtRuntimeException(
+                        ExceptionType.ENGINE_UNAVAILABLE,
+                        "engine is SLEEPING; retry elsewhere",
+                    )
 
-main()
+                    async def generate():
+                        raise error
+                        yield  # make this an async generator; it never emits a token
+
+                    def response(*args, **kwargs):
+                        return CompleteResponseAsyncGenerator(
+                            generate(), CompleteResponseAsyncGenerator.get_last_value
+                        )
+
+                    async def run():
+                        worker = self.frontend_server._frontend_worker
+                        with patch.object(
+                            worker, "inference", side_effect=response
+                        ), patch.object(worker, "is_streaming", return_value=streaming):
+                            if openai:
+                                self.frontend_server._openai_endpoint = MagicMock()
+                                self.frontend_server._openai_endpoint.chat_completion.side_effect = (
+                                    response
+                                )
+                                result = await self.frontend_server.chat_completion(
+                                    ChatCompletionRequest(
+                                        messages=[{"role": "user", "content": "hello"}],
+                                        stream=streaming,
+                                    ),
+                                    FakeRawRequest(),
+                                )
+                            else:
+                                result = await self.frontend_server.inference(
+                                    {"prompt": "hello", "stream": streaming},
+                                    FakeRawRequest(),
+                                )
+                            if streaming:
+                                # Headers are already committed. Preserve the SSE
+                                # error contract rather than pretending to send 503.
+                                self.assertEqual(result.status_code, 200)
+                                chunks = [chunk async for chunk in result.body_iterator]
+                                self.assertEqual(len(chunks), 1)
+                                body = json.loads(chunks[0].split(":", 1)[1])
+                            else:
+                                self.assertEqual(result.status_code, 503)
+                                body = json.loads(result.body)
+                            self.assertEqual(body["error_code"], 8600)
+                            self.assertEqual(
+                                body["error_code_str"], "8600_ENGINE_UNAVAILABLE"
+                            )
+
+                    asyncio.run(run())
+
+    def test_other_errors_keep_existing_http_status(self):
+        for error in (
+            RuntimeError("internal failure"),
+            FtRuntimeException(ExceptionType.UNKNOWN_ERROR, "internal failure"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                result = self.frontend_server._handle_exception(
+                    {request_id_field_name: 1}, error
+                )
+                self.assertEqual(result.status_code, 500)
+
+
+if __name__ == "__main__":
+    main()

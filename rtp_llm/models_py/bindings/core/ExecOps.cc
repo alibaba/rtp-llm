@@ -21,6 +21,7 @@
 #include <atomic>
 #include <algorithm>
 #include <memory>
+#include <optional>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
 #elif USING_ROCM
@@ -509,6 +510,16 @@ void execNoBlockCopy(const CopyParams& params) {
     const auto& src = params.src;
     const auto& dst = params.dst;
 #if USING_CUDA
+    int copy_device = -1;
+    if (dst.is_cuda()) {
+        copy_device = static_cast<int>(dst.get_device());
+    } else if (src.is_cuda()) {
+        copy_device = static_cast<int>(src.get_device());
+    }
+    std::optional<DeviceGuard> guard;
+    if (copy_device >= 0) {
+        guard.emplace(copy_device);
+    }
     auto stream = getNoBlockCopyStream().stream();
     check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), src.nbytes(), cudaMemcpyDefault, stream));
     check_cuda_value(cudaStreamSynchronize(stream));

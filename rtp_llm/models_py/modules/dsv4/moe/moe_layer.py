@@ -25,6 +25,10 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.model_loader.weight_memory_saver import (
+    feature_weights_region,
+    pausable_empty,
+)
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DEFAULT_DSV4_CHUNK_TOKENS,
@@ -127,7 +131,7 @@ def _get_or_create_final_out(
     cached = _FINAL_OUT_CACHE.get(key)
     if cached is not None and cached.size(0) >= capacity:
         return cached
-    cached = torch.empty((max(capacity, 1), dim), dtype=dtype, device=device)
+    cached = pausable_empty((max(capacity, 1), dim), dtype=dtype, device=device)
     _FINAL_OUT_CACHE[key] = cached
     return cached
 
@@ -235,12 +239,17 @@ class MoE(nn.Module):
                 "w2_w": resolved_layer_weights[W.v4_shared_w2_w],
                 "w2_s": resolved_layer_weights[W.v4_shared_w2_s],
             }
-            self.shared_experts = W13SharedExpert(
-                dim,
-                moe_inter_dim,
-                expert_weights=shared_w,
-                swiglu_limit=swiglu_limit,
-            )
+            # Shared-expert FP8 scale repacking is a feature-derived resident
+            # allocation too; keep it in the same VMM ownership contract as
+            # the routed strategy below.  Executor preparation remains outside
+            # the region because it only records views / runtime stream state.
+            with feature_weights_region():
+                self.shared_experts = W13SharedExpert(
+                    dim,
+                    moe_inter_dim,
+                    expert_weights=shared_w,
+                    swiglu_limit=swiglu_limit,
+                )
             self._shared_executor = get_shared_expert_executor(
                 max_tokens_per_rank=max_tokens_per_rank,
                 dim=dim,
@@ -259,7 +268,11 @@ class MoE(nn.Module):
         ) == "0" and self._strategy.can_use_gate_pack_static(self.gate)
         self._strategy._gate_pack_warmup_enabled = self._gate_pack_static
         self._strategy._gate_pack_route_scale = float(self.gate.route_scale)
+        # Each strategy uses the same feature-weight API for its resident
+        # repack outputs; large staging tensors deliberately remain in the
+        # ordinary allocator so they do not strand private VMM segments.
         self._strategy.setup_weights(resolved_layer_weights)
+        self._strategy.setup_runtime()
 
     def _should_chunk(self, tokens: int) -> bool:
         max_tokens = int(self.max_tokens_per_rank)

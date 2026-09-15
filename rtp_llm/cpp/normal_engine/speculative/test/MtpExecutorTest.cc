@@ -1858,4 +1858,24 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
     RTP_LLM_LOG_INFO("[dispatch-bench] speedup: %.1fx", speedup);
 }
 
+// Legacy pause can still drive an empty matching executor round. Sleep itself
+// uses the round fence, with no per-forward pause-marker bookkeeping.
+TEST_F(MtpExecutorTest, testProcessForPauseUsesEmptyStep) {
+    MtpExecutorTestConfig test_config;
+    auto                  components = createMtpExecutorComponents(test_config);
+
+    // No fake model outputs required: an empty pause step skips forward/sampling
+    // after the (single-rank no-op) tp sync.
+    setupFakeModels(components.executor.get(),
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler));
+
+    ASSERT_TRUE(components.executor->process({}).ok());
+    ASSERT_TRUE(components.executor->processForPause().ok());
+    ASSERT_TRUE(components.executor->process({}).ok());
+}
+
 }  // namespace rtp_llm

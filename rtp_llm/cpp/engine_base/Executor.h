@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include <cstdint>
+#include <list>
 #include <memory>
 #include <cstdlib>
 
@@ -16,6 +17,17 @@ class Executor {
 public:
     Executor() {};
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) = 0;
+    virtual absl::Status processForPause() {
+        std::list<GenerateStreamPtr> empty_streams;
+        return process(empty_streams);
+    }
+
+    // Drain any outstanding stream-async worker tasks (dispatch / MTP prepare-verify
+    // runners) before acknowledging sleep quiescence. For DP/EP the engine calls
+    // this after admitting the common stopping round and before its final device
+    // synchronization, so no worker can retain weights or KV across resource release.
+    // Default: no async runners to drain.
+    virtual void drainAsyncRunners() {}
 
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,

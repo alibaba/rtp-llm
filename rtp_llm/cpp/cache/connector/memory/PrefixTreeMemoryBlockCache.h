@@ -89,7 +89,12 @@ public:
     std::vector<CacheItem>   popOldestStateOrChainEvictable(CacheBackingType backing_type);
     std::vector<CacheKeyType> cacheKeys() const;
     std::vector<CacheKeyType> cacheKeysUnorderedForStatus() const;
-    size_t size() const;
+    size_t                    size() const;
+    // Drop all cached entries in place (keeps the object address stable for shared_ptr
+    // holders). Used on sleep/wake when the backing pinned host buffers are discarded.
+    // Returns removed entries so the owner can release both memory and disk refs.
+    // Requires all transfers to be drained.
+    std::vector<CacheItem> clear();
 
 private:
     struct RetiredItem {
