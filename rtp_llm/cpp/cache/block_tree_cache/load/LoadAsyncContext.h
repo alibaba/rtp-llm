@@ -122,6 +122,8 @@ private:
     std::condition_variable   cv_;
     size_t                    remaining_transfer_count_{0};
     std::atomic<size_t>       remaining_join_count_{0};
+    // Published under the loader tree mutex; settlement acquires that mutex
+    // before obtaining this joined context and reading its start time.
     int64_t                   join_start_time_us_{0};
     bool                      has_failure_{false};
     bool                      settlement_ready_{false};
