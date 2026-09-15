@@ -11,6 +11,7 @@
 #include <memory>
 #include <limits>
 #include <optional>
+#include <set>
 
 namespace rtp_llm {
 namespace {
@@ -260,6 +261,7 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
     // §2.1 那条「两侧 CP 必须相等」的硬拒因此删除 —— 非对称 CP 由 planner 的白名单
     // （dst.cpSize() ∈ {1, src.cpSize()}）判定，不再由这里一刀切。
     P2PBroadcastClient::RankRoutes rank_routes;
+    std::vector<int>                active_route_ids;
     uint64_t                       plan_digest = 0;
     const size_t                   worker_num  = config_.worker_grpc_addrs.size();
     if (!no_transfer) {
@@ -286,6 +288,14 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
             return {nullptr, routes.status()};
         }
         rank_routes = std::move(routes.value());
+
+        std::set<int> active_route_id_set;
+        for (const auto& worker_routes : rank_routes) {
+            for (const auto& route : worker_routes) {
+                active_route_id_set.insert(route.route_id());
+            }
+        }
+        active_route_ids.assign(active_route_id_set.begin(), active_route_id_set.end());
 
         const bool all_routes_empty =
             std::all_of(rank_routes.begin(), rank_routes.end(), [](const auto& routes) { return routes.empty(); });
@@ -316,6 +326,7 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
          request_deadline_ms,
          transfer_deadline_ms,
          rank_routes = std::move(rank_routes),
+         active_route_ids = std::move(active_route_ids),
          plan_digest,
          collector,
          async_context,
@@ -337,6 +348,7 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
                                                    prefill_tp_size,
                                                    no_transfer,
                                                    std::move(rank_routes),
+                                                   std::move(active_route_ids),
                                                    plan_digest);
             if (!async_calls) {
                 async_context->markStartFailed(start_error);
@@ -384,6 +396,7 @@ P2PConnectorSchedulerDecode::startAsyncReadCalls(int64_t            request_id,
                                                  int                            prefill_tp_size,
                                                  bool                           no_transfer,
                                                  P2PBroadcastClient::RankRoutes rank_routes,
+                                                 std::vector<int>                active_route_ids,
                                                  uint64_t                       plan_digest) {
 
     const int64_t entry_us = currentTimeUs();
@@ -406,7 +419,8 @@ P2PConnectorSchedulerDecode::startAsyncReadCalls(int64_t            request_id,
                                                    request_deadline_ms,
                                                    transfer_deadline_ms,
                                                    no_transfer,
-                                                   plan_digest);
+                                                   plan_digest,
+                                                   active_route_ids);
     const int64_t server_load_cost_us = currentTimeUs() - server_load_start_us;
     if (server_load_cost_us >= 100000) {
         RTP_LLM_LOG_WARNING("[PD-DIAG] startAsyncReadCalls slow server_caller->load, "

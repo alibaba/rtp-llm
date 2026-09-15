@@ -323,6 +323,37 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnOK_BroadcastSuccess) {
     }
 }
 
+TEST_F(P2PConnectorSchedulerTest, HandleReadBroadcastsOnlyDecodeActiveRoutes) {
+    const std::string unique_key = "test_active_route_filter";
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers = {
+        {"127.0.0.1", 12345}, {"127.0.0.1", 12346}};
+    const auto plan = prefill_scheduler_->planFor(static_cast<int>(decode_transfer_servers.size()), unique_key);
+    ASSERT_TRUE(plan->ok()) << plan->error.ToString();
+    ASSERT_GT(plan->plan.routes.size(), 1u);
+
+    const int selected_route_id = plan->plan.routes.back().route_id;
+    const auto deadline_ms      = currentTimeMs() + 1000;
+    const auto error_info       = prefill_scheduler_->sendKVCache(unique_key,
+                                                            1011,
+                                                            decode_transfer_servers,
+                                                            deadline_ms,
+                                                            nullptr,
+                                                            false,
+                                                            deadline_ms,
+                                                            {selected_route_id});
+    ASSERT_TRUE(error_info.ok()) << error_info.ToString();
+
+    size_t broadcast_route_count = 0;
+    for (const auto& server : tp_broadcast_servers_) {
+        const auto request = server->service()->getLastBroadcastTpRequest();
+        for (const auto& route : request.routes()) {
+            EXPECT_EQ(route.route_id(), selected_route_id);
+            ++broadcast_route_count;
+        }
+    }
+    EXPECT_EQ(broadcast_route_count, 1u);
+}
+
 TEST_F(P2PConnectorSchedulerTest, HandleRead_FiltersLinearLayersByAttentionType) {
     rebuildSchedulerWithLayerAttnTypes({CacheGroupType::FULL, CacheGroupType::LINEAR});
 
@@ -705,6 +736,13 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadCpSendsEachWorkerItsRoundRobinKeys) {
     EXPECT_EQ(rank0_layer.block_ids(1), 11);
     EXPECT_EQ(rank1_layer.block_ids(0), 10);
     EXPECT_EQ(rank1_layer.block_ids(1), 11);
+
+    const auto start_load_request = prefill_server_->service()->getLastStartLoadRequest();
+    const std::set<int> active_route_ids(start_load_request.active_route_ids().begin(),
+                                         start_load_request.active_route_ids().end());
+    EXPECT_EQ(active_route_ids.size(), 2u);
+    EXPECT_EQ(active_route_ids.count(rank0_request.routes(0).route_id()), 1u);
+    EXPECT_EQ(active_route_ids.count(rank1_request.routes(0).route_id()), 1u);
 }
 
 TEST_F(P2PConnectorSchedulerTest, AsyncReadCpRejectsDifferentSourceCpSize) {

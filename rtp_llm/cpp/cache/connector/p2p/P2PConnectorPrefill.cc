@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
 
+#include <set>
+
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorLayerContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
@@ -235,6 +237,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         }
         return false;
     };
+    const std::set<int> active_route_ids(request.active_route_ids().begin(), request.active_route_ids().end());
     auto      send_start_us = currentTimeUs();
     ErrorInfo error_info = scheduler_->sendKVCache(unique_key,
                                                    request_id,
@@ -242,7 +245,8 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
                                                    transfer_deadline_ms,
                                                    direct_cancel,
                                                    request.no_transfer(),
-                                                   request_deadline_ms);
+                                                   request_deadline_ms,
+                                                   active_route_ids);
     auto send_cost_us = currentTimeUs() - send_start_us;
     if (error_info.hasError()) {
         RTP_LLM_LOG_ERROR("[PD-DIAG] handleRead sendKVCache failed, unique_key=%s, send_cost_us=%ld, error=%s",

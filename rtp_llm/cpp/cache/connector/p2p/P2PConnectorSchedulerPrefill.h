@@ -8,6 +8,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <set>
 #include <utility>
 #include <memory>
 #include <string>
@@ -29,7 +30,8 @@ public:
                           int64_t                                              deadline_ms,
                           std::function<bool()>                                is_cancelled = nullptr,
                           bool                                                 no_transfer = false,
-                          int64_t                                              request_deadline_ms = 0);
+                          int64_t                                              request_deadline_ms = 0,
+                          const std::set<int>&                                 active_route_ids = {});
 
     /// @brief 与 decode 侧用**同一个 planner 函数**算镜像 plan。
     /// decode 的 (tp_size, cp_size) 由本端推导：tp_size = decode_transfer_servers.size()，
@@ -42,7 +44,9 @@ public:
     /// @brief 把 plan 投影成每个 prefill worker 的 route 列表。
     /// prefill 方向不带 layer_blocks —— 在所有被允许的 CP 形态下 (src_rank, dst_rank, tag)
     /// 唯一确定一条 route，而 worker 自己 writeByLayer 产出的本地投影恰好等于该 route 的键集。
-    P2PBroadcastClient::RankRoutes buildPrefillRankRoutes(const TransferPlan& plan, size_t worker_num) const;
+    P2PBroadcastClient::RankRoutes buildPrefillRankRoutes(const TransferPlan&  plan,
+                                                          size_t               worker_num,
+                                                          const std::set<int>& active_route_ids = {}) const;
 
 private:
     /// 轮询 result->done()；is_cancelled 或当前时间超过 deadline_ms 时发 CANCEL_HANDLE_READ。

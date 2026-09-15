@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/connector/p2p/DecodeLoadHelper.h"
 
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/RpcCompletionQueue.h"
@@ -211,7 +212,8 @@ std::shared_ptr<DecodeLoadHelper::Result> DecodeLoadHelper::load(int64_t        
                                                                    int64_t            request_deadline_ms,
                                                                    int64_t            transfer_deadline_ms,
                                                                    bool               no_transfer,
-                                                                   uint64_t           plan_digest) {
+                                                                   uint64_t           plan_digest,
+                                                                   const std::vector<int>& active_route_ids) {
     auto result        = std::make_shared<Result>();
     result->request_id = request_id;
     result->unique_key = unique_key;
@@ -267,8 +269,14 @@ std::shared_ptr<DecodeLoadHelper::Result> DecodeLoadHelper::load(int64_t        
     result->start_time_us = currentTimeUs();
 
     const int64_t build_rpc_start_us = currentTimeUs();
-    if (!buildAndStartAsyncRpc(
-            result, unique_key, request_deadline_ms, transfer_deadline_ms, request_id, no_transfer, plan_digest)) {
+    if (!buildAndStartAsyncRpc(result,
+                               unique_key,
+                               request_deadline_ms,
+                               transfer_deadline_ms,
+                               request_id,
+                               no_transfer,
+                               plan_digest,
+                               active_route_ids)) {
         if (result->status.ok())
             result->status = grpcStatusFromErrorInfo(
                 ErrorInfo(ErrorCode::RPC_FINISH_FAILED,
@@ -301,12 +309,16 @@ bool DecodeLoadHelper::buildAndStartAsyncRpc(const std::shared_ptr<Result>& resu
                                               int64_t                        transfer_deadline_ms,
                                               int64_t                        request_id,
                                               bool                           no_transfer,
-                                              uint64_t                       plan_digest) {
+                                              uint64_t                       plan_digest,
+                                              const std::vector<int>&        active_route_ids) {
     result->request.set_unique_key(unique_key);
     result->request.set_deadline_ms(transfer_deadline_ms);
     result->request.set_request_deadline_ms(request_deadline_ms);
     result->request.set_no_transfer(no_transfer);
     result->request.set_plan_digest(plan_digest);
+    for (int route_id : active_route_ids) {
+        result->request.add_active_route_ids(route_id);
+    }
 
     for (const auto& tp_worker : tp_worker_infos_) {
         auto tp_worker_info = result->request.add_workers();

@@ -108,7 +108,8 @@ public:
                                  int64_t            request_deadline_ms,
                                  int64_t            transfer_deadline_ms,
                                  bool               no_transfer = false,
-                                 uint64_t           plan_digest = 0);
+                                 uint64_t           plan_digest = 0,
+                                 const std::vector<int>& active_route_ids = {});
 
 private:
     bool buildAndStartAsyncRpc(const std::shared_ptr<Result>& result,
@@ -117,7 +118,8 @@ private:
                                int64_t                        transfer_deadline_ms,
                                int64_t                        request_id,
                                bool                           no_transfer,
-                               uint64_t                       plan_digest);
+                               uint64_t                       plan_digest,
+                               const std::vector<int>&        active_route_ids);
 
     std::vector<std::string>    worker_addrs_;
     std::shared_ptr<RPCPool>    rpc_pool_;

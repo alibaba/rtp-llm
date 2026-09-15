@@ -435,7 +435,7 @@ TEST_F(P2PConnectorResourceStoreTest, NotifySideChannelReady_WritesNormallyWhenN
     P2PConnectorResourceEntry::SideChannelData side_data;
     side_data.has_first_token = true;
     side_data.first_token_id  = 99;
-    stream_store_->notifySideChannelReady(unique_key, currentTimeMs() + 5000, std::move(side_data));
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, std::move(side_data));
 
     P2PConnectorResourceEntry::SideChannelData consumed;
     ASSERT_TRUE(stream_store_->consumeSideChannelData(unique_key, consumed));

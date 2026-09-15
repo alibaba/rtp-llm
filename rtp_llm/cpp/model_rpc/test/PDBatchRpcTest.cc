@@ -28,7 +28,6 @@ GenerateInputPB batchItem(int64_t id) {
     config->set_num_beams(1);
     config->set_num_return_sequences(1);
     config->set_timeout_ms(5000);
-    config->set_aux_info(true);
     config->set_unique_key("business-key");
     return item;
 }
@@ -237,7 +236,6 @@ TEST_F(PDBatchRpcTest, OneRpcAndOneEnqueuePerSidePreserveIdentityKeysAndOutputOr
     batch.mutable_inputs(0)->mutable_generate_config()->set_calculate_loss(1);
     batch.mutable_inputs(0)->mutable_generate_config()->set_return_logits(true);
     batch.mutable_inputs(0)->mutable_generate_config()->set_return_hidden_states(true);
-    batch.mutable_inputs(1)->mutable_generate_config()->set_aux_info(false);
     for (auto& item : *batch.mutable_inputs()) {
         item.set_batch_group_size(2);
         item.mutable_batch_group_id()->set_value(77);

@@ -715,6 +715,10 @@ message P2PConnectorStartLoadRequestPB {
     // Digest of the Decode-side transfer plan. Prefill computes its mirror
     // plan before resource wait and rejects a mismatch immediately.
     uint64 plan_digest = 6;
+    // Route ids that remain after Decode projects the static transfer plan onto
+    // this request's concrete key range. Prefill uses the same ids to avoid
+    // dispatching routes whose key set is empty for short/windowed requests.
+    repeated int32 active_route_ids = 7;
 }
 
 // Side-channel tensor blob: carries named tensor data between prefill and decode

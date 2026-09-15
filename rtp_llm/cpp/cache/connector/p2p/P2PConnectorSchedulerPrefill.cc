@@ -70,10 +70,15 @@ ErrorInfo P2PConnectorSchedulerPrefill::checkPlanDigest(int                decod
 }
 
 P2PBroadcastClient::RankRoutes
-P2PConnectorSchedulerPrefill::buildPrefillRankRoutes(const TransferPlan& plan, size_t worker_num) const {
+P2PConnectorSchedulerPrefill::buildPrefillRankRoutes(const TransferPlan&  plan,
+                                                     size_t               worker_num,
+                                                     const std::set<int>& active_route_ids) const {
     P2PBroadcastClient::RankRoutes rank_routes(worker_num);
     for (size_t worker_rank = 0; worker_rank < worker_num; ++worker_rank) {
         for (const auto* route : plan.forPrefillRank(static_cast<int>(worker_rank))) {
+            if (!active_route_ids.empty() && active_route_ids.count(route->route_id) == 0) {
+                continue;
+            }
             TransferRoutePB pb;
             // peer_index 是 decode_transfer_servers 的下标，与 route->dst_rank 同一命名空间。
             RouteCodec::encodeForPrefill(*route, route->dst_rank, &pb);
@@ -90,7 +95,8 @@ P2PConnectorSchedulerPrefill::sendKVCache(const std::string&                    
                                           int64_t                                              deadline_ms,
                                           std::function<bool()>                                is_cancelled,
                                           bool                                                 no_transfer,
-                                          int64_t                                              request_deadline_ms) {
+                                          int64_t                                              request_deadline_ms,
+                                          const std::set<int>&                                 active_route_ids) {
     RTP_LLM_LOG_DEBUG("sendKVCache start, request_id: %ld, unique_key: %s, decode_transfer_servers_size: %zu",
                       request_id,
                       unique_key.c_str(),
@@ -131,7 +137,21 @@ P2PConnectorSchedulerPrefill::sendKVCache(const std::string&                    
             return plan->error;
         }
         plan_digest = plan->plan.digest();
-        rank_routes = buildPrefillRankRoutes(plan->plan, worker_num);
+        if (!active_route_ids.empty()) {
+            std::set<int> planned_route_ids;
+            for (const auto& route : plan->plan.routes) {
+                planned_route_ids.insert(route.route_id);
+            }
+            for (int route_id : active_route_ids) {
+                if (planned_route_ids.count(route_id) == 0) {
+                    report_metric_func(false);
+                    return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                                     "sendKVCache: active route id " + std::to_string(route_id)
+                                         + " is absent from transfer plan");
+                }
+            }
+        }
+        rank_routes = buildPrefillRankRoutes(plan->plan, worker_num, active_route_ids);
     }
 
     P2PBroadcastClient::BroadcastParams params;
@@ -244,6 +264,31 @@ P2PConnectorSchedulerPrefill::waitForBroadcastCompletion(const std::shared_ptr<P
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
         sleep_ms = std::min(sleep_ms * 2, kBackoffCapMs);
+    }
+
+    // The HANDLE_READ RPC and the transfer share the same deadline. gRPC may
+    // therefore publish DEADLINE_EXCEEDED immediately before this polling
+    // loop observes the clock crossing deadline_ms. In that ordering the
+    // loop exits through result->done() and would otherwise skip the
+    // best-effort CANCEL_HANDLE_READ cleanup entirely.
+    if (!cancel_result && !result->success() && currentTimeMs() >= deadline_ms) {
+        RTP_LLM_LOG_WARNING(
+            "sendKVCache: broadcast completed unsuccessfully at deadline_ms=%ld, cancelling, request_id: %ld, "
+            "unique_key: %s",
+            deadline_ms,
+            request_id,
+            unique_key.c_str());
+        cancel_result = tp_broadcast_client_->cancel(unique_key,
+                                                     P2PConnectorBroadcastType::CANCEL_HANDLE_READ,
+                                                     request_deadline_ms,
+                                                     request_id,
+                                                     deadline_ms);
+        if (deadline_exceeded_out) {
+            *deadline_exceeded_out = true;
+        }
+        if (!cancel_result) {
+            cancel_result = std::make_shared<P2PBroadcastClient::Result>(unique_key);
+        }
     }
     return cancel_result;
 }

@@ -69,6 +69,7 @@ private:
                         int                                                     prefill_tp_size = 0,
                         bool                                                    no_transfer     = false,
                         P2PBroadcastClient::RankRoutes                          rank_routes     = {},
+                        std::vector<int>                                         active_route_ids = {},
                         uint64_t                                                plan_digest     = 0);
 
     /// @brief 校验对端上报的 CP 片数与本端配置推导出的值一致（设计文档 §3.2.4）。
