@@ -244,9 +244,12 @@ public:
     uint64_t blockRefs() const {
         // The target already enables -fno-access-control for test observations.
         const auto pool = getCacheManager()->allocator_->getDeviceBlockPool();
+        // Snapshot under the pool lock: refCount() rejects unallocated blocks,
+        // and checking isAllocated() separately would race with reclamation.
+        std::lock_guard<std::mutex> lock(pool->mutex_);
         uint64_t   refs = 0;
         for (int block = 1; block < kBlocks; ++block)
-            refs += pool->refCount(block);
+            refs += pool->refcounts_[block];
         return refs;
     }
 
