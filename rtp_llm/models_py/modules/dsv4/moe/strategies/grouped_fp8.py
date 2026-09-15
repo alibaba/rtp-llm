@@ -508,6 +508,19 @@ def _silu_mul_quant_fp32scale(
 class GroupedFP8Strategy(RoutedExpertsStrategy):
     name = "grouped_fp8"
 
+    def __init__(self, cfg: MoeCfg):
+        from rtp_llm.model_loader.weight_memory_saver import is_enabled
+
+        # Routed tensors are popped from ModelWeights without a wake consumer.
+        # Tagging their storage alone would leave blank weights after level 2.
+        if is_enabled():
+            raise RuntimeError(
+                "grouped_fp8 does not support sleep mode: routed-expert weights "
+                "do not yet implement sleep reclamation and in-place wake reload. "
+                "Disable sleep mode when using SM90 grouped_fp8."
+            )
+        super().__init__(cfg)
+
     # Both are set in setup_weights; the class-level defaults exist so forward is
     # safe for a caller that drives the strategy without one (the equivalence test
     # does call setup_weights, but nothing enforces that).
