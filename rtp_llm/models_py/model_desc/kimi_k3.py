@@ -67,6 +67,9 @@ from rtp_llm.models_py.modules.kimi_k3.input_preparation import (
     prepare_round,
 )
 from rtp_llm.models_py.modules.kimi_k3.kda import KimiK3KDA
+from rtp_llm.models_py.modules.kimi_k3.kernel_jit_warmup import (
+    warmup_kimi_k3_kernel_jit,
+)
 from rtp_llm.models_py.triton_kernels.common.activation import SituAndMul
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
@@ -703,6 +706,7 @@ class KimiK3Model(GptModelBase):
                     **fp8_kwargs,
                 )
             self._gemm_reduce_scatter_configured = True
+        warmup_kimi_k3_kernel_jit(self, init_resource)
         return True
 
     def _validate_page_rr_target(self) -> None:

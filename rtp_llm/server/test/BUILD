@@ -44,6 +44,12 @@ py_test(
 )
 
 py_test(
+    name = "startup_warmup_test",
+    srcs = ["startup_warmup_test.py"],
+    deps = ["//rtp_llm/server:server"],
+)
+
+py_test(
     name = "vit_proxy_server_test",
     srcs = ["vit_proxy_server_test.py"],
     deps = [

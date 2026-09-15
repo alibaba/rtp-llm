@@ -24,6 +24,9 @@ from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import (
     configure_gemm_reduce_scatter,
     gemm_reduce_scatter,
 )
+from rtp_llm.models_py.modules.kimi_k3.kernel_jit_warmup import (
+    warmup_kimi_k3_kernel_jit,
+)
 from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLA
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.models_py.modules.kimi_k3.moe_se import KimiK3LatentMoESE
@@ -199,6 +202,7 @@ class KimiK3MtpModel(GptModelBase):
         self.embedding = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
+        self.embedding_weight = self.embedding.weight
         self.media_token_id = model_config.mm_related_params.special_token_ids.get(
             "image_token_index"
         )
@@ -262,6 +266,8 @@ class KimiK3MtpModel(GptModelBase):
                 use_fused=not self._decode_role,
             )
             self._gemm_reduce_scatter_configured = True
+        # Keep the independent MTP process on the same pre-capture JIT path.
+        warmup_kimi_k3_kernel_jit(self, init_resource)
         return True
 
     def _embed_shifted_tokens(self, inputs):

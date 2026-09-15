@@ -155,3 +155,14 @@ py_test(
     for operator in ["custom_all_gather", "push_reduce_scatter"]
     for tp in [2, 4]
 ]
+
+py_test(
+    name = "kernel_jit_warmup_test",
+    srcs = ["test_kernel_jit_warmup.py"],
+    main = "test_kernel_jit_warmup.py",
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
+)

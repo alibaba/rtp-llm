@@ -332,6 +332,7 @@ class KimiK3LatentMoE(nn.Module):
             )
         device = st_w1_w.device
         intermediate = int(st_w1_w.shape[1])
+        self._mega_intermediate_size = intermediate
         if (
             self.latent_size != 3584
             or intermediate != 3072
