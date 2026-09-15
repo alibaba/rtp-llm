@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <string>
@@ -65,6 +66,11 @@ public:
     virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
                                                             const CacheKeysType&   cache_keys,
                                                             bool                   is_connector = false) = 0;
+    std::shared_ptr<KVCacheResource>
+    incrKVCacheRefWithReleaseCallback(const KVCacheResource& kvcache_resource,
+                                      const CacheKeysType&   cache_keys,
+                                      bool                   is_connector,
+                                      std::function<void()>  release_callback);
 
     virtual GroupedCacheLayerLayout allLayerCacheBase() const                                           = 0;
     virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
@@ -103,8 +109,8 @@ public:
         shared_block_cache_ = std::move(shared_block_cache);
     }
 
-    void setUseCudaMallocBlockPool(bool use_cuda_malloc_block_pool) {
-        use_cuda_malloc_block_pool_ = use_cuda_malloc_block_pool;
+    void setUseDeviceMallocBlockPool(bool use_device_malloc_block_pool) {
+        use_device_malloc_block_pool_ = use_device_malloc_block_pool;
     }
 
     void setCPSlotMapper(std::shared_ptr<CPSlotMapper> cp_slot_mapper) {
@@ -195,10 +201,17 @@ protected:
     SharedBlockCachePtr                shared_block_cache_;
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_           = nullptr;
-    bool                               use_cuda_malloc_block_pool_ = false;
+    bool                               use_device_malloc_block_pool_ = false;
 
     size_t  reserve_block_num_{0};
     int64_t reserve_block_ratio_{0};
+
+    // One allocation spans capacity preflight, optional cache matching and one
+    // or more BlockPool allocations.  BlockPool makes each individual
+    // operation thread-safe, but without this transaction lock concurrent
+    // init-malloc callers can all pass the same reserve check and collectively
+    // consume the forward-progress reserve before any one of them allocates.
+    std::mutex malloc_mutex_;
 };
 
 using KVCacheAllocatorPtr = std::shared_ptr<KVCacheAllocator>;

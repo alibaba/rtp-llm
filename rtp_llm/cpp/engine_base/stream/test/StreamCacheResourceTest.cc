@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockAsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -777,6 +778,65 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_Done_ReturnsTrue_ClearsContext
     ASSERT_TRUE(resource.loadCacheDone());
 }
 
+TEST_F(StreamCacheResourceTest, testLoadCacheDone_TransferFailureRetriesThenSucceeds) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    stream_->generate_input_->generate_config->reuse_cache         = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+    resource.resource_context_.load_cache_retry_times              = 1;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
+
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
+    cache_manager_->coordinator_ = mock_coord;
+
+    auto match_child = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
+    ON_CALL(*match_child, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*match_child, success()).WillByDefault(testing::Return(true));
+    ON_CALL(*match_child, matchedBlockCount()).WillByDefault(testing::Return(1));
+    auto fused_match = std::make_shared<FusedAsyncContext>(
+        std::vector<std::shared_ptr<AsyncContext>>{std::static_pointer_cast<AsyncContext>(match_child)});
+
+    auto failed_read = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*failed_read, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*failed_read, success()).WillByDefault(testing::Return(false));
+    ON_CALL(*failed_read, errorInfo())
+        .WillByDefault(testing::Return(ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, "first transfer failed")));
+    auto failed_fused_read = std::make_shared<FusedAsyncContext>(
+        std::vector<std::shared_ptr<AsyncContext>>{std::static_pointer_cast<AsyncContext>(failed_read)});
+    auto failed_resource = std::make_shared<KVCacheResource>();
+    failed_resource->setMemoryReuseBlockNum(1);
+    auto failed_context = std::make_shared<FusedAsyncReadContext>(fused_match, failed_resource, nullptr);
+    failed_context->setFusedReadContext(failed_fused_read);
+
+    auto successful_resource = std::make_shared<KVCacheResource>();
+    successful_resource->setMemoryReuseBlockNum(1);
+    auto successful_context = std::make_shared<FusedAsyncReadContext>(fused_match, successful_resource, nullptr);
+    successful_context->setFusedReadContext(nullptr);
+
+    EXPECT_CALL(*mock_coord, asyncRead(testing::_))
+        .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(failed_context)))
+        .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(successful_context)));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.asyncLoadCache());
+
+    EXPECT_FALSE(resource.loadCacheDone());
+    EXPECT_FALSE(stream_->hasError());
+    EXPECT_EQ(resource.load_cache_retry_count_, 1);
+    EXPECT_EQ(resource.load_cache_context_, successful_context);
+
+    EXPECT_TRUE(resource.loadCacheDone());
+    EXPECT_FALSE(stream_->hasError());
+    EXPECT_EQ(resource.load_cache_context_, nullptr);
+    EXPECT_EQ(stream_->memoryReuseLength(), resource.seqSizePerBlock());
+}
+
 TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ThenLoadCacheDone_UpdatesReuseLength) {
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
@@ -820,6 +880,48 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ThenLoadCacheDone_UpdatesReus
     EXPECT_EQ(stream_->initialReuseLength(), total_reuse_len);
     EXPECT_EQ(stream_->reuseLength(), total_reuse_len);
     EXPECT_EQ(stream_->memoryReuseLength(), memory_reuse_len);
+}
+
+TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ThenLoadCacheDone_AttributesRemoteReuse) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    stream_->generate_input_->generate_config->reuse_cache         = true;
+    resource.resource_context_.enable_remote_cache                 = true;
+    stream_->generate_input_->generate_config->enable_remote_cache = true;
+
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
+    cache_manager_->coordinator_ = mock_coord;
+
+    auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*match_child, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*match_child, success()).WillByDefault(testing::Return(true));
+    auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
+
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    kv_resource->setRemoteReuseBlockNum(1);
+
+    std::shared_ptr<Meta> meta;
+    auto                  load_ctx = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
+    load_ctx->setFusedReadContext(nullptr);
+
+    EXPECT_CALL(*mock_coord, asyncRead(testing::_))
+        .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(load_ctx)));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.asyncLoadCache());
+    ASSERT_TRUE(resource.loadCacheDone());
+
+    const int remote_reuse_len = resource.seqSizePerBlock();
+    EXPECT_EQ(stream_->initialReuseLength(), remote_reuse_len);
+    EXPECT_EQ(stream_->reuseLength(), remote_reuse_len);
+    EXPECT_EQ(stream_->localReuseLength(), 0);
+    EXPECT_EQ(stream_->remoteReuseLength(), remote_reuse_len);
 }
 
 TEST_F(StreamCacheResourceTest, testP2PSideChannelRestoresZeroFirstTokenAndMtpState) {

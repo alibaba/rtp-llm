@@ -70,6 +70,67 @@ def causal_conv1d_update_ref(
 
 
 class TestCausalConv1dUpdate(unittest.TestCase):
+    def test_cuda_graph_padding_row_does_not_touch_cache(self):
+        device = "cuda"
+        dtype = torch.bfloat16
+        valid_batch = 3
+        graph_batch = 4
+        seqlen = 8
+        dim = 256
+        width = 4
+        seq_size_per_block = 64
+        sequence_lengths = [130, 193, 257]
+
+        torch.manual_seed(17)
+        block_map = torch.zeros(
+            graph_batch, 16, dtype=torch.int32, device=device
+        )
+        next_block = 1
+        for row, sequence_length in enumerate(sequence_lengths):
+            block_count = math.ceil(sequence_length / seq_size_per_block) + seqlen
+            block_map[row, :block_count] = torch.arange(
+                next_block,
+                next_block + block_count,
+                dtype=torch.int32,
+                device=device,
+            )
+            next_block += block_count
+
+        x = torch.randn(graph_batch, dim, seqlen, dtype=dtype, device=device)
+        weight = torch.randn(dim, width, dtype=torch.float32, device=device)
+        cache_seed = torch.randn(
+            next_block, dim, width - 1, dtype=dtype, device=device
+        )
+        valid_cache = cache_seed.clone()
+        padded_cache = cache_seed.clone()
+
+        valid_out = causal_conv1d_update(
+            x[:valid_batch],
+            valid_cache,
+            weight,
+            activation="silu",
+            block_map=block_map[:valid_batch],
+            sequence_lengths=torch.tensor(
+                sequence_lengths, dtype=torch.int32, device=device
+            ),
+            seq_size_per_block=seq_size_per_block,
+        )
+        padded_out = causal_conv1d_update(
+            x,
+            padded_cache,
+            weight,
+            activation="silu",
+            block_map=block_map,
+            sequence_lengths=torch.tensor(
+                sequence_lengths + [0], dtype=torch.int32, device=device
+            ),
+            seq_size_per_block=seq_size_per_block,
+        )
+        torch.cuda.synchronize()
+
+        torch.testing.assert_close(padded_out[:valid_batch], valid_out)
+        torch.testing.assert_close(padded_cache, valid_cache)
+
     def test_causal_conv1d_update(self):
         itype = torch.bfloat16
         device = "cuda"

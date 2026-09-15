@@ -41,6 +41,13 @@ py_test(
 )
 
 py_test(
+    name = "test_swizzle_load_config",
+    srcs = ["test_swizzle_load_config.py"],
+    deps = py_test_deps,
+    exec_properties = {"gpu": "A10"},
+)
+
+py_test(
     name = "test_model_weight_info",
     srcs = ["test_model_weight_info.py"],
     deps = py_test_deps + [

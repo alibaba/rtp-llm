@@ -269,7 +269,6 @@ class DecodeTopkLengthCaptureFullWidthTest(unittest.TestCase):
         _update_topk_lengths_in_place(meta, start_pos, 2, full_width=True)
         self.assertEqual([int(x) for x in meta.swa_topk_length[:2]], [WINDOW, WINDOW])
 
-
 class DecodeTopkLengthParityTest(unittest.TestCase):
     """Eager build vs allocate+update produce identical length values."""
 

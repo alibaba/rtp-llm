@@ -293,6 +293,53 @@ TEST_F(GenerateStreamTest, pendingCompletionIsConsumerVisibleBeforeSchedulerComm
     EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
 }
 
+TEST_F(GenerateStreamTest, finishOrCancelPreservesPendingSuccessfulCompletion) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}));
+    stream->setNeedReleaseResource(true);
+    stream->generate_status_->status.store(StreamState::RUNNING);
+    stream->reportEvent(StreamEvents::GenerateDone);
+
+    std::promise<void> stop_started;
+    auto               stop_ready = stop_started.get_future();
+    auto               stop_result = std::async(std::launch::async, [stream, &stop_started] {
+        stop_started.set_value();
+        return stream->finishOrCancel(1000, "cancel stream");
+    });
+    stop_ready.get();
+    EXPECT_EQ(stop_result.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+    EXPECT_FALSE(stream->hasError());
+
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(stop_result.get());
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
+}
+
+TEST_F(GenerateStreamTest, finishOrCancelCancelsIncompleteStreamAndWaitsForCommit) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}));
+    stream->setNeedReleaseResource(true);
+    stream->generate_status_->status.store(StreamState::RUNNING);
+
+    std::promise<void> stop_started;
+    auto               stop_ready = stop_started.get_future();
+    auto               stop_result = std::async(std::launch::async, [stream, &stop_started] {
+        stop_started.set_value();
+        return stream->finishOrCancel(1000, "client closed");
+    });
+    stop_ready.get();
+    for (int i = 0; i < 100 && !stream->hasError(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
+
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(stop_result.get());
+    EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
+}
+
 TEST_F(GenerateStreamTest, nextOutputDrainsFinalOutputBeforeCompletion) {
     auto builder = GenerateStreamBuilder();
     auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createContextStream({1, 2, 3}));
@@ -669,12 +716,58 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateTracksRealAndUpperBoundSeqLen)
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
 
     GenerateStream::MtpAsyncDeviceState state;
-    state.last_real_seq_len = stream->seqLength();
-    state.next_real_seq_len = state.last_real_seq_len + 2;
+    state.previous_seq_len_upper_bound = stream->seqLength();
+    state.next_seq_len_upper_bound     = state.previous_seq_len_upper_bound + 2;
     stream->setMtpAsyncDeviceState(std::move(state));
 
-    ASSERT_EQ(stream->getMtpAsyncDeviceState().last_real_seq_len, stream->seqLength());
-    ASSERT_EQ(stream->getMtpAsyncDeviceState().next_real_seq_len, stream->seqLength() + 2);
+    ASSERT_EQ(stream->getMtpAsyncDeviceState().previous_seq_len_upper_bound, stream->seqLength());
+    ASSERT_EQ(stream->getMtpAsyncDeviceState().next_seq_len_upper_bound, stream->seqLength() + 2);
+}
+
+TEST_F(GenerateStreamTest, testMtpAsyncDeviceStatePublishesCoherentConcurrentSnapshots) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
+
+    constexpr int       publishes_per_writer = 1000;
+    std::atomic<bool>   start{false};
+    std::atomic<bool>   writers_done{false};
+    std::atomic<bool>   incoherent_snapshot{false};
+    std::vector<std::thread> writers;
+    for (int writer_id = 0; writer_id < 2; ++writer_id) {
+        writers.emplace_back([&, writer_id] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            for (int i = 1; i <= publishes_per_writer; ++i) {
+                const int marker = writer_id * publishes_per_writer + i;
+                GenerateStream::MtpAsyncDeviceState state;
+                state.previous_seq_len_upper_bound = marker;
+                state.next_seq_len_upper_bound     = marker;
+                stream->setMtpAsyncDeviceState(std::move(state));
+            }
+        });
+    }
+    std::thread reader([&] {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        while (!writers_done.load(std::memory_order_acquire)) {
+            const auto state = stream->getMtpAsyncDeviceState();
+            if (state.epoch != 0 && state.previous_seq_len_upper_bound != state.next_seq_len_upper_bound) {
+                incoherent_snapshot.store(true, std::memory_order_release);
+            }
+        }
+    });
+
+    start.store(true, std::memory_order_release);
+    for (auto& writer : writers) {
+        writer.join();
+    }
+    writers_done.store(true, std::memory_order_release);
+    reader.join();
+
+    EXPECT_FALSE(incoherent_snapshot.load(std::memory_order_acquire));
+    EXPECT_EQ(stream->getMtpAsyncDeviceState().epoch, 2u * publishes_per_writer);
 }
 
 // setSpecDecodeDeviceState / clearSpecDecodeDeviceState

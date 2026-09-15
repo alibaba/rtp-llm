@@ -28,8 +28,10 @@ bool HybridTypeKVCacheAllocator::doInit() {
     }
 
     auto pool_config = BlockPoolConfigHelper::createConfig(config_);
-    block_pool_      = std::make_shared<BlockPool>(
-        pool_config, allocation_type_, /*use_pinned_cpu_backing=*/false, use_cuda_malloc_block_pool_);
+    const bool use_device_malloc_backing =
+        allocation_type_ == AllocationType::DEVICE && use_device_malloc_block_pool_;
+    block_pool_ = std::make_shared<BlockPool>(
+        pool_config, allocation_type_, /*use_pinned_cpu_backing=*/false, use_device_malloc_backing);
     RTP_LLM_CHECK_WITH_INFO(block_pool_->init(), "Failed to initialize block pool for HybridTypeKVCacheAllocator");
 
     const int group_nums = config_.groupNums();

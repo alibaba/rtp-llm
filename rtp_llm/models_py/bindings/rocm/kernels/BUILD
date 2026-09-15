@@ -98,13 +98,23 @@ cc_library(
 )
 
 cc_library(
+    name = "rocm_trtllm_allreduce_sync",
+    hdrs = ["trtllm_allreduce_sync.cuh"],
+    deps = [
+        "@local_config_rocm//rocm:rocm_headers",
+        "@local_config_rocm//rocm:hip",
+    ],
+    copts = rocm_copts(),
+)
+
+cc_library(
     name = "rocm_trtllm_allreduce_fusion",
     srcs = ["trtllm_allreduce_fusion.cu"],
     hdrs = [
         "trtllm_allreduce_fusion.h",
         "hip_float8_impl.h",
     ],
-    deps = rocm_deps + torch_deps(),
+    deps = rocm_deps + torch_deps() + [":rocm_trtllm_allreduce_sync"],
     copts = rocm_copts(),
     visibility = ["//visibility:public"],
 )

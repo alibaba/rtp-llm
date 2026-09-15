@@ -53,7 +53,10 @@ class ArmCpuImpl(CpuImpl):
         ]
 
     def maybe_rewrite_weight_by_key(
-        self, key: str, weight: torch.Tensor
+        self,
+        key: str,
+        weight: torch.Tensor,
+        use_swizzle_a: Optional[bool] = None,
     ) -> torch.Tensor:
         return preprocess_gemm_weight_by_key(
             key, weight, self.py_env_configs.py_hw_kernel_config.arm_gemm_use_kai
@@ -927,7 +930,10 @@ class RocmImpl(GpuImpl):
         return x_
 
     def maybe_rewrite_weight_by_key(
-        self, key: str, weight: torch.Tensor
+        self,
+        key: str,
+        weight: torch.Tensor,
+        use_swizzle_a: Optional[bool] = None,
     ) -> torch.Tensor:
         is_gfx950 = self._is_gfx950()
         if key == "weight":
@@ -954,14 +960,18 @@ class RocmImpl(GpuImpl):
             W.linear_attn_ba_w,
             W.linear_attn_out_w,
         ]:
-            use_swizzle = self.py_env_configs.py_hw_kernel_config.use_swizzleA
+            should_swizzle = (
+                self.py_env_configs.py_hw_kernel_config.use_swizzleA
+                if use_swizzle_a is None
+                else use_swizzle_a
+            )
             if key == W.linear_attn_ba_w:
                 # BA remains BF16 even when qkvz is quantized. Select its
                 # physical layout from the actual TP-local shape so aligned
                 # projections keep the fast path while N=24/12 safely fall
                 # back to the raw layout.
-                use_swizzle = use_swizzle and should_swizzle_linear_attn_ba(weight)
-            if use_swizzle:
+                should_swizzle = should_swizzle and should_swizzle_linear_attn_ba(weight)
+            if should_swizzle:
                 if weight.dtype != torch.float8_e4m3fn:
                     weight = swizzle_tensor(weight.t(), False).t()
                 else:

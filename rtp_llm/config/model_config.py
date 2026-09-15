@@ -42,13 +42,39 @@ def kv_cache_dtype_to_torch_dtype(
 
 def ssm_state_dtype_str_to_data_type(ssm_state_dtype: str) -> DataType:
     ssm_state_dtype = ssm_state_dtype.lower()
-    if ssm_state_dtype == "bf16":
+    if ssm_state_dtype in ("bf16", "bfloat16"):
         return DataType.TYPE_BF16
-    if ssm_state_dtype == "fp16":
+    if ssm_state_dtype in ("fp16", "float16"):
         return DataType.TYPE_FP16
-    if ssm_state_dtype == "fp32":
+    if ssm_state_dtype in ("fp32", "float32"):
         return DataType.TYPE_FP32
     raise ValueError(f"Unsupported ssm_state_dtype: {ssm_state_dtype}")
+
+
+def resolve_ssm_state_dtype(
+    configured_ssm_state_dtype: str,
+    model_ssm_state_dtype: DataType,
+    enable_remote_cache: bool,
+) -> DataType:
+    configured_ssm_state_dtype = configured_ssm_state_dtype.lower()
+    if configured_ssm_state_dtype != "auto":
+        return ssm_state_dtype_str_to_data_type(configured_ssm_state_dtype)
+
+    # The legacy remote connector addresses KV cache through one contiguous
+    # BlockPool. A model-declared recurrent-state dtype that differs from the
+    # attention cache dtype requires independent physical pools, which that
+    # connector explicitly rejects. Keep ``auto`` backward compatible for this
+    # connector while preserving an explicit user override for fail-fast
+    # validation once independent pools are requested deliberately.
+    if enable_remote_cache and model_ssm_state_dtype != DataType.TYPE_BF16:
+        logging.warning(
+            "SSM_STATE_DTYPE=auto resolved to %s, but remote cache requires a "
+            "contiguous shared KV cache pool; falling back to bf16",
+            model_ssm_state_dtype,
+        )
+        return DataType.TYPE_BF16
+
+    return model_ssm_state_dtype
 
 
 class ModelConfig(CppModelConfig):
@@ -58,6 +84,7 @@ class ModelConfig(CppModelConfig):
         "dspark_noise_token_id",
         "dspark_target_layer_ids",
         "dspark_markov_rank",
+        "dspark_sample_from_anchor",
         "capture_aux_hidden_layer_ids",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
@@ -542,6 +569,7 @@ class ModelConfig(CppModelConfig):
         self.dspark_noise_token_id: Optional[int] = None
         self.dspark_target_layer_ids: Optional[list[int]] = None
         self.dspark_markov_rank: Optional[int] = None
+        self.dspark_sample_from_anchor: bool = True
         # Target-side decoder layer outputs exported to the DSpARK draft.
         self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
         self.normalize_lm_head_weight: bool = False
@@ -926,8 +954,10 @@ def build_model_config(
         if kv_cache_config.kernel_seq_size_per_block > 0
         else kv_cache_config.seq_size_per_block
     )
-    model_config.linear_attention_config.ssm_state_dtype = (
-        ssm_state_dtype_str_to_data_type(kv_cache_config.ssm_state_dtype)
+    model_config.linear_attention_config.ssm_state_dtype = resolve_ssm_state_dtype(
+        kv_cache_config.ssm_state_dtype,
+        model_config.linear_attention_config.ssm_state_dtype,
+        kv_cache_config.enable_remote_cache,
     )
     model_config.linear_attention_config.conv_state_dtype = model_config.data_type
 
