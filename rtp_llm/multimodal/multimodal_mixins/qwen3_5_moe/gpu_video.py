@@ -34,6 +34,7 @@ class GpuVideoInput:
     patch_size: int
     temporal_patch_size: int
     color_space: int = 2
+    source_fps: float = 0.0
 
     @property
     def shape(self):
@@ -102,6 +103,7 @@ def prepare_gpu_video(encoded, configs, processor, factor, size=None):
         processor.patch_size,
         processor.temporal_patch_size,
         color_space,
+        fps,
     )
     grid = torch.tensor(
         [
@@ -274,10 +276,13 @@ def _decode_on_stream(data, device, nvc, stream, consumer_stream):
 def preprocess_video_cuda(data: GpuVideoInput, processor, device):
     video = decode_video_cuda(data, device)
     with torch.profiler.record_function("video_resize"):
-        # Use the same HF resize backend and uint8 rounding as the CPU path.
-        video = resize_video_to_shape(
-            video, processor, data.resized_height, data.resized_width
-        )
+        # vLLM resizes uint8 frames on CPU. CPU and CUDA bicubic kernels can
+        # round values near half-integers differently, changing ViT inputs.
+        # Keep NVDEC decoding, but use the reference resize device as well.
+        if tuple(video.shape[-2:]) != (data.resized_height, data.resized_width):
+            video = resize_video_to_shape(
+                video.cpu(), processor, data.resized_height, data.resized_width
+            ).to(device)
     with torch.profiler.record_function("video_processor"):
         result = processor(
             video,

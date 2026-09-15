@@ -1,4 +1,7 @@
 #include <array>
+#include <cstdlib>
+#include <fstream>
+#include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include <memory>
 #include <utility>
 #include "gtest/gtest.h"
@@ -187,6 +190,100 @@ TEST(MultimodalInputTest, timeoutDoesNotAffectCacheKey) {
 
     EXPECT_EQ(inherited_input.cache_key(), explicit_input.cache_key());
     EXPECT_NE(inherited_input.to_string(), explicit_input.to_string());
+}
+
+TEST_F(MultimodalProcessorTest, videoFrameLayoutPreservesOuterTagsAndMrope) {
+    auto             processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1, 2}}, false, 100);
+    MultimodalOutput output;
+    output.mm_features     = {torch::arange(8, torch::kFloat32).reshape({8, 1})};
+    auto original_features = output.mm_features[0];
+    output.mm_position_ids = std::vector<torch::Tensor>{
+        torch::tensor({0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1}, torch::kInt32)
+            .reshape({8, 3})};
+    output.mm_token_layouts = {torch::tensor({10, 1, -4, 2, 11, 1, -4, 2}, torch::kInt32)};
+    MultimodalInput video_input("video");
+    video_input.mm_type = 2;
+    auto result =
+        processor.expandTokenIdsWithLayout(output, torch::tensor({9, 1, -1, 2, 8}, torch::kInt32), {video_input});
+    ASSERT_TRUE(result.ok());
+    const auto& expanded = result.value();
+    EXPECT_EQ(expanded.expanded_ids.numel(), 18);
+    EXPECT_TRUE(torch::equal(expanded.locs, torch::tensor({4, 11}, torch::kInt32)));
+    EXPECT_EQ(expanded.text_tokens_mask.sum().item<int>(), 10);
+    EXPECT_EQ(expanded.expanded_ids[1].item<int>(), 1);
+    EXPECT_EQ(expanded.expanded_ids[16].item<int>(), 2);
+    ASSERT_EQ(output.mm_features.size(), 2);
+    EXPECT_TRUE(torch::equal(output.mm_features[0], original_features.narrow(0, 0, 4)));
+    EXPECT_TRUE(torch::equal(output.mm_features[1], original_features.narrow(0, 4, 4)));
+    GenerateInput input;
+    input.multimodal_inputs        = std::vector<MultimodalInput>{MultimodalInput("video")};
+    input.multimodal_features      = output.mm_features;
+    input.multimodal_feature_types = output.mm_feature_types;
+    EXPECT_EQ(input.multimodalLengths().at(2), 8);
+    auto positions = PositionIdsGenerator::generatePositionIds(18, MROPE, expanded.locs, output.mm_position_ids);
+    auto expected =
+        torch::tensor({0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3,  4, 4,  4, 4, 4,  5,  4,  5,  4,  4,  5,  5,  6,  6,  6,
+                       7, 7, 7, 8, 8, 8, 9, 9, 9, 9, 9, 10, 9, 10, 9, 9, 10, 10, 11, 11, 11, 12, 12, 12, 13, 13, 13},
+                      torch::kInt32)
+            .reshape({18, 3});
+    EXPECT_TRUE(torch::equal(positions.reshape({18, 3}), expected));
+}
+
+TEST_F(MultimodalProcessorTest, videoFrameLayoutRejectsUncoveredFeatures) {
+    auto processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1, 2}}, false, 100);
+    for (const auto& values : std::vector<std::vector<int32_t>>{{10, 1, -3, 2}, {10, 1, -5, 2}, {10, -4, 2}}) {
+        MultimodalOutput output;
+        output.mm_features      = {torch::zeros({4, 1})};
+        output.mm_token_layouts = {torch::tensor(values, torch::kInt32)};
+        auto result = processor.expandTokenIdsWithLayout(output, torch::tensor({9, 1, -1, 2, 8}, torch::kInt32), {});
+        EXPECT_FALSE(result.ok());
+    }
+}
+
+TEST_F(MultimodalProcessorTest, actualVllmVideoReference) {
+    const char* directory = std::getenv("QWEN_VIDEO_REFERENCE_DIR");
+    if (!directory)
+        GTEST_SKIP() << "optional actual vLLM preprocessing reference";
+    auto read = [&](const std::string& name) {
+        std::ifstream file(std::string(directory) + "/" + name, std::ios::binary | std::ios::ate);
+        if (!file)
+            throw std::runtime_error("missing reference " + name);
+        const auto bytes  = static_cast<int64_t>(file.tellg());
+        auto       tensor = torch::empty({bytes / 4}, torch::kInt32);
+        file.seekg(0);
+        file.read(reinterpret_cast<char*>(tensor.data_ptr()), bytes);
+        return tensor;
+    };
+    auto original           = read("original_ids.i32");
+    auto expected_ids       = read("reference_ids.i32");
+    auto expected_positions = read("reference_positions.i32").reshape({-1, 3});
+    auto grid               = read("grid.i32");
+    int  t = grid[0].item<int>(), h = grid[1].item<int>() / 2, w = grid[2].item<int>() / 2;
+    auto special   = read("special_ids.i32");
+    auto processor = FakeMultimodalProcessor::createFakeMultimodalProcessor(
+        {{special[0].item<int>(), special[1].item<int>()}}, false, 65536);
+    MultimodalOutput output;
+    output.mm_features = {torch::zeros({t * h * w, 1})};
+    auto  positions    = torch::empty({t * h * w, 3}, torch::kInt32);
+    auto* ptr          = positions.data_ptr<int32_t>();
+    for (int i = 0; i < t * h * w; ++i) {
+        ptr[i * 3]     = 0;
+        ptr[i * 3 + 1] = (i / w) % h;
+        ptr[i * 3 + 2] = i % w;
+    }
+    output.mm_position_ids  = std::vector<torch::Tensor>{positions};
+    output.mm_token_layouts = {read("layout.i32")};
+    auto result             = processor.expandTokenIdsWithLayout(output, original, {});
+    ASSERT_TRUE(result.ok());
+    const auto& expanded = result.value();
+    ASSERT_EQ(expanded.expanded_ids.numel(), expected_ids.numel());
+    auto visual     = expanded.text_tokens_mask == 0;
+    auto normalized = expanded.expanded_ids.clone();
+    normalized.masked_fill_(visual, special[2].item<int>());
+    EXPECT_TRUE(torch::equal(normalized, expected_ids));
+    auto actual_positions =
+        PositionIdsGenerator::generatePositionIds(expected_ids.numel(), MROPE, expanded.locs, output.mm_position_ids);
+    EXPECT_TRUE(torch::equal(actual_positions.reshape({-1, 3}), expected_positions));
 }
 
 }  // namespace rtp_llm

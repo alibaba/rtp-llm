@@ -29,7 +29,12 @@ class Qwen35Renderer(Qwen3CoderRenderer, Qwen2VLRenderer):
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         prompt_and_mm_input = self._render_messages(
             request,
-            request.extra_configs.add_vision_id if request.extra_configs else True,
+            (
+                request.extra_configs.add_vision_id
+                if request.extra_configs
+                and "add_vision_id" in request.extra_configs.model_fields_set
+                else False
+            ),
         )
         input_ids = self.tokenizer.encode(prompt_and_mm_input.prompt)
         return RenderedInputs(

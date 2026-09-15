@@ -22,15 +22,14 @@ ErrorResult<MultimodalOutput> MultimodalPbConverter::inlineOutputFromPb(const Mu
     // Convert malformed remote data into an error instead of propagating torch exceptions.
     try {
         torch::Tensor mm_embedding = TensorPbConvert::pbToTorch(output_pb.multimodal_embedding()), mm_position_id;
-        bool          contain_pos         = output_pb.has_multimodal_pos_id();
+        bool          contain_pos  = output_pb.has_multimodal_pos_id();
         bool          contain_extra_input = output_pb.multimodal_extra_input_size() > 0;
         if (contain_pos) {
             mm_position_id = TensorPbConvert::pbToTorch(output_pb.multimodal_pos_id());
         }
         // RDMA receipts have no inline embedding and must not reach this decoder.
         if (mm_embedding.dim() == 0) {
-            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
-                             "inline multimodal response carries no embedding tensor");
+            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "inline multimodal response carries no embedding tensor");
         }
         MultimodalOutput     mm_output;
         std::vector<int64_t> split_sizes;
@@ -41,8 +40,8 @@ ErrorResult<MultimodalOutput> MultimodalPbConverter::inlineOutputFromPb(const Mu
         if (split_sizes.empty() || split_total != mm_embedding.size(0)) {
             return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
                              "inline multimodal response is inconsistent: split_sizes sum="
-                                 + std::to_string(split_total) + " does not match mm_embedding.size(0)="
-                                 + std::to_string(mm_embedding.size(0)));
+                                 + std::to_string(split_total)
+                                 + " does not match mm_embedding.size(0)=" + std::to_string(mm_embedding.size(0)));
         }
         mm_output.mm_features = mm_embedding.split(split_sizes, 0);
         if (contain_pos) {
@@ -69,6 +68,13 @@ ErrorResult<MultimodalOutput> MultimodalPbConverter::inlineOutputFromPb(const Mu
             }
             mm_output.mm_extra_input = std::move(extra_inputs);
         }
+        if (output_pb.multimodal_token_layout_size() != 0
+            && output_pb.multimodal_token_layout_size() != static_cast<int>(split_sizes.size())) {
+            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "multimodal token layout count mismatch");
+        }
+        for (const auto& layout : output_pb.multimodal_token_layout()) {
+            mm_output.mm_token_layouts.emplace_back(TensorPbConvert::pbToTorch(layout));
+        }
         return mm_output;
     } catch (const std::exception& e) {
         return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
@@ -76,8 +82,7 @@ ErrorResult<MultimodalOutput> MultimodalPbConverter::inlineOutputFromPb(const Mu
     }
 }
 
-void MultimodalPbConverter::preprocessConfigToPb(MMPreprocessConfigPB* config_pb,
-                                                 const MMPreprocessConfig& config) {
+void MultimodalPbConverter::preprocessConfigToPb(MMPreprocessConfigPB* config_pb, const MMPreprocessConfig& config) {
     config_pb->set_width(config.width);
     config_pb->set_height(config.height);
     config_pb->set_min_pixels(config.min_pixels);

@@ -330,11 +330,13 @@ class MMEmbeddingRes:
         embeddings: List[torch.Tensor],
         position_ids: Optional[List[torch.Tensor]] = None,
         extra_input: Optional[List[torch.Tensor]] = None,
+        token_layouts: Optional[List[torch.Tensor]] = None,
     ):
         self.embeddings = embeddings
         self.position_ids = position_ids if position_ids is not None else []
         # Model-specific extra input, one opaque flat 1-D tensor per image (e.g. deepstack).
         self.extra_input = extra_input if extra_input is not None else []
+        self.token_layouts = token_layouts if token_layouts is not None else []
 
     def __str__(self) -> str:
         return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, extra_input_shape={[d.shape for d in self.extra_input] if self.extra_input is not None else []})"
@@ -562,7 +564,24 @@ class MMProcessEngine:
                     )
 
                 with torch.profiler.record_function("postprocess"):
-                    result = MMEmbeddingRes(emb_res, pos_res, extra_input_res)
+                    layouts = []
+                    for wi in work_items:
+                        item = wi.embedding_result
+                        count = len(self._maybe_tensor_to_list(item[0], dim=2))
+                        if len(item) > 3:
+                            values = self._maybe_tensor_to_list(item[3], dim=1)
+                            if len(values) != count:
+                                raise ValueError(
+                                    "token layout count does not match media count"
+                                )
+                            layouts.extend(values)
+                        else:
+                            layouts.extend(
+                                torch.empty(0, dtype=torch.int32) for _ in range(count)
+                            )
+                    if not any(layout.numel() for layout in layouts):
+                        layouts = []
+                    result = MMEmbeddingRes(emb_res, pos_res, extra_input_res, layouts)
 
                 if not self.vit_config.disable_access_log:
                     self._access_logger.log_success_access(mm_inputs, str(result))

@@ -25,7 +25,7 @@ cc_test(
         "FakeMultimodalProcessor.h",
     ]),
     copts = test_copts,
-    deps = torch_deps() + [
+    deps = torch_deps() + cuda13_torch_link_deps + [
         "//rtp_llm/cpp/testing:device_test_utils",
 
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
@@ -33,6 +33,7 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
         "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
+        "//rtp_llm/cpp/models:position_ids_generator",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ],

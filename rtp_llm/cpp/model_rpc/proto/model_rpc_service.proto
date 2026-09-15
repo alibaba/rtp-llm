@@ -229,6 +229,10 @@ message MultimodalOutputPB {
     repeated int32 split_size = 4;
     // Non-empty means fields 1/2/3 are stored in these slots; split_size remains inline.
     repeated MMRdmaSlotPB output_rdma_slots = 5;
+    // Optional per-media prompt replacements, always inline (also for RDMA).
+    // Empty tensor keeps legacy expansion. Non-negative values are text token IDs;
+    // -N inserts the next N visual feature rows. Includes enclosing vision tags.
+    repeated TensorPB multimodal_token_layout = 6;
 }
 
 message ReleaseLeasePB {

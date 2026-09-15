@@ -28,7 +28,7 @@ from rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin import (
     Qwen3_VLMixin,
 )
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
-from rtp_llm.multimodal.qwen3_vl_video import resolve_video_size
+from rtp_llm.multimodal.qwen3_vl_video import resolve_video_size, video_token_layout
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.database import CkptDatabase
@@ -86,7 +86,7 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
                 vit_config.download_headers,
                 max_file_size_kb=vit_config.mm_video_max_file_size_kb,
             )
-            return prepare_gpu_video(
+            data, grid = prepare_gpu_video(
                 source.getvalue(),
                 item.mm_preprocess_config,
                 processor.video_processor,
@@ -97,9 +97,23 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
                     vit_config.mm_video_total_max_pixels,
                 ),
             )
-        return Qwen3_VLImageEmbedding.preprocess_input(
-            mm_inputs, vit_config, processor, factor
+            layout = video_token_layout(
+                grid, data.frame_indices, data.source_fps, processor
+            )
+            return data, grid, layout
+        data = Qwen3_VLImageEmbedding.preprocess_input(
+            mm_inputs, vit_config, processor, factor, return_video_metadata=True
         )
+        if mm_inputs[0].mm_type == MMUrlType.VIDEO:
+            pixels, grid, metadata = data
+            return (
+                pixels,
+                grid,
+                video_token_layout(
+                    grid, metadata.frames_indices, metadata.fps, processor
+                ),
+            )
+        return data
 
     def estimate_work(self, data, mm_type=None) -> MMWorkEstimate:
         grid = data[1]
@@ -196,12 +210,21 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
         )
         per_grid_positions = self.get_position_ids(grid_thw, device=self._device)
         results, grid_offset = [], 0
-        for data, embedding in zip(data_list, per_item_embeds):
+        for data, embedding, mm_type in zip(data_list, per_item_embeds, mm_types):
             count = data[1].shape[0]
             positions = per_grid_positions[grid_offset : grid_offset + count]
-            results.append(
-                (embedding, positions[0] if count == 1 else torch.cat(positions))
-            )
+            position_ids = positions[0] if count == 1 else torch.cat(positions)
+            if mm_type == MMUrlType.VIDEO:
+                if len(data) < 3:
+                    raise ValueError(
+                        "Qwen3.5 video is missing its timestamp token layout"
+                    )
+                # Each frame is a separate MRoPE image grid. The text between
+                # frames advances the base position in the language model.
+                position_ids[:, 0] = 0
+                results.append((embedding, position_ids, None, data[2]))
+            else:
+                results.append((embedding, position_ids))
             grid_offset += count
         return results
 

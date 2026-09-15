@@ -51,13 +51,19 @@ private:
 
     ErrorInfo getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb);
 
+    ErrorResult<ExpandedOutput> expandTokenIdsWithLayout(MultimodalOutput&                   output,
+                                                         const torch::Tensor&                token_ids,
+                                                         const std::vector<MultimodalInput>& mm_inputs,
+                                                         torch::Tensor                       token_type_ids = {});
+
     virtual ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
                                                               std::string ip_port = "") = 0;
 
-    ErrorResult<ExpandedOutput> expandTokenIds(const std::vector<torch::Tensor>&           mm_embedding,
-                                               const torch::Tensor&                        token_ids,
-                                               const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                               torch::Tensor                               token_type_ids = {});
+    ErrorResult<ExpandedOutput> expandTokenIds(const std::vector<torch::Tensor>&               mm_embedding,
+                                               const torch::Tensor&                            token_ids,
+                                               const std::vector<rtp_llm::MultimodalInput>     mm_inputs,
+                                               torch::Tensor                                   token_type_ids = {},
+                                               const std::vector<std::pair<int32_t, int32_t>>* resolved_locs = nullptr);
 
     ErrorResult<std::vector<std::pair<int32_t, int32_t>>> getMultimodalTags(const torch::Tensor& token_ids);
 

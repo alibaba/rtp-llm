@@ -71,6 +71,11 @@ private:
                     }
                     mm_embedding_res.mm_extra_input = extra_input;
                 }
+                if (py::hasattr(res, "token_layouts")) {
+                    for (auto& layout : convertPyObjectToVec(res.attr("token_layouts"))) {
+                        mm_embedding_res.mm_token_layouts.emplace_back(convertPyObjectToTensor(layout));
+                    }
+                }
                 return mm_embedding_res;
             } catch (py::error_already_set& e) {
                 std::string error_msg = e.what();
