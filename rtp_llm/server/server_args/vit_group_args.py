@@ -8,7 +8,7 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.ops import VitSeparation
-from rtp_llm.server.server_args.util import str2bool
+from rtp_llm.server.server_args.util import nonnegative_int, str2bool
 
 
 def _convert_vit_separation(value):
@@ -66,21 +66,6 @@ def _positive_int(value):
         raise argparse.ArgumentTypeError(f"must be a positive integer, got {value!r}")
     if parsed <= 0:
         raise argparse.ArgumentTypeError(f"must be a positive integer, got {value!r}")
-    return parsed
-
-
-def _non_negative_int(value):
-    """For the caps where 0 is meaningful ("unlimited"), unlike the timeouts."""
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        raise argparse.ArgumentTypeError(
-            f"must be a non-negative integer, got {value!r}"
-        )
-    if parsed < 0:
-        raise argparse.ArgumentTypeError(
-            f"must be a non-negative integer, got {value!r}"
-        )
     return parsed
 
 
@@ -360,7 +345,7 @@ def init_vit_group_args(parser, vit_config):
         "--mm_rdma_max_slot_bytes",
         env_name="MM_RDMA_MAX_SLOT_BYTES",
         bind_to=(rdma_config, "max_slot_bytes"),
-        type=_non_negative_int,
+        type=nonnegative_int,
         default=1024 * 1024 * 1024,
         help="encoder 侧单个 RDMA slot 的字节上限，默认 1GiB；更大的输出自动分块；0 表示不限制。"
         "分块时按 256B 对齐向下取整后计算，因此实际生效上限是不超过该值的最大 256 倍数",
