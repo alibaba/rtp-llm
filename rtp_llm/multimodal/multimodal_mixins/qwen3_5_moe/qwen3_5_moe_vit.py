@@ -1,4 +1,5 @@
 import logging
+import math
 from functools import lru_cache
 from typing import Callable
 
@@ -165,10 +166,43 @@ class Qwen3_5MoeVisionPatchEmbed(nn.Module):
             self.patch_size,
             self.patch_size,
         )
-        hidden_states = self.proj(hidden_states.to(dtype=target_dtype)).view(
-            -1, self.embed_dim
-        )
-        return hidden_states
+        hidden_states = hidden_states.to(dtype=target_dtype)
+        # Bound independent patch projections so large video batches retain the
+        # same BF16 convolution results as smaller batches.
+        max_elements = (1 << 31) - 1
+        patch_size = math.prod(hidden_states.shape[1:])
+        max_rows = max(1, max_elements // max(patch_size, self.embed_dim))
+        if hidden_states.shape[0] <= max_rows:
+            return self.proj(hidden_states).view(-1, self.embed_dim)
+
+        first = self.proj(hidden_states[:max_rows]).view(-1, self.embed_dim)
+        output = first.new_empty((hidden_states.shape[0], self.embed_dim))
+        output[:max_rows].copy_(first)
+        del first
+        for start in range(max_rows, hidden_states.shape[0], max_rows):
+            end = min(start + max_rows, hidden_states.shape[0])
+            output[start:end].copy_(
+                self.proj(hidden_states[start:end]).view(-1, self.embed_dim)
+            )
+        return output
+
+
+class Qwen3_5MoeVisionLayerNorm(nn.LayerNorm):
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # CUDA LayerNorm can wrap flattened 32-bit offsets for large video batches.
+        # Keep each call below the index limit without splitting a normalized row.
+        max_elements = (1 << 31) - 1
+        if not hidden_states.is_cuda or hidden_states.numel() <= max_elements:
+            return super().forward(hidden_states)
+
+        row_size = math.prod(self.normalized_shape)
+        max_rows = max(1, max_elements // row_size)
+        rows = hidden_states.reshape(-1, *self.normalized_shape)
+        output = torch.empty_like(rows)
+        for start in range(0, rows.shape[0], max_rows):
+            end = min(start + max_rows, rows.shape[0])
+            output[start:end].copy_(super().forward(rows[start:end]))
+        return output.reshape(hidden_states.shape)
 
 
 class Qwen3_5MoeVisionPatchMerger(nn.Module):
@@ -178,7 +212,7 @@ class Qwen3_5MoeVisionPatchMerger(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size * (config.spatial_merge_size**2)
         self.use_postshuffle_norm = use_postshuffle_norm
-        self.norm = nn.LayerNorm(
+        self.norm = Qwen3_5MoeVisionLayerNorm(
             self.hidden_size if use_postshuffle_norm else config.hidden_size, eps=1e-6
         )
         self.linear_fc1 = nn.Linear(self.hidden_size, self.hidden_size)
@@ -403,8 +437,8 @@ class Qwen3_5MoeVisionAttention(nn.Module):
 class Qwen3_5MoeVisionBlock(GradientCheckpointingLayer):
     def __init__(self, config, attn_implementation: str = "sdpa") -> None:
         super().__init__()
-        self.norm1 = nn.LayerNorm(config.hidden_size, eps=1e-6)
-        self.norm2 = nn.LayerNorm(config.hidden_size, eps=1e-6)
+        self.norm1 = Qwen3_5MoeVisionLayerNorm(config.hidden_size, eps=1e-6)
+        self.norm2 = Qwen3_5MoeVisionLayerNorm(config.hidden_size, eps=1e-6)
         self.attn = Qwen3_5MoeVisionAttention(config=config)
         self.mlp = Qwen3_5MoeVisionMLP(config=config)
 
