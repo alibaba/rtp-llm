@@ -1,4 +1,18 @@
 py_test(
+    name = "custom_output_processor_test",
+    srcs = [
+        "custom_output_processor_test.py",
+    ],
+    data = [
+        "//rtp_llm:sdk",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "kv_cache_specs_test",
     srcs = [
         "kv_cache_specs_test.py",

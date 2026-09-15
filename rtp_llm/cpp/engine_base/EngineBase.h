@@ -90,6 +90,10 @@ public:
         return false;
     }
 
+    // Deployment-registered post-layers CustomHandler (generate path).
+    // Engines that do not run post layers reject it at startup.
+    virtual void setPostLayersProcessor(pybind11::object handler);
+
     virtual bool updateEplbConfig(const EPLBConfig& config) {
         return false;
     }

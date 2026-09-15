@@ -3,7 +3,9 @@ import functools
 import json
 import logging
 import math
+import os
 import time
+from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Dict, Optional, Union
 
 import grpc
@@ -378,6 +380,79 @@ def _record_client_span_latency(
         pass
 
 
+@dataclass(frozen=True)
+class CustomOutputSelector:
+    """Deployment selector serialized to RPC and resolved by C++."""
+
+    token_position: Optional[int] = None
+    tracked_token_id: Optional[int] = None
+    expected_token_id: Optional[int] = None
+
+    @staticmethod
+    def _parse_int32(name: str, raw: str, *, non_negative: bool) -> int:
+        try:
+            value = int(raw)
+        except ValueError as error:
+            raise ValueError(f"{name} must be an integer") from error
+        lower_bound = 0 if non_negative else -(2**31)
+        if value < lower_bound or value > 2**31 - 1:
+            requirement = (
+                "between 0 and 2147483647" if non_negative else "a valid int32 integer"
+            )
+            raise ValueError(f"{name} must be {requirement}")
+        return value
+
+    @classmethod
+    def from_env(cls) -> "CustomOutputSelector":
+        position_raw = os.environ.get("CUSTOM_OUTPUT_TOKEN_POSITION")
+        tracked_token_id_raw = os.environ.get("CUSTOM_OUTPUT_TRACKED_TOKEN_ID")
+        expected_token_id_raw = os.environ.get("CUSTOM_OUTPUT_EXPECTED_TOKEN_ID")
+        if position_raw is not None and tracked_token_id_raw is not None:
+            raise ValueError(
+                "CUSTOM_OUTPUT_TOKEN_POSITION and CUSTOM_OUTPUT_TRACKED_TOKEN_ID "
+                "are mutually exclusive"
+            )
+        if expected_token_id_raw is not None and position_raw is None:
+            raise ValueError(
+                "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID requires CUSTOM_OUTPUT_TOKEN_POSITION"
+            )
+
+        position = (
+            cls._parse_int32(
+                "CUSTOM_OUTPUT_TOKEN_POSITION", position_raw, non_negative=False
+            )
+            if position_raw is not None
+            else None
+        )
+        tracked_token_id = (
+            cls._parse_int32(
+                "CUSTOM_OUTPUT_TRACKED_TOKEN_ID",
+                tracked_token_id_raw,
+                non_negative=True,
+            )
+            if tracked_token_id_raw is not None
+            else None
+        )
+        expected_token_id = (
+            cls._parse_int32(
+                "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID",
+                expected_token_id_raw,
+                non_negative=True,
+            )
+            if expected_token_id_raw is not None
+            else None
+        )
+        return cls(position, tracked_token_id, expected_token_id)
+
+    def write_to(self, input_pb: GenerateInputPB) -> None:
+        if self.token_position is not None:
+            input_pb.custom_output_token_position.value = self.token_position
+        elif self.tracked_token_id is not None:
+            input_pb.custom_output_tracked_token_id.value = self.tracked_token_id
+        if self.expected_token_id is not None:
+            input_pb.custom_output_expected_token_id.value = self.expected_token_id
+
+
 class StreamState:
     def __init__(self):
         self.cached_logits_dict = {}
@@ -435,7 +510,9 @@ def _trans_jsonable_options(
     )
 
 
-def trans_input(input_py: GenerateInput):
+def trans_input(
+    input_py: GenerateInput, selector: Optional[CustomOutputSelector] = None
+):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
@@ -443,6 +520,17 @@ def trans_input(input_py: GenerateInput):
     input_pb.group_size = input_py.group_size
     if hasattr(input_py, "group_id") and input_py.group_id != -1:
         input_pb.group_id.value = input_py.group_id
+    # Keep the deployment selector typed on the wire. C++ resolves it against
+    # the authoritative token array before the request reaches the scheduler.
+    custom_output_token_position = input_py.custom_output_token_position
+    if custom_output_token_position < -1:
+        raise ValueError("custom_output_token_position must be -1 or non-negative")
+    if selector is None:
+        selector = CustomOutputSelector.from_env()
+    if custom_output_token_position >= 0:
+        input_pb.custom_output_token_position.value = custom_output_token_position
+    else:
+        selector.write_to(input_pb)
 
     request_info = getattr(input_py, "request_info", None)
     if request_info is not None:
@@ -731,6 +819,13 @@ def trans_output(
         and output_pb.all_probs.shape[0] > 0
         else None
     )
+    all_custom_output = (
+        trans_tensor(output_pb.custom_output)
+        if output_pb.HasField("custom_output")
+        and len(output_pb.custom_output.shape) > 0
+        and output_pb.custom_output.shape[0] > 0
+        else None
+    )
 
     prompt_logits_data = None
     if output_pb.HasField("prompt_logits") and output_pb.prompt_logits.HasField(
@@ -837,6 +932,9 @@ def trans_output(
         if prompt_logits_data is not None:
             output_py.prompt_logits = prompt_logits_data
 
+        if all_custom_output is not None:
+            output_py.custom_output = all_custom_output[i]
+
         if (
             logits_index is not None
             and all_logits is not None
@@ -874,6 +972,10 @@ class ModelRpcClient(object):
         self._addresses = addresses
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
         self._decode_entrance = decode_entrance
+        # Environment-backed deployment config is immutable after startup.
+        # Parse and validate it once instead of reading/parsing env vars for
+        # every request on the frontend hot path.
+        self._custom_output_selector = CustomOutputSelector.from_env()
         self._options = []
         for key, value in client_config.items():
             self._options.append((key, value))
@@ -966,7 +1068,7 @@ class ModelRpcClient(object):
             # matches the client gRPC deadline: engine-side timeout checks and
             # P2P deadlineMs() require a positive timeout_ms.
             input_py.generate_config.timeout_ms = int(effective_ms)
-        input_pb = trans_input(input_py)
+        input_pb = trans_input(input_py, self._custom_output_selector)
         response_iterator = None
         rpc_status = None
         stream_state = StreamState()
@@ -1239,7 +1341,7 @@ class ModelRpcClient(object):
         batch_input_pb = BatchGenerateInputPB()
         for inp in inputs:
             inp.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
-            input_pb = trans_input(inp)
+            input_pb = trans_input(inp, self._custom_output_selector)
             batch_input_pb.inputs.append(input_pb)
 
         target_address = self._addresses[inputs[0].request_id % len(self._addresses)]

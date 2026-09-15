@@ -37,7 +37,10 @@ private:
                               bool                 return_all_probs,
                               const torch::Tensor& new_tokens_all,
                               const torch::Tensor& token_ids_cpu,
-                              const torch::Tensor& success_cpu) const;
+                              const torch::Tensor& success_cpu,
+                              const torch::Tensor& batch_custom_output  = {},
+                              bool                 has_custom_output    = false,
+                              bool                 custom_output_failed = false) const;
 
 private:
     std::vector<int64_t> output_vocab_ids_;

@@ -95,6 +95,9 @@ public:
     // tagging only — never used for engine-side scheduling decisions.
     int32_t priority = 0;
 
+    // Absolute, zero-based position in input_ids; -1 selects the last token.
+    int custom_output_token_position = -1;
+
     // Batch grouping params
     int     group_size = 1;
     int64_t group_id   = -1;
@@ -156,6 +159,8 @@ public:
     std::optional<torch::Tensor>      logits;
     std::optional<torch::Tensor>      loss;
     std::optional<PromptLogitsOutput> prompt_logits;
+    // Output of the deployment-registered post-layers CustomHandler.
+    std::optional<torch::Tensor> custom_output;
 };
 
 class GenerateOutputs {

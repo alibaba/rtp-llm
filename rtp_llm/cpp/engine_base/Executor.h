@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <cstdlib>
+#include <stdexcept>
 
 namespace rtp_llm {
 
@@ -16,6 +17,12 @@ class Executor {
 public:
     Executor() {};
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) = 0;
+
+    // Deployment-registered post-layers CustomHandler (generate path).
+    // Executors that do not run post layers reject it at startup.
+    virtual void setPostLayersProcessor(const std::shared_ptr<PostLayersProcessor>& processor) {
+        throw std::runtime_error("post-layers processor is not supported by this executor");
+    }
 
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,

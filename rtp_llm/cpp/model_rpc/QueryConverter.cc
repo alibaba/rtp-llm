@@ -12,6 +12,53 @@
 
 namespace rtp_llm {
 
+namespace {
+
+int resolveCustomOutputPosition(const GenerateInputPB& input) {
+    const bool has_position = input.has_custom_output_token_position();
+    const bool has_token_id = input.has_custom_output_tracked_token_id();
+    RTP_LLM_CHECK_WITH_INFO(!(has_position && has_token_id),
+                            "custom output token position and tracked token id are mutually exclusive");
+    RTP_LLM_CHECK_WITH_INFO(!input.has_custom_output_expected_token_id() || has_position,
+                            "custom output expected token id requires a token position selector");
+
+    int position = -1;
+    if (has_position) {
+        const int configured_position = input.custom_output_token_position().value();
+        position = configured_position >= 0 ? configured_position : input.token_ids_size() + configured_position;
+        RTP_LLM_CHECK_WITH_INFO(position >= 0 && position < input.token_ids_size(),
+                                "custom output token position %d is outside prompt length %d",
+                                configured_position,
+                                input.token_ids_size());
+    } else if (has_token_id) {
+        const int tracked_token_id = input.custom_output_tracked_token_id().value();
+        RTP_LLM_CHECK_WITH_INFO(
+            tracked_token_id >= 0, "custom output tracked token id must be non-negative, got %d", tracked_token_id);
+        for (int i = input.token_ids_size() - 1; i >= 0; --i) {
+            if (input.token_ids(i) == tracked_token_id) {
+                position = i;
+                break;
+            }
+        }
+        RTP_LLM_CHECK_WITH_INFO(
+            position >= 0, "custom output tracked token id %d was not found in the prompt", tracked_token_id);
+    }
+
+    if (input.has_custom_output_expected_token_id()) {
+        const int expected = input.custom_output_expected_token_id().value();
+        RTP_LLM_CHECK_WITH_INFO(
+            expected >= 0, "custom output expected token id must be non-negative, got %d", expected);
+        RTP_LLM_CHECK_WITH_INFO(input.token_ids(position) == expected,
+                                "token at custom output position %d is %d, expected %d",
+                                position,
+                                input.token_ids(position),
+                                expected);
+    }
+    return position;
+}
+
+}  // namespace
+
 #define TRANS_OPTIONAL(name)                                                                                           \
     if (config_proto->has_##name()) {                                                                                  \
         generate_config->name = config_proto->name().value();                                                          \
@@ -235,6 +282,7 @@ RequestInfo QueryConverter::transRequestInfo(const RequestInfoPB& request_info_p
 std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB* input) {
     std::shared_ptr<GenerateInput> generate_input = std::make_shared<GenerateInput>();
     generate_input->request_id                    = input->request_id();
+    generate_input->custom_output_token_position  = resolveCustomOutputPosition(*input);
     generate_input->request_info                  = transRequestInfo(input->request_info());
     generate_input->global_start_time_us          = input->start_time();
     generate_input->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -469,6 +517,9 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
         pb->set_start_pos(pl.start_pos);
         pb->set_end_pos(pl.end_pos);
     }
+
+    stackBuffersToTensorPB(
+        flatten_output->mutable_custom_output(), source_outputs, [](const auto& r) { return r.custom_output; });
 
     RTP_LLM_LOG_DEBUG("transResponse done");
 }

@@ -50,6 +50,7 @@ from rtp_llm.config.generate_config import (
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
+    CustomOutputSelector,
     ModelRpcClient,
     StreamState,
     _engine_reported_finished,
@@ -249,6 +250,272 @@ class ModelRpcClientTest(TestCase):
 
         self.assertEqual(request_info_pb.trace_id, "header-trace")
         self.assertEqual(request_info_pb.request_id, "header-request-id")
+
+    def test_trans_output_keeps_custom_output_separate_from_softmax_probs(self):
+        # Preserve scalar/vector outputs and vocabulary probabilities independently.
+        for shape, values in (
+            ([2, 1, 1], [-0.25, 1.75]),
+            ([2, 1, 2], [0.25, 0.75, -0.5, 1.125]),
+        ):
+            for existing_probs in (False, True):
+                with self.subTest(shape=shape, existing_probs=existing_probs):
+                    input_py = GenerateInput(
+                        token_ids=torch.tensor([1, 2, 3]),
+                        generate_config=GenerateConfig(
+                            aux_info=True, return_softmax_probs=existing_probs
+                        ),
+                        request_id=123,
+                        mm_inputs=[],
+                    )
+                    outputs_pb = GenerateOutputsPB()
+                    flatten = outputs_pb.flatten_output
+                    flatten.finished.extend([True, True])
+                    for _ in range(2):
+                        aux = flatten.aux_info.add()
+                        aux.input_len = 3
+                        if existing_probs:
+                            aux.softmax_probs.CopyFrom(
+                                TensorPB(
+                                    data_type=TensorPB.DataType.FP32,
+                                    shape=[1],
+                                    fp32_data=struct.pack("<f", 0.9),
+                                )
+                            )
+                    flatten.custom_output.CopyFrom(
+                        TensorPB(
+                            data_type=TensorPB.DataType.FP32,
+                            shape=shape,
+                            fp32_data=struct.pack("<" + "f" * len(values), *values),
+                        )
+                    )
+
+                    outputs = trans_output(input_py, outputs_pb, StreamState())
+
+                    expected = torch.tensor(values).reshape(shape)
+                    for index, output in enumerate(outputs.generate_outputs):
+                        torch.testing.assert_close(
+                            output.custom_output, expected[index]
+                        )
+                        self.assertEqual(
+                            output.aux_info.softmax_probs,
+                            torch.tensor([0.9]).tolist() if existing_probs else [],
+                        )
+                        self.assertEqual(output.aux_info.input_len, 3)
+
+    def test_trans_output_preserves_softmax_probs_without_custom_output(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(aux_info=True, return_softmax_probs=True),
+            request_id=123,
+            mm_inputs=[],
+        )
+        outputs_pb = GenerateOutputsPB()
+        flatten = outputs_pb.flatten_output
+        flatten.finished.append(True)
+        flatten.aux_info.add().softmax_probs.CopyFrom(
+            TensorPB(
+                data_type=TensorPB.DataType.FP32,
+                shape=[2],
+                fp32_data=struct.pack("<ff", 0.25, 0.75),
+            )
+        )
+
+        output = trans_output(input_py, outputs_pb, StreamState()).generate_outputs[0]
+
+        self.assertIsNone(output.custom_output)
+        self.assertEqual(output.aux_info.softmax_probs, [0.25, 0.75])
+
+    def test_trans_output_does_not_create_aux_info_for_custom_output(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(aux_info=False),
+            request_id=123,
+            mm_inputs=[],
+        )
+        outputs_pb = GenerateOutputsPB()
+        flatten = outputs_pb.flatten_output
+        flatten.finished.append(True)
+        flatten.custom_output.CopyFrom(
+            TensorPB(
+                data_type=TensorPB.DataType.FP32,
+                shape=[1, 2],
+                fp32_data=struct.pack("<ff", 0.25, 0.75),
+            )
+        )
+
+        output = trans_output(input_py, outputs_pb, StreamState()).generate_outputs[0]
+
+        self.assertEqual(output.custom_output.tolist(), [0.25, 0.75])
+        self.assertIsNone(output.aux_info)
+
+    def test_trans_input_serializes_relative_position_for_cpp_resolution(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([7, 42, 8, 42, 9]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"CUSTOM_OUTPUT_TOKEN_POSITION": "-2"},
+            clear=True,
+        ):
+            input_pb = trans_input(input_py)
+
+        self.assertTrue(input_pb.HasField("custom_output_token_position"))
+        self.assertEqual(input_pb.custom_output_token_position.value, -2)
+        self.assertEqual(input_py.custom_output_token_position, -1)
+
+    def test_trans_input_respects_explicit_position(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([42, 8, 9]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+            custom_output_token_position=1,
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"CUSTOM_OUTPUT_TOKEN_POSITION": "-2"},
+            clear=True,
+        ):
+            input_pb = trans_input(input_py)
+
+        self.assertEqual(input_pb.custom_output_token_position.value, 1)
+
+    def test_trans_input_leaves_position_bounds_check_to_cpp(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([42]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"CUSTOM_OUTPUT_TOKEN_POSITION": "-2"},
+            clear=True,
+        ):
+            input_pb = trans_input(input_py)
+
+        self.assertEqual(input_pb.custom_output_token_position.value, -2)
+
+    def test_trans_input_rejects_invalid_explicit_request_position(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([42]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+            custom_output_token_position=-2,
+        )
+        with self.assertRaisesRegex(ValueError, "must be -1 or non-negative"):
+            trans_input(input_py)
+
+    def test_trans_input_serializes_expected_token_validation(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([7, 42, 8, 42, 9]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "CUSTOM_OUTPUT_TOKEN_POSITION": "-2",
+                "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID": "42",
+            },
+            clear=True,
+        ):
+            input_pb = trans_input(input_py)
+
+        self.assertEqual(input_pb.custom_output_token_position.value, -2)
+        self.assertEqual(input_pb.custom_output_expected_token_id.value, 42)
+
+    def test_trans_input_serializes_expected_token_without_scanning(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([7, 8, 9]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "CUSTOM_OUTPUT_TOKEN_POSITION": "-2",
+                "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID": "42",
+            },
+            clear=True,
+        ):
+            input_pb = trans_input(input_py)
+
+        self.assertEqual(input_pb.custom_output_token_position.value, -2)
+        self.assertEqual(input_pb.custom_output_expected_token_id.value, 42)
+
+    def test_trans_input_serializes_tracked_token_for_cpp_scan(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([7, 42, 9]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "CUSTOM_OUTPUT_TRACKED_TOKEN_ID": "42",
+            },
+            clear=True,
+        ):
+            input_pb = trans_input(input_py)
+
+        self.assertFalse(input_pb.HasField("custom_output_token_position"))
+        self.assertEqual(input_pb.custom_output_tracked_token_id.value, 42)
+
+    def test_expected_token_requires_position_selector(self):
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"CUSTOM_OUTPUT_EXPECTED_TOKEN_ID": "42"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "requires"):
+                CustomOutputSelector.from_env()
+
+    def test_custom_output_selector_validates_environment_at_construction(self):
+        invalid_cases = [
+            ({"CUSTOM_OUTPUT_TOKEN_POSITION": "not-an-int"}, "must be an integer"),
+            ({"CUSTOM_OUTPUT_TOKEN_POSITION": str(2**31)}, "valid int32"),
+            ({"CUSTOM_OUTPUT_TRACKED_TOKEN_ID": "-1"}, "between"),
+            (
+                {
+                    "CUSTOM_OUTPUT_TOKEN_POSITION": "-2",
+                    "CUSTOM_OUTPUT_TRACKED_TOKEN_ID": "42",
+                },
+                "mutually exclusive",
+            ),
+            (
+                {
+                    "CUSTOM_OUTPUT_TOKEN_POSITION": "-2",
+                    "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID": "not-an-int",
+                },
+                "must be an integer",
+            ),
+            (
+                {
+                    "CUSTOM_OUTPUT_TOKEN_POSITION": "-2",
+                    "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID": "-1",
+                },
+                "must be between",
+            ),
+        ]
+        for environment, message in invalid_cases:
+            with self.subTest(environment=environment):
+                with unittest.mock.patch.dict(os.environ, environment, clear=True):
+                    with self.assertRaisesRegex(ValueError, message):
+                        CustomOutputSelector.from_env()
 
     @staticmethod
     def _make_generate_input(generate_config: GenerateConfig) -> GenerateInput:

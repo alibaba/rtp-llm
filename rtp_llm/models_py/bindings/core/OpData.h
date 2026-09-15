@@ -39,6 +39,7 @@ struct GptModelInputs {
     torch::Tensor         input_lengths;      // [batch_size]
     torch::Tensor         sequence_lengths;   // [decoder_batch_size]
     torch::Tensor         lm_output_indexes;  // selected output rows
+    torch::Tensor         custom_output_indexes;  // selected context rows; undefined uses last rows
     // Kept for ModelInputsLogger/legacy micro-batch consumers; the async
     // scheduling redesign no longer populates it (stays undefined).
     torch::Tensor lm_output_lengths;        // [total_batch_size]
@@ -124,6 +125,10 @@ struct GptModelOutputs {
     // the readable fallback reason returned through AuxInfo.
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status{
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
+    // Selected context rows; undefined when no handler ran on this step.
+    torch::Tensor custom_output;
+    // The dispatcher turns handler failures into per-stream execution errors.
+    std::string custom_output_error;
 };
 
 struct CopyParams {

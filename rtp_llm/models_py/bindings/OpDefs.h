@@ -361,6 +361,9 @@ struct PyModelInputs {
     PyAttentionInputs    attention_inputs;
     AttentionInputsByTag attention_inputs_by_tag;
     BertEmbeddingInputs  bert_embedding_inputs;
+    // Optional device int64 indexes, one per context request. Undefined on
+    // decode/default post-norm paths. Select BEFORE applying the final norm.
+    torch::Tensor pre_final_norm_output_indexes;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();
@@ -373,6 +376,9 @@ struct PyModelOutputs {
     // a first-class forward output because CUDA graph replay does not execute
     // Python and therefore cannot safely recover it from mutable model state.
     torch::Tensor mtp_target_hidden_states;
+    // Selected rows only [context_batch, hidden], NOT the full token activation.
+    // hidden_states always keeps its existing semantics for generation.
+    torch::Tensor pre_final_norm_hidden_states;
 
     PyModelOutputs() = default;
 

@@ -122,6 +122,29 @@ TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {
               (std::array<int64_t, 2>{1048576, 12288}));
 }
 
+TEST_F(ModelDataTest, testCustomOutputShapeHintsPreservePlacementAndAbsence) {
+    GptModelInputs inputs;
+    auto           hints = getModelInputShapeHints(inputs);
+    EXPECT_EQ(hints[GptModelInputIndex::customOutputIndexes], 0);
+    const auto bit = GptModelInputDeviceBit::kDeviceBitCustomOutputIndexes;
+    EXPECT_EQ(hints[GptModelInputIndex::tensorDeviceMap] & bit, 0);
+
+    inputs.custom_output_indexes = torch::tensor({1, 3}, torch::kInt32);
+    hints                        = getModelInputShapeHints(inputs);
+    EXPECT_EQ(hints[GptModelInputIndex::customOutputIndexes], 2);
+    EXPECT_EQ(hints[GptModelInputIndex::tensorDeviceMap] & bit, 0);
+
+    inputs.custom_output_indexes = inputs.custom_output_indexes.cuda();
+    hints                        = getModelInputShapeHints(inputs);
+    EXPECT_EQ(hints[GptModelInputIndex::customOutputIndexes], 2);
+    EXPECT_NE(hints[GptModelInputIndex::tensorDeviceMap] & bit, 0);
+
+    inputs.custom_output_indexes = torch::Tensor();
+    hints                        = getModelInputShapeHints(inputs);
+    EXPECT_EQ(hints[GptModelInputIndex::customOutputIndexes], 0);
+    EXPECT_EQ(hints[GptModelInputIndex::tensorDeviceMap] & bit, 0);
+}
+
 TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) {
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(-1, 1), RTPException);
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(1, 0), RTPException);
