@@ -54,6 +54,17 @@ public:
     virtual void initTestDevices() {}
 
     void initTestDataDir() {
+        const auto native_test_data_dir = getenv("RTP_LLM_TEST_DATA_DIR");
+        if (native_test_data_dir) {
+            test_data_path_ = native_test_data_dir;
+            RTP_LLM_CHECK(!test_data_path_.empty() && test_data_path_.front() == '/');
+            if (test_data_path_.back() != '/') {
+                test_data_path_ += '/';
+            }
+            std::cout << "test using data path [" << test_data_path_ << "]" << std::endl;
+            return;
+        }
+
         const auto test_src_dir    = getenv("TEST_SRCDIR");
         const auto test_work_space = getenv("TEST_WORKSPACE");
         const auto test_binary     = getenv("TEST_BINARY");

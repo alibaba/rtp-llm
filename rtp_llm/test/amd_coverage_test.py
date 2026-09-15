@@ -83,6 +83,7 @@ def test_gtest_adapter_rejects_zero_skipped_wrong_or_failed_case(
         assert str(Path(adapter.torch.__file__).resolve().parent / "lib") in library_paths
         assert str(binary.parent.parent) in library_paths
         assert "/existing/rocm/lib" in library_paths
+        assert kwargs["env"]["RTP_LLM_TEST_DATA_DIR"] == str(tmp_path.resolve())
         Path(args[2].removeprefix("--gtest_output=xml:")).write_text(xml)
         return SimpleNamespace(returncode=exitcode, stdout="gtest output", stderr="")
 

@@ -27,6 +27,7 @@ def test_rocm_beam_search_gtest(gtest_case, tmp_path):
     if env.get("LD_LIBRARY_PATH"):
         library_paths.append(env["LD_LIBRARY_PATH"])
     env["LD_LIBRARY_PATH"] = os.pathsep.join(library_paths)
+    env["RTP_LLM_TEST_DATA_DIR"] = str(tmp_path.resolve())
     result = subprocess.run(
         [str(_BINARY), f"--gtest_filter={gtest_case}", f"--gtest_output=xml:{report}"],
         capture_output=True,
