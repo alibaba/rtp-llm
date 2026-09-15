@@ -804,11 +804,14 @@ TEST_F(P2PConnectorTest, HandleRead_NoTransferSkipsDataTransferAndReturnsSideCha
     std::string unique_key  = "test_no_transfer";
     int64_t     request_id  = 5012;
     int64_t     timeout_ms  = 5000;
-    int64_t     deadline_ms = currentTimeMs() + timeout_ms;
     auto        resource    = createValidKVCacheResource(2, 2);
+    std::weak_ptr<KVCacheResource> weak_resource = resource;
     auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
+    const int64_t deadline_ms = stream->deadlineMs();
     auto        meta        = createMockMeta(stream.get());
-    connector_->asyncRead(resource, meta, 0, 0);
+    ASSERT_NE(connector_->asyncRead(resource, meta, 0, 0), nullptr);
+    resource.reset();
+    EXPECT_FALSE(weak_resource.expired());
 
     P2PConnectorResourceEntry::SideChannelData data;
     data.has_first_token = true;
@@ -826,6 +829,7 @@ TEST_F(P2PConnectorTest, HandleRead_NoTransferSkipsDataTransferAndReturnsSideCha
     connector_->handleRead(request, response);
 
     EXPECT_EQ(response.error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_TRUE(weak_resource.expired());
     EXPECT_TRUE(response.payload().has_first_generate_token());
     EXPECT_EQ(response.payload().first_generate_token_id(), 34567);
     for (const auto& server : tp_broadcast_servers_) {

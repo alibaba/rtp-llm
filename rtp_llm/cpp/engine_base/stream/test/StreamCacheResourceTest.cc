@@ -272,6 +272,7 @@ protected:
         ModelConfig model_config;
         model_config.attn_config.tokens_per_block = 2;
         RuntimeConfig runtime_config;
+        model_config.vocab_size = 1024;
         model_config.max_seq_len = 2048;
         stream_                  = std::make_shared<NormalGenerateStream>(
             generate_input, model_config, runtime_config, resource_context, nullptr);
@@ -1163,6 +1164,7 @@ TEST_F(StreamCacheResourceTest, testP2PPrefillRegistrationFailureIsTerminal) {
 
 TEST_F(StreamCacheResourceTest, testP2PFirstTokenEnqueuesDecodeDuplicateForSuppression) {
     prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    stream_->generateConfig()->pd_separation = true;
     auto& resource = stream_->streamCacheResource();
 
     auto matched_resource = std::make_shared<KVCacheResource>();
@@ -1196,6 +1198,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenEnqueuesDecodeDuplicateForSuppr
 
 TEST_F(StreamCacheResourceTest, testP2PFirstTokenFinishesSingleTokenRequestAfterLoad) {
     prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    stream_->generateConfig()->pd_separation = true;
     auto& resource = stream_->streamCacheResource();
     stream_->generateConfig()->max_new_tokens = 1;
     stream_->generate_status_->status         = StreamState::LOADING_CACHE;
