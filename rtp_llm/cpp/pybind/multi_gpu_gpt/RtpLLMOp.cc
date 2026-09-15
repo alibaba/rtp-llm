@@ -110,7 +110,8 @@ void RtpLLMOp::init(py::object model,
                     py::object vit_config,
                     py::object mm_process_engine,
                     py::object propose_model,
-                    py::object token_processor) {
+                    py::object token_processor,
+                    bool      defer_service_start) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     EngineInitParams params = initModel(model, engine_config, vit_config);
@@ -125,15 +126,95 @@ void RtpLLMOp::init(py::object model,
 
     params.showDebugInfo();
     std::unique_ptr<ProposeModelEngineInitParams> propose_params = initProposeModel(propose_model, params);
-    pybind11::gil_scoped_release                  release;
-    grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
-                                      this,
-                                      std::move(params),
-                                      std::move(mm_process_engine),
-                                      std::move(propose_params),
-                                      std::move(token_processor));
+    if (defer_service_start) {
+        // Build weights, core GPU KV and executor state for the template, but
+        // leave cache connectors, engine loops and listeners for post-restore.
+        deferred_init_params_       = std::make_unique<EngineInitParams>(std::move(params));
+        deferred_mm_process_engine_ = std::move(mm_process_engine);
+        deferred_propose_params_    = std::move(propose_params);
+        deferred_token_processor_   = std::move(token_processor);
+        prepareRPCService(*deferred_init_params_,
+                          std::move(deferred_mm_process_engine_),
+                          std::move(deferred_propose_params_),
+                          std::move(deferred_token_processor_),
+                          true);
+        rpc_server_deferred_ = true;
+        RTP_LLM_LOG_INFO(
+            "backend service/cache initialization deferred until SCR checkpoint release");
+        return;
+    }
+    pybind11::gil_scoped_release release;
+    server_start_failed_  = false;
+    stop_requested_       = false;
+    deferred_init_params_ = std::make_unique<EngineInitParams>(std::move(params));
+    grpc_server_thread_   = std::thread([this,
+                                       mm_process_engine = std::move(mm_process_engine),
+                                       propose_params = std::move(propose_params),
+                                       token_processor = std::move(token_processor)]() mutable {
+        try {
+            initRPCServer(*deferred_init_params_,
+                          std::move(mm_process_engine),
+                          std::move(propose_params),
+                          std::move(token_processor));
+        } catch (const std::exception& e) {
+            setServerStartError(e.what());
+        } catch (...) {
+            setServerStartError("unknown exception while starting RPC server");
+        }
+        // These moved-from objects may still own Python references. Release
+        // them only while holding the GIL.
+        pybind11::gil_scoped_acquire acquire;
+        mm_process_engine = py::object();
+        propose_params.reset();
+        token_processor = py::object();
+    });
     while (!is_server_ready_) {
+        if (server_start_failed_) {
+            std::lock_guard<std::mutex> lock(server_state_mutex_);
+            RTP_LLM_FAIL("RPC server start failed: %s", server_start_error_.c_str());
+        }
         sleep(1);  // wait 1s for server ready
+    }
+}
+
+void RtpLLMOp::startRPCServer() {
+    if (!rpc_server_deferred_) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(deferred_init_params_ != nullptr, "deferred RPC init params are missing");
+    rpc_server_deferred_ = false;
+
+    {
+        pybind11::gil_scoped_release release;
+        server_start_failed_ = false;
+        stop_requested_      = false;
+        grpc_server_thread_ = std::thread([this]() {
+            try {
+                startRPCServerInternal(*deferred_init_params_);
+            } catch (const std::exception& e) {
+                setServerStartError(e.what());
+            } catch (...) {
+                setServerStartError("unknown exception while starting RPC server");
+            }
+        });
+        while (!is_server_ready_) {
+            if (server_start_failed_) {
+                std::lock_guard<std::mutex> lock(server_state_mutex_);
+                RTP_LLM_FAIL("deferred RPC server start failed: %s", server_start_error_.c_str());
+            }
+            sleep(1);
+        }
+    }
+}
+
+void RtpLLMOp::updateRuntimeEndpoints(py::object runtime_config) {
+    RTP_LLM_CHECK_WITH_INFO(rpc_server_deferred_ && deferred_init_params_ != nullptr,
+                            "runtime endpoints can only be updated before deferred RPC start");
+    auto config = runtime_config.cast<RuntimeConfig>();
+    deferred_init_params_->runtime_config.worker_addrs = config.worker_addrs;
+    deferred_init_params_->runtime_config.worker_grpc_addrs = config.worker_grpc_addrs;
+    if (model_rpc_service_) {
+        model_rpc_service_->updateRuntimeEndpoints(config);
     }
 }
 
@@ -284,10 +365,30 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
     }
 }
 
-void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_init_params,
+void RtpLLMOp::initRPCServer(const EngineInitParams&                       maga_init_params,
                              py::object                                    mm_process_engine,
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                              py::object                                    token_processor) {
+    {
+        pybind11::gil_scoped_acquire acquire;
+        prepareRPCService(maga_init_params,
+                          std::move(mm_process_engine),
+                          std::move(propose_params),
+                          std::move(token_processor),
+                          false);
+        // Keep all Python-owned temporaries empty before releasing the GIL;
+        // the HttpApiServer/MultimodalProcessor retain their own references.
+        mm_process_engine = py::object();
+        propose_params.reset();
+        token_processor = py::object();
+    }
+}
+
+void RtpLLMOp::prepareRPCService(const EngineInitParams&                       maga_init_params,
+                                 py::object                                    mm_process_engine,
+                                 std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                                 py::object                                    token_processor,
+                                 bool                                           defer_network_services) {
     std::string server_address;
     int64_t     http_port              = 0;
     int64_t     model_rpc_port         = 0;
@@ -302,10 +403,26 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
             && maga_init_params.parallelism_config.tp_size > maga_init_params.parallelism_config.local_world_size;
         // NOTE: ip/ip段可自定义为所需范围。
         server_address = "0.0.0.0:" + std::to_string(model_rpc_port);
+        deferred_server_address_ = server_address;
         if (role_type == RoleType::PREFILL || role_type == RoleType::DECODE) {
             model_rpc_service_.reset(new RemoteRpcServiceImpl());
         } else {
             model_rpc_service_.reset(new LocalRpcServiceImpl());
+        }
+        model_rpc_service_->setDeferServiceStart(defer_network_services);
+        if (defer_network_services) {
+            grpc::Status grpc_status =
+                model_rpc_service_->init(maga_init_params, std::move(mm_process_engine), std::move(propose_params));
+            if (!grpc_status.ok()) {
+                RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
+            }
+            std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
+            http_server_.reset(new HttpApiServer(model_rpc_service_->getEngine(),
+                                                 model_rpc_service_->getMultimodalProcessor(),
+                                                 http_server_address,
+                                                 maga_init_params,
+                                                 token_processor));
+            return;
         }
         if (start_grpc_before_init) {
             model_rpc_service_->prepareLocalServer();
@@ -344,7 +461,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         builder.SetSyncServerOption(grpc::ServerBuilder::MAX_POLLERS, grpc_config.max_server_pollers);
         RTP_LLM_LOG_INFO("grpc sync server MAX_POLLERS: %d", grpc_config.max_server_pollers);
     }
-    builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
+    builder.AddListeningPort(deferred_server_address_, grpc::InsecureServerCredentials());
     builder.RegisterService(model_rpc_service_.get());
 
     grpc_server_ = builder.BuildAndStart();
@@ -370,6 +487,64 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     setKmonServiceServing(true);
     grpc_server_->Wait();
     RTP_LLM_LOG_INFO("Server exit on %s", server_address.c_str());
+}
+
+void RtpLLMOp::startRPCServerInternal(const EngineInitParams& maga_init_params) {
+    int64_t model_rpc_port = -1;
+    {
+        pybind11::gil_scoped_acquire acquire;
+        model_rpc_port = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
+    }
+
+    // This is the single post-checkpoint release point for the engine loop,
+    // cache connectors, remote CacheStore and the model RPC listener.
+    model_rpc_service_->startDeferredServices();
+    if (model_rpc_port < 0) {
+        is_server_ready_ = true;
+        setKmonServiceServing(true);
+        return;
+    }
+
+    grpc::ServerBuilder builder;
+    builder.AddChannelArgument(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, 1024 * 1024 * 1024);
+    builder.AddChannelArgument(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH, 1024 * 1024 * 1024);
+    const GrpcConfig& grpc_config  = maga_init_params.grpc_config;
+    auto              server_config = grpc_config.get_server_config();
+    for (auto it = server_config.begin(); it != server_config.end(); ++it) {
+        RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
+        builder.AddChannelArgument(it->first, it->second);
+    }
+    if (grpc_config.max_server_pollers > 0) {
+        builder.SetSyncServerOption(grpc::ServerBuilder::MAX_POLLERS, grpc_config.max_server_pollers);
+    }
+    builder.AddListeningPort(deferred_server_address_, grpc::InsecureServerCredentials());
+    builder.RegisterService(model_rpc_service_.get());
+    grpc::Server* grpc_server = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(server_state_mutex_);
+        grpc_server_ = builder.BuildAndStart();
+        grpc_server  = grpc_server_.get();
+    }
+    RTP_LLM_CHECK_WITH_INFO(grpc_server != nullptr,
+                            "grpc server start failed at address " + deferred_server_address_);
+    RTP_LLM_LOG_INFO("Server listening on %s", deferred_server_address_.c_str());
+    is_server_ready_ = true;
+    setKmonServiceServing(true);
+    // stop() may race with BuildAndStart. Publish the server pointer first,
+    // then honor a shutdown that arrived while the listener was being built.
+    if (stop_requested_) {
+        grpc_server->Shutdown();
+    }
+    grpc_server->Wait();
+    RTP_LLM_LOG_INFO("Server exit on %s", deferred_server_address_.c_str());
+}
+
+void RtpLLMOp::setServerStartError(const std::string& error) {
+    {
+        std::lock_guard<std::mutex> lock(server_state_mutex_);
+        server_start_error_ = error;
+    }
+    server_start_failed_ = true;
 }
 
 void RtpLLMOp::startHttpServer(py::object model_weights_loader,
@@ -461,10 +636,17 @@ void RtpLLMOp::stop() {
     setKmonServiceServing(false);
     bool expected = false;
     if (is_server_shutdown_.compare_exchange_strong(expected, true)) {
+        stop_requested_      = true;
+        rpc_server_deferred_ = false;
         if (model_rpc_service_) {
             model_rpc_service_->beginShutdown();
         }
-        if (grpc_server_) {
+        grpc::Server* grpc_server = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(server_state_mutex_);
+            grpc_server = grpc_server_.get();
+        }
+        if (grpc_server) {
             if (model_rpc_service_) {
                 model_rpc_service_->cancelPendingRequests();
             }
@@ -478,12 +660,17 @@ void RtpLLMOp::stop() {
             // RPC otherwise prevents rank 0 from reaching model shutdown after
             // all ranks have rendezvoused. An immediate deadline cancels any
             // request that survived the drain timeout.
-            grpc_server_->Shutdown(std::chrono::system_clock::now());
+            grpc_server->Shutdown(std::chrono::system_clock::now());
         }
         if (grpc_server_thread_.joinable()) {
+            // The normal-start listener thread reacquires the GIL to release
+            // its Python captures before exiting.  Joining with the GIL held
+            // deadlocks even when SCR is disabled.
+            pybind11::gil_scoped_release release;
             grpc_server_thread_.join();
         }
-        if (grpc_server_) {
+        {
+            std::lock_guard<std::mutex> lock(server_state_mutex_);
             grpc_server_.reset();
         }
         if (model_rpc_service_) {
@@ -496,6 +683,10 @@ void RtpLLMOp::stop() {
             http_server_->stop();
             http_server_.reset();
         }
+        deferred_init_params_.reset();
+        deferred_propose_params_.reset();
+        deferred_mm_process_engine_ = py::object();
+        deferred_token_processor_   = py::object();
         stopKmonitorFactory();
     }
 }
@@ -540,7 +731,10 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("vit_config"),
              py::arg("mm_process_engine"),
              py::arg("propose_model"),
-             py::arg("token_processor"))
+             py::arg("token_processor"),
+             py::arg("defer_service_start") = false)
+        .def("start_rpc_server", &RtpLLMOp::startRPCServer)
+        .def("update_runtime_endpoints", &RtpLLMOp::updateRuntimeEndpoints)
         .def("start_http_server",
              &RtpLLMOp::startHttpServer,
              py::arg("model_weights_loader"),

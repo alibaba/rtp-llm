@@ -1,20 +1,54 @@
 from __future__ import annotations
 
 import io
+import os
 import queue
 import signal
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+from rtp_llm.config.py_config_modules import GrammarAdmissionConfig
 from rtp_llm.dash_sc.inference.grammar_validator import (
     GrammarCompilationError,
     GrammarValidator,
     _compile_exception_reply,
     _WorkerStatus,
 )
+from rtp_llm.ops import GrammarConfig
 
 
 class GrammarValidatorTest(unittest.TestCase):
+
+    def test_template_leaves_grammar_workers_for_the_first_validation(self):
+        def initialize(validator, *args):
+            validator._compile_threads = 1
+            validator._cache_limit_bytes = 0
+
+        for phase, warm in (
+            ("normal", True),
+            ("checkpoint", False),
+            ("restore", False),
+        ):
+            with self.subTest(phase=phase), patch.dict(
+                os.environ, {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": phase}
+            ), patch.object(
+                GrammarValidator, "_initialize_compiler", initialize
+            ), patch.object(
+                GrammarValidator, "_ensure_pool"
+            ) as ensure:
+                validator = GrammarValidator(
+                    "{}", GrammarConfig(), GrammarAdmissionConfig()
+                )
+                self.assertEqual(ensure.call_count, int(warm))
+                self.assertEqual(validator._live, 0)
+                self.assertTrue(validator._idle.empty())
+                # The real validation path initializes workers on demand.
+                ensure.side_effect = RuntimeError(
+                    "first validation reached worker startup"
+                )
+                with self.assertRaisesRegex(RuntimeError, "first validation"):
+                    validator._compile_in_worker("ebnf", 'root ::= "x"')
+
     def setUp(self) -> None:
         self.validator = GrammarValidator.__new__(GrammarValidator)
         self.validator._check_grammar = MagicMock(return_value=True)

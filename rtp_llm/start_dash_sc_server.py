@@ -17,6 +17,11 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
+from rtp_llm.utils.scr_template_utils import (
+    ScrParticipantManifest,
+    arrive_scr_template_barrier,
+    is_scr_template_phase_active,
+)
 
 setup_logging()
 
@@ -38,6 +43,7 @@ def start_dash_sc_server(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
     service_draining=None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     from rtp_llm.metrics import kmonitor
 
@@ -70,7 +76,24 @@ def start_dash_sc_server(
     try:
         set_global_controller(global_controller)
         app = DashScApp(py_env_configs)
-        app.start(ready_pipe_writer=pipe_writer)
+        def on_prebind() -> None:
+            if scr_manifest is None or not is_scr_template_phase_active():
+                return
+            worker_id = scr_manifest.worker_id("dash_sc", f"{rank_id}:{server_id}")
+            result = arrive_scr_template_barrier(
+                worker_id=worker_id,
+                worker_num=scr_manifest.worker_num,
+                generation=scr_manifest.generation or None,
+                fail_closed=True,
+            )
+            logging.info(
+                "sCR DashSc reached prebind arrival worker_id=%d worker_num=%d result=%r",
+                worker_id,
+                scr_manifest.worker_num,
+                result,
+            )
+
+        app.start(ready_pipe_writer=pipe_writer, on_prebind=on_prebind)
     except BaseException as e:
         logging.error(
             f"start dash_sc server error: {e}, trace: {traceback.format_exc()}"

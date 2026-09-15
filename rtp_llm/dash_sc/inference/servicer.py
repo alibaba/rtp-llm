@@ -82,6 +82,7 @@ from rtp_llm.server.request_headers import (
     extract_trace_id,
 )
 from rtp_llm.utils.base_model_datatypes import GenerateInput, RequestInfo
+from rtp_llm.utils.scr_restore_context import RestoreContext
 from rtp_llm.utils.util import AtomicCounter
 
 # Phase-2 dash_sc_request_id (response infer.id) suffix; keeps client able to tell
@@ -1945,6 +1946,9 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         here without changing the call-site in ``DashScGrpcServer.stop``.
         """
         self._request_metrics.close()
+
+    def restore_fixup(self, context: RestoreContext) -> None:
+        self._ip = context.pod_ip
 
     def _next_rtp_llm_request_id(self) -> int:
         sequence = self._seq_counter.increment() % 4096  # 12 bits

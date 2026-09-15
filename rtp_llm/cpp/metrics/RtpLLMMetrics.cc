@@ -2,6 +2,9 @@
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "kmonitor/client/KMonitorFactory.h"
+#include "kmonitor/client/KMonitorWorker.h"
+#include "kmonitor/client/core/MetricsConfig.h"
+#include "kmonitor/client/core/MetricsSystem.h"
 #include "rtp_llm/cpp/metrics/KmonParam.h"
 
 namespace rtp_llm {
@@ -1126,6 +1129,36 @@ void RtpLLMDiskCacheMetrics::report(const kmonitor::MetricsTags*           tags,
 #undef REPORT_QPS
 #undef REPORT_GAUGE
 
+namespace {
+
+bool kmonitorTransportDeferred = false;
+
+bool deferKmonitorTransportForScr() {
+    const auto phase = autil::EnvUtil::getEnv("SCR_PHASE", "");
+    const bool enabled = autil::EnvUtil::getEnv("RTPLLM_ENABLE_SCR", false);
+    return enabled && (phase == "checkpoint" || phase == "restore");
+}
+
+void fillKmonitorConfig(kmonitor::MetricsConfig& metricsConfig, const KmonParam& param) {
+    metricsConfig.set_tenant_name(param.kmonitorTenant);
+    metricsConfig.set_service_name(param.kmonitorServiceName);
+    std::string sink_address = param.kmonitorSinkAddress;
+    if (!param.kmonitorPort.empty()) {
+        sink_address += ":" + param.kmonitorPort;
+    }
+    metricsConfig.set_sink_address(sink_address.c_str());
+    metricsConfig.set_enable_log_file_sink(param.kmonitorEnableLogFileSink);
+    metricsConfig.set_manually_mode(param.kmonitorManuallyMode);
+    metricsConfig.set_inited(true);
+    metricsConfig.AddGlobalTag("hippo_slave_ip", param.hippoSlaveIp);
+    for (const auto& pair : param.kmonitorTags) {
+        metricsConfig.AddGlobalTag(pair.first, pair.second);
+    }
+    setHippoTags(metricsConfig);
+}
+
+}  // namespace
+
 bool initKmonitorFactory() {
     KmonParam param;
     param.init();
@@ -1145,31 +1178,22 @@ bool initKmonitorFactory() {
     }
 
     kmonitor::MetricsConfig metricsConfig;
-    metricsConfig.set_tenant_name(param.kmonitorTenant);
-    metricsConfig.set_service_name(param.kmonitorServiceName);
-    std::string sink_address = param.kmonitorSinkAddress;
-    if (!param.kmonitorPort.empty()) {
-        sink_address += ":" + param.kmonitorPort;
-    }
-    metricsConfig.set_sink_address(sink_address.c_str());
-    metricsConfig.set_enable_log_file_sink(param.kmonitorEnableLogFileSink);
-    // metricsConfig.set_enable_prometheus_sink(param.kmonitorEnablePrometheusSink);
-    metricsConfig.set_manually_mode(param.kmonitorManuallyMode);
-    metricsConfig.set_inited(true);
-    metricsConfig.AddGlobalTag("hippo_slave_ip", param.hippoSlaveIp);
-    for (auto& pair : param.kmonitorTags) {
-        metricsConfig.AddGlobalTag(pair.first, pair.second);
-    }
-    setHippoTags(metricsConfig);
+    const bool deferTransport = deferKmonitorTransportForScr();
+    fillKmonitorConfig(metricsConfig, param);
     if (!kmonitor::KMonitorFactory::Init(metricsConfig)) {
         RTP_LLM_LOG_ERROR("init kmonitor factory failed with");
         return false;
     }
+    kmonitorTransportDeferred = deferTransport;
 
     // registerBuildInMetrics to refresh sg_buildin_kmonitor for KMonitorWorker::Start
     kmonitor::KMonitorFactory::registerBuildInMetrics(nullptr, param.kmonitorMetricsPrefix);
     RTP_LLM_LOG_INFO("KMonitorFactory::registerBuildInMetrics() finished");
 
+    if (deferTransport) {
+        RTP_LLM_LOG_INFO("KMonitor transport deferred until SCR steady-point returns");
+        return true;
+    }
     kmonitor::KMonitorFactory::Start();
     RTP_LLM_LOG_INFO("KMonitorFactory::Start() finished");
     return true;
@@ -1178,6 +1202,34 @@ bool initKmonitorFactory() {
 void stopKmonitorFactory() {
     stopKmonServiceStatus();
     kmonitor::KMonitorFactory::Shutdown();
+}
+
+bool resumeKmonitorAfterScr() {
+    if (!kmonitorTransportDeferred) {
+        return true;
+    }
+    auto* worker = kmonitor::KMonitorFactory::GetWorker();
+    auto* factoryConfig = kmonitor::KMonitorFactory::GetConfig();
+    if (worker == nullptr || worker->getMetricsSystem() == nullptr || factoryConfig == nullptr) {
+        return false;
+    }
+    KmonParam param;
+    param.init();
+    kmonitor::MetricsConfig resumedConfig;
+    fillKmonitorConfig(resumedConfig, param);
+    *factoryConfig = resumedConfig;
+    auto* system = worker->getMetricsSystem();
+    // Start refreshes common tags before MetricsSystem::Init creates transport.
+    // Only SCR needs to replace identity captured by registered metric handles.
+    system->SetOutputTagKeys({"hippo_slave_ip", "host_ip", "container_ip", "hippo_role", "hippo_app", "hippo_group",
+                             "host", "hippo_cluster"});
+    kmonitor::KMonitorFactory::Start();
+    if (!system->Started()) {
+        return false;
+    }
+    kmonitorTransportDeferred = false;
+    RTP_LLM_LOG_INFO("SCR native Kmonitor activated with refreshed runtime identity");
+    return true;
 }
 
 void setHippoTags(kmonitor::MetricsConfig& config) {

@@ -10,6 +10,15 @@ namespace rtp_llm {
 
 class CacheStoreAsyncWriterTest: public ::testing::Test {};
 
+TEST_F(CacheStoreAsyncWriterTest, DefersThreadPoolUntilInit) {
+    CacheStoreAsyncWriter writer;
+    ASSERT_EQ(nullptr, writer.thread_pool_);
+
+    writer.init();
+    ASSERT_NE(nullptr, writer.thread_pool_);
+    writer.waitAllDone();
+}
+
 TEST_F(CacheStoreAsyncWriterTest, InitAndWaitBasic) {
     CacheStoreAsyncWriter writer;
     ASSERT_TRUE(writer.state_ == CacheStoreAsyncWriter::State::IDLE);

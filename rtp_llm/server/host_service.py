@@ -14,6 +14,11 @@ from pydantic import BaseModel, Field
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
+from rtp_llm.utils.scr_template_lifecycle import (
+    CallbackHook,
+    get_template_lifecycle,
+    template_phase_active,
+)
 
 route_logger = logging.getLogger("route_logger")
 
@@ -106,7 +111,7 @@ class VipServerWrapper:
                 ip, port = addr.split(":")
                 hosts.append(Host(ip, port))
             self.hosts = hosts
-        else:
+        elif not template_phase_active():
             from rtp_llm.vipserver import get_host_list_by_domain
 
             self.hosts = get_host_list_by_domain(self.domain)
@@ -243,6 +248,21 @@ class MasterService:
         self._probe_executor = ThreadPoolExecutor(max_workers=self.max_parallel_probes)
         self._snapshot_lock = threading.Lock()
         self._route_snapshot = RouteSnapshot.empty()
+        self.backend_refresh_thread = None
+        if not self.master_vip.domain:
+            return
+        if template_phase_active():
+            get_template_lifecycle().register(
+                f"master-discovery:{id(self)}",
+                CallbackHook(release=lambda _: self.start_refresh()),
+            )
+        else:
+            self.start_refresh()
+
+    def start_refresh(self) -> None:
+        # Template startup reaches this only after identity fixup and release.
+        if not self.master_vip.domain or self.backend_refresh_thread is not None:
+            return
         self.backend_refresh_thread = threading.Thread(
             target=self.refresh_master_addr,
             name="rtp_llm_master_addr_refresh",

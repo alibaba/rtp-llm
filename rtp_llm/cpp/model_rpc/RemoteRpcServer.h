@@ -14,6 +14,11 @@ public:
                       py::object                                             mm_process_engine,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
 
+    void setDeferCacheStore(bool defer) {
+        defer_cache_store_ = defer;
+    }
+    void startDeferredServices() override;
+
     auto& resource() {
         return resource_;
     }
@@ -28,6 +33,7 @@ protected:
     RemoteServerResource        resource_;
     std::atomic<size_t>         loading_cache_requests_{0};
     std::shared_ptr<CacheStore> cache_store_;
+    bool                        defer_cache_store_{false};
 };
 
 }  // namespace rtp_llm

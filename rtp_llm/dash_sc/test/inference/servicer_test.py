@@ -30,13 +30,11 @@ from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
-    DASH_ERROR_ADMISSION_OVERLOADED,
     DASH_ERROR_AUTO_TPM_PREEMPTED,
     DASH_ERROR_BAD_REQUEST,
     DASH_ERROR_CAPACITY,
     DASH_ERROR_INTERNAL,
     DASH_ERROR_INVALID_OUTPUT,
-    DASH_ERROR_RESOURCE_EXHAUSTED,
     DASH_ERROR_TIMEOUT,
     DASH_ERROR_TOO_LONG,
     DASH_ERROR_UNSUPPORTED,
@@ -2951,6 +2949,25 @@ class _FakeGrpcContext:
 
 
 class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
+
+    def test_restore_refreshes_ip_used_by_backend_request_id_factory(self):
+        from rtp_llm.utils.scr_restore_context import RestoreContext
+
+        visitor = MagicMock()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor, ip="192.0.2.10", port=9000, server_id="0"
+        )
+        factory = visitor.set_request_id_factory.call_args.args[0]
+        with patch(
+            "rtp_llm.frontend.request_id_generator.time.time", return_value=1700000000
+        ):
+            ids = [factory()]
+            for ip in ("192.0.2.20", "192.0.2.30"):
+                servicer.restore_fixup(RestoreContext("same-seed", ip))
+                ids.append(factory())
+        self.assertEqual(len({(request_id >> 12) & 0xFFF for request_id in ids}), 3)
+        self.assertEqual([request_id & 0xFFF for request_id in ids], [1, 2, 3])
+
     def _valid_infer_request(self) -> predict_v2_pb2.ModelInferRequest:
         req = predict_v2_pb2.ModelInferRequest()
         req.id = "srv-1"

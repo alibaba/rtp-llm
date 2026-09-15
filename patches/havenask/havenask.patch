@@ -47,3 +47,127 @@ index 03ff7ce5..bdaff505 100644
  def genshared(name, lib):
      return native.genrule(
          name = name,
+diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.cpp aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.cpp
+--- aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.cpp
++++ aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.cpp
+@@ -50,6 +50,35 @@
+
+ const string &MetricsRecord::Name() const { return info_->Name(); }
+
++void MetricsRecord::OverrideTags(const map<string, string> &tags, const std::set<string> &keys) {
++    const auto &current = tags_->GetTagsMap();
++    bool changed = false;
++    for (const auto &key : keys) {
++        auto oldTag = current.find(key);
++        auto newTag = tags.find(key);
++        if (oldTag == current.end() && newTag == tags.end()) {
++            continue;
++        }
++        if (oldTag == current.end() || newTag == tags.end() || oldTag->second != newTag->second) {
++            changed = true;
++            break;
++        }
++    }
++    if (!changed) {
++        return;
++    }
++    auto mergedTags = current;
++    for (const auto &key : keys) {
++        auto tag = tags.find(key);
++        if (tag == tags.end()) {
++            mergedTags.erase(key);
++        } else {
++            mergedTags[key] = tag->second;
++        }
++    }
++    tags_.reset(new MetricsTags(mergedTags));
++}
++
+ void MetricsRecord::AddValue(const MetricsInfoPtr &info, double value) {
+     auto str = autil::StringUtil::fToString(value, /*format*/ "%.10g");
+     auto item = new MetricsValue(info, str);
+diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.h aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.h
+--- aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.h
++++ aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.h
+@@ -9,6 +9,7 @@
+ #define KMONITOR_CLIENT_CORE_METRICSRECORD_H_
+
+ #include <map>
++#include <set>
+ #include <string>
+ #include <vector>
+
+@@ -29,6 +30,8 @@
+     const std::string &Name() const;
+     const MetricsTagsPtr &Tags() const { return tags_; }
+     const std::vector<MetricsValue *> &Values() const { return values_; }
++    // Keys absent from tags are removed. Other per-metric tags are preserved.
++    void OverrideTags(const std::map<std::string, std::string> &tags, const std::set<std::string> &keys);
+     void AddValue(const MetricsInfoPtr &info, double value);
+     void AddValue(const MetricsInfoPtr &info, const std::string &value);
+
+diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.cpp aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.cpp
+--- aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.cpp
++++ aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.cpp
+@@ -53,6 +53,17 @@
+ }
+
+ void MetricsSystem::Init(MetricsConfig *config) {
++    output_override_tags_.clear();
++    for (const auto &key : output_tag_keys_) {
++        const auto &globalTags = config->global_tags()->GetTagsMap();
++        auto globalTag = globalTags.find(key);
++        auto commonTag = config->CommonTags().find(key);
++        if (globalTag != globalTags.end()) {
++            output_override_tags_[key] = globalTag->second;
++        } else if (config->use_common_tag() && commonTag != config->CommonTags().end()) {
++            output_override_tags_[key] = commonTag->second;
++        }
++    }
+     if (!initSink(config)) {
+         AUTIL_LOG(ERROR, "sink init fail, metric system event timer stop");
+         return;
+@@ -114,6 +125,11 @@
+ }
+
+ void MetricsSystem::PublishMetrics(MetricsRecords &records) {
++    if (!output_tag_keys_.empty()) {
++        for (auto record : records.getRecords()) {
++            record->OverrideTags(output_override_tags_, output_tag_keys_);
++        }
++    }
+     for (auto e : sinks_) {
+         auto &sink = e.second;
+         auto &rawRecords = records.getRecords();
+diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.h aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.h
+--- aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.h
++++ aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.h
+@@ -39,6 +39,8 @@
+     MetricsSystem &operator=(const MetricsSystem &) = delete;
+
+ public:
++    // Set before Init: publish these tags from the new config, even for retained metrics.
++    void SetOutputTagKeys(const std::set<std::string> &keys) { output_tag_keys_ = keys; }
+     void Init(MetricsConfig *config);
+     void Stop();
+     bool Started();
+@@ -77,6 +79,8 @@
+     int64_t random_time_;
+     std::mutex queue_mutex_;
+     std::queue<std::pair<int64_t, MetricsRecords>> publish_queue_;
++    std::set<std::string> output_tag_keys_;
++    std::map<std::string, std::string> output_override_tags_;
+
+ private:
+     AUTIL_LOG_DECLARE();
+diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsConfig.cpp aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsConfig.cpp
+--- aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsConfig.cpp
++++ aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsConfig.cpp
+@@ -74,6 +74,7 @@
+         manually_mode_ = config.manually_mode();
+         *global_tags_ = *config.global_tags();
+         use_common_tag_ = config.use_common_tag();
++        common_tags_ = config.CommonTags();
+     }
+     return *this;
+ }
