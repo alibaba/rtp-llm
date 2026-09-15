@@ -39,6 +39,23 @@ def _run(args, timeout: float) -> str:
     ).strip()
 
 
+def _ensure_python_scripts_on_path() -> None:
+    """Expose tools installed beside the active Python to runtime JITs."""
+    scripts_dir = sysconfig.get_path("scripts")
+    if not scripts_dir:
+        logging.warning("JIT_RUNTIME_PATH: Python scripts directory is unavailable")
+        return
+
+    scripts_dir = os.path.realpath(scripts_dir)
+    current_path = os.environ.get("PATH", "")
+    path_entries = [entry for entry in current_path.split(os.pathsep) if entry]
+    if scripts_dir in (os.path.realpath(entry) for entry in path_entries):
+        return
+
+    os.environ["PATH"] = os.pathsep.join([scripts_dir, *path_entries])
+    logging.info("JIT_RUNTIME_PATH: prepended Python scripts directory %s", scripts_dir)
+
+
 def _accelerator_scope(backend: str, version: str) -> str | None:
     try:
         arch = _run([sys.executable, "-c", GPU_PROBE], 60)
@@ -355,6 +372,7 @@ class JitCacheManager(FileSystemEventHandler):
 
 
 def start_from_config(config):
+    _ensure_python_scripts_on_path()
     if not config.manage_jit_cache:
         logging.info("JIT cache management disabled by configuration")
         return

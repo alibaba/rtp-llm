@@ -446,5 +446,68 @@ class VitMetricsTest(TestCase):
         )
 
 
+    def test_qwen3_video_load_falls_back_to_pyav(self):
+        import numpy as np
+        import torch
+        from rtp_llm.multimodal.multimodal_mixins.qwen2_5_vl import qwen2_5_vl_mixin
+        from rtp_llm.multimodal.multimodal_mixins.qwen2_5_vl.qwen2_5_vl_mixin import (
+            Qwen2_5_VLImageEmbedding,
+        )
+
+        class FakeFrame:
+            def __init__(self, index):
+                self.index = index
+
+            def to_ndarray(self, format):
+                self.assert_format = format
+                return np.full((4, 6, 3), self.index, dtype=np.uint8)
+
+        class FakeContainer:
+            def __init__(self):
+                self.stream = SimpleNamespace(
+                    frames=8, average_rate=1, guessed_rate=None
+                )
+                self.streams = SimpleNamespace(video=[self.stream])
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def decode(self, stream):
+                self.assert_stream = stream
+                return iter(FakeFrame(index) for index in range(8))
+
+        class Config:
+            fps = 1
+            min_frames = 4
+            max_frames = 4
+            min_pixels = -1
+            max_pixels = -1
+            height = -1
+            width = -1
+
+        fake_av = SimpleNamespace(open=MagicMock(return_value=FakeContainer()))
+
+        def fake_resize(video, size, interpolation=None, antialias=None):
+            return video
+
+        with patch.object(qwen2_5_vl_mixin, "VideoReader", None), patch.object(
+            qwen2_5_vl_mixin, "av", fake_av
+        ), patch.object(
+            qwen2_5_vl_mixin, "smart_resize", return_value=(4, 6)
+        ), patch.object(
+            qwen2_5_vl_mixin.transforms.functional,
+            "resize",
+            side_effect=fake_resize,
+        ):
+            video = Qwen2_5_VLImageEmbedding.load_video(b"video", Config())
+
+        fake_av.open.assert_called_once_with(b"video", mode="r")
+        self.assertEqual(tuple(video.shape), (4, 3, 4, 6))
+        self.assertEqual(video[:, 0, 0, 0].tolist(), [0, 2, 5, 7])
+
+
 if __name__ == "__main__":
     main()

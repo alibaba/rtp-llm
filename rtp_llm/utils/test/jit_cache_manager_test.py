@@ -63,6 +63,28 @@ requires_shared_acl = unittest.skipUnless(
 )
 
 
+class JitRuntimePathTest(unittest.TestCase):
+    def test_prepends_python_scripts_directory(self):
+        with mock.patch.object(
+            jit.sysconfig, "get_path", return_value="/opt/conda310/bin"
+        ), mock.patch.dict(os.environ, {"PATH": "/usr/local/bin:/usr/bin"}):
+            jit._ensure_python_scripts_on_path()
+            self.assertEqual(
+                os.environ["PATH"], "/opt/conda310/bin:/usr/local/bin:/usr/bin"
+            )
+
+    def test_does_not_duplicate_python_scripts_directory(self):
+        with mock.patch.object(
+            jit.sysconfig, "get_path", return_value="/opt/conda310/bin"
+        ), mock.patch.dict(
+            os.environ, {"PATH": "/usr/local/bin:/opt/conda310/bin:/usr/bin"}
+        ):
+            jit._ensure_python_scripts_on_path()
+            self.assertEqual(
+                os.environ["PATH"], "/usr/local/bin:/opt/conda310/bin:/usr/bin"
+            )
+
+
 def contents(root: Path) -> dict[str, bytes]:
     return {
         path.relative_to(root).as_posix(): path.read_bytes()
@@ -914,8 +936,40 @@ class BackendTest(JitCacheTestBase):
         configs.jit_config.remote_jit_dir = remote
         configs.jit_config.jit_cache_setup_timeout_s = 5
         configs.jit_config.manage_jit_cache = True
+        configs.fmha_config.enable_flashinfer_trtllm_gen = False
         configs.parallelism_config.world_size = world_size
         return configs
+
+    def test_trtllm_gen_prewarm_is_skipped_when_disabled(self):
+        configs = self.make_configs()
+        prefill = types.ModuleType("flashinfer.prefill")
+        prefill.get_trtllm_gen_fmha_module = mock.Mock()
+        with mock.patch.dict(sys.modules, {"flashinfer.prefill": prefill}):
+            backend._prewarm_flashinfer_trtllm_gen(configs)
+        prefill.get_trtllm_gen_fmha_module.assert_not_called()
+
+    def test_trtllm_gen_prewarm_builds_launcher_once(self):
+        configs = self.make_configs()
+        configs.fmha_config.enable_flashinfer_trtllm_gen = True
+        prefill = types.ModuleType("flashinfer.prefill")
+        prefill.get_trtllm_gen_fmha_module = mock.Mock()
+        with mock.patch.dict(sys.modules, {"flashinfer.prefill": prefill}):
+            backend._prewarm_flashinfer_trtllm_gen(configs)
+        prefill.get_trtllm_gen_fmha_module.assert_called_once_with()
+
+    def test_trtllm_gen_prewarm_failure_prevents_rank_spawn(self):
+        configs = self.make_configs(remote="/r", world_size=2)
+        configs.fmha_config.enable_flashinfer_trtllm_gen = True
+        with self.patched_backend(device_count=2), mock.patch.object(
+            jit, "start_from_config", return_value=None
+        ), mock.patch.object(
+            backend,
+            "_prewarm_flashinfer_trtllm_gen",
+            side_effect=RuntimeError("launcher build failed"),
+        ), mock.patch.object(backend, "multi_rank_start") as ranks:
+            with self.assertRaisesRegex(RuntimeError, "launcher build failed"):
+                backend.start_backend_server(None, configs)
+        ranks.assert_not_called()
 
     def patched_backend(self, *, cuda=True, device_count=1, signal_handler=None):
         """Neutralize start_backend_server's process-wide startup side effects."""
@@ -942,10 +996,13 @@ class BackendTest(JitCacheTestBase):
     def test_manage_jit_cache_false_skips_all_setup(self):
         config = self.make_configs(remote="/r").jit_config
         config.manage_jit_cache = False
-        with mock.patch.object(jit, "setup_jit_cache_env") as setup, mock.patch.object(
-            jit, "JitCacheManager"
-        ) as manager:
+        with mock.patch.object(
+            jit, "_ensure_python_scripts_on_path"
+        ) as ensure_path, mock.patch.object(
+            jit, "setup_jit_cache_env"
+        ) as setup, mock.patch.object(jit, "JitCacheManager") as manager:
             self.assertIsNone(jit.start_from_config(config))
+        ensure_path.assert_called_once_with()
         setup.assert_not_called()
         manager.assert_not_called()
 

@@ -3,6 +3,7 @@
 # Packages that link libcudart.so.12 (flash_attn, flashinfer_*, deep_ep,
 # fast_hadamard, nvidia_cutlass_dsl) are deferred.
 -r requirements_base.txt
+av==16.1.0
 https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl
 https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl
 mysql-connector-python

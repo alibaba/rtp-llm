@@ -214,6 +214,9 @@ audioread==3.1.0 \
     --hash=sha256:1c4ab2f2972764c896a8ac61ac53e261c8d29f0c6ccd652f84e18f08a4cab190 \
     --hash=sha256:b30d1df6c5d3de5dcef0fb0e256f6ea17bdcf5f979408df0297d8a408e2971b4
     # via librosa
+av==16.1.0 \
+    --hash=sha256:6cbac833092e66b6b0ac4d81ab077970b8ca874951e9c3974d41d922aaa653ed
+    # via -r internal_source/deps/requirements_cuda13_arm.txt
 backports-strenum==1.3.1 \
     --hash=sha256:77c52407342898497714f0596e86188bb7084f89063226f4ba66863482f42414 \
     --hash=sha256:cdcfe36dc897e2615dc793b7d3097f54d359918fc448754a517e6f23044ccf83

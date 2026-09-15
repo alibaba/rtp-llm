@@ -404,6 +404,7 @@ def start_backend_server(
             manager = start_from_config(py_env_configs.jit_config)
         except Exception:  # cold start; a signal instead unwinds to the finally
             logging.exception("JIT_CACHE_FAIL_OPEN: setup failed; cold start")
+        _prewarm_flashinfer_trtllm_gen(py_env_configs)
         if torch.cuda.device_count() > 1 and pc.world_size > 1:
             return multi_rank_start(
                 global_controller,
@@ -415,3 +416,26 @@ def start_backend_server(
     finally:
         if manager:
             manager.stop()
+
+
+def _prewarm_flashinfer_trtllm_gen(py_env_configs: PyEnvConfigs) -> None:
+    """Build the shared TRTLLM-Gen launcher before local ranks are spawned.
+
+    FlashInfer downloads ``flashInferMetaInfo.h`` while building this launcher.
+    Letting every local rank discover a cold cache on its first request makes
+    them contend on FlashInfer's 30-second artifact lock.  A slow download can
+    then make the losing ranks raise ``flashInferMetaInfo.h not found`` and
+    terminate the whole backend.  The backend parent already owns the shared
+    JIT cache environment, so populate and compile it once here.
+
+    This is deliberately fail-closed: a service configured to use TRTLLM-Gen
+    must not become healthy when its first request is guaranteed to fail.
+    """
+    if not py_env_configs.fmha_config.enable_flashinfer_trtllm_gen:
+        return
+
+    logging.info("Prewarming FlashInfer TRTLLM-Gen FMHA launcher")
+    from flashinfer.prefill import get_trtllm_gen_fmha_module
+
+    get_trtllm_gen_fmha_module()
+    logging.info("FlashInfer TRTLLM-Gen FMHA launcher is ready")

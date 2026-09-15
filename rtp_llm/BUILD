@@ -68,12 +68,14 @@ xft_dep = select({
 arch_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
+    "@//:using_cuda13_arm": [":av"],
     "//conditions:default": [":decord", ":av"],
 })
 
 arch_with_version_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
+    "@//:using_cuda13_arm": ["av==16.1.0"],
     "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
 })
 
@@ -227,6 +229,7 @@ py_library(
     deps = [
         ":torch",
         ":utils",
+        "//rtp_llm/models_py/triton_kernels:common",
     ],
 )
 
