@@ -38,7 +38,6 @@ constexpr int kLayers           = 3;
 constexpr int kBlocks           = 32;
 constexpr int kTokensPerBlock   = 4;
 constexpr int kNewTokens        = 3;
-constexpr int kRequestTimeoutMs = 10000;
 
 void require(bool condition, const std::string& message) {
     if (!condition) {
@@ -55,15 +54,45 @@ std::string environment(const char* name, const char* fallback) {
     return value ? value : fallback;
 }
 
+int64_t steadyTimeMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+struct PayloadTimeouts {
+    int request_ms;
+    int load_ms;
+};
+
+PayloadTimeouts payloadTimeouts() {
+    const bool remote = !environment("P2P_SMOKE_CONTROL_ADDR", "").empty();
+    const auto read   = [](const char* name, int fallback) {
+        const auto value = environment(name, "");
+        if (value.empty())
+            return fallback;
+        size_t    parsed  = 0;
+        const int timeout = std::stoi(value, &parsed);
+        require(parsed == value.size() && timeout > 0 && timeout <= 600000,
+                std::string(name) + " must be between 1 and 600000 ms");
+        return timeout;
+    };
+    // Payload integrity is independent of clock synchronization. Production
+    // still checks absolute deadlines, so allow bounded skew in cross-host runs.
+    PayloadTimeouts result{read("P2P_SMOKE_REQUEST_TIMEOUT_MS", remote ? 120000 : 10000),
+                           read("P2P_SMOKE_LOAD_TIMEOUT_MS", remote ? 90000 : 3000)};
+    require(result.load_ms < result.request_ms, "payload load timeout must be less than request timeout");
+    return result;
+}
+
 bool waitFor(const std::function<bool()>& condition) {
     // Cover the production 20s lease hold after a failed physical transfer.
-    const auto deadline = currentTimeMs() + 30000;
+    const auto deadline = steadyTimeMs() + 30000;
     do {
         if (condition()) {
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    } while (currentTimeMs() < deadline);
+    } while (steadyTimeMs() < deadline);
     return condition();
 }
 
@@ -394,8 +423,8 @@ public:
     std::unique_ptr<grpc::Server> server;
 };
 
-std::shared_ptr<PayloadEngine>
-makePayloadEngine(const CacheConfig& config, RoleType role, const PayloadEndpoint& endpoint, bool rdma) {
+std::shared_ptr<PayloadEngine> makePayloadEngine(
+    const CacheConfig& config, RoleType role, const PayloadEndpoint& endpoint, bool rdma, int load_timeout_ms) {
     PDSepConfig pd;
     pd.role_type             = role;
     pd.decode_entrance       = true;
@@ -404,7 +433,7 @@ makePayloadEngine(const CacheConfig& config, RoleType role, const PayloadEndpoin
     const auto transfer_port = autil::NetUtil::randomPort();
     require(transfer_port > 1 && transfer_port <= 65535, "invalid transfer port");
     pd.cache_store_listen_port = transfer_port - 1;
-    pd.load_cache_timeout_ms   = 3000;
+    pd.load_cache_timeout_ms   = load_timeout_ms;
     RuntimeConfig runtime;
     runtime.max_generate_batch_size                     = 4;
     runtime.fifo_scheduler_config.max_batch_tokens_size = 256;
@@ -418,14 +447,16 @@ makePayloadEngine(const CacheConfig& config, RoleType role, const PayloadEndpoin
 // Test control protocol carries configuration, counters and diagnostics only.
 // Cache bytes and the first token exclusively use the production RPC/transport.
 struct WorkerHello {
-    uint32_t magic = 0x50325031;
+    uint32_t magic              = 0x50325032;
     int32_t  dtype = 0;
     int32_t  fault = 0;
     int32_t  rdma  = 0;
+    int32_t  request_timeout_ms = 0;
+    int32_t  load_timeout_ms    = 0;
 };
 
 struct WorkerReport {
-    uint32_t magic          = 0x50325031;
+    uint32_t magic          = 0x50325032;
     int32_t  pid            = 0;
     int32_t  grpc_port      = 0;
     int32_t  generate_calls = 0, peer_calls = 0, load_calls = 0, handle_read_calls = 0;
@@ -448,9 +479,9 @@ public:
 };
 
 void awaitControl(int fd, short events, int64_t deadline) {
-    while (currentTimeMs() < deadline) {
+    while (steadyTimeMs() < deadline) {
         pollfd    poll_fd{fd, events, 0};
-        const int result = ::poll(&poll_fd, 1, static_cast<int>(std::max<int64_t>(0, deadline - currentTimeMs())));
+        const int result = ::poll(&poll_fd, 1, static_cast<int>(std::max<int64_t>(0, deadline - steadyTimeMs())));
         if (result < 0 && errno == EINTR)
             continue;
         require(result > 0, "P2P worker control timed out or poll failed");
@@ -462,7 +493,7 @@ void awaitControl(int fd, short events, int64_t deadline) {
 }
 
 void controlIO(int fd, void* data, size_t size, bool sending, int timeout_ms = 10000) {
-    const auto deadline = currentTimeMs() + timeout_ms;
+    const auto deadline = steadyTimeMs() + timeout_ms;
     auto*      bytes    = static_cast<char*>(data);
     while (size > 0) {
         awaitControl(fd, sending ? POLLOUT : POLLIN, deadline);
@@ -495,7 +526,7 @@ sockaddr_in controlAddress(const std::string& address) {
 // connects to an explicitly launched P worker and never signals a remote PID.
 class PrefillProcess {
 public:
-    PrefillProcess(DataType dtype, Fault fault, bool rdma) {
+    PrefillProcess(DataType dtype, Fault fault, bool rdma, PayloadTimeouts timeouts) {
         try {
             const auto remote = environment("P2P_SMOKE_CONTROL_ADDR", "");
             if (remote.empty()) {
@@ -506,7 +537,7 @@ public:
                 require(control_.fd >= 0, "control socket creation failed");
                 const int result = ::connect(control_.fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
                 require(result == 0 || errno == EINPROGRESS, "cannot connect to remote P control endpoint");
-                awaitControl(control_.fd, POLLOUT, currentTimeMs() + 10000);
+                awaitControl(control_.fd, POLLOUT, steadyTimeMs() + 10000);
                 int       error = 0;
                 socklen_t size  = sizeof(error);
                 require(::getsockopt(control_.fd, SOL_SOCKET, SO_ERROR, &error, &size) == 0 && error == 0,
@@ -516,6 +547,8 @@ public:
             hello.dtype = dtype == DataType::TYPE_INT8 ? 1 : 0;
             hello.fault = static_cast<int32_t>(fault);
             hello.rdma  = rdma;
+            hello.request_timeout_ms = timeouts.request_ms;
+            hello.load_timeout_ms    = timeouts.load_ms;
             controlIO(control_.fd, &hello, sizeof(hello), true);
             ready = receive(120000);
             require(ready.grpc_port > 0 && ready.host[0] != '\0', "P did not advertise a ready RPC endpoint");
@@ -654,13 +687,16 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
         ASSERT_EQ(::bind(listener.fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)), 0);
         ASSERT_EQ(::listen(listener.fd, 1), 0);
         std::cerr << "P2P control listening at " << listen_address << "; waiting for D (120s)" << std::endl;
-        awaitControl(listener.fd, POLLIN, currentTimeMs() + 120000);
+        awaitControl(listener.fd, POLLIN, steadyTimeMs() + 120000);
         control.fd = ::accept4(listener.fd, nullptr, nullptr, SOCK_CLOEXEC);
         ASSERT_GE(control.fd, 0);
     }
     WorkerHello hello;
     controlIO(control.fd, &hello, sizeof(hello), false);
     ASSERT_EQ(hello.magic, WorkerHello{}.magic);
+    ASSERT_GT(hello.load_timeout_ms, 0);
+    ASSERT_LT(hello.load_timeout_ms, hello.request_timeout_ms);
+    ASSERT_LE(hello.request_timeout_ms, 600000);
     ASSERT_TRUE(hello.dtype == 0 || hello.dtype == 1);
     ASSERT_GE(hello.fault, 0);
     ASSERT_LE(hello.fault, static_cast<int>(Fault::OmitLastLayer));
@@ -676,7 +712,7 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
         PayloadEndpoint endpoint(prefill, &prefill, host);
         const auto      config = test::makeSimpleMhaCacheConfig(
             kLayers, kBlocks, kTokensPerBlock, hello.dtype == 1 ? DataType::TYPE_INT8 : DataType::TYPE_FP16, 2, 16);
-        auto engine            = makePayloadEngine(config, RoleType::PREFILL, endpoint, hello.rdma);
+        auto engine = makePayloadEngine(config, RoleType::PREFILL, endpoint, hello.rdma, hello.load_timeout_ms);
         prefill.engine_        = engine;
         prefill.dp_grpc_addrs_ = {endpoint.address()};
         engine->fault          = static_cast<Fault>(hello.fault);
@@ -704,7 +740,7 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
                       << " transport=" << transport << std::endl;
             while (true) {
                 char command = 0;
-                controlIO(control.fd, &command, 1, false, 120000);
+                controlIO(control.fd, &command, 1, false, hello.request_timeout_ms + 60000);
                 if (command == 'Q')
                     break;
                 require(command == 'S', "unknown P worker control command");
@@ -723,18 +759,22 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
 class P2PGenerateStreamSmokeTest: public DeviceTestBase {
 protected:
     void initialize(DataType dtype, Fault fault = Fault::None) {
+        timeouts_            = payloadTimeouts();
         const auto transport = environment("P2P_SMOKE_TRANSPORT", "tcp");
         require(transport == "tcp" || transport == "rdma", "P2P_SMOKE_TRANSPORT must be tcp or rdma");
         host_ = environment("P2P_SMOKE_HOST", "127.0.0.1");
         require(transport != "rdma" || host_ != "127.0.0.1", "RDMA requires P2P_SMOKE_HOST on its network interface");
         // P execs a fresh image (or is launched on another host) before D starts its backend.
-        prefill_process_ = std::make_unique<PrefillProcess>(dtype, fault, transport == "rdma");
+        prefill_process_ = std::make_unique<PrefillProcess>(dtype, fault, transport == "rdma", timeouts_);
         std::cerr << "P2P decode pid=" << ::getpid() << ", prefill pid=" << prefill_process_->ready.pid
-                  << " grpc=" << prefill_process_->ready.host << ':' << prefill_process_->ready.grpc_port << std::endl;
+                  << " grpc=" << prefill_process_->ready.host << ':' << prefill_process_->ready.grpc_port
+                  << " request_timeout_ms=" << timeouts_.request_ms << " load_timeout_ms=" << timeouts_.load_ms
+                  << std::endl;
         decode_.meta_           = std::make_shared<RpcServerRuntimeMeta>();
         decode_rpc_             = std::make_unique<PayloadEndpoint>(decode_, nullptr, host_);
         const auto cache_config = test::makeSimpleMhaCacheConfig(kLayers, kBlocks, kTokensPerBlock, dtype, 2, 16);
-        decode_engine_          = makePayloadEngine(cache_config, RoleType::DECODE, *decode_rpc_, transport == "rdma");
+        decode_engine_ =
+            makePayloadEngine(cache_config, RoleType::DECODE, *decode_rpc_, transport == "rdma", timeouts_.load_ms);
         decode_.engine_         = decode_engine_;
         decode_.prefill_server_caller_ = std::make_shared<PrefillServerCaller>("p2p-payload-smoke");
         decode_engine_->start();
@@ -743,7 +783,7 @@ protected:
     GenerateInputPB request(int64_t id, int prompt_length) const {
         GenerateInputPB request;
         request.set_request_id(id);
-        request.set_request_deadline_ms(currentTimeMs() + kRequestTimeoutMs);
+        request.set_request_deadline_ms(currentTimeMs() + timeouts_.request_ms);
         for (int token = 1; token <= prompt_length; ++token) {
             request.add_token_ids(token);
         }
@@ -752,7 +792,7 @@ protected:
         config->set_max_new_tokens(kNewTokens);
         config->set_num_beams(1);
         config->set_num_return_sequences(1);
-        config->set_timeout_ms(kRequestTimeoutMs);
+        config->set_timeout_ms(timeouts_.request_ms);
         config->set_is_streaming(true);
         auto* role = config->add_role_addrs();
         role->set_role(RoleAddrPB::PREFILL);
@@ -765,7 +805,7 @@ protected:
         auto stub =
             RpcService::NewStub(grpc::CreateChannel(decode_rpc_->address(), grpc::InsecureChannelCredentials()));
         grpc::ClientContext context;
-        context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(kRequestTimeoutMs + 2000));
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(timeouts_.request_ms + 2000));
         auto              reader = stub->GenerateStreamCall(&context, request);
         GenerateOutputsPB output;
         while (reader->Read(&output)) {
@@ -848,6 +888,7 @@ protected:
         }
     }
 
+    PayloadTimeouts                  timeouts_{10000, 3000};
     std::string                      host_;
     DecodeRpcServerNew2              decode_;
     std::shared_ptr<PayloadEngine>   decode_engine_;
