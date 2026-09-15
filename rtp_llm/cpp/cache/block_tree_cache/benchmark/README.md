@@ -1,5 +1,19 @@
 # BlockTreeCache Benchmark
 
+## Device/Host copy API priority
+
+默认顺序为 `cuda_batch > sm > generic`。
+
+`BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY` 可设置为 `cuda_batch`、`sm` 或 `generic`。
+只把指定接口移到首位，其他接口保持相对顺序。例如：
+
+```bash
+export BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY=sm  # sm > cuda_batch > generic
+```
+
+仅在 executor 构造时读取；未设置/空值使用默认顺序，非法值告警后使用默认顺序。
+优先级不会覆盖接口禁用选项或 SM 阈值。不适用时尝试下一个接口，执行失败则返回错误。
+
 本目录提供 BlockTreeCache 的 Tree 在线生命周期 microbenchmark 与 Device/Host/Disk transfer benchmark。当前实现以 workload 可核对、失败可传播、repetition 相互独立为前提；整改前的 buffered 大工作集与 round-trip 数值不能作为基线。
 
 > [!IMPORTANT]
