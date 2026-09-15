@@ -2,6 +2,7 @@
 
 // Multimodal protobuf-to-engine conversions shared by RPC and transport code.
 
+#include <cstdint>
 #include <vector>
 
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -12,7 +13,7 @@ namespace rtp_llm {
 
 class MultimodalPbConverter {
 public:
-    static MultimodalInputsPB inputsToPb(const std::vector<MultimodalInput>& mm_inputs);
+    static MultimodalInputsPB inputsToPb(const std::vector<MultimodalInput>& mm_inputs, int64_t request_id = 0);
 
     // Decode and validate an inline response.
     static ErrorResult<MultimodalOutput> inlineOutputFromPb(const MultimodalOutputPB& output_pb);

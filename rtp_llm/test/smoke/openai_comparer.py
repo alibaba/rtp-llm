@@ -7,6 +7,7 @@ import torch
 from pydantic import BaseModel
 from smoke.base_comparer import BaseComparer
 from smoke.common_def import REL_PATH, QueryStatus, SmokeException
+from smoke.concurrent_stress import _detect_repetition
 from smoke.grammar_constraint_validator import validate_constraint
 from smoke.utils import create_temporary_copy
 
@@ -14,6 +15,7 @@ from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionStreamResponse,
+    UsageInfo,
 )
 from rtp_llm.utils.base_model_datatypes import AuxInfo
 
@@ -29,6 +31,16 @@ class OpenaiComparer(BaseComparer):
         return query_info
 
     def format_result(self, result_json: Dict[str, Any]) -> BaseModel:
+        # Cases that only assert output health carry an empty expected result;
+        # synthesize an empty response so the comparison can reach the health
+        # checks instead of failing to parse the golden value.
+        if not result_json and self.qr_info.get("compare_config", {}).get(
+            "skip_choices", False
+        ):
+            usage = UsageInfo(prompt_tokens=0, total_tokens=0, completion_tokens=0)
+            if self.is_stream:
+                return ChatCompletionStreamResponse(choices=[], usage=usage)
+            return ChatCompletionResponse(choices=[], usage=usage)
         if result_json.get("extra_outputs", None) is not None:
             path = result_json["extra_outputs"].get("all_hidden_states", None)
             if path is not None and isinstance(path, str):
@@ -352,6 +364,349 @@ class OpenaiComparer(BaseComparer):
                 f"[grammar_constraint_only] constraint check failed: {e}",
             ) from e
 
+    def _choice_text(self, choice: Any) -> str:
+        message = getattr(choice, "message", None)
+        if message is not None:
+            content = getattr(message, "content", "")
+        else:
+            delta = getattr(choice, "delta", None)
+            content = getattr(delta, "content", "") if delta is not None else ""
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        return json.dumps(self._to_json_safe(content), ensure_ascii=False)
+
+    def _choice_generated_text(self, choice: Any) -> str:
+        content = self._choice_text(choice)
+        if content.strip():
+            return content
+
+        message = getattr(choice, "message", None)
+        if message is not None:
+            reasoning_content = getattr(message, "reasoning_content", "")
+        else:
+            delta = getattr(choice, "delta", None)
+            reasoning_content = (
+                getattr(delta, "reasoning_content", "") if delta is not None else ""
+            )
+        if reasoning_content is None:
+            return ""
+        if isinstance(reasoning_content, str):
+            return reasoning_content
+        return json.dumps(self._to_json_safe(reasoning_content), ensure_ascii=False)
+
+    def _enum_value(self, value: Any) -> Any:
+        return getattr(value, "value", value)
+
+    def _validate_output_health(
+        self,
+        actual_result: Union[ChatCompletionResponse, ChatCompletionStreamResponse],
+        compare_config: Dict[str, Any],
+        diffs: List[str],
+    ) -> None:
+        health_config = compare_config.get("output_health_check")
+        if not health_config:
+            return
+        if health_config is True:
+            health_config = {}
+
+        choices = getattr(actual_result, "choices", None) or []
+        expected_choice_count = int(health_config.get("expected_choice_count", 1))
+        if len(choices) != expected_choice_count:
+            diffs.append(
+                self._format_expect_actual(
+                    "health choice count",
+                    expected_choice_count,
+                    len(choices),
+                )
+            )
+
+        usage = getattr(actual_result, "usage", None)
+        for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            min_key = f"min_{field}"
+            if min_key not in health_config:
+                continue
+            actual_value = getattr(usage, field, None) if usage is not None else None
+            min_value = int(health_config[min_key])
+            if actual_value is None or actual_value < min_value:
+                diffs.append(
+                    self._format_expect_actual(
+                        f"health {field} >= {min_value}",
+                        f">= {min_value}",
+                        actual_value,
+                    )
+                )
+
+        required_finish_reason = health_config.get("required_finish_reason")
+        min_content_chars = int(health_config.get("min_content_chars", 1))
+        min_unique_chars = int(health_config.get("min_unique_non_ws_chars", 0))
+        repeat_window = int(health_config.get("repeat_window", 0))
+        required_substrings = health_config.get("required_substrings", [])
+        required_substrings_any = health_config.get("required_substrings_any", [])
+        forbidden_substrings = health_config.get("forbidden_substrings", [])
+
+        for idx, choice in enumerate(choices):
+            if required_finish_reason is not None:
+                actual_reason = self._enum_value(getattr(choice, "finish_reason", None))
+                if actual_reason != required_finish_reason:
+                    diffs.append(
+                        self._format_expect_actual(
+                            f"health choices[{idx}].finish_reason",
+                            required_finish_reason,
+                            actual_reason,
+                        )
+                    )
+
+            content = self._choice_generated_text(choice)
+            stripped = content.strip()
+            if len(stripped) < min_content_chars:
+                diffs.append(
+                    self._format_expect_actual(
+                        f"health choices[{idx}].content length",
+                        f">= {min_content_chars}",
+                        len(stripped),
+                    )
+                )
+
+            control_chars = [
+                c for c in content if ord(c) < 32 and c not in ("\n", "\r", "\t")
+            ]
+            if control_chars:
+                diffs.append(
+                    self._format_expect_actual(
+                        f"health choices[{idx}].content control chars",
+                        "none",
+                        [ord(c) for c in control_chars[:20]],
+                    )
+                )
+
+            if min_unique_chars > 0:
+                unique_chars = {c for c in content if not c.isspace()}
+                if len(unique_chars) < min_unique_chars:
+                    diffs.append(
+                        self._format_expect_actual(
+                            f"health choices[{idx}].content unique chars",
+                            f">= {min_unique_chars}",
+                            len(unique_chars),
+                        )
+                    )
+
+            if repeat_window > 0:
+                repeated = _detect_repetition(content, repeat_window)
+                if repeated is not None:
+                    diffs.append(
+                        self._format_expect_actual(
+                            f"health choices[{idx}].content repetition",
+                            "no repeated fragment",
+                            repeated[:200],
+                        )
+                    )
+
+            missing_required = [
+                text for text in required_substrings if text not in content
+            ]
+            if missing_required:
+                diffs.append(
+                    self._format_expect_actual(
+                        f"health choices[{idx}].content required substrings",
+                        required_substrings,
+                        {"missing": missing_required},
+                    )
+                )
+
+            if required_substrings_any and not any(
+                text in content for text in required_substrings_any
+            ):
+                diffs.append(
+                    self._format_expect_actual(
+                        f"health choices[{idx}].content required any substring",
+                        required_substrings_any,
+                        "none found",
+                    )
+                )
+
+            present_forbidden = [
+                text for text in forbidden_substrings if text and text in content
+            ]
+            if present_forbidden:
+                diffs.append(
+                    self._format_expect_actual(
+                        f"health choices[{idx}].content forbidden substrings",
+                        "none",
+                        present_forbidden,
+                    )
+                )
+
+    def _validate_aux_info_health(
+        self,
+        actual_result: Union[ChatCompletionResponse, ChatCompletionStreamResponse],
+        compare_config: Dict[str, Any],
+        diffs: List[str],
+    ) -> None:
+        aux_config = compare_config.get("aux_info_health_check")
+        if not aux_config:
+            return
+        if aux_config is True:
+            aux_config = {}
+
+        aux_info = getattr(actual_result, "aux_info", None)
+        if aux_info is None:
+            diffs.append(self._format_expect_actual("aux_info health", aux_config, None))
+            return
+
+        for field in (
+            "reuse_len",
+            "local_reuse_len",
+            "remote_reuse_len",
+            "memory_reuse_len",
+            "prefill_total_reuse_len",
+            "prefill_local_reuse_len",
+            "prefill_remote_reuse_len",
+            "prefill_memory_reuse_len",
+            "decode_total_reuse_len",
+            "decode_local_reuse_len",
+            "decode_remote_reuse_len",
+            "decode_memory_reuse_len",
+        ):
+            actual_value = getattr(aux_info, field, None)
+            min_key = f"min_{field}"
+            if min_key in aux_config:
+                min_value = int(aux_config[min_key])
+                if actual_value is None or actual_value < min_value:
+                    diffs.append(
+                        self._format_expect_actual(
+                            f"aux_info.{field} >= {min_value}",
+                            f">= {min_value}",
+                            actual_value,
+                        )
+                    )
+            max_key = f"max_{field}"
+            if max_key in aux_config:
+                max_value = int(aux_config[max_key])
+                if actual_value is None or actual_value > max_value:
+                    diffs.append(
+                        self._format_expect_actual(
+                            f"aux_info.{field} <= {max_value}",
+                            f"<= {max_value}",
+                            actual_value,
+                        )
+                    )
+
+        output_len = getattr(aux_info, "output_len", None)
+        iter_count = getattr(aux_info, "iter_count", None)
+
+        min_output_len = aux_config.get("min_output_len")
+        if min_output_len is not None and (
+            output_len is None or output_len < int(min_output_len)
+        ):
+            diffs.append(
+                self._format_expect_actual(
+                    f"aux_info.output_len >= {min_output_len}",
+                    f">= {min_output_len}",
+                    output_len,
+                )
+            )
+
+        max_output_len = aux_config.get("max_output_len")
+        if max_output_len is not None and (
+            output_len is None or output_len > int(max_output_len)
+        ):
+            diffs.append(
+                self._format_expect_actual(
+                    f"aux_info.output_len <= {max_output_len}",
+                    f"<= {max_output_len}",
+                    output_len,
+                )
+            )
+
+        max_iter_count = aux_config.get("max_iter_count")
+        if max_iter_count is not None and (
+            iter_count is None or iter_count > int(max_iter_count)
+        ):
+            diffs.append(
+                self._format_expect_actual(
+                    f"aux_info.iter_count <= {max_iter_count}",
+                    f"<= {max_iter_count}",
+                    iter_count,
+                )
+            )
+
+        max_iter_count_ratio = aux_config.get("max_iter_count_ratio")
+        if max_iter_count_ratio is not None:
+            if output_len in (None, 0) or iter_count is None:
+                diffs.append(
+                    self._format_expect_actual(
+                        "aux_info.iter_count/output_len",
+                        f"<= {max_iter_count_ratio}",
+                        {"iter_count": iter_count, "output_len": output_len},
+                    )
+                )
+            else:
+                ratio = float(iter_count) / float(output_len)
+                if ratio > float(max_iter_count_ratio):
+                    diffs.append(
+                        self._format_expect_actual(
+                            "aux_info.iter_count/output_len",
+                            f"<= {max_iter_count_ratio}",
+                            ratio,
+                        )
+                    )
+
+        min_tokens_per_iter = aux_config.get("min_tokens_per_iter")
+        if min_tokens_per_iter is not None:
+            if iter_count in (None, 0) or output_len is None:
+                diffs.append(
+                    self._format_expect_actual(
+                        "aux_info.output_len/iter_count",
+                        f">= {min_tokens_per_iter}",
+                        {"output_len": output_len, "iter_count": iter_count},
+                    )
+                )
+            else:
+                tokens_per_iter = float(output_len) / float(iter_count)
+                if tokens_per_iter < float(min_tokens_per_iter):
+                    diffs.append(
+                        self._format_expect_actual(
+                            "aux_info.output_len/iter_count",
+                            f">= {min_tokens_per_iter}",
+                            tokens_per_iter,
+                        )
+                    )
+
+        max_tokens_per_iter = aux_config.get("max_tokens_per_iter")
+        if max_tokens_per_iter is not None:
+            if iter_count in (None, 0) or output_len is None:
+                diffs.append(
+                    self._format_expect_actual(
+                        "aux_info.output_len/iter_count",
+                        f"<= {max_tokens_per_iter}",
+                        {"output_len": output_len, "iter_count": iter_count},
+                    )
+                )
+            else:
+                tokens_per_iter = float(output_len) / float(iter_count)
+                if tokens_per_iter > float(max_tokens_per_iter):
+                    diffs.append(
+                        self._format_expect_actual(
+                            "aux_info.output_len/iter_count",
+                            f"<= {max_tokens_per_iter}",
+                            tokens_per_iter,
+                        )
+                    )
+
+        required_pd_sep = aux_config.get("required_pd_sep")
+        if required_pd_sep is not None:
+            actual_pd_sep = getattr(aux_info, "pd_sep", None)
+            if actual_pd_sep != bool(required_pd_sep):
+                diffs.append(
+                    self._format_expect_actual(
+                        "aux_info.pd_sep",
+                        bool(required_pd_sep),
+                        actual_pd_sep,
+                    )
+                )
+
     def compare_result(
         self,
         expect_result: Union[ChatCompletionResponse, ChatCompletionStreamResponse],
@@ -373,6 +728,9 @@ class OpenaiComparer(BaseComparer):
                 + "\n  actual: "
                 + type(actual_result).__name__
             )
+
+        self._validate_output_health(actual_result, compare_config, diffs)
+        self._validate_aux_info_health(actual_result, compare_config, diffs)
 
         if not skip_usage and expect_result.usage != actual_result.usage:
             diffs.append(

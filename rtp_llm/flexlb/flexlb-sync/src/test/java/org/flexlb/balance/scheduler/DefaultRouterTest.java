@@ -20,6 +20,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.VitCacheDirectory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -52,6 +53,7 @@ class DefaultRouterTest {
     private RandomStrategy vitSelector;
     private ConfigService configService;
     private ModelMetaConfig modelMeta;
+    private VitCacheDirectory vitCacheDirectory;
 
     @BeforeEach
     void setUp() {
@@ -60,6 +62,7 @@ class DefaultRouterTest {
         vitSelector = mock(RandomStrategy.class);
         configService = mock(ConfigService.class);
         modelMeta = mock(ModelMetaConfig.class);
+        vitCacheDirectory = mock(VitCacheDirectory.class);
     }
 
     @Test
@@ -428,7 +431,8 @@ class DefaultRouterTest {
                 decodeSelector,
                 vitSelector,
                 configService,
-                modelMeta);
+                modelMeta,
+                vitCacheDirectory);
     }
 
     private void stubQueueSelection(

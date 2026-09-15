@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -344,9 +345,10 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
                 resource_context_.cache_manager->insertIntoCache(insert_info);
             }
+            const bool tiered_remote_eviction = resource_context_.enable_memory_cache_remote_eviction;
             storeCacheAsync(batch_kv_cache_resource_,
                             reuseCache() && enableMemoryCache() && !enableTieredMemoryCache(),
-                            reuseCache() && enableRemoteCache());
+                            reuseCache() && enableRemoteCache() && !tiered_remote_eviction);
             // only evict when succeeds
             if (enableTieredMemoryCache()) {
                 evictDeviceCacheToMemory();
@@ -764,39 +766,34 @@ std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
 }
 
 void StreamCacheResource::evictDeviceCacheToMemory() {
-    const auto min_free_blocks = resource_context_.device_cache_min_free_blocks;
-    if (!reuseCache() || !enableMemoryCache() || min_free_blocks <= 0) {
+    if (!reuseCache() || !enableMemoryCache()) {
         return;
     }
-    // Use notInUseBlocksNum() instead of freeBlocksNum() to account for
-    // in-flight connector blocks (being async-written to memory). These blocks
-    // are neither held by requests nor in BlockCache, so they will become free
-    // once the async write completes. This prevents concurrent streams from
-    // over-evicting when multiple streams finish simultaneously.
+    if (resource_context_.enable_memory_cache_remote_eviction) {
+        auto coordinator = resource_context_.cache_manager->connectorCoordinator();
+        if (!coordinator) {
+            RTP_LLM_LOG_WARNING("tiered memory cache eviction skipped: connector coordinator is null, stream[%s]",
+                                stream_->streamLogTag().c_str());
+            return;
+        }
+        coordinator->enqueueTieredEviction(stream_->traceId());
+        return;
+    }
+
+    // Preserve the legacy fixed-free-block behavior while the new feature is disabled.
+    const auto min_free_blocks = resource_context_.device_cache_min_free_blocks;
+    if (min_free_blocks <= 0) {
+        return;
+    }
     const auto not_in_use_blocks = resource_context_.cache_manager->notInUseBlocksNum();
     if (not_in_use_blocks >= static_cast<size_t>(min_free_blocks)) {
         return;
     }
-
     const auto need_blocks      = static_cast<size_t>(min_free_blocks) - not_in_use_blocks;
     auto       evicted_resource = resource_context_.cache_manager->popBlocksFromCache(need_blocks);
     if (!evicted_resource || !evicted_resource->hasCacheKeys()) {
-        RTP_LLM_LOG_INFO(
-            "tiered memory cache skip eviction, stream[%s], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu",
-            stream_->streamLogTag().c_str(),
-            not_in_use_blocks,
-            min_free_blocks,
-            need_blocks);
         return;
     }
-
-    RTP_LLM_LOG_INFO(
-        "tiered memory cache evict, stream[%s], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu, evict_keys=%zu",
-        stream_->streamLogTag().c_str(),
-        not_in_use_blocks,
-        min_free_blocks,
-        need_blocks,
-        evicted_resource->cacheKeys(0).size());
     storeCacheAsync(evicted_resource, /*enable_memory_cache=*/true, /*enable_remote_cache=*/false);
     resource_context_.cache_manager->blockCacheFree(evicted_resource);
 }

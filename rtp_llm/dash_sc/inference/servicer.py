@@ -158,6 +158,7 @@ def _build_mm_inputs_from_request(
                 fps=part.fps,
                 min_frames=part.min_frames,
                 max_frames=part.max_frames,
+                max_long_side_pixel=part.max_long_side_pixel,
             ),
         )
         for part in parts
@@ -329,6 +330,17 @@ def _dash_error_mapping_for_ft_exception(
         return _DashFtErrorMapping(
             DASH_ERROR_ADMISSION_OVERLOADED,
             "Too many requests.",
+        )
+
+    if exception_type in (
+        ExceptionType.UNSAFE_INPUT_CONTENT,
+        ExceptionType.UNSAFE_OUTPUT_CONTENT,
+    ):
+        # Greennet content-safety verdict. The ``DataInspectionFailed:`` prefix is
+        # part of the public DashScope contract, so it must survive the mapping.
+        return _DashFtErrorMapping(
+            _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY[exception_type.category],
+            public_message=f"DataInspectionFailed: {exc.message}",
         )
 
     return _DashFtErrorMapping(
@@ -866,10 +878,11 @@ async def iter_real_model_stream_infer(
     tag = stream_log_tag(request_id_numeric=rtp_llm_request_id, trace_id=trace_str)
     runtime = think_runtime if think_runtime is not None else _ThinkRuntime()
     logging.debug(
-        "[DashScGrpc] [%s] real infer start: model_name=%s input_len=%s sampling=%s",
+        "[DashScGrpc] [%s] real infer start: model_name=%s input_len=%s structural_tag=%s sampling=%s",
         tag,
         request.model_name,
         len(input_ids_list),
+        getattr(sampling, "structural_tag", None),
         sampling,
     )
     matched_echo_ids = _matched_echo_prefix_ids(input_ids_list, echo_prefix_ids)

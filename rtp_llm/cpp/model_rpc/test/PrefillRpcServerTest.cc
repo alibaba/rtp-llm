@@ -99,7 +99,8 @@ public:
 
 private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput> mm_inputs,
-                                                      std::string                        ip_port = "") override {
+                                                      std::string                        ip_port    = "",
+                                                      int64_t                            request_id = 0) override {
         const auto result_code = result_codes_[std::min<size_t>(call_count_, result_codes_.size() - 1)];
         ++call_count_;
         if (result_code != ErrorCode::NONE_ERROR) {

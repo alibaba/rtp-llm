@@ -16,6 +16,7 @@ public enum StrategyErrorType {
     NO_VIT_WORKER(8405, true),
     NO_FRONTEND_WORKER(8407, true),
     INVALID_REQUEST(8406, false),
+    VIT_ROUTE_STALE(8408, false),
 
     // queue error
     QUEUE_FULL(8502, false, "TooManyRequests"),

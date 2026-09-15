@@ -470,8 +470,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                          kv_cache_config,
                                                          sp_config,
                                                          warm_up_result,
-                                                         isMTPEagle(),
-                                                         isEagle());
+                                                         isMTPEagle());
 
         resource_context_.cache_manager = make_shared<KVCacheManager>(config,
                                                                       false,
@@ -719,9 +718,10 @@ bool NormalEngine::isDSpark() {
 
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     if (isMTPEagle()) {
-        int        propose_step   = sp_config.gen_num_per_cycle;
-        int        mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
-        const bool is_dspark      = propose_params_->sp_type == SP_TYPE_DSPARK;
+        const auto& draft_model_config = propose_params_->getEngineInitParams().model_config_;
+        int         propose_step       = sp_config.gen_num_per_cycle;
+        int         mtp_vocab_size     = draft_model_config.vocab_size;
+        const bool  is_dspark          = propose_params_->sp_type == SP_TYPE_DSPARK;
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
                 if (streams.empty()) {
@@ -732,7 +732,13 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
             case RoleType::DECODE:
                 if (streams.empty()) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));
+                        propose_step,
+                        model_config_,
+                        draft_model_config,
+                        runtime_config,
+                        resource_context_,
+                        mtp_vocab_size,
+                        is_dspark));
                 }
                 break;
             case RoleType::PDFUSION: {
@@ -751,7 +757,13 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                 }
                 if (!has_decode) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));
+                        propose_step,
+                        model_config_,
+                        draft_model_config,
+                        runtime_config,
+                        resource_context_,
+                        mtp_vocab_size,
+                        is_dspark));
                 }
                 break;
             }

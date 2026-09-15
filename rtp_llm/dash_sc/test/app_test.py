@@ -167,10 +167,13 @@ class DeriveEchoPrefixIdsTest(TestCase):
 class CreateProxyServicerOnLoopTest(TestCase):
     def test_constructs_inside_running_loop(self) -> None:
         created_loops = []
+        received_configs = []
         sentinel = object()
+        sentinel_config = object()
 
         def fake_servicer(**kwargs):
             created_loops.append(asyncio.get_running_loop())
+            received_configs.append(kwargs.pop("dash_sc_grpc_config"))
             self.assertEqual(kwargs, {"rank_id": 7, "server_id": "42"})
             return sentinel
 
@@ -178,6 +181,7 @@ class CreateProxyServicerOnLoopTest(TestCase):
             with patch.object(bg_app, "DashScProxyServicer", side_effect=fake_servicer):
                 loop = asyncio.get_running_loop()
                 servicer = await _create_proxy_servicer_on_loop(
+                    dash_sc_grpc_config=sentinel_config,
                     rank_id=7,
                     server_id="42",
                 )
@@ -186,6 +190,7 @@ class CreateProxyServicerOnLoopTest(TestCase):
         loop, servicer = asyncio.run(run())
         self.assertIs(servicer, sentinel)
         self.assertEqual(created_loops, [loop])
+        self.assertEqual(received_configs, [sentinel_config])
 
 
 class TraceTelemetryLifecycleTest(TestCase):

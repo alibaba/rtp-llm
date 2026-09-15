@@ -21,6 +21,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.VitCacheDirectory;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 
@@ -218,7 +219,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     new CostBasedDecodeStrategy(workers),
                     new RandomStrategy(workers),
                     configs,
-                    emptyModelMeta());
+                    emptyModelMeta(),
+                    org.mockito.Mockito.mock(VitCacheDirectory.class));
         }
 
         private synchronized void bind(DefaultRouter exactRouter) {

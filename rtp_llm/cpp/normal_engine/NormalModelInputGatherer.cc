@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace rtp_llm {
 
@@ -25,6 +26,56 @@ bool asyncDebugEnabled() {
 bool deviceInputEnabled() {
     const char* env = std::getenv("RTP_LLM_DEVICE_INPUT");
     return env != nullptr && std::string(env) == "1";
+}
+
+bool pdDebugEnabled() {
+    const char* env = std::getenv("RTP_LLM_PD_DEBUG");
+    return env != nullptr && std::string(env) == "1";
+}
+
+torch::TensorOptions runtimeCudaI32Options() {
+    return torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
+}
+
+void checkRuntimeCudaDevice(const torch::Tensor& tensor, const char* name) {
+    if (!tensor.defined() || !tensor.is_cuda()) {
+        return;
+    }
+    const auto expected_device = static_cast<int>(getDeviceId());
+    RTP_LLM_CHECK_WITH_INFO(tensor.get_device() == expected_device,
+                            "%s is on cuda:%d, expected runtime cuda:%d",
+                            name,
+                            tensor.get_device(),
+                            expected_device);
+}
+
+std::string tensorSummary(const torch::Tensor& tensor, int64_t limit = 4) {
+    if (!tensor.defined()) {
+        return "None";
+    }
+    std::ostringstream oss;
+    oss << "shape=[";
+    for (int64_t i = 0; i < tensor.dim(); ++i) {
+        if (i > 0) {
+            oss << ",";
+        }
+        oss << tensor.size(i);
+    }
+    oss << "] device=" << tensor.device() << " dtype=" << tensor.dtype() << " numel=" << tensor.numel();
+    if (tensor.numel() == 0) {
+        return oss.str();
+    }
+    auto flat       = tensor.reshape({-1});
+    auto head_count = std::min<int64_t>(limit, flat.numel());
+    auto tail_count = std::min<int64_t>(limit, flat.numel());
+    auto head       = flat.slice(0, 0, head_count);
+    auto tail       = flat.slice(0, flat.numel() - tail_count, flat.numel());
+    if (head.device().is_cuda()) {
+        head = head.cpu();
+        tail = tail.cpu();
+    }
+    oss << " head=" << head << " tail=" << tail;
+    return oss.str();
 }
 
 struct GatherModelInputContext {
@@ -179,8 +230,9 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
         auto          current_feature = mm_feature.slice(0, token_offset, feature_len).contiguous();
         if (!current_feature.is_cuda()) {
             host_holder.hold_host(current_feature);
-            gathered_mm_features.emplace_back(current_feature.to(torch::kCUDA, /*non_blocking=*/true));
+            gathered_mm_features.emplace_back(current_feature.to(getTorchCudaDevice(), /*non_blocking=*/true));
         } else {
+            checkRuntimeCudaDevice(current_feature, "multimodal feature");
             gathered_mm_features.emplace_back(std::move(current_feature));
         }
 
@@ -194,8 +246,9 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
             if (!current_extra_input.is_cuda()) {
                 host_holder.hold_host(current_extra_input);
                 gathered_mm_extra_input.emplace_back(
-                    current_extra_input.to(torch::kCUDA, /*non_blocking=*/true));
+                    current_extra_input.to(getTorchCudaDevice(), /*non_blocking=*/true));
             } else {
+                checkRuntimeCudaDevice(current_extra_input, "multimodal extra input");
                 gathered_mm_extra_input.emplace_back(std::move(current_extra_input));
             }
         }
@@ -223,7 +276,7 @@ torch::Tensor buildLmOutputIndexesOnCuda(const GptModelInputs& model_input, cons
     const auto total_batch_size         = static_cast<int64_t>(stream_groups.totalModelBatchSize());
     const auto total_decode_batch_size  = static_cast<int64_t>(stream_groups.totalDecodeBatchSize());
     const auto total_context_batch_size = total_batch_size - total_decode_batch_size;
-    auto       cuda_i32                 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto       cuda_i32                 = runtimeCudaI32Options();
 
     if (total_batch_size == 0) {
         return torch::empty({0}, cuda_i32);
@@ -279,7 +332,10 @@ torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor, TensorHolder& host
     if (!tensor.defined()) {
         return tensor;
     }
-    auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto cuda_i32 = runtimeCudaI32Options();
+    if (tensor.is_cuda()) {
+        checkRuntimeCudaDevice(tensor, "publishInt32ToCuda input");
+    }
     if (tensor.is_cuda() && tensor.scalar_type() == torch::kInt32) {
         return tensor;
     }
@@ -401,11 +457,13 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
         }
     }
     std::vector<torch::Tensor> normal_combo_tokens_gpu;
-    std::vector<torch::Tensor> normal_sequence_lengths_gpu;
+    std::vector<torch::Tensor> normal_next_seq_lens_gpu;
     if (use_normal_device_state) {
         normal_combo_tokens_gpu.reserve(stream_groups.totalDecodeBatchSize());
-        normal_sequence_lengths_gpu.reserve(stream_groups.totalDecodeBatchSize());
+        normal_next_seq_lens_gpu.reserve(stream_groups.totalDecodeBatchSize());
     }
+    const bool pd_debug_enabled     = pdDebugEnabled();
+    bool       pd_debug_long_decode = false;
 
     for (const auto& stream : stream_groups.decodeStreams()) {
         model_input.need_all_logits        = model_input.need_all_logits || stream->calculateLoss();
@@ -414,11 +472,16 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
         auto& kv_cache                     = *stream->kvCachePtr();
         RTP_LLM_LOG_DEBUG("decode kv_cache: %s", kv_cache.debugString().c_str());
         RTP_LLM_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
+        if (pd_debug_enabled) {
+            pd_debug_long_decode = pd_debug_long_decode || stream->inputLength() > 1024 || stream->seqLength() > 1024;
+        }
 
         for (auto i = 0; i < current_batch_size; ++i) {
             model_input.trace_ids.push_back(stream->traceId());
             if (use_normal_device_state) {
-                const auto&             state = stream->getNormalAsyncDeviceState();
+                const auto& state = stream->getNormalAsyncDeviceState();
+                checkRuntimeCudaDevice(state.last_sample_token_gpu, "normal async last_sample_token_gpu");
+                checkRuntimeCudaDevice(state.next_seq_len_gpu, "normal async next_seq_len_gpu");
                 static std::atomic<int> debug_log_budget{200};
                 if (asyncDebugEnabled() && stream->hasPendingAsyncBookkeeping()
                     && debug_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
@@ -433,7 +496,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                                         ctx.batch_idx);
                 }
                 normal_combo_tokens_gpu.push_back(state.last_sample_token_gpu.reshape({1}));
-                normal_sequence_lengths_gpu.push_back((state.next_seq_len_gpu - 1).to(torch::kInt32).reshape({1}));
+                normal_next_seq_lens_gpu.push_back(state.next_seq_len_gpu.reshape({1}));
                 ctx.input_lengths[ctx.batch_idx] = stream->inputLength();
             } else {
                 auto currentTokens = stream->currentExecuteTokens(i);
@@ -460,8 +523,24 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     }
 
     if (use_normal_device_state) {
-        model_input.combo_tokens     = torch::cat(normal_combo_tokens_gpu, 0).to(torch::kInt32);
-        model_input.sequence_lengths = torch::cat(normal_sequence_lengths_gpu, 0).to(torch::kInt32);
+        model_input.combo_tokens     = torch::cat(normal_combo_tokens_gpu, 0).to(runtimeCudaI32Options());
+        model_input.sequence_lengths = (torch::cat(normal_next_seq_lens_gpu, 0) - 1).to(runtimeCudaI32Options());
+    }
+    if (pd_debug_enabled && pd_debug_long_decode) {
+        static std::atomic<int> debug_log_budget{256};
+        if (debug_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            RTP_LLM_LOG_INFO("[PD_DEBUG][MODEL_INPUT_DECODE] use_normal_device_state=%d total_decode_bs=%zu "
+                             "max_blocks=%zu combo_tokens=%s input_lengths=%s sequence_lengths=%s "
+                             "kv_kernel_blocks=%s kv_blocks=%s",
+                             static_cast<int>(use_normal_device_state),
+                             stream_groups.totalDecodeBatchSize(),
+                             ctx.max_blocks_num,
+                             tensorSummary(model_input.combo_tokens).c_str(),
+                             tensorSummary(model_input.input_lengths).c_str(),
+                             tensorSummary(model_input.sequence_lengths).c_str(),
+                             tensorSummary(model_input.kv_cache_kernel_block_id).c_str(),
+                             tensorSummary(model_input.kv_cache_block_id).c_str());
+        }
     }
     return absl::OkStatus();
 }

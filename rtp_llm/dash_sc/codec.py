@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -25,18 +26,46 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.structural_tag import (
     DashScStructuralTagError,
     adapt_dashscope_tool_call_wrapper_to_tag,
+    force_at_least_one,
     structural_tag_from_response_format,
     validate_structural_tag_shape,
 )
-from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
+
+_FORCE_AT_LEAST_ONE_ENV_KEY = "DASH_SC_FORCE_STRUCTURAL_TAG_AT_LEAST_ONE"
+
+
+def _force_at_least_one_enabled() -> bool:
+    """Read env each call so toggling at runtime takes effect without restart.
+
+    The hot path serializes structural_tag once per request, so the extra getenv
+    is in the noise. Truthy values: "1" / "true" / "yes" / "on" (case-insensitive).
+    """
+    raw = os.environ.get(_FORCE_AT_LEAST_ONE_ENV_KEY, "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs, MMUrlType
 
 if TYPE_CHECKING:
     from rtp_llm.config.generate_config import GenerateConfig
-    from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 _INT32_MIN = -2_147_483_648
 _INT32_MAX = 2_147_483_647
 _DEFAULT_MAX_NEW_TOKENS = 32000
+_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV = "DASH_SC_PACK_EOS_FOR_EMPTY_GENERATED_IDS"
+_TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_MULTIMODAL_USAGE_FIELDS = (
+    (MMUrlType.IMAGE, "image_tokens"),
+    (MMUrlType.VIDEO, "video_tokens"),
+    (MMUrlType.AUDIO, "audio_tokens"),
+)
+
+
+def _pack_eos_for_empty_generated_ids() -> bool:
+    return (
+        os.environ.get(_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV, "").strip().lower()
+        in _TRUE_ENV_VALUES
+    )
+
 
 
 class LLMFinishReason(IntEnum):
@@ -166,6 +195,11 @@ class DashScParameterError(ValueError):
 
 class DashScInputIdsError(RuntimeError):
     """Input IDs cannot be represented by the engine's INT32 tensor."""
+
+
+
+class DashScParameterError(ValueError):
+    """Explicit user-parameter parse/validation error for dash-sc gRPC."""
 
 
 # ----------------------------------------------------------------------------
@@ -599,6 +633,13 @@ def _parse_grammar_controls(
                 structural_tag = response_structural_tag
             response_format = None
 
+    # Env-gated override: force_at_least_one walks the structural_tag and only
+    # mutates ``triggered_tags`` / ``tags_with_separator`` nodes, so it's safe
+    # to call on any format — non-matching shapes (json_schema / regex / ebnf)
+    # are mechanical no-ops, no separate gate needed.
+    if structural_tag is not None and _force_at_least_one_enabled():
+        force_at_least_one(structural_tag)
+
     return (
         _jsonable_to_string(response_format),
         bool(json_format_value),
@@ -704,6 +745,7 @@ class DashScRequestControls:
 
     return_input_ids: bool = False
     enable_thinking: bool | None = None
+    thinking_mode: str | None = None
     max_new_think_tokens: int | None = None
     timeout_ms: int | None = None
     traffic_reject_priority: int | None = None
@@ -783,6 +825,12 @@ class SamplingParams:
                 backend_max_new_tokens = min(
                     backend_max_new_tokens, int(self.max_total_tokens)
                 )
+        if request_max_think is None:
+            max_thinking_tokens = backend_max_new_tokens
+        elif request_max_think < 0:
+            max_thinking_tokens = _INT32_MAX
+        else:
+            max_thinking_tokens = request_max_think
         return GenerateConfig(
             max_new_tokens=backend_max_new_tokens,
             num_return_sequences=self.num_return_sequences,
@@ -995,6 +1043,20 @@ def parse_request_controls(
             _lookup_ds_request_control(ds_attrs, "enable_thinking")
         )
 
+    thinking_mode = _parse_optional_parameter_string(request, "thinking_mode")
+    if thinking_mode is None:
+        thinking_mode = _normalize_non_empty_str(
+            _lookup_ds_request_control(ds_attrs, "x-ds-llm-thinking-mode")
+        )
+    if thinking_mode is None:
+        thinking_mode = _normalize_non_empty_str(
+            _lookup_ds_request_control(ds_attrs, "thinking_mode")
+        )
+    if thinking_mode is not None:
+        thinking_mode = thinking_mode.strip().lower()
+        if thinking_mode not in ("disabled", "adaptive", "enabled"):
+            thinking_mode = None
+
     max_new_think_tokens = _parse_optional_scalar_int(request, "max_new_think_tokens")
     if max_new_think_tokens is None:
         max_new_think_tokens = _parse_optional_parameter_int(
@@ -1041,6 +1103,7 @@ def parse_request_controls(
     return DashScRequestControls(
         return_input_ids=return_input_ids,
         enable_thinking=enable_thinking,
+        thinking_mode=thinking_mode,
         max_new_think_tokens=max_new_think_tokens,
         timeout_ms=timeout_ms,
         traffic_reject_priority=traffic_reject_priority,
@@ -1097,10 +1160,11 @@ _MULTIMODAL_PARAMETER_KEYS: tuple[str, ...] = ("payload", "__messages__")
 _PER_PART_CONFIG_INT_KEYS: tuple[str, ...] = (
     "min_pixels",
     "max_pixels",
-    "fps",
+    "max_long_side_pixel",
     "max_frames",
     "min_frames",
 )
+_PER_PART_CONFIG_FLOAT_KEYS: tuple[str, ...] = ("fps",)
 
 
 @dataclass(frozen=True)
@@ -1111,7 +1175,8 @@ class MultimodalPart:
     mm_type: MMUrlType
     min_pixels: int = -1
     max_pixels: int = -1
-    fps: int = -1
+    max_long_side_pixel: int = -1
+    fps: float = -1.0
     max_frames: int = -1
     min_frames: int = -1
 
@@ -1124,9 +1189,9 @@ def _extract_openai_url(part: dict[str, Any], inner_field: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _extract_per_part_config(part: dict[str, Any]) -> dict[str, int]:
+def _extract_per_part_config(part: dict[str, Any]) -> dict[str, int | float]:
     """Read nested preprocess_config first, then apply inline overrides."""
-    out: dict[str, int] = {}
+    out: dict[str, int | float] = {}
     nested = part.get("preprocess_config")
     if isinstance(nested, dict):
         for key in _PER_PART_CONFIG_INT_KEYS:
@@ -1137,6 +1202,14 @@ def _extract_per_part_config(part: dict[str, Any]) -> dict[str, int]:
                 and value > 0
             ):
                 out[key] = int(value)
+        for key in _PER_PART_CONFIG_FLOAT_KEYS:
+            value = nested.get(key)
+            if (
+                not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and value > 0
+            ):
+                out[key] = float(value)
     for key in _PER_PART_CONFIG_INT_KEYS:
         value = part.get(key)
         if (
@@ -1145,6 +1218,14 @@ def _extract_per_part_config(part: dict[str, Any]) -> dict[str, int]:
             and value > 0
         ):
             out[key] = int(value)
+    for key in _PER_PART_CONFIG_FLOAT_KEYS:
+        value = part.get(key)
+        if (
+            not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and value > 0
+        ):
+            out[key] = float(value)
     return out
 
 
@@ -1296,17 +1377,11 @@ def _append_generated_ids_output(
     infer: predict_v2_pb2.ModelInferResponse,
     generated_ids: list[int],
 ) -> None:
-    """``generated_ids``: INT32 little-endian, shape ``[1, len]``.
-
-    When empty, a 4-byte filler (single INT32 ``0``) is appended because
-    ``raw_input_contents`` indices must stay aligned with ``outputs``. The consumer
-    side (access_log ``_scan_response_outputs``) checks declared ``shape`` so the
-    filler byte does not leak into token accumulators.
-    """
+    """``generated_ids``: INT32 little-endian, shape ``[1, len]``."""
     raw = (
         struct.pack("<%di" % len(generated_ids), *generated_ids)
         if generated_ids
-        else struct.pack("<i", 0)
+        else b""
     )
     out = infer.outputs.add()
     out.name = "generated_ids"
@@ -1322,10 +1397,9 @@ def prepend_to_generated_ids_tensor(
     """Prepend ``token_ids`` to the already-appended ``generated_ids`` tensor on ``infer``.
 
     Returns ``False`` and leaves ``infer`` untouched when ``token_ids`` is empty, when
-    ``generated_ids`` is absent, or when its declared shape is a zero-length / filler
-    payload (``shape[-1] <= 0``). On success, re-packs the raw bytes as
-    ``token_ids + existing_ids`` (INT32 little-endian) and updates ``shape`` to
-    ``[1, len(token_ids) + cur_len]``.
+    ``generated_ids`` is absent, or when its declared shape is zero-length. On
+    success, re-packs the raw bytes as ``token_ids + existing_ids`` (INT32
+    little-endian) and updates ``shape`` to ``[1, len(token_ids) + cur_len]``.
     """
     if not token_ids:
         return False
@@ -1429,18 +1503,36 @@ def _append_prompt_cache_usage_parameters(
     infer.parameters["prompt_cached_token_num"].int64_param = cached_tokens
 
 
+def _append_multimodal_usage(
+    infer: predict_v2_pb2.ModelInferResponse,
+    multimodal_lengths: dict[int, int] | None,
+) -> None:
+    if not multimodal_lengths:
+        return
+
+    for mm_type, field_name in _MULTIMODAL_USAGE_FIELDS:
+        token_count = int(multimodal_lengths.get(mm_type, 0) or 0)
+        if token_count <= 0:
+            continue
+        infer.parameters[field_name].int64_param = token_count
+
+
 def _append_aux_info_metrics_outputs(
     infer: predict_v2_pb2.ModelInferResponse,
     out_py: GenerateOutput,
     prompt_token_fallback: int = 0,
 ) -> None:
-    """``prompt_token_num`` = AuxInfo.input_len; ``prompt_cached_token_num`` = AuxInfo.reuse_len."""
+    """Append prompt, cache, and per-media token usage from ``AuxInfo``."""
     ax = out_py.aux_info
     input_len = int(ax.input_len) if ax is not None else int(prompt_token_fallback)
     reuse_len = int(ax.reuse_len) if ax is not None else 0
     _append_int32_scalar_output(infer, "prompt_token_num", input_len)
     _append_int32_scalar_output(infer, "prompt_cached_token_num", reuse_len)
     _append_prompt_cache_usage_parameters(infer, input_len, reuse_len)
+    _append_multimodal_usage(
+        infer,
+        ax.multimodal_lengths if ax is not None else None,
+    )
 
 
 def build_stream_response_from_generate_outputs(
@@ -1487,6 +1579,10 @@ def build_stream_response_from_generate_outputs(
         if token_ids is not None
         else _token_ids_list_from_generate_output(out_py)
     )
+    if not generated_ids and finished and _pack_eos_for_empty_generated_ids():
+        if eos_token_id is None:
+            raise RuntimeError("eos_token_id is required for terminal response")
+        generated_ids = [int(eos_token_id)]
 
     if return_input_ids and request_input_ids is not None:
         _append_prompt_token_ids_output(infer, request_input_ids)

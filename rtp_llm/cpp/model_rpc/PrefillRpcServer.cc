@@ -353,7 +353,7 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
         return;
     }
 
-    auto result = mm_processor_->updateMultimodalFeatures(input);
+    auto result = mm_processor_->updateMultimodalFeatures(input, prefill_context.server_context);
     if (!result.ok()) {
         prefill_context.setRetryable(isRetryableMultimodalError(result.code()));
         setContextError(prefill_context, result);
@@ -387,6 +387,15 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
     for (const auto& address : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(address);
     }
+
+    // Propagate CP size so decode knows prefill used context-parallel page-RR.
+    // Sharding is driven by kv_cache_sharded alone; the CP rotate method only
+    // selects how prefill rotates activations and must not gate the KV layout.
+    const auto& cp_cfg = maga_init_params_.parallelism_config.prefill_cp_config;
+    if (cp_cfg.kv_cache_sharded && maga_init_params_.parallelism_config.tp_size > 1) {
+        alloc_request.set_prefill_cp_size(static_cast<int32_t>(maga_init_params_.parallelism_config.tp_size));
+    }
+
     return alloc_request;
 }
 

@@ -186,6 +186,9 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
                                 static_cast<int>(legacy_in_think_mode));
         }
     }
+    if (config_proto->has_enable_think_logits_processor()) {
+        generate_config->enable_think_logits_processor = config_proto->enable_think_logits_processor().value();
+    }
     generate_config->max_thinking_tokens = config_proto->max_thinking_tokens();
     for (const auto& token_id : config_proto->begin_think_token_ids()) {
         generate_config->begin_think_token_ids.push_back(token_id);
@@ -262,18 +265,20 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
             for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
                 crop_positions.push_back(crop_position);
             }
-            mm_inputs.emplace_back(mm_input->multimodal_url(),
-                                   torch::empty(1),
-                                   mm_input->multimodal_type(),
-                                   mm_preprocess_config->width(),
-                                   mm_preprocess_config->height(),
-                                   mm_preprocess_config->min_pixels(),
-                                   mm_preprocess_config->max_pixels(),
-                                   mm_preprocess_config->fps(),
-                                   mm_preprocess_config->min_frames(),
-                                   mm_preprocess_config->max_frames(),
-                                   crop_positions,
-                                   mm_preprocess_config->mm_timeout_ms());
+            mm_inputs.emplace_back(
+                mm_input->multimodal_url(),
+                torch::empty(1),
+                mm_input->multimodal_type(),
+                mm_preprocess_config->width(),
+                mm_preprocess_config->height(),
+                mm_preprocess_config->min_pixels(),
+                mm_preprocess_config->max_pixels(),
+                mm_preprocess_config->fps(),
+                mm_preprocess_config->min_frames(),
+                mm_preprocess_config->max_frames(),
+                crop_positions,
+                mm_preprocess_config->mm_timeout_ms(),
+                mm_preprocess_config->max_long_side_pixel() > 0 ? mm_preprocess_config->max_long_side_pixel() : -1);
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }

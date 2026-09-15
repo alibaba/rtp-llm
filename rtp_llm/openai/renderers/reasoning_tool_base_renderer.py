@@ -34,6 +34,7 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector 
 )
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
 from rtp_llm.openai.renderers.sglang_helpers.token_normalizer import (
+    _MAX_UTF8_WINDOW,
     TokenNormalizer,
     expand_prev_window,
 )
@@ -448,7 +449,10 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         # If normalizer didn't yield anything (buffered for \uFFFD resolution),
         # don't update so next iteration has full context for sliding window.
         if normalizer_yielded and new_token_ids:
-            status.last_token_length = len(new_token_ids)
+            # Keep enough context for UTF-8 characters split across MTP batches.
+            # Decoding the next batch needs the previous incomplete bytes; keeping
+            # only the previous batch size can make already-emitted text replay.
+            status.last_token_length = min(len(status.output_ids), _MAX_UTF8_WINDOW)
             status.last_output_ids = status.output_ids
             status.last_token_length = expand_prev_window(
                 self.tokenizer, status.last_output_ids, status.last_token_length
@@ -494,6 +498,9 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                 )
                 if token_delta is not None:
                     collected_deltas.append(token_delta)
+            final_delta = await self._flush_reasoning_parser(status, output)
+            if final_delta is not None:
+                collected_deltas.append(final_delta)
             return collected_deltas, normalizer_yielded
 
         # Non-streaming: accumulate all text first, then process once
@@ -512,6 +519,32 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             is_streaming=False,
         )
         return ([complete_delta] if complete_delta is not None else []), True
+
+    async def _flush_reasoning_parser(
+        self, status: StreamStatus, output: GenerateOutput
+    ) -> Optional[OutputDelta]:
+        """Emit text the reasoning parser held back, once generation has finished.
+
+        A parser may keep a trailing fragment buffered while it is still ambiguous
+        (e.g. a `...</` that could grow into a think marker). At end of stream the
+        ambiguity is resolved in favour of it being ordinary content.
+        """
+        if status.finish_reason is None or not isinstance(
+            status, ReasoningToolStreamStatus
+        ):
+            return None
+        if status.reasoning_parser is None:
+            return None
+        pending = status.reasoning_parser.flush_markers()
+        if not pending:
+            return None
+        return OutputDelta(
+            output_str=DeltaMessage(content=pending),
+            logprobs=None,
+            input_length=output.aux_info.input_len,
+            output_length=output.aux_info.output_len,
+            reuse_length=output.aux_info.reuse_len,
+        )
 
     async def _process_reasoning_and_tool_calls(
         self,

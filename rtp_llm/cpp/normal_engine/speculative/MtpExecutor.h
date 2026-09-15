@@ -85,6 +85,7 @@ public:
                                                         const ResourceContext& resource_context);
     static GenerateStreamPtr createMinFakeDecodeStream(int                    max_new_tokens,
                                                        const ModelConfig&     model_config,
+                                                       const ModelConfig&     draft_model_config,
                                                        const RuntimeConfig&   runtime_config,
                                                        const ResourceContext& resource_context,
                                                        int                    vocab_size,
@@ -108,9 +109,10 @@ protected:
     bool finishDSparkPrefillCachePublication(const GptModelInputs&               model_input,
                                              const std::list<GenerateStreamPtr>& streams);
 
-    void maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
-                                              ModelBase&      source,
-                                              bool            request_actual_rows = false);
+    bool maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs&       model_input,
+                                              ModelBase&            source,
+                                              MtpHiddenStatesLayout layout         = MtpHiddenStatesLayout::GLOBAL,
+                                              int64_t               requested_rows = -1);
     // Normalize the model's optional pre-output-projection MTP buffer into the
     // forward result. Callers then use the regular all_hidden_states ->
     // last_hidden_states hand-off. hidden_rows == 0 means "use the tensor's own
@@ -128,7 +130,7 @@ protected:
 
     absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
 
-    // decodeStep helpers — extracted to keep decodeStep readable. Each helper
+    // decodeStep helpers: each helper
     // owns a single phase (sync, prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
     void            waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStreamPtr>& streams);
@@ -138,7 +140,7 @@ protected:
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
-    void            broadcastPostRejectionInputs(GptModelInputs& model_input);
+    void            broadcastPostRejectionInputs(GptModelInputs& model_input, bool broadcast_hidden_states);
     GptModelOutputs runDSparkProposeForward(GptModelInputs& model_input);
     SamplerOutput   sampleDSparkDraft(const StreamGroups&  stream_groups,
                                       const torch::Tensor& base_logits,

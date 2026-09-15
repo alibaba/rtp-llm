@@ -176,4 +176,44 @@ TEST(MemoryDiskBlockCacheTest, RemoveIfMatchChecksBackingAndSlot) {
     EXPECT_FALSE(cache.contains(2));
 }
 
+
+TEST(MemoryDiskBlockCacheTest, RemoteEvictionOnlyDetachesCompleteMemoryBacking) {
+    MemoryDiskBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(memoryItem(1, 10, true)).first);
+    ASSERT_TRUE(cache.putCommitted(memoryItem(2, 20, false)).first);
+    ASSERT_TRUE(cache.putCommitted(diskItem(3, 30, true)).first);
+
+    auto victims = cache.detachMemoryForRemoteEviction(3);
+    ASSERT_EQ(victims.size(), 1u);
+    EXPECT_EQ(victims[0].cache_key, 1);
+    EXPECT_GT(victims[0].generation, 0u);
+    EXPECT_FALSE(cache.contains(1));
+    EXPECT_TRUE(cache.contains(2));
+    EXPECT_TRUE(cache.contains(3));
+    EXPECT_EQ(cache.remoteEvictingSize(), 1u);
+}
+
+TEST(MemoryDiskBlockCacheTest, RemoteEvictionFinishIsGenerationProtected) {
+    MemoryDiskBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(memoryItem(1, 10)).first);
+    auto victims = cache.detachMemoryForRemoteEviction(1);
+    ASSERT_EQ(victims.size(), 1u);
+    EXPECT_FALSE(cache.finishRemoteEviction(1, victims[0].generation + 1).has_value());
+    auto finished = cache.finishRemoteEviction(1, victims[0].generation);
+    ASSERT_TRUE(finished.has_value());
+    EXPECT_EQ(finished->block_index, 10);
+    EXPECT_FALSE(cache.finishRemoteEviction(1, victims[0].generation).has_value());
+}
+
+TEST(MemoryDiskBlockCacheTest, ImmediateMemoryEvictionDoesNotTouchDiskOrRemoteState) {
+    MemoryDiskBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(memoryItem(1, 10)).first);
+    ASSERT_TRUE(cache.putCommitted(diskItem(2, 20)).first);
+    auto victims = cache.popMemoryForImmediateEviction(2);
+    ASSERT_EQ(victims.size(), 1u);
+    EXPECT_EQ(victims[0].cache_key, 1);
+    EXPECT_TRUE(cache.contains(2));
+    EXPECT_EQ(cache.remoteEvictingSize(), 0u);
+}
+
 }  // namespace rtp_llm::test

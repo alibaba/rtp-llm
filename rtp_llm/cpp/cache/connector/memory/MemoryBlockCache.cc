@@ -35,6 +35,8 @@ std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> MemoryBlockCache::pu
     RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(item.block_index), "put block id should not be null");
 
     std::unique_lock<std::shared_mutex> lock(mutex_);
+    CacheItem new_item = item;
+    new_item.generation = next_generation_++;
     if (lru_cache_.contains(item.cache_key)) {
         // Key exists:
         // - Always increase old matched item's popularity
@@ -42,7 +44,7 @@ std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> MemoryBlockCache::pu
         //   Return the old item as "popped" so the caller can free the old block.
         const auto& [success, old_item] = lru_cache_.get(item.cache_key);
         if (success && !old_item.is_complete && item.is_complete) {
-            lru_cache_.put(item.cache_key, item);
+            lru_cache_.put(item.cache_key, new_item);
             return {true, old_item};
         }
         return {false, std::nullopt};
@@ -60,7 +62,7 @@ std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> MemoryBlockCache::pu
         popped_item = popped_cache_item;
     }
 
-    lru_cache_.put(item.cache_key, item);
+    lru_cache_.put(item.cache_key, new_item);
     return {true, popped_item};
 }
 
@@ -107,6 +109,59 @@ std::vector<BlockIdxType> MemoryBlockCache::pop(int n) {
     }
 
     return pop_blocks;
+}
+
+
+std::vector<MemoryBlockCache::CacheItem> MemoryBlockCache::detachForRemoteEviction(int n) {
+    RTP_LLM_PROFILE_FUNCTION();
+    RTP_LLM_CHECK_WITH_INFO(n > 0, "detach n should > 0, n = " + std::to_string(n));
+    std::vector<CacheItem> items;
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto cond = [&](const CacheKeyType& key, const CacheItem& item) {
+        return !item.is_resident && item.is_complete && remote_evicting_items_.count(key) == 0;
+    };
+    while (n-- > 0 && !lru_cache_.empty()) {
+        auto [success, item] = lru_cache_.popWithCond(cond);
+        if (!success) {
+            break;
+        }
+        remote_evicting_items_.insert_or_assign(item.cache_key, item);
+        items.push_back(item);
+    }
+    return items;
+}
+
+std::vector<MemoryBlockCache::CacheItem> MemoryBlockCache::popForImmediateEviction(int n) {
+    RTP_LLM_PROFILE_FUNCTION();
+    RTP_LLM_CHECK_WITH_INFO(n > 0, "pop n should > 0, n = " + std::to_string(n));
+    std::vector<CacheItem> items;
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto cond = [&](const CacheKeyType&, const CacheItem& item) { return !item.is_resident && item.is_complete; };
+    while (n-- > 0 && !lru_cache_.empty()) {
+        auto [success, item] = lru_cache_.popWithCond(cond);
+        if (!success) {
+            break;
+        }
+        items.push_back(item);
+    }
+    return items;
+}
+
+std::optional<MemoryBlockCache::CacheItem> MemoryBlockCache::finishRemoteEviction(CacheKeyType cache_key,
+                                                                                  uint64_t generation) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto it = remote_evicting_items_.find(cache_key);
+    if (it == remote_evicting_items_.end() || it->second.generation != generation) {
+        return std::nullopt;
+    }
+    CacheItem item = it->second;
+    remote_evicting_items_.erase(it);
+    return item;
+}
+
+size_t MemoryBlockCache::remoteEvictingSize() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return remote_evicting_items_.size();
 }
 
 bool MemoryBlockCache::empty() const {

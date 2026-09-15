@@ -137,6 +137,12 @@ std::string KVCacheConfig::to_string() const {
         << "enable_device_cache: " << enable_device_cache << "\n"
         << "enable_memory_cache: " << enable_memory_cache << "\n"
         << "enable_memory_cache_sm_copy: " << enable_memory_cache_sm_copy << "\n"
+        << "memory_cache_h2d_copy_mode: " << memory_cache_h2d_copy_mode << "\n"
+        << "memory_cache_h2d_copy_strict: " << memory_cache_h2d_copy_strict << "\n"
+        << "enable_memory_cache_h2d_3d_batch_auto: " << enable_memory_cache_h2d_3d_batch_auto << "\n"
+        << "memory_cache_d2h_copy_mode: " << memory_cache_d2h_copy_mode << "\n"
+        << "memory_cache_d2h_copy_strict: " << memory_cache_d2h_copy_strict << "\n"
+        << "enable_memory_cache_d2h_3d_batch_auto: " << enable_memory_cache_d2h_3d_batch_auto << "\n"
         << "enable_remote_cache: " << enable_remote_cache << "\n"
         << "write_cache_sync: " << write_cache_sync << "\n"
         << "enable_tiered_memory_cache: " << enable_tiered_memory_cache << "\n"
@@ -146,6 +152,12 @@ std::string KVCacheConfig::to_string() const {
         << "prefix_tree_memory_state_swa_pool_ratio: " << prefix_tree_memory_state_swa_pool_ratio << "\n"
         << "enable_independent_group_eviction: " << enable_independent_group_eviction << "\n"
         << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
+        << "enable_memory_cache_remote_eviction: " << enable_memory_cache_remote_eviction << "\n"
+        << "device_cache_high_watermark_ratio: " << device_cache_high_watermark_ratio << "\n"
+        << "memory_cache_high_watermark_ratio: " << memory_cache_high_watermark_ratio << "\n"
+        << "memory_cache_remote_eviction_watermark_ratio: " << memory_cache_remote_eviction_watermark_ratio << "\n"
+        << "memory_cache_remote_eviction_timeout_ms: " << memory_cache_remote_eviction_timeout_ms << "\n"
+        << "memory_cache_remote_eviction_max_blocks: " << memory_cache_remote_eviction_max_blocks << "\n"
         << "load_cache_retry_times: " << load_cache_retry_times << "\n"
         << "dsv4_fixed_pool_blocks: " << dsv4_fixed_pool_blocks << "\n"
         << "dsv4_hca_state_pool_blocks: " << dsv4_hca_state_pool_blocks << "\n"
@@ -216,7 +228,11 @@ std::string HWKernelConfig::to_string() const {
         << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n"
         << "decode_capture_batch_sizes size: " << decode_capture_batch_sizes.size() << "\n"
         << "disable_dpc_random: " << disable_dpc_random << "\n"
-        << "rocm_disable_custom_ag: " << rocm_disable_custom_ag;
+        << "rocm_disable_custom_ag: " << rocm_disable_custom_ag << "\n"
+        << "deterministic_gemm: " << deterministic_gemm << "\n"
+        << "deterministic_attn: " << deterministic_attn << "\n"
+        << "enable_fuse_kernels: " << enable_fuse_kernels << "\n"
+        << "sp_prefill_cuda_graph_mode: " << sp_prefill_cuda_graph_mode;
     return oss.str();
 }
 
@@ -308,7 +324,9 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "tree_decode_config: " << tree_decode_config << "\n"
         << "gen_num_per_cycle: " << gen_num_per_cycle << "\n"
         << "force_stream_sample: " << force_stream_sample << "\n"
+        << "deterministic_draft_exact_match: " << deterministic_draft_exact_match << "\n"
         << "force_score_context_attention: " << force_score_context_attention << "\n"
+        << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "quantization: " << quantization << "\n"
         << "checkpoint_path: " << checkpoint_path << "\n"
         << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id;
@@ -394,6 +412,7 @@ std::string FIFOSchedulerConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_context_batch_size: " << max_context_batch_size << "\n"
         << "max_batch_tokens_size: " << max_batch_tokens_size << "\n"
+        << "max_batch_kv_len: " << max_batch_kv_len << "\n"
         << "pdfusion_scheduler_mode: " << pdfusion_scheduler_mode << "\n"
         << "decode_prefill_ratio: " << decode_prefill_ratio << "\n"
         << "cp_force_single_prefill: " << cp_force_single_prefill << "\n"

@@ -6,6 +6,24 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace py = pybind11;
+
+namespace {
+
+c10::ScalarType parseModelDataType(const std::string& dtype) {
+    if (dtype == "bf16" || dtype == "bfloat16") {
+        return c10::ScalarType::BFloat16;
+    }
+    if (dtype == "fp16" || dtype == "float16" || dtype == "half") {
+        return c10::ScalarType::Half;
+    }
+    if (dtype == "fp32" || dtype == "float32" || dtype == "float") {
+        return c10::ScalarType::Float;
+    }
+    throw std::invalid_argument("unsupported cuda graph test model_data_type: " + dtype);
+}
+
+}  // namespace
+
 namespace rtp_llm {
 
 // Single wrapper for both prefill and decode tests; init_prefill / init_decode
@@ -86,6 +104,10 @@ public:
         return runner_ != nullptr ? runner_->getCurrentRealGraphBs(state_) : 0;
     }
 
+    torch::Tensor getMtpTargetHiddenStates(int64_t num_tokens) {
+        return runner_ != nullptr ? runner_->getMtpTargetHiddenStates(state_, num_tokens) : torch::Tensor();
+    }
+
     ~CudaGraphTestRunner() {
         reset_runner();
     }
@@ -131,5 +153,6 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("num_tokens_per_bs") = 1)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
+        .def("getMtpTargetHiddenStates", &CudaGraphTestRunner::getMtpTargetHiddenStates)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
 }

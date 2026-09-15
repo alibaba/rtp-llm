@@ -91,3 +91,11 @@ py_test(
     imports = [],
     exec_properties = {"gpu": "A10"},
 )
+
+py_test(
+    name = "server_test",
+    srcs = ["server_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "A10"},
+)

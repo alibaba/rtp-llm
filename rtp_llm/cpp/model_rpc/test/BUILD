@@ -82,6 +82,7 @@ cc_test(
     ],
     copts = test_copts,
     deps = test_deps + [
+        "//rtp_llm/cpp/model_rpc:multimodal_pb_converter",
         "//rtp_llm/cpp/models:logits_processor",
     ],
     env = {

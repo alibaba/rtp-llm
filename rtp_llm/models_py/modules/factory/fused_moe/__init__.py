@@ -124,11 +124,24 @@ else:
             CudaFp4EpLowLatencyStrategy,
             CudaFp4EpNormalStrategy,
             CudaFp4NoDPStrategy,
+            CudaMegaMoeFp8SEStrategy,
+            CudaMegaMoeFp8Strategy,
+            CudaMegaMoeFusedStrategy,
+            CudaMxfp8EpLowLatencyStrategy,
+            CudaMxfp8EpNormalStrategy,
+            CudaMxfp8NoDPStrategy,
         )
 
         registry.register(CudaFp4EpLowLatencyStrategy())
         registry.register(CudaFp4EpNormalStrategy())
         registry.register(CudaFp4NoDPStrategy())
+        registry.register(CudaMxfp8NoDPStrategy())
+        registry.register(CudaMxfp8EpNormalStrategy())
+        registry.register(CudaMxfp8EpLowLatencyStrategy())
+        # Explicit-request only, so registration order does not affect ``auto``.
+        registry.register(CudaMegaMoeFp8Strategy())
+        registry.register(CudaMegaMoeFp8SEStrategy())
+        registry.register(CudaMegaMoeFusedStrategy())
     FusedMoeFactory.set_registry(registry)
 
 # Out-of-tree backends registered a hook before this module existed. Runs for

@@ -65,7 +65,8 @@ build:sm8x --action_env TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.6,8.9"
 build:sm8x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.6,8.9"
 build:sm9x --action_env TF_CUDA_COMPUTE_CAPABILITIES="9.0"
 build:sm9x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="9.0"
-build:sm10x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="10.0"
+build:sm10x --action_env TF_CUDA_COMPUTE_CAPABILITIES="10.0,10.3"
+build:sm10x --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="10.0,10.3"
 build:sm12x --action_env TF_CUDA_COMPUTE_CAPABILITIES="12.0"
 build:sm12x --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="12.0"
 build:cuda12 --action_env TF_CUDA_VERSION="12.4"
@@ -171,6 +172,22 @@ build:cuda13 --copt=-Wno-array-bounds
 build:cuda13 --copt=-Wno-unused-result
 build:cuda13 --copt=-Wno-array-parameter
 build:cuda13 --copt=-Wno-narrowing
+# gcc-toolset-12 (the CUDA 13 x86 host compiler) adds -Winterference-size to
+# -Wall; torch 2.11's c10/cuda/CUDAEvent.h uses
+# std::hardware_destructive_interference_size, which -Werror then promotes to a
+# hard error. The flag is C++-only, so use cxxopt (copt would break C files
+# like zlib's zutil.c). Suppress like the other third-party warnings above.
+#
+# IMPORTANT: only use the plain -Wno-interference-size form, NOT
+# -Wno-error=interference-size. Plain -Wno-<unknown> is silently accepted (just a
+# note) by older compilers, but -Wno-error=<unknown> is a HARD ERROR there. Some
+# build environments (e.g. the online image build) fall back to the al8 base gcc
+# 10, which has no -Winterference-size -> -Wno-error=interference-size aborts the
+# grpc compile. -Wno-interference-size already disables the warning entirely on
+# gcc-toolset-12, so -Werror has nothing left to promote -- the -Wno-error= form
+# was redundant.
+build:cuda13 --cxxopt=-Wno-interference-size
+build:cuda13 --host_cxxopt=-Wno-interference-size
 # cuda13 owns its own dep chain: torch 2.11+cu130, triton 3.6.0, dedicated
 # pip_gpu_cuda13_torch / torch_2.11_py310_cuda repos and a dedicated whl_deps
 # branch in arch_select.bzl.  Selects that need to treat cu13 the same as

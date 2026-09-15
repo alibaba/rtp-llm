@@ -32,6 +32,22 @@ def init_generate_group_args(parser, generate_env_config):
         help="深度思考模式: disabled/adaptive/enabled（兼容 0/1）",
     )
     generate_group.add_argument(
+        "--enable_think_logits_processor",
+        env_name="ENABLE_THINK_LOGITS_PROCESSOR",
+        bind_to=(generate_env_config, "enable_think_logits_processor"),
+        type=str2bool,
+        default=True,
+        help="是否启用 thinking 边界 logits processor",
+    )
+    generate_group.add_argument(
+        "--max_thinking_tokens",
+        env_name="MAX_THINKING_TOKENS",
+        bind_to=(generate_env_config, "max_thinking_tokens"),
+        type=int,
+        default=None,
+        help="请求未指定 thinking budget 时使用的最大思考 token 数",
+    )
+    generate_group.add_argument(
         "--force_stop_words",
         env_name="FORCE_STOP_WORDS",
         bind_to=(generate_env_config, "force_stop_words"),

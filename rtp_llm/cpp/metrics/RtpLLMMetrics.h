@@ -945,7 +945,9 @@ private:
 
 class RtpLLMCacheEvictionMetricsCollector final {
 public:
-    int64_t lifetime_ms = 0;
+    int64_t lifetime_ms                = -1;
+    int64_t evicted_block_count        = -1;
+    int64_t direct_evicted_block_count = -1;
 };
 
 class RtpLLMCacheEvictionMetrics: public kmonitor::MetricsGroup {
@@ -954,7 +956,9 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheEvictionMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* evicted_block_lifetime_ms_metric = nullptr;
+    kmonitor::MutableMetric* evicted_block_lifetime_ms_metric  = nullptr;
+    kmonitor::MutableMetric* evicted_block_count_metric        = nullptr;
+    kmonitor::MutableMetric* direct_evicted_block_count_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1003,6 +1007,41 @@ public:
     int64_t remote_get_write_location_time_us = 0;
     int64_t remote_write_broadcast_time_us    = 0;
     int64_t remote_finish_write_time_us       = 0;
+};
+
+class RtpLLMMemoryRemoteEvictionMetricsCollector final {
+public:
+    bool    memory_remote_evict_qps                     = false;
+    bool    memory_remote_evict_fail_qps                = false;
+    int64_t memory_remote_evict_block_count             = 0;
+    int64_t memory_remote_evict_success_block_count     = 0;
+    int64_t memory_remote_evict_failed_block_count      = 0;
+    int64_t memory_remote_evict_latency_us              = 0;
+    int64_t memory_remote_evict_bytes                   = 0;
+    int64_t memory_remote_evict_inflight_blocks         = 0;
+    int64_t memory_emergency_evict_block_count          = 0;
+    int64_t device_to_memory_after_remote_latency_us    = 0;
+};
+
+class RtpLLMMemoryRemoteEvictionMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryRemoteEvictionMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* memory_remote_evict_qps_metric                  = nullptr;
+    kmonitor::MutableMetric* memory_remote_evict_fail_qps_metric             = nullptr;
+    kmonitor::MutableMetric* memory_remote_evict_block_count_metric          = nullptr;
+    kmonitor::MutableMetric* memory_remote_evict_success_block_count_metric  = nullptr;
+    kmonitor::MutableMetric* memory_remote_evict_failed_block_count_metric   = nullptr;
+    kmonitor::MutableMetric* memory_remote_evict_latency_us_metric           = nullptr;
+    kmonitor::MutableMetric* memory_remote_evict_bytes_metric                = nullptr;
+    kmonitor::MutableMetric* memory_remote_evict_inflight_blocks_metric      = nullptr;
+    kmonitor::MutableMetric* memory_emergency_evict_block_count_metric       = nullptr;
+    kmonitor::MutableMetric* device_to_memory_after_remote_latency_us_metric = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
 };
 
 class RtpLLMRemoteCacheSDKMetricsCollector final {
@@ -1361,6 +1400,17 @@ public:
     bool    from_gpu           = false;
 };
 
+class RtpLLMMemoryCache3DCopyMetricsCollector final {
+public:
+    bool    failed      = false;
+    bool    from_gpu    = false;
+    int64_t block_count = 0;
+    int64_t tile_count  = 0;
+    int64_t op_count    = 0;
+    int64_t bytes       = 0;
+    int64_t latency_us  = 0;
+};
+
 class RtpLLMMemoryCacheStatusMetricsCollector final {
 public:
     int64_t item_num            = 0;
@@ -1378,6 +1428,7 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheWriteMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyTaskMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCache3DCopyMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheStatusMetricsCollector* collector);
 
 public:
@@ -1406,7 +1457,6 @@ public:
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_failed_qps_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_latency_metric    = nullptr;
 
-    kmonitor::MutableMetric* kv_cache_memory_cache_status_item_num_metric            = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_qps_metric             = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_failed_qps_metric      = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_latency_metric         = nullptr;
@@ -1416,6 +1466,15 @@ public:
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_item_num_metric        = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_disk_item_num_metric   = nullptr;
 
+    kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_qps_metric         = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_failed_qps_metric  = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_block_count_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_tile_count_metric  = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_op_count_metric    = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_bytes_metric       = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_latency_us_metric  = nullptr;
+
+    kmonitor::MutableMetric* kv_cache_memory_cache_status_item_num_metric            = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_status_total_block_num_metric     = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_status_allocated_block_num_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_status_available_block_num_metric = nullptr;

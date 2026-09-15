@@ -301,6 +301,80 @@ bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
 #endif
 }
 
+bool exec3DBatchedMemoryCopy(const BatchedMemoryCopy3DParams& params) {
+    if (params.runs.empty()) {
+        return true;
+    }
+    if (params.device_index < 0) {
+        RTP_LLM_LOG_WARNING("exec3DBatchedMemoryCopy failed: invalid device_index=%d", params.device_index);
+        return false;
+    }
+#if CUDART_VERSION >= 13000
+    check_cuda_value(cudaSetDevice(params.device_index));
+    int runtime_version = 0;
+    (void)cudaRuntimeGetVersion(&runtime_version);
+    RTP_LLM_LOG_DEBUG("exec3DBatchedMemoryCopy runtime=%d compile=%d ops=%zu device=%d",
+                      runtime_version, CUDART_VERSION, params.runs.size(), params.device_index);
+    auto stream = getNoBlockCopyStream().stream();
+    std::vector<cudaMemcpy3DBatchOp> ops;
+    ops.reserve(params.runs.size());
+    for (const auto& run : params.runs) {
+        if (run.src == nullptr || run.dst == nullptr || run.width_bytes == 0 || run.depth == 0
+            || run.src_layer_pitch_bytes < run.width_bytes || run.dst_layer_pitch_bytes < run.width_bytes) {
+            RTP_LLM_LOG_WARNING("exec3DBatchedMemoryCopy rejected invalid run");
+            return false;
+        }
+        cudaMemcpy3DBatchOp op{};
+        op.src.type               = cudaMemcpyOperandTypePointer;
+        op.src.op.ptr.ptr         = const_cast<void*>(run.src);
+        op.src.op.ptr.rowLength   = run.src_layer_pitch_bytes;
+        op.src.op.ptr.layerHeight = 1;
+        op.dst.type               = cudaMemcpyOperandTypePointer;
+        op.dst.op.ptr.ptr         = run.dst;
+        op.dst.op.ptr.rowLength   = run.dst_layer_pitch_bytes;
+        op.dst.op.ptr.layerHeight = 1;
+        op.extent                 = make_cudaExtent(run.width_bytes, 1, run.depth);
+        op.srcAccessOrder = params.source_is_cuda ? cudaMemcpySrcAccessOrderDuringApiCall :
+                                                    cudaMemcpySrcAccessOrderStream;
+        op.flags                  = 0;
+        ops.push_back(op);
+    }
+    constexpr size_t kMaxOpsPerBatch = 64;
+    cudaError_t err = cudaSuccess;
+    for (size_t begin = 0; begin < ops.size(); begin += kMaxOpsPerBatch) {
+        const size_t count = std::min(kMaxOpsPerBatch, ops.size() - begin);
+        err = cudaMemcpy3DBatchAsync(count, ops.data() + begin, 0, stream);
+        if (err != cudaSuccess) {
+            (void)cudaGetLastError();
+            const auto& failed = params.runs[begin];
+            RTP_LLM_LOG_WARNING("exec3DBatchedMemoryCopy submit failed: ops=%zu chunk_begin=%zu chunk_ops=%zu "
+                                "src=%p dst=%p width=%zu src_pitch=%zu dst_pitch=%zu depth=%zu error=%s",
+                                ops.size(), begin, count, failed.src, failed.dst, failed.width_bytes,
+                                failed.src_layer_pitch_bytes, failed.dst_layer_pitch_bytes, failed.depth,
+                                cudaGetErrorString(err));
+            return false;
+        }
+        // CUDA currently allows only one outstanding 3D batch per stream.
+        err = cudaStreamSynchronize(stream);
+        if (err != cudaSuccess) {
+            RTP_LLM_LOG_WARNING("exec3DBatchedMemoryCopy chunk failed: begin=%zu ops=%zu error=%s",
+                                begin, count, cudaGetErrorString(err));
+            return false;
+        }
+    }
+    if (err != cudaSuccess) {
+        RTP_LLM_LOG_WARNING("exec3DBatchedMemoryCopy stream failed: ops=%zu, error=%s",
+                            ops.size(), cudaGetErrorString(err));
+        return false;
+    }
+    check_cuda_error();
+    return true;
+#else
+    RTP_LLM_LOG_DEBUG("exec3DBatchedMemoryCopy unavailable: CUDART_VERSION=%d", CUDART_VERSION);
+    return false;
+#endif
+}
+
 bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch* scratch) {
     if (params.tiles.empty()) {
         return true;

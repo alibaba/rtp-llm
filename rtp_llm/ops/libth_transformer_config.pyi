@@ -396,6 +396,7 @@ class EplbMode:
 class FIFOSchedulerConfig:
     cp_force_single_prefill: bool
     decode_prefill_ratio: str
+    max_batch_kv_len: int
     max_batch_tokens_size: int
     max_batch_tokens_without_cache: int
     max_context_batch_size: int
@@ -690,6 +691,9 @@ class KVCacheConfig:
     enable_device_cache: bool
     enable_memory_cache: bool
     enable_memory_cache_sm_copy: bool
+    memory_cache_h2d_copy_mode: str
+    memory_cache_h2d_copy_strict: bool
+    enable_memory_cache_h2d_3d_batch_auto: bool
     enable_prefix_tree_memory_cache: bool
     enable_legacy_memory_connector_fallback: bool
     enable_gpu_prefix_tree: bool
@@ -1094,6 +1098,7 @@ class ModelConfig:
     use_fp32_to_compute_logit: bool
     use_kvcache: bool
     use_norm_attn_out_residual: bool
+    use_opaque_kv_cache_store: bool
     use_norm_input_residual: bool
     vocab_size: int
     def __init__(self) -> None:
@@ -1655,6 +1660,7 @@ class SpeculativeExecutionConfig:
     checkpoint_path: str
     force_score_context_attention: bool
     force_stream_sample: bool
+    deterministic_draft_exact_match: bool
     gen_num_per_cycle: int
     model_type: str
     quantization: str

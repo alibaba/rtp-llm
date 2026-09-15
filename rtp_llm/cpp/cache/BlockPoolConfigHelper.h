@@ -64,13 +64,19 @@ public:
             // MTP block size may differ from the main model. Use the real
             // MTP group that owns a layer; target-aligned placeholder groups
             // must not affect the sub-model memory layout.
+            // All layouts in one BlockPool share the same block-id space. The
+            // parent block count may have been reduced by cross-rank sync after
+            // the MTP sub-configs were created, so size the draft layout with
+            // the synchronized parent count as well.
+            CacheConfig mtp_layout_config = *mtp_sub_config;
+            mtp_layout_config.block_num   = cache_config.block_num;
             MemoryLayoutConfig mtp_layout =
                 createMemoryLayoutConfig(false,
                                          mtp_layer_num,
-                                         mtp_spec->block_size_bytes(),
-                                         mtp_spec->scale_block_size_bytes(),
+                                         mtp_sub_config->kvBlockStrideBytesForGroup(real_mtp_gid),
+                                         mtp_sub_config->kvScaleStrideBytesForGroup(real_mtp_gid),
                                          mtp_spec,
-                                         cache_config,
+                                         mtp_layout_config,
                                          mtp_sub_config->localKvHeadNumForGroup(real_mtp_gid),
                                          mtp_sub_config->seqSizePerBlockForGroup(real_mtp_gid),
                                          mtp_sub_config->kernelBlocksPerKvBlockForGroup(real_mtp_gid));
@@ -199,6 +205,8 @@ private:
         cfg.dtype                   = spec->memoryLayoutDType();
         cfg.local_head_num_kv       = local_kv_head_num;
         cfg.enable_hybrid_attention = enable_hybrid_attention;
+        // Opaque PD transfer (whole-block) — see MemoryLayoutConfig::transfer_whole_block.
+        cfg.transfer_whole_block = cache_config.use_opaque_kv_cache_store;
         // Scale 3D layout for MLA and indexer; KV 3D only for MLA (concat_and_cache_mla)
         cfg.is_mla                     = cache_config.use_mla || cache_config.is_sparse;
         cfg.use_mla                    = cache_config.use_mla;

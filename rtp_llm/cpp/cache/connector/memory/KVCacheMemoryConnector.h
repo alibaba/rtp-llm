@@ -67,6 +67,26 @@ public:
     std::vector<CacheKeyType> cacheKeys() const;
     std::vector<CacheKeyType> cacheKeysForStatus() const;
 
+    // The memory connector owns one host BlockPool per RTP client. These
+    // accessors expose its shared backing to the remote KVCM client without
+    // transferring ownership of either the mapping or the memfd.
+    void* hostPoolBaseAddress() const;
+    size_t hostPoolSizeBytes() const;
+    int hostPoolSharedMemoryFd() const;
+
+    using MemoryRemoteEvictionItem = MemoryDiskBlockCache::CacheItem;
+    using HostBlockBuffer = std::vector<BlockInfo>;
+    using HostBlockBuffers = std::vector<HostBlockBuffer>;
+    size_t totalMemoryBlocks() const;
+    size_t freeMemoryBlocks() const;
+    std::vector<MemoryRemoteEvictionItem> prepareRemoteEviction(size_t block_num);
+    bool buildHostBlockBuffers(const std::vector<MemoryRemoteEvictionItem>& items,
+                               const std::vector<size_t>& selected_indices,
+                               HostBlockBuffers& buffers) const;
+    void finishRemoteEviction(const std::vector<MemoryRemoteEvictionItem>& items, bool remote_success);
+    size_t evictMemoryImmediately(size_t block_num);
+
+
 private:
     struct LayerTagSlot {
         int         layer_id{-1};
@@ -114,6 +134,7 @@ private:
     struct CopyPlan {
         std::vector<CopyInfoPerKey> copy_infos;
         CopyDirection               direction;
+        uint64_t                    plan_id{0};
     };
 
     std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType&             cache_keys,
@@ -184,6 +205,15 @@ private:
                                                               CopyDirection                    direction,
                                                               const std::vector<LayerTagSlot>& slots);
     StagedMemoryCopyScratch& stagedCopyScratchForDevice(int device_index);
+    // CUDA 13 cudaMemcpy3DBatchAsync fast path. Opt-in through
+    // memory_cache_{h2d,d2h}_copy_mode or enable_memory_cache_*_3d_batch_auto;
+    // returns false whenever the layout is not expressible as 3D tiles.
+    bool tryCopyCacheWith3DBatchedMemoryCopy(const NormalizedCopyItems&       items,
+                                             CopyDirection                    direction,
+                                             const std::vector<LayerTagSlot>& slots,
+                                             size_t*                          tile_count    = nullptr,
+                                             size_t*                          run_count     = nullptr,
+                                             size_t*                          payload_bytes = nullptr);
 
     void                             checkLayerBlockStrideBytes() const;
     std::vector<LayerTagSlot>        layerTagSlots() const;
@@ -286,6 +316,7 @@ private:
     bool                       diskCacheEnabled() const;
     bool                       copyItemUsesLayerBlocks(const NormalizedCopyItem& item) const;
     int64_t                    copyPlanTimeoutMs(const std::shared_ptr<CopyPlan>& copy_plan) const;
+    size_t                     estimateCopyPlanBytes(const std::shared_ptr<CopyPlan>& copy_plan) const;
     std::shared_ptr<BlockPool> createBlockPool(size_t block_size, size_t pool_size_mb) const;
     std::string                blockPoolDebugString() const;
     size_t                     memoryCacheBlockSizeBytes() const;
@@ -305,6 +336,13 @@ private:
                                int64_t       copy_item_num,
                                int64_t       disk_item_num,
                                CopyDirection direction);
+    void report3DCopyMetrics(bool          success,
+                             int64_t       latency_us,
+                             CopyDirection direction,
+                             int64_t       block_count,
+                             int64_t       tile_count,
+                             int64_t       op_count,
+                             int64_t       bytes);
     void reportDiskMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
     void reportDiskReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
     void reportDiskWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
@@ -332,6 +370,7 @@ private:
     std::shared_ptr<DiskBlockPool>                          incomplete_disk_pool_;
     std::shared_ptr<BroadcastManager>                       broadcast_manager_;
     std::shared_ptr<autil::LockFreeThreadPool>              wait_done_thread_pool_;
+    std::atomic<uint64_t>                                   next_copy_plan_id_{1};
 
     std::shared_ptr<BlockPool> complete_pool_;
     std::shared_ptr<BlockPool> incomplete_pool_;

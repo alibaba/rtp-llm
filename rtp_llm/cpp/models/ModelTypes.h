@@ -93,6 +93,7 @@ enum GptModelInputIndex : size_t {
     needAllHiddenStates,
     mtpHiddenStates,
     mtpHiddenStatesDtype,
+    mtpHiddenStatesLayout,
     skipRun,
     gptModelRequestLength,  // length of request id & pd_separation
     isFakeStream,
@@ -167,9 +168,10 @@ public:
     // post-reduce ``[T, D]``. Default returns an empty Tensor (model has no such
     // buffer); ``PyWrappedModel`` overrides to call the Python accessor.
     //
-    // The producer writes the buffer in verify (req-major) layout
+    // Without CP the producer writes the buffer in verify (req-major) layout
     // ``[r0_v0, r0_v1, …, r0_v_ps, r1_v0, …]``: each request occupies
-    // ``propose_step + 1`` consecutive rows. ``num_tokens >= 0`` returns that
+    // ``propose_step + 1`` consecutive rows. After CP input handling, the same
+    // producer writes this rank's local zigzag rows instead. ``num_tokens >= 0`` returns that
     // many leading rows; ``num_tokens < 0`` asks the producer for its last
     // written row count (CP prefill keeps rank-local rows in the buffer, so
     // the count cannot be derived from the global token count).
@@ -192,6 +194,10 @@ public:
     virtual torch::Tensor getMtpLastHiddenStates(int64_t /*num_tokens*/) {
         return torch::Tensor();
     }
+
+    virtual void selectMtpIterationTopkCache(const torch::Tensor& /*select_indices*/, int64_t /*total_tokens*/) {}
+
+    virtual void copyMtpIterationTopkCacheFrom(const ModelBase& /*source*/) {}
 
     rtp_llm::Weights            weights_;
     rtp_llm::OverallExpertStats overall_expert_stats_;

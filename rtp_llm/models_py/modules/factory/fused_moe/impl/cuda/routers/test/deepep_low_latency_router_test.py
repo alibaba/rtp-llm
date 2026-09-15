@@ -47,7 +47,7 @@ def _init_router(
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(world_size))
     os.environ["ACCL_DISPATCH_NUM_WARP_GROUPS"] = "4"
     os.environ["ACCL_COMBINE_NUM_WARP_GROUPS"] = "4"
-    os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
+    os.environ.setdefault("ACCL_LOW_LATENCY_OPTIMIZE", "1")
     os.environ["ACCL_TOPO_FIX"] = "1"
     os.environ["ACCL_LOAD_BALANCE"] = "1"
     # init params

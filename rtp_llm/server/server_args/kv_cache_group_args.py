@@ -180,6 +180,54 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="内存 Cache 拷贝是否启用 split-KV SM scatter/gather（CUDA 上满足布局条件时）。默认 False；True 时满足条件可走 SM copy。",
     )
     kv_cache_group.add_argument(
+        "--memory_cache_h2d_copy_mode",
+        env_name="MEMORY_CACHE_H2D_COPY_MODE",
+        bind_to=(kv_cache_config, "memory_cache_h2d_copy_mode"),
+        type=str,
+        default="auto",
+        help="Memory-cache H2D copy mode: auto, generic, memcpy_batch, memcpy3d_batch, staged_sm, split_kv_sm.",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_h2d_copy_strict",
+        env_name="MEMORY_CACHE_H2D_COPY_STRICT",
+        bind_to=(kv_cache_config, "memory_cache_h2d_copy_strict"),
+        type=str2bool,
+        default=False,
+        help="Fail H2D copy instead of falling back when the requested copy mode is unavailable.",
+    )
+    kv_cache_group.add_argument(
+        "--enable_memory_cache_h2d_3d_batch_auto",
+        env_name="ENABLE_MEMORY_CACHE_H2D_3D_BATCH_AUTO",
+        bind_to=(kv_cache_config, "enable_memory_cache_h2d_3d_batch_auto"),
+        type=str2bool,
+        default=False,
+        help="Allow auto mode to select CUDA 13 cudaMemcpy3DBatchAsync for eligible layouts.",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_d2h_copy_mode",
+        env_name="MEMORY_CACHE_D2H_COPY_MODE",
+        bind_to=(kv_cache_config, "memory_cache_d2h_copy_mode"),
+        type=str,
+        default="auto",
+        help="Memory-cache D2H copy mode: auto, generic, memcpy_batch, memcpy3d_batch, staged_sm, split_kv_sm.",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_d2h_copy_strict",
+        env_name="MEMORY_CACHE_D2H_COPY_STRICT",
+        bind_to=(kv_cache_config, "memory_cache_d2h_copy_strict"),
+        type=str2bool,
+        default=False,
+        help="Fail D2H copy instead of falling back when the requested copy mode is unavailable.",
+    )
+    kv_cache_group.add_argument(
+        "--enable_memory_cache_d2h_3d_batch_auto",
+        env_name="ENABLE_MEMORY_CACHE_D2H_3D_BATCH_AUTO",
+        bind_to=(kv_cache_config, "enable_memory_cache_d2h_3d_batch_auto"),
+        type=str2bool,
+        default=False,
+        help="Allow auto mode to select CUDA 13 cudaMemcpy3DBatchAsync for eligible D2H layouts.",
+    )
+    kv_cache_group.add_argument(
         "--memory_cache_size_mb",
         env_name="MEMORY_CACHE_SIZE_MB",
         bind_to=(kv_cache_config, "memory_cache_size_mb"),
@@ -484,6 +532,57 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=str2bool,
         default=False,
         help="分层 cache 开关。开启后，stream 释放时只全量写 remote，再按 GPU 空闲 block 阈值将冷 block 淘汰到 memory。",
+    )
+    kv_cache_group.add_argument(
+        "--enable_memory_cache_remote_eviction",
+        env_name="ENABLE_MEMORY_CACHE_REMOTE_EVICTION",
+        bind_to=(kv_cache_config, "enable_memory_cache_remote_eviction"),
+        type=str2bool,
+        default=False,
+        help="Memory cache 超过水位时是否先异步淘汰到 Remote；首版仅支持单 cache group。",
+    )
+    kv_cache_group.add_argument(
+        "--device_cache_high_watermark_ratio",
+        env_name="DEVICE_CACHE_HIGH_WATERMARK_RATIO",
+        bind_to=(kv_cache_config, "device_cache_high_watermark_ratio"),
+        type=int,
+        choices=range(1, 101),
+        default=95,
+        help="Device cache 允许使用的最大 block 百分比，范围 [1, 100]。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_high_watermark_ratio",
+        env_name="MEMORY_CACHE_HIGH_WATERMARK_RATIO",
+        bind_to=(kv_cache_config, "memory_cache_high_watermark_ratio"),
+        type=int,
+        choices=range(1, 101),
+        default=95,
+        help="Memory cache 硬水位；超过后紧急释放 block，范围 [1, 100]。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_remote_eviction_watermark_ratio",
+        env_name="MEMORY_CACHE_REMOTE_EVICTION_WATERMARK_RATIO",
+        bind_to=(kv_cache_config, "memory_cache_remote_eviction_watermark_ratio"),
+        type=int,
+        choices=range(1, 101),
+        default=90,
+        help="Memory cache 软水位；超过后触发 Memory 到 Remote 淘汰，必须不高于硬水位。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_remote_eviction_timeout_ms",
+        env_name="MEMORY_CACHE_REMOTE_EVICTION_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "memory_cache_remote_eviction_timeout_ms"),
+        type=int,
+        default=2000,
+        help="Memory 到 Remote 淘汰任务的超时时间（毫秒）。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_remote_eviction_max_blocks",
+        env_name="MEMORY_CACHE_REMOTE_EVICTION_MAX_BLOCKS",
+        bind_to=(kv_cache_config, "memory_cache_remote_eviction_max_blocks"),
+        type=int,
+        default=32,
+        help="单次 Memory 到 Remote 淘汰的最大 block 数。",
     )
     kv_cache_group.add_argument(
         "--device_cache_min_free_blocks",

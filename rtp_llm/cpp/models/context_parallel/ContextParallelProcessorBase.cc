@@ -99,6 +99,8 @@ void remapMultimodalInputs(GptModelInputs&             model_input,
     auto& orig_features = model_input.multimodal_features.value();
     auto  orig_locs_cpu = model_input.mm_features_locs.is_cuda() ? model_input.mm_features_locs.cpu().contiguous() :
                                                                    model_input.mm_features_locs.contiguous();
+    RTP_LLM_CHECK_WITH_INFO(orig_locs_cpu.dim() == 1 && orig_locs_cpu.scalar_type() == torch::kInt32,
+                            "mm_features_locs must be a 1-D int32 tensor");
     const auto orig_locs_acc = orig_locs_cpu.accessor<int32_t, 1>();
     const auto num_features  = orig_features.size();
     RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(num_features) == orig_locs_cpu.size(0),
@@ -142,6 +144,12 @@ void remapMultimodalInputs(GptModelInputs&             model_input,
                                 feature_idx,
                                 feature_start);
         const int64_t feature_end = feature_start + feature_len;
+        RTP_LLM_CHECK_WITH_INFO(feature_end <= remap.global_token_num,
+                                "multimodal feature %zu range [%ld,%ld) is outside global input [0,%ld)",
+                                feature_idx,
+                                feature_start,
+                                feature_end,
+                                remap.global_token_num);
         if (has_previous_feature) {
             RTP_LLM_CHECK_WITH_INFO(feature_start >= previous_feature_end,
                                     "multimodal feature ranges must be sorted and non-overlapping: "
@@ -251,8 +259,15 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
 
     const bool has_multimodal_input =
         model_input.multimodal_features.has_value() && !model_input.multimodal_features.value().empty();
-    RTP_LLM_CHECK_WITH_INFO(!has_multimodal_input || model_input.mm_features_locs.defined(),
-                            "mm_features_locs is required when multimodal_features is non-empty");
+    const bool has_multimodal_locs =
+        model_input.mm_features_locs.defined() && model_input.mm_features_locs.numel() > 0;
+    const bool has_mm_extra_input = model_input.mm_extra_input.has_value() && !model_input.mm_extra_input->empty();
+    RTP_LLM_CHECK_WITH_INFO(!has_multimodal_input || has_multimodal_locs,
+                            "multimodal_features require mm_features_locs");
+    RTP_LLM_CHECK_WITH_INFO(!has_multimodal_locs || has_multimodal_input,
+                            "mm_features_locs require multimodal_features");
+    RTP_LLM_CHECK_WITH_INFO(!has_mm_extra_input || has_multimodal_input,
+                            "mm_extra_input requires multimodal_features");
 
     static const auto pinned_i32 = torch::TensorOptions(torch::kInt32).pinned_memory(true);
 
@@ -340,19 +355,30 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     }
 
     const bool has_hidden_states          = total_hidden_states.defined() && total_hidden_states.numel() > 0;
-    const bool should_split_hidden_states = has_hidden_states && split_hidden_states_;
+    bool       should_split_hidden_states = false;
     if (has_hidden_states) {
         RTP_LLM_CHECK_WITH_INFO(
             total_hidden_states.dim() == 2, "CP MTP hidden states must be 2-D, got dim=%ld", total_hidden_states.dim());
-        const int64_t expected_token_num = split_hidden_states_ ? global_token_num : local_token_num;
-        RTP_LLM_CHECK_WITH_INFO(total_hidden_states.size(0) == expected_token_num,
-                                "CP MTP hidden states row count mismatch: rows=%ld, expected=%ld, layout=%s, "
-                                "global_tokens=%ld, local_tokens=%ld",
-                                total_hidden_states.size(0),
-                                expected_token_num,
-                                split_hidden_states_ ? "global" : "local",
-                                global_token_num,
-                                local_token_num);
+        if (model_input.last_hidden_states_layout == MtpHiddenStatesLayout::GLOBAL) {
+            RTP_LLM_CHECK_WITH_INFO(total_hidden_states.size(0) == global_token_num,
+                                    "global CP MTP hidden states row count mismatch: rows=%ld, global_tokens=%ld",
+                                    total_hidden_states.size(0),
+                                    global_token_num);
+            should_split_hidden_states = true;
+        } else if (model_input.last_hidden_states_layout == MtpHiddenStatesLayout::CP_LOCAL) {
+            RTP_LLM_CHECK_WITH_INFO(total_hidden_states.size(0) == local_token_num,
+                                    "local CP MTP hidden states row count mismatch: rows=%ld, local_tokens=%ld",
+                                    total_hidden_states.size(0),
+                                    local_token_num);
+        } else {
+            RTP_LLM_FAIL("CP MTP hidden states require an explicit GLOBAL or CP_LOCAL layout, rows=%ld, "
+                         "global_tokens=%ld, local_tokens=%ld",
+                         total_hidden_states.size(0),
+                         global_token_num,
+                         local_token_num);
+        }
+    } else {
+        model_input.last_hidden_states_layout = MtpHiddenStatesLayout::NONE;
     }
     std::vector<int64_t> hidden_select_indices;
     std::vector<uint8_t> hidden_valid_mask;
@@ -476,6 +502,10 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         auto split_hidden = total_hidden_states.index_select(0, select_indices);
         split_hidden.masked_fill_(valid_mask.logical_not().unsqueeze(1), 0);
         model_input.last_hidden_states = split_hidden;
+    }
+
+    if (has_hidden_states) {
+        model_input.last_hidden_states_layout = MtpHiddenStatesLayout::CP_LOCAL;
     }
 
     model_input.combo_tokens  = cp_split_input_tokens.to(torch::kCUDA, /*non_blocking=*/true);

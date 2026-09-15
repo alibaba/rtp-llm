@@ -176,20 +176,30 @@ def get_fmha_impl(
             attn_configs, attn_inputs, fmha_config
         )
 
+    rejected: List[str] = []
+
     for impl in mha_impls:
         # Check if this FMHA implementation is disabled before creating instance
         impl_class_name = impl.__name__
 
         # Skip if this FMHA implementation is disabled in config
         if _is_fmha_impl_disabled(impl_class_name, fmha_config):
+            rejected.append(f"{impl_class_name}: disabled by config")
+            continue
+
+        # Check parallelism config first to avoid calling support() on impls
+        # that don't support CP — some impls (e.g. TRT) abort in support().
+        # CP only splits the prefill sequence; decode runs standard attention,
+        # so the prefill-CP gate must not reject decode impls when CP is enabled.
+        if attn_inputs.is_prefill and not impl.support_parallelism_config(
+            parallelism_config
+        ):
+            rejected.append(f"{impl_class_name}: does not support prefill CP")
             continue
 
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
-            continue
-
-        # Check if implementation supports parallelism config
-        if not impl.support_parallelism_config(parallelism_config):
+            rejected.append(f"{impl_class_name}: support() returned False")
             continue
         kwargs = {"fmha_config": fmha_config} if impl.accepts_fmha_config else {}
         try:
@@ -201,9 +211,11 @@ def get_fmha_impl(
             ):
                 raise
             logging.warning(f"Failed to instantiate {impl_class_name}: {e}")
+            rejected.append(f"{impl_class_name}: raised {type(e).__name__}: {e}")
             continue
         if not is_cuda_graph or instance.support_cuda_graph():
             return instance
+        rejected.append(f"{impl_class_name}: no cuda graph support")
     if (
         attn_configs.rope_config.style == RopeStyle.Mrope
         and not attn_configs.rope_config.mrope_interleaved
@@ -214,7 +226,12 @@ def get_fmha_impl(
             "non-interleaved layout by default; do not flip mrope_interleaved because "
             "that changes RoPE semantics. Use a CUDA backend for these checkpoints."
         )
-    raise Exception("can not find mha type")
+    raise Exception(
+        "can not find mha type for "
+        f"{'prefill' if attn_inputs.is_prefill else 'decode'} "
+        f"(is_cuda_graph={is_cuda_graph}, candidates={len(mha_impls)}): "
+        + "; ".join(rejected)
+    )
 
 
 class AttnImplFactory(object):

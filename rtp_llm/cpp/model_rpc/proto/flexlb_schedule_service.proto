@@ -64,6 +64,9 @@ message FlexlbScheduleRequestPB {
     // metadata) preserves the guard through a rolling upgrade because older
     // protobuf runtimes retain unknown fields when they relay the request.
     uint32 forward_hop = 15;
+    repeated string media_keys = 16;
+    FlexlbServerStatusPB selected_vit = 17;
+    bool vit_route_only = 18;
 }
 
 message FlexlbServerStatusPB {
@@ -72,6 +75,8 @@ message FlexlbServerStatusPB {
     int32 http_port = 3;
     int32 grpc_port = 4;
     reserved 5;
+    string group = 6;
+    string worker_instance = 7;
 }
 
 // Why an incoming request was rejected by the admission decision.  This is

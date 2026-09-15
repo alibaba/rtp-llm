@@ -1168,6 +1168,7 @@ class W:
     multi_tokens_predict_enorm = "multi_tokens_predict_enorm.weight"
     multi_tokens_predict_hnorm = "multi_tokens_predict_hnorm.weight"
     multi_tokens_predict_eh_proj = "multi_tokens_predict_eh_proj.weight"
+    multi_tokens_predict_eh_proj_s = "multi_tokens_predict_eh_proj.weight_scale"
     multi_tokens_predict_final_ln_gamma = "multi_tokens_predict_final_layernorm.gamma"
     multi_tokens_predict_final_ln_beta = "multi_tokens_predict_final_layernorm.beta"
     multi_tokens_predict_d2t_map = "multi_tokens_predict_d2t_map"
@@ -1176,6 +1177,7 @@ class W:
     # eagle3
     eagle3_fc_proj = "eagle3_fc.weight"
     eagle3_fc_norm_gamma = "eagle3_fc.gamma"
+    eagle3_aux_norm_gamma = "eagle3_aux_norm.gamma"
     eagle3_input_norm_gamma = "eagle3_input.gamma"
 
     # attn
@@ -1296,6 +1298,20 @@ class W:
     mla_indexer_weights_proj_w = (
         "self_attention_weights.mla.indexer.weights_proj.kernel"
     )
+
+    # MiniMax-M3 sparse attention (MSA) index branch.
+    # Sparse layers (per text_config.sparse_attention_freq) carry an
+    # additional Q/K projection + RMSNorm pair that feeds the index attention
+    # path. With disable_index_value=True (M3 default for all sparse layers)
+    # there is NO index_v_proj and NO index_o_proj.
+    msa_idx_q_w = "self_attention_weights.msa.index_q_proj.kernel"
+    msa_idx_k_w = "self_attention_weights.msa.index_k_proj.kernel"
+    msa_idx_q_raw_w = "self_attention_weights.msa.index_q_proj.raw_kernel"
+    msa_idx_q_raw_s = "self_attention_weights.msa.index_q_proj.raw_weight_scale_inv"
+    msa_idx_k_raw_w = "self_attention_weights.msa.index_k_proj.raw_kernel"
+    msa_idx_k_raw_s = "self_attention_weights.msa.index_k_proj.raw_weight_scale_inv"
+    msa_idx_q_norm = "self_attention_weights.msa.index_q_layernorm.gamma"
+    msa_idx_k_norm = "self_attention_weights.msa.index_k_layernorm.gamma"
     # cross attn
     cross_attn_pre_ln_gamma = "cross_attention_weights_pre_layernorm.gamma"
     cross_attn_pre_ln_beta = "cross_attention_weights_pre_layernorm.beta"
@@ -1504,18 +1520,31 @@ class W:
         multi_tokens_predict_enorm: sp_id,
         multi_tokens_predict_hnorm: sp_id,
         multi_tokens_predict_eh_proj: sp_id,
+        multi_tokens_predict_eh_proj_s: sp_id,
         multi_tokens_predict_final_ln_gamma: sp_id,
         multi_tokens_predict_final_ln_beta: sp_id,
         multi_tokens_predict_d2t_map: sp_id,
         multi_tokens_predict_t2d_map: sp_id,
         eagle3_fc_proj: sp_id,
         eagle3_fc_norm_gamma: sp_id,
+        eagle3_aux_norm_gamma: sp_id,
         eagle3_input_norm_gamma: sp_id,
         pre_attn_ln_gamma: sp_id,
         pre_attn_ln_beta: sp_id,
         qk_ln_gamma: sp_head_qk_norm,
         q_ln_gamma: sp_id,
         k_ln_gamma: sp_id,
+        # MiniMax-M3 MSA index branch is replicated across TP ranks: every rank
+        # computes the same index Q/K and thus the same top-k block selection,
+        # which it then applies to its local (sharded) main K/V heads.
+        msa_idx_q_w: sp_id,
+        msa_idx_k_w: sp_id,
+        msa_idx_q_raw_w: sp_id,
+        msa_idx_q_raw_s: sp_id,
+        msa_idx_k_raw_w: sp_id,
+        msa_idx_k_raw_s: sp_id,
+        msa_idx_q_norm: sp_id,
+        msa_idx_k_norm: sp_id,
         attn_qkv_w: sp_head,
         attn_qkv_z: sp_head_z,
         attn_qkv_s: sp_head_s,

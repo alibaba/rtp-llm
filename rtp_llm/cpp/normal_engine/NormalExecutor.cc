@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
+#include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/models/ModelInputsLogger.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
@@ -14,6 +15,7 @@
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include <c10/core/DeviceGuard.h>
 
 using namespace std;
 
@@ -44,6 +46,23 @@ void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inpu
     holder.hold_host(inputs.do_sample);
     holder.hold_host(inputs.finished_mask);
     holder.hold_host(inputs.cum_log_probs);
+}
+
+torch::TensorOptions runtimeCudaOptions(c10::ScalarType dtype) {
+    return torch::TensorOptions().dtype(dtype).device(getTorchCudaDevice());
+}
+
+void checkRuntimeCudaDevice(const torch::Tensor& tensor, const char* tag, const char* name) {
+    if (!tensor.defined() || !tensor.is_cuda()) {
+        return;
+    }
+    const auto expected_device = static_cast<int>(getDeviceId());
+    RTP_LLM_CHECK_WITH_INFO(tensor.get_device() == expected_device,
+                            "[normal-device-input] %s.%s is on cuda:%d, expected runtime cuda:%d",
+                            tag,
+                            name,
+                            tensor.get_device(),
+                            expected_device);
 }
 
 }  // namespace
@@ -178,7 +197,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 }
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
-    const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    setCurrentThreadDevice(static_cast<int>(getDeviceId()));
+    c10::DeviceGuard runtime_device_guard(getTorchCudaDevice());
+    const int64_t    process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     if (schedule_time_us <= 0) {
         schedule_time_us = process_start_time_us;
     }
@@ -450,11 +471,16 @@ void NormalExecutor::ensureModelInputsOnCuda(GptModelInputs& model_input, const 
     }
 
     auto to_cuda = [this, tag](torch::Tensor& tensor, const char* name) {
-        if (!tensor.defined() || tensor.is_cuda()) {
+        if (!tensor.defined()) {
             return;
         }
+        if (tensor.is_cuda()) {
+            checkRuntimeCudaDevice(tensor, tag, name);
+            return;
+        }
+        const auto cuda_options = runtimeCudaOptions(tensor.scalar_type());
         if (tensor.numel() == 0) {
-            tensor = torch::empty(tensor.sizes(), torch::TensorOptions(tensor.dtype()).device(torch::kCUDA));
+            tensor = torch::empty(tensor.sizes(), cuda_options);
             return;
         }
         if (!tensor.is_pinned()) {
@@ -463,14 +489,14 @@ void NormalExecutor::ensureModelInputsOnCuda(GptModelInputs& model_input, const 
             // than abort, but warn loudly so we can fix the producer.
             RTP_LLM_LOG_WARNING(
                 "[normal-device-input] %s.%s is CPU but not pinned; H2D falls back to blocking copy", tag, name);
-            tensor = tensor.to(torch::kCUDA);
+            tensor = tensor.to(cuda_options);
             return;
         }
         // non_blocking=true requires the source tensor to outlive the copy;
         // the holder keeps a reference until the next process() iteration
         // releases it (after the broadcast has consumed the tensor).
         buffer_holder_.hold_host(tensor);
-        tensor = tensor.to(torch::kCUDA, /*non_blocking=*/true);
+        tensor = tensor.to(cuda_options, /*non_blocking=*/true);
     };
 
     to_cuda(model_input.combo_tokens, "combo_tokens");
@@ -496,6 +522,7 @@ void NormalExecutor::checkModelInputsOnCuda(const GptModelInputs& model_input, c
                                 name,
                                 tensor.device().str().c_str(),
                                 tensor.numel());
+        checkRuntimeCudaDevice(tensor, tag, name);
     };
     check(model_input.combo_tokens, "combo_tokens");
     check(model_input.input_lengths, "input_lengths");
@@ -552,7 +579,7 @@ void NormalExecutor::prepareGrpcNormalDeviceState(const StreamGroups& stream_gro
         return;
     }
 
-    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto cuda_i32 = runtimeCudaOptions(torch::kInt32);
     for (const auto& stream : stream_groups.decodeStreams()) {
         if (!stream->consumeGrpcNormalDeviceStatePending()) {
             continue;
@@ -625,9 +652,13 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
         }
     }
 
-    const auto    cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto cuda_i32 = runtimeCudaOptions(torch::kInt32);
+    if (token_ids.is_cuda()) {
+        checkRuntimeCudaDevice(token_ids, "publish_normal_device_state", "token_ids");
+    }
     torch::Tensor token_ids_gpu =
         (token_ids.is_cuda() && token_ids.scalar_type() == torch::kInt32) ? token_ids : token_ids.to(cuda_i32);
+    checkRuntimeCudaDevice(token_ids_gpu, "publish_normal_device_state", "token_ids");
     const int64_t token_rows = token_ids_gpu.size(0);
     if (token_rows < static_cast<int64_t>(all_streams.size())) {
         RTP_LLM_LOG_WARNING(
@@ -636,29 +667,41 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
         return;
     }
 
-    int64_t batch_idx_out = 0;
-    for (auto& stream : all_streams) {
-        torch::Tensor last_sample_token_gpu;
-        if (token_ids_gpu.dim() == 1) {
-            last_sample_token_gpu = token_ids_gpu.narrow(0, batch_idx_out, 1).to(torch::kInt32);
-        } else {
-            const int64_t last_col = token_ids_gpu.size(-1) - 1;
-            last_sample_token_gpu =
-                token_ids_gpu.narrow(0, batch_idx_out, 1).select(-1, last_col).reshape({1}).to(torch::kInt32);
-        }
+    std::vector<torch::Tensor> cur_seq_len_gpu_views;
+    cur_seq_len_gpu_views.reserve(all_streams.size());
+    std::vector<int> cur_real_seq_lens;
+    cur_real_seq_lens.reserve(all_streams.size());
 
+    for (auto& stream : all_streams) {
         // Mirror next_seq_len_gpu on host for the next iter's scheduler.
         // Fall back to live seqLength only on first publish (no prior worker).
         const auto& prev_state = stream->getNormalAsyncDeviceState();
         const int   cur_real_seq_len =
             prev_state.next_real_seq_len > 0 ? prev_state.next_real_seq_len : stream->seqLength();
+        cur_real_seq_lens.push_back(cur_real_seq_len);
 
         torch::Tensor cur_seq_len_gpu;
         const auto&   prev_next_seq_len = prev_state.next_seq_len_gpu;
         if (prev_next_seq_len.defined() && prev_next_seq_len.is_cuda()) {
-            cur_seq_len_gpu = prev_next_seq_len;
+            checkRuntimeCudaDevice(prev_next_seq_len, "publish_normal_device_state", "prev_next_seq_len");
+            cur_seq_len_gpu = prev_next_seq_len.reshape({1});
         } else {
             cur_seq_len_gpu = torch::full({1}, static_cast<int64_t>(cur_real_seq_len), cuda_i32);
+        }
+        cur_seq_len_gpu_views.push_back(std::move(cur_seq_len_gpu));
+    }
+
+    torch::Tensor next_seq_len_gpu_all = (torch::cat(cur_seq_len_gpu_views, 0) + 1).to(torch::kInt32);
+    checkRuntimeCudaDevice(next_seq_len_gpu_all, "publish_normal_device_state", "next_seq_len_gpu_all");
+
+    int64_t batch_idx_out = 0;
+    for (auto& stream : all_streams) {
+        torch::Tensor last_sample_token_gpu;
+        if (token_ids_gpu.dim() == 1) {
+            last_sample_token_gpu = token_ids_gpu.narrow(0, batch_idx_out, 1);
+        } else {
+            const int64_t last_col = token_ids_gpu.size(-1) - 1;
+            last_sample_token_gpu  = token_ids_gpu.narrow(0, batch_idx_out, 1).select(-1, last_col).reshape({1});
         }
 
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
@@ -669,9 +712,9 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
 
         GenerateStream::NormalAsyncDeviceState state;
         state.last_sample_token_gpu = std::move(last_sample_token_gpu);
-        state.next_seq_len_gpu      = (cur_seq_len_gpu + 1).to(torch::kInt32);
-        state.last_real_seq_len     = cur_real_seq_len;
-        state.next_real_seq_len     = cur_real_seq_len + 1;
+        state.next_seq_len_gpu      = next_seq_len_gpu_all.narrow(0, batch_idx_out, 1);
+        state.last_real_seq_len     = cur_real_seq_lens[batch_idx_out];
+        state.next_real_seq_len     = cur_real_seq_lens[batch_idx_out] + 1;
         stream->setNormalAsyncDeviceState(std::move(state));
         batch_idx_out += 1;
     }

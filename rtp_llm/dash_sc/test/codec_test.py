@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import struct
 from unittest import TestCase, main
+from unittest.mock import patch
 
 import torch
 
@@ -394,7 +396,7 @@ class DashScGrpcRequestTest(TestCase):
         op = parse_request_controls(req)
 
         self.assertEqual(json.loads(sp.response_format), {"type": "json_object"})
-        self.assertIs(op.enable_thinking, False)
+        self.assertIsNone(op.enable_thinking)
 
     def test_build_model_infer_request_preserves_json_controls(self) -> None:
         req = build_model_infer_request(
@@ -674,6 +676,28 @@ class DashScGrpcRequestTest(TestCase):
 
                 self.assertEqual(sp.max_new_tokens, value)
                 self.assertTrue(sp.max_new_tokens_from_completion_alias)
+
+    def test_default_thinking_budget_follows_max_new_tokens(self) -> None:
+        generate_config = SamplingParams(max_new_tokens=123).to_generate_config(
+            other=OtherParams(enable_thinking=True)
+        )
+
+        self.assertEqual(generate_config.max_new_tokens, 123)
+        self.assertEqual(generate_config.max_thinking_tokens, 123)
+
+    def test_default_thinking_budget_follows_resolved_completion_alias(self) -> None:
+        sampling = SamplingParams(
+            max_new_tokens=100,
+            max_new_tokens_from_completion_alias=True,
+            max_total_tokens=80,
+        )
+
+        generate_config = sampling.to_generate_config(
+            other=OtherParams(enable_thinking=True)
+        )
+
+        self.assertEqual(generate_config.max_new_tokens, 80)
+        self.assertEqual(generate_config.max_thinking_tokens, 80)
 
     def test_completion_alias_thinking_budget_keeps_backend_limit(
         self,
@@ -962,6 +986,426 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(gc.max_thinking_tokens, 128)
         self.assertEqual(gc.stop_words_list, [[42]])
         self.assertTrue(gc.return_input_ids)
+
+    @staticmethod
+    def _set_payload(
+        req: predict_v2_pb2.ModelInferRequest,
+        payload_obj: object,
+        key: str = "payload",
+    ) -> None:
+        req.parameters[key].string_param = json.dumps(payload_obj)
+
+    # ------------------------------------------------------------------
+    # OpenAI shape (gpt3_serving build_payload output)
+    # ------------------------------------------------------------------
+
+    def test_parse_multimodal_parts_image_video_audio(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            req,
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": "http://x.png"},
+                                },
+                                {
+                                    "type": "video_url",
+                                    "video_url": {"url": "http://y.mp4"},
+                                },
+                                {
+                                    "type": "audio_url",
+                                    "audio_url": {"url": "http://z.wav"},
+                                },
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        parts = parse_multimodal_parts_from_request(req)
+        self.assertEqual(
+            parts,
+            [
+                MultimodalPart(url="http://x.png", mm_type=MMUrlType.IMAGE),
+                MultimodalPart(url="http://y.mp4", mm_type=MMUrlType.VIDEO),
+                MultimodalPart(url="http://z.wav", mm_type=MMUrlType.AUDIO),
+            ],
+        )
+
+    def test_parse_multimodal_parts_skips_text(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            req,
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "describe this"},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": "http://a.png"},
+                                },
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        parts = parse_multimodal_parts_from_request(req)
+        self.assertEqual(
+            parts,
+            [MultimodalPart(url="http://a.png", mm_type=MMUrlType.IMAGE)],
+        )
+
+    def test_parse_multimodal_parts_missing_payload(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        self.assertEqual(parse_multimodal_parts_from_request(req), [])
+
+    def test_parse_multimodal_parts_invalid_json(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["payload"].string_param = "not json"
+        # Fail-open: returns [] instead of raising.
+        self.assertEqual(parse_multimodal_parts_from_request(req), [])
+
+    def test_parse_multimodal_parts_url_as_string(self) -> None:
+        # Defensive: hand-built clients may pass image_url as plain string.
+        req = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            req,
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "image_url", "image_url": "http://b.jpg"}
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        parts = parse_multimodal_parts_from_request(req)
+        self.assertEqual(
+            parts,
+            [MultimodalPart(url="http://b.jpg", mm_type=MMUrlType.IMAGE)],
+        )
+
+    def test_parse_multimodal_parts_top_level_messages(self) -> None:
+        # Tolerate clients that send {'messages': [...]} without the 'input' wrapper.
+        req = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            req,
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": "http://c.png"}}
+                        ],
+                    }
+                ]
+            },
+        )
+        parts = parse_multimodal_parts_from_request(req)
+        self.assertEqual(
+            parts,
+            [MultimodalPart(url="http://c.png", mm_type=MMUrlType.IMAGE)],
+        )
+
+    def test_parse_multimodal_parts_bare_messages_list(self) -> None:
+        # dashllm __messages__ path: bare list without dict wrapper.
+        req = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            req,
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "http://d.png"}}
+                    ],
+                }
+            ],
+            key="__messages__",
+        )
+        parts = parse_multimodal_parts_from_request(req)
+        self.assertEqual(
+            parts,
+            [MultimodalPart(url="http://d.png", mm_type=MMUrlType.IMAGE)],
+        )
+
+    # ------------------------------------------------------------------
+    # Dashscope native shape (multimodal_serving / MMGPT3Item / ocr/*.json)
+    # ------------------------------------------------------------------
+
+    def test_parse_multimodal_parts_native_image_video_audio(self) -> None:
+        # Native shape: no ``type`` field, modality keyed directly.
+        req = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            req,
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"image": "http://x.png"},
+                                {"video": "http://y.mp4"},
+                                {"audio": "http://z.wav"},
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        parts = parse_multimodal_parts_from_request(req)
+        self.assertEqual(
+            parts,
+            [
+                MultimodalPart(url="http://x.png", mm_type=MMUrlType.IMAGE),
+                MultimodalPart(url="http://y.mp4", mm_type=MMUrlType.VIDEO),
+                MultimodalPart(url="http://z.wav", mm_type=MMUrlType.AUDIO),
+            ],
+        )
+
+    def test_parse_multimodal_parts_native_with_inline_config(self) -> None:
+        # ocr/request_for_general.json: per-part min_pixels/max_pixels inline.
+        req = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            req,
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "image": "http://ocr.jpg",
+                                    "min_pixels": 3136,
+                                    "max_pixels": 6422528,
+                                    "max_long_side_pixel": 1008,
+                                    "enable_rotate": False,
+                                },
+                                {"text": "describe"},
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        parts = parse_multimodal_parts_from_request(req)
+        self.assertEqual(
+            parts,
+            [
+                MultimodalPart(
+                    url="http://ocr.jpg",
+                    mm_type=MMUrlType.IMAGE,
+                    min_pixels=3136,
+                    max_pixels=6422528,
+                    max_long_side_pixel=1008,
+                )
+            ],
+        )
+
+    def test_parse_multimodal_parts_native_video_config(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            req,
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "video": "http://video.mp4",
+                                    "fps": 0.2,
+                                    "max_long_side_pixel": 896,
+                                    "max_frames": 32,
+                                },
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        parts = parse_multimodal_parts_from_request(req)
+        self.assertEqual(
+            parts,
+            [
+                MultimodalPart(
+                    url="http://video.mp4",
+                    mm_type=MMUrlType.VIDEO,
+                    max_long_side_pixel=896,
+                    fps=0.2,
+                    max_frames=32,
+                ),
+            ],
+        )
+
+    # ------------------------------------------------------------------
+    # Wrapping & alternative parameter key
+    # ------------------------------------------------------------------
+
+    def test_parse_multimodal_parts_full_http_body_wrapping(self) -> None:
+        # Canonical dashscope HTTP body shape (see ocr/request_for_general.json):
+        # header sibling + payload wrapper around input.messages.
+        req = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            req,
+            {
+                "header": {"request_id": "ocr_test"},
+                "payload": {
+                    "input": {
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"image": "http://full.png"},
+                                    {"text": "describe"},
+                                ],
+                            }
+                        ]
+                    },
+                    "parameters": {"max_tokens": 2000},
+                },
+            },
+        )
+        parts = parse_multimodal_parts_from_request(req)
+        self.assertEqual(
+            parts,
+            [MultimodalPart(url="http://full.png", mm_type=MMUrlType.IMAGE)],
+        )
+
+    def test_parse_multimodal_parts_double_underscore_messages_key(self) -> None:
+        # multimodal_serving/server/dserv_stream_worker_for_vl.py reads
+        # parameters['__messages__'] instead of parameters['payload'].
+        req = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            req,
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"image": "http://dserv.png"}],
+                        }
+                    ]
+                }
+            },
+            key="__messages__",
+        )
+        parts = parse_multimodal_parts_from_request(req)
+        self.assertEqual(
+            parts,
+            [MultimodalPart(url="http://dserv.png", mm_type=MMUrlType.IMAGE)],
+        )
+
+    def test_parse_multimodal_parts_payload_key_wins_over_messages(self) -> None:
+        # If both keys are present, ``payload`` (gpt3_serving outbound) wins;
+        # this matches _MULTIMODAL_PARAMETER_KEYS priority order.
+        req = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            req,
+            {
+                "messages": [
+                    {"role": "user", "content": [{"image": "http://from-payload.png"}]}
+                ]
+            },
+            key="payload",
+        )
+        self._set_payload(
+            req,
+            {
+                "messages": [
+                    {"role": "user", "content": [{"image": "http://from-double.png"}]}
+                ]
+            },
+            key="__messages__",
+        )
+        parts = parse_multimodal_parts_from_request(req)
+        self.assertEqual(
+            parts,
+            [MultimodalPart(url="http://from-payload.png", mm_type=MMUrlType.IMAGE)],
+        )
+
+    # ------------------------------------------------------------------
+    # Per-part config edge cases
+    # ------------------------------------------------------------------
+
+    def test_parse_multimodal_parts_nested_preprocess_config(self) -> None:
+        # RTP-LLM's OpenAI ContentPart.preprocess_config nesting works too.
+        req = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            req,
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": "http://nested.png"},
+                                    "preprocess_config": {
+                                        "min_pixels": 100,
+                                        "max_pixels": 200,
+                                        "max_long_side_pixel": 1008,
+                                        "fps": 0.2,
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        parts = parse_multimodal_parts_from_request(req)
+        self.assertEqual(
+            parts,
+            [
+                MultimodalPart(
+                    url="http://nested.png",
+                    mm_type=MMUrlType.IMAGE,
+                    min_pixels=100,
+                    max_pixels=200,
+                    max_long_side_pixel=1008,
+                    fps=0.2,
+                )
+            ],
+        )
+
+    def test_parse_multimodal_parts_inline_overrides_nested(self) -> None:
+        # When both nested ``preprocess_config`` and inline keys are set, inline wins.
+        req = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            req,
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "image": "http://both.png",
+                                    "preprocess_config": {"min_pixels": 100},
+                                    "min_pixels": 9999,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        parts = parse_multimodal_parts_from_request(req)
+        self.assertEqual(parts[0].min_pixels, 9999)
 
 
 class DashScMultimodalRequestTest(TestCase):
@@ -1327,6 +1771,32 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         )
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 10)
 
+    def test_multimodal_token_usage_is_returned_in_parameters(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([7], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(
+                input_len=100,
+                multimodal_lengths={
+                    MMUrlType.IMAGE: 64,
+                    MMUrlType.VIDEO: 32,
+                    MMUrlType.AUDIO: 16,
+                },
+            ),
+        )
+        resp = StreamResponseBuilder(
+            dash_sc_request_id="req-mm",
+            model_name="mdl",
+            request_log_tag=stream_log_tag(
+                request_id_numeric=100, trace_id="req-mm"
+            ),
+        ).build(GenerateOutputs(generate_outputs=[out]))
+        infer = resp.infer_response
+
+        self.assertEqual(infer.parameters["image_tokens"].int64_param, 64)
+        self.assertEqual(infer.parameters["video_tokens"].int64_param, 32)
+        self.assertEqual(infer.parameters["audio_tokens"].int64_param, 16)
+
     def test_dash_error_response_uses_inner_error_fields(self) -> None:
         resp = build_dash_error_response(
             "req-error",
@@ -1583,7 +2053,7 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             infer.outputs[i].name: infer.raw_output_contents[i]
             for i in range(len(infer.outputs))
         }
-        self.assertEqual(by_name["generated_ids"], struct.pack("<i", 0))
+        self.assertEqual(by_name["generated_ids"], b"")
         self.assertEqual(list(infer.outputs[0].shape), [1, 0])
 
     def test_updates_dynamic_fields_without_mutating_prior_frames(self) -> None:

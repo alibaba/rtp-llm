@@ -15,6 +15,9 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
+    force_py_flashinfer,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     check_attention_inputs,
 )
@@ -31,7 +34,13 @@ from rtp_llm.ops.compute_ops import (
 )
 
 # Constants
-DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
+# FlashInfer's batch-prefill plan allocates a few internal scratch tensors
+# (e.g. ``batch_prefill_tmp_v``) out of this workspace. The size scales with
+# max_batch_tokens * num_qo_heads * head_dim, so 128MB can overflow for wide
+# GQA models. Allow overriding via env and default to a roomier 512MB.
+DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = int(
+    __import__("os").environ.get("PY_FLASHINFER_WORKSPACE_SIZE_MB", "512")
+)
 
 # FP8 KV cache uses a unit quantization scale: K/V are cast
 # directly to float8_e4m3fn and FA3 FP8 kernels run with scale_q/k/v = 1.0.
@@ -173,6 +182,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
             "HND",
             backend=backend,
         )
+        # prepare() installs graph-owned metadata buffers before the first
+        # graph plan. Eager prefill must retain FlashInfer's normal mode.
+        self.prefill_wrapper._use_cuda_graph = self.enable_cuda_graph
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
@@ -235,6 +247,10 @@ class PyFlashinferPrefillPagedAttnOp(object):
             ]
 
         if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
+            # Both full-capacity and compact graphs need FlashInfer's fixed
+            # padded grid. In particular, compact draft-prefill enables
+            # split-KV below, so the number of active KV chunks may change at
+            # replay even though its Q layout and batch size are fixed.
             self.prefill_wrapper._use_cuda_graph = True
             self.prefill_wrapper._qo_indptr_buf = qo_indptr
             self.prefill_wrapper._paged_kv_indptr_buf = (
@@ -279,6 +295,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
             )
             qo_indptr = self.qo_indptr
 
+        # CUDA graphs use a fixed padded grid with dynamic split-KV schedules.
+        # Re-plan before every replay to refresh chunk mappings and
+        # block_valid_mask in stable workspace buffers.
         self.prefill_wrapper.plan(
             qo_indptr,
             self.fmha_params.decode_page_indptr_d,
@@ -874,7 +893,7 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         3. MhaRotaryEmbeddingOp supports the inputs
         """
         return (
-            not is_sm10x()
+            (not is_sm10x() or force_py_flashinfer())
             and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
             and attn_configs.rope_config.style != RopeStyle.Mrope
         )
@@ -1006,7 +1025,7 @@ class PyFlashinferDecodeAttnOp(object):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs,
+        attn_inputs: Optional[PyAttentionInputs] = None,
     ) -> None:
         self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         # attn_configs already has head_num and kv_head_num divided by tp_size
@@ -1022,13 +1041,20 @@ class PyFlashinferDecodeAttnOp(object):
             use_tensor_cores=self.use_tensor_core,
         )
         self.dtype = attn_configs.dtype
+        self.kv_cache_dtype = attn_configs.kv_cache_dtype
         self.kv_dtype = attn_kv_dtype(attn_configs)
         # CUDA-core decode dequantizes FP8 KV; tensor-core decode uses the
         # batch-prefill path and therefore shares attn_q_dtype().
         self.q_dtype = (
             attn_q_dtype(attn_configs) if self.use_tensor_core else self.dtype
         )
-        self.enable_cuda_graph = attn_inputs.is_cuda_graph
+        # attn_inputs is optional so model-owned subclasses (MiniMax target
+        # verify) and unit tests can still construct with configs only.
+        # Graph mode is re-checked in _enable_cuda_graph_wrapper() from the
+        # live inputs, because capture sets is_cuda_graph at prepare time.
+        self.enable_cuda_graph = bool(
+            attn_inputs is not None and getattr(attn_inputs, "is_cuda_graph", False)
+        )
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
@@ -1041,6 +1067,35 @@ class PyFlashinferDecodeAttnOp(object):
     def _requires_tensor_core_cuda_graph_replan(self) -> bool:
         # Tensor-core decode refreshes replay-time plan metadata.
         return self.use_tensor_core
+
+    def _enable_cuda_graph_wrapper(self, attn_inputs: PyAttentionInputs) -> None:
+        if (
+            not getattr(attn_inputs, "is_cuda_graph", False)
+            or self.decode_wrapper._fixed_batch_size != 0
+        ):
+            return
+
+        # The FlashInfer wrapper batch is the number of planned attention rows.
+        # Plain decode has one row per request, while model-owned target-verify
+        # paths may expand each request into multiple token rows. Do not use
+        # input_lengths.size(0) here — that would under-size MTP verify graphs.
+        batch_size = self.fmha_params.paged_kv_last_page_len_d.size(0)
+        self.enable_cuda_graph = True
+        self.decode_wrapper._use_cuda_graph = True
+        # Both decode backends read these buffers during run(); replay only
+        # updates fmha_params in-place, so the wrapper must hold these views.
+        self.decode_wrapper._paged_kv_indptr_buf = self.fmha_params.decode_page_indptr_d
+        self.decode_wrapper._paged_kv_last_page_len_buf = (
+            self.fmha_params.paged_kv_last_page_len_d
+        )
+        self.decode_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
+        self.decode_wrapper._fixed_batch_size = batch_size
+        if self.use_tensor_core:
+            self.decode_wrapper._qo_indptr_buf = torch.arange(
+                batch_size + 1,
+                dtype=torch.int32,
+                device=self.g_workspace_buffer.device,
+            )
 
     def _plan_decode_wrapper(self, attn_inputs: PyAttentionInputs) -> None:
         if self._requires_tensor_core_cuda_graph_replan():
@@ -1110,26 +1165,7 @@ class PyFlashinferDecodeAttnOp(object):
                 forbid_realloc=forbid_realloc,
             )
 
-        if self.enable_cuda_graph and self.decode_wrapper._fixed_batch_size == 0:
-            batch_size = attn_inputs.input_lengths.size(0)
-            self.decode_wrapper._use_cuda_graph = True
-            # Both decode backends read these buffers during run(); replay only
-            # updates fmha_params in-place, so the wrapper must hold these views.
-            self.decode_wrapper._paged_kv_indptr_buf = (
-                self.fmha_params.decode_page_indptr_d
-            )
-            self.decode_wrapper._paged_kv_last_page_len_buf = (
-                self.fmha_params.paged_kv_last_page_len_d
-            )
-            self.decode_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
-            self.decode_wrapper._fixed_batch_size = batch_size
-            if self.use_tensor_core:
-                self.decode_wrapper._qo_indptr_buf = torch.arange(
-                    batch_size + 1,
-                    dtype=torch.int32,
-                    device=self.g_workspace_buffer.device,
-                )
-
+        self._enable_cuda_graph_wrapper(attn_inputs)
         self._plan_decode_wrapper(attn_inputs)
         return self.fmha_params
 

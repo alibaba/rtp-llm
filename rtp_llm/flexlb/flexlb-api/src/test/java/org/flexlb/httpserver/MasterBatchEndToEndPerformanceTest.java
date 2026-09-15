@@ -38,6 +38,7 @@ import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.RouteService;
+import org.flexlb.service.VitCacheDirectory;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -339,7 +340,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 new CostBasedDecodeStrategy(engineWorkerStatus),
                 new RandomStrategy(engineWorkerStatus),
                 configService,
-                modelMeta);
+                modelMeta,
+                mock(VitCacheDirectory.class, withSettings().stubOnly()));
     }
 
     @BeforeEach

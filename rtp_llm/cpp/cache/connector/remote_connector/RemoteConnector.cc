@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
+#include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 
 #include <atomic>
 #include <algorithm>
@@ -199,6 +200,10 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
     }
 }
 
+void RemoteConnector::setMemoryConnector(const std::shared_ptr<KVCacheMemoryConnector>& connector) {
+    memory_connector_ = connector;
+}
+
 RemoteConnector::~RemoteConnector() {
     if (thread_pool_) {
         thread_pool_->stop();
@@ -372,10 +377,30 @@ bool RemoteConnector::init() {
                                                                    kv_cache_manager::RoleType::WORKER,
                                                     &regist_span,
                                                     genLocationSpecName(tp_rank, registration_group.group_name)};
+    kv_cache_manager::SharedMemoryRegistration shared_memory_registration;
+    const kv_cache_manager::SharedMemoryRegistration* shared_memory_registration_ptr = nullptr;
+    if (auto memory_connector = memory_connector_.lock()) {
+        const int shared_memory_fd = memory_connector->hostPoolSharedMemoryFd();
+        if (shared_memory_fd >= 0) {
+            shared_memory_registration = {memory_connector->hostPoolBaseAddress(),
+                                          memory_connector->hostPoolSizeBytes(),
+                                          shared_memory_fd};
+            RTP_LLM_CHECK_WITH_INFO(shared_memory_registration.base != nullptr && shared_memory_registration.size > 0,
+                                    "invalid shared host block pool registration: fd=%d base=%p size=%zu",
+                                    shared_memory_registration.fd,
+                                    shared_memory_registration.base,
+                                    shared_memory_registration.size);
+            shared_memory_registration_ptr = &shared_memory_registration;
+            RTP_LLM_LOG_INFO("remote connector uses shared host block pool: fd=%d base=%p size=%zu",
+                             shared_memory_registration.fd,
+                             shared_memory_registration.base,
+                             shared_memory_registration.size);
+        }
+    }
     int cur_device = -1;
     check_cuda_value(cudaGetDevice(&cur_device));
     RTP_LLM_LOG_INFO("cuda cur device: %d", cur_device);
-    if (!client_wrapper_->init(client_config_map, client_init_params)) {
+    if (!client_wrapper_->init(client_config_map, client_init_params, shared_memory_registration_ptr)) {
         RTP_LLM_LOG_ERROR("create remote kv cache client failed");
         return false;
     }
@@ -476,6 +501,24 @@ std::shared_ptr<AsyncContext> RemoteConnector::asyncRead(const std::shared_ptr<K
     return nullptr;
 }
 
+std::shared_ptr<AsyncContext> RemoteConnector::asyncWriteMemory(
+    const CacheKeysType& cache_keys,
+    const std::vector<int32_t>& memory_block_ids,
+    const std::shared_ptr<Meta>& meta,
+    const std::shared_ptr<void>& buffer_lease) {
+    if (!meta || cache_keys.empty() || cache_keys.size() != memory_block_ids.size() || !buffer_lease) {
+        return nullptr;
+    }
+    auto context = std::make_shared<RemoteConnectorAsyncContext>();
+    auto ec = thread_pool_->pushTask(
+        [this, cache_keys, memory_block_ids, meta, buffer_lease, context]() {
+            context->setState(RemoteConnectorState::State::RCS_START);
+            asyncWriteMemoryTask(cache_keys, memory_block_ids, meta, buffer_lease, context);
+        }, false);
+    CHECK_THREAD_POOL_EC("asyncWriteMemory", context, ec);
+    return context;
+}
+
 std::shared_ptr<AsyncContext> RemoteConnector::asyncWrite(const std::shared_ptr<KVCacheResource>& resource,
                                                           const std::shared_ptr<Meta>&            meta) {
     if (!meta) {
@@ -535,6 +578,16 @@ bool RemoteConnector::copyCache(const RemoteOperationRequestPB& request, RemoteO
                     auto actual_uri = mutable_actual_uris->Add();
                     *actual_uri     = uri_str;
                 }
+            }
+            break;
+        }
+        case ::RemoteOpType::REMOTE_OPERATION_WRITE_MEMORY: {
+            kv_cache_manager::UriStrVec out_uris;
+            if (!WriteMemory(trace_id, block_ids, uris, out_uris)) {
+                return false;
+            }
+            for (const auto& uri : out_uris) {
+                *response.add_actual_uris() = uri;
             }
             break;
         }
@@ -664,104 +717,238 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
     resource->setRemoteReuseBlockNum(new_reuse_block_num);
 }
 
-void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResource>&             resource,
-                                     const std::shared_ptr<Meta>&                        meta,
+void RemoteConnector::asyncWriteMemoryTask(
+    CacheKeysType cache_keys,
+    std::vector<int32_t> memory_block_ids,
+    const std::shared_ptr<Meta>& meta,
+    const std::shared_ptr<void>& buffer_lease,
+    const std::shared_ptr<RemoteConnectorAsyncContext>& async_context) {
+    auto request_builder =
+        [this, memory_block_ids = std::move(memory_block_ids)](const kv_cache_manager::Locations& locations,
+                                                               const std::vector<size_t>& selected_indices,
+                                                               const std::string& trace_id,
+                                                               std::vector<FunctionRequestPB>& requests,
+                                                               ActualUriGather& actual_uri_gather) {
+            requests.resize(broadcaster_->workerNum());
+            actual_uri_gather.resize(broadcaster_->workerNum());
+            const auto& specs = group_policy_->spec_info_map();
+            for (size_t location_idx = 0; location_idx < locations.size(); ++location_idx) {
+                for (const auto& spec : locations[location_idx]) {
+                    auto it = specs.find(spec.spec_name);
+                    if (it == specs.end()) {
+                        RTP_LLM_LOG_WARNING("trace_id [%s], memory write not find spec_name [%s]",
+                                            trace_id.c_str(),
+                                            spec.spec_name.c_str());
+                        return false;
+                    }
+                    auto* request = requests[it->second.tp_rank].mutable_remote_request();
+                    request->set_op(::RemoteOpType::REMOTE_OPERATION_WRITE_MEMORY);
+                    request->set_trace_id(trace_id);
+                    request->add_block_ids(memory_block_ids[selected_indices[location_idx]]);
+                    request->add_uris(spec.uri);
+                    actual_uri_gather[it->second.tp_rank].push_back(
+                        const_cast<kv_cache_manager::LocationSpecUnit*>(&spec));
+                }
+            }
+            return true;
+        };
+    asyncWriteCommonTask(std::move(cache_keys),
+                         {},
+                         {},
+                         meta->unique_id(),
+                         "memory_evict_" + meta->trace_id(),
+                         std::move(request_builder),
+                         buffer_lease,
+                         async_context);
+}
+
+void RemoteConnector::asyncWriteCommonTask(
+    CacheKeysType cache_keys,
+    std::vector<int64_t> tokens,
+    std::vector<std::string> location_spec_group_names,
+    std::string unique_id,
+    std::string trace_id,
+    WriteRequestBuilder request_builder,
+    std::shared_ptr<void> buffer_lease,
+    const std::shared_ptr<RemoteConnectorAsyncContext>& async_context) {
+    (void)buffer_lease;
+    WriteMetricsHelper helper(trace_id, metrics_reporter_);
+    const std::string finish_trace_id = trace_id.compare(0, 12, "start_write_") == 0
+                                            ? "finish_write_" + trace_id.substr(12)
+                                            : "finish_" + trace_id;
+    if (cache_keys.empty()) {
+        async_context->setState(RemoteConnectorState::State::RCS_SUCCESS);
+        helper.collector.remote_write_fail_qps = false;
+        return;
+    }
+
+    async_context->setState(RemoteConnectorState::State::RCS_WRITE_START);
+    auto [location_ok, write_location] = client_wrapper_->getWriteLocation(
+        unique_id, trace_id, cache_keys, tokens, location_spec_group_names, 600);
+    helper.collector.remote_get_write_location_time_us = currentTimeUs() - helper.begin_us;
+    if (!location_ok) {
+        RTP_LLM_LOG_WARNING("asyncPut getWriteLocation failed, [%s]", trace_id.c_str());
+        async_context->setState(RemoteConnectorState::State::RCS_ERROR);
+        return;
+    }
+    if (write_location.locations.empty()) {
+        RTP_LLM_LOG_INFO(
+            "remote write all blocks already exist, trace_id=%s, unique_id=%s, write_session_id=%s, blocks=%zu",
+            trace_id.c_str(),
+            unique_id.c_str(),
+            write_location.write_session_id.c_str(),
+            cache_keys.size());
+        async_context->setState(RemoteConnectorState::State::RCS_SUCCESS);
+        helper.collector.remote_write_fail_qps = false;
+        return;
+    }
+
+    std::vector<size_t> selected_indices;
+    std::visit(
+        [&](const auto& mask) {
+            using T = std::decay_t<decltype(mask)>;
+            if constexpr (std::is_same_v<T, kv_cache_manager::BlockMaskOffset>) {
+                for (size_t i = mask; i < cache_keys.size(); ++i) {
+                    selected_indices.push_back(i);
+                }
+            } else {
+                for (size_t i = 0; i < mask.size(); ++i) {
+                    if (!mask[i]) {
+                        selected_indices.push_back(i);
+                    }
+                }
+            }
+        },
+        write_location.block_mask);
+
+    const auto finish_failed_write = [&]() {
+        async_context->setState(RemoteConnectorState::State::RCS_WRITE_FINISH);
+        client_wrapper_->finishWrite(unique_id,
+                                     finish_trace_id,
+                                     write_location.write_session_id,
+                                     kv_cache_manager::BlockMaskOffset{0},
+                                     kv_cache_manager::Locations{});
+        async_context->setState(RemoteConnectorState::State::RCS_ERROR);
+    };
+    RTP_LLM_LOG_INFO(
+        "remote write location ready, trace_id=%s, unique_id=%s, write_session_id=%s, total_blocks=%zu, selected_blocks=%zu",
+        trace_id.c_str(),
+        unique_id.c_str(),
+        write_location.write_session_id.c_str(),
+        cache_keys.size(),
+        selected_indices.size());
+    if (selected_indices.size() != write_location.locations.size()) {
+        RTP_LLM_LOG_WARNING("remote write mask mismatch, trace_id=%s, selected=%zu, locations=%zu",
+                            trace_id.c_str(),
+                            selected_indices.size(),
+                            write_location.locations.size());
+        finish_failed_write();
+        return;
+    }
+
+    std::vector<FunctionRequestPB> requests;
+    ActualUriGather actual_uri_gather;
+    if (!request_builder(write_location.locations, selected_indices, trace_id, requests, actual_uri_gather)) {
+        finish_failed_write();
+        return;
+    }
+    helper.collector.remote_write_cache_block_num = selected_indices.size();
+
+    async_context->setState(RemoteConnectorState::State::RCS_WRITE_BROADCAST);
+    auto rpc_call = [](const std::shared_ptr<RpcService::Stub>& stub,
+                       const std::shared_ptr<grpc::ClientContext>& context,
+                       const FunctionRequestPB& request,
+                       grpc::CompletionQueue* completion_queue) {
+        return stub->AsyncExecuteFunction(context.get(), request, completion_queue);
+    };
+    const int64_t broadcast_begin_us = currentTimeUs();
+    auto broadcast_result = broadcaster_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+        requests, put_broadcast_timeout_, rpc_call);
+    broadcast_result->waitDone();
+    helper.collector.remote_write_broadcast_time_us = currentTimeUs() - broadcast_begin_us;
+    if (!broadcast_result->success()) {
+        RTP_LLM_LOG_WARNING("Write failed for grpc status, trace_id [%s]", trace_id.c_str());
+        finish_failed_write();
+        return;
+    }
+
+    auto responses = broadcast_result->responses();
+    bool actual_uri_not_empty = false;
+    for (size_t rank = 0; rank < responses.size(); ++rank) {
+        const auto& actual_uris = responses[rank].remote_response().actual_uris();
+        if (static_cast<size_t>(actual_uris.size()) > actual_uri_gather[rank].size()) {
+            RTP_LLM_LOG_WARNING("remote write actual URI count mismatch, trace_id=%s, rank=%zu", trace_id.c_str(), rank);
+            finish_failed_write();
+            return;
+        }
+        for (int uri_idx = 0; uri_idx < actual_uris.size(); ++uri_idx) {
+            if (!actual_uris[uri_idx].empty()) {
+                actual_uri_not_empty = true;
+                actual_uri_gather[rank][uri_idx]->uri = actual_uris[uri_idx];
+            }
+        }
+    }
+
+    const int64_t finish_begin_us = currentTimeUs();
+    async_context->setState(RemoteConnectorState::State::RCS_WRITE_FINISH);
+    static const kv_cache_manager::Locations empty_locations;
+    const auto& actual_locations = actual_uri_not_empty ? write_location.locations : empty_locations;
+    const bool finish_ok = client_wrapper_->finishWrite(unique_id,
+                                                         finish_trace_id,
+                                                         write_location.write_session_id,
+                                                         write_location.locations.size(),
+                                                         actual_locations);
+    helper.collector.remote_finish_write_time_us = currentTimeUs() - finish_begin_us;
+    if (!finish_ok) {
+        RTP_LLM_LOG_WARNING("asyncPut finishWrite failed, [%s]", trace_id.c_str());
+        async_context->setState(RemoteConnectorState::State::RCS_ERROR);
+        return;
+    }
+    helper.collector.remote_write_fail_qps = false;
+    async_context->setState(RemoteConnectorState::State::RCS_SUCCESS);
+}
+
+void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResource>& resource,
+                                     const std::shared_ptr<Meta>& meta,
                                      const std::shared_ptr<RemoteConnectorAsyncContext>& async_context) {
     RTP_LLM_LOG_DEBUG(
-        "asyncWriteTask, deviceReuseBlockNum[%d], memoryReuseBlockNum[%d],  remoteReuseBlockNum[%d], cacheKeysSize[%zu]",
+        "asyncWriteTask, deviceReuseBlockNum[%d], memoryReuseBlockNum[%d], remoteReuseBlockNum[%d], cacheKeysSize[%zu]",
         resource->deviceReuseBlockNum(),
         resource->memoryReuseBlockNum(),
         resource->remoteReuseBlockNum(),
         resource->cacheKeys().size());
-    auto keys = resource->cacheKeys();
-    if (!keys.empty() && !resource->lastBlockAligned()) {
-        keys.pop_back();
+    auto cache_keys = resource->cacheKeys();
+    if (!cache_keys.empty() && !resource->lastBlockAligned()) {
+        cache_keys.pop_back();
     }
-    WriteMetricsHelper          helper(meta->trace_id(), metrics_reporter_);
-    const std::string&          unique_id            = meta->unique_id();
-    std::string                 start_write_trace_id = "start_write_" + meta->trace_id();
-    const std::vector<int64_t>& tokens               = meta->tokens();
-    std::vector<std::string>    location_spec_group_names;
-    RETURN_IF(keys.empty(), write);
-    CHECK_AND_LOG(group_policy_->getNeedWriteGroups(resource, location_spec_group_names),
-                  RCS_ERROR,
-                  "trace_id [%s] filter need write groups failed",
-                  start_write_trace_id.c_str());
-    // 1. for meta_client : get cache location from remote service
-    async_context->setState(RemoteConnectorState::State::RCS_WRITE_START);
-    auto [start_result, write_location] = client_wrapper_->getWriteLocation(
-        unique_id, start_write_trace_id, keys, tokens, location_spec_group_names, 600);
-    helper.collector.remote_get_write_location_time_us = currentTimeUs() - helper.begin_us;
-    CHECK_AND_LOG(start_result, RCS_ERROR, "asyncPut getWriteLocation failed, [%s]", start_write_trace_id.c_str());
-    RETURN_IF(write_location.locations.empty(), write);
-    // TODO : support finish partially
-    const std::string&                 write_session_id = write_location.write_session_id;
-    static kv_cache_manager::Locations empty_locations;
-    kv_cache_manager::Locations*       actual_locations  = &empty_locations;
-    size_t                             succeed_block_num = 0;
-    auto                               finish_write_task = [&, this](bool success = false) {
-        int64_t     finish_write_begin_us = currentTimeUs();
-        std::string finish_write_trace_id = "finish_write_" + meta->trace_id();
-        async_context->setState(RemoteConnectorState::State::RCS_WRITE_FINISH);
-        bool finish_result = this->client_wrapper_->finishWrite(
-            unique_id, finish_write_trace_id, write_session_id, succeed_block_num, *actual_locations);
-        helper.collector.remote_finish_write_time_us = currentTimeUs() - finish_write_begin_us;
-        CHECK_AND_LOG(finish_result, RCS_ERROR, "asyncPut finishWrite failed, [%s]", finish_write_trace_id.c_str());
-        if (success) {
-            async_context->setState(RemoteConnectorState::State::RCS_SUCCESS);
-            helper.collector.remote_write_fail_qps = false;
-        } else {
-            async_context->setState(RemoteConnectorState::State::RCS_ERROR);
-        }
-    };
-    // 2. sync call all rank write
-    std::vector<FunctionRequestPB> requests;
-    ActualUriGather                actual_uri_gather;
-    CHECK_AND_LOG_WITH_DEFER(genWriteRequest(broadcaster_->workerNum(),
-                                             write_location.locations,
-                                             write_location.block_mask,
-                                             start_write_trace_id,
-                                             resource,
-                                             requests,
-                                             actual_uri_gather),
-                             finish_write_task,
-                             "remote_connector_put genRequest failed");
-    helper.collector.remote_write_cache_block_num = requests[0].remote_request().block_ids_size();
-
-    async_context->setState(RemoteConnectorState::State::RCS_WRITE_BROADCAST);
-    auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
-                       const std::shared_ptr<grpc::ClientContext>& context,
-                       const FunctionRequestPB&                    request,
-                       grpc::CompletionQueue*                      completion_queue) {
-        return stub->AsyncExecuteFunction(context.get(), request, completion_queue);
-    };
-    int64_t broadcast_begin_us = currentTimeUs();
-    auto    broadcast_result =
-        broadcaster_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, put_broadcast_timeout_, rpc_call);
-    broadcast_result->waitDone();
-    helper.collector.remote_write_broadcast_time_us = currentTimeUs() - broadcast_begin_us;
-    CHECK_AND_LOG_WITH_DEFER(broadcast_result->success(),
-                             finish_write_task,
-                             "Write failed for grpc status, trace_id [%s]",
-                             (meta->trace_id()).c_str());
-    auto responses = broadcast_result->responses();
-    // 3. for meta_client : finish write
-    // TODO : get real succeed_block_num
-    succeed_block_num         = write_location.locations.size();
-    bool actual_uri_not_empty = false;
-    for (int i = 0; i < broadcaster_->workerNum(); i++) {
-        const auto& proto_actual_uris = responses[i].remote_response().actual_uris();
-        for (int j = 0; j < proto_actual_uris.size(); j++) {
-            if (!proto_actual_uris[j].empty()) {
-                actual_uri_not_empty         = true;
-                actual_uri_gather[i][j]->uri = proto_actual_uris[j];
-            }
-        }
+    std::vector<std::string> location_spec_group_names;
+    if (!group_policy_->getNeedWriteGroups(resource, location_spec_group_names)) {
+        RTP_LLM_LOG_WARNING("trace_id [%s] filter need write groups failed", meta->trace_id().c_str());
+        async_context->setState(RemoteConnectorState::State::RCS_ERROR);
+        return;
     }
-    if (actual_uri_not_empty) {
-        actual_locations = &write_location.locations;
-    }
-    finish_write_task(true);
+    auto request_builder =
+        [this, resource](const kv_cache_manager::Locations& locations,
+                         const std::vector<size_t>& selected_indices,
+                         const std::string& trace_id,
+                         std::vector<FunctionRequestPB>& requests,
+                         ActualUriGather& actual_uri_gather) {
+            return genWriteRequest(broadcaster_->workerNum(),
+                                   locations,
+                                   selected_indices,
+                                   trace_id,
+                                   resource,
+                                   requests,
+                                   actual_uri_gather);
+        };
+    asyncWriteCommonTask(std::move(cache_keys),
+                         meta->tokens(),
+                         std::move(location_spec_group_names),
+                         meta->unique_id(),
+                         "start_write_" + meta->trace_id(),
+                         std::move(request_builder),
+                         resource,
+                         async_context);
 }
 
 #undef RETURN_IF
@@ -823,7 +1010,7 @@ bool RemoteConnector::genReadRequest(size_t                                   tp
 
 bool RemoteConnector::genWriteRequest(size_t                                  tp_size,
                                       const kv_cache_manager::Locations&      locations,
-                                      const kv_cache_manager::BlockMask&      block_mask,
+                                      const std::vector<size_t>&              selected_indices,
                                       const std::string&                      trace_id,
                                       const std::shared_ptr<KVCacheResource>& resource,
                                       std::vector<FunctionRequestPB>&         requests,
@@ -835,32 +1022,15 @@ bool RemoteConnector::genWriteRequest(size_t                                  tp
         requests[i].mutable_remote_request()->set_trace_id(trace_id);
         actual_uri_gather[i].reserve(locations.size() * 1.2);
     }
-    std::vector<size_t> cache_key_idx_vec;  // for BlockMaskVector
-    if (std::holds_alternative<kv_cache_manager::BlockMaskVector>(block_mask)) {
-        const auto& block_mask_v = std::get<kv_cache_manager::BlockMaskVector>(block_mask);
-        for (size_t i = 0; i < block_mask_v.size(); i++) {
-            if (!block_mask_v[i]) {
-                cache_key_idx_vec.push_back(i);
-            }
-        }
-        RTP_LLM_CHECK_WITH_INFO((cache_key_idx_vec.size() == locations.size()),
-                                "genWriteRequest fail, locations size[%zu], need write size[%zu]",
-                                locations.size(),
-                                cache_key_idx_vec.size());
+    if (selected_indices.size() != locations.size()) {
+        RTP_LLM_LOG_WARNING("genWriteRequest fail, locations size[%zu], selected size[%zu]",
+                            locations.size(),
+                            selected_indices.size());
+        return false;
     }
-    int64_t     cache_key_idx;
     const auto& spec_name_to_info = group_policy_->spec_info_map();
-    for (int64_t location_idx = 0; location_idx < locations.size(); location_idx++) {
-        std::visit(
-            [&cache_key_idx, &location_idx, &cache_key_idx_vec](const auto& block_mask) {
-                using T = std::decay_t<decltype(block_mask)>;
-                if constexpr (std::is_same_v<kv_cache_manager::BlockMaskOffset, T>) {
-                    cache_key_idx = block_mask + location_idx;
-                } else if constexpr (std::is_same_v<kv_cache_manager::BlockMaskVector, T>) {
-                    cache_key_idx = cache_key_idx_vec[location_idx];
-                }
-            },
-            block_mask);
+    for (size_t location_idx = 0; location_idx < locations.size(); ++location_idx) {
+        const size_t cache_key_idx = selected_indices[location_idx];
         for (const auto& location_spec : locations[location_idx]) {
             const auto iter = spec_name_to_info.find(location_spec.spec_name);
             if (iter == spec_name_to_info.end()) {
@@ -930,6 +1100,51 @@ bool RemoteConnector::Read(const std::string&                 trace_id,
         return false;
     }
     helper.collector.remote_sdk_fail_qps = false;
+    return true;
+}
+
+bool RemoteConnector::WriteMemory(const std::string& trace_id,
+                                  const std::vector<int32_t>& block_ids,
+                                  const kv_cache_manager::UriStrVec& uri_str_vec,
+                                  kv_cache_manager::UriStrVec& out_uri_str_vec) {
+    auto memory = memory_connector_.lock();
+    if (!memory || block_ids.size() != uri_str_vec.size()) {
+        return false;
+    }
+    std::vector<KVCacheMemoryConnector::MemoryRemoteEvictionItem> items;
+    std::vector<size_t> indices;
+    for (size_t i = 0; i < block_ids.size(); ++i) {
+        KVCacheMemoryConnector::MemoryRemoteEvictionItem item;
+        item.backing_type = CacheBackingType::MEMORY;
+        item.block_index = block_ids[i];
+        item.block_size = 0;
+        items.push_back(item);
+        indices.push_back(i);
+    }
+    KVCacheMemoryConnector::HostBlockBuffers host_buffers;
+    if (!memory->buildHostBlockBuffers(items, indices, host_buffers)) {
+        return false;
+    }
+    kv_cache_manager::BlockBuffers buffers;
+    buffers.reserve(host_buffers.size());
+    size_t iov_count = 0;
+    size_t total_bytes = 0;
+    for (const auto& host : host_buffers) {
+        kv_cache_manager::BlockBuffer block;
+        for (const auto& info : host) {
+            block.iovs.push_back({kv_cache_manager::MemoryType::CPU, info.addr, info.size_bytes, false});
+            ++iov_count;
+            total_bytes += info.size_bytes;
+        }
+        buffers.push_back(std::move(block));
+    }
+    RTP_LLM_LOG_INFO("memory remote SDK write, trace_id=%s, blocks=%zu, iovs=%zu, bytes=%zu",
+                     trace_id.c_str(), buffers.size(), iov_count, total_bytes);
+    auto result = client_wrapper_->saveKvCaches(uri_str_vec, buffers);
+    if (!result.first) {
+        return false;
+    }
+    out_uri_str_vec = std::move(result.second);
     return true;
 }
 
