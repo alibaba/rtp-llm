@@ -644,9 +644,21 @@ class DeepSeekVLV2NewloaderTest(unittest.TestCase):
             torch.tensor([0.25, -0.5], dtype=torch.float32),
         )
 
+    @torch.inference_mode()
     def test_loaded_language_and_vision_weights_run_multimodal_forward(self):
         language_path, language, _ = _load_language()
         self.addCleanup(language_path.cleanup)
+
+        class _CpuSiluAndMul(torch.nn.Module):
+            def forward(self, gate_up):
+                gate, up = gate_up.chunk(2, dim=-1)
+                return torch.nn.functional.silu(gate) * up
+
+        # This tiny CPU fixture checks checkpoint loading and multimodal
+        # assembly with reference attention. Do not dispatch its FP32 tensors
+        # to the host-selected accelerator activation. The dedicated
+        # test_deepseek_vl2_multimodal_gpu suite exercises native inference.
+        language.layers[0].mlp.act_fn = _CpuSiluAndMul()
         vision_config = _vision_config()
         with mock.patch(
             "rtp_llm.models_py.new_models.deepseek_vl2.vision.timm.create_model",

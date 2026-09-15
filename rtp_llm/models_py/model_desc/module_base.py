@@ -60,8 +60,10 @@ class GptModelBase(nn.Module):
 
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device_type()
+        # Auxiliary capture is opt-in. NewLoader also accepts lightweight/HF
+        # configs that do not carry this optional service-level setting.
         self._mtp_aux_capture_layer_ids = tuple(
-            config.capture_aux_hidden_layer_ids or ()
+            getattr(config, "capture_aux_hidden_layer_ids", None) or ()
         )
         self._mtp_aux_capture_layer_id_set = frozenset(
             self._mtp_aux_capture_layer_ids
