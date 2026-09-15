@@ -245,5 +245,5 @@ def no_block_copy_link_deps():
 def transfer_backend_deps():
     native.alias(
         name = "transfer_backend_arch_select_impl",
-        actual = "@rtp_llm//rtp_llm/cpp/cache/legacy/p2p_connector/transfer:transfer_backend_base_impl",
+        actual = "@rtp_llm//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_backend_base_impl",
     )
