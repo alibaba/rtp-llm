@@ -383,6 +383,22 @@ class AttentionInputRoutingTest(unittest.TestCase):
         self.assertEqual(narrowed.stride(0), block_map.stride(0))
         self.assertEqual(narrowed[:, 0].tolist(), [0, 4, 8])
 
+    def test_qwen3_next_cuda_graph_preserves_logical_block_map_width(self):
+        block_map = torch.arange(21, dtype=torch.int32).reshape(3, 7)[:, :6]
+        attention_inputs = SimpleNamespace(
+            is_cuda_graph=True,
+            kv_cache_kernel_block_id_device=block_map,
+        )
+        decode = object.__new__(Qwen3NextGatedDeltaNetDecode)
+
+        actual = decode._get_fla_block_map(attention_inputs)
+
+        self.assertIs(actual, block_map)
+        self.assertEqual(actual.shape, (3, 6))
+        self.assertEqual(actual.stride(0), 7)
+        self.assertEqual(actual[:, 5].tolist(), [5, 12, 19])
+
+
     def test_qwen3_next_non_graph_keeps_full_block_map(self):
         block_map = torch.arange(12, dtype=torch.int32).reshape(3, 4)
         attention_inputs = SimpleNamespace(

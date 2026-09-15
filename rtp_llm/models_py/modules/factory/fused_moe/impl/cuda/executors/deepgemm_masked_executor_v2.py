@@ -57,7 +57,12 @@ class DeepGemmMaskedExecutorV2(DeepGemmHybridExecutor):
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
     ) -> CombineForwardPayload:
-        return self.execute_masked(
+        # Keep the graph-safe masked path for decode-sized batches, but use the
+        # contiguous grouped GEMM inherited from DeepGemmHybridExecutor for
+        # large prefill batches.  Always padding every expert to the full
+        # prefill token count can otherwise require tens of GiB of temporary
+        # memory for long multimodal prompts.
+        return super().execute(
             payload,
             activation,
             expert_map,

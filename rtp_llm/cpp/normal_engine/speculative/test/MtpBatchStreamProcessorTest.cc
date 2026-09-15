@@ -4701,4 +4701,234 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecMaskExcludesPaddedSamplerLogitsWitho
     EXPECT_EQ(model_output.logits.data_ptr(), sampler_inputs.logits.data_ptr());
 }
 
+namespace {
+
+MtpBatchStreamProcessor makeMultimodalMtpProcessor(const std::string& draft_model_type = "qwen35_moe_mtp",
+                                                  SpeculativeType sp_type = SP_TYPE_EAGLE) {
+    ModelConfig model_config;
+    model_config.model_type = "qwen35_moe";
+    model_config.vocab_size = 32;
+    model_config.max_seq_len = 4096;
+    model_config.num_layers = 1;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type = sp_type;
+    sp_config.model_type = draft_model_type;
+    return MtpBatchStreamProcessor(model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{},
+                                   MtpBatchStreamProcessorTest::makeProcessorCacheConfig(), sp_config, false);
+}
+
+GptModelInputs multimodalMtpInput(const vector<int>& lengths,
+                                  const vector<int>& mask,
+                                  const vector<torch::Tensor>& features,
+                                  const vector<int>& locs) {
+    GptModelInputs input;
+    input.combo_tokens = torch::arange(mask.size(), torch::kInt32);
+    input.input_lengths = torch::tensor(lengths, torch::kInt32);
+    input.sequence_lengths = torch::empty({0}, torch::kInt32);
+    input.prefix_lengths = torch::zeros({static_cast<int64_t>(lengths.size())}, torch::kInt32);
+    input.text_tokens_mask = torch::tensor(mask, torch::kInt32);
+    input.multimodal_features = features;
+    input.mm_features_locs = torch::tensor(locs, torch::kInt32);
+    return input;
+}
+
+}  // namespace
+
+TEST_F(MtpBatchStreamProcessorTest, testMtpMultimodalShiftsMaskWithinEachRequest) {
+    auto processor = makeMultimodalMtpProcessor();
+    auto input = multimodalMtpInput({4, 4}, {1, 0, 0, 1, 1, 1, 0, 1},
+                                    {torch::ones({2, 2}), torch::ones({1, 2})}, {1, 6});
+    const auto old_mask = input.text_tokens_mask;
+    processor.alignPrefillMultimodalInputs(input, input.input_lengths);
+    EXPECT_EQ((vector<int>{0, 0, 1, 1, 1, 0, 1, 1}), toVec<int>(input.text_tokens_mask));
+    EXPECT_EQ((vector<int>{0, 5}), toVec<int>(input.mm_features_locs));
+    EXPECT_EQ((vector<int>{1, 0, 0, 1, 1, 1, 0, 1}), toVec<int>(old_mask));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testMtpMultimodalRejectsMaskLengthMismatch) {
+    auto processor = makeMultimodalMtpProcessor();
+    auto input = multimodalMtpInput({2, 2}, {1, 0, 1}, {torch::ones({1, 2})}, {1});
+    EXPECT_ANY_THROW(processor.alignPrefillMultimodalInputs(input, input.input_lengths));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testMtpMultimodalShiftsFeatureLocations) {
+    auto processor = makeMultimodalMtpProcessor();
+    const auto first = torch::arange(6).reshape({3, 2});
+    const auto second = torch::arange(4).reshape({2, 2});
+    auto input = multimodalMtpInput({4, 4}, {1, 0, 0, 0, 1, 1, 0, 0}, {first, second}, {1, 6});
+    processor.alignPrefillMultimodalInputs(input, input.input_lengths);
+    EXPECT_EQ((vector<int>{0, 5}), toVec<int>(input.mm_features_locs));
+    ASSERT_EQ(input.multimodal_features->size(), 2);
+    EXPECT_TRUE(torch::equal(input.multimodal_features.value()[0], first));
+    EXPECT_TRUE(torch::equal(input.multimodal_features.value()[1], second));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testMtpMultimodalDropsRowAtRequestBoundary) {
+    auto processor = makeMultimodalMtpProcessor();
+    const auto feature = torch::arange(6).reshape({3, 2});
+    auto input = multimodalMtpInput({4, 4}, {1, 1, 1, 1, 0, 0, 0, 1}, {feature}, {4});
+    processor.alignPrefillMultimodalInputs(input, input.input_lengths);
+    EXPECT_EQ((vector<int>{4}), toVec<int>(input.mm_features_locs));
+    EXPECT_TRUE(torch::equal(input.multimodal_features.value()[0], feature.slice(0, 1)));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testMtpMultimodalCropsPartiallyReusedFeature) {
+    auto processor = makeMultimodalMtpProcessor();
+    const auto feature = torch::arange(3714 * 2).reshape({3714, 2});
+    // Gatherer owns the prefix crop: original loc 1, reused prefix 1844.
+    // Its canonical output is the last 1871 rows at local position zero.
+    auto input = multimodalMtpInput({1871}, vector<int>(1871, 0), {feature.slice(0, 1843)}, {0});
+    processor.alignPrefillMultimodalInputs(input, input.input_lengths);
+    EXPECT_EQ((vector<int>{0}), toVec<int>(input.mm_features_locs));
+    ASSERT_EQ(input.multimodal_features->size(), 1);
+    EXPECT_EQ(input.multimodal_features.value()[0].size(0), 1870);
+    EXPECT_TRUE(torch::equal(input.multimodal_features.value()[0], feature.slice(0, 1844)));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testMtpMultimodalPartialReuseAcrossRequests) {
+    auto processor = makeMultimodalMtpProcessor();
+    const auto first = torch::arange(4).reshape({2, 2});
+    const auto second = torch::arange(8).reshape({4, 2});
+    // The second image has already lost two rows to prefix reuse in the gatherer.
+    auto input = multimodalMtpInput({4, 4}, {1, 0, 0, 1, 0, 0, 1, 1}, {first, second.slice(0, 2)}, {1, 4});
+    processor.alignPrefillMultimodalInputs(input, input.input_lengths);
+    EXPECT_EQ((vector<int>{0, 4}), toVec<int>(input.mm_features_locs));
+    EXPECT_TRUE(torch::equal(input.multimodal_features.value()[0], first));
+    EXPECT_TRUE(torch::equal(input.multimodal_features.value()[1], second.slice(0, 3)));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testMtpMultimodalRejectsFeatureMaskMismatch) {
+    auto processor = makeMultimodalMtpProcessor();
+    auto input = multimodalMtpInput({4}, {1, 1, 1, 1}, {torch::ones({2, 2})}, {1});
+    EXPECT_ANY_THROW(processor.alignPrefillMultimodalInputs(input, input.input_lengths));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testMtpMultimodalDropsLoneVisualTokenAtRequestStart) {
+    auto processor = makeMultimodalMtpProcessor();
+    auto input = multimodalMtpInput({2}, {0, 1}, {torch::ones({1, 2})}, {0});
+    input.mm_extra_input = vector<torch::Tensor>{torch::ones({4})};
+    processor.alignPrefillMultimodalInputs(input, input.input_lengths);
+    EXPECT_TRUE(input.multimodal_features->empty());
+    EXPECT_TRUE(input.mm_extra_input->empty());
+    EXPECT_EQ(input.mm_features_locs.numel(), 0);
+    EXPECT_EQ((vector<int>{1, 1}), toVec<int>(input.text_tokens_mask));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testMtpMultimodalDropsEmptyFeatureAtRequestStart) {
+    auto processor = makeMultimodalMtpProcessor();
+    auto input = multimodalMtpInput({1}, {1}, {torch::empty({0, 2})}, {0});
+    processor.alignPrefillMultimodalInputs(input, input.input_lengths);
+    EXPECT_TRUE(input.multimodal_features->empty());
+    EXPECT_EQ(input.mm_features_locs.numel(), 0);
+    EXPECT_EQ((vector<int>{1}), toVec<int>(input.text_tokens_mask));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testMtpMultimodalDeepstackUsesSameFeatureRows) {
+    auto processor = makeMultimodalMtpProcessor();
+    const auto feature = torch::arange(6).reshape({3, 2});
+    const auto extra = torch::arange(12).reshape({2, 3, 2});
+    auto input = multimodalMtpInput({4}, {0, 0, 0, 1}, {feature}, {0});
+    input.mm_extra_input = vector<torch::Tensor>{extra.reshape({-1})};
+    processor.alignPrefillMultimodalInputs(input, input.input_lengths);
+    EXPECT_TRUE(torch::equal(input.multimodal_features.value()[0], feature.slice(0, 1)));
+    ASSERT_EQ(input.mm_extra_input->size(), 1);
+    EXPECT_TRUE(torch::equal(input.mm_extra_input.value()[0], extra.slice(1, 1).contiguous().reshape({-1})));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testMtpMultimodalGateAcceptsQwenDraftsUnderEagleAndMtp) {
+    for (const auto& draft : {"qwen35_moe_mtp", "qwen35_dense_mtp", "qwen3_next_mtp"}) {
+        for (const auto type : {SP_TYPE_EAGLE, SP_TYPE_MTP}) {
+            auto processor = makeMultimodalMtpProcessor(draft, type);
+            auto input = multimodalMtpInput({2}, {0, 1}, {torch::ones({1, 2})}, {0});
+            processor.alignPrefillMultimodalInputs(input, input.input_lengths);
+            EXPECT_EQ((vector<int>{1, 1}), toVec<int>(input.text_tokens_mask));
+            EXPECT_TRUE(input.multimodal_features->empty());
+        }
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testMtpMultimodalGateKeepsOtherDraftContracts) {
+    const vector<std::pair<std::string, SpeculativeType>> cases = {
+        {"qwen_3_moe_eagle3", SP_TYPE_EAGLE}, {"qwen35_moe_mtp", SP_TYPE_DSPARK},
+        {"deepseek-v3-mtp", SP_TYPE_MTP}};
+    for (const auto& [model_type, sp_type] : cases) {
+        auto processor = makeMultimodalMtpProcessor(model_type, sp_type);
+        auto input = multimodalMtpInput({2}, {0, 1}, {torch::ones({1, 2})}, {0});
+        processor.alignPrefillMultimodalInputs(input, input.input_lengths);
+        EXPECT_EQ((vector<int>{0, 1}), toVec<int>(input.text_tokens_mask));
+        EXPECT_EQ(input.multimodal_features->size(), 1);
+        EXPECT_EQ((vector<int>{0}), toVec<int>(input.mm_features_locs));
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testMtpMultimodalCppShiftPrecedesCpAdjacentRuns) {
+    auto processor = makeMultimodalMtpProcessor();
+    vector<int> mask(16, 1);
+    std::fill(mask.begin() + 2, mask.begin() + 14, 0);
+    const auto feature = torch::arange(24).reshape({12, 2});
+    auto input = multimodalMtpInput({16}, mask, {feature}, {2});
+    processor.alignPrefillMultimodalInputs(input, input.input_lengths);
+    // Token shift is covered by the public-entry test below; emulate its output.
+    input.combo_tokens = torch::arange(1, 17, torch::kInt32);
+    ParallelismConfig cp_config;
+    cp_config.tp_size = 2;
+    cp_config.tp_rank = 0;
+    ZigZagProcessor cp(cp_config);
+    torch_ext::PyContextParallelParams cp_params;
+    cp.handleInputs(input, cp_params);
+    EXPECT_EQ((vector<int>{0, 1, 2, 3, 12, 13, 14, 15}), toVec<int>(cp_params.prefill_shuffle_indices));
+    EXPECT_EQ((vector<int>{1, 0, 0, 0, 0, 1, 1, 1}), toVec<int>(input.text_tokens_mask));
+    EXPECT_EQ((vector<int>{1, 4}), toVec<int>(input.mm_features_locs));
+    ASSERT_EQ(input.multimodal_features->size(), 2);
+    EXPECT_TRUE(torch::equal(input.multimodal_features.value()[0].cpu(), feature.slice(0, 0, 3)));
+    EXPECT_TRUE(torch::equal(input.multimodal_features.value()[1].cpu(), feature.slice(0, 11, 12)));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testMtpMultimodalCppShiftPreservesCpChunkBoundary) {
+    auto processor = makeMultimodalMtpProcessor();
+    vector<int> mask(16, 1);
+    std::fill(mask.begin() + 2, mask.begin() + 5, 0);
+    const auto feature = torch::arange(6).reshape({3, 2});
+    auto input = multimodalMtpInput({16}, mask, {feature}, {2});
+    processor.alignPrefillMultimodalInputs(input, input.input_lengths);
+    input.combo_tokens = torch::arange(1, 17, torch::kInt32);
+    ParallelismConfig cp_config;
+    cp_config.tp_size = 2;
+    cp_config.tp_rank = 0;
+    ZigZagProcessor cp(cp_config);
+    torch_ext::PyContextParallelParams cp_params;
+    cp.handleInputs(input, cp_params);
+    // Local shifting loses the visual token at index 3; global shifting keeps it.
+    EXPECT_EQ((vector<int>{1, 0, 0, 0, 1, 1, 1, 1}), toVec<int>(input.text_tokens_mask));
+    ASSERT_EQ(input.multimodal_features->size(), 1);
+    EXPECT_TRUE(torch::equal(input.multimodal_features.value()[0].cpu(), feature));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputAlignsMultimodalFieldsOnce) {
+    auto processor = makeMultimodalMtpProcessor();
+    ModelConfig model_config;
+    model_config.vocab_size = 32;
+    model_config.max_seq_len = 16;
+    model_config.num_layers = 1;
+    RuntimeConfig runtime_config;
+    ResourceContext resource_context;
+    auto stream1 = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 4}, 1);
+    auto stream2 = createContextStream(model_config, runtime_config, resource_context, {5, 6, 7, 8}, 2);
+    const StreamGroups streams({stream1, stream2});
+    const auto first = torch::tensor({20.0f, 21.0f, 22.0f, 23.0f}).reshape({2, 2});
+    const auto second = torch::tensor({30.0f, 31.0f}).reshape({1, 2});
+    auto input = multimodalMtpInput({4, 4}, {1, 0, 0, 1, 1, 1, 0, 1}, {first, second}, {1, 6});
+    input.combo_tokens = torch::tensor({1, 1000, 1001, 2, 4, 5, 1002, 6}, torch::kInt32);
+    GptModelOutputs output;
+    output.all_hidden_states = torch::zeros({8, 2});
+    SamplerOutput sampled;
+    sampled.token_ids = torch::tensor({3, 7}, torch::kInt32).reshape({2, 1});
+    TensorHolder holder;
+    processor.updatePrefillPostDraftModelInput(streams, input, output, sampled, holder);
+    EXPECT_EQ((vector<int>{1000, 1001, 2, 3, 5, 1002, 6, 7}), toVec<int>(input.combo_tokens));
+    EXPECT_EQ((vector<int>{0, 0, 1, 1, 1, 0, 1, 1}), toVec<int>(input.text_tokens_mask));
+    EXPECT_EQ((vector<int>{0, 5}), toVec<int>(input.mm_features_locs));
+    EXPECT_TRUE(torch::equal(input.multimodal_features.value()[0], first));
+    EXPECT_TRUE(torch::equal(input.multimodal_features.value()[1], second));
+}
 }  // namespace rtp_llm
