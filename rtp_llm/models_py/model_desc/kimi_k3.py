@@ -97,20 +97,21 @@ from rtp_llm.utils.model_weight import W
 if TYPE_CHECKING:
     from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
 
+from rtp_llm.models_py.modules.kimi_k3.ktp_step import KtpForwardMode, KtpStepPlan
+from rtp_llm.models_py.modules.kimi_k3.ktp_step import (
+    coordinate_ktp_step as coordinate_ktp_step_collective,
+)
+from rtp_llm.models_py.modules.kimi_k3.ktp_step import (
+    default_decode_capture_buckets,
+    normalize_capture_buckets,
+    pad_ktp_decode_inputs,
+)
 from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLA
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.models_py.modules.kimi_k3.moe_se import KimiK3LatentMoESE
 from rtp_llm.models_py.modules.kimi_k3.parallel_mode import (
     KimiK3ParallelMode,
     resolve_kimi_k3_parallel_mode,
-)
-from rtp_llm.models_py.modules.kimi_k3.ktp_step import (
-    KtpForwardMode,
-    KtpStepPlan,
-    coordinate_ktp_step as coordinate_ktp_step_collective,
-    default_decode_capture_buckets,
-    normalize_capture_buckets,
-    pad_ktp_decode_inputs,
 )
 from rtp_llm.models_py.modules.kimi_k3.projection_ktp import (
     validate_projection_ktp_sp_type,
@@ -274,7 +275,11 @@ class KimiK3DecoderLayer(nn.Module):
 
     @staticmethod
     def _local_projection(x: torch.Tensor, weight) -> torch.Tensor:
-        return weight(x) if not isinstance(weight, torch.Tensor) else torch.matmul(x, weight)
+        return (
+            weight(x)
+            if not isinstance(weight, torch.Tensor)
+            else torch.matmul(x, weight)
+        )
 
     def _project_tp_sp_inputs(
         self,
@@ -557,7 +562,9 @@ class KimiK3Model(GptModelBase):
                     f"got TP/DP/KTP/EP/world={topology}"
                 )
             validate_projection_ktp_sp_type(os.environ.get("SP_TYPE", ""))
-            configured = tuple(int(value) for value in init_resource.decode_capture_batch_sizes)
+            configured = tuple(
+                int(value) for value in init_resource.decode_capture_batch_sizes
+            )
             self._ktp_capture_buckets = (
                 normalize_capture_buckets(configured)
                 if configured
@@ -650,6 +657,11 @@ class KimiK3Model(GptModelBase):
                     **fp8_kwargs,
                 )
             self._gemm_reduce_scatter_configured = True
+        from rtp_llm.models_py.modules.kimi_k3.kernel_jit_warmup import (
+            warmup_kimi_k3_kernel_jit,
+        )
+
+        warmup_kimi_k3_kernel_jit(self, init_resource)
         return True
 
     def _validate_page_rr_target(self) -> None:
@@ -733,8 +745,7 @@ class KimiK3Model(GptModelBase):
         local_real_batch = 0 if is_fake_stream else request_rows
         graph_eligible = bool(
             cuda_graph_enabled
-            and forward_mode
-            in (KtpForwardMode.DECODE, KtpForwardMode.TARGET_VERIFY)
+            and forward_mode in (KtpForwardMode.DECODE, KtpForwardMode.TARGET_VERIFY)
         )
         if local_graph_eligible is not None:
             graph_eligible = graph_eligible and bool(local_graph_eligible)
@@ -1113,8 +1124,7 @@ class KimiK3Model(GptModelBase):
             attention_inputs.prefix_lengths_host, "prefix_lengths_host"
         )
         logical_request_count = int(
-            getattr(attention_inputs, "logical_request_count", 0)
-            or len(input_lengths)
+            getattr(attention_inputs, "logical_request_count", 0) or len(input_lengths)
         )
         logical_input_lengths = input_lengths[:logical_request_count]
         logical_prefix_lengths = prefix_lengths[:logical_request_count]
@@ -1443,7 +1453,9 @@ class KimiK3Model(GptModelBase):
             )
             round_sequence_count = int(lengths_host.numel())
             real_round_requests = (
-                len(round_plan.slices) if round_plan is not None else round_sequence_count
+                len(round_plan.slices)
+                if round_plan is not None
+                else round_sequence_count
             )
             padding_requests = round_sequence_count - real_round_requests
             if padding_requests not in (0, 1):

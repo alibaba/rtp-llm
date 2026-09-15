@@ -1095,6 +1095,19 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
 
         self.assertEqual(len(calls), 2)
 
+    def test_triton_warmup_retry_preserves_launch_result(self):
+        result = object()
+
+        self.assertIs(
+            _run_triton_warmup_launch_with_retry(
+                "test",
+                "shape S=1 T=16",
+                lambda: result,
+                device=torch.device("cpu"),
+            ),
+            result,
+        )
+
     def test_triton_warmup_retry_handles_called_process_context(self):
         calls = []
 

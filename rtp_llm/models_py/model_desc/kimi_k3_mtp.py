@@ -5,10 +5,7 @@ from typing import Optional
 import torch
 from torch import nn
 
-from rtp_llm.models_py.distributed.collective_torch import (
-    Group,
-    get_process_group,
-)
+from rtp_llm.models_py.distributed.collective_torch import Group, get_process_group
 from rtp_llm.models_py.distributed.sequence_parallel import (
     SequenceParallelLayout,
     finalize_sequence_parallel_output,
@@ -196,6 +193,7 @@ class KimiK3MtpModel(GptModelBase):
         self.embedding = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
+        self.embedding_weight = self.embedding.weight
         self.media_token_id = model_config.mm_related_params.special_token_ids.get(
             "image_token_index"
         )
@@ -257,6 +255,12 @@ class KimiK3MtpModel(GptModelBase):
                 n=self.hidden_size,
             )
             self._gemm_reduce_scatter_configured = True
+        from rtp_llm.models_py.modules.kimi_k3.kernel_jit_warmup import (
+            warmup_kimi_k3_kernel_jit,
+        )
+
+        # Keep the independent MTP process on the same pre-capture JIT path.
+        warmup_kimi_k3_kernel_jit(self, init_resource)
         return True
 
     def _embed_shifted_tokens(self, inputs):

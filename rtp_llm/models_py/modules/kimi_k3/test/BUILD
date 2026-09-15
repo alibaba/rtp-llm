@@ -20,3 +20,14 @@ py_test(
     ],
     timeout = "short",
 )
+
+py_test(
+    name = "kernel_jit_warmup_test",
+    srcs = ["test_kernel_jit_warmup.py"],
+    main = "test_kernel_jit_warmup.py",
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
+)

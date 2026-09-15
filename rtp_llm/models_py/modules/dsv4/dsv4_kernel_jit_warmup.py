@@ -13,7 +13,7 @@ import os
 import time
 from functools import lru_cache, partial
 from importlib import import_module
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 import torch
 
@@ -313,29 +313,40 @@ def _is_triton_transient_ptxas_compile_error(error: BaseException) -> bool:
     return saw_ptxas_failure and saw_tmp_log_missing
 
 
-def _triton_warmup_rank_tmpdir(rank: int) -> str:
+def _triton_warmup_rank_tmpdir(
+    rank: int,
+    *,
+    tmpdir_env: Optional[str] = _TRITON_WARMUP_TMPDIR_ENV,
+    namespace: str = "rtp_llm_dsv4_triton_warmup_tmp",
+) -> str:
     base_dir = (
-        os.environ.get(_TRITON_WARMUP_TMPDIR_ENV)
+        (os.environ.get(tmpdir_env) if tmpdir_env else None)
         or os.environ.get("TRITON_CACHE_DIR")
         or os.environ.get("DG_JIT_CACHE_DIR")
         or "/tmp"
     )
     return os.path.join(
         base_dir,
-        "rtp_llm_dsv4_triton_warmup_tmp",
+        namespace,
         f"rank_{int(rank)}",
     )
 
 
-def _activate_triton_warmup_tmpdir() -> tuple[str, str | None]:
+def _activate_triton_warmup_tmpdir(
+    *,
+    tmpdir_env: Optional[str] = _TRITON_WARMUP_TMPDIR_ENV,
+    namespace: str = "rtp_llm_dsv4_triton_warmup_tmp",
+) -> tuple[str, str | None]:
     previous_tmpdir = os.environ.get("TMPDIR")
-    tmpdir = _triton_warmup_rank_tmpdir(_dist_rank())
+    tmpdir = _triton_warmup_rank_tmpdir(
+        _dist_rank(), tmpdir_env=tmpdir_env, namespace=namespace
+    )
     try:
         os.makedirs(tmpdir, exist_ok=True)
     except Exception:
         tmpdir = os.path.join(
             "/tmp",
-            "rtp_llm_dsv4_triton_warmup_tmp",
+            namespace,
             f"rank_{_dist_rank()}",
         )
         os.makedirs(tmpdir, exist_ok=True)
@@ -428,18 +439,21 @@ def _run_triton_warmup_launch_with_retry(
     launch_fn: Any,
     *,
     device: torch.device,
-) -> None:
+    tmpdir_env: Optional[str] = _TRITON_WARMUP_TMPDIR_ENV,
+    tmpdir_namespace: str = "rtp_llm_dsv4_triton_warmup_tmp",
+) -> Any:
     """Retry transient Triton ptxas temp-file failures during startup warmup."""
 
     last_error: BaseException | None = None
     attempts = _TRITON_WARMUP_COMPILE_RETRIES + 1
-    tmpdir, previous_tmpdir = _activate_triton_warmup_tmpdir()
+    tmpdir, previous_tmpdir = _activate_triton_warmup_tmpdir(
+        tmpdir_env=tmpdir_env, namespace=tmpdir_namespace
+    )
     try:
         logging.info("[%s] Triton warmup TMPDIR=%s", label, tmpdir)
         for attempt in range(1, attempts + 1):
             try:
-                launch_fn()
-                return
+                return launch_fn()
             except Exception as error:
                 if not _is_triton_transient_ptxas_compile_error(error):
                     raise
@@ -791,8 +805,10 @@ def _maybe_add_shape(
         shapes[key] = info
 
 
-def _collect_dsv4_dense_gemm_shapes(model: Any) -> Dict[tuple[str, int, int], dict]:
-    """Collect representative dense DeepGEMM shapes from the live DSV4 model."""
+def collect_dense_gemm_shapes(
+    model: Any, *, label: str = "DSV4"
+) -> Dict[tuple[str, int, int], dict]:
+    """Collect representative dense DeepGEMM shapes from a live model."""
 
     shapes: Dict[tuple[str, int, int], dict] = {}
     for module_name, module in model.named_modules():
@@ -857,16 +873,25 @@ def _collect_dsv4_dense_gemm_shapes(model: Any) -> Dict[tuple[str, int, int], di
     fp8_keys = sorted(k for k in shapes if k[0] == "fp8")
     fp8_fp4_keys = sorted(k for k in shapes if k[0] == "fp8_fp4")
     logging.info(
-        "[DSV4 DenseGEMM] collected shapes: fp8=%d fp8_fp4=%d total=%d",
+        "[%s DenseGEMM] collected shapes: fp8=%d fp8_fp4=%d total=%d",
+        label,
         len(fp8_keys),
         len(fp8_fp4_keys),
         len(shapes),
     )
     if fp8_keys:
-        logging.info("[DSV4 DenseGEMM]   fp8 (N,K): %s", fp8_keys)
+        logging.info("[%s DenseGEMM]   fp8 (N,K): %s", label, fp8_keys)
     if fp8_fp4_keys:
-        logging.info("[DSV4 DenseGEMM]   fp8_fp4 (N,K): %s", fp8_fp4_keys)
+        logging.info("[%s DenseGEMM]   fp8_fp4 (N,K): %s", label, fp8_fp4_keys)
     return shapes
+
+
+def _collect_dsv4_dense_gemm_shapes(
+    model: Any,
+) -> Dict[tuple[str, int, int], dict]:
+    """Backward-compatible DSV4 entry point for the generic shape walker."""
+
+    return collect_dense_gemm_shapes(model, label="DSV4")
 
 
 def _collect_dsv4_mhc_prenorm_shapes(model: Any) -> Dict[tuple[int, int], dict]:
@@ -1492,6 +1517,8 @@ def warmup_dense_gemm_jit(
     *,
     max_m: int,
     device: torch.device,
+    label: str = "DSV4",
+    launch_observer: Optional[Callable[[str, str, float], None]] = None,
 ) -> None:
     """Compile representative DeepGEMM dense GEMM M buckets at startup."""
 
@@ -1529,14 +1556,16 @@ def warmup_dense_gemm_jit(
     if rank == 0:
         total_launches = sum(len(grid) for grid in m_grids.values())
         logging.info(
-            "[DSV4 DenseGEMM] JIT warmup start: %d shapes, %d representative M launches, num_sms=%d: %s",
+            "[%s DenseGEMM] JIT warmup start: %d shapes, %d representative M launches, num_sms=%d: %s",
+            label,
             len(shape_keys),
             total_launches,
             num_sms,
             shape_keys,
         )
         logging.info(
-            "[DSV4 DenseGEMM] representative M grids: %s",
+            "[%s DenseGEMM] representative M grids: %s",
+            label,
             {key: m_grids.get(key, ()) for key in shape_keys},
         )
 
@@ -1544,8 +1573,9 @@ def warmup_dense_gemm_jit(
         for key in shape_keys:
             info = shapes[key]
             for m_value in m_grids.get(key, ()):
+                launch_begin = time.perf_counter()
                 _run_deepgemm_warmup_launch_with_retry(
-                    "DSV4 DenseGEMM",
+                    f"{label} DenseGEMM",
                     f"shape={key} m={m_value}",
                     partial(
                         _launch_dummy_gemm,
@@ -1556,13 +1586,20 @@ def warmup_dense_gemm_jit(
                     ),
                     device=device,
                 )
+                if launch_observer is not None:
+                    _sync_cuda(device)
+                    launch_observer(
+                        "dense_gemm",
+                        f"kind={key[0]} N={key[1]} K={key[2]} M={m_value}",
+                        time.perf_counter() - launch_begin,
+                    )
             _sync_cuda(device)
             _release_cuda_cache(device)
 
     t0 = time.time()
-    _run_deepgemm_warmup_launches_serialized("DSV4 DenseGEMM", _run_warmup_launches)
+    _run_deepgemm_warmup_launches_serialized(f"{label} DenseGEMM", _run_warmup_launches)
     if rank == 0:
-        logging.info("[DSV4 DenseGEMM] JIT warmup done in %.2fs", time.time() - t0)
+        logging.info("[%s DenseGEMM] JIT warmup done in %.2fs", label, time.time() - t0)
     _DENSE_GEMM_JIT_WARMED_KEYS.add(warmup_key)
 
 
@@ -1778,9 +1815,7 @@ def warmup_mhc_head_fused_jit(
         return
     _assert_not_capturing()
 
-    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
-        tk_mhc_head_fused_enabled,
-    )
+    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_head_fused_enabled
 
     if not tk_mhc_head_fused_enabled():
         return
@@ -1816,13 +1851,9 @@ def warmup_mhc_head_fused_jit(
             _release_cuda_cache(device)
 
     t0 = time.time()
-    _run_deepgemm_warmup_launches_serialized(
-        "DSV4 mHCHeadFused", _run_warmup_launches
-    )
+    _run_deepgemm_warmup_launches_serialized("DSV4 mHCHeadFused", _run_warmup_launches)
     if rank == 0:
-        logging.info(
-            "[DSV4 mHCHeadFused] JIT warmup done in %.2fs", time.time() - t0
-        )
+        logging.info("[DSV4 mHCHeadFused] JIT warmup done in %.2fs", time.time() - t0)
     _MHC_HEAD_FUSED_JIT_WARMED_KEYS.add(warmup_key)
 
 

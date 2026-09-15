@@ -311,6 +311,7 @@ class KimiK3LatentMoE(nn.Module):
             )
         device = st_w1_w.device
         intermediate = int(st_w1_w.shape[1])
+        self._mega_intermediate_size = intermediate
         if (
             self.latent_size != 3584
             or intermediate != 3072
@@ -533,9 +534,7 @@ class KimiK3LatentMoE(nn.Module):
                 hidden_states, router_weight, out_dtype=torch.float32
             )
         else:
-            router_logits = torch.matmul(
-                hidden_states.float(), router_weight.float()
-            )
+            router_logits = torch.matmul(hidden_states.float(), router_weight.float())
         if self._group_topk.fused_sigmoid_supported(
             router_logits,
             correction_bias,
