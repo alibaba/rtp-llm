@@ -202,11 +202,11 @@ public:
         decode.engine_                = decode_engine;
         prefill.engine_               = prefill_engine;
         // Stub model execution, but use the real per-request timeout store.
-        prefill_engine->cache_manager_ = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(1, 2, 1, DataType::TYPE_FP16), true);
+        prefill_engine->resource_context_.cache_manager = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(1, 2, 1, DataType::TYPE_FP16), true);
         auto connector = std::make_shared<P2PConnector>(P2PConnectorConfig{}, nullptr, nullptr);
         connector->prefill_ = std::make_unique<P2PConnectorPrefill>(P2PConnectorConfig{}, nullptr, nullptr);
         connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr, 10);
-        prefill_engine->cache_manager_->p2p_connector_ = connector;
+        prefill_engine->resource_context_.cache_manager->p2p_connector_ = connector;
         decode.meta_                  = std::make_shared<RpcServerRuntimeMeta>();
         prefill.meta_                 = std::make_shared<RpcServerRuntimeMeta>();
         decode.prefill_server_caller_ = std::make_shared<PrefillServerCaller>("batch-test");
