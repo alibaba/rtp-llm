@@ -83,6 +83,8 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         // 3. Verify: mock prefill received the EnqueueBatch call (recorded before sleep)
         assertTrue(mockPrefillWorker.getEnqueueCount() >= 1,
                 "Prefill worker should have received at least 1 EnqueueBatch call");
+        assertTrue(mockPrefillWorker.getRpcService().isCancelled(10001L),
+                "The engine must fence late enqueue before timeout cleanup");
 
         // 4. Verify: timeout handling cleans up PrefillEndpoint inflight state
         InflightAssertions.assertPrefillInflightEmpty(getPrefillEndpoint());

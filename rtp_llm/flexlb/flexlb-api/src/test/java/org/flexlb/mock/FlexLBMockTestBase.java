@@ -7,6 +7,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.Router;
+import org.flexlb.balance.scheduler.priority.GrpcEngineCancelChannel;
 import org.flexlb.cache.core.EngineLocalView;
 import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.config.ConfigService;
@@ -192,7 +193,8 @@ public abstract class FlexLBMockTestBase {
         // 11. Create real scheduler
         scheduler = new FlexlbBatchScheduler(
                 configService, router,
-                endpointRegistry, dispatcher, reporter, null, null);
+                endpointRegistry, dispatcher, reporter, null, null,
+                new GrpcEngineCancelChannel(grpcClient));
 
         // 12. Register prefill endpoint with the real scheduler as BatchDecisionHandler
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, prefillIpPort, prefillWs);
@@ -222,6 +224,9 @@ public abstract class FlexLBMockTestBase {
 
         if (scheduler != null) {
             scheduler.shutdown();
+        }
+        if (dispatcher != null) {
+            dispatcher.shutdown();
         }
         if (mockPrefillWorker != null) {
             mockPrefillWorker.stop();
@@ -268,9 +273,17 @@ public abstract class FlexLBMockTestBase {
         Router fixedRouter = mock(Router.class);
         when(fixedRouter.route(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
+            reserveDecode(ctx);
             return successRoute(ctx.getRequestId());
         });
         return fixedRouter;
+    }
+
+    protected void reserveDecode(BalanceContext ctx) {
+        Request request = ctx.getRequest();
+        getDecodeEndpoint().reserve(ctx.getRequestId(), request.getSeqLen(),
+                request.getSeqLen() + request.getMaxNewTokens(),
+                ctx.getPriority(), ctx.getDeadlineMs());
     }
 
     /**

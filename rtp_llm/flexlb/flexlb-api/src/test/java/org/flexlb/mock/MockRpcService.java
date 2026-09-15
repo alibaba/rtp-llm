@@ -8,6 +8,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -44,6 +46,8 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
 
     /** Counter for CheckHealth calls. */
     final AtomicLong healthCheckCount = new AtomicLong(0);
+
+    private final Set<Long> cancelledRequests = ConcurrentHashMap.newKeySet();
 
     // ==================== Behavior (volatile, hot-swappable) ====================
 
@@ -82,6 +86,10 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         return healthCheckCount.get();
     }
 
+    public boolean isCancelled(long requestId) {
+        return cancelledRequests.contains(requestId);
+    }
+
     /** Clear all call records (useful between test cases sharing a worker). */
     public void resetRecords() {
         enqueuedRequests.clear();
@@ -91,6 +99,16 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     }
 
     // ==================== RPC implementations ====================
+
+    @Override
+    public void cancel(EngineRpcService.CancelRequestPB request,
+                       StreamObserver<EngineRpcService.CancelResponsePB> responseObserver) {
+        cancelledRequests.add(request.getRequestId());
+        responseObserver.onNext(EngineRpcService.CancelResponsePB.newBuilder()
+                .setStatus(EngineRpcService.CancelStatusPB.CANCEL_STATUS_TOMBSTONED)
+                .build());
+        responseObserver.onCompleted();
+    }
 
     @Override
     public void enqueueBatch(EngineRpcService.EnqueueBatchRequestPB request,
@@ -129,6 +147,14 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
             for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
                 for (EngineRpcService.EnqueueBatchExternalInputPB ext : slot.getRequestsList()) {
                     long reqId = ext.getInput().getRequestId();
+                    if (cancelledRequests.contains(reqId)) {
+                        responseBuilder.addErrors(EngineRpcService.EnqueueBatchErrorPB.newBuilder()
+                                .setRequestId(reqId)
+                                .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                                        .setErrorCode(EngineRpcService.ErrorCodePB.CANCELLED.getNumber())
+                                        .setErrorMessage("request cancelled")));
+                        continue;
+                    }
                     responseBuilder.addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
                             .setRequestId(reqId)
                             .build());
