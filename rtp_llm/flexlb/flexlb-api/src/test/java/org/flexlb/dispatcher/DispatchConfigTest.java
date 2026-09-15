@@ -36,7 +36,7 @@ class DispatchConfigTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"batch-timeout-ms,0", "body-read-margin-ms,-1", "max-aggregate-request-bytes,0",
+    @CsvSource({"batch-timeout-ms,0", "body-read-margin-ms,-1", "discovery-failure-grace-ms,-1", "max-aggregate-request-bytes,0",
             "max-aggregate-response-bytes,0", "fe-allocation,typo", "sub-batch,count:0", "pre-assign-be,true",
             "probe-path,health", "probe-path,//host/health", "probe-path,https://host/health", "probe-path,/health#fragment"})
     void invalidConfigurationFailsAtStartup(String key, String value) {

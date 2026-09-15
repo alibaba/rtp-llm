@@ -6,6 +6,8 @@ import org.flexlb.discovery.ServiceHostListener;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.reactive.function.client.ClientResponse;
@@ -43,25 +45,26 @@ class FePoolTest {
         }
     }
 
-    private FePool create(WebClient client) {
-        cfg.setDiscoveryFailureGraceMs(100);
+    private FePool create(WebClient client, long graceMs) {
+        cfg.setDiscoveryFailureGraceMs(graceMs);
         pool = new FePool(discovery, client, cfg, DispatcherTestSupport.noopMetrics(), clock::get, 50);
         return pool;
     }
 
-    @Test
-    void discoveryPushPollGraceAndRecoveryPublishCompleteSnapshots() {
+    @ParameterizedTest
+    @CsvSource({"100,a:b", "100,a:b:a", "0,a:b"})
+    void discoveryPushPollGraceAndRecoveryPublishCompleteSnapshots(long graceMs, String hosts) {
         when(discovery.getHosts(anyString())).thenThrow(new IllegalStateException("boot unavailable"));
-        create(WebClient.create()).start();
+        create(WebClient.create(), graceMs).start();
         assertThrows(IllegalStateException.class, pool::next);
         ArgumentCaptor<ServiceHostListener> listener = ArgumentCaptor.forClass(ServiceHostListener.class);
         verify(discovery).listen(anyString(), listener.capture());
-        listener.getValue().onHostsChanged(List.of(WorkerHost.of("a", 80), WorkerHost.of("b", 80)));
+        listener.getValue().onHostsChanged(List.of(hosts.split(":")).stream().map(host -> WorkerHost.of(host, 80)).toList());
         assertEquals(List.of("http://a:80", "http://b:80", "http://a:80"), pool.nextBatch(3));
         assertEquals("http://b:80", pool.next());
         doReturn(List.of()).when(discovery).getHosts(anyString());
         pool.refresh();
-        assertEquals(2, pool.currentSize());
+        assertEquals(graceMs == 0 ? 0 : 2, pool.currentSize());
         clock.set(TimeUnit.MILLISECONDS.toNanos(101));
         pool.refresh();
         assertThrows(IllegalStateException.class, pool::next);
@@ -84,7 +87,7 @@ class FePoolTest {
             }
             int code = request.url().getHost().equals("a") ? status.get() : 200;
             return Mono.just(ClientResponse.create(HttpStatus.valueOf(code)).build());
-        }).build());
+        }).build(), 100);
         pool.update(List.of(WorkerHost.of("a", 80), WorkerHost.of("b", 80)));
         pool.probeOnce().block();
         assertTrue(pool.isAlive("http://a:80"));
@@ -114,7 +117,7 @@ class FePoolTest {
 
     @Test
     void concurrentReservationsStayBalanced() {
-        create(WebClient.create()).update(List.of(WorkerHost.of("a", 80), WorkerHost.of("b", 80), WorkerHost.of("c", 80)));
+        create(WebClient.create(), 100).update(List.of(WorkerHost.of("a", 80), WorkerHost.of("b", 80), WorkerHost.of("c", 80)));
         List<String> picks = IntStream.range(0, 900).parallel().mapToObj(i -> pool.nextBatch(7)).flatMap(List::stream).toList();
         for (String host : List.of("a", "b", "c")) {
             assertEquals(2100, picks.stream().filter(("http://" + host + ":80")::equals).count());
@@ -138,7 +141,7 @@ class FePoolTest {
             }
             return List.of(WorkerHost.of("recovered", 80));
         });
-        create(WebClient.create());
+        create(WebClient.create(), 100);
         try {
             pool.refresh();
             pool.refresh();

@@ -68,9 +68,7 @@ public class FePool {
         this.metrics = metrics;
         this.clock = clock;
         this.lookupTimeoutMs = lookupTimeoutMs;
-        this.graceNanos = TimeUnit.MILLISECONDS.toNanos(
-                cfg.getDiscoveryFailureGraceMs() > 0 ? cfg.getDiscoveryFailureGraceMs() : 300_000);
-        this.lastNonEmpty = clock.getAsLong();
+        this.graceNanos = TimeUnit.MILLISECONDS.toNanos(cfg.getDiscoveryFailureGraceMs());
     }
 
     @PostConstruct
@@ -102,7 +100,7 @@ public class FePool {
 
     void update(List<WorkerHost> hosts) {
         try {
-            List<String> next = hosts.stream().map(host -> "http://" + host.getIpPort()).toList();
+            List<String> next = hosts.stream().map(host -> "http://" + host.getIpPort()).distinct().toList();
             if (!next.isEmpty()) {
                 lastNonEmpty = clock.getAsLong();
                 List<String> previous = urls.getAndSet(next);
@@ -112,14 +110,12 @@ public class FePool {
                 }
             } else {
                 List<String> previous = urls.get();
-                if (!previous.isEmpty() && clock.getAsLong() - lastNonEmpty > graceNanos) {
+                if (!previous.isEmpty() && clock.getAsLong() - lastNonEmpty >= graceNanos) {
                     if (urls.compareAndSet(previous, List.of())) {
                         Logger.warn("FE discovery remained empty beyond grace; dropping {} hosts", previous.size());
                     }
-                } else if (!previous.isEmpty()) {
-                    if (emptyWarn.tryAcquire()) {
-                        Logger.warn("FE discovery empty within grace; retaining {} hosts", previous.size());
-                    }
+                } else if (!previous.isEmpty() && emptyWarn.tryAcquire()) {
+                    Logger.warn("FE discovery empty within grace; retaining {} hosts", previous.size());
                 }
             }
         } catch (RuntimeException error) {

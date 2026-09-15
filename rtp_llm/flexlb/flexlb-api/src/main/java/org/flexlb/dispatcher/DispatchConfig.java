@@ -10,7 +10,7 @@ import lombok.Setter;
 public class DispatchConfig {
     public enum FeAllocation { MASTER, LOCAL }
 
-    /** Empty discovery may retain the previous pool for this long. */
+    /** Empty discovery may retain the previous pool for this long; zero disables retention. */
     private long discoveryFailureGraceMs = 300_000;
 
     private String subBatch = "count:5";
