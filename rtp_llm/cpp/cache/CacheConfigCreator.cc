@@ -250,12 +250,18 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                             block_num,
                             static_cast<long>(config.block_size_bytes / 1024 / 1024));
 
-    const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
+    const auto local_shards     = static_cast<size_t>(parallelism_config.local_kv_page_rr_shard_count());
+    const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block * local_shards;
     config.block_num            = static_cast<int>(block_num);
     config.finalizeBlockNums(block_num, runtime_config);
-    RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
+    RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %zu tokens (logical capacity), "
+                     "physical_page_tokens=%zu, local_shards=%zu",
+                     block_num,
+                     kv_cache_seq_len,
+                     config.seq_size_per_block,
+                     local_shards);
     if (kv_cache_seq_len < model_config.max_seq_len) {
-        RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
+        RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %zu tokens, less than max_seq_len %ld, "
                             "this is dangerous, consider decrease max_seq_len",
                             block_num,
                             kv_cache_seq_len,
@@ -636,14 +642,18 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     config.finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
     config.fixed_pool_reserve_bytes = fixed_reserve;
 
-    const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
+    const auto local_shards     = static_cast<size_t>(parallelism_config.local_kv_page_rr_shard_count());
+    const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block * local_shards;
     RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, block_num=%zu, "
-                     "allows storing %zu tokens, total_block_size=%zu bytes (main=%zu + %d*propose=%zu)",
+                     "allows storing %zu tokens (logical capacity), physical_page_tokens=%zu, local_shards=%zu, "
+                     "total_block_size=%zu bytes (main=%zu + %d*propose=%zu)",
                      is_mtp,
                      total_layer_num,
                      num_mtp_modules,
                      block_num,
                      kv_cache_seq_len,
+                     config.seq_size_per_block,
+                     local_shards,
                      total_block_size_bytes,
                      score_config.block_size_bytes,
                      num_mtp_modules,
