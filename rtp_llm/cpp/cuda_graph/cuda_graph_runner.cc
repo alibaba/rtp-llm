@@ -429,8 +429,19 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     auto&      py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     auto       attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
     const bool has_tagged_cache = !inputs.attention_inputs_by_tag.empty();
-    const int  selected_graph_batch_size =
-        is_prefill_cuda_graph_mode_ ? static_cast<int>(max_bs_) : state.current_real_graph_bs;
+    // Compact draft-prefill graphs capture fewer batch rows than max_bs_, so the
+    // replay fills must follow what this graph actually captured.
+    const int captured_batch_capacity = py_model_inputs_.attention_inputs.input_lengths_device.defined() ?
+                                            static_cast<int>(
+                                                py_model_inputs_.attention_inputs.input_lengths_device.numel()) :
+                                            static_cast<int>(max_bs_);
+    RTP_LLM_CHECK_WITH_INFO(state.current_batch_size <= captured_batch_capacity,
+                            "cuda graph replay batch size %d exceeds captured capacity %d for graph %zu",
+                            state.current_batch_size,
+                            captured_batch_capacity,
+                            graph_idx);
+    const int selected_graph_batch_size =
+        is_prefill_cuda_graph_mode_ ? captured_batch_capacity : state.current_real_graph_bs;
     const bool has_padded_rows = state.current_batch_size < selected_graph_batch_size;
 
     // These values are ordinary host scalars, not captured tensor storage. A
@@ -617,22 +628,22 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             addCudaGraphPrepareFillRegion(fill_params,
                                           py_model_inputs_.attention_inputs.prefix_lengths_device,
                                           state.current_batch_size,
-                                          max_bs_,
+                                          captured_batch_capacity,
                                           0);
             addCudaGraphPrepareFillRegion(fill_params,
                                           py_model_inputs_.attention_inputs.input_lengths_device,
                                           state.current_batch_size,
-                                          max_bs_,
+                                          captured_batch_capacity,
                                           0);
             addCudaGraphPrepareFillRegion(fill_params,
                                           py_model_inputs_.attention_inputs.cu_seqlens_device,
                                           state.current_batch_size + 1,
-                                          max_bs_ + 1,
+                                          captured_batch_capacity + 1,
                                           state.current_seq_len);
             addCudaGraphPrepareFillRegionFromDevice(fill_params,
                                                     py_model_inputs_.attention_inputs.cu_kv_seqlens_device,
                                                     state.current_batch_size + 1,
-                                                    max_bs_ + 1,
+                                                    captured_batch_capacity + 1,
                                                     inputs.attention_inputs.cu_kv_seqlens_device,
                                                     state.current_batch_size);
         } else if (has_padded_rows && !isGenerationPrefillCudaGraph()) {
