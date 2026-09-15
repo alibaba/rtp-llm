@@ -12,7 +12,8 @@ Strategies (priority high→low for ``forced=None``):
 
     ep_size  env / kernel                 → strategy
     --------------------------------------------------------
-    >1       DSV4_USE_MEGA_MOE_SE!=0       MegaMoEStrategySE (strict; default)
+    >1       SM90 + grouped FP8 available GroupedFP8Strategy
+    >1       DSV4_USE_MEGA_MOE_SE!=0       MegaMoEStrategySE (strict; SM100 default)
     >1       DSV4_USE_MEGA_MOE_SE=0        MegaMoEStrategy
     >1       mega unavailable/disabled     RuntimeError
     1        grouped FP4 kernel available  GroupedFP4Strategy
@@ -275,6 +276,13 @@ def select_strategy(
         from rtp_llm.models_py.modules.dsv4.moe.mega_se_buf import mega_moe_se_requested
 
         se_requested = mega_moe_se_requested()
+        # The default Mega-SE implementation requires SM100. Preserve the
+        # Hopper auto-pick while keeping an explicit SE request strict.
+        if se_requested and os.environ.get("DSV4_USE_MEGA_MOE_SE") is None:
+            se_requested = not any(
+                cls.name == "grouped_fp8" and cls.can_handle(cfg)
+                for cls in _STRATEGY_PRIORITY
+            )
         fused_requested = mega_moe_fused_requested()
         if se_requested and fused_requested:
             raise RuntimeError(

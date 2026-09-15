@@ -154,7 +154,9 @@ class StrategySelectTest(unittest.TestCase):
     def test_ep_gt1_default_picks_mega_se_when_capable(self):
         with _env(DSV4_USE_MEGA_MOE_SE=None), mock.patch.object(
             MegaMoEStrategy, "can_handle", return_value=True
-        ), mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=True):
+        ), mock.patch.object(
+            MegaMoEStrategySE, "can_handle", return_value=True
+        ), mock.patch.object(GroupedFP8Strategy, "can_handle", return_value=False):
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategySE)
 
     def test_ep_gt1_explicit_se_zero_picks_non_fused_mega(self):
@@ -181,6 +183,21 @@ class StrategySelectTest(unittest.TestCase):
         with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False), \
              mock.patch.object(GroupedFP8Strategy, "can_handle", return_value=True):
             self.assertIs(select_strategy(_cfg(ep_size=4)), GroupedFP8Strategy)
+
+    def test_ep_gt1_sm90_default_picks_grouped_fp8(self):
+        with _env(DSV4_USE_MEGA_MOE_SE=None), mock.patch.object(
+            MegaMoEStrategy, "can_handle", return_value=False
+        ), mock.patch.object(
+            MegaMoEStrategySE, "can_handle", return_value=False
+        ), mock.patch.object(GroupedFP8Strategy, "can_handle", return_value=True):
+            self.assertIs(select_strategy(_cfg(ep_size=4)), GroupedFP8Strategy)
+
+    def test_ep_gt1_sm90_explicit_mega_se_remains_strict(self):
+        with _env(DSV4_USE_MEGA_MOE_SE="1"), mock.patch.object(
+            MegaMoEStrategySE, "can_handle", return_value=False
+        ), mock.patch.object(GroupedFP8Strategy, "can_handle", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "Forced MoE strategy 'mega_se'"):
+                select_strategy(_cfg(ep_size=4))
 
     def test_ep1_prefers_grouped_fp8_over_local_loop(self):
         """grouped_fp8 outranks local_loop, which hardcodes FP4 expert storage."""
