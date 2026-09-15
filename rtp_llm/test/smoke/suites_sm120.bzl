@@ -4,28 +4,16 @@ def sm120_suites():
     native.test_suite(
         name = "smoke_sm120_basic",
         tests = [
-            smoke_test(
-                name = "softmax_probs_sm120",
-                task_info = "data/model/qwen25/q_r_softmax_probs_sm120.json",
-                smoke_args = "--act_type FP16 --warm_up 0",
-                gpu_type = ["RTX_5000_PRO"],
-            ),
-            smoke_test(
-                name = "fp16_sm120",
-                task_info = "data/model/qwen25/q_r_s_fp16_sm120.json",
-                smoke_args = "--act_type FP16 --warm_up 0",
-                gpu_type = ["RTX_5000_PRO"],
-            ),
-            smoke_test(
-                name = "bf16_sm120",
-                task_info = "data/model/qwen25/q_r_s_bf16_sm120.json",
-                smoke_args = "--act_type BF16 --warm_up 0",
-                gpu_type = ["RTX_5000_PRO"],
-            ),
-            smoke_test(
-                name = "bf16_cuda_graph_sm120",
-                task_info = "data/model/qwen25/q_r_s_bf16_sm120.json",
-                smoke_args = "--act_type BF16 --warm_up 0 --seq_size_per_block 64 --enable_cuda_graph 1 --decode_capture_config '1,2'",
+            custom_smoke_test(
+                name = "qwen3_bf16_sm120",
+                main = "sm120_qwen3_test.py",
+                # One PDFUSION server runs all generation/API/cache scenarios.
+                smoke_args = "--role_type PDFUSION --act_type BF16 --warm_up 0 --tp_size 1 --world_size 1 --frontend_server_count 1 --max_seq_len 8192 --seq_size_per_block 64 --concurrency_limit 4 --enable_cuda_graph 1 --decode_capture_config '1,2' --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 0 --enable_remote_cache 0",
+                data = [
+                    "//rtp_llm:sdk",
+                    "data/model/qwen3/q_r_4b_bf16_sm120.json",
+                ],
+                deps = ["//rtp_llm:transformers"],
                 gpu_type = ["RTX_5000_PRO"],
             ),
             smoke_test(
@@ -35,18 +23,6 @@ def sm120_suites():
                 # KV pool. This gates graph capture memory accounting instead of
                 # bypassing it with a fixed test_block_num.
                 smoke_args = "--act_type BF16 --warm_up 1 --seq_size_per_block 64 --concurrency_limit 5 --max_context_batch_size 5 --enable_cuda_graph 1 --decode_capture_config '1' --generation_prefill_cuda_graph_max_requests 5 --generation_prefill_capture_config '64,256'",
-                gpu_type = ["RTX_5000_PRO"],
-            ),
-            smoke_test(
-                name = "random_seed_sm120",
-                task_info = "data/model/qwen25/test_random_seed_sm120.json",
-                smoke_args = "--act_type FP16 --warm_up 0",
-                gpu_type = ["RTX_5000_PRO"],
-            ),
-            smoke_test(
-                name = "logits_index_sm120",
-                task_info = "data/model/qwen25/logits_index_q_r_sm120.json",
-                smoke_args = "--act_type FP16 --warm_up 0",
                 gpu_type = ["RTX_5000_PRO"],
             ),
             smoke_test(
