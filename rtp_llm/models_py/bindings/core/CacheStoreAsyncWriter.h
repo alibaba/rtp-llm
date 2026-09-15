@@ -30,11 +30,13 @@ class KVCacheResource;
 class CacheStoreAsyncWriter: public CacheStoreWriter {
 public:
     using StoreCompletionCallback = CacheStoreCompletionCallback;
-    explicit CacheStoreAsyncWriter(int                             device_id              = -1,
-                                   std::shared_ptr<KVCacheManager> cache_manager          = nullptr,
-                                   size_t                          cache_model_id         = 0,
-                                   std::optional<int> mtp_cache_config_index = std::nullopt,
-                                   std::optional<std::chrono::milliseconds> store_completion_timeout = std::nullopt);
+
+    explicit CacheStoreAsyncWriter(
+        int                                      device_id              = -1,
+        std::shared_ptr<KVCacheManager>          cache_manager          = nullptr,
+        size_t                                   cache_model_id         = 0,
+        std::optional<int>                       mtp_cache_config_index = std::nullopt,
+        std::optional<std::chrono::milliseconds> store_completion_timeout = std::nullopt);
     ~CacheStoreAsyncWriter() override;
 
     void init(bool track_store_completions = false);
