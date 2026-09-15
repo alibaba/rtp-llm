@@ -3,7 +3,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class P2PConnectorMetrics;
 
@@ -165,4 +165,4 @@ private:
     kmonitor::MutableMetric* prefill_worker_computed_request_count_metric = nullptr;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

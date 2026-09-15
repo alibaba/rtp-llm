@@ -2,7 +2,7 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 AsymmetricTpUtil::AsymmetricTpUtil(int64_t tp_size, int64_t tp_rank): tp_size_(tp_size), tp_rank_(tp_rank) {}
 
@@ -73,4 +73,4 @@ AsymmetricTpUtil::handleND1P(const std::vector<std::pair<std::string, uint32_t>>
     return asymmetric_tp_contexts;
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

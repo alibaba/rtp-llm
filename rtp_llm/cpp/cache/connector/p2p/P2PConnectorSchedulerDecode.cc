@@ -7,7 +7,7 @@
 #include <memory>
 #include <optional>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 P2PConnectorSchedulerDecode::P2PConnectorSchedulerDecode(
     P2PConnectorSchedulerConfig                config,
@@ -142,4 +142,4 @@ std::optional<P2PConnectorSchedulerDecode::AsyncReadCallResults> P2PConnectorSch
     return AsyncReadCallResults{server_call_result, tp_sync_result};
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

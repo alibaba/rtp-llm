@@ -4,7 +4,7 @@
 #include "aios/network/arpc/arpc/ANetRPCServer.h"
 #include "autil/NetUtil.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 namespace transfer {
 class TcpServer {
@@ -44,4 +44,4 @@ private:
 };
 
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

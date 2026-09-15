@@ -22,7 +22,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class P2PConnectorWorkerPrefill {
 public:
@@ -116,4 +116,4 @@ private:
     std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> handle_cancel_flags_;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

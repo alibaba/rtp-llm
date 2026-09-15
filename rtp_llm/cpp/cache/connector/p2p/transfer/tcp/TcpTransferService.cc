@@ -3,7 +3,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 namespace transfer {
 namespace tcp {
 
@@ -122,4 +122,4 @@ void TcpTransferService::transferViaTcp(const std::shared_ptr<TcpTaskContext>& c
 
 }  // namespace tcp
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

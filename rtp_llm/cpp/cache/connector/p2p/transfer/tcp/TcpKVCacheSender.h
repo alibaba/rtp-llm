@@ -11,7 +11,7 @@
 #include <memory>
 #include <string>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 namespace transfer {
 namespace tcp {
 
@@ -58,4 +58,4 @@ private:
 
 }  // namespace tcp
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

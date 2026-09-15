@@ -10,7 +10,7 @@
 #include "aios/network/anet/transport.h"
 #include "aios/network/arpc/arpc/ANetRPCChannelManager.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 namespace transfer {
 
@@ -50,4 +50,4 @@ private:
 };
 }  // namespace transfer
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

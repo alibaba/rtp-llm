@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpKVCacheReceiver.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 namespace transfer {
 
 namespace {
@@ -56,4 +56,4 @@ TransferBackendPair createTransferBackend(TransferBackend                     ba
 }
 
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

@@ -2,7 +2,7 @@
 
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 namespace transfer {
 
 /// @brief Transfer-layer error codes, scoped to the transport abstraction.
@@ -61,4 +61,4 @@ inline ErrorCode toErrorCode(TransferErrorCode ec) {
 }
 
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

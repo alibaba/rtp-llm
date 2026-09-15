@@ -11,7 +11,7 @@
 #include <optional>
 #include <vector>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 struct StoreWaitContext {
     int64_t                                             request_id;
@@ -55,4 +55,4 @@ private:
     std::vector<StoreWaitContext> contexts_;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

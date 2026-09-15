@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <functional>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 StoreWaitContextChecker::StoreWaitContextChecker(
     const kmonitor::MetricsReporterPtr&                   metrics_reporter,
@@ -66,4 +66,4 @@ void StoreWaitContextChecker::checkOnce() {
     }
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

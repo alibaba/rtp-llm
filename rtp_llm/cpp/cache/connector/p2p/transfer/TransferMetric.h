@@ -3,7 +3,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 namespace transfer {
 
 class TransferClientMetricsCollector final {
@@ -59,4 +59,4 @@ private:
 };
 
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

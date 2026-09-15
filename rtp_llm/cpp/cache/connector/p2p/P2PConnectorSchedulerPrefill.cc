@@ -7,7 +7,7 @@
 #include <chrono>
 #include <thread>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 P2PConnectorSchedulerPrefill::P2PConnectorSchedulerPrefill(
     P2PConnectorSchedulerConfig                config,
@@ -130,4 +130,4 @@ P2PConnectorSchedulerPrefill::waitForBroadcastCompletion(const std::shared_ptr<P
     return cancel_result;
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

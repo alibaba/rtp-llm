@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 /// @brief Facade: 统一外部接口，内部委托给 Prefill / Decode 子对象
 class P2PConnectorWorker {
@@ -60,4 +60,4 @@ private:
     std::unique_ptr<P2PConnectorWorkerDecode>  decode_;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

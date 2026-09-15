@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class P2PConnectorSchedulerPrefill {
 public:
@@ -44,4 +44,4 @@ private:
     std::shared_ptr<P2PBroadcastClient> tp_broadcast_client_;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

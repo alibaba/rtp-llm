@@ -2,7 +2,7 @@
 
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 namespace transfer {
 
 bool TransferMetric::init(kmonitor::MetricsGroupManager* manager) {
@@ -61,4 +61,4 @@ void TransferMetric::report(const kmonitor::MetricsTags* tags, TransferServerMet
 }
 
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

@@ -12,7 +12,7 @@ namespace rtp_llm {
 class GenerateStream;
 }
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class Meta {
 public:
@@ -43,4 +43,4 @@ public:
     }
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

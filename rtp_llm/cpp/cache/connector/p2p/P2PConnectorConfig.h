@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 struct P2PConnectorSchedulerConfig {
     std::vector<std::string> worker_grpc_addrs;
@@ -100,4 +100,4 @@ struct P2PConnectorConfig {
     }
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

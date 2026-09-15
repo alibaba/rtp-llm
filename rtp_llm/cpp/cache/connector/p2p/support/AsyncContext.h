@@ -18,11 +18,15 @@ public:
     }
 };
 
-class AsyncMatchContext: public AsyncContext {
+}  // namespace rtp_llm::legacy::p2p
+
+namespace rtp_llm {
+
+class AsyncMatchContext: public ::rtp_llm::legacy::p2p::AsyncContext {
 public:
     ~AsyncMatchContext() override = default;
 
     virtual size_t matchedBlockCount() const = 0;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

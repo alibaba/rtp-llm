@@ -3,7 +3,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferBackendFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 P2PConnectorWorker::P2PConnectorWorker(P2PConnectorWorkerConfig                    config,
                                        const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
@@ -91,4 +91,4 @@ void P2PConnectorWorker::setStoreWaitTimeoutMs(int64_t store_wait_timeout_ms) {
     prefill_->setStoreWaitTimeoutMs(store_wait_timeout_ms);
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

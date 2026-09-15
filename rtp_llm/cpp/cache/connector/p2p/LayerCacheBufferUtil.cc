@@ -5,7 +5,7 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 namespace {
 
@@ -165,4 +165,4 @@ LayerCacheBufferUtil::buildKeyBlockInfos(const std::shared_ptr<LayerBlockConvert
     return key_block_infos;
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

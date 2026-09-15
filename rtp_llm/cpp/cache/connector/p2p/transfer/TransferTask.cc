@@ -4,7 +4,7 @@
 
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 namespace transfer {
 
 // ==================== TransferTask ====================
@@ -125,4 +125,4 @@ int64_t TransferTaskStore::getTaskCount() const {
 }
 
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

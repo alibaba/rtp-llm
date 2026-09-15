@@ -15,7 +15,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class P2PConnectorWorkerDecode {
 public:
@@ -84,4 +84,4 @@ private:
     std::unordered_map<std::string, std::shared_ptr<ReadTaskGroup>> read_tasks_;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

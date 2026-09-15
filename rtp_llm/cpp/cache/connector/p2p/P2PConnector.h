@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class P2PConnectorScheduler;
 class P2PConnectorWorker;
@@ -46,16 +46,17 @@ public:
     std::shared_ptr<AsyncMatchContext> asyncMatch(const KVCacheResourcePtr&    resource,
                                                   const std::shared_ptr<Meta>& meta) override;
 
-    std::shared_ptr<AsyncContext> asyncRead(const KVCacheResourcePtr&                 resource,
-                                            const std::shared_ptr<Meta>&              meta,
-                                            const std::shared_ptr<AsyncMatchContext>& match_context,
-                                            int                                       start_read_block_index,
-                                            int                                       read_block_num) override;
+    std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext>
+    asyncRead(const KVCacheResourcePtr&                 resource,
+              const std::shared_ptr<Meta>&              meta,
+              const std::shared_ptr<AsyncMatchContext>& match_context,
+              int                                       start_read_block_index,
+              int                                       read_block_num) override;
 
-    std::shared_ptr<AsyncContext> asyncWrite(const KVCacheResourcePtr&    resource,
-                                             const std::shared_ptr<Meta>& meta) override;
+    std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext> asyncWrite(const KVCacheResourcePtr&    resource,
+                                                                     const std::shared_ptr<Meta>& meta) override;
 
-    std::shared_ptr<AsyncContext>
+    std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext>
     asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) override;
 
 public:
@@ -104,4 +105,4 @@ private:
     std::shared_ptr<P2PConnectorResourceStore> stream_store_;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

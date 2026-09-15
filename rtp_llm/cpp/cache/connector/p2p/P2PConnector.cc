@@ -15,7 +15,7 @@
 #include <chrono>
 #include <thread>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 P2PConnector::P2PConnector(P2PConnectorConfig                          config,
                            const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
@@ -74,11 +74,12 @@ std::shared_ptr<AsyncMatchContext> P2PConnector::asyncMatch(const KVCacheResourc
     return nullptr;
 }
 
-std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr&                 resource,
-                                                      const std::shared_ptr<Meta>&              meta,
-                                                      const std::shared_ptr<AsyncMatchContext>& match_context,
-                                                      int                                       start_read_block_index,
-                                                      int                                       read_block_num) {
+std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext>
+P2PConnector::asyncRead(const KVCacheResourcePtr&                 resource,
+                        const std::shared_ptr<Meta>&              meta,
+                        const std::shared_ptr<AsyncMatchContext>& match_context,
+                        int                                       start_read_block_index,
+                        int                                       read_block_num) {
     if (!meta || !resource || !meta->generateStream()) {
         RTP_LLM_LOG_WARNING("asyncRead failed, meta is null");
         return nullptr;
@@ -106,13 +107,13 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr& 
     return nullptr;
 }
 
-std::shared_ptr<AsyncContext> P2PConnector::asyncWrite(const KVCacheResourcePtr&    resource,
-                                                       const std::shared_ptr<Meta>& meta) {
+std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext> P2PConnector::asyncWrite(const KVCacheResourcePtr&    resource,
+                                                                               const std::shared_ptr<Meta>& meta) {
     // p2p connector not support async write
     return nullptr;
 }
 
-std::shared_ptr<AsyncContext>
+std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext>
 P2PConnector::asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) {
     auto resource = std::make_shared<KVCacheResource>(layer_context->kvCacheResource());
     worker_->writeByLayer(layer_id, resource, layer_context->requestId(), layer_context->attentionEvent());
@@ -421,4 +422,4 @@ grpc::Status P2PConnector::fillResponseWithStreamInfo(const std::shared_ptr<P2PC
     return grpc::Status::OK;
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

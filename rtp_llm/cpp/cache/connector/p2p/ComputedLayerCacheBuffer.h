@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class ComputedLayerCacheBuffer {
 public:
@@ -67,4 +67,4 @@ private:
     std::unordered_map<int64_t, std::shared_ptr<ComputedLayerCacheBuffer>> computed_buffers_;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

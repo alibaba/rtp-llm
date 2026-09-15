@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 /// Shared key format for P2P transfer includes the semantic cache tag.
 class P2PKeyUtil {
@@ -15,4 +15,4 @@ public:
     }
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

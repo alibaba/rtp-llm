@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class ComputedLayerCacheBufferTest: public ::testing::Test {
 protected:
@@ -198,4 +198,4 @@ TEST_F(ComputedLayerCacheBufferTest, CheckTimeoutMixed) {
     EXPECT_EQ(store_->getBuffersCount(), 1);
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

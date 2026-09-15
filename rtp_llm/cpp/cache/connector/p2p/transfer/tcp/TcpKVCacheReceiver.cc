@@ -2,7 +2,7 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 namespace transfer {
 namespace tcp {
 
@@ -69,4 +69,4 @@ transfer::IKVCacheRecvTaskPtr TcpKVCacheReceiver::getTask(const std::string& uni
 
 }  // namespace tcp
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm
