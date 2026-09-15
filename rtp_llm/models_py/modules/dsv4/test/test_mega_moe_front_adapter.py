@@ -28,6 +28,15 @@ class _FakePlan:
         post[:2].fill_(4)
         comb[:2].fill_(5)
 
+    def run_hash_out(self, *args, **kwargs) -> None:
+        self.calls.append((args, kwargs))
+        normalized = args[9]
+        post = args[16]
+        comb = args[17]
+        normalized[:2].fill_(3)
+        post[:2].fill_(4)
+        comb[:2].fill_(5)
+
     def close(self) -> None:
         self.closed = True
 
@@ -222,6 +231,29 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "DSV4_MEGA_MOE_FRONT"):
                 moe_front_requested()
 
+    def test_front_switch_is_independent_from_attention_switches(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "DSV4_MEGA_MOE_FRONT": "1",
+                "DSV4_MEGA_CSA": "0",
+                "DSV4_MEGA_HCA": "0",
+            },
+            clear=True,
+        ):
+            self.assertTrue(moe_front_requested())
+
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "DSV4_MEGA_MOE_FRONT": "0",
+                "DSV4_MEGA_CSA": "1",
+                "DSV4_MEGA_HCA": "1",
+            },
+            clear=True,
+        ):
+            self.assertFalse(moe_front_requested())
+
     def test_plans_share_one_layer_workspace(self) -> None:
         adapter, _ = _fake_adapter()
         first_input = torch.empty((16, 4, adapter.dim), dtype=torch.bfloat16)
@@ -393,6 +425,80 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         self.assertEqual(tuple(args[13].shape), (2, 6))
         self.assertIs(kwargs["router_logits"], adapter.router_logits)
         self.assertTrue(plan.closed)
+
+    def test_hash_front_passes_int32_ids_to_four_kernel_plan(self) -> None:
+        adapter, plan = _fake_adapter()
+        adapter.gate.hash = True
+        adapter.correction_bias = None
+        adapter.tid2eid = torch.arange(256, dtype=torch.int32)
+        residual = torch.arange(2 * 4 * adapter.dim, dtype=torch.float32)
+        residual = residual.to(torch.bfloat16).view(2, 1, 4, adapter.dim)
+        input_ids = torch.tensor([[11], [12]], dtype=torch.int32)
+
+        y, normalized, post, comb = adapter.forward(residual, input_ids)
+
+        self.assertEqual(tuple(y.shape), (2, 1, adapter.dim))
+        self.assertTrue(torch.all(normalized == 3))
+        self.assertTrue(torch.all(post == 4))
+        self.assertTrue(torch.all(comb == 5))
+        self.assertEqual(len(plan.calls), 1)
+        args, _ = plan.calls[0]
+        self.assertEqual(args[4].data_ptr(), input_ids.data_ptr())
+        self.assertEqual(args[4].dtype, torch.int32)
+        self.assertIs(args[5], adapter.tid2eid)
+        self.assertEqual(args[18], 16)
+        self.assertTrue(plan.closed)
+
+    def test_decode_over_capacity_uses_original_moe_path(self) -> None:
+        dim = 8
+        residual = torch.ones((257, 1, 4, dim), dtype=torch.bfloat16)
+        input_ids = torch.arange(257, dtype=torch.int64).view(257, 1)
+        collapsed = residual.mean(dim=-2)
+
+        attn_hc = SimpleNamespace(
+            pre=mock.Mock(return_value=(collapsed, object(), object())),
+            post=mock.Mock(return_value=residual),
+        )
+        ffn_hc = SimpleNamespace(
+            pre=mock.Mock(return_value=(collapsed, object(), object())),
+            post=mock.Mock(return_value=residual),
+        )
+        adapter = SimpleNamespace(
+            supports=mock.Mock(return_value=False),
+            forward=mock.Mock(side_effect=AssertionError("front must not run")),
+        )
+        ffn = mock.Mock(return_value=collapsed)
+        block = SimpleNamespace(
+            layer_id=3,
+            attn_hc=attn_hc,
+            attn_norm=mock.Mock(side_effect=lambda value: value),
+            attn=None,
+            ffn_hc=ffn_hc,
+            ffn_norm=mock.Mock(side_effect=lambda value: value),
+            ffn=ffn,
+            _moe_front_adapter=adapter,
+        )
+
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4._record_tensor.should_record_layer",
+            return_value=False,
+        ):
+            output = Block.forward_decode(
+                block,
+                residual,
+                SimpleNamespace(),
+                input_ids,
+                attn_fn=lambda value: value,
+            )
+
+        self.assertIs(output, residual)
+        adapter.supports.assert_called_once_with(residual, input_ids)
+        adapter.forward.assert_not_called()
+        ffn_hc.pre.assert_called_once()
+        ffn.assert_called_once()
+        ffn_input, ffn_input_ids = ffn.call_args.args
+        self.assertEqual(ffn_input.data_ptr(), collapsed.data_ptr())
+        self.assertIs(ffn_input_ids, input_ids)
 
     def test_empty_rank_skips_front_and_enters_mega_collective(self) -> None:
         adapter, plan = _fake_adapter()
