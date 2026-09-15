@@ -271,7 +271,8 @@ private:
                 try {
                     cudaCheck(device_status);
                     const bool prefill = pd_.role_type == RoleType::PREFILL;
-                    if (prefill || stream->seqLength() == stream->inputLength() + 1) {
+                    if ((prefill && stream->queryPdSep())
+                        || (!prefill && stream->seqLength() == stream->inputLength() + 1)) {
                         cacheStep(stream, prefill);
                     }
                     // D must have applied the real first-token side channel
@@ -280,21 +281,22 @@ private:
                         require(!stream->isContextStream(), "D became runnable before P2P side channel");
                         require(stream->seqLength() > stream->inputLength(), "missing prefill token");
                     }
-                    const int token = 100 + stream->seqLength() - stream->inputLength();
+                    const int  token  = 100 + stream->seqLength() - stream->inputLength();
+                    const auto width  = static_cast<int64_t>(stream->nextBatchSize());
+                    auto       tokens = torch::full({width, 1}, token, torch::kInt32);
+                    if (stream->hasNumBeams()) {
+                        tokens = torch::empty({width, static_cast<int64_t>(stream->seqLength() + 1)}, torch::kInt32);
+                        for (int64_t row = 0; row < width; ++row) {
+                            const int  source = std::min<int64_t>(row, stream->currentBatchSize() - 1);
+                            const auto prefix = stream->completeTokenIdsVec(source);
+                            auto*      data   = tokens.data_ptr<int32_t>() + row * tokens.size(1);
+                            std::copy(prefix.begin(), prefix.end(), data);
+                            data[stream->seqLength()] = token;
+                        }
+                    }
                     stream->step();
-                    StreamUpdateInfo update{torch::tensor({token}, torch::kInt32).reshape({1, 1}),
-                                            1,
-                                            {},
-                                            {},
-                                            {},
-                                            {},
-                                            {},
-                                            {},
-                                            {},
-                                            {},
-                                            true,
-                                            false,
-                                            std::nullopt};
+                    StreamUpdateInfo update{tokens, 1, {}, {}, {}, {}, {}, {}, {}, {}, true, false, std::nullopt};
+                    update.cum_log_probs = torch::zeros({width}, torch::kFloat32);
                     stream->update(update);
                 } catch (const std::exception& error) {
                     {
@@ -741,7 +743,6 @@ protected:
         config->set_num_return_sequences(1);
         config->set_timeout_ms(kRequestTimeoutMs);
         config->set_is_streaming(true);
-        config->set_aux_info(true);
         auto* role = config->add_role_addrs();
         role->set_role(RoleAddrPB::PREFILL);
         role->set_ip(prefill_process_->ready.host);
@@ -849,6 +850,49 @@ TEST_F(P2PGenerateStreamSmokeTest, GenerateStreamTransfersEveryFp16CacheByte) {
 
 TEST_F(P2PGenerateStreamSmokeTest, GenerateStreamTransfersInt8CacheAndScaleBytes) {
     roundTrips(DataType::TYPE_INT8);
+}
+
+TEST_F(P2PGenerateStreamSmokeTest, NonPDQueriesFinishOnPrefillWithoutP2PTransfer) {
+    initialize(DataType::TYPE_FP16);
+    int requests = 0;
+    for (int mode = 0; mode < 5; ++mode) {
+        for (const std::string key : {std::string{}, std::string{"business-key"}}) {
+            SCOPED_TRACE(::testing::Message() << "mode=" << mode << " key=" << key);
+            auto  input  = request(801 + requests, 8);
+            auto* config = input.mutable_generate_config();
+            config->set_unique_key(key);
+            if (mode == 0)
+                config->set_max_new_tokens(1);
+            if (mode == 1)
+                config->set_num_beams(2);
+            if (mode == 2) {
+                config->add_variable_num_beams(2);
+                config->add_variable_num_beams(4);
+                config->add_variable_num_beams(2);
+            }
+            if (mode == 3)
+                config->set_num_return_sequences(2);
+            if (mode == 4)
+                config->set_can_use_pd_separation(false);
+            std::vector<GenerateOutputsPB> outputs;
+            const auto                     status  = generate(input, outputs);
+            const auto                     prefill = prefill_process_->snapshot();
+            ASSERT_TRUE(status.ok()) << status.error_message() << " P=" << prefill.failure;
+            ASSERT_FALSE(outputs.empty());
+            ASSERT_GT(outputs.back().flatten_output().finished_size(), 0);
+            for (bool finished : outputs.back().flatten_output().finished())
+                EXPECT_TRUE(finished);
+            ++requests;
+            EXPECT_EQ(prefill.generate_calls, requests);
+            EXPECT_EQ(prefill.peer_calls, 0);
+            EXPECT_EQ(prefill.load_calls, 0);
+            EXPECT_EQ(prefill.published_bytes, 0u);
+            EXPECT_EQ(decode_engine_->checked_requests.load(), 0);
+            EXPECT_EQ(decode_rpc_->service.read_calls.load(), 0);
+            EXPECT_TRUE(std::string(prefill.failure).empty()) << prefill.failure;
+            ASSERT_NO_FATAL_FAILURE(expectReleased());
+        }
+    }
 }
 
 TEST_F(P2PGenerateStreamSmokeTest, CorruptedTransferredByteFailsBeforeDecodeOutput) {
