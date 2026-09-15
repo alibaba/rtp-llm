@@ -35,6 +35,8 @@ RDMA 使用同一目标及同一套断言，向测试传入：
 
 RDMA 需要启用内源 backend 的构建、RDMA 网卡和对应驱动。后端不支持或初始化失败会直接失败，不回退 TCP。同机 RDMA 测试还要求后端支持同机端点互传。
 
+多网卡环境可在两端设置 Barex 现有的 `ACCL_USE_NICS=<网卡名>`，例如 `mlx5_2`，限定本轮验证使用的网卡；通过单网卡测试不代表其他网卡或跨机链路已通过。
+
 这是传输完整性测试；生成 token 是确定值，不校验模型推理精度。
 
 
@@ -68,3 +70,21 @@ RDMA 需要启用内源 backend 的构建、RDMA 网卡和对应驱动。后端�
 D 完成后，两端测试均应 PASSED，P 自动清理退出。换用 INT8 或反例时，重新启动一次 P，并在 D 选择对应的单个测试名称；不要在跨机模式下使用全套用例过滤器。TCP 跨机验证将两端 transport 都改成 `tcp`。
 
 控制端口 29800、两端动态分配的 gRPC 和传输端口需互通。两台机器时钟需同步，生产 P2P 使用绝对 deadline。GPU 选择遵循各自远端运行环境的 `CUDA_VISIBLE_DEVICES`；测试内部使用可见设备 0。
+
+## 2026-09-15 验证记录
+
+代码版本 `2663f60457`，111 的 `yzh` 容器编译，产物由 111 SCP 到 112。CUDA 13.2 环境在 `sm9x`、`cuda12_9` 后追加 `cuda13`、`sm10x`，并使用远端独立 `arch-config-rdma` 覆盖配置启用真实内源 RDMA backend。
+
+| 验证项 | 环境 | 结果 |
+| --- | --- | --- |
+| 缓存层 non-PD / PD / allocator 回归 | 111，`yzh` | 4 项通过 |
+| Python gRPC 错误处理 | 111，`yzh` | 6 项通过 |
+| non-PD GenerateStreamCall 入口回归 | 111，同机双进程 | 10 种请求组合 × 3 轮通过 |
+| TCP 完整 payload smoke | 112，同机双进程，GPU 0 | 5 用例 × 3 轮通过 |
+| RDMA 完整 payload smoke | 112，同机双进程，GPU 1，`ACCL_USE_NICS=mlx5_2` | 5 用例 × 3 轮通过 |
+
+每轮正例逐字节检查 FP16 的 7680 字节、INT8 KV/scale 的 4800 字节；同时验证 token、故障检测和缓存释放。这里的 GPU 编号指 `CUDA_VISIBLE_DEVICES`，进程内设备编号均为 0。
+
+归档目录：111 的 `/home/yanzhan.yzh/p2p-payload-20260915/build_logs/`。`p2p_portfix_build.log` 为构建日志，`payload_112/{tcp,rdma}_stability112.log` 为三轮记录，对应 `.signal` 均为 0。测试运行副本位于两台机器的 `/dev/shm/yzh-p2p-payload-20260915/runtime-rdma-2663f60457/`。
+
+跨机验证尚未完成：112 时钟比 111 慢约 46 秒，导致绝对 deadline 在 P 端已过期；尚未校准宿主机时钟。默认多网卡的 RDMA 首轮也出现超时，单网卡通过不能证明其他网卡可用。112 根盘写满后，重跑日志改存 `/dev/shm` 并归档回 111。
