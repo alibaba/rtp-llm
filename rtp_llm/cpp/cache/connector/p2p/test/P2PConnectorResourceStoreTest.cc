@@ -75,11 +75,11 @@ TEST_F(P2PConnectorResourceStoreTest, StealResource_NotFound) {
 }
 
 TEST_F(P2PConnectorResourceStoreTest, StealResource_CanOnlyStealOnce) {
-    std::string unique_key  = "test_key_2";
-    int64_t     request_id  = 1002;
+    std::string unique_key = "test_key_2";
+    int64_t     request_id = 1002;
     int64_t     deadline_ms = getDeadlineMs();
-    auto        meta        = createMockMeta(unique_key, request_id, deadline_ms);
-    auto        resource    = createMockKVCacheResource();
+    auto        meta       = createMockMeta(unique_key, request_id, deadline_ms);
+    auto        resource   = createMockKVCacheResource();
 
     stream_store_->addResource(meta, resource);
 

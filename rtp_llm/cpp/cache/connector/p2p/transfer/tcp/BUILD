@@ -13,6 +13,7 @@ cc_library(
     ] + torch_deps() + no_block_copy_link_deps(),
     visibility = ["//visibility:public"],
 )
+
 cc_library(
     name = "tcp_task_context",
     hdrs = ["TcpTaskContext.h"],
@@ -66,3 +67,4 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
 )
+
