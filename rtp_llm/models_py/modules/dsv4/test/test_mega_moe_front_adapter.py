@@ -449,7 +449,7 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         self.assertEqual(args[18], 16)
         self.assertTrue(plan.closed)
 
-    def test_decode_over_capacity_uses_original_moe_path(self) -> None:
+    def test_decode_fallback_and_disabled_front_use_original_moe_path(self) -> None:
         dim = 8
         residual = torch.ones((257, 1, 4, dim), dtype=torch.bfloat16)
         input_ids = torch.arange(257, dtype=torch.int64).view(257, 1)
@@ -499,6 +499,25 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         ffn_input, ffn_input_ids = ffn.call_args.args
         self.assertEqual(ffn_input.data_ptr(), collapsed.data_ptr())
         self.assertIs(ffn_input_ids, input_ids)
+
+        block._moe_front_adapter = None
+        ffn_hc.pre.reset_mock()
+        ffn.reset_mock()
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4._record_tensor.should_record_layer",
+            return_value=False,
+        ):
+            output = Block.forward_decode(
+                block,
+                residual,
+                SimpleNamespace(),
+                input_ids,
+                attn_fn=lambda value: value,
+            )
+
+        self.assertIs(output, residual)
+        ffn_hc.pre.assert_called_once()
+        ffn.assert_called_once()
 
     def test_empty_rank_skips_front_and_enters_mega_collective(self) -> None:
         adapter, plan = _fake_adapter()
