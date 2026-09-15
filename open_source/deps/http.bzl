@@ -5,6 +5,26 @@ def clean_dep(dep):
 
 def http_deps():
     http_archive(
+        name = "nvcomp_cuda13_x86",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/nvcomp/5.0.0.6/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_x86_64.whl",
+            "https://files.pythonhosted.org/packages/56/c9/f8a1b957f949ab4c4dc29e7f56316a2224b92c78cad9a66aeab2b36f8857/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_x86_64.whl",
+        ],
+        sha256 = "91a4e4b1dc15b0f38e54a3353c917086c99c9f415e1ad79a57d5f28d62b68a4d",
+        type = "zip",
+        build_file = clean_dep("//3rdparty/nvcomp:nvcomp.BUILD"),
+    )
+    http_archive(
+        name = "nvcomp_cuda13_arm",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/nvcomp/5.0.0.6/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_aarch64.whl",
+            "https://files.pythonhosted.org/packages/a3/86/e5eccb10e8be41501dfb7191a6b2cff32558d0bba3370ae67f37561caf43/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_aarch64.whl",
+        ],
+        sha256 = "13910a5e5dbf7d4ce21c807c801a1f10c261b9a2d538896e93b736c21d7d6b1d",
+        type = "zip",
+        build_file = clean_dep("//3rdparty/nvcomp:nvcomp.BUILD"),
+    )
+    http_archive(
         name = "rules_pkg",
         urls = [
             "https://mirror.bazel.build/github.com/bazelbuild/rules_pkg/releases/download/0.6.0/rules_pkg-0.6.0.tar.gz",

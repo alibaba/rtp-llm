@@ -21,6 +21,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/models_py/bindings/CrcBlockCopy.h"
 
 namespace rtp_llm {
 
@@ -62,7 +63,7 @@ public:
         RTP_LLM_FAIL("KVCacheMemoryConnector asyncWriteByLayer is not implemented");
     }
 
-    // virtual for test
+    // Return whether the request was handled; response carries the copy outcome. Virtual for tests.
     virtual bool              copyCache(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response);
     std::vector<CacheKeyType> cacheKeys() const;
     std::vector<CacheKeyType> cacheKeysForStatus() const;
@@ -120,6 +121,7 @@ private:
                                                     bool&                               no_need_write);
     std::shared_ptr<CopyPlan> createCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos,
                                              const CopyDirection&               direction);
+    void                      invalidateCopyPlan(const CopyPlan& plan, bool merge_sources);
     bool startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context, const std::shared_ptr<CopyPlan>& copy_plan);
     std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
          sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
@@ -156,7 +158,19 @@ private:
     bool                     copyMemoryItemsGeneric(const MemoryOperationRequestPB&     request,
                                                     CopyDirection                       direction,
                                                     const std::vector<LayerRegionSlot>& slots);
-    bool                     validateCopyItemBacking(const MemoryOperationRequestPB::CopyItem& item) const;
+    void                                 initCrcCopy();
+    MemoryOperationResponsePB::ErrorCode copyCacheWithCrc(const MemoryOperationRequestPB&     request,
+                                                          const std::vector<LayerRegionSlot>& slots);
+    bool                                 reserveCrcDump();
+    void                                 dumpCrcFailure(const MemoryOperationRequestPB& request,
+                                                        int                             item_index,
+                                                        CacheBlockKind                  kind,
+                                                        CrcBlockCopyResult              result,
+                                                        const void*                     host,
+                                                        size_t                          bytes,
+                                                        const void*                     inherited);
+    void reportCopyError(MemoryOperationResponsePB::ErrorCode error, CopyDirection direction);
+    bool validateCopyItemBacking(const MemoryOperationRequestPB::CopyItem& item) const;
 
     void                         checkLayerBlockStrideBytes() const;
     std::vector<LayerRegionSlot> layerRegionSlots() const;
@@ -201,14 +215,9 @@ private:
     bool                         allocateOnePrefixBacking(CopyInfoPerKey& copy_info);
     bool                         preparePrefixMergeSources(std::vector<CopyInfoPerKey>& copy_infos);
     void                         releasePrefixMergeSource(const CopyInfoPerKey& copy_info);
-    bool                         mergePrefixExistingSlots(PrefixTreeMemoryBlockCache::CacheItem& item,
-                                                          const PrefixTreeMemoryBlockCache::MatchResult& existing,
-                                                          const std::vector<LayerRegionSlot>& slots);
-    bool                         mergePrefixConflictForCommit(CopyInfoPerKey& copy_info,
-                                                              PrefixTreeMemoryBlockCache::CacheItem& item,
-                                                              const std::vector<LayerRegionSlot>& slots);
-    void                         putPrefixToCache(CopyInfoPerKey&                  copy_info,
-                                                  const BlockDependency&           dependency,
+    bool                         retryPrefixWrite(CopyInfoPerKey& copy_info, const std::vector<LayerRegionSlot>& slots);
+    void                         putPrefixToCache(CopyInfoPerKey&                     copy_info,
+                                                  const BlockDependency&              dependency,
                                                   const std::vector<LayerRegionSlot>& slots);
     void                         releasePrefixRequestBacking(const CopyInfoPerKey& copy_info);
     void                         releasePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item);
@@ -303,6 +312,21 @@ private:
     std::shared_ptr<DiskBlockPool>                          incomplete_disk_pool_;
     std::shared_ptr<BroadcastManager>                       broadcast_manager_;
     std::shared_ptr<autil::LockFreeThreadPool>              wait_done_thread_pool_;
+    bool                                                    crc_enabled_{false};
+    std::string                                             crc_dump_path_{"logs/kv_cache_crc"};
+    static constexpr size_t                                 kCopyThreadCount = 8;
+    struct CrcCopySlot {
+        std::unique_ptr<CrcBlockCopy> copy;
+        bool                          busy{false};
+    };
+    std::mutex               crc_mutex_;
+    std::condition_variable  crc_cv_;
+    std::vector<CrcCopySlot> crc_copy_slots_;
+    uint64_t                 crc_layout_{0};
+    int64_t                  crc_dump_window_us_{0};
+    size_t                   crc_dump_count_{0};
+    std::mutex               crc_dump_mutex_;
+    uint64_t                 crc_dump_sequence_{0};
 
     std::shared_ptr<BlockPool> complete_pool_;
     std::shared_ptr<BlockPool> incomplete_pool_;
@@ -310,6 +334,7 @@ private:
     size_t                     incomplete_block_size_{0};
     std::shared_ptr<BlockPool> compressed_pool_;
     std::shared_ptr<BlockPool> state_swa_pool_;
+    // Physical prefix pool sizes, including CRC footer and alignment when enabled.
     size_t                     compressed_block_size_{0};
     size_t                     state_swa_block_size_{0};
     bool                       use_prefix_tree_memory_cache_{false};

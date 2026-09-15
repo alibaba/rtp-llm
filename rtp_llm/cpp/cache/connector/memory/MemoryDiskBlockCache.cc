@@ -77,13 +77,16 @@ MemoryDiskBlockCache::putCommitted(const CacheItem& input_item) {
     return {true, std::nullopt};
 }
 
-std::optional<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::removeIfMatch(CacheKeyType     cache_key,
-                                                                                   CacheBackingType backing_type,
-                                                                                   BlockIdxType expected_block_index,
-                                                                                   int32_t      expected_disk_slot) {
+std::optional<MemoryDiskBlockCache::CacheItem>
+MemoryDiskBlockCache::removeIfMatch(CacheKeyType        cache_key,
+                                    CacheBackingType    backing_type,
+                                    BlockIdxType        expected_block_index,
+                                    int32_t             expected_disk_slot,
+                                    std::optional<bool> expected_is_complete) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto                                it = items_.find(cache_key);
-    if (it == items_.end() || it->second.backing_type != backing_type) {
+    if (it == items_.end() || it->second.backing_type != backing_type
+        || (expected_is_complete.has_value() && it->second.is_complete != *expected_is_complete)) {
         return std::nullopt;
     }
     if (backing_type == CacheBackingType::MEMORY && it->second.block_index != expected_block_index) {

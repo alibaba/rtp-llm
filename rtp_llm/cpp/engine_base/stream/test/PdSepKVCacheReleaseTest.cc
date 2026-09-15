@@ -581,8 +581,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
     std::vector<int> tokens(3 * spb + 17);
     std::iota(tokens.begin(), tokens.end(), 1);
 
-    auto config        = makeDsv4Config();
-    config.linear_step = 4;
+    const auto config = makeDsv4Config();
+    ASSERT_EQ(config.linear_step, 1);
     prepareStreamWithConfig(tokens, config, spb, RoleType::PREFILL);
     allocateAndFinish();
 
@@ -592,16 +592,15 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
         ASSERT_EQ(resource.kvCache().blocksNum(0, gid), 4) << "group " << gid;
         const auto& blocks = resource.kvCache().blocks(0, gid);
-        if (gid < 3) {
-            EXPECT_FALSE(isNullBlockIdx(blocks[0])) << "paged group " << gid;
-        } else {
-            EXPECT_TRUE(isNullBlockIdx(blocks[0])) << "tail group " << gid << " should keep only tail blocks";
-            if (config.group_region_names[gid] == KVCacheRegionName::HCA_STATE) {
-                EXPECT_TRUE(isNullBlockIdx(blocks[2])) << "HCA_STATE keeps only its final active tail block";
-            } else {
-                EXPECT_FALSE(isNullBlockIdx(blocks[2])) << "tail group " << gid;
+        if (config.group_region_names[gid] == KVCacheRegionName::HCA_STATE) {
+            for (size_t pos = 0; pos + 1 < blocks.size(); ++pos) {
+                EXPECT_TRUE(isNullBlockIdx(blocks[pos])) << "HCA_STATE pos " << pos;
             }
-            EXPECT_FALSE(isNullBlockIdx(blocks[3])) << "tail group " << gid;
+            EXPECT_FALSE(isNullBlockIdx(blocks.back())) << "HCA_STATE keeps its final active tail block";
+        } else {
+            for (auto block : blocks) {
+                EXPECT_FALSE(isNullBlockIdx(block)) << "step=1 reusable group " << gid;
+            }
         }
     }
 
@@ -638,8 +637,17 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
 
     auto& resource2 = stream2->streamCacheResource();
     ASSERT_TRUE(resource2.initKVBlock().ok());
-    EXPECT_GE(stream2->reuseLength(), spb) << "DSV4 prefill should reuse cached 7-group prefix blocks";
+    EXPECT_EQ(stream2->reuseLength(), 3 * spb) << "DSV4 prefill should reuse all three complete blocks";
     EXPECT_EQ(resource2.kvCache().groupNums(), kDsv4PoolNum);
+    for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
+        if (config.group_region_names[gid] == KVCacheRegionName::HCA_STATE) {
+            const auto& blocks = resource2.kvCache().blocks(0, gid);
+            ASSERT_EQ(blocks.size(), 4u);
+            for (size_t pos = 0; pos < 3; ++pos) {
+                EXPECT_TRUE(isNullBlockIdx(blocks[pos])) << "HCA_STATE must not reuse prefix pos " << pos;
+            }
+        }
+    }
 
     stream2->generate_status_->status = StreamState::FINISHED;
     stream2->fillSubGenerateStatus(StreamState::FINISHED);

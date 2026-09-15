@@ -44,6 +44,24 @@ TEST(MemoryDiskBlockCacheTest, ContainsAndMatchMemoryAndDisk) {
     EXPECT_EQ(disk.disk_slot, 20);
 }
 
+TEST(MemoryDiskBlockCacheTest, RemoveIfMatchDistinguishesCompleteAndIncompletePools) {
+    for (auto backing : {CacheBackingType::MEMORY, CacheBackingType::DISK}) {
+        MemoryDiskBlockCache cache;
+        auto old_item = backing == CacheBackingType::MEMORY ? memoryItem(1, 10, false) : diskItem(1, 10, false);
+        ASSERT_TRUE(cache.putCommitted(old_item).first);
+        ASSERT_FALSE(cache.matchAndMarkInFlight(1).is_complete);
+        ASSERT_TRUE(cache.removeIfMatch(1, backing, old_item.block_index, old_item.disk_slot, false));
+
+        // A new entry in the other pool can have the same index while an old read is still finishing.
+        auto replacement        = old_item;
+        replacement.is_complete = true;
+        ASSERT_TRUE(cache.putCommitted(replacement).first);
+        EXPECT_FALSE(cache.removeIfMatch(1, backing, old_item.block_index, old_item.disk_slot, false));
+        EXPECT_TRUE(cache.match(1).is_complete);
+        EXPECT_TRUE(cache.removeIfMatch(1, backing, replacement.block_index, replacement.disk_slot, true));
+    }
+}
+
 TEST(MemoryDiskBlockCacheTest, SharedAccessSeqEvictsOldestAcrossBackings) {
     MemoryDiskBlockCache cache;
     ASSERT_TRUE(cache.putCommitted(memoryItem(1, 10)).first);

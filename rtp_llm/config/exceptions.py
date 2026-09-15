@@ -55,6 +55,7 @@ class ExceptionType(IntEnum):
     INVALID_PARAMS = 605, ExceptionCategory.BAD_REQUEST
     EXECUTION_EXCEPTION = 606
     EXCEEDS_KV_CACHE_MAX_LEN = 607, ExceptionCategory.TOO_LONG
+    KV_CACHE_REUSE_ERROR = 608
 
     # Internal error-code range. Retryability is decided by the owning
     # subsystem; terminal admission decisions in this range are not retried.

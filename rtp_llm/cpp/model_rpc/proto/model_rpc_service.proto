@@ -564,7 +564,17 @@ message MemoryOperationRequestPB {
 }
 
 message MemoryOperationResponsePB {
+    enum ErrorCode {
+        NONE = 0;
+        RPC_FAILED = 1;
+        COPY_FAILED = 2;
+        INVALID_REQUEST = 3;
+        IO_FAILED = 4;
+        CRC_COMPUTE_FAILED = 5;
+        CRC_MISMATCH = 6;
+    }
     bool success = 1;
+    ErrorCode error_code = 2;
 }
 
 message TPWorkerInfoPB {

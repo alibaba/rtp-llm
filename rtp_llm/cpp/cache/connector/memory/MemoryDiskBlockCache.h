@@ -49,10 +49,11 @@ public:
     bool        contains(CacheKeyType cache_key) const;
 
     std::pair<bool, std::optional<CacheItem>>                   putCommitted(const CacheItem& item);
-    std::optional<CacheItem>                                    removeIfMatch(CacheKeyType     cache_key,
-                                                                              CacheBackingType backing_type,
-                                                                              BlockIdxType     expected_block_index,
-                                                                              int32_t          expected_disk_slot);
+    std::optional<CacheItem>                                    removeIfMatch(CacheKeyType        cache_key,
+                                                                              CacheBackingType    backing_type,
+                                                                              BlockIdxType        expected_block_index,
+                                                                              int32_t             expected_disk_slot,
+                                                                              std::optional<bool> expected_is_complete = std::nullopt);
     std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> put(const MemoryBlockCache::CacheItem& item);
     std::optional<MemoryBlockCache::CacheItem>                  remove(CacheKeyType cache_key);
     std::optional<MemoryBlockCache::CacheItem> removeIfMatch(CacheKeyType cache_key, BlockIdxType expected_block_index);
