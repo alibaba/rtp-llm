@@ -17,9 +17,11 @@ struct BatchDecodeSchedulerConfigLocal: public autil::legacy::Jsonizable {
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("batch_size", batch_size_);
         json.Jsonize("mode", mode_, "decode");
+        json.Jsonize("require_full_batch", require_full_batch_, false);
     }
     uint32_t    batch_size_;
     std::string mode_;
+    bool        require_full_batch_ = false;
 };
 class BatchDecodeScheduler: public SchedulerBase {
 public:
@@ -97,12 +99,14 @@ public:
         BatchDecodeSchedulerConfigLocal config;
         autil::legacy::FromJsonString(config, scheduler_info);
         batch_size_ = config.batch_size_;
+        require_full_batch_ = config.require_full_batch_;
         if (config.mode_ == "decode") {
             scheduler_type_ = SchedulerType::kBatchDecode;
         } else if (config.mode_ == "prefill") {
             scheduler_type_ = SchedulerType::kBatchPrefill;
         }
-        RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %d, mode to %d", batch_size_, int(scheduler_type_));
+        RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %d, mode to %d, require_full_batch=%d",
+                         batch_size_, int(scheduler_type_), int(config.require_full_batch_));
     }
 
     // 根据状态机转移后的目标状态，将 stream 路由到对应的队列
@@ -245,12 +249,10 @@ public:
                 break;
             }
         }
-        // Schedule any non-empty compatible group.  Waiting for a full batch
-        // would strand smaller groups (e.g., mixed DEFAULT/ORIGINAL all-probs
-        // modes) when the total never reaches batch_size_.  The caller wakes
-        // up at most every kFlushTimeoutMs to batch as much as possible while
-        // still flushing partial groups promptly.
-        bool should_schedule = !new_streams.empty();
+        // Ordinary calls flush partial compatible groups to avoid stranding mixed
+        // modes. Fixed-batch benchmarks wait for the configured batch size.
+        const bool should_schedule = !new_streams.empty()
+                                     && (!require_full_batch_.load() || new_streams.size() >= batch_size_);
         if (should_schedule) {
             for (auto& stream : new_streams) {
                 stream->reportEvent(StreamEvents::CanRun);
@@ -311,8 +313,8 @@ public:
         // Phase 2: we have a waiting batch that has not yet reached batch_size_ and nothing is
         // running. Give it up to kFlushTimeoutMs to fill; wake early if it reaches batch_size_ or
         // running/loading work appears. When the timer expires the predicate stays false and we
-        // fall through to flush a partial batch -- this is what keeps low-traffic or mixed
-        // ReturnAllProbsMode groups from waiting forever for a full batch_size_.
+        // fall through to evaluate the batch. Ordinary calls can flush a partial batch;
+        // fixed-batch benchmarks keep it waiting until enough compatible streams arrive.
         if (running_streams_.empty() && !waiting_streams_.empty()
             && waiting_streams_.size() < batch_size_) {
             cond_.wait_for(lock, kFlushTimeoutMs, [this] {
@@ -326,8 +328,7 @@ public:
         evaluateAndUpdateStreams(loading_cache_streams_);
         evaluateAndUpdateStreams(running_streams_);
 
-        // No running work but streams are waiting -> schedule them. By this point either the batch
-        // is full or the flush timeout elapsed, so a partial batch is intentional.
+        // When no work is running, evaluate the waiting group using the requested batch policy.
         if (running_streams_.empty() && !waiting_streams_.empty()) {
             evaluateWaitingStreams();
             if (!running_streams_.empty()) {
@@ -366,6 +367,7 @@ private:
     std::list<GenerateStreamPtr> loading_cache_streams_;
     std::list<GenerateStreamPtr> running_streams_;
     uint32_t                     batch_size_;
+    std::atomic<bool>            require_full_batch_{false};
     bool                         reorder_request_;
     uint32_t                     current_step_ = 0;
 

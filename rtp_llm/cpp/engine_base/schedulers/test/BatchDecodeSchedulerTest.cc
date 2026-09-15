@@ -123,6 +123,51 @@ TEST_F(BatchDecodeSchedulerTest, testMixedReturnAllProbsPartialFlush) {
     ASSERT_EQ(scheduler.running_streams_.size() + scheduler.waiting_streams_.size(), 2u);
 }
 
+TEST_F(BatchDecodeSchedulerTest, testPerfWaitsForFullConfiguredBatch) {
+    CacheConfig cache_config = makeMhaCacheConfig(1, 8, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
+    scheduler.updateSchedulerInfo(R"({"batch_size":2,"mode":"decode","require_full_batch":true})");
+
+    ASSERT_TRUE(scheduler.enqueue(makeStream(resource_context, model_config, runtime_config)).ok());
+    auto partial = scheduler.schedule();
+    ASSERT_TRUE(partial.ok());
+    ASSERT_TRUE(partial.value().empty());
+    ASSERT_EQ(scheduler.waiting_streams_.size(), 1u);
+
+    ASSERT_TRUE(scheduler.enqueue(makeStream(resource_context, model_config, runtime_config)).ok());
+    auto full = scheduler.schedule();
+    ASSERT_TRUE(full.ok());
+    ASSERT_EQ(full.value().size(), 2u);
+    ASSERT_TRUE(scheduler.waiting_streams_.empty());
+}
+
+TEST_F(BatchDecodeSchedulerTest, testOrdinaryUpdateRestoresPartialFlush) {
+    CacheConfig cache_config = makeMhaCacheConfig(1, 8, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
+    scheduler.updateSchedulerInfo(R"({"batch_size":2,"require_full_batch":true})");
+    scheduler.updateSchedulerInfo(R"({"batch_size":2})");
+
+    ASSERT_TRUE(scheduler.enqueue(makeStream(resource_context, model_config, runtime_config)).ok());
+    auto partial = scheduler.schedule();
+    ASSERT_TRUE(partial.ok());
+    ASSERT_EQ(partial.value().size(), 1u);
+    ASSERT_TRUE(scheduler.waiting_streams_.empty());
+}
+
 // Regression: a sustained all-probs (DEFAULT/ORIGINAL) backlog must not starve a plain NONE
 // request. Before the fairness fix, NONE was excluded from the starvation check and only spliced in
 // after the concrete group, so it never won a slot while a DEFAULT backlog kept filling batch_size_.

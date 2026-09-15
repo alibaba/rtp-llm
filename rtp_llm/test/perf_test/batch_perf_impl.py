@@ -291,6 +291,7 @@ class BatchPerfImpl(object):
         payload = {
             "batch_size": local_batch_size,
             "mode": "decode" if self.is_decode else "prefill",
+            "require_full_batch": True,
         }
         last_error = None
         for attempt in range(1, 21):

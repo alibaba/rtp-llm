@@ -83,6 +83,27 @@ def test_latency_trimming_preserves_failures_from_every_measurement():
 
 
 @pytest.mark.parametrize("is_decode", [True, False])
+def test_benchmark_requests_the_full_per_dp_batch(is_decode):
+    with patch("rtp_llm.test.perf_test.batch_perf_impl.ProcessPoolExecutor"):
+        runner = BatchPerfImpl(1234, 8, 128, "query", is_decode=is_decode)
+    response = Mock(status_code=200)
+    response.json.return_value = {"status": "ok"}
+    with patch(
+        "rtp_llm.test.perf_test.batch_perf_impl.requests.post", return_value=response
+    ) as post:
+        runner._set_concurrency()
+    post.assert_called_once_with(
+        "http://127.0.0.1:1234/update_scheduler_info",
+        json={
+            "batch_size": 16,
+            "mode": "decode" if is_decode else "prefill",
+            "require_full_batch": True,
+        },
+        timeout=60,
+    )
+
+
+@pytest.mark.parametrize("is_decode", [True, False])
 @pytest.mark.parametrize("valid", [True, False])
 def test_no_baseline_wrapper_validates_results_and_restores_state(
     tmp_path, monkeypatch, is_decode, valid
