@@ -155,7 +155,7 @@ class CaseRunner(object):
         if enable_remote_cache:
             self.remote_kvcm_server = self._start_remote_kvcm_server()
             assert self.remote_kvcm_server is not None, "remote kvcm shoule not be None"
-            env_dict["RECO_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
+            env_dict["KVCM_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
         task_states = TaskStates()
         logging.info(f"smoke_args_str: {self.smoke_args_str}")
         server_manager = self.start_server(
@@ -934,7 +934,7 @@ class CaseRunner(object):
         for env_str in env_list:
             k, v = env_str.split("=", 1)
             v = self._expand_env_value(v)
-            if k == "MEMORY_CACHE_DISK_PATHS":
+            if k == "DISK_CACHE_PATHS":
                 self._prepare_memory_cache_disk_paths(v)
             env_dict.update({k: v})
             logging.info(f"env dict update {k}:{v}")
@@ -966,7 +966,7 @@ class CaseRunner(object):
                     os.path.commonpath([abs_path, root]) == root for root in safe_roots
                 ):
                     raise RuntimeError(
-                        f"refuse to clean MEMORY_CACHE_DISK_PATHS outside test dirs: {abs_path}"
+                        f"refuse to clean DISK_CACHE_PATHS outside test dirs: {abs_path}"
                     )
                 shutil.rmtree(abs_path)
                 logging.info("cleaned memory cache disk path: %s", abs_path)

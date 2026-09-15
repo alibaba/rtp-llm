@@ -1,0 +1,96 @@
+{
+  "profile_id": "deepseek_v4_pro_fp8_tp1_cp1",
+  "model": "deepseek_v4_pro",
+  "dtype": "fp8",
+  "tp_size": 1,
+  "prefill_cp_size": 1,
+  "tokens_per_block": 128,
+  "kernel_tokens_block": 128,
+  "groups": [
+    {
+      "tag": "csa_kv",
+      "layer_count": 30,
+      "type": "FULL",
+      "entries_per_block": 32,
+      "layer_stride_bytes": 19008,
+      "group_payload_bytes": 570240,
+      "tier_policy": "device_host_disk"
+    },
+    {
+      "tag": "hca_kv",
+      "layer_count": 31,
+      "type": "FULL",
+      "entries_per_block": 1,
+      "layer_stride_bytes": 1152,
+      "group_payload_bytes": 35712,
+      "tier_policy": "device_host_disk"
+    },
+    {
+      "tag": "indexer_kv",
+      "layer_count": 30,
+      "type": "FULL",
+      "entries_per_block": 32,
+      "layer_stride_bytes": 4224,
+      "group_payload_bytes": 126720,
+      "tier_policy": "device_host_disk"
+    },
+    {
+      "tag": "indexer_state",
+      "layer_count": 30,
+      "type": "SWA",
+      "sliding_window_size": 128,
+      "entries_per_block": 8,
+      "layer_stride_bytes": 16384,
+      "group_payload_bytes": 491520,
+      "tier_policy": "device_host_disk"
+    },
+    {
+      "tag": "csa_state",
+      "layer_count": 30,
+      "type": "SWA",
+      "sliding_window_size": 128,
+      "entries_per_block": 8,
+      "layer_stride_bytes": 65536,
+      "group_payload_bytes": 1966080,
+      "tier_policy": "device_host_disk"
+    },
+    {
+      "tag": "hca_state",
+      "layer_count": 31,
+      "type": "SWA",
+      "sliding_window_size": 128,
+      "entries_per_block": 128,
+      "layer_stride_bytes": 524288,
+      "group_payload_bytes": 16252928,
+      "tier_policy": "device_only"
+    },
+    {
+      "tag": "swa_kv",
+      "layer_count": 61,
+      "type": "SWA",
+      "sliding_window_size": 128,
+      "entries_per_block": 128,
+      "layer_stride_bytes": 74880,
+      "group_payload_bytes": 4567680,
+      "tier_policy": "device_host_disk"
+    }
+  ],
+  "group_sets": [
+    {
+      "name": "full_context",
+      "members": ["csa_kv", "hca_kv", "indexer_kv"],
+      "payload_bytes": 732672
+    },
+    {
+      "name": "swa",
+      "members": ["csa_state", "indexer_state", "swa_kv"],
+      "payload_bytes": 7025280
+    }
+  ],
+  "device_only_groups": ["hca_state"],
+  "default_capacity": {
+    "device_block_count": 65536,
+    "host_block_count": 65536,
+    "disk_block_count": 65536
+  }
+}

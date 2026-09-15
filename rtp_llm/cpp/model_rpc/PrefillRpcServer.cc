@@ -620,7 +620,8 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     auto              prefill_total_reuse_len  = prefill_context.getStream()->initialReuseLength();
     auto              prefill_local_reuse_len  = prefill_context.getStream()->localReuseLength();
     auto              prefill_remote_reuse_len = prefill_context.getStream()->remoteReuseLength();
-    auto              prefill_memory_reuse_len = prefill_context.getStream()->memoryReuseLength();
+    auto              prefill_memory_reuse_len = prefill_context.getStream()->hostReuseLength();
+    auto              prefill_disk_reuse_len   = prefill_context.getStream()->diskReuseLength();
     const auto        cache_manager            = prefill_context.getStream()->resourceContext().cache_manager;
     const bool use_independent_block_pools = cache_manager && cache_manager->cacheConfig().use_independent_block_pools;
     // Decode workers do not receive ViT features in PD mode, so preserve the
@@ -659,6 +660,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
                                 prefill_local_reuse_len,
                                 prefill_remote_reuse_len,
                                 prefill_memory_reuse_len,
+                                prefill_disk_reuse_len,
                                 use_independent_block_pools);
         }
         if (!prefill_context.rpc_context.writer->Write(response)) {
@@ -680,32 +682,41 @@ void PrefillRpcServer::mergeCacheReuseInfo(AuxInfoPB& aux_info,
                                            int        prefill_local_reuse_len,
                                            int        prefill_remote_reuse_len,
                                            int        prefill_memory_reuse_len,
+                                           int        prefill_disk_reuse_len,
                                            bool       use_independent_block_pools) {
     const int decode_total_reuse_len  = aux_info.total_reuse_len();
     const int decode_local_reuse_len  = aux_info.local_reuse_len();
     const int decode_remote_reuse_len = aux_info.remote_reuse_len();
     const int decode_memory_reuse_len = aux_info.memory_reuse_len();
+    const int decode_disk_reuse_len   = aux_info.disk_reuse_len();
 
     aux_info.set_prefill_total_reuse_len(prefill_total_reuse_len);
     aux_info.set_prefill_local_reuse_len(prefill_local_reuse_len);
     aux_info.set_prefill_remote_reuse_len(prefill_remote_reuse_len);
     aux_info.set_prefill_memory_reuse_len(prefill_memory_reuse_len);
+    aux_info.set_prefill_disk_reuse_len(prefill_disk_reuse_len);
 
     aux_info.set_decode_total_reuse_len(decode_total_reuse_len);
     aux_info.set_decode_local_reuse_len(decode_local_reuse_len);
     aux_info.set_decode_remote_reuse_len(decode_remote_reuse_len);
     aux_info.set_decode_memory_reuse_len(decode_memory_reuse_len);
+    aux_info.set_decode_disk_reuse_len(decode_disk_reuse_len);
 
+    // Legacy shared-pool models expose the prefill phase through the top-level
+    // fields. Independent pools may complete additional reuse during the
+    // direct handoff, so expose the longer proven phase for those models only.
     if (use_independent_block_pools && decode_total_reuse_len > prefill_total_reuse_len) {
         aux_info.set_total_reuse_len(decode_total_reuse_len);
         aux_info.set_local_reuse_len(decode_local_reuse_len);
         aux_info.set_remote_reuse_len(decode_remote_reuse_len);
         aux_info.set_memory_reuse_len(decode_memory_reuse_len);
+        aux_info.set_disk_reuse_len(decode_disk_reuse_len);
     } else {
         aux_info.set_total_reuse_len(prefill_total_reuse_len);
         aux_info.set_local_reuse_len(prefill_local_reuse_len);
         aux_info.set_remote_reuse_len(prefill_remote_reuse_len);
         aux_info.set_memory_reuse_len(prefill_memory_reuse_len);
+        aux_info.set_disk_reuse_len(prefill_disk_reuse_len);
     }
 }
 

@@ -1,6 +1,6 @@
 load("//:def.bzl", "copts")
 
-load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
+load("//bazel:device_defs.bzl", "device_impl_target")
 
 test_copts = [
     "-fno-access-control",
@@ -26,7 +26,7 @@ cc_library(
         "MockGenerateStream.h",
     ],
     deps = [
-        "//rtp_llm/cpp/cache/connector:connector",
+        "//rtp_llm/cpp/cache/connector/p2p:legacy_support",
         "//rtp_llm/cpp/engine_base/stream:stream",
     ],
     copts = test_copts,

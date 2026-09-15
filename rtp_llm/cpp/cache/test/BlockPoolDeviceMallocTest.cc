@@ -5,8 +5,9 @@
 #include <utility>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/BlockPool.h"
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 
 #if USING_CUDA
@@ -170,12 +171,11 @@ bool synchronizeDevice() {
 #endif
 }
 
-BlockPoolConfig makeSmallBlockPoolConfig() {
-    constexpr uint32_t kLayerNum        = 1;
-    constexpr uint32_t kBlockNum        = 4;
-    constexpr size_t   kBlockSizeBytes = 256;
-    auto config = BlockPoolConfigHelper::createConfig(kLayerNum, kBlockNum, kBlockSizeBytes, DataType::TYPE_FP16);
-    config.pool_name = "raw_device_malloc_test";
+DeviceBlockPoolConfig makeSmallBlockPoolConfig() {
+    auto cache_config                = makeSimpleMhaCacheConfig(1, 4, 1, DataType::TYPE_FP16, 1, 64);
+    auto config                      = DeviceBlockPoolConfigHelper::createConfig(cache_config);
+    config.pool_name                 = "raw_device_malloc_test";
+    config.use_device_malloc_backing = true;
     return config;
 }
 #endif
@@ -189,10 +189,7 @@ TEST(BlockPoolDeviceMallocTest, AllocatesUsableGpuBacking) {
     }
 
     auto config = makeSmallBlockPoolConfig();
-    auto pool   = std::make_shared<BlockPool>(config,
-                                            AllocationType::DEVICE,
-                                            /*use_pinned_cpu_backing=*/false,
-                                            /*use_device_malloc_backing=*/true);
+    auto pool   = std::make_shared<DeviceBlockPool>(std::make_shared<const DeviceBlockPoolConfig>(config));
     ASSERT_TRUE(pool->init());
     ASSERT_NE(pool->getBaseAddress(), nullptr);
     EXPECT_EQ(pool->where(), MemoryType::MEMORY_GPU);
@@ -205,9 +202,14 @@ TEST(BlockPoolDeviceMallocTest, AllocatesUsableGpuBacking) {
     EXPECT_TRUE(synchronizeDevice());
 
     auto block = pool->convertIndexToBuffer(/*layer_id=*/0, /*block_id=*/1);
-    ASSERT_EQ(block.size(), 1u);
-    EXPECT_TRUE(block[0].is_cuda);
-    EXPECT_EQ(block[0].size_bytes, config.memory_layouts[0].kv_block_stride_bytes);
+    ASSERT_FALSE(block.empty());
+    size_t total_bytes = 0;
+    for (const auto& part : block) {
+        EXPECT_TRUE(part.is_cuda);
+        EXPECT_NE(part.addr, nullptr);
+        total_bytes += part.size_bytes;
+    }
+    EXPECT_EQ(total_bytes, config.memory_layouts[0].kv_block_stride_bytes);
 #else
     GTEST_SKIP() << "Raw device allocation is only supported in CUDA and ROCm builds";
 #endif
@@ -220,10 +222,7 @@ TEST(BlockPoolDeviceMallocTest, PassesGpuBackingToMemoryRegistrationBoundary) {
     }
 
     auto config = makeSmallBlockPoolConfig();
-    auto pool   = std::make_shared<BlockPool>(config,
-                                            AllocationType::DEVICE,
-                                            /*use_pinned_cpu_backing=*/false,
-                                            /*use_device_malloc_backing=*/true);
+    auto pool   = std::make_shared<DeviceBlockPool>(std::make_shared<const DeviceBlockPoolConfig>(config));
     ASSERT_TRUE(pool->init());
 
     const auto& layout      = config.memory_layouts[0];
@@ -256,10 +255,8 @@ TEST(BlockPoolDeviceMallocTest, DestructionRestoresCurrentDevice) {
     ASSERT_TRUE(getDevice(&original_device));
     ASSERT_TRUE(setDevice(0));
 
-    auto pool = std::make_shared<BlockPool>(makeSmallBlockPoolConfig(),
-                                            AllocationType::DEVICE,
-                                            /*use_pinned_cpu_backing=*/false,
-                                            /*use_device_malloc_backing=*/true);
+    auto pool =
+        std::make_shared<DeviceBlockPool>(std::make_shared<const DeviceBlockPoolConfig>(makeSmallBlockPoolConfig()));
     ASSERT_TRUE(pool->init());
 
     ASSERT_TRUE(setDevice(1));

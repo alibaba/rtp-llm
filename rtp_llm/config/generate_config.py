@@ -269,6 +269,9 @@ class GenerateConfig(BaseModel):
 
     enable_memory_cache: bool = True
 
+    enable_disk_cache: bool = True
+
+    # Protocol compatibility: BlockTreeCache DEVICE uploads follow deployment backend configuration.
     enable_remote_cache: bool = True
     group_timeout: Optional[int] = None  # ms
 
