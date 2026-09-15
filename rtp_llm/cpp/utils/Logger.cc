@@ -14,8 +14,11 @@
  * limitations under the License.
  */
 
+#include <arpa/inet.h>
+#include <atomic>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -32,6 +35,10 @@ struct CachedLogLevelEnv {
 
 const bool kUseConsoleAppender = autil::EnvUtil::getEnv("FT_SERVER_TEST", 0) == 1;
 
+// One immutable override covers every Logger, including lazy instances created
+// after restore. The constructor-cached IP remains the normal-startup fallback.
+std::shared_ptr<const std::string> runtime_ip;
+
 const CachedLogLevelEnv kLogLevelEnv = []() {
     const char* env = std::getenv("LOG_LEVEL");
     return CachedLogLevelEnv{env != nullptr, env ? env : ""};
@@ -45,6 +52,21 @@ void warmupLoggers() {
 }
 
 }  // namespace
+
+void Logger::refreshRuntimeIdentity(const std::string& ip) {
+    in_addr ipv4;
+    in6_addr ipv6;
+    if (ip.find('\0') != std::string::npos
+        || (inet_pton(AF_INET, ip.c_str(), &ipv4) != 1 && inet_pton(AF_INET6, ip.c_str(), &ipv6) != 1)) {
+        throw std::invalid_argument("SCR logger runtime IP must be a numeric IP address");
+    }
+    std::atomic_store_explicit(&runtime_ip, std::make_shared<const std::string>(ip), std::memory_order_release);
+}
+
+std::string Logger::runtimeIp() const {
+    auto current = std::atomic_load_explicit(&runtime_ip, std::memory_order_acquire);
+    return current ? *current : ip_;
+}
 
 bool initLogger(std::string log_file_path) {
     std::cerr << "initLogger log_file_path: " << log_file_path << std::endl;

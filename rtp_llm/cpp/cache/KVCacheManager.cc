@@ -180,7 +180,7 @@ KVCacheManager::~KVCacheManager() {
 
 // 初始化和配置相关
 
-bool KVCacheManager::init() {
+bool KVCacheManager::init(bool defer_connector_start) {
     RTP_LLM_CHECK_WITH_INFO(!allocator_ && !coordinator_ && !metrics_reporter_thread_.joinable(),
                             "KVCacheManager::init called more than once");
     RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "cache specs must not be empty");
@@ -238,8 +238,20 @@ bool KVCacheManager::init() {
         metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
     }
 
-    initConnectorCoordinator();
+    if (defer_connector_start) {
+        RTP_LLM_LOG_INFO(
+            "deferring memory/remote/P2P cache connector initialization until SCR release");
+    } else {
+        initConnectorCoordinator();
+    }
     return true;
+}
+
+void KVCacheManager::startDeferredServices() {
+    if (coordinator_) {
+        return;
+    }
+    initConnectorCoordinator();
 }
 
 const CacheConfig& KVCacheManager::cacheConfig() const {

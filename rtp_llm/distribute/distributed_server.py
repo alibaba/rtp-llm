@@ -7,7 +7,7 @@ import socket
 import time
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, Optional
 
 from torch.distributed import TCPStore
 
@@ -19,6 +19,14 @@ from rtp_llm.config.py_config_modules import (
 )
 from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
+from rtp_llm.utils.scr_local_comm import local_comm_enabled, validate_local_members
+
+
+def _template_loopback_enabled(parallelism_config: ParallelismConfig) -> bool:
+    """Select loopback automatically for a single-Pod SCR template."""
+    return local_comm_enabled(
+        parallelism_config.world_size, parallelism_config.local_world_size
+    )
 
 
 class BackendStopConsensusError(TimeoutError):
@@ -119,7 +127,15 @@ def get_dp_addrs_from_world_info(
             if (member.world_rank % parallelism_config.tp_size) == 0
         ]
 
-    addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]
+    if local_comm_enabled(
+        parallelism_config.world_size,
+        parallelism_config.local_world_size,
+        world_info.num_nodes,
+    ):
+        validate_local_members(world_info, parallelism_config)
+        addresses = [f"127.0.0.1:{member.rpc_server_port}" for member in members]
+    else:
+        addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]
     logging.info(
         f"[world_rank: {parallelism_config.world_rank}] "
         f"using addresses from world_info: {addresses}"
@@ -254,8 +270,13 @@ class DistributedServer(object):
         else:
             self.master_server_port = int(master_server_port)
 
+        if _template_loopback_enabled(pc):
+            self.master_ip = "127.0.0.1"
+
         self._nccl_comm_config = _build_nccl_comm_config(
-            self.master_ip, self.master_server_port, pc.dp_rank
+            self.master_ip,
+            self.master_server_port,
+            pc.dp_rank,
         )
 
         logging.info(
@@ -546,8 +567,9 @@ class DistributedServer(object):
 
     def regist(self) -> None:
         key = self.REGISTRY_RANK_ADDRESS_KEY + str(self.rank)
+        ip = "127.0.0.1" if _template_loopback_enabled(self.py_env_configs.parallelism_config) else self.worker_info.ip
         self.safe_store_set(
-            key, f"{self.worker_info.ip}:{self.worker_info.server_port}"
+            key, f"{ip}:{self.worker_info.server_port}"
         )
 
     def bootstrap(self) -> None:

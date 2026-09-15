@@ -37,6 +37,7 @@ from rtp_llm.ops import (
     SpeculativeExecutionConfig,
     VitSeparation,
 )
+from rtp_llm.utils.scr_local_comm import cache_store_advertise_ip
 
 
 @dataclass
@@ -333,6 +334,7 @@ def update_worker_addrs(
         return
     worker_addrs = []
     worker_grpc_addrs = []
+    advertise_ip = cache_store_advertise_ip(world_info, parallelism_config)
     local_rank = parallelism_config.local_rank
     for member in world_info.members:
         if (
@@ -343,7 +345,7 @@ def update_worker_addrs(
             == parallelism_config.dp_rank
         ):
             worker_addrs.append(
-                f"{member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"
+                f"{advertise_ip or member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"
             )
             worker_grpc_addrs.append(f"{member.ip}:{member.rpc_server_port}")
             logging.info(

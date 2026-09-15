@@ -5,13 +5,7 @@
 
 namespace rtp_llm {
 
-CacheStoreAsyncWriter::CacheStoreAsyncWriter(int device_id): device_id_(device_id) {
-    constexpr size_t kThreadCount = 3;
-    constexpr size_t kQueueSize   = 10000;
-    auto pool = std::make_shared<autil::LockFreeThreadPool>(kThreadCount, kQueueSize, nullptr, "CacheStoreAsync");
-    RTP_LLM_CHECK_WITH_INFO(pool->start(), "CacheStoreAsyncWriter: failed to start thread pool");
-    thread_pool_ = std::move(pool);
-}
+CacheStoreAsyncWriter::CacheStoreAsyncWriter(int device_id): device_id_(device_id) {}
 
 CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
     if (state_ == State::RUNNING) {
@@ -23,12 +17,23 @@ CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
     }
 }
 
-// IDLE -> RUNNING. Resets bookkeeping for a new forward-pass cycle.
+// IDLE -> RUNNING. Lazily starts the workers on first real use so constructing
+// the model at an SCR checkpoint does not create idle cache-store threads.
 void CacheStoreAsyncWriter::init() {
     std::lock_guard<std::mutex> lock(state_mutex_);
     RTP_LLM_CHECK_WITH_INFO(state_ == State::IDLE,
                             "CacheStoreAsyncWriter::init() called while already RUNNING. "
                             "Must call waitAllDone() before re-initializing.");
+
+    if (!thread_pool_) {
+        constexpr size_t kThreadCount = 3;
+        constexpr size_t kQueueSize   = 10000;
+        auto pool =
+            std::make_shared<autil::LockFreeThreadPool>(kThreadCount, kQueueSize, nullptr, "CacheStoreAsync");
+        RTP_LLM_CHECK_WITH_INFO(pool->start(), "CacheStoreAsyncWriter: failed to start thread pool");
+        thread_pool_ = std::move(pool);
+    }
+
     pending_count_.store(0, std::memory_order_relaxed);
     stored_exception_ = nullptr;
     state_            = State::RUNNING;

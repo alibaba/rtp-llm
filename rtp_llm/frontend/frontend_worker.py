@@ -32,6 +32,10 @@ from rtp_llm.utils.base_model_datatypes import GenerateResponse
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
+from rtp_llm.utils.scr_template_utils import (
+    register_backend_visitor_template_hook,
+    register_server_config_template_hook,
+)
 
 
 class PipelineResponse(BaseModel):
@@ -113,6 +117,10 @@ class FrontendWorker:
             prefill_cp_config=py_env_configs.prefill_cp_config,
         )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
+        self._py_env_configs = py_env_configs
+        # Refresh ServerConfig.ip before the visitor hook reads it during fixup.
+        register_server_config_template_hook(py_env_configs)
+        register_backend_visitor_template_hook(self.backend_rpc_server_visitor, py_env_configs)
         self.generate_env_config = py_env_configs.generate_env_config
         self.server_config = py_env_configs.server_config
 

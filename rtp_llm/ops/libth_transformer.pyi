@@ -4,7 +4,7 @@ import typing
 
 import torch
 
-__all__: list[str] = ['EmbeddingCppOutput', 'MultimodalInput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput', 'build_xgrammar_tokenizer_info_json']
+__all__: list[str] = ['EmbeddingCppOutput', 'MultimodalInput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput', 'build_xgrammar_tokenizer_info_json', 'resume_kmonitor_after_scr']
 class EmbeddingCppOutput:
     output: TypedOutput
     def __init__(self) -> None:
@@ -31,9 +31,11 @@ class RtpEmbeddingOp:
 class RtpLLMOp:
     def __init__(self) -> None:
         ...
-    def init(self, model: typing.Any, engine_config: typing.Any, vit_config: typing.Any, mm_process_engine: typing.Any, propose_model: typing.Any, token_processor: typing.Any) -> None:
+    def init(self, model: typing.Any, engine_config: typing.Any, vit_config: typing.Any, mm_process_engine: typing.Any, propose_model: typing.Any, token_processor: typing.Any, defer_service_start: bool = ...) -> None:
         ...
-    def start_http_server(self, model_weights_loader: typing.Any, lora_infos: typing.Any, world_info: typing.Any, tokenizer: typing.Any, render: typing.Any) -> None:
+    def start_rpc_server(self) -> None:
+        ...
+    def start_http_server(self, model_weights_loader: typing.Any, world_info: typing.Any, tokenizer: typing.Any, render: typing.Any) -> None:
         ...
     def stop(self) -> None:
         ...
@@ -54,4 +56,6 @@ class TypedOutput:
     def t(self, arg1: torch.Tensor) -> None:
         ...
 def build_xgrammar_tokenizer_info_json(vocab: dict[str, int], backend_tokenizer_str: str, vocab_size: int, stop_token_ids: list[int]) -> str:
+    ...
+def resume_kmonitor_after_scr() -> bool:
     ...

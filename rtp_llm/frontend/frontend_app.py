@@ -6,7 +6,7 @@ import signal
 import socket
 import threading
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
@@ -299,9 +299,32 @@ class FrontendApp(object):
             "Backend health_check did not become ready within %ds" % timeout_s
         )
 
-    def start(self):
+    def start(
+        self,
+        on_ready: Optional[Callable[[], None]] = None,
+        on_prebind: Optional[Callable[[], None]] = None,
+    ):
+        """Start the HTTP server and block on its main-thread service loop.
+
+        ``on_prebind`` runs after application initialization but before the
+        listening socket is created.  A checkpoint/template barrier belongs
+        here: the process must remain out of service until the control plane
+        releases the barrier.
+
+        ``on_ready`` is invoked by the ASGI startup hook, after the socket has
+        been bound and (for a colocated backend) the backend health check has
+        completed.  It must be installed before ``server.run``: this method
+        intentionally blocks and therefore callers cannot reliably run a
+        readiness callback after it returns.
+        """
+        self._on_ready = on_ready
+        self._on_prebind = on_prebind
         self.frontend_server.start()
         app = self.create_app()
+
+        prebind = getattr(self, "_on_prebind", None)
+        if prebind is not None:
+            prebind()
 
         loop = "auto"
         if threading.current_thread() != threading.main_thread():

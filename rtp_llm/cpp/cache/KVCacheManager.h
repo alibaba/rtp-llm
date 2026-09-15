@@ -38,7 +38,8 @@ public:
     ~KVCacheManager();
 
     // 初始化和配置相关
-    bool init();
+    bool init(bool defer_connector_start = false);
+    void startDeferredServices();
 
     const CacheConfig& cacheConfig() const;
     const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;

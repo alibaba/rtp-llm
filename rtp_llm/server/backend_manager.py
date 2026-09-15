@@ -18,8 +18,11 @@ from rtp_llm.distribute.distributed_server import (
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
+from rtp_llm.ops import TaskType
 from rtp_llm.utils.concurrency_controller import get_global_controller
 from rtp_llm.utils.fuser import _nfs_manager
+from rtp_llm.utils.scr_restore_context import RestoreContext
+from rtp_llm.utils.scr_template_lifecycle import get_template_lifecycle
 
 USAGE_HEADER = "USAGE"
 BACKEND_STORE_FAILURE_TIMEOUT_S = 600.0
@@ -43,6 +46,8 @@ class BackendManager(object):
         if py_env_configs.parallelism_config.world_rank == 0:
             kmonitor.init()
         self.engine: Optional[BaseEngine] = None
+        self._engine_config = None
+        self._world_info = None
         self._shutdown_requested = threading.Event()
         self._stopped = threading.Event()
         if service_draining is not None:
@@ -57,7 +62,7 @@ class BackendManager(object):
         # This only changes Python/native metrics; RPCs and the engine keep running.
         self._mark_not_serving()
 
-    def start(self):
+    def start(self, defer_service_start: bool = False):
         """Initialize backend server without entering service loop"""
         self._distributed_server.start(self.py_env_configs)
         # Create EngineConfig from py_env_configs (server/distribute config already adjusted for this rank)
@@ -96,6 +101,8 @@ class BackendManager(object):
             engine_config.parallelism_config,
             world_info,
         )
+        self._engine_config = engine_config
+        self._world_info = world_info
         # Build main model_config
         model_config = ModelFactory.create_model_config(
             model_args=self.py_env_configs.model_args,
@@ -113,6 +120,12 @@ class BackendManager(object):
             engine_config=engine_config,
             model_config=model_config,
         )
+
+        if defer_service_start and model_config.task_type != TaskType.LANGUAGE_MODEL:
+            raise RuntimeError(
+                "SCR template startup does not support embedding engines yet; "
+                "refusing to start listeners before the arrival barrier"
+            )
 
         # Initialize DeepEP wrapper if MOE model and DeepEP is enabled
         if (
@@ -141,6 +154,7 @@ class BackendManager(object):
             vit_config=self.py_env_configs.vit_config,
             merge_lora=self.py_env_configs.lora_config.merge_lora,
             propose_model_config=propose_model_config,
+            defer_service_start=defer_service_start,
         )
         # Replay a notification received while the engine was still loading.
         if self._service_draining is not None and self._service_draining.is_set():
@@ -149,7 +163,39 @@ class BackendManager(object):
             "engine created successfully: self.engine.task_type=%s",
             self.engine.task_type,
         )
+        get_template_lifecycle().register_fixup(f"backend-endpoints:{id(self)}", self)
         kmonitor.start_serving_when_ready()
+
+    def restore_fixup(self, context: RestoreContext) -> None:
+        if self._engine_config is None or self._world_info is None:
+            raise RuntimeError("backend endpoint fixup requested before start")
+        current = get_world_info(
+            self.py_env_configs.server_config,
+            self.py_env_configs.distribute_config,
+            self.py_env_configs.parallelism_config,
+            distributed_server=self._distributed_server,
+        )
+        world_info = context.resolve_world_info(
+            current,
+            self.py_env_configs.parallelism_config,
+        )
+        self.py_env_configs.server_config.ip = context.pod_ip
+        update_worker_addrs(
+            self._engine_config.runtime_config,
+            self._engine_config.parallelism_config,
+            world_info,
+        )
+        self._world_info = world_info
+        refresh = getattr(self.engine, "update_runtime_endpoints", None)
+        if refresh is None:
+            raise RuntimeError("engine does not support template endpoint fixup")
+        refresh(self._engine_config.runtime_config, world_info)
+
+    def start_service(self) -> None:
+        """Release listeners deferred for a pre-service SCR barrier."""
+        start_service = getattr(self.engine, "start_service", None)
+        if start_service is not None:
+            start_service()
 
     def serve_forever(self):
         """Enter service loop to keep the process alive until shutdown is requested"""
