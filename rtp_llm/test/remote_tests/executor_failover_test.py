@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -564,7 +565,7 @@ def test_per_test_command_exports_marker_gpu_count(tmp_path, monkeypatch):
     assert "export RTP_REMOTE_HEARTBEAT_KEEPALIVE=1;" in perf_shell
 
 
-def test_session_command_locks_total_gpu_pool_and_slices_workers(monkeypatch):
+def test_session_command_locks_total_gpu_pool_and_slices_workers(monkeypatch, tmp_path):
     monkeypatch.setenv("RTP_REMOTE_GPU_MEMORY_PREFLIGHT", "1")
     plugin = object.__new__(remote_plugin.RemoteREAPIPlugin)
     plugin.workers = 4
@@ -598,6 +599,53 @@ def test_session_command_locks_total_gpu_pool_and_slices_workers(monkeypatch):
         "export GPU_COUNT=4; unset WORLD_SIZE; export GPU_COUNT_PER_WORKER=4;"
         in shell
     )
+
+    inner_script = shlex.split(shell)[-1]
+    nodeid_plugin = inner_script.split("<< '_NODEID_PLUGIN_PY_'\n", 1)[1].split(
+        "\n_NODEID_PLUGIN_PY_", 1
+    )[0]
+    (tmp_path / "rtp_remote_nodeid_plugin.py").write_text(nodeid_plugin)
+    (tmp_path / "test_sample.py").write_text(
+        "import pytest\n"
+        "@pytest.fixture\n"
+        "def bad_setup(): raise RuntimeError('setup failure')\n"
+        "@pytest.fixture\n"
+        "def bad_teardown():\n"
+        "    yield\n"
+        "    raise RuntimeError('teardown failure')\n"
+        "@pytest.mark.parametrize('value', [1, 2])\n"
+        "def test_pass(value): assert value > 0\n"
+        "def test_fail(): assert False\n"
+        "def test_setup(bad_setup): pass\n"
+        "def test_teardown(bad_teardown): pass\n"
+        "def test_skip(): pytest.skip('exercise skipped report metadata')\n"
+    )
+    expected_nodeids = {
+        f"test_sample.py::{name}" for name in (
+            "test_pass[1]", "test_pass[2]", "test_fail", "test_setup",
+            "test_teardown", "test_skip",
+        )
+    }
+    for workers in (0, 2):
+        report = tmp_path / f"report-{workers}.xml"
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "pytest", "-q", "-c", os.devnull,
+                "--noconftest", f"--rootdir={tmp_path}",
+                "-p", "rtp_remote_nodeid_plugin", "-p", "xdist.plugin",
+                "-n", str(workers), f"--junitxml={report}", "test_sample.py",
+            ],
+            cwd=tmp_path,
+            env=dict(os.environ, PYTHONPATH=str(tmp_path),
+                     PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", PYTEST_ADDOPTS=""),
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 1, result.stdout + result.stderr
+        cases = list(ET.parse(report).getroot().iter("testcase"))
+        assert len(cases) == 6
+        assert {remote_plugin._testcase_nodeid(case) for case in cases} == expected_nodeids
+        for case in cases:
+            assert len(case.findall("./properties/property[@name='nodeid']")) == 1
 
 
 def test_session_command_forwards_profile_ignore_paths(monkeypatch):

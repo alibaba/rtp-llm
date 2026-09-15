@@ -2191,9 +2191,10 @@ class RemoteREAPIPlugin:
         lines.append("def pytest_runtest_makereport(item, call):")
         lines.append("    outcome = yield")
         lines.append("    report = outcome.get_result()")
-        lines.append("    if call.when == 'call':")
+        # JUnit finalizes testcase properties from the teardown report,
+        # including when setup failed or skipped before the call phase.
         lines.append(
-            f"        report.user_properties.append(('{_NODEID_PROPERTY}', item.nodeid))"
+            f"    report.user_properties.append(('{_NODEID_PROPERTY}', item.nodeid))"
         )
         lines.append("_NODEID_PLUGIN_PY_")
 
