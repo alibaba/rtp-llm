@@ -36,6 +36,7 @@ from ..mega_se_jit_warmup import (
     mega_moe_se_jit_warmup_enabled,
     parse_mega_moe_se_jit_warmup_tokens_override,
 )
+from ..mega_front import MEGA_MOE_FRONT_CAPACITY
 from ..warmup_sync import sync_cuda_graph_warmup_ranks
 from .base import MoeCfg, register_strategy
 from .mega import (
@@ -136,7 +137,9 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         self._mega_buf = _get_or_create_mega_se_buf(
             group=group,
             num_experts=cfg.n_routed_experts,
-            num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
+            num_max_tokens_per_rank=max(
+                cfg.max_tokens_per_rank, MEGA_MOE_FRONT_CAPACITY
+            ),
             num_topk=cfg.n_activated_experts,
             hidden=D,
             intermediate_hidden=inter,
@@ -472,6 +475,16 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
         y = self._mega_y[:tokens]
         self._launch(y, tokens, x.device)
+        return y
+
+    def forward_prepacked(self, tokens: int, device: torch.device) -> torch.Tensor:
+        """Run MegaMoE-SE after the CUDA extension populated its input buffer."""
+        tokens = int(tokens)
+        self._validate_capacity(tokens)
+        y = self._mega_y[:tokens]
+        # A zero-token rank still enters the collective launch. This is
+        # required when EP/DP routing leaves a rank with no local tokens.
+        self._launch(y, tokens, device)
         return y
 
     def forward_with_gate_pack(self, x, gate, input_ids):

@@ -6,7 +6,7 @@ twice — once for Attention and once for MoE FFN.
 
 import logging
 import os
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -175,6 +175,70 @@ class Block(nn.Module):
             name="ffn",
         )
         self._prefill_fast_hc_impls_cached = self._resolve_prefill_fast_hc_impls()
+        self._mega_csa_adapter = None
+        self._mega_hca_adapter = None
+        self._mega_front_adapter = None
+
+    def enable_mega_csa(self, runtime, layer_weights: Dict[str, torch.Tensor]) -> None:
+        """Attach the TP1 CSA adapter only to compress-ratio-4 layers."""
+        if int(self.attn.compress_ratio) != 4:
+            return
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_adapter import (
+            MegaCSAAdapter,
+        )
+
+        self._mega_csa_adapter = MegaCSAAdapter(self, layer_weights, runtime)
+
+    def enable_mega_hca(self, runtime, layer_weights: Dict[str, torch.Tensor]) -> None:
+        """Attach the TP1 HCA adapter only to compress-ratio-128 layers."""
+        if int(self.attn.compress_ratio) != 128:
+            return
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_hca_adapter import (
+            MegaHCAAdapter,
+        )
+
+        self._mega_hca_adapter = MegaHCAAdapter(self, layer_weights, runtime)
+
+    def enable_mega_front(
+        self, *, required: bool = False, gen_num_per_cycle: int = 0
+    ) -> None:
+        """Attach the CUDA-extension MoE front to a MegaMoE-SE decode layer."""
+        strategy_name = getattr(self.ffn._strategy, "name", "")
+        if strategy_name != "mega_se":
+            if required:
+                raise RuntimeError(
+                    "DSV4 Mega decode with EP>1 requires the mega_se MoE strategy, "
+                    f"got {strategy_name or 'unknown'!r}"
+                )
+            return
+        score_func = getattr(
+            getattr(self.ffn, "gate", None), "score_func", "sqrtsoftplus"
+        )
+        if score_func != "sqrtsoftplus":
+            if required:
+                raise RuntimeError(
+                    "DSV4 Mega MoE front requires score_func='sqrtsoftplus', "
+                    f"got {score_func!r}"
+                )
+            logging.info(
+                "DSV4 Mega MoE front disabled for unsupported score_func=%r; "
+                "using the ordinary MoE front",
+                score_func,
+            )
+            return
+        from rtp_llm.models_py.modules.dsv4.moe.mega_front import MegaMoeFrontAdapter
+
+        self._mega_front_adapter = MegaMoeFrontAdapter(
+            self.ffn,
+            self.ffn_hc,
+            self.ffn_norm,
+            gen_num_per_cycle=gen_num_per_cycle,
+        )
+
+    def prepare_mega_capture_plans(self, capture_batches: Sequence[int]) -> None:
+        """Prepare MoE-front plans for the framework's graph capture buckets."""
+        if self._mega_front_adapter is not None:
+            self._mega_front_adapter.prepare_capture_plans(capture_batches)
 
     def _sync_after_first_cp_prefill_attention(self) -> None:
         if self._cp_sync_after_attn_done:
@@ -314,39 +378,70 @@ class Block(nn.Module):
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
         _dbg_layer = _rt.should_record_layer(self.layer_id)
-        # Attention path
-        residual = x
-        x_pre, post, comb = self.attn_hc.pre(
-            x,
-            dbg_tag=f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None,
+        mega_adapter = self._mega_csa_adapter or self._mega_hca_adapter
+        use_mega_attention = (
+            attn_fn is None
+            and mega_adapter is not None
+            and mega_adapter.supports_decode_shape(x, attn_metadata)
         )
-        # Framework RMSNorm wants 2D — collapse [B, q_len, dim] → [B*q_len, dim]
-        # and view back; attention.forward_decode wants the original 3D shape.
-        bsz, q_len, dim_ = x_pre.shape
-        x_pre = self.attn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
-        if _dbg_layer:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
-        if attn_fn is not None:
-            attn_out = attn_fn(x_pre)
+        if use_mega_attention:
+            x = mega_adapter.forward_attention_sublayer(
+                self, x, attn_metadata, kv_cache=kv_cache
+            )
         else:
-            attn_out = self.attn.forward_decode(x_pre, attn_metadata, kv_cache=kv_cache)
-        if _dbg_layer:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_out", attn_out)
-        x = self.attn_hc.post(attn_out, residual, post, comb)
+            # Attention path
+            residual = x
+            x_pre, post, comb = self.attn_hc.pre(
+                x,
+                dbg_tag=(
+                    f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None
+                ),
+            )
+            # Framework RMSNorm wants 2D. Attention keeps the original 3D shape.
+            bsz, q_len, dim_ = x_pre.shape
+            x_pre = self.attn_norm(x_pre.reshape(bsz * q_len, dim_)).view(
+                bsz, q_len, dim_
+            )
+            if _dbg_layer:
+                _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
+            if attn_fn is not None:
+                attn_out = attn_fn(x_pre)
+            else:
+                attn_out = self.attn.forward_decode(
+                    x_pre, attn_metadata, kv_cache=kv_cache
+                )
+            if _dbg_layer:
+                _rt.record_if_level(
+                    2, f"L{self.layer_id:02d}_decode_attn_out", attn_out
+                )
+            x = self.attn_hc.post(attn_out, residual, post, comb)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_residual", x)
 
-        # FFN path — MoE has no per-step state, reuse existing forward
+        # Mega decode replaces the ordinary HC/norm/router/pack sequence with
+        # the extension front. Unsupported request sizes keep the generic path.
         residual = x
-        x_pre, post, comb = self.ffn_hc.pre(
-            x,
-            dbg_tag=f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None,
+        use_mega_front = (
+            self._mega_front_adapter is not None
+            and self._mega_front_adapter.supports(x)
+            and (attn_fn is not None or mega_adapter is None or use_mega_attention)
         )
-        bsz, q_len, dim_ = x_pre.shape
-        x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
+        if use_mega_front:
+            ffn_out, x_pre, post, comb = self._mega_front_adapter.forward(x, input_ids)
+        else:
+            x_pre, post, comb = self.ffn_hc.pre(
+                x,
+                dbg_tag=(
+                    f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None
+                ),
+            )
+            bsz, q_len, dim_ = x_pre.shape
+            x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(
+                bsz, q_len, dim_
+            )
+            ffn_out = self.ffn(x_pre, input_ids)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
-        ffn_out = self.ffn(x_pre, input_ids)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
