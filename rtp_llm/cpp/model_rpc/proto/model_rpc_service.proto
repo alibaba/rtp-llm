@@ -643,6 +643,7 @@ message EmbeddingOutputPB {
 }
 
 service EmbeddingRpcService {
+    rpc StartProfile(StartProfileRequestPB) returns (EmptyPB);
     rpc embedding(EmbeddingInputPB) returns (EmbeddingOutputPB);
     rpc health(EmbeddingHealthRequestPB) returns (EmptyPB);
 }

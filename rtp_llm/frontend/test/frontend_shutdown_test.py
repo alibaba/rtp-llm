@@ -11,6 +11,7 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
 from uvicorn import Config, Server
 
+from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.frontend.frontend_app import (
     FrontendApp,
     GracefulShutdownServer,
@@ -105,6 +106,75 @@ class FrontendShutdownManagerTest(unittest.TestCase):
 
     def dump_headers(self):
         return {self._DUMP_HEADER: self._DUMP_TOKEN}
+
+    def test_start_profile_uses_embedding_rpc(self):
+        endpoint = EmbeddingEndpoint.__new__(EmbeddingEndpoint)
+        endpoint.address = "localhost:8087"
+        endpoint._channel_pool = SimpleNamespace(get=AsyncMock())
+        start = AsyncMock()
+        with patch(
+            "rtp_llm.embedding.embedding_endpoint.pb2_grpc.EmbeddingRpcServiceStub",
+            return_value=SimpleNamespace(StartProfile=start),
+        ):
+            result = asyncio.run(
+                endpoint.start_profile(
+                    {
+                        "trace_name": "embedding",
+                        "start_step": 2,
+                        "num_steps": 4,
+                        "all_tp": True,
+                    }
+                )
+            )
+            self.assertEqual(result, {"status": "ok"})
+            request = start.await_args.args[0]
+            self.assertEqual(
+                (request.trace_name, request.start_step, request.num_steps),
+                ("embedding", 2, 4),
+            )
+            self.assertTrue(request.enable_all_rank)
+            endpoint._channel_pool.get.assert_awaited_with(endpoint.address)
+            for field in ("enable_all_rank", "all_tp"):
+                for value, expected in (
+                    (False, False),
+                    ("false", False),
+                    ("0", False),
+                    ("true", True),
+                    ("1", True),
+                ):
+                    with self.subTest(field=field, value=value):
+                        result = asyncio.run(endpoint.start_profile({field: value}))
+                        self.assertEqual(result, {"status": "ok"})
+                        self.assertEqual(
+                            start.await_args.args[0].enable_all_rank, expected
+                        )
+            asyncio.run(
+                endpoint.start_profile({"enable_all_rank": "false", "all_tp": True})
+            )
+            self.assertFalse(start.await_args.args[0].enable_all_rank)
+            start.side_effect = RuntimeError("backend unavailable")
+            self.assertIn(
+                "backend unavailable", asyncio.run(endpoint.start_profile({}))["error"]
+            )
+
+    def test_start_profile_routes_to_embedding_backend(self):
+        owner = FrontendApp.__new__(FrontendApp)
+        owner.frontend_server = FakeFrontendServer(is_embedding=True)
+        endpoint = SimpleNamespace(
+            start_profile=AsyncMock(return_value={"status": "ok"})
+        )
+        owner.frontend_server._embedding_endpoint = endpoint
+        owner.shutdown_manager = FrontendShutdownManager()
+        owner.separated_frontend = True
+        owner.server_config = SimpleNamespace(http_port=0)
+        owner.grpc_client = FakeGrpcClient()
+        client = TestClient(owner.create_app())
+        payload = {"trace_name": "embedding", "start_step": 2, "num_steps": 4}
+        for route in ("/start_profile", "/rtp_llm/start_profile"):
+            response = client.post(route, json=payload)
+            self.assertEqual(response.json(), {"status": "ok"})
+            endpoint.start_profile.assert_awaited_with(payload)
+        self.assertEqual(owner.grpc_client.calls, [])
 
     def test_draining_rejects_new_business_and_marks_health_unavailable(self):
         app_owner = FrontendApp.__new__(FrontendApp)
@@ -423,9 +493,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
     def test_uvicorn_signal_marks_frontend_draining(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
-        server.set_server(
-            FakeFrontendServer(), manager, pre_stop_drain_seconds=0
-        )
+        server.set_server(FakeFrontendServer(), manager, pre_stop_drain_seconds=0)
 
         server.handle_exit(signal.SIGTERM, None)
         self.assertTrue(server.wait_for_signal_dispatch())
@@ -436,12 +504,8 @@ class FrontendShutdownManagerTest(unittest.TestCase):
     def test_uvicorn_shutdown_closes_production_frontend_and_grpc_contracts(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
-        frontend_server = create_autospec(
-            FrontendServer, instance=True, spec_set=True
-        )
-        grpc_client = create_autospec(
-            GrpcClientWrapper, instance=True, spec_set=True
-        )
+        frontend_server = create_autospec(FrontendServer, instance=True, spec_set=True)
+        grpc_client = create_autospec(GrpcClientWrapper, instance=True, spec_set=True)
         server.set_server(frontend_server, manager, grpc_client)
 
         with patch.object(Server, "shutdown", new_callable=AsyncMock):
@@ -453,13 +517,9 @@ class FrontendShutdownManagerTest(unittest.TestCase):
     def test_frontend_close_failure_does_not_block_grpc_cleanup(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
-        frontend_server = create_autospec(
-            FrontendServer, instance=True, spec_set=True
-        )
+        frontend_server = create_autospec(FrontendServer, instance=True, spec_set=True)
         frontend_server.close.side_effect = RuntimeError("frontend close failed")
-        grpc_client = create_autospec(
-            GrpcClientWrapper, instance=True, spec_set=True
-        )
+        grpc_client = create_autospec(GrpcClientWrapper, instance=True, spec_set=True)
         server.set_server(frontend_server, manager, grpc_client)
 
         with patch.object(Server, "shutdown", new_callable=AsyncMock):
@@ -538,9 +598,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
     def test_sigterm_after_pre_stop_signal_keeps_existing_drain_timer(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
-        server.set_server(
-            FakeFrontendServer(), manager, pre_stop_drain_seconds=10
-        )
+        server.set_server(FakeFrontendServer(), manager, pre_stop_drain_seconds=10)
         server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
         self.assertTrue(server.wait_for_signal_dispatch())
         pre_stop_timer = server._pre_stop_timer
@@ -561,9 +619,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
     def test_sigterm_after_elapsed_pre_stop_signal_starts_shutdown(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
-        server.set_server(
-            FakeFrontendServer(), manager, pre_stop_drain_seconds=10
-        )
+        server.set_server(FakeFrontendServer(), manager, pre_stop_drain_seconds=10)
         server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
         self.assertTrue(server.wait_for_signal_dispatch())
 
@@ -579,9 +635,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
     def test_sigterm_waits_for_pre_stop_drain_before_uvicorn_shutdown(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
-        server.set_server(
-            FakeFrontendServer(), manager, pre_stop_drain_seconds=0.01
-        )
+        server.set_server(FakeFrontendServer(), manager, pre_stop_drain_seconds=0.01)
 
         server.handle_exit(signal.SIGTERM, None)
         self.assertTrue(server.wait_for_signal_dispatch())
@@ -597,9 +651,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
     def test_duplicate_sigterm_keeps_pre_stop_drain(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
-        server.set_server(
-            FakeFrontendServer(), manager, pre_stop_drain_seconds=100
-        )
+        server.set_server(FakeFrontendServer(), manager, pre_stop_drain_seconds=100)
 
         server.handle_exit(signal.SIGTERM, None)
         self.assertTrue(server.wait_for_signal_dispatch())
@@ -619,9 +671,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
     def test_sigterm_after_timer_fires_does_not_rearm_pre_stop_drain(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
-        server.set_server(
-            FakeFrontendServer(), manager, pre_stop_drain_seconds=0.01
-        )
+        server.set_server(FakeFrontendServer(), manager, pre_stop_drain_seconds=0.01)
 
         server.handle_exit(signal.SIGTERM, None)
         self.assertTrue(server.wait_for_signal_dispatch())
@@ -646,9 +696,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         server = GracefulShutdownServer(
             Config(lambda scope: None, timeout_graceful_shutdown=10)
         )
-        server.set_server(
-            FakeFrontendServer(), manager, pre_stop_drain_seconds=30
-        )
+        server.set_server(FakeFrontendServer(), manager, pre_stop_drain_seconds=30)
 
         self.assertEqual(server._effective_pre_stop_drain_seconds(), 9.0)
 
@@ -657,9 +705,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         server = GracefulShutdownServer(
             Config(lambda scope: None, timeout_graceful_shutdown=600)
         )
-        server.set_server(
-            FakeFrontendServer(), manager, pre_stop_drain_seconds=600
-        )
+        server.set_server(FakeFrontendServer(), manager, pre_stop_drain_seconds=600)
 
         self.assertEqual(server._effective_pre_stop_drain_seconds(), 540.0)
 
