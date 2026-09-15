@@ -94,6 +94,19 @@ TEST(AsyncContextTest, FusedAsyncContext_DoneTrue_WhenEmptyOrAllDoneOrNull) {
     EXPECT_TRUE(fused.done());
 }
 
+TEST(AsyncContextTest, MemoryReuseFailurePropagatesInConnectorOrder) {
+    auto memory = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    auto remote = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*memory, success()).WillByDefault(testing::Return(false));
+    ON_CALL(*memory, errorInfo())
+        .WillByDefault(testing::Return(ErrorInfo(ErrorCode::KV_CACHE_REUSE_ERROR, "memory copy failed on rank 1")));
+    ON_CALL(*remote, success()).WillByDefault(testing::Return(false));
+    ON_CALL(*remote, errorInfo()).WillByDefault(testing::Return(ErrorInfo::OkStatus()));
+    FusedAsyncContext fused({memory, remote});
+    EXPECT_FALSE(fused.success());
+    EXPECT_EQ(fused.errorInfo().code(), ErrorCode::KV_CACHE_REUSE_ERROR);
+}
+
 TEST(AsyncContextTest, FusedAsyncContext_DoneFalse_WhenAnyNotDone) {
     auto done_ctx     = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     auto not_done_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();

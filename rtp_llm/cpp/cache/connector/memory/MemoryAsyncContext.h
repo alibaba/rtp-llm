@@ -45,7 +45,12 @@ private:
 // 用于 memory connector read/write
 class MemoryAsyncContext: public AsyncContext {
 public:
-    explicit MemoryAsyncContext(const std::function<void(bool)>& done_callback): done_callback_(done_callback) {}
+    explicit MemoryAsyncContext(const std::function<void(bool)>& done_callback,
+                                bool                             reject_reuse_on_failure = false,
+                                std::function<void()>            copy_failure_callback   = {}):
+        done_callback_(done_callback),
+        reject_reuse_on_failure_(reject_reuse_on_failure),
+        copy_failure_callback_(std::move(copy_failure_callback)) {}
     ~MemoryAsyncContext() override = default;
 
 public:
@@ -53,6 +58,7 @@ public:
     bool done() const override;
     bool success() const override;
     void setBroadcastResult(const std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result);
+    ErrorInfo errorInfo() const override;
 
 private:
     bool successLocked() const;
@@ -65,6 +71,8 @@ private:
     bool                                                                    result_ready_{false};
     bool                                                                    finalizing_{false};
     std::atomic<bool>                                                       already_done_{false};
+    bool                                                                    reject_reuse_on_failure_{false};
+    std::function<void()>                                                   copy_failure_callback_;
 };
 
 }  // namespace rtp_llm

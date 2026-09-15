@@ -24,6 +24,10 @@ public:
     virtual const std::string&          unique_id() const         = 0;
     virtual const std::vector<int64_t>& tokens() const            = 0;
 
+    virtual int64_t request_id() const {
+        return 0;
+    }
+
     // P2P read extension: returns GenerateStream pointer for type safety.
     // Non-P2P scenarios can return nullptr by default.
     virtual GenerateStream* generateStream() const {

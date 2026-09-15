@@ -269,6 +269,36 @@ static void assertDsv4RegionPatternEq(const std::shared_ptr<KVCacheManager>& man
     }
 }
 
+TEST(KVCacheManagerInitTest, Dsv4RejectsUnsupportedLinearStepBeforeAllocating) {
+    auto config = makeCompactDSV4ManagerConfig();
+    ASSERT_TRUE(config.use_opaque_kv_cache_store);
+    for (auto role : {RoleType::PREFILL, RoleType::DECODE, RoleType::PDFUSION}) {
+        PDSepConfig pd_sep_config;
+        pd_sep_config.role_type = role;
+        for (int step : {-1, 0, 2, 4}) {
+            SCOPED_TRACE(::testing::Message() << "role=" << static_cast<int>(role) << " step=" << step);
+            config.linear_step = step;
+            KVCacheManager manager(config, /*warmup=*/true, nullptr, {}, {}, {}, {}, pd_sep_config);
+            EXPECT_THROW(manager.init(), std::runtime_error);
+            EXPECT_EQ(manager.allocator_, nullptr);
+            EXPECT_EQ(manager.coordinator_, nullptr);
+            EXPECT_EQ(manager.cacheConfig().linear_step, step);
+        }
+    }
+}
+
+TEST_F(KVCacheManagerTest, NonDsv4LinearStepRemainsConfigurable) {
+    for (int step : {1, 2, 4}) {
+        SCOPED_TRACE(step);
+        auto config = makeSimpleHybridMhaCacheConfig(4, 4, 2, rtp_llm::DataType::TYPE_INT8);
+        ASSERT_FALSE(config.use_opaque_kv_cache_store);
+        config.linear_step = step;
+        KVCacheManager manager(config, /*warmup=*/true);
+        ASSERT_TRUE(manager.init());
+        EXPECT_EQ(manager.cacheConfig().linear_step, step);
+    }
+}
+
 TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);

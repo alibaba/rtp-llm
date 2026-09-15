@@ -838,6 +838,12 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*              t
 }
 
 bool RtpLLMMemoryCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(crc_bytes_metric, "rtp_llm_kv_cache_crc_checked_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(crc_latency_metric, "rtp_llm_kv_cache_crc_copy_latency_us");
+    REGISTER_QPS_MUTABLE_METRIC(crc_failed_metric, "rtp_llm_kv_cache_crc_failed_qps");
+    REGISTER_QPS_MUTABLE_METRIC(crc_metadata_failed_metric, "rtp_llm_kv_cache_crc_metadata_failed_qps");
+    REGISTER_QPS_MUTABLE_METRIC(crc_dump_written_metric, "rtp_llm_kv_cache_crc_dump_written_qps");
+    REGISTER_QPS_MUTABLE_METRIC(crc_dump_dropped_metric, "rtp_llm_kv_cache_crc_dump_dropped_qps");
     // Match 相关指标
     REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_match_qps_metric, "rtp_llm_kv_cache_memory_cache_match_qps");
     REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_match_none_qps_metric,
@@ -960,6 +966,24 @@ void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*            ta
     if (collector->write_token == 0) {
         REPORT_MUTABLE_QPS(kv_cache_memory_cache_write_none_qps_metric);
     }
+}
+
+void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*          tags,
+                                      RtpLLMMemoryCacheCrcMetricsCollector* collector) {
+    kmonitor::MetricsTags copy_tag = tags ? *tags : kmonitor::MetricsTags{};
+    copy_tag.AddTag("copy_direction", collector->to_device ? "TO_GPU" : "FROM_GPU");
+    if (collector->bytes || collector->failed) {
+        crc_bytes_metric->Report(&copy_tag, collector->bytes);
+        crc_latency_metric->Report(&copy_tag, collector->latency_us);
+    }
+    if (collector->failed)
+        crc_failed_metric->Report(&copy_tag, collector->failed);
+    if (collector->metadata_failed)
+        crc_metadata_failed_metric->Report(&copy_tag, collector->metadata_failed);
+    if (collector->dump_written)
+        crc_dump_written_metric->Report(&copy_tag, collector->dump_written);
+    if (collector->dump_dropped)
+        crc_dump_dropped_metric->Report(&copy_tag, collector->dump_dropped);
 }
 
 void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*           tags,

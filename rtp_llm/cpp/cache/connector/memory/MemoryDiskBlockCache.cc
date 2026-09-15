@@ -21,7 +21,7 @@ MemoryDiskBlockCache::MatchResult MemoryDiskBlockCache::match(CacheKeyType cache
     }
     touchLocked(it->second);
     const auto& item = it->second;
-    return {item.backing_type, item.block_index, item.disk_slot, item.block_size, item.is_complete};
+    return {item.backing_type, item.block_index, item.disk_slot, item.block_size, item.is_complete, item.crc_epoch};
 }
 
 MemoryDiskBlockCache::MatchResult MemoryDiskBlockCache::matchAndMarkInFlight(CacheKeyType cache_key) {
@@ -34,7 +34,7 @@ MemoryDiskBlockCache::MatchResult MemoryDiskBlockCache::matchAndMarkInFlight(Cac
     touchLocked(it->second);
     it->second.in_flight_ref++;
     const auto& item = it->second;
-    return {item.backing_type, item.block_index, item.disk_slot, item.block_size, item.is_complete};
+    return {item.backing_type, item.block_index, item.disk_slot, item.block_size, item.is_complete, item.crc_epoch};
 }
 
 bool MemoryDiskBlockCache::contains(CacheKeyType cache_key) const {
@@ -80,10 +80,12 @@ MemoryDiskBlockCache::putCommitted(const CacheItem& input_item) {
 std::optional<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::removeIfMatch(CacheKeyType     cache_key,
                                                                                    CacheBackingType backing_type,
                                                                                    BlockIdxType expected_block_index,
-                                                                                   int32_t      expected_disk_slot) {
+                                                                                   int32_t      expected_disk_slot,
+                                                                                   uint64_t     expected_crc_epoch) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto                                it = items_.find(cache_key);
-    if (it == items_.end() || it->second.backing_type != backing_type) {
+    if (it == items_.end() || it->second.backing_type != backing_type
+        || (expected_crc_epoch && it->second.crc_epoch != expected_crc_epoch)) {
         return std::nullopt;
     }
     if (backing_type == CacheBackingType::MEMORY && it->second.block_index != expected_block_index) {

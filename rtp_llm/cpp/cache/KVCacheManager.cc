@@ -114,6 +114,9 @@ KVCacheManager::~KVCacheManager() {
 
 bool KVCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "cache specs must not be empty");
+    RTP_LLM_CHECK_WITH_INFO(!config_.use_opaque_kv_cache_store || config_.linear_step == 1,
+                            "DeepSeek V4 cache requires linear_step=1, got %d",
+                            config_.linear_step);
 
     auto shared_cache = std::make_shared<SharedBlockCache>();
     shared_cache->setPrefixTreeEnabled(kv_cache_config_.enable_gpu_prefix_tree);

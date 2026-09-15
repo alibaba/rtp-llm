@@ -33,6 +33,7 @@ public:
         uint64_t         last_access_seq{0};
         int64_t          created_time_us{0};
         uint32_t         in_flight_ref{0};
+        uint64_t         crc_epoch{0};
     };
 
     struct MatchResult {
@@ -41,6 +42,7 @@ public:
         int32_t          disk_slot{-1};
         size_t           block_size{0};
         bool             is_complete{false};
+        uint64_t         crc_epoch{0};
     };
 
 public:
@@ -52,7 +54,8 @@ public:
     std::optional<CacheItem>                                    removeIfMatch(CacheKeyType     cache_key,
                                                                               CacheBackingType backing_type,
                                                                               BlockIdxType     expected_block_index,
-                                                                              int32_t          expected_disk_slot);
+                                                                              int32_t          expected_disk_slot,
+                                                                              uint64_t         expected_crc_epoch = 0);
     std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> put(const MemoryBlockCache::CacheItem& item);
     std::optional<MemoryBlockCache::CacheItem>                  remove(CacheKeyType cache_key);
     std::optional<MemoryBlockCache::CacheItem> removeIfMatch(CacheKeyType cache_key, BlockIdxType expected_block_index);

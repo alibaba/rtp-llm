@@ -55,10 +55,12 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps + [
+    deps = [
         "//rtp_llm/cpp/cache/connector:connector",
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
-    ],
+        "@com_google_googletest//:gtest_main",
+        "@com_google_googletest//:gtest",
+    ] + torch_deps() + cuda13_torch_link_deps,
     env = {},
     exec_properties = {'gpu':'H20'},
 )

@@ -5,6 +5,14 @@ package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 copy_all_so()
 
+copy_files(
+    name = "copy_nvcomp_lib",
+    srcs = select({
+        "@//:using_cuda13_x86": ["@nvcomp_cuda13_x86//:shared_library"],
+        "//conditions:default": [],
+    }),
+)
+
 # copy 3fs libs
 copy_files(
     name = "copy_hf3fs_libs",
@@ -217,6 +225,7 @@ filegroup(
     srcs = [],
     data = [
         ":copy_acclep_libs",
+        ":copy_nvcomp_lib",
         ":copy_aiter",
         ":copy_hf3fs_libs",
         ":copy_remote_kv_cache_manager_client_libs",
@@ -227,6 +236,7 @@ filegroup(
     name = "whl_package_libs",
     srcs = [],
     data = [
+        ":copy_nvcomp_lib",
         ":librtp_compute_ops_so",
         ":libth_transformer_config_so",
         ":libth_transformer_so",

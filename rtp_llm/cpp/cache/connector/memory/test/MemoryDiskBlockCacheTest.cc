@@ -44,6 +44,20 @@ TEST(MemoryDiskBlockCacheTest, ContainsAndMatchMemoryAndDisk) {
     EXPECT_EQ(disk.disk_slot, 20);
 }
 
+TEST(MemoryDiskBlockCacheTest, CrcEpochPreventsRemovingNewBacking) {
+    MemoryDiskBlockCache cache;
+    auto                 first = memoryItem(1, 10);
+    first.crc_epoch            = 101;
+    ASSERT_TRUE(cache.putCommitted(first).first);
+    ASSERT_EQ(cache.matchAndMarkInFlight(1).crc_epoch, 101);
+    EXPECT_FALSE(cache.removeIfMatch(1, CacheBackingType::MEMORY, 10, -1, 100));
+    ASSERT_TRUE(cache.removeIfMatch(1, CacheBackingType::MEMORY, 10, -1, 101));
+    first.crc_epoch = 102;
+    ASSERT_TRUE(cache.putCommitted(first).first);
+    EXPECT_FALSE(cache.removeIfMatch(1, CacheBackingType::MEMORY, 10, -1, 101));
+    EXPECT_EQ(cache.match(1).crc_epoch, 102);
+}
+
 TEST(MemoryDiskBlockCacheTest, SharedAccessSeqEvictsOldestAcrossBackings) {
     MemoryDiskBlockCache cache;
     ASSERT_TRUE(cache.putCommitted(memoryItem(1, 10)).first);

@@ -1363,6 +1363,17 @@ public:
     float   used_ratio          = 0;
 };
 
+class RtpLLMMemoryCacheCrcMetricsCollector final {
+public:
+    bool    to_device       = false;
+    int64_t bytes           = 0;
+    int64_t latency_us      = 0;
+    int64_t failed          = 0;
+    int64_t metadata_failed = 0;
+    int64_t dump_written    = 0;
+    int64_t dump_dropped    = 0;
+};
+
 class RtpLLMMemoryCacheMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
@@ -1372,9 +1383,16 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyTaskMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheStatusMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCrcMetricsCollector* collector);
 
 public:
     kmonitor::MutableMetric* kv_cache_memory_cache_match_qps_metric         = nullptr;
+    kmonitor::MutableMetric* crc_bytes_metric                               = nullptr;
+    kmonitor::MutableMetric* crc_latency_metric                             = nullptr;
+    kmonitor::MutableMetric* crc_failed_metric                              = nullptr;
+    kmonitor::MutableMetric* crc_metadata_failed_metric                     = nullptr;
+    kmonitor::MutableMetric* crc_dump_written_metric                        = nullptr;
+    kmonitor::MutableMetric* crc_dump_dropped_metric                        = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_match_failed_qps_metric  = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_match_none_qps_metric    = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_match_latency_metric     = nullptr;

@@ -21,6 +21,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/models_py/bindings/CrcBlockCopy.h"
 
 namespace rtp_llm {
 
@@ -97,6 +98,7 @@ private:
         bool                      request_released{false};
         uint64_t                  generation{0};
         uint64_t                  src_generation{0};
+        uint64_t                  crc_epoch{0};
     };
     enum class CopyDirection {
         H2D = 0,
@@ -105,6 +107,8 @@ private:
     struct CopyPlan {
         std::vector<CopyInfoPerKey> copy_infos;
         CopyDirection               direction;
+        std::string                 trace_id;
+        int64_t                     request_id{0};
     };
 
     std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType&                cache_keys,
@@ -156,6 +160,25 @@ private:
     bool                     copyMemoryItemsGeneric(const MemoryOperationRequestPB&     request,
                                                     CopyDirection                       direction,
                                                     const std::vector<LayerRegionSlot>& slots);
+    void                     initCrcCopy();
+    void                     initCrcMetrics();
+    bool copyCacheWithCrc(const MemoryOperationRequestPB& request, const std::vector<LayerRegionSlot>& slots);
+    void invalidateCrcPlan(const CopyPlan& plan, bool merge_sources);
+    bool reserveCrcDump();
+    void dumpCrcFailure(const MemoryOperationRequestPB& request,
+                        int                             item_index,
+                        CacheBlockKind                  kind,
+                        CrcBlockCopyResult              result,
+                        const void*                     host,
+                        size_t                          bytes,
+                        const void*                     inherited);
+    void reportCrcMetrics(bool    to_device,
+                          int64_t bytes,
+                          int64_t latency_us,
+                          int64_t failed,
+                          int64_t metadata_failed = 0,
+                          int64_t dump_written    = 0,
+                          int64_t dump_dropped    = 0);
     bool                     validateCopyItemBacking(const MemoryOperationRequestPB::CopyItem& item) const;
 
     void                         checkLayerBlockStrideBytes() const;
@@ -207,9 +230,15 @@ private:
     bool                         mergePrefixConflictForCommit(CopyInfoPerKey& copy_info,
                                                               PrefixTreeMemoryBlockCache::CacheItem& item,
                                                               const std::vector<LayerRegionSlot>& slots);
+    bool                      retryPrefixCrcWrite(CopyInfoPerKey&                     copy_info,
+                                                  const std::vector<LayerRegionSlot>& slots,
+                                                  const std::string&                  trace_id,
+                                                  int64_t                             request_id);
     void                         putPrefixToCache(CopyInfoPerKey&                  copy_info,
                                                   const BlockDependency&           dependency,
-                                                  const std::vector<LayerRegionSlot>& slots);
+                                               const std::vector<LayerRegionSlot>& slots,
+                                               const std::string&                  trace_id   = {},
+                                               int64_t                             request_id = 0);
     void                         releasePrefixRequestBacking(const CopyInfoPerKey& copy_info);
     void                         releasePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item);
     void                         referencePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item);
@@ -303,6 +332,23 @@ private:
     std::shared_ptr<DiskBlockPool>                          incomplete_disk_pool_;
     std::shared_ptr<BroadcastManager>                       broadcast_manager_;
     std::shared_ptr<autil::LockFreeThreadPool>              wait_done_thread_pool_;
+    bool                                                    crc_enabled_{false};
+    std::string                                             crc_dump_path_{"logs/kv_cache_crc"};
+    static constexpr size_t                                 kCopyThreadCount = 8;
+    struct CrcCopySlot {
+        std::unique_ptr<CrcBlockCopy> copy;
+        bool                          busy{false};
+    };
+    std::mutex                                 crc_mutex_;
+    std::condition_variable                    crc_cv_;
+    std::vector<CrcCopySlot>                   crc_copy_slots_;
+    std::atomic<uint64_t>                      next_crc_epoch_{1};
+    uint64_t                                   crc_layout_{0};
+    int64_t                                    crc_dump_window_us_{0};
+    size_t                                     crc_dump_count_{0};
+    size_t                                     crc_dump_pending_{0};
+    std::atomic<uint64_t>                      crc_dump_sequence_{0};
+    std::shared_ptr<autil::LockFreeThreadPool> crc_dump_pool_;
 
     std::shared_ptr<BlockPool> complete_pool_;
     std::shared_ptr<BlockPool> incomplete_pool_;
@@ -316,6 +362,7 @@ private:
 
     // metrics reporter
     kmonitor::MetricsReporterPtr metrics_reporter_;
+    kmonitor::MetricsReporterPtr crc_metrics_reporter_;
     std::shared_ptr<std::thread> metrics_reporter_thread_{nullptr};
     std::atomic<bool>            stop_{false};
 };

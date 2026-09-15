@@ -39,10 +39,8 @@ PrefixTreeMemoryBlockCache::CacheItem item(CacheKeyType           key,
     return item;
 }
 
-PrefixTreeMemoryBlockCache::CacheItem diskItem(CacheKeyType         key,
-                                               CacheBlockKind       kind,
-                                               int32_t              disk_slot,
-                                               std::vector<uint8_t> slot_valid_mask = {}) {
+PrefixTreeMemoryBlockCache::CacheItem
+diskItem(CacheKeyType key, CacheBlockKind kind, int32_t disk_slot, std::vector<uint8_t> slot_valid_mask = {}) {
     auto result          = item(key, kind, NULL_BLOCK_IDX, std::move(slot_valid_mask));
     result.backing_type  = CacheBackingType::DISK;
     result.block_index   = NULL_BLOCK_IDX;
@@ -69,6 +67,42 @@ TEST(PrefixTreeMemoryBlockCacheTest, ContainsAndMatchAreKindAware) {
     EXPECT_EQ(state.block_index, 12);
 }
 
+TEST(PrefixTreeMemoryBlockCacheTest, CrcMergeCommitRejectsReplacedSource) {
+    PrefixTreeMemoryBlockCache cache;
+    auto                       source = item(1, CacheBlockKind::STATE_SWA_KV, 11, {1, 0, 0});
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), source).first);
+    const auto pinned = cache.matchAndMarkInFlight(1, source.kind);
+    ASSERT_TRUE(pinned.found);
+    ASSERT_GT(pinned.generation, 0u);
+    auto newer = item(1, source.kind, 12, {1, 1, 0});
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), newer).first);
+    const auto current = cache.match(1, source.kind);
+    ASSERT_TRUE(current.found);
+    EXPECT_GT(current.generation, pinned.generation);
+    auto late = item(1, source.kind, 13, {1, 1, 1});
+    EXPECT_FALSE(cache.putCommitted(1, rootDep(), late, pinned.generation).first);
+    EXPECT_EQ(cache.match(1, source.kind).generation, current.generation);
+    const auto retired = cache.releaseInFlight(
+        1, source.kind, pinned.backing_type, pinned.block_index, pinned.disk_slot, pinned.generation);
+    ASSERT_TRUE(retired.has_value());
+    EXPECT_EQ(retired->generation, pinned.generation);
+    EXPECT_TRUE(cache.putCommitted(1, rootDep(), late, current.generation).first);
+    const auto committed = cache.match(1, source.kind);
+    EXPECT_GT(committed.generation, current.generation);
+    EXPECT_EQ(committed.block_index, late.block_index);
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, CrcMergeCommitRejectsDetachedSource) {
+    PrefixTreeMemoryBlockCache cache;
+    auto                       source = item(1, CacheBlockKind::STATE_SWA_KV, 11, {1, 0});
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), source).first);
+    const auto old = cache.match(1, source.kind);
+    ASSERT_TRUE(cache.detachIfMatch(1, source.kind, old.backing_type, old.block_index, old.disk_slot, old.generation));
+    auto candidate = item(1, source.kind, 12, {1, 1});
+    EXPECT_FALSE(cache.putCommitted(1, rootDep(), candidate, old.generation).first);
+    EXPECT_FALSE(cache.contains(1, source.kind));
+}
+
 TEST(PrefixTreeMemoryBlockCacheTest, DuplicateKindDoesNotBlockMissingOtherKind) {
     PrefixTreeMemoryBlockCache cache;
     ASSERT_TRUE(cache.putCommitted(1, rootDep(), item(1, CacheBlockKind::COMPRESSED_KV, 11)).first);
@@ -86,7 +120,8 @@ TEST(PrefixTreeMemoryBlockCacheTest, DuplicateKindDoesNotBlockMissingOtherKind) 
 
 TEST(PrefixTreeMemoryBlockCacheTest, SlotMaskMustCoverRequestedSlots) {
     PrefixTreeMemoryBlockCache cache;
-    ASSERT_TRUE(cache.putCommitted(1,
+    ASSERT_TRUE(cache
+                    .putCommitted(1,
                                    rootDep(),
                                    item(1,
                                         CacheBlockKind::STATE_SWA_KV,
@@ -102,7 +137,8 @@ TEST(PrefixTreeMemoryBlockCacheTest, SlotMaskMustCoverRequestedSlots) {
 
 TEST(PrefixTreeMemoryBlockCacheTest, WiderSlotMaskReplacesNarrowerBacking) {
     PrefixTreeMemoryBlockCache cache;
-    ASSERT_TRUE(cache.putCommitted(1,
+    ASSERT_TRUE(cache
+                    .putCommitted(1,
                                    rootDep(),
                                    item(1,
                                         CacheBlockKind::STATE_SWA_KV,
@@ -127,7 +163,8 @@ TEST(PrefixTreeMemoryBlockCacheTest, WiderSlotMaskReplacesNarrowerBacking) {
 
 TEST(PrefixTreeMemoryBlockCacheTest, NonCoveringSlotMaskDoesNotReplaceBacking) {
     PrefixTreeMemoryBlockCache cache;
-    ASSERT_TRUE(cache.putCommitted(1,
+    ASSERT_TRUE(cache
+                    .putCommitted(1,
                                    rootDep(),
                                    item(1,
                                         CacheBlockKind::STATE_SWA_KV,
@@ -151,7 +188,8 @@ TEST(PrefixTreeMemoryBlockCacheTest, NonCoveringSlotMaskDoesNotReplaceBacking) {
 
 TEST(PrefixTreeMemoryBlockCacheTest, SameSlotMaskDuplicateDoesNotReplaceBacking) {
     PrefixTreeMemoryBlockCache cache;
-    ASSERT_TRUE(cache.putCommitted(1,
+    ASSERT_TRUE(cache
+                    .putCommitted(1,
                                    rootDep(),
                                    item(1,
                                         CacheBlockKind::STATE_SWA_KV,
@@ -172,7 +210,8 @@ TEST(PrefixTreeMemoryBlockCacheTest, SameSlotMaskDuplicateDoesNotReplaceBacking)
 
 TEST(PrefixTreeMemoryBlockCacheTest, MarkInFlightRejectsNonCoveringMask) {
     PrefixTreeMemoryBlockCache cache;
-    ASSERT_TRUE(cache.putCommitted(1,
+    ASSERT_TRUE(cache
+                    .putCommitted(1,
                                    rootDep(),
                                    item(1,
                                         CacheBlockKind::STATE_SWA_KV,
@@ -190,7 +229,8 @@ TEST(PrefixTreeMemoryBlockCacheTest, MarkInFlightRejectsNonCoveringMask) {
 
 TEST(PrefixTreeMemoryBlockCacheTest, InFlightCanBeReplacedByCoveringBacking) {
     PrefixTreeMemoryBlockCache cache;
-    ASSERT_TRUE(cache.putCommitted(1,
+    ASSERT_TRUE(cache
+                    .putCommitted(1,
                                    rootDep(),
                                    item(1,
                                         CacheBlockKind::STATE_SWA_KV,
@@ -229,7 +269,8 @@ TEST(PrefixTreeMemoryBlockCacheTest, InFlightCanBeReplacedByCoveringBacking) {
 
 TEST(PrefixTreeMemoryBlockCacheTest, RetiredItemRequiresAllInFlightReleases) {
     PrefixTreeMemoryBlockCache cache;
-    ASSERT_TRUE(cache.putCommitted(1,
+    ASSERT_TRUE(cache
+                    .putCommitted(1,
                                    rootDep(),
                                    item(1,
                                         CacheBlockKind::STATE_SWA_KV,
@@ -272,7 +313,8 @@ TEST(PrefixTreeMemoryBlockCacheTest, RetiredItemRequiresAllInFlightReleases) {
 
 TEST(PrefixTreeMemoryBlockCacheTest, MultipleRetiredItemsReleaseOutOfOrder) {
     PrefixTreeMemoryBlockCache cache;
-    ASSERT_TRUE(cache.putCommitted(1,
+    ASSERT_TRUE(cache
+                    .putCommitted(1,
                                    rootDep(),
                                    item(1,
                                         CacheBlockKind::STATE_SWA_KV,
@@ -282,7 +324,8 @@ TEST(PrefixTreeMemoryBlockCacheTest, MultipleRetiredItemsReleaseOutOfOrder) {
     auto old_in_flight = cache.matchAndMarkInFlight(1, CacheBlockKind::STATE_SWA_KV, std::vector<uint8_t>{1, 0, 0});
     ASSERT_TRUE(old_in_flight.found);
 
-    ASSERT_TRUE(cache.putCommitted(1,
+    ASSERT_TRUE(cache
+                    .putCommitted(1,
                                    rootDep(),
                                    item(1,
                                         CacheBlockKind::STATE_SWA_KV,
@@ -292,7 +335,8 @@ TEST(PrefixTreeMemoryBlockCacheTest, MultipleRetiredItemsReleaseOutOfOrder) {
     auto middle_in_flight = cache.matchAndMarkInFlight(1, CacheBlockKind::STATE_SWA_KV, std::vector<uint8_t>{1, 1, 0});
     ASSERT_TRUE(middle_in_flight.found);
 
-    ASSERT_TRUE(cache.putCommitted(1,
+    ASSERT_TRUE(cache
+                    .putCommitted(1,
                                    rootDep(),
                                    item(1,
                                         CacheBlockKind::STATE_SWA_KV,
@@ -437,7 +481,8 @@ TEST(PrefixTreeMemoryBlockCacheTest, BranchParentBecomesEvictableAfterAllChildre
 
 TEST(PrefixTreeMemoryBlockCacheTest, ResidentItemIsMatchableButNeverEvictable) {
     PrefixTreeMemoryBlockCache cache;
-    ASSERT_TRUE(cache.putCommitted(1,
+    ASSERT_TRUE(cache
+                    .putCommitted(1,
                                    rootDep(0),
                                    item(1,
                                         CacheBlockKind::COMPRESSED_KV,
@@ -457,7 +502,8 @@ TEST(PrefixTreeMemoryBlockCacheTest, ParentDetachPreservesChildLeafAccounting) {
 
     auto parent = cache.matchAndMarkInFlight(1, CacheBlockKind::COMPRESSED_KV);
     ASSERT_TRUE(parent.found);
-    EXPECT_FALSE(cache.detachIfMatch(1,
+    EXPECT_FALSE(cache
+                     .detachIfMatch(1,
                                      CacheBlockKind::COMPRESSED_KV,
                                      CacheBackingType::MEMORY,
                                      parent.block_index,

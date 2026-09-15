@@ -49,16 +49,13 @@ bool PrefixTreeMemoryBlockCache::contains(CacheKeyType                 cache_key
     return state.has_value && !state.detached && slotMaskCovers(state.slot_valid_mask, required_slot_mask);
 }
 
-PrefixTreeMemoryBlockCache::MatchResult
-PrefixTreeMemoryBlockCache::match(CacheKeyType cache_key, CacheBlockKind kind) {
+PrefixTreeMemoryBlockCache::MatchResult PrefixTreeMemoryBlockCache::match(CacheKeyType cache_key, CacheBlockKind kind) {
     static const std::vector<uint8_t> empty_required_mask;
     return match(cache_key, kind, empty_required_mask);
 }
 
-PrefixTreeMemoryBlockCache::MatchResult
-PrefixTreeMemoryBlockCache::match(CacheKeyType                 cache_key,
-                                  CacheBlockKind               kind,
-                                  const std::vector<uint8_t>& required_slot_mask) {
+PrefixTreeMemoryBlockCache::MatchResult PrefixTreeMemoryBlockCache::match(
+    CacheKeyType cache_key, CacheBlockKind kind, const std::vector<uint8_t>& required_slot_mask) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto                                it = nodes_.find(cache_key);
     if (it == nodes_.end() || !validKind(kind)) {
@@ -79,16 +76,14 @@ PrefixTreeMemoryBlockCache::match(CacheKeyType                 cache_key,
             state.slot_valid_mask};
 }
 
-PrefixTreeMemoryBlockCache::MatchResult
-PrefixTreeMemoryBlockCache::matchAndMarkInFlight(CacheKeyType cache_key, CacheBlockKind kind) {
+PrefixTreeMemoryBlockCache::MatchResult PrefixTreeMemoryBlockCache::matchAndMarkInFlight(CacheKeyType   cache_key,
+                                                                                         CacheBlockKind kind) {
     static const std::vector<uint8_t> empty_required_mask;
     return matchAndMarkInFlight(cache_key, kind, empty_required_mask);
 }
 
-PrefixTreeMemoryBlockCache::MatchResult
-PrefixTreeMemoryBlockCache::matchAndMarkInFlight(CacheKeyType                 cache_key,
-                                                 CacheBlockKind               kind,
-                                                 const std::vector<uint8_t>& required_slot_mask) {
+PrefixTreeMemoryBlockCache::MatchResult PrefixTreeMemoryBlockCache::matchAndMarkInFlight(
+    CacheKeyType cache_key, CacheBlockKind kind, const std::vector<uint8_t>& required_slot_mask) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto                                it = nodes_.find(cache_key);
     if (it == nodes_.end() || !validKind(kind)) {
@@ -114,10 +109,19 @@ PrefixTreeMemoryBlockCache::matchAndMarkInFlight(CacheKeyType                 ca
 std::pair<bool, std::optional<PrefixTreeMemoryBlockCache::CacheItem>>
 PrefixTreeMemoryBlockCache::putCommitted(CacheKeyType            cache_key,
                                           const BlockDependency&  dependency,
-                                          const CacheItem&        input_item) {
+                                         const CacheItem&       input_item,
+                                         uint64_t               expected_source_generation) {
     RTP_LLM_CHECK_WITH_INFO(validKind(input_item.kind), "invalid prefix-tree memory kind");
     RTP_LLM_CHECK_WITH_INFO(input_item.cache_key == cache_key, "cache key mismatch");
     std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (expected_source_generation) {
+        const auto source = nodes_.find(cache_key);
+        if (source == nodes_.end())
+            return {false, std::nullopt};
+        const auto& state = source->second.kinds[kindIndex(input_item.kind)];
+        if (!state.has_value || state.detached || state.generation != expected_source_generation)
+            return {false, std::nullopt};
+    }
     auto&                               node  = upsertNodeLocked(cache_key, dependency);
     auto&                               state = node.kinds[kindIndex(input_item.kind)];
     std::optional<CacheItem> old_item;
@@ -659,9 +663,16 @@ PrefixTreeMemoryBlockCache::toItemLocked(const Node& node, CacheBlockKind kind) 
     if (!state.has_value) {
         return std::nullopt;
     }
-    return CacheItem{
-        node.cache_key, kind, state.backing_type, state.block_index, state.disk_slot, state.block_size,
-        state.is_resident, state.generation, state.created_time_us, state.slot_valid_mask};
+    return CacheItem{node.cache_key,
+                     kind,
+                     state.backing_type,
+                     state.block_index,
+                     state.disk_slot,
+                     state.block_size,
+                     state.is_resident,
+                     state.generation,
+                     state.created_time_us,
+                     state.slot_valid_mask};
 }
 
 bool PrefixTreeMemoryBlockCache::isKindLeafLocked(const Node& node, CacheBlockKind kind) const {

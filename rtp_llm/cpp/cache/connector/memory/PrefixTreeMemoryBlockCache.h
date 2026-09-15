@@ -65,12 +65,13 @@ public:
     MatchResult match(CacheKeyType cache_key, CacheBlockKind kind);
     MatchResult match(CacheKeyType cache_key, CacheBlockKind kind, const std::vector<uint8_t>& required_slot_mask);
     MatchResult matchAndMarkInFlight(CacheKeyType cache_key, CacheBlockKind kind);
-    MatchResult matchAndMarkInFlight(CacheKeyType                 cache_key,
-                                     CacheBlockKind               kind,
-                                     const std::vector<uint8_t>& required_slot_mask);
+    MatchResult
+    matchAndMarkInFlight(CacheKeyType cache_key, CacheBlockKind kind, const std::vector<uint8_t>& required_slot_mask);
 
-    std::pair<bool, std::optional<CacheItem>>
-    putCommitted(CacheKeyType cache_key, const BlockDependency& dependency, const CacheItem& item);
+    std::pair<bool, std::optional<CacheItem>> putCommitted(CacheKeyType           cache_key,
+                                                           const BlockDependency& dependency,
+                                                           const CacheItem&       item,
+                                                           uint64_t               expected_source_generation = 0);
     std::optional<CacheItem> detachIfMatch(CacheKeyType     cache_key,
                                            CacheBlockKind   kind,
                                            CacheBackingType backing_type,

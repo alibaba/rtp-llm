@@ -544,6 +544,9 @@ message MemoryOperationRequestPB {
         oneof src_disk_slot_presence {
             int32 src_disk_slot = 10;
         }
+        uint64 cache_key = 11;
+        reserved 12, 13;
+        reserved "crc_epoch", "src_crc_epoch";
     }
     enum CopyDirection {
         H2D = 0;
@@ -561,10 +564,16 @@ message MemoryOperationRequestPB {
     }
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
+    reserved 3;
+    reserved "crc_version";
+    string trace_id = 4;
+    int64 request_id = 5;
 }
 
 message MemoryOperationResponsePB {
     bool success = 1;
+    reserved 2, 3, 4, 5;
+    reserved "crc_version", "crc_checked_items", "crc_error", "crc_integrity_failure";
 }
 
 message TPWorkerInfoPB {

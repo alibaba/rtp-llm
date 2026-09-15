@@ -34,6 +34,48 @@ test_copts = [
 ] + copts()
 
 cc_test(
+    name = "crc_block_copy_test",
+    srcs = ["CrcBlockCopyTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/models_py/bindings:crc_block_copy",
+        "//rtp_llm/models_py/bindings/cuda:no_block_copy",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    exec_properties = {"gpu": "H20"},
+)
+
+cc_test(
+    name = "memory_async_context_crc_test",
+    srcs = ["MemoryAsyncContextCrcTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:block_pool",
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+)
+
+cc_test(
+    name = "memory_cache_crc_diagnostics_test",
+    srcs = ["KVCacheCrcDiagnosticsTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@havenask//aios/autil:env_util",
+        "@havenask//aios/autil:json",
+        "@havenask//aios/autil:time",
+        "@havenask//aios/kmonitor:kmonitor_client_cpp",
+    ] + torch_deps() + cuda13_torch_link_deps,
+)
+
+cc_test(
     name = "memory_connector_test",
     srcs = [
         "KVCacheMemoryConnectorTest.cc",
@@ -61,6 +103,7 @@ cc_test(
         "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache:kv_cache_allocator_hdr",
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+        "//rtp_llm/cpp/cache/connector/memory/test/mock:test_rpc_service_lib",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/utils:core_utils",
@@ -94,9 +137,11 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps + [
+    deps = [
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
-    ],
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
     env = {},
     exec_properties = {'gpu':'H20'},
 )
@@ -108,9 +153,11 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps + [
+    deps = [
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
-    ],
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
     env = {},
     exec_properties = {'gpu':'H20'},
 )

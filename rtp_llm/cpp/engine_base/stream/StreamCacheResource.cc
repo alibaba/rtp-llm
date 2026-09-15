@@ -41,8 +41,11 @@ private:
 
 class MetaImpl: public Meta {
 public:
-    MetaImpl(bool enable_memory_cache, bool enable_remote_cache, std::string trace_id):
-        enable_memory_cache_(enable_memory_cache), enable_remote_cache_(enable_remote_cache), trace_id_(trace_id) {}
+    MetaImpl(bool enable_memory_cache, bool enable_remote_cache, std::string trace_id, int64_t request_id = 0):
+        enable_memory_cache_(enable_memory_cache),
+        enable_remote_cache_(enable_remote_cache),
+        trace_id_(trace_id),
+        request_id_(request_id) {}
     virtual ~MetaImpl() = default;
 
 public:
@@ -54,6 +57,9 @@ public:
     }
     const std::string& trace_id() const override {
         return trace_id_;
+    }
+    int64_t request_id() const override {
+        return request_id_;
     }
     const std::string& unique_id() const override {
         return unique_id_;
@@ -94,6 +100,7 @@ private:
     bool                 enable_memory_cache_{false};
     bool                 enable_remote_cache_{false};
     std::string          trace_id_;
+    int64_t              request_id_{0};
     std::string          unique_id_ = "";
     std::vector<int64_t> tokens_;  // TODO : get tokens (remote connector)
 };
@@ -476,8 +483,10 @@ bool StreamCacheResource::asyncLoadCache() {
     if (load_cache_once_.exchange(true)) {
         return true;
     }
-    auto meta = std::make_shared<MetaImpl>(
-        reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
+    auto meta              = std::make_shared<MetaImpl>(reuseCache() && enableMemoryCache(),
+                                           reuseCache() && enableRemoteCache(),
+                                           stream_->traceId(),
+                                           stream_->streamId());
     meta->generate_stream_ = stream_;
     meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
@@ -487,69 +496,13 @@ bool StreamCacheResource::asyncLoadCache() {
 
 bool StreamCacheResource::loadCacheDone() {
     if (!load_cache_context_) {
-        return true;  // 没有 context，视为已完成
+        return true;
     }
     if (!load_cache_context_->done()) {
-        return false;  // coordinator 后台线程尚未处理完
+        return false;
     }
-    // 加载完成（无论成功失败），更新 reuse lengths
-    waitLoadCacheDone(load_cache_context_);
-    if (!load_cache_context_->success()) {
-        // 区分匹配失败和传输失败
-        auto      read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
-        bool      should_retry = false;
-        const int max_retry    = resource_context_.load_cache_retry_times;
-        if (read_context && read_context->fusedMatchContext()) {
-            // 检查是否有匹配到的块
-            size_t matched_blocks = 0;
-            for (const auto& match_ctx : read_context->fusedMatchContext()->contexts()) {
-                auto async_match_ctx = std::dynamic_pointer_cast<AsyncMatchContext>(match_ctx);
-                if (async_match_ctx) {
-                    matched_blocks = std::max(matched_blocks, async_match_ctx->matchedBlockCount());
-                }
-            }
-            // 如果匹配到了块（matched_blocks > 0），说明是传输失败，需要重试，否则是匹配失败，不重试
-            if (matched_blocks > 0) {
-                should_retry = true;
-                // 即使传输失败，也更新已匹配到的 reuse lengths
-                updateReuseLengthsFromContext(read_context);
-                RTP_LLM_LOG_WARNING(
-                    "load cache failed (matched %zu blocks but transfer failed), retry count: %d/%d, stream: [%ld]",
-                    matched_blocks,
-                    load_cache_retry_count_,
-                    max_retry,
-                    stream_->streamId());
-            } else {
-                RTP_LLM_LOG_WARNING("load cache failed (no blocks matched), continuing without cache, stream: [%ld]",
-                                    stream_->streamId());
-            }
-        }
-
-        load_cache_context_.reset();
-
-        if (should_retry) {
-            // 传输失败：保持重试逻辑
-            if (load_cache_retry_count_ >= max_retry) {
-                RTP_LLM_LOG_WARNING("load cache failed after %d retries (transfer error), stream: [%ld]",
-                                    load_cache_retry_count_,
-                                    stream_->streamId());
-                stream_->reportEventWithoutLock(StreamEvents::Error,
-                                                ErrorCode::LOAD_CACHE_TIMEOUT,
-                                                "load cache failed after " + std::to_string(max_retry)
-                                                    + " retries (transfer error)");
-                releaseResource();
-                return true;
-            }
-            load_cache_retry_count_++;
-            asyncLoadCache();
-            return false;  // 失败重试
-        } else {
-            // 匹配失败：不重试，继续执行
-            return true;
-        }
-    }
-    load_cache_context_.reset();
-    return true;
+    load_cache_context_->waitDone();
+    return finishLoadCache(std::move(load_cache_context_), true);
 }
 
 // TODO, delete it soon
@@ -657,8 +610,10 @@ void StreamCacheResource::loadCacheSync() {
     if (load_cache_once_.exchange(true)) {
         return;
     }
-    auto meta = std::make_shared<MetaImpl>(
-        reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
+    auto meta              = std::make_shared<MetaImpl>(reuseCache() && enableMemoryCache(),
+                                           reuseCache() && enableRemoteCache(),
+                                           stream_->traceId(),
+                                           stream_->streamId());
     meta->generate_stream_ = stream_;
     meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
@@ -667,34 +622,119 @@ void StreamCacheResource::loadCacheSync() {
         RTP_LLM_PROFILE_SCOPE("asyncLoadCache");
         load_cache_context = resource_context_.cache_manager->asyncLoadCache(connector_context);
     }
-    waitLoadCacheDone(load_cache_context);
+    if (load_cache_context) {
+        load_cache_context->waitDone();
+    }
+    finishLoadCache(std::move(load_cache_context), false);
     // TODO: scheduler will call incrkvblock after load cache, or may lack block on p2p connector
 }
 
-void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context) {
+bool StreamCacheResource::finishLoadCache(std::shared_ptr<AsyncContext> load_context, bool allow_retry) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!load_context) {
-        return;
+        return true;
     }
-    load_context->waitDone();
-    if (!(load_context->success())) {
-        auto error = load_context->errorInfo();
+    if (!load_context->success()) {
+        const auto error = load_context->errorInfo();
         RTP_LLM_LOG_WARNING("load cache done but not success, stream: [%s], error: %s",
                             stream_->streamLogTag().c_str(),
                             error.ToString().c_str());
-        if (error.hasError()) {
-            // loadCacheDone() is called from moveToNext(), which already holds the stream mutex.
-            stream_->reportErrorWithoutLock(error.code(), error.ToString());
+        if (error.code() == ErrorCode::KV_CACHE_REUSE_ERROR) {
+            // Connector copies start after the device prefix, into separately
+            // allocated blocks. Keep that prefix and the destination allocations;
+            // prefill will overwrite the entire untrusted suffix, including any
+            // blocks copied successfully on only a subset of ranks.
+            const int device_reuse_len =
+                batch_kv_cache_resource_->cacheResource(0).deviceReuseBlockNum() * reuseBlockTokens();
+            for (int batch = 0; batch < batch_kv_cache_resource_->batchSize(); ++batch) {
+                auto& resource = batch_kv_cache_resource_->cacheResource(batch);
+                resource.setMemoryReuseBlockNum(0);
+                resource.setRemoteReuseBlockNum(0);
+            }
+            if (auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_context)) {
+                read_context->resource()->setMemoryReuseBlockNum(0);
+                read_context->resource()->setRemoteReuseBlockNum(0);
+            }
+            stream_->setMemoryReuseLength(0);
+            stream_->setRemoteReuseLength(0);
+            stream_->setLocalReuseLength(device_reuse_len);
+            stream_->setInitialReuseLength(device_reuse_len);
+            stream_->setReuseLength(device_reuse_len);
+            stream_->setMtpTokenIndex(device_reuse_len);
+            RTP_LLM_LOG_WARNING("memory cache rejected; recompute suffix, stream: [%s], device_reuse_length: %d",
+                                stream_->streamLogTag().c_str(),
+                                device_reuse_len);
+            return true;
         }
-        return;
+        if (error.hasError()) {
+            // The asynchronous caller already holds the stream mutex.
+            stream_->reportErrorWithoutLock(error.code(), error.ToString());
+            return true;
+        }
+        if (!allow_retry) {
+            return true;
+        }
+        // 区分匹配失败和传输失败
+        auto      read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_context);
+        bool      should_retry = false;
+        const int max_retry    = resource_context_.load_cache_retry_times;
+        if (read_context && read_context->fusedMatchContext()) {
+            // 检查是否有匹配到的块
+            size_t matched_blocks = 0;
+            for (const auto& match_ctx : read_context->fusedMatchContext()->contexts()) {
+                auto async_match_ctx = std::dynamic_pointer_cast<AsyncMatchContext>(match_ctx);
+                if (async_match_ctx) {
+                    matched_blocks = std::max(matched_blocks, async_match_ctx->matchedBlockCount());
+                }
+            }
+            // 如果匹配到了块（matched_blocks > 0），说明是传输失败，需要重试，否则是匹配失败，不重试
+            if (matched_blocks > 0) {
+                should_retry = true;
+                // 即使传输失败，也更新已匹配到的 reuse lengths
+                updateReuseLengthsFromContext(read_context);
+                RTP_LLM_LOG_WARNING(
+                    "load cache failed (matched %zu blocks but transfer failed), retry count: %d/%d, stream: [%ld]",
+                    matched_blocks,
+                    load_cache_retry_count_,
+                    max_retry,
+                    stream_->streamId());
+            } else {
+                RTP_LLM_LOG_WARNING("load cache failed (no blocks matched), continuing without cache, stream: [%ld]",
+                                    stream_->streamId());
+            }
+        }
+
+        load_context.reset();
+
+        if (should_retry) {
+            // 传输失败：保持重试逻辑
+            if (load_cache_retry_count_ >= max_retry) {
+                RTP_LLM_LOG_WARNING("load cache failed after %d retries (transfer error), stream: [%ld]",
+                                    load_cache_retry_count_,
+                                    stream_->streamId());
+                stream_->reportEventWithoutLock(StreamEvents::Error,
+                                                ErrorCode::LOAD_CACHE_TIMEOUT,
+                                                "load cache failed after " + std::to_string(max_retry)
+                                                    + " retries (transfer error)");
+                releaseResource();
+                return true;
+            }
+            load_cache_retry_count_++;
+            asyncLoadCache();
+            return false;  // 失败重试
+        } else {
+            // 匹配失败：不重试，继续执行
+            return true;
+        }
     }
     auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_context);
     if (!read_context) {
         RTP_LLM_LOG_WARNING("load cache success but cast context failed, stream: [%s]",
                             stream_->streamLogTag().c_str());
-        return;
+        return true;
     }
     updateReuseLengthsFromContext(read_context);
+    return true;
 }
 
 void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context) {
@@ -721,7 +761,8 @@ void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<Fu
 std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
     const std::shared_ptr<BatchKVCacheResource>& batch_resource, bool enable_memory_cache, bool enable_remote_cache) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto meta              = std::make_shared<MetaImpl>(enable_memory_cache, enable_remote_cache, stream_->traceId());
+    auto meta =
+        std::make_shared<MetaImpl>(enable_memory_cache, enable_remote_cache, stream_->traceId(), stream_->streamId());
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_resource, meta);
     auto store_context     = resource_context_.cache_manager->asyncStoreCache(connector_context);
     if (resource_context_.write_cache_sync) {

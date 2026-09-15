@@ -60,6 +60,14 @@ bool MemoryAsyncContext::success() const {
     return successLocked();
 }
 
+ErrorInfo MemoryAsyncContext::errorInfo() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!reject_reuse_on_failure_ || !broadcast_result_ || !broadcast_result_->success() || successLocked()) {
+        return ErrorInfo::OkStatus();
+    }
+    return ErrorInfo(ErrorCode::KV_CACHE_REUSE_ERROR, "memory cache reuse failed");
+}
+
 void MemoryAsyncContext::waitDone() {
     std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>> result;
     {
@@ -87,9 +95,17 @@ void MemoryAsyncContext::waitDone() {
         ok            = successLocked();
         done_callback = std::move(done_callback_);
     }
+    auto copy_failure = std::move(copy_failure_callback_);
+    if (!ok && reject_reuse_on_failure_ && result && result->success() && copy_failure) {
+        copy_failure();
+    }
     if (done_callback) {
         done_callback(ok);
     }
+    // Captures own the CPU backing/copy-plan and connector GPU references.
+    // Release them before the scheduler can observe completion and recompute.
+    copy_failure  = {};
+    done_callback = {};
 
     {
         std::lock_guard<std::mutex> lock(mutex_);

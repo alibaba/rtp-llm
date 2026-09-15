@@ -4,6 +4,20 @@ load("//bazel:arch_select.bzl", "torch_deps", "fa_deps")
 package(default_visibility=["//rtp_llm:__subpackages__"])
 
 cc_library(
+    name = "crc_block_copy",
+    srcs = ["CrcBlockCopy.cu"],
+    copts = cuda_copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings:crc_block_copy_hdr",
+        "@nvcomp_cuda13_x86//:crc32",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+        "@local_config_cuda//cuda:cuda_driver",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_host_utils",
     srcs = [
         "cuda_host_utils.cc",
