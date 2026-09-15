@@ -1615,11 +1615,13 @@ class BackendTest(JitCacheTestBase):
 
     def test_runtime_handler_installed_after_start_requests_shutdown(self):
         handlers = {}
+        events = []
 
         class FakeBackendManager:
             instance = None
 
             def __init__(self, _configs, service_draining=None):
+                events.append("backend")
                 self.request_shutdown = mock.Mock()
                 self.serve_forever = mock.Mock()
                 FakeBackendManager.instance = self
@@ -1647,6 +1649,20 @@ class BackendTest(JitCacheTestBase):
                 stack.enter_context(mock.patch.object(backend, name))
             stack.enter_context(
                 mock.patch.object(
+                    backend,
+                    "setup_cuda_device_and_accl_env",
+                    side_effect=lambda *_: events.append("device"),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    backend,
+                    "configure_kernel_tuning",
+                    side_effect=lambda: events.append("tuning"),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
                     backend.signal,
                     "signal",
                     side_effect=lambda s, h: handlers.__setitem__(s, h),
@@ -1655,6 +1671,7 @@ class BackendTest(JitCacheTestBase):
             stack.enter_context(mock.patch.object(backend, "_send_pipe_status", status))
             backend.local_rank_start(None, configs, pipe_writer=object())
         self.assertEqual(status.call_args[0][1], "success")
+        self.assertEqual(events, ["device", "tuning", "backend"])
         handlers[backend.signal.SIGTERM](backend.signal.SIGTERM, None)
         FakeBackendManager.instance.request_shutdown.assert_called_once_with()
         FakeBackendManager.instance.serve_forever.assert_called_once_with()
