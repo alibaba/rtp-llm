@@ -16,6 +16,7 @@ from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.config.response_format_compiler import (
     recompile_reasoning_envelope,
+    update_reasoning_envelope_budget,
     uses_reasoning_envelope,
 )
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
@@ -65,7 +66,9 @@ def _speculative_reserve_tokens(
     Source mapping: ``NormalEngine.cc`` sets ``reserve_step`` to ``3 * gamma``
     for DSpARK and ``gamma + 1`` otherwise; ``GenerateStream.cc`` takes its max
     with the async output-buffer reserve ``2 * gamma + 1``. Keep the branch
-    tests below in sync with those two C++ symbols.
+    tests below in sync with those two C++ symbols; SpeculativeReserveSyncTest
+    pins these branches against the C++ literals, so a C++ change must update
+    that table consciously.
     """
 
     sp_type = (
@@ -103,11 +106,19 @@ _TERMINAL_ROUTE_EXCEPTION_TYPES = frozenset(
     }
 )
 # 8xxx 里的取消与永久性请求错误不是瞬态路由故障：换个 request id 重试会违背取消
-# 语义（CANCELLED / ROUTER_REQUEST_CANCELLED），或把注定失败的请求再提交一遍
-# （MASTER_INVALID_REQUEST 等 BAD_REQUEST）。
+# 语义，或把注定失败的请求再提交一遍（BAD_REQUEST 等类别）。
+# 取消语义按错误码逐一钉住，而不是拉黑整个 CANCELLED 类别：
+# P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED(8317) 与
+# P2P_CONNECTOR_WORKER_READ_CANCELLED(8323) 同为 CANCELLED 类别，但它们是 worker
+# 抢占/重启/连接拆除引起的瞬态读取消，换 request id 重试正是恢复手段。
+_NON_RETRYABLE_ROUTE_EXCEPTION_TYPES = frozenset(
+    {
+        int(ExceptionType.CANCELLED),
+        int(ExceptionType.ROUTER_REQUEST_CANCELLED),
+    }
+)
 _NON_RETRYABLE_ROUTE_CATEGORIES = frozenset(
     {
-        ExceptionCategory.CANCELLED,
         ExceptionCategory.BAD_REQUEST,
         ExceptionCategory.UNSUPPORTED,
         ExceptionCategory.TOO_LONG,
@@ -238,6 +249,8 @@ class BackendRPCServerVisitor:
                 # Cancellation and permanent request errors carry 8xxx codes too,
                 # but they are not transient: a retry under a new request id
                 # would defeat the cancel or re-submit a doomed request.
+                if exception_type in _NON_RETRYABLE_ROUTE_EXCEPTION_TYPES:
+                    return False
                 try:
                     category = ExceptionType(exception_type).category
                 except ValueError:
@@ -672,12 +685,12 @@ class BackendRPCServerVisitor:
                 f"{speculative_reserve}, max_new_tokens is {max_new_tokens}",
             )
 
+        # 空 end 标记只让引擎侧的强制收尾（ThinkModeLogitsProcessor 的
+        # has_think_budget 需要非空 DFA）退化为 no-op，reasoning 语法仍按
+        # max_thinking_tokens 约束思考段，请求照常可服务：与 validate() 以及
+        # ADAPTIVE 空 begin 标记「告警不拒绝」的口径一致，不按输入非法拒绝，
+        # 结束标记长度按 0 计入收敛。
         end_think_token_ids = getattr(config, "end_think_token_ids", None) or []
-        if not end_think_token_ids:
-            raise FtRuntimeException(
-                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                "end_think_token_ids must be non-empty when thinking is enabled",
-            )
 
         max_thinking_tokens = getattr(config, "max_thinking_tokens", None)
         end_tag_len = len(end_think_token_ids)
@@ -692,6 +705,9 @@ class BackendRPCServerVisitor:
                 f"token (generatable_tokens={max_new_tokens})",
             )
         if max_thinking_tokens is not None and max_thinking_tokens > think_budget_cap:
+            # 显式性标记由 endpoint 写在同一个 config 实例上：endpoint 与
+            # visitor 同在 Python 前端进程，trans_input 序列化发生在
+            # _validate_input 之后，标记在这里仍然可读。
             budget_was_explicit = "max_thinking_tokens" in getattr(
                 config, "model_fields_set", set()
             ) or getattr(config, "_max_thinking_tokens_was_explicit", False)
@@ -710,7 +726,11 @@ class BackendRPCServerVisitor:
                     input.prompt_length,
                 )
             config.max_thinking_tokens = think_budget_cap
-            recompile_reasoning_envelope(config)
+            # 预算收敛只改 reasoning 段的 max_tokens 一个标量：默认预算下每个
+            # thinking 请求都会走进来，原地更新避免整包重编译；形状不是编译器
+            # 产物时回退到全量重编译。
+            if not update_reasoning_envelope_budget(config, think_budget_cap):
+                recompile_reasoning_envelope(config)
 
     @torch.inference_mode()
     async def enqueue(

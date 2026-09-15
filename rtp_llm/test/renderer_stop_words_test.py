@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, List
 from unittest import IsolatedAsyncioTestCase, TestCase, main
-from unittest.mock import MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import torch
 
@@ -24,6 +24,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
     RendererParams,
     StreamStatus,
+    _strip_boundary_special_ids,
 )
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
@@ -650,6 +651,19 @@ class EncodeExtraStopWordsTest(TestCase):
 
         self.assertEqual(self.renderer.encode_extra_stop_words(["<|absent|>"]), [])
 
+    def test_strip_boundary_special_ids_does_not_mutate_input(self):
+        """裁剪返回新列表：模块级函数若原地改入参，未来共享列表的调用方会被
+        静默改动。"""
+        tokenizer = Mock()
+        tokenizer.all_special_tokens = ["<s>", "</s>"]
+        tokenizer.convert_tokens_to_ids = Mock(return_value=[0, 2])
+        ids = [0, 9, 2]
+
+        stripped = _strip_boundary_special_ids(tokenizer, "x", ids)
+
+        self.assertEqual([9], stripped)
+        self.assertEqual([0, 9, 2], ids)
+
     def test_falls_back_for_tokenizers_without_add_special_tokens(self):
         # Legacy tokenizers expose encode(text) only. The repo already tolerates
         # this for request stop words; extra stop words must not be stricter.
@@ -1258,6 +1272,34 @@ class ReasoningStatusWithLogprobsTest(IsolatedAsyncioTestCase):
         self.assertEqual(len(statuses), 1)
         self.assertIsInstance(statuses[0], ReasoningToolStreamStatus)
         self.assertIs(statuses[0].reasoning_parser, parser)
+
+    async def test_reasoning_delta_carries_logprobs(self):
+        """logprobs 请求走 reasoning/tool 解析路径时也必须带上 logprobs：解析
+        delta 的构造点与纯文本路径一样填充该字段，不能只活在纯文本分支里。"""
+        renderer = Mock(spec=ReasoningToolBaseRenderer)
+        renderer._extract_reasoning_content = Mock(return_value=("thinking", "rest"))
+        renderer._extract_tool_calls_content = AsyncMock(return_value=(None, "rest"))
+        sentinel = object()
+        renderer._generate_log_probs = AsyncMock(return_value=sentinel)
+        renderer._process_reasoning_and_tool_calls = (
+            ReasoningToolBaseRenderer._process_reasoning_and_tool_calls.__get__(
+                renderer
+            )
+        )
+
+        request = Mock(logprobs=True)
+        status = ReasoningToolStreamStatus(request, Mock(), Mock())
+        status.delta_output_string = "thinking..."
+        output = Mock()
+        output.aux_info.input_len = 1
+        output.aux_info.output_len = 1
+        output.aux_info.reuse_len = 0
+
+        delta = await renderer._process_reasoning_and_tool_calls(status, output, True)
+
+        self.assertIsNotNone(delta)
+        self.assertIs(sentinel, delta.logprobs)
+        self.assertEqual("thinking", delta.output_str.reasoning_content)
 
 
 def _weather_tool() -> GPTToolDefinition:

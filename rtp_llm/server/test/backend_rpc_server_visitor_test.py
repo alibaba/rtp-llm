@@ -1,4 +1,5 @@
 import asyncio
+import os
 import unittest
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.ops import SpeculativeType
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
     get_role_names,
@@ -834,6 +836,125 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["ok"], outputs)
         self.assertEqual(2, client.attempts)
         self.assertEqual([123, 456], client.request_ids)
+
+    async def test_p2p_worker_read_cancelled_stays_retryable(self):
+        """P2P worker 读取消与用户取消同属 CANCELLED 类别，但语义是 worker 抢占/
+        连接拆除引起的瞬态故障：必须仍能换 request id 重试恢复，不能被按类别
+        拉黑。"""
+        for exception_type in (
+            ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED,
+            ExceptionType.P2P_CONNECTOR_WORKER_READ_CANCELLED,
+        ):
+            with self.subTest(exception_type=exception_type):
+                client = _FailingBeforeOutputModelRpcClient(
+                    FtRuntimeException(exception_type, "worker teardown")
+                )
+                visitor = self._visitor(client)
+                request_id_factory = Mock(return_value=456)
+                visitor.set_request_id_factory(request_id_factory)
+
+                stream = await visitor.enqueue(_FakeInput(_FakeGenerateConfig(False)))
+                with self.assertRaises(FtRuntimeException) as ctx:
+                    [output async for output in stream]
+
+                self.assertEqual(exception_type, ctx.exception.exception_type)
+                self.assertEqual(
+                    1 + visitor.pd_route_retry_on_unavailable, client.attempts
+                )
+                request_id_factory.assert_called()
+
+
+class SpeculativeReserveSyncTest(unittest.TestCase):
+    """`_speculative_reserve_tokens` 与 C++ 的同步真值表（防静默漂移）。
+
+    C++ 侧公式（Python 侧无法共享符号，故用绝对数值钉住）：
+      - ``NormalEngine.cc``：DSpARK 时 ``reserve_step_ = 3 * gamma``；
+        其余 ``reserve_step_ = gamma + 1``；无推测时 0。
+      - ``GenerateStream.cc``：异步输出缓冲为 ``2 * gamma + 1``，与上述取 max。
+    任一侧改公式 → 本表失败 → 必须同步另一侧并更新此表。
+    """
+
+    def test_reserve_truth_table(self):
+        from rtp_llm.server.backend_rpc_server_visitor import (
+            _speculative_reserve_tokens,
+        )
+
+        cases = [
+            # (sp_config, stream_async, expected)
+            (None, False, 0),
+            (
+                SimpleNamespace(
+                    model_type="", type=SpeculativeType.MTP, gen_num_per_cycle=3
+                ),
+                False,
+                0,
+            ),
+            (
+                SimpleNamespace(
+                    model_type="mtp", type=SpeculativeType.NONE, gen_num_per_cycle=3
+                ),
+                False,
+                0,
+            ),
+            (
+                SimpleNamespace(
+                    model_type="mtp", type=SpeculativeType.MTP, gen_num_per_cycle=0
+                ),
+                False,
+                1,
+            ),
+            (
+                SimpleNamespace(
+                    model_type="mtp", type=SpeculativeType.MTP, gen_num_per_cycle=3
+                ),
+                False,
+                4,
+            ),
+            (
+                SimpleNamespace(
+                    model_type="mtp", type=SpeculativeType.MTP, gen_num_per_cycle=3
+                ),
+                True,
+                7,
+            ),
+            (
+                SimpleNamespace(
+                    model_type="dspark",
+                    type=SpeculativeType.DSPARK,
+                    gen_num_per_cycle=3,
+                ),
+                False,
+                9,
+            ),
+            (
+                SimpleNamespace(
+                    model_type="dspark",
+                    type=SpeculativeType.DSPARK,
+                    gen_num_per_cycle=3,
+                ),
+                True,
+                9,
+            ),
+            (
+                SimpleNamespace(
+                    model_type="dspark",
+                    type=SpeculativeType.DSPARK,
+                    gen_num_per_cycle=0,
+                ),
+                True,
+                0,
+            ),
+        ]
+        for sp_config, stream_async, expected in cases:
+            with self.subTest(sp_config=sp_config, stream_async=stream_async):
+                env = {"RTP_LLM_STREAM_ASYNC": "1" if stream_async else "0"}
+                with patch.dict(os.environ, env):
+                    self.assertEqual(
+                        _speculative_reserve_tokens(sp_config),
+                        expected,
+                        "speculative reserve drifted from NormalEngine.cc/"
+                        "GenerateStream.cc literals",
+                    )
 
 
 if __name__ == "__main__":

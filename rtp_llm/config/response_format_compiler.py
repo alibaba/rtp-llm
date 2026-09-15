@@ -315,6 +315,48 @@ def recompile_reasoning_envelope(config: Any) -> None:
     prepare_response_format(config, reasoning_format=reasoning_format)
 
 
+def update_reasoning_envelope_budget(config: Any, budget: int) -> bool:
+    """Patch the installed reasoning envelope's budget in place.
+
+    The boundary clamp changes exactly one scalar of the compiled grammar (the
+    reasoning segment's ``max_tokens``). Rebuilding the whole envelope for a
+    two-token difference is per-request overhead, so patch the installed
+    structural_tag instead; the scalar is not part of normalization, so the
+    grammar stays engine-ready. Returns False when the installed envelope is
+    not the compiler's shape, and the caller falls back to a full recompile.
+    """
+
+    value = getattr(config, "structural_tag", None)
+    if not isinstance(value, dict):
+        return False
+    node = _find_reasoning_budget_node(value)
+    if node is None:
+        return False
+    node["max_tokens"] = budget
+    return True
+
+
+def _find_reasoning_budget_node(node: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(node, dict):
+        content = node.get("content")
+        if (
+            node.get("type") == "tag"
+            and isinstance(content, dict)
+            and "max_tokens" in content
+        ):
+            return content
+        children = list(node.values())
+    elif isinstance(node, list):
+        children = node
+    else:
+        return None
+    for child in children:
+        found = _find_reasoning_budget_node(child)
+        if found is not None:
+            return found
+    return None
+
+
 def validate_engine_ready(config: Any) -> None:
     """Read-only grammar assertion used at the RPC boundary."""
 

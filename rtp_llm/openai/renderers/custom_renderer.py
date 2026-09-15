@@ -106,7 +106,10 @@ def _strip_boundary_special_ids(tokenizer, word: str, ids: List[int]) -> List[in
     旧式 encode() 默认会追加 BOS/EOS，包着特殊 token 的序列在生成输出中
     永不出现，注册成停止序列等于静默失效。裁剪时至少保留一个 id，避免把
     <|endoftext|> 这类本身就是特殊 token 的停止词裁空。
+
+    返回新列表，不修改入参：调用方可能共享传入的 ids。
     """
+    ids = list(ids)
     if len(ids) <= 1:
         return ids
     special_tokens = getattr(tokenizer, "all_special_tokens", None)

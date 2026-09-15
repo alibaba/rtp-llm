@@ -1,7 +1,9 @@
 import copy
 import hashlib
 import logging
+import threading
 import time
+from collections import OrderedDict
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
@@ -105,35 +107,47 @@ _MAX_DIVERGE_DEPTH = 8
 _SANITIZE_WARN_INTERVAL = 300  # seconds
 _last_sanitize_warn_time: float = 0.0
 _last_downgrade_warn_time: float = 0.0
-_last_adaptive_anchor_warn_time: float = 0.0
+# ADAPTIVE 缺 begin 标记按 (think_start_tag, think_end_tag) 去重而不是进程级时间
+# 窗口：该告警由模型配置决定，多配置部署下一个配置的告警不应抑制另一个，消息里
+# 也要带上实际 tag 才能定位该改哪份配置。
+_ADAPTIVE_ANCHOR_WARN_CACHE_SIZE = 128
+_adaptive_anchor_warned_keys: "OrderedDict[tuple, None]" = OrderedDict()
+_adaptive_anchor_warn_lock = threading.Lock()
 
 
 def _reset_sanitize_warn_state():
     """Reset rate-limiting state for testing. NOT for production use."""
     global _last_sanitize_warn_time, _last_downgrade_warn_time
-    global _last_adaptive_anchor_warn_time
     _last_sanitize_warn_time = 0.0
     _last_downgrade_warn_time = 0.0
-    _last_adaptive_anchor_warn_time = 0.0
+    _adaptive_anchor_warned_keys.clear()
 
 
-def _warn_adaptive_without_begin_think_ids():
+def _warn_adaptive_without_begin_think_ids(
+    think_start_tag: Optional[str] = None, think_end_tag: Optional[str] = None
+) -> None:
     """ADAPTIVE 缺 begin_think_token_ids 只告警不拦截。
 
     引擎侧 firstTokenOrInvalid() 对空 vector 返回 invalid，think 起始 token 的
     mask/bitmask 操作退化为 no-op；endpoint 也无法凭 prompt 锚点把请求升级为
     ENABLED。即请求仍可服务，只是失去 think 起始约束，因此不能按输入非法拒绝。
     """
-    global _last_adaptive_anchor_warn_time
-    now = time.monotonic()
-    if now - _last_adaptive_anchor_warn_time < _SANITIZE_WARN_INTERVAL:
-        return
-    _last_adaptive_anchor_warn_time = now
+    key = (think_start_tag, think_end_tag)
+    with _adaptive_anchor_warn_lock:
+        if key in _adaptive_anchor_warned_keys:
+            _adaptive_anchor_warned_keys.move_to_end(key)
+            return
+        _adaptive_anchor_warned_keys[key] = None
+        if len(_adaptive_anchor_warned_keys) > _ADAPTIVE_ANCHOR_WARN_CACHE_SIZE:
+            _adaptive_anchor_warned_keys.popitem(last=False)
     logging.getLogger(__name__).warning(
-        "thinking_mode=ADAPTIVE but begin_think_token_ids is empty: the engine cannot "
-        "bias the first token toward the think start tag and the prompt anchor cannot "
-        "upgrade the request to ENABLED. Set --think_start_tag or use a template that "
-        "injects the anchor."
+        "thinking_mode=ADAPTIVE but begin_think_token_ids is empty "
+        "(think_start_tag=%r, think_end_tag=%r): the engine cannot bias the first "
+        "token toward the think start tag and the prompt anchor cannot upgrade the "
+        "request to ENABLED. Set --think_start_tag or use a template that injects "
+        "the anchor.",
+        think_start_tag,
+        think_end_tag,
     )
 
 
@@ -654,6 +668,12 @@ class GenerateConfig(BaseModel):
                     think_start_tag, add_special_tokens=False
                 )
 
+            if not self.begin_think_token_ids:
+                _warn_adaptive_without_begin_think_ids(
+                    generate_env_config.think_start_tag,
+                    generate_env_config.think_end_tag,
+                )
+
             if not self.end_think_token_ids:
                 end_think_token_id = generate_env_config.think_end_token_id
                 if end_think_token_id != -1:
@@ -868,8 +888,8 @@ class GenerateConfig(BaseModel):
                     is_list_positive_integer(self.begin_think_token_ids),
                     f"begin_think_token_ids {self.begin_think_token_ids} is wrong data type",
                 )
-                if not self.begin_think_token_ids:
-                    _warn_adaptive_without_begin_think_ids()
+                # 空 begin 标记的告警需要 think tag 上下文，在 add_thinking_params
+                # 派生标记处触发（那里才有 generate_env_config）。
 
             calculate_loss_list = [0, 1, 2]
             check_with_info(

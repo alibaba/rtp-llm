@@ -43,7 +43,7 @@ from rtp_llm.openai.api_datatype import (
     RoleEnum,
     ToolCall,
 )
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint, _request_value_digest
 from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderers import custom_renderer
 from rtp_llm.openai.renderers.chatglm45_renderer import ChatGlm45Renderer
@@ -3378,7 +3378,11 @@ class EnabledWithoutAnchorWarningTest(TestCase):
 
         cache = renderer._enabled_without_anchor_warned_keys
         self.assertEqual(len(cache), 128)
-        self.assertNotIn("template-159", repr(tuple(cache)))
+        # 去重键存的是模板摘要（bytes），断言必须落在摘要上：最新模板在缓存里、
+        # 最旧模板已被 LRU 淘汰，才能钉住淘汰语义。
+        template_digests = [key[1] for key in cache]
+        self.assertIn(_request_value_digest("template-159"), template_digests)
+        self.assertNotIn(_request_value_digest("template-0"), template_digests)
 
 
 if __name__ == "__main__":

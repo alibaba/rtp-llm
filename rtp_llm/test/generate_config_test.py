@@ -24,6 +24,7 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.config.response_format import ResponseFormat, prompt_ends_with_think_anchor
 from rtp_llm.config.response_format_compiler import (
     ReasoningFormat,
+    recompile_reasoning_envelope,
     restore_final_constraint,
     validate_engine_ready,
 )
@@ -570,6 +571,46 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertTrue(config.in_think_mode)
         self.assertTrue(config._max_thinking_tokens_was_explicit)
 
+    def test_endpoint_explicit_budget_marker_reaches_validate_input(self):
+        """endpoint 写入的显式性标记必须被 _validate_input 读到：两者是同一个
+        前端进程内的同一个 config 实例，trans_input 序列化发生在其后；显式预算
+        被收敛时必须能看到 'exceeds the safe thinking budget' 告警。"""
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = 102
+        request = ChatCompletionRequest(
+            messages=[],
+            max_tokens=100,
+            thinking_budget=32000,
+            enable_thinking=True,
+        )
+        config = self._extract_openai_generation_config(request, generate_env_config)
+        self.assertTrue(config._max_thinking_tokens_was_explicit)
+
+        visitor = Mock()
+        visitor.max_seq_len = 100
+        visitor.sp_config = None
+        visitor._validate_input = BackendRPCServerVisitor._validate_input.__get__(
+            visitor
+        )
+        generate_input = GenerateInput(
+            request_id=0,
+            token_ids=torch.zeros(1, 40, dtype=torch.int),
+            mm_inputs=[],
+            generate_config=config,
+        )
+
+        with patch("rtp_llm.server.backend_rpc_server_visitor.logging") as logging_mock:
+            visitor._validate_input(generate_input)
+
+        self.assertEqual(config.max_thinking_tokens, 58)
+        self.assertTrue(
+            any(
+                "exceeds the safe thinking budget" in str(call)
+                for call in logging_mock.warning.call_args_list
+            )
+        )
+
     def test_openai_max_completion_tokens_respects_max_tokens_total_cap(self):
         generate_env_config = GenerateEnvConfig()
         generate_env_config.think_mode = 1
@@ -925,19 +966,56 @@ class OpenaiGenerateConfigTest(TestCase):
 
     def test_adaptive_thinking_without_begin_token_ids_warns(self):
         """ADAPTIVE 靠 begin 标记探测思考是否开始；标记为空时引擎侧的 think 起始
-        约束退化为 no-op，请求仍可服务，因此只告警而不拒绝，也不改配置。"""
+        约束退化为 no-op，请求仍可服务，因此只告警而不拒绝，也不改配置。
+
+        告警在派生 begin 标记处触发（那里才有 think tag 上下文）；没有 tokenizer
+        时 encode 不出标记，是这条兜底告警的现实触发路径。"""
+        env = GenerateEnvConfig()
+        env.think_start_tag = "<think>"
+        env.think_end_token_id = 102
         config = GenerateConfig(
-            thinking_mode=ThinkingMode.ADAPTIVE,
-            max_thinking_tokens=100,
-            end_think_token_ids=[102],
+            thinking_mode=ThinkingMode.ADAPTIVE, max_thinking_tokens=100
         )
+
         _reset_sanitize_warn_state()
         with self.assertLogs("rtp_llm.config.generate_config", level="WARNING") as logs:
-            config.validate()
+            config.add_thinking_params(None, env)
+
         self.assertTrue(
             any("begin_think_token_ids is empty" in line for line in logs.output)
         )
+        self.assertTrue(any("<think>" in line for line in logs.output))
         self.assertEqual(config.thinking_mode, ThinkingMode.ADAPTIVE)
+        self.assertEqual(config.begin_think_token_ids, [])
+
+    def test_adaptive_warning_dedupes_per_tag_config(self):
+        """告警按 (think_start_tag, think_end_tag) 去重：同一配置只提醒一次，
+        不同 tag 的配置互不抑制（进程级时间窗口会让后一个配置的告警消失），
+        运维也能从消息里的 tag 定位该改哪份配置。"""
+        env_a = GenerateEnvConfig()
+        env_a.think_start_tag = "<think>"
+        env_a.think_end_token_id = 102
+        env_b = GenerateEnvConfig()
+        env_b.think_start_tag = "<reasoning>"
+        env_b.think_end_token_id = 102
+
+        def make_config():
+            return GenerateConfig(
+                thinking_mode=ThinkingMode.ADAPTIVE, max_thinking_tokens=100
+            )
+
+        _reset_sanitize_warn_state()
+        with self.assertLogs("rtp_llm.config.generate_config", level="WARNING") as logs:
+            make_config().add_thinking_params(None, env_a)
+            make_config().add_thinking_params(None, env_a)
+            make_config().add_thinking_params(None, env_b)
+
+        warnings = [
+            line for line in logs.output if "begin_think_token_ids is empty" in line
+        ]
+        self.assertEqual(2, len(warnings))
+        self.assertIn("<think>", warnings[0])
+        self.assertIn("<reasoning>", warnings[1])
 
     def test_thinking_not_adaptive_tolerates_empty_begin_token_ids(self):
         # ENABLED 不依赖 begin 标记（R1 风格模型无锚点也能 think），不得被误伤；
@@ -1925,16 +2003,16 @@ class MaxThinkingTokensClampTest(TestCase):
         self.assertEqual(ctx.exception.exception_type, ExceptionType.LONG_PROMPT_ERROR)
         self.assertIn("cannot fit", str(ctx.exception))
 
-    def test_enabled_thinking_requires_end_token_ids(self):
+    def test_enabled_thinking_without_end_tag_stays_serviceable(self):
+        """空 end 标记只让引擎侧强制收尾（has_think_budget 需要非空 DFA）退化
+        为 no-op，reasoning 语法仍按预算约束思考段：请求照常服务、不按输入非法
+        拒绝，结束标记长度按 0 计入收敛。"""
         generate_input = self._make_input(end_think_token_ids=[])
 
-        with self.assertRaises(FtRuntimeException) as ctx:
-            self.visitor._validate_input(generate_input)
+        self.visitor._validate_input(generate_input)
 
-        self.assertEqual(
-            ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
-        )
-        self.assertIn("end_think_token_ids", str(ctx.exception))
+        # room = 60，结束标记长度未知按 0 计，再为 EOS/最终内容留 1 个 token。
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 59)
 
     def test_clamp_rebuilds_the_structural_reasoning_budget(self):
         generate_input = self._make_input(end_think_token_ids=[101, 102])
@@ -1955,6 +2033,67 @@ class MaxThinkingTokensClampTest(TestCase):
         self.assertEqual(original_budget, 32000)
         self.assertEqual(config.max_thinking_tokens, 57)
         self.assertEqual(rebuilt_budget, 57)
+
+    def test_clamp_patches_the_envelope_without_recompiling(self):
+        """默认预算下每个 thinking 请求都会收敛一次预算：只改 reasoning 段的
+        max_tokens 一个标量，不应整包重编译语法。"""
+        generate_input = self._make_input(end_think_token_ids=[101, 102])
+        config = generate_input.generate_config
+        config.thinking_mode = ThinkingMode.ENABLED
+        config.finalize_response_format(
+            reasoning_format=ReasoningFormat(tag_begin="", tag_end="</think>")
+        )
+
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.recompile_reasoning_envelope"
+        ) as recompile_mock:
+            self.visitor._validate_input(generate_input)
+
+        recompile_mock.assert_not_called()
+        self.assertEqual(
+            config.structural_tag["format"]["elements"][0]["content"]["max_tokens"],
+            57,
+        )
+
+    def test_in_place_budget_update_matches_full_recompile(self):
+        """原地更新与全量重编译必须产出同一份语法：原地路径只在预算标量上不同。"""
+
+        def build():
+            generate_input = self._make_input(end_think_token_ids=[101, 102])
+            config = generate_input.generate_config
+            config.thinking_mode = ThinkingMode.ENABLED
+            config.finalize_response_format(
+                reasoning_format=ReasoningFormat(tag_begin="", tag_end="</think>")
+            )
+            return generate_input, config
+
+        generate_input, config = build()
+        self.visitor._validate_input(generate_input)
+
+        _, recompiled = build()
+        recompiled.max_thinking_tokens = config.max_thinking_tokens
+        recompile_reasoning_envelope(recompiled)
+
+        self.assertEqual(config.structural_tag, recompiled.structural_tag)
+
+    def test_unknown_envelope_shape_falls_back_to_full_recompile(self):
+        """原地更新认不出语法形状时必须回退全量重编译，不能静默漏改预算。"""
+        generate_input = self._make_input(end_think_token_ids=[101])
+        config = generate_input.generate_config
+        config.thinking_mode = ThinkingMode.ENABLED
+        config.finalize_response_format(
+            reasoning_format=ReasoningFormat(tag_begin="", tag_end="</think>")
+        )
+
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.update_reasoning_envelope_budget",
+            return_value=False,
+        ), patch(
+            "rtp_llm.server.backend_rpc_server_visitor.recompile_reasoning_envelope"
+        ) as recompile_mock:
+            self.visitor._validate_input(generate_input)
+
+        recompile_mock.assert_called_once_with(config)
 
     def test_adaptive_reasoning_grammar_is_clamped_and_rebuilt(self):
         generate_input = self._make_input(
