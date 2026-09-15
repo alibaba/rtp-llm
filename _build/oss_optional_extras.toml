@@ -28,6 +28,9 @@ rocm = [
     # Keep AITER aligned with requirements_rocm.txt and its FlyDSL 0.3.1
     # dependency so uv can resolve the Python-native ROCm environment.
     "aiter @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/aiter-0.1.21.dev80%2Bg987203ba5.d20260825-cp310-cp310-linux_x86_64.whl",
+    # Match the prebuilt AITER tensor registry and the Bazel ROCm lockfile.
+    # pybind11 3.1 uses a different internals ABI for newly JIT-built modules.
+    "pybind11==3.0.1",
     # FLA kernels import FlyDSL directly, so do not rely on AITER to install it
     # transitively.
     "flydsl==0.3.1",

@@ -321,36 +321,8 @@ def _run_moriep_correctness(
         _cleanup_dist()
 
 
-def _is_fp8_ocp_supported() -> bool:
-    """Check whether the current GPU / ROCm stack supports FP8 OCP.
-
-    On architectures like gfx942, ``HIP_FP8_TYPE_OCP`` is not defined, so
-    mori never compiles the ``*_fp8_ocp`` kernels.  Running a dispatch with
-    ``torch.float8_e4m3fn`` would fail with
-    ``HIP error 500: hipModuleGetFunction(EpDispatchIntraNodeKernel_fp8_ocp)``.
-    """
-    import subprocess
-
-    result = subprocess.run(
-        ["/opt/rocm/bin/hipcc", "-dM", "-E", "-x", "c", "/dev/null"],
-        capture_output=True,
-        text=True,
-    )
-    return "HIP_FP8_TYPE_OCP" in result.stdout
-
-
-_FP8_OCP_SUPPORTED: bool | None = None
-
-
-def _fp8_ocp_supported() -> bool:
-    global _FP8_OCP_SUPPORTED
-    if _FP8_OCP_SUPPORTED is None:
-        _FP8_OCP_SUPPORTED = _is_fp8_ocp_supported()
-    return _FP8_OCP_SUPPORTED
-
-
 # ---------------------------------------------------------------------------
-# Test cases: world_size = 2, 4, 8, data_type = bf16, fp8_e4m3fn, num_tokens = 128, 4096, 8192, use_external_inp_buf = True, False
+# BF16 and the device-native FP8 format, with internal and external input buffers.
 # ---------------------------------------------------------------------------
 
 
@@ -372,10 +344,6 @@ class MoriEPWrapperIntegrationTest(unittest.TestCase):
         if torch.cuda.device_count() < n:
             self.skipTest(f"Need at least {n} CUDA devices")
 
-    def _require_fp8_ocp(self):
-        if not _fp8_ocp_supported():
-            self.skipTest("FP8 OCP not supported on this GPU")
-
     def _run(
         self,
         world_size: int,
@@ -385,8 +353,6 @@ class MoriEPWrapperIntegrationTest(unittest.TestCase):
     ):
         self._require_gpus(world_size)
         self._require_mori()
-        if data_type == torch.float8_e4m3fn:
-            self._require_fp8_ocp()
         port = _get_free_port()
         mp.spawn(
             _run_moriep_correctness,
@@ -402,11 +368,14 @@ class MoriEPWrapperIntegrationTest(unittest.TestCase):
         )
 
     _world_size_list = [2]
-    _dtype_list = [torch.bfloat16, torch.float8_e4m3fn]
     _max_inp_token_per_rank_list = [128]
 
     def test_dispatch_combine_correctness(self):
-        for dtype in self._dtype_list:
+        from aiter import dtypes
+
+        # gfx942 uses FNUZ; OCP is the native FP8 format on gfx950.
+        # Exercise both BF16 and FP8 on the selected hardware.
+        for dtype in (torch.bfloat16, dtypes.fp8):
             for ws in self._world_size_list:
                 for max_inp_token_per_rank in self._max_inp_token_per_rank_list:
                     for use_external_inp_buf in [True, False]:

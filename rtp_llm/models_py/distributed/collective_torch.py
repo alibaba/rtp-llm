@@ -597,10 +597,12 @@ def destroy_distributed_environment():
 
     # Release MoriEP singleton resources before destroying process groups so
     # subsequent re-initialization starts from a clean state.
+    moriep_initialized = False
     try:
         from rtp_llm.models_py.distributed.moriep_wrapper import MoriEPWrapper
 
-        if MoriEPWrapper.is_initialized():
+        moriep_initialized = MoriEPWrapper.is_initialized()
+        if moriep_initialized:
             instance = MoriEPWrapper.get_instance()
             if instance is not None:
                 instance.reset_op()
@@ -613,7 +615,12 @@ def destroy_distributed_environment():
     try:
         import mori  # type: ignore
 
-        if hasattr(mori, "shmem") and hasattr(mori.shmem, "shmem_finalize"):
+        # MORI aborts in native code if finalize runs without a matching init.
+        if (
+            moriep_initialized
+            and hasattr(mori, "shmem")
+            and hasattr(mori.shmem, "shmem_finalize")
+        ):
             mori.shmem.shmem_finalize()
     except ImportError:
         pass

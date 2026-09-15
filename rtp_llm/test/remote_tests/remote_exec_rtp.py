@@ -505,6 +505,18 @@ def build_remote_setup_command(rootdir: Path, *, setup_env: Optional[dict] = Non
         "ls -lh rtp_llm/libs/libth_transformer_config.so "
         "rtp_llm/libs/libth_transformer.so "
         "rtp_llm/libs/librtp_compute_ops.so 2>/dev/null || true; "
+        "if [ -d /opt/rocm ] && [ -f _build/rocm_jit.py ]; then "
+        '  echo ">>>PHASE:rocm_jit_start $(date +%s)"; '
+        "  python -m _build.rocm_jit & RJ_PID=$!; "
+        '  (while kill -0 "$RJ_PID" 2>/dev/null; do '
+        '    if [ -n "${RTP_REMOTE_HEARTBEAT_FILE:-}" ]; then '
+        '      printf \'%s %s\\n\' "$(date +%s)" rocm_jit_active '
+        '        >> "$RTP_REMOTE_HEARTBEAT_FILE" 2>/dev/null || true; '
+        "    fi; sleep 5; done) & RJ_HB_PID=$!; "
+        '  wait "$RJ_PID"; RJ_RC=$?; wait "$RJ_HB_PID" 2>/dev/null || true; '
+        '  if [ "$RJ_RC" -ne 0 ]; then exit "$RJ_RC"; fi; '
+        '  echo ">>>PHASE:rocm_jit_done $(date +%s)"; '
+        "fi; "
     )
 
 

@@ -730,8 +730,8 @@ _CUDA129_TEST_BAZEL_STAGED_OUTPUTS = [
 _ROCM_TEST_BAZEL_STAGED_OUTPUTS = [
     (
         _STAGED_OUTPUT_TEST,
-        "//rtp_llm/models_py/bindings/rocm/ops/tests:beam_search_op_test",
-        (("beam_search_op_test", "test/rocm_beam_search_op_test"),),
+        "//rtp_llm/models_py/bindings/rocm/ops/tests:beam_search_op_test_bin",
+        (("beam_search_op_test_bin", "test/rocm_beam_search_op_test"),),
     ),
 ]
 

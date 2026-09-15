@@ -125,6 +125,11 @@ class BuildPackagingContractTest(TestCase):
             "Python-native metadata must not contain the invalid amd_smi.tar direct reference",
         )
         self.assertEqual(
+            str(requirements["pybind11"].specifier),
+            "==3.0.1",
+            "AITER JIT modules must share the prebuilt tensor registry ABI",
+        )
+        self.assertEqual(
             str(requirements["flydsl"].specifier),
             "==0.3.1",
             "FLA kernels require an explicit FlyDSL dependency",
@@ -576,6 +581,14 @@ class BuildPackagingContractTest(TestCase):
             "//rtp_llm/cpp/cuda_graph/tests:test_cuda_graph_runner",
             [entry[1] for entry in staged],
         )
+        self.assertIn(
+            (
+                "test",
+                "//rtp_llm/models_py/bindings/rocm/ops/tests:beam_search_op_test_bin",
+                (("beam_search_op_test_bin", "test/rocm_beam_search_op_test"),),
+            ),
+            staged,
+        )
 
     def test_dynamic_version_uses_release_version(self):
         setup_module = _load_setup_module()
@@ -648,7 +661,15 @@ class BuildPackagingContractTest(TestCase):
         internal_overlay = PROJECT_ROOT / "internal_source" / "pyproject_internal.toml"
         if internal_overlay.exists():
             with open(internal_overlay, "rb") as f:
-                internal_extras = tomllib.load(f)["project"]["optional-dependencies"]
+                internal_config = tomllib.load(f)
+            if "project" not in internal_config:
+                # OSS CI retains only dispatch configuration after stripping
+                # the internal package and its dependency overlay.
+                self.assertEqual(set(internal_config), {"tool"})
+                self.assertEqual(set(internal_config["tool"]), {"rtp-llm"})
+                self.assertEqual(set(internal_config["tool"]["rtp-llm"]), {"remote"})
+                return
+            internal_extras = internal_config["project"]["optional-dependencies"]
             internal_pins = [
                 req
                 for req in internal_extras["cuda12_9"]
@@ -681,6 +702,16 @@ class BuildPackagingContractTest(TestCase):
         profiles = pyproject["tool"]["rtp_llm"]["pytest_ci"]["profiles"]
         profile = profiles["py_ut_amd"]
         expected_paths = [
+            "rtp_llm/model_loader/test/test_inline_fp8_quant.py",
+            "rtp_llm/models_py/modules/factory/fused_moe/defs/test/fused_moe_allreduce_contract_test.py",
+            "rtp_llm/models_py/triton_kernels/fla/test/test_gdn_decode.py",
+            "rtp_llm/models_py/triton_kernels/fla/test/test_flydsl_chunk_gdn_shape_gate.py",
+            "rtp_llm/models_py/triton_kernels/fla/test/test_l2norm.py",
+            "rtp_llm/models_py/triton_kernels/fla/test/test_chunk_prefill.py",
+            "rtp_llm/models_py/triton_kernels/fla/test/test_gdn_block_prefill.py",
+            "rtp_llm/models_py/triton_kernels/moe/test/test_remap_local_ids.py",
+            "rtp_llm/models_py/model_desc/test/generic_moe_allreduce_test.py",
+            "rtp_llm/models_py/bindings/rocm/ops/tests/test_rocm_beam_search_op.py",
             "rtp_llm/models_py/modules/base/rocm/test/",
             "rtp_llm/models_py/modules/factory/attention/rocm_impl/test/",
             "rtp_llm/models_py/modules/factory/fused_moe/impl/rocm/test/",
@@ -734,7 +765,7 @@ class BuildPackagingContractTest(TestCase):
             "py_ut_sm9x": 416,
             "py_ut_sm100": 3,
             "py_ut_sm100_arm": 104,
-            "py_ut_amd": 127,
+            "py_ut_amd": 286,
             "py_ut_frontend": 63,
         }.items():
             self.assertEqual(profiles[name].get("expected_count"), expected_count)

@@ -292,11 +292,17 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         server = GracefulShutdownServer(Config(lambda scope: None))
         server.set_server(FakeFrontendServer(), manager, pre_stop_drain_seconds=0.01)
 
-        server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
-        self.assertTrue(manager.is_unavailable())
-        self.assertFalse(manager.is_draining())
-        self.assertFalse(server.should_exit)
-        self.assertTrue(self.wait_until(lambda: server.should_exit))
+        with patch("rtp_llm.frontend.frontend_app.threading.Timer") as timer_factory:
+            server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
+            self.assertTrue(manager.is_unavailable())
+            self.assertFalse(manager.is_draining())
+            self.assertFalse(server.should_exit)
+            timer_factory.return_value.start.assert_called_once_with()
+            interval, callback = timer_factory.call_args.args
+            self.assertGreater(interval, 0)
+            self.assertLessEqual(interval, 0.01)
+            callback(*timer_factory.call_args.kwargs["args"])
+            timer_factory.return_value.cancel.assert_called_once_with()
 
         self.assertTrue(manager.is_unavailable())
         self.assertTrue(manager.is_draining())

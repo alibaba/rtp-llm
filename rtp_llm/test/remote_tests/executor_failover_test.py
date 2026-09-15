@@ -1079,6 +1079,10 @@ def test_remote_setup_and_pytest_keep_heartbeat_alive_during_long_work(tmp_path)
     assert "pip_install_active" in command
     assert 'wait "$PV_PID"; PV_RC=$?' in command
     assert 'OUT=$(cat logs/prepare_venv.out)' in command
+    assert "python -m _build.rocm_jit & RJ_PID=$!" in command
+    assert "rocm_jit_active" in command
+    assert 'wait "$RJ_PID"; RJ_RC=$?' in command
+    assert 'if [ "$RJ_RC" -ne 0 ]; then exit "$RJ_RC"; fi;' in command
     assert subprocess.run(
         ["bash", "-n"], input=command, text=True, capture_output=True, check=False
     ).returncode == 0

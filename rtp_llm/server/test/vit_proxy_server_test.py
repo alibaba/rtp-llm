@@ -818,10 +818,11 @@ class VitProxyRpcServerForwardingTest(TestCase):
         self.assertEqual(server.load_balancer.get_alive_worker_addresses(), ["live"])
 
     @patch(
-        "rtp_llm.server.vit_proxy_server.time.monotonic",
-        side_effect=[100.0, 100.0, 103.0],
+        "rtp_llm.server.vit_proxy_server.time",
+        wraps=time,
     )
-    def test_forwarding_retries_share_one_timeout_budget(self, _):
+    def test_forwarding_retries_share_one_timeout_budget(self, clock):
+        clock.monotonic.side_effect = [100.0, 100.0, 103.0]
         failed_stub = MagicMock()
         failed_stub.RemoteMultimodalEmbedding.side_effect = RpcUnavailable()
         live_stub = MagicMock()
@@ -840,10 +841,11 @@ class VitProxyRpcServerForwardingTest(TestCase):
         )
 
     @patch(
-        "rtp_llm.server.vit_proxy_server.time.monotonic",
-        side_effect=[100.0, 100.0, 106.0],
+        "rtp_llm.server.vit_proxy_server.time",
+        wraps=time,
     )
-    def test_forwarding_stops_retry_when_timeout_budget_is_exhausted(self, _):
+    def test_forwarding_stops_retry_when_timeout_budget_is_exhausted(self, clock):
+        clock.monotonic.side_effect = [100.0, 100.0, 106.0]
         failed_stub = MagicMock()
         failed_stub.RemoteMultimodalEmbedding.side_effect = RpcUnavailable()
         live_stub = MagicMock()
