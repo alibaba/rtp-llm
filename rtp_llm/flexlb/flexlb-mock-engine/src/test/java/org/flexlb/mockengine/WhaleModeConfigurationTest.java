@@ -158,6 +158,7 @@ class WhaleModeConfigurationTest {
                     .setRequestId(42).addAllTokenIds(java.util.Collections.nCopies(513, 123))
                     .setGenerateConfig(org.flexlb.engine.grpc.EngineRpcService.GenerateConfigPB.newBuilder()
                             .setMaxNewTokens(eos ? 393216 : 8).setMinNewTokens(8)
+                            .setReuseCache(true).setEnableDeviceCache(true).setEnableMemoryCache(true)
                             .addRoleAddrs(org.flexlb.engine.grpc.EngineRpcService.RoleAddrPB.newBuilder()
                                     .setRole(org.flexlb.engine.grpc.EngineRpcService.RoleAddrPB.RoleType.DECODE)
                                     .setRoleStr("DECODE").setIp(d.getHost()).setGrpcPort(port + 1)));

@@ -313,6 +313,7 @@ class DirectPrefillCoalescingTest {
         EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
                 .setRequestId(requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
+                        .setReuseCache(true).setEnableDeviceCache(true)
                         .setMaxNewTokens(1)
                         .build());
         for (int token = 0; token < inputTokens; token++) {
