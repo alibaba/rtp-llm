@@ -10,6 +10,23 @@ from rtp_llm.ops.compute_ops import KVCache
 from rtp_llm.utils.model_weight import W
 
 
+def _mm_supports_out_dtype() -> bool:
+    """Whether ``torch.mm`` accepts ``out_dtype`` (the ``aten::mm.dtype``
+    overload, added in torch 2.8). Older torch releases raise ``TypeError`` for
+    that keyword, so the capability has to be probed instead of assumed."""
+    try:
+        return "dtype" in torch.ops.aten.mm.overloads()
+    except Exception:
+        return False
+
+
+_MM_SUPPORTS_OUT_DTYPE = _mm_supports_out_dtype()
+
+# Row block of the fp32 head-gate projection: it bounds how many activation rows
+# are staged in fp32 at once instead of widening the whole activation.
+_HEAD_GATE_FP32_ROW_CHUNK = 4096
+
+
 class Indexer(nn.Module):
     """
     Indexer for DeepSeek-V3.2 DSA (DeepSeek Sparse Attention) mechanism.
@@ -101,11 +118,53 @@ class Indexer(nn.Module):
         return bool(attention_inputs.is_prefill) and self._prefill_cp_enabled()
 
     # TODO: fuse kernel here
+    def _project_head_gate(self, x: torch.Tensor) -> torch.Tensor:
+        """Project ``x`` with ``weights_proj`` and return fp32 gate logits.
+
+        ``x`` is the whole ``[token_count, hidden_size]`` activation while the
+        gate logits are only ``[token_count, index_head_num]``, so the
+        activation is never widened as a whole. Either the 16-bit operands are
+        consumed in place with an fp32 accumulator and an fp32 result, or the
+        small projection weight is widened to fp32 and the activation is
+        streamed through in row blocks, which keeps the fp32 accumulate and the
+        fp32 result of the original implementation.
+        """
+        weight = self.weights_proj.weight  # CudaF16Linear stores [out, in]
+        # torch.mm is 2-D only, and the row loop below strides the leading dim,
+        # which for a rank-3 input is the batch: one iteration would widen the
+        # whole activation to fp32. Flatten so both paths stay per-token.
+        leading_shape = x.shape[:-1]
+        if x.dim() != 2:
+            x = x.reshape(-1, x.shape[-1])
+        if (
+            _MM_SUPPORTS_OUT_DTYPE
+            and x.is_cuda
+            and x.dtype == weight.dtype
+            and x.dtype in (torch.float16, torch.bfloat16)
+        ):
+            gate = torch.mm(x, weight.t(), out_dtype=torch.float32)
+            return gate.reshape(*leading_shape, gate.shape[-1])
+        cached = getattr(self, "_head_gate_fp32_weight", None)
+        if cached is None or cached[0] is not weight:
+            # Widened once and kept: rebuilding it per call allocates inside the
+            # CUDA Graph capture region on every layer.
+            cached = (weight, weight.float().t())
+            self._head_gate_fp32_weight = cached
+        weight = cached[1]
+        weights = torch.empty(
+            (*x.shape[:-1], weight.shape[-1]),
+            dtype=torch.float32,
+            device=x.device,
+        )
+        for start in range(0, weights.shape[0], _HEAD_GATE_FP32_ROW_CHUNK):
+            block = slice(start, start + _HEAD_GATE_FP32_ROW_CHUNK)
+            torch.matmul(x[block].float(), weight, out=weights[block])
+        return weights.reshape(*leading_shape, weights.shape[-1])
+
     def _get_logits_head_gate(
         self, x: torch.Tensor, q_scale: torch.Tensor
     ) -> torch.Tensor:
-        x = x.float()
-        weights = self.weights_proj(x)
+        weights = self._project_head_gate(x)
         scale = self.softmax_scale * self.weights_scale
         weights = weights.unsqueeze(-1) * q_scale * scale
         return weights
