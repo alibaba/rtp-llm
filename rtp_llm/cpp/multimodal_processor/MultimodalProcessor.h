@@ -14,6 +14,10 @@
 
 namespace py = pybind11;
 
+namespace grpc {
+class ServerContext;
+}
+
 namespace rtp_llm {
 
 struct ExpandedOutput {
@@ -52,23 +56,29 @@ private:
     ErrorInfo getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb);
 
     virtual ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                              std::string ip_port = "") = 0;
+                                                              std::string                                 ip_port = "",
+                                                              int64_t              request_id                     = 0,
+                                                              grpc::ServerContext* server_context = nullptr) = 0;
 
-    ErrorResult<ExpandedOutput> expandTokenIds(const std::vector<torch::Tensor>&           mm_embedding,
-                                               const torch::Tensor&                        token_ids,
-                                               const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                               torch::Tensor                               token_type_ids = {});
+    ErrorResult<ExpandedOutput>
+    expandTokenIds(const std::vector<torch::Tensor>&                mm_embedding,
+                   const torch::Tensor&                             token_ids,
+                   const std::vector<rtp_llm::MultimodalInput>      mm_inputs,
+                   torch::Tensor                                    token_type_ids = {},
+                   const std::optional<std::vector<torch::Tensor>>& feature_hashes = std::nullopt);
 
     ErrorResult<std::vector<std::pair<int32_t, int32_t>>> getMultimodalTags(const torch::Tensor& token_ids);
 
     ErrorInfo checkExpandLength(const ExpandedOutput& expand_output);
 
 public:
-    ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input);
+    ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input,
+                                       grpc::ServerContext*                     server_context = nullptr);
 
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>&    input,
                                        const std::vector<rtp_llm::MultimodalInput>& mm_inputs,
-                                       const std::string&                           vit_role_addr);
+                                       const std::string&                           vit_role_addr,
+                                       grpc::ServerContext*                         server_context = nullptr);
 
     ErrorResult<MultimodalFeature> getMultimodalFeatures(const torch::Tensor&                         input_ids,
                                                          const std::vector<rtp_llm::MultimodalInput>& mm_inputs);

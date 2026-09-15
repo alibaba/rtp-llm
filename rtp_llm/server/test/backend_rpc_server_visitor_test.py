@@ -22,6 +22,9 @@ from rtp_llm.telemetry import attributes as trace_attrs
 class _FakeTokenIds:
     shape = (3,)
 
+    def tolist(self):
+        return [1, 2, 3]
+
 
 class _FakeGenerateConfig:
     def __init__(
@@ -182,8 +185,85 @@ class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
         visitor._page_rr_route_cache_keys = True
         self.assertEqual(visitor._cache_key_block_size(), 1024)
 
+    @staticmethod
+    def _make_visitor(tp_size, kv_cache_sharded, prefill_cp_size=0):
+        pd_sep_config = SimpleNamespace(max_rpc_timeout_ms=1000, decode_entrance=False)
+        parallelism_config = SimpleNamespace(tp_size=tp_size)
+        prefill_cp_config = SimpleNamespace(
+            kv_cache_sharded=kv_cache_sharded,
+            prefill_cp_size=prefill_cp_size,
+            is_enabled=lambda: prefill_cp_size > 0,
+            is_prefill_enabled=lambda: prefill_cp_size > 0,
+        )
+        with patch("rtp_llm.server.backend_rpc_server_visitor.ModelRpcClient"), patch(
+            "rtp_llm.server.backend_rpc_server_visitor.HostServiceArgs.create_from_env",
+            return_value=SimpleNamespace(),
+        ), patch("rtp_llm.server.backend_rpc_server_visitor.HostService"), patch(
+            "rtp_llm.server.backend_rpc_server_visitor.MasterClient"
+        ), patch.object(
+            BackendRPCServerVisitor, "get_backend_role_list", return_value=[]
+        ):
+            return BackendRPCServerVisitor(
+                max_seq_len=4096,
+                seq_size_per_block=128,
+                pd_sep_config=pd_sep_config,
+                addresses=[],
+                parallelism_config=parallelism_config,
+                prefill_cp_config=prefill_cp_config,
+            )
+
+    def test_visitor_enables_page_rr_route_keys_for_cp4_sharded_cache(self):
+        visitor = self._make_visitor(tp_size=4, kv_cache_sharded=True)
+
+        self.assertTrue(visitor._page_rr_route_cache_keys)
+        self.assertEqual(visitor._page_rr_cp_size, 4)
+
+    def test_visitor_keeps_legacy_route_keys_when_sharding_is_disabled(self):
+        visitor = self._make_visitor(tp_size=4, kv_cache_sharded=False)
+
+        self.assertFalse(visitor._page_rr_route_cache_keys)
+        self.assertEqual(visitor._page_rr_cp_size, 1)
+
+    def test_visitor_keeps_legacy_route_keys_for_tp1(self):
+        visitor = self._make_visitor(tp_size=1, kv_cache_sharded=True)
+
+        self.assertFalse(visitor._page_rr_route_cache_keys)
+        self.assertEqual(visitor._page_rr_cp_size, 1)
+
+    def test_visitor_prefers_explicit_prefill_cp_size_for_routing(self):
+        visitor = self._make_visitor(
+            tp_size=8, kv_cache_sharded=True, prefill_cp_size=4
+        )
+
+        self.assertTrue(visitor._page_rr_route_cache_keys)
+        self.assertEqual(visitor._page_rr_cp_size, 4)
+
 
 class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_page_rr_canonical_keys_are_sent_to_flexlb_client(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.seq_size_per_block = 128
+        visitor._page_rr_route_cache_keys = True
+        visitor._page_rr_cp_size = 4
+        visitor._report_recent_cache_key_metrics = lambda _keys: None
+        visitor.master_client = _FakeMasterClient()
+        generate_input = _FakeRouteInput()
+
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys",
+            return_value=list(range(10, 22)),
+        ), patch(
+            "rtp_llm.server.backend_rpc_server_visitor.trans_input",
+            return_value=_FakeInputPB(),
+        ), patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
+            result = await visitor.get_master_route_addrs(generate_input)
+
+        self.assertIsNone(result)
+        call = visitor.master_client.calls[0]
+        self.assertEqual(call["block_cache_keys"], [13, 17, 21])
+        self.assertEqual(call["request_id"], 456)
+        self.assertEqual(generate_input.generate_config.role_addrs, ["prefill-role"])
+
     async def test_get_master_route_addrs_passes_pb_and_marks_master_enqueue(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.seq_size_per_block = 16

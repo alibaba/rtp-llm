@@ -29,9 +29,18 @@ py_test(
         ":testdata",
     ],
     env = {
-        "MM_CACHE_ITEM_NUM": "0"
+        "MM_CACHE_ITEM_NUM": "0",
+        "MM_CACHE_GPU_MAX_BYTES": "0",
+        "MM_CACHE_CPU_MAX_BYTES": "0",
     },
     exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "mm_embedding_cache_test",
+    srcs = ["mm_embedding_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "A10"},
 )
 
 py_test(
@@ -98,6 +107,16 @@ py_test(
     ],
 )
 
+py_test(
+    name = "minimax_m3_vl_vit_test",
+    srcs = [
+        "minimax_m3_vl_vit_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
 # This target covers the production shared-library and Python/C++ config boundary.
 # The real Barex multi-GPU export -> read -> release smoke lives in internal_source.
 py_test(
@@ -114,4 +133,14 @@ py_test(
         "//rtp_llm:config_ops",
     ],
     exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "minimax_m3_vl_rope_test",
+    srcs = [
+        "minimax_m3_vl_rope_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
 )

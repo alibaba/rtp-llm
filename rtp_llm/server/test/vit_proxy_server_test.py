@@ -2,8 +2,9 @@ import queue
 import threading
 import time
 from concurrent import futures
+from types import SimpleNamespace
 from unittest import TestCase, main
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import grpc
 
@@ -23,6 +24,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceStub,
     add_MultimodalRpcServiceServicer_to_server,
 )
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.multimodal.mm_scheduler import (
     MMSchedulerOverloadError,
     MMSchedulerRequestTooLargeError,
@@ -37,12 +39,14 @@ from rtp_llm.server.vit_proxy_server import (
     VitProxyRpcServer,
     WorkerConnectionPool,
     _resolve_forwarding_deadline_seconds,
+    _report_vit_error_qps,
     _resolve_rpc_timeout_seconds,
     resolve_default_rpc_timeout_seconds,
 )
 from rtp_llm.server.vit_rpc_server import (
     MultimodalRpcServer,
 )
+from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
 
 
 class FakeContext:
@@ -50,6 +54,7 @@ class FakeContext:
         self.code = None
         self.details = None
         self.time_remaining_values = list(time_remaining_values or [])
+        self.callbacks = []
 
     def set_code(self, code):
         self.code = code
@@ -62,6 +67,10 @@ class FakeContext:
             return self.time_remaining_values.pop(0)
         return None
 
+    def add_callback(self, callback):
+        self.callbacks.append(callback)
+        return True
+
 
 class RpcDeadlineExceeded(grpc.RpcError):
     def code(self):
@@ -69,6 +78,9 @@ class RpcDeadlineExceeded(grpc.RpcError):
 
     def details(self):
         return "deadline exceeded"
+
+    def trailing_metadata(self):
+        return None
 
 
 class RpcUnavailable(grpc.RpcError):
@@ -78,6 +90,9 @@ class RpcUnavailable(grpc.RpcError):
     def details(self):
         return "unavailable"
 
+    def trailing_metadata(self):
+        return None
+
 
 class RpcResourceExhausted(grpc.RpcError):
     def code(self):
@@ -85,6 +100,9 @@ class RpcResourceExhausted(grpc.RpcError):
 
     def details(self):
         return "MMScheduler queue full"
+
+    def trailing_metadata(self):
+        return None
 
 
 class FakeGrpcFuture:
@@ -161,8 +179,186 @@ class FailingEngine:
     def __init__(self, error):
         self.error = error
 
-    def mm_embedding_rpc(self, request):
+    def get_embedding_result(self, *args, **kwargs):
         raise self.error
+
+    def cancel_queued_request(self, request_id):
+        pass
+
+    def report_vit_error(self, error):
+        pass
+
+
+class VitErrorQpsTest(TestCase):
+    @patch("rtp_llm.server.vit_proxy_server.kmonitor.report")
+    def test_worker_reported_error_is_not_counted_again(self, report):
+        class WorkerRpcError(grpc.RpcError):
+            def trailing_metadata(self):
+                return ((VIT_ERROR_REPORTED_METADATA_KEY, "1"),)
+
+        error = WorkerRpcError()
+
+        _report_vit_error_qps(error)
+
+        report.assert_not_called()
+
+    @patch("rtp_llm.server.vit_rpc_server.trans_mm_input", return_value=[])
+    def test_worker_marks_generic_rpc_error_as_reported(self, _trans_mm_input):
+        engine = MagicMock()
+        engine.async_submit.side_effect = RuntimeError("preprocess submit failed")
+        servicer = MultimodalRpcServer.__new__(MultimodalRpcServer)
+        servicer.engine = engine
+        servicer._rdma = None
+        context = MagicMock()
+        context.abort.side_effect = RuntimeError("worker aborted")
+
+        with self.assertRaises(RuntimeError):
+            servicer.AsyncSubmitEmbedding(MultimodalInputsPB(), context)
+
+        metadata = context.set_trailing_metadata.call_args.args[0]
+        self.assertIn((VIT_ERROR_REPORTED_METADATA_KEY, "1"), metadata)
+
+    @patch("rtp_llm.server.vit_proxy_server.kmonitor.report")
+    def test_wait_greennet_worker_rpc_error_reports_error_qps(self, report):
+        class WorkerRpcError(grpc.RpcError):
+            def code(self):
+                return grpc.StatusCode.UNAVAILABLE
+
+            def details(self):
+                return "worker unavailable"
+
+            def trailing_metadata(self):
+                return ()
+
+        load_balancer = MagicMock()
+        load_balancer.get_worker.return_value = "worker-a"
+        load_balancer.decrement_connections.side_effect = RuntimeError("counter failed")
+        connection_pool = MagicMock()
+        stub = MagicMock()
+        connection_pool.get_stub.return_value = stub
+        worker_call = MagicMock()
+        worker_call.result.side_effect = WorkerRpcError()
+        stub.WaitGreenNetVerdict.future.return_value = worker_call
+        context = MagicMock()
+        context.add_callback.return_value = True
+        context.abort.side_effect = RuntimeError("proxy aborted")
+
+        servicer = VitProxyRpcServer(load_balancer, connection_pool)
+        with self.assertRaises(RuntimeError):
+            servicer.WaitGreenNetVerdict(MultimodalInputsPB(), context)
+
+        error_reports = [
+            call
+            for call in report.call_args_list
+            if call.args and call.args[0] == AccMetrics.VIT_ERROR_QPS_METRIC
+        ]
+        self.assertEqual(len(error_reports), 1)
+        worker_call.cancel.assert_not_called()
+
+    @patch("rtp_llm.server.vit_rpc_server.trans_mm_input", return_value=[])
+    def test_worker_rpc_failed_verdict_is_reported(self, _trans_mm_input):
+        engine = MagicMock()
+        verdict = SimpleNamespace(passed=False, code=2, message="unsafe")
+        engine.wait_greennet_verdict.return_value = verdict
+        servicer = MultimodalRpcServer.__new__(MultimodalRpcServer)
+        servicer.engine = engine
+        servicer._rdma = None
+        context = MagicMock()
+        context.add_callback.return_value = True
+
+        servicer.WaitGreenNetVerdict(MultimodalInputsPB(), context)
+
+        engine.report_vit_error.assert_called_once_with(verdict)
+        self.assertEqual(
+            context.set_code.call_args.args[0], grpc.StatusCode.PERMISSION_DENIED
+        )
+
+    @patch("rtp_llm.server.vit_proxy_server.kmonitor.report")
+    def test_rdma_release_worker_error_reports_error_qps(self, report):
+        load_balancer = MagicMock()
+        connection_pool = MagicMock()
+        servicer = VitProxyRpcServer(load_balancer, connection_pool)
+        servicer._transport_router = MagicMock()
+        servicer._transport_router.release.side_effect = RuntimeError("release failed")
+
+        with self.assertRaises(RuntimeError):
+            servicer.ReleaseRdmaLease(ReleaseLeasePB(lease_id=["h"]), MagicMock())
+
+        error_reports = [
+            call
+            for call in report.call_args_list
+            if call.args and call.args[0] == AccMetrics.VIT_ERROR_QPS_METRIC
+        ]
+        self.assertEqual(len(error_reports), 1)
+
+    @patch("rtp_llm.server.vit_proxy_server.kmonitor.report")
+    def test_connection_cleanup_error_reports_error_qps(self, report):
+        load_balancer = MagicMock()
+        load_balancer.worker_addresses = ["worker-a"]
+        load_balancer.get_worker.return_value = "worker-a"
+        load_balancer.decrement_connections.side_effect = RuntimeError("counter failed")
+        connection_pool = MagicMock()
+        stub = MagicMock()
+        worker_call = MagicMock()
+        worker_call.result.return_value = MultimodalOutputPB()
+        stub.RemoteMultimodalEmbedding.future.return_value = worker_call
+        connection_pool.get_stub.return_value = stub
+        context = MagicMock()
+        context.add_callback.return_value = True
+        context.time_remaining.return_value = None
+
+        servicer = VitProxyRpcServer(load_balancer, connection_pool)
+        self.assertIsInstance(
+            servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), context),
+            MultimodalOutputPB,
+        )
+
+        error_reports = [
+            call
+            for call in report.call_args_list
+            if call.args and call.args[0] == AccMetrics.VIT_ERROR_QPS_METRIC
+        ]
+        self.assertEqual(len(error_reports), 1)
+
+
+class VitWorkerRequestIdTest(TestCase):
+    @patch("rtp_llm.server.vit_rpc_server.trans_mm_input")
+    @patch("rtp_llm.server.vit_rpc_server.kmonitor.report")
+    def test_request_id_is_forwarded_to_engine_entrypoints(self, _, trans_mm_input):
+        converted = [MagicMock(name="mm_input")]
+        trans_mm_input.return_value = converted
+        engine = MagicMock()
+        engine.wait_greennet_verdict.return_value = SimpleNamespace(passed=True)
+        transport = MagicMock()
+        transport.transfer.return_value = MultimodalOutputPB()
+        servicer = MultimodalRpcServer.__new__(MultimodalRpcServer)
+        servicer.engine = engine
+        servicer._transport = transport
+        request = MultimodalInputsPB(request_id=987654321)
+        async_context = MagicMock()
+        wait_context = MagicMock()
+        remote_context = MagicMock()
+        wait_context.add_callback.return_value = True
+        remote_context.add_callback.return_value = True
+
+        servicer.AsyncSubmitEmbedding(request, async_context)
+        servicer.WaitGreenNetVerdict(request, wait_context)
+        servicer.RemoteMultimodalEmbedding(request, remote_context)
+
+        engine.async_submit.assert_called_once_with(converted, 987654321)
+        engine.wait_greennet_verdict.assert_called_once_with(
+            converted, request_id=987654321, cancellation_event=ANY
+        )
+        engine.get_embedding_result.assert_called_once_with(
+            converted, request_id=987654321, cancellation_event=ANY
+        )
+        transport.transfer.assert_called_once_with(request, ANY)
+
+        wait_context.add_callback.call_args.args[0]()
+        remote_context.add_callback.call_args.args[0]()
+        self.assertEqual(engine.cancel_queued_request.call_count, 2)
+        for cancel_call in engine.cancel_queued_request.call_args_list:
+            self.assertEqual(cancel_call.args, (987654321,))
 
 
 class LoadBalancerRoundRobinTest(TestCase):
@@ -260,6 +456,21 @@ class RpcTimeoutTest(TestCase):
         )
 
         self.assertEqual(deadline, 110.0)
+
+
+class RpcTimeoutTest(TestCase):
+    def test_uses_configured_default_when_request_timeout_is_unset(self):
+        request = MultimodalInputsPB()
+        request.multimodal_inputs.add().mm_preprocess_config.mm_timeout_ms = -1
+
+        self.assertEqual(_resolve_rpc_timeout_seconds(request, 123.0), 123.0)
+
+    def test_uses_largest_positive_request_timeout(self):
+        request = MultimodalInputsPB()
+        request.multimodal_inputs.add().mm_preprocess_config.mm_timeout_ms = 2000
+        request.multimodal_inputs.add().mm_preprocess_config.mm_timeout_ms = 3500
+
+        self.assertEqual(_resolve_rpc_timeout_seconds(request, 123.0), 3.5)
 
 
 class LoadBalancerLeastConnectionsTest(TestCase):
@@ -792,6 +1003,15 @@ class VitProxyRpcServerForwardingTest(TestCase):
         connection_pool.get_stub.side_effect = lambda addr: stubs[addr]
         return VitProxyRpcServer(load_balancer, connection_pool)
 
+    def _set_remote_result(self, stub, response=None, error=None):
+        call = MagicMock()
+        if error is not None:
+            call.result.side_effect = error
+        else:
+            call.result.return_value = response or MultimodalOutputPB()
+        stub.RemoteMultimodalEmbedding.future.return_value = call
+        return call
+
     def test_status_health_is_used_by_forwarding(self):
         dead_stub = self._make_status_stub(
             WorkerStatusPB(role="VIT", alive=False, status_version=1)
@@ -799,10 +1019,10 @@ class VitProxyRpcServerForwardingTest(TestCase):
         live_stub = self._make_status_stub(
             WorkerStatusPB(role="VIT", alive=True, status_version=2)
         )
-        dead_stub.RemoteMultimodalEmbedding.side_effect = AssertionError(
+        dead_stub.RemoteMultimodalEmbedding.future.side_effect = AssertionError(
             "unhealthy worker should not receive forwarded requests"
         )
-        live_stub.RemoteMultimodalEmbedding.return_value = MultimodalOutputPB()
+        self._set_remote_result(live_stub)
         server = self._make_server({"dead": dead_stub, "live": live_stub})
 
         status = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
@@ -810,21 +1030,21 @@ class VitProxyRpcServerForwardingTest(TestCase):
 
         self.assertTrue(status.alive)
         self.assertIsInstance(response, MultimodalOutputPB)
-        dead_stub.RemoteMultimodalEmbedding.assert_not_called()
-        live_stub.RemoteMultimodalEmbedding.assert_called_once()
+        dead_stub.RemoteMultimodalEmbedding.future.assert_not_called()
+        live_stub.RemoteMultimodalEmbedding.future.assert_called_once()
 
     def test_forwarding_retry_marks_failed_worker_unhealthy(self):
         failed_stub = MagicMock()
-        failed_stub.RemoteMultimodalEmbedding.side_effect = RpcUnavailable()
+        self._set_remote_result(failed_stub, error=RpcUnavailable())
         live_stub = MagicMock()
-        live_stub.RemoteMultimodalEmbedding.return_value = MultimodalOutputPB()
+        self._set_remote_result(live_stub)
         server = self._make_server({"failed": failed_stub, "live": live_stub})
 
         response = server.RemoteMultimodalEmbedding(MultimodalInputsPB(), FakeContext())
 
         self.assertIsInstance(response, MultimodalOutputPB)
-        failed_stub.RemoteMultimodalEmbedding.assert_called_once()
-        live_stub.RemoteMultimodalEmbedding.assert_called_once()
+        failed_stub.RemoteMultimodalEmbedding.future.assert_called_once()
+        live_stub.RemoteMultimodalEmbedding.future.assert_called_once()
         self.assertEqual(server.load_balancer.get_alive_worker_addresses(), ["live"])
 
     @patch(
@@ -833,9 +1053,9 @@ class VitProxyRpcServerForwardingTest(TestCase):
     )
     def test_forwarding_retries_share_one_timeout_budget(self, _):
         failed_stub = MagicMock()
-        failed_stub.RemoteMultimodalEmbedding.side_effect = RpcUnavailable()
+        self._set_remote_result(failed_stub, error=RpcUnavailable())
         live_stub = MagicMock()
-        live_stub.RemoteMultimodalEmbedding.return_value = MultimodalOutputPB()
+        self._set_remote_result(live_stub)
         server = self._make_server({"failed": failed_stub, "live": live_stub})
         server.default_rpc_timeout_seconds = 5.0
 
@@ -843,10 +1063,12 @@ class VitProxyRpcServerForwardingTest(TestCase):
 
         self.assertIsInstance(response, MultimodalOutputPB)
         self.assertEqual(
-            failed_stub.RemoteMultimodalEmbedding.call_args.kwargs["timeout"], 5.0
+            failed_stub.RemoteMultimodalEmbedding.future.call_args.kwargs["timeout"],
+            5.0,
         )
         self.assertEqual(
-            live_stub.RemoteMultimodalEmbedding.call_args.kwargs["timeout"], 2.0
+            live_stub.RemoteMultimodalEmbedding.future.call_args.kwargs["timeout"],
+            2.0,
         )
 
     @patch(
@@ -855,9 +1077,9 @@ class VitProxyRpcServerForwardingTest(TestCase):
     )
     def test_forwarding_stops_retry_when_timeout_budget_is_exhausted(self, _):
         failed_stub = MagicMock()
-        failed_stub.RemoteMultimodalEmbedding.side_effect = RpcUnavailable()
+        self._set_remote_result(failed_stub, error=RpcUnavailable())
         live_stub = MagicMock()
-        live_stub.RemoteMultimodalEmbedding.return_value = MultimodalOutputPB()
+        self._set_remote_result(live_stub)
         server = self._make_server({"failed": failed_stub, "live": live_stub})
         server.default_rpc_timeout_seconds = 5.0
         context = FakeContext()
@@ -867,8 +1089,8 @@ class VitProxyRpcServerForwardingTest(TestCase):
 
         self.assertEqual(context.code, grpc.StatusCode.DEADLINE_EXCEEDED)
         self.assertIn("forwarding timeout exhausted", context.details)
-        failed_stub.RemoteMultimodalEmbedding.assert_called_once()
-        live_stub.RemoteMultimodalEmbedding.assert_not_called()
+        failed_stub.RemoteMultimodalEmbedding.future.assert_called_once()
+        live_stub.RemoteMultimodalEmbedding.future.assert_not_called()
 
     def test_forwarding_uses_latest_status_probe_result(self):
         failed_stub = self._make_status_stub(
@@ -877,7 +1099,7 @@ class VitProxyRpcServerForwardingTest(TestCase):
         recovered_stub = self._make_status_stub(
             WorkerStatusPB(role="VIT", alive=True, status_version=2)
         )
-        recovered_stub.RemoteMultimodalEmbedding.return_value = MultimodalOutputPB()
+        self._set_remote_result(recovered_stub)
         server = self._make_server({"failed": failed_stub, "recovered": recovered_stub})
         server.load_balancer.set_worker_alive("failed", False)
         server.load_balancer.set_worker_alive("recovered", False)
@@ -887,15 +1109,15 @@ class VitProxyRpcServerForwardingTest(TestCase):
             server.RemoteMultimodalEmbedding(MultimodalInputsPB(), context)
         self.assertEqual(context.code, grpc.StatusCode.UNAVAILABLE)
         self.assertIn("No healthy VIT worker behind proxy", context.details)
-        failed_stub.RemoteMultimodalEmbedding.assert_not_called()
-        recovered_stub.RemoteMultimodalEmbedding.assert_not_called()
+        failed_stub.RemoteMultimodalEmbedding.future.assert_not_called()
+        recovered_stub.RemoteMultimodalEmbedding.future.assert_not_called()
 
         status = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
         response = server.RemoteMultimodalEmbedding(MultimodalInputsPB(), FakeContext())
 
         self.assertTrue(status.alive)
         self.assertIsInstance(response, MultimodalOutputPB)
-        recovered_stub.RemoteMultimodalEmbedding.assert_called_once()
+        recovered_stub.RemoteMultimodalEmbedding.future.assert_called_once()
         self.assertEqual(
             server.load_balancer.get_alive_worker_addresses(), ["recovered"]
         )
@@ -926,32 +1148,34 @@ class VitProxyRpcServerForwardingTest(TestCase):
 
     def test_forwarding_non_rpc_exception_does_not_retry_or_mark_unhealthy(self):
         failed_stub = MagicMock()
-        failed_stub.RemoteMultimodalEmbedding.side_effect = ValueError("bad request")
+        self._set_remote_result(failed_stub, error=ValueError("bad request"))
         live_stub = MagicMock()
-        live_stub.RemoteMultimodalEmbedding.return_value = MultimodalOutputPB()
+        self._set_remote_result(live_stub)
         server = self._make_server({"failed": failed_stub, "live": live_stub})
 
         with self.assertRaises(ValueError):
             server.RemoteMultimodalEmbedding(MultimodalInputsPB(), FakeContext())
 
-        failed_stub.RemoteMultimodalEmbedding.assert_called_once()
-        live_stub.RemoteMultimodalEmbedding.assert_not_called()
+        failed_stub.RemoteMultimodalEmbedding.future.assert_called_once()
+        live_stub.RemoteMultimodalEmbedding.future.assert_not_called()
         self.assertEqual(
             server.load_balancer.get_alive_worker_addresses(), ["failed", "live"]
         )
 
     def test_forwarding_deadline_does_not_retry_or_mark_unhealthy(self):
         timeout_stub = MagicMock()
-        timeout_stub.RemoteMultimodalEmbedding.side_effect = RpcDeadlineExceeded()
+        self._set_remote_result(timeout_stub, error=RpcDeadlineExceeded())
         live_stub = MagicMock()
-        live_stub.RemoteMultimodalEmbedding.return_value = MultimodalOutputPB()
+        self._set_remote_result(live_stub)
         server = self._make_server({"timeout": timeout_stub, "live": live_stub})
+        context = FakeContext()
+        context.abort = MagicMock(side_effect=RpcDeadlineExceeded())
 
         with self.assertRaises(RpcDeadlineExceeded):
-            server.RemoteMultimodalEmbedding(MultimodalInputsPB(), FakeContext())
+            server.RemoteMultimodalEmbedding(MultimodalInputsPB(), context)
 
-        timeout_stub.RemoteMultimodalEmbedding.assert_called_once()
-        live_stub.RemoteMultimodalEmbedding.assert_not_called()
+        timeout_stub.RemoteMultimodalEmbedding.future.assert_called_once()
+        live_stub.RemoteMultimodalEmbedding.future.assert_not_called()
         self.assertEqual(
             server.load_balancer.get_alive_worker_addresses(), ["timeout", "live"]
         )
@@ -961,7 +1185,7 @@ class VitProxyRpcServerForwardingTest(TestCase):
         as RESOURCE_EXHAUSTED through the real gRPC framework — not downgraded to
         UNKNOWN — and must NOT retry another worker or mark the worker unhealthy."""
         overloaded_stub = MagicMock()
-        overloaded_stub.RemoteMultimodalEmbedding.side_effect = RpcResourceExhausted()
+        self._set_remote_result(overloaded_stub, error=RpcResourceExhausted())
         load_balancer = LoadBalancer(["overloaded"])
         connection_pool = MagicMock()
         connection_pool.get_stub.side_effect = lambda addr: overloaded_stub
@@ -982,7 +1206,7 @@ class VitProxyRpcServerForwardingTest(TestCase):
             grpc_server.stop(0)
 
         self.assertEqual(error.exception.code(), grpc.StatusCode.RESOURCE_EXHAUSTED)
-        overloaded_stub.RemoteMultimodalEmbedding.assert_called_once()
+        overloaded_stub.RemoteMultimodalEmbedding.future.assert_called_once()
         self.assertEqual(
             server.load_balancer.get_alive_worker_addresses(), ["overloaded"]
         )
@@ -1068,13 +1292,17 @@ class MMOutputProxyRouterTest(TestCase):
             "worker-a": stub_a,
             "worker-b": stub_b,
         }[address]
-        stub_a.RemoteMultimodalEmbedding.return_value = MultimodalOutputPB(
+        call_a = MagicMock()
+        call_a.result.return_value = MultimodalOutputPB(
             output_rdma_slots=[_rdma_slot("handle-a")]
         )
+        stub_a.RemoteMultimodalEmbedding.future.return_value = call_a
         response_b = MultimodalOutputPB()
         response_b.output_rdma_slots.add().CopyFrom(_rdma_slot("handle-b-1"))
         response_b.output_rdma_slots.add().CopyFrom(_rdma_slot("handle-b-2"))
-        stub_b.RemoteMultimodalEmbedding.return_value = response_b
+        call_b = MagicMock()
+        call_b.result.return_value = response_b
+        stub_b.RemoteMultimodalEmbedding.future.return_value = call_b
 
         servicer = VitProxyRpcServer(load_balancer, connection_pool)
         servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), FakeContext())
@@ -1220,6 +1448,31 @@ class MMOutputProxyRouterTest(TestCase):
 
         self.assertFalse(first.is_alive())
         self.assertEqual(stub.calls, 1)
+
+
+class VitProxyCancellationTest(TestCase):
+    @patch("rtp_llm.server.vit_proxy_server.kmonitor.init")
+    @patch("rtp_llm.server.vit_proxy_server.kmonitor.report")
+    def test_parent_rpc_cancellation_cancels_worker_rpc(self, _mock_report, _mock_init):
+        load_balancer = MagicMock()
+        load_balancer.worker_addresses = ["worker-a"]
+        load_balancer.get_worker.return_value = "worker-a"
+        connection_pool = MagicMock()
+        stub = MagicMock()
+        connection_pool.get_stub.return_value = stub
+        worker_call = MagicMock()
+        worker_call.result.return_value = MultimodalOutputPB()
+        stub.RemoteMultimodalEmbedding.future.return_value = worker_call
+        context = MagicMock()
+        context.add_callback.return_value = True
+        context.time_remaining.return_value = None
+
+        servicer = VitProxyRpcServer(load_balancer, connection_pool)
+        servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), context)
+
+        cancel_callback = context.add_callback.call_args.args[0]
+        cancel_callback()
+        worker_call.cancel.assert_called_once_with()
 
 
 if __name__ == "__main__":

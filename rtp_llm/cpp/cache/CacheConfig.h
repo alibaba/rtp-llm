@@ -45,6 +45,13 @@ public:
     bool             use_typed_cache_regions                  = false;
     bool             use_opaque_kv_cache_store                = false;
     bool             disable_decode_first_malloc_device_reuse = false;
+    // True while the scale region really holds a per-KV-head quantization scale, so a
+    // head partition of the data block implies the same partition of the scale. Config
+    // creators clear it where the scale slot is instead repurposed as a head-independent
+    // side cache (MiniMax-M3 MSA parks its BF16 indexer-K cache there, held in full on
+    // every attention-TP rank). Read by DecodeRpcServer::loadCache to decide whether
+    // kv_scale_ takes the same partition as kv_ during a P-CP -> D-TP transfer.
+    bool             scale_region_is_head_partitioned         = true;
 
     rtp_llm::DataType dtype         = rtp_llm::DataType::TYPE_INVALID;
     uint32_t          layer_num     = 0;  // the number of main model layers

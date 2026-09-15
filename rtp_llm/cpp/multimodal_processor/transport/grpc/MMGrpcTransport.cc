@@ -69,8 +69,10 @@ public:
         }
     }
 
-    ErrorResult<MultimodalOutputPB>
-    request(const std::string& endpoint, MultimodalInputsPB& request_pb, DeadlineBudget& budget) override {
+    ErrorResult<MultimodalOutputPB> request(const std::string&   endpoint,
+                                            MultimodalInputsPB&  request_pb,
+                                            DeadlineBudget&      budget,
+                                            grpc::ServerContext* server_context) override {
         if (budget.exhausted()) {
             return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "vit rpc budget exhausted before the call");
         }
@@ -82,12 +84,21 @@ public:
         auto& connection = connection_status.value();
         auto  stub       = connection.stub;
 
-        grpc::ClientContext context;
-        context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(budget.remainingMs()));
+        std::unique_ptr<grpc::ClientContext> context;
+        if (server_context == nullptr) {
+            context = std::make_unique<grpc::ClientContext>();
+        } else {
+            grpc::PropagationOptions options;
+            options.enable_deadline_propagation().enable_cancellation_propagation();
+            context = grpc::ClientContext::FromServerContext(*server_context, options);
+        }
+        const auto budget_deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(budget.remainingMs());
+        context->set_deadline(server_context == nullptr ? budget_deadline :
+                                                          std::min(budget_deadline, server_context->deadline()));
         MultimodalOutputPB receipt;
         const int64_t      request_bytes = request_pb.ByteSizeLong();
         const auto         start         = std::chrono::steady_clock::now();
-        auto               status        = stub->RemoteMultimodalEmbedding(&context, request_pb, &receipt);
+        auto               status        = stub->RemoteMultimodalEmbedding(context.get(), request_pb, &receipt);
         const int64_t      cost_us =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
         metrics_->reportRpcMetrics(endpoint, cost_us, request_bytes, receipt.ByteSizeLong());
@@ -98,8 +109,16 @@ public:
             if (auto error_info = parseMultimodalErrorMessage(status.error_message())) {
                 return *error_info;
             }
-            if (status.error_code() == grpc::StatusCode::UNAVAILABLE
-                || status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+            if (status.error_code() == grpc::StatusCode::CANCELLED) {
+                return ErrorInfo(ErrorCode::CANCELLED, status.error_message());
+            }
+            if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {
+                return ErrorInfo(ErrorCode::CONCURRENCY_LIMIT_ERROR, status.error_message());
+            }
+            if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+                return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, status.error_message());
+            }
+            if (status.error_code() == grpc::StatusCode::UNAVAILABLE) {
                 return ErrorInfo(ErrorCode::MM_REMOTE_RPC_FAILED, status.error_message());
             }
             RTP_LLM_LOG_WARNING("unclassified multimodal RPC error is not retryable, grpc code [%d], message [%s]",

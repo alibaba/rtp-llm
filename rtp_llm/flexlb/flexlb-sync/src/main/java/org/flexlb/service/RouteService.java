@@ -48,8 +48,10 @@ public class RouteService {
                         : flexlbConfig.getDispatcher().getType() == DispatcherConfig.Type.BATCH
                                 ? "BATCH" : "QUEUE");
 
+        boolean vitOnly = balanceContext.getRequest() != null
+                && balanceContext.getRequest().isVitRouteOnly();
         CompletableFuture<Response> resultFuture;
-        if (flexlbConfig.isDirect()) {
+        if (flexlbConfig.isDirect() || vitOnly) {
             resultFuture = routeDirect(balanceContext);
         } else {
             resultFuture = routeScheduled(balanceContext);
@@ -64,7 +66,7 @@ public class RouteService {
             }
             try {
                 balanceContext.setResponse(result);
-                if (result != null && result.isSuccess()) {
+                if (!vitOnly && result != null && result.isSuccess()) {
                     recentCacheKeyTraceReporter.report(balanceContext);
                 }
             } catch (RuntimeException completionSideEffectFailure) {

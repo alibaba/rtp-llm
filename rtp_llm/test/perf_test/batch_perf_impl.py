@@ -42,7 +42,6 @@ def _curl_server_single_worker(
         "prompt": input_query,
         "generate_config": gen_config,
     }
-
     if generate_config is not None:
         gen_config.update(generate_config)
         if "top_k" in generate_config:
@@ -50,8 +49,13 @@ def _curl_server_single_worker(
         if "top_p" in generate_config:
             req["top_p"] = generate_config["top_p"]
 
-    if "top_k" not in req:
-        req["top_k"] = 1
+    # The native inference endpoint deserializes sampling parameters from
+    # generate_config. Keep the legacy top-level mirror for endpoints that still
+    # consume it, but do not accidentally benchmark the native endpoint with its
+    # default top_k=0 (random sampling).
+    if "top_k" not in req["generate_config"]:
+        req["generate_config"]["top_k"] = 1
+    req["top_k"] = req["generate_config"]["top_k"]
 
     profile_step = _effective_profile_steps(is_decode, decode_test_length)
     if profile:
@@ -110,6 +114,9 @@ def _curl_server_batch_worker(
 
 
 class BatchPerfImpl(object):
+    _SEED_ATTEMPTS = 8
+    _SEED_RETRY_SLEEP_S = 10
+
     def __init__(
         self,
         base_port: int,
@@ -125,17 +132,14 @@ class BatchPerfImpl(object):
         warmup_runs: Optional[int] = None,
         measure_runs: Optional[int] = None,
         profile_runs: Optional[int] = None,
+        reuse_cache_seed_query: Optional[Union[str, List[str]]] = None,
+        query_variants: Optional[List[Union[str, List[str]]]] = None,
+        target_reuse_len: int = 0,
     ):
         self.base_port = base_port
         self.dp_size = dp_size
         self.batch_size = batch_size
-        if isinstance(query, str):
-            self.input_queries = [query] * batch_size
-        else:
-            assert (
-                len(query) == batch_size
-            ), f"query list length {len(query)} != batch_size {batch_size}"
-            self.input_queries = query
+        self.input_queries = self._normalize_queries(query)
         self.is_decode = is_decode
         self.max_requests_per_process = 128
         self.num_processes = max(
@@ -150,6 +154,18 @@ class BatchPerfImpl(object):
         self.profile = profile
         self.generate_config = generate_config or {}
         self.profile_trace_name = profile_trace_name
+        self.query_variants = (
+            [self._normalize_queries(item) for item in query_variants]
+            if query_variants
+            else []
+        )
+        self.query_variant_index = 0
+        self.reuse_cache_seed_queries = (
+            self._normalize_seed_queries(reuse_cache_seed_query)
+            if reuse_cache_seed_query
+            else []
+        )
+        self.target_reuse_len = target_reuse_len
         self.warmup_runs = (
             int(os.environ.get("PERF_FORMAL_WARMUP_RUNS", "1"))
             if warmup_runs is None
@@ -180,27 +196,122 @@ class BatchPerfImpl(object):
             return 3
         return max(1, int(num_measures))
 
+    def _normalize_queries(self, query: Union[str, List[str]]) -> List[str]:
+        if isinstance(query, str):
+            return [query] * self.batch_size
+        assert (
+            len(query) == self.batch_size
+        ), f"query list length {len(query)} != batch_size {self.batch_size}"
+        return query
+
+    def _normalize_seed_queries(self, query: Union[str, List[str]]) -> List[str]:
+        if isinstance(query, str):
+            # Cold seed is a full-length prefill. Duplicating it to the
+            # measure batch overflows max_batch_tokens_size and deadlocks
+            # BatchDecodeScheduler, which only dispatches a full batch.
+            return [query]
+        assert query, "reuse-cache seed query list must not be empty"
+        return query
+
+    def _next_input_queries(self) -> List[str]:
+        if not self.query_variants:
+            return self.input_queries
+        variant = self.query_variants[
+            min(self.query_variant_index, len(self.query_variants) - 1)
+        ]
+        self.query_variant_index += 1
+        return variant
+
+    def _seed_reuse_cache(self) -> None:
+        if not self.reuse_cache_seed_queries:
+            return
+        seed_batch = max(1, len(self.reuse_cache_seed_queries))
+        self._set_concurrency(scheduler_batch_size=seed_batch)
+        try:
+            seed_config = dict(self.generate_config)
+            seed_config.update({"reuse_cache": True, "enable_device_cache": True})
+            logging.info(
+                "[PERF_REUSE_CACHE_SEED] trace=%s seed_requests=%d target_reuse_len=%s",
+                self.profile_trace_name,
+                seed_batch,
+                self.target_reuse_len,
+            )
+            # The server admits requests through a fixed gate sized to
+            # concurrency_limit, which equals the measure batch. A seed sent
+            # right after a full batch completes gets a 409 because the gate has
+            # not released every slot yet, so retry before calling it a failure.
+            for attempt in range(1, self._SEED_ATTEMPTS + 1):
+                responses = _curl_server_batch_worker(
+                    list(range(len(self.reuse_cache_seed_queries))),
+                    self.base_port,
+                    self.reuse_cache_seed_queries,
+                    self.is_decode,
+                    self.decode_test_length,
+                    self.wait_time,
+                    False,
+                    seed_config,
+                    "",
+                )
+                metric = analyze_results(responses)
+                if metric.success_requests == metric.total_requests:
+                    break
+                if attempt < self._SEED_ATTEMPTS:
+                    logging.warning(
+                        "[PERF_REUSE_CACHE_SEED] attempt %d/%d succeeded %d/%d, "
+                        "retrying in %ds",
+                        attempt,
+                        self._SEED_ATTEMPTS,
+                        metric.success_requests,
+                        metric.total_requests,
+                        self._SEED_RETRY_SLEEP_S,
+                    )
+                    time.sleep(self._SEED_RETRY_SLEEP_S)
+            check_with_info(
+                metric.success_requests == metric.total_requests,
+                "reuse-cache seed failed: "
+                f"{metric.success_requests}/{metric.total_requests} succeeded",
+            )
+        finally:
+            self._set_concurrency()
+
+    def _validate_reuse_metric(self, metric: TestResultMetrics) -> None:
+        if self.target_reuse_len <= 0 or metric.success_requests == 0:
+            return
+        tolerance = max(64.0, self.target_reuse_len * 0.02)
+        delta = abs(metric.avg_reuse_len - self.target_reuse_len)
+        check_with_info(
+            delta <= tolerance,
+            "reuse-cache hit length is outside tolerance: "
+            f"target={self.target_reuse_len}, actual_avg={metric.avg_reuse_len:.2f}, "
+            f"tolerance={tolerance:.2f}, trace={self.profile_trace_name}",
+        )
+
     # warmup (JIT compile) xN -> measure xN (trim min/max, average) ->
     # profile xN (optional, torch profiler affects accuracy)
     def run(self, num_measures: Optional[int] = None) -> TestResultMetrics:
         self._set_concurrency()
 
         for i in range(self.warmup_runs):
+            self._seed_reuse_cache()
             logging.info(
                 "[PERF_WARMUP_RUN] %d/%d trace=%s",
                 i + 1,
                 self.warmup_runs,
                 self.profile_trace_name,
             )
-            _ = self._curl_server()
+            _ = self._curl_server(input_queries=self._next_input_queries())
 
         measure_runs = self._effective_measure_runs(num_measures)
         key = "avg_decode_time" if self.is_decode else "avg_prefill_time"
         measurements: List[TestResultMetrics] = []
         all_measure_responses: List[ResponseInfo] = []
         for i in range(measure_runs):
-            responses = self._curl_server_responses()
+            self._seed_reuse_cache()
+            responses = self._curl_server_responses(
+                input_queries=self._next_input_queries()
+            )
             metric = analyze_results(responses)
+            self._validate_reuse_metric(metric)
             logging.info(
                 "[PERF_MEASURE_RUN] %d/%d trace=%s success=%d/%d "
                 "avg_prefill_ms=%.3f avg_total_ms=%.3f avg_wait_ms=%.3f",
@@ -231,6 +342,7 @@ class BatchPerfImpl(object):
         else:
             # Too few runs to trim: pool every response of every run instead.
             results = analyze_results(all_measure_responses)
+        self._validate_reuse_metric(results)
 
         if self.profile and self.profile_runs > 0:
             # Pre-arm via /start_profile with enable_all_rank=true so that
@@ -264,24 +376,32 @@ class BatchPerfImpl(object):
                 except Exception as e:
                     logging.warning(f"[PERF_PREARM_PROFILE] failed: {e}")
             for i in range(self.profile_runs):
+                self._seed_reuse_cache()
                 logging.info(
                     "[PERF_PROFILE_RUN] %d/%d trace=%s",
                     i + 1,
                     self.profile_runs,
                     self.profile_trace_name,
                 )
-                _ = self._curl_server(True)
+                _ = self._curl_server(
+                    True, input_queries=self._next_input_queries()
+                )
             time.sleep(int(os.environ.get("PERF_PROFILE_FLUSH_SLEEP", "60")))
         return results
 
-    def _set_concurrency(self):
+    def _set_concurrency(self, scheduler_batch_size: Optional[int] = None):
+        if scheduler_batch_size is None:
+            check_with_info(
+                self.batch_size % self.dp_size == 0,
+                f"concurrency {self.batch_size} must be divisible by dp_size {self.dp_size}",
+            )
+            scheduler_batch_size = self.batch_size // self.dp_size
         check_with_info(
-            self.batch_size % self.dp_size == 0,
-            f"concurrency {self.batch_size} must be divisible by dp_size {self.dp_size}",
+            scheduler_batch_size > 0,
+            f"scheduler batch_size must be positive, got {scheduler_batch_size}",
         )
-        local_batch_size = self.batch_size // self.dp_size
         payload = {
-            "batch_size": local_batch_size,
+            "batch_size": scheduler_batch_size,
             "mode": "decode" if self.is_decode else "prefill",
         }
         last_error = None
@@ -308,7 +428,12 @@ class BatchPerfImpl(object):
             time.sleep(3)
         raise Exception(f"failed to set concurrency after retries: {last_error}")
 
-    def _curl_server_responses(self, profile: bool = False) -> List[ResponseInfo]:
+    def _curl_server_responses(
+        self,
+        profile: bool = False,
+        input_queries: Optional[List[str]] = None,
+    ) -> List[ResponseInfo]:
+        input_queries = input_queries or self.input_queries
         request_batches: List[List[int]] = []
         for i in range(0, self.batch_size, self.max_requests_per_process):
             batch_indices = list(
@@ -318,7 +443,7 @@ class BatchPerfImpl(object):
 
         futures: List[Future[List[ResponseInfo]]] = []
         for batch_indices in request_batches:
-            batch_queries = [self.input_queries[i] for i in batch_indices]
+            batch_queries = [input_queries[i] for i in batch_indices]
             futures.append(
                 self.executor.submit(
                     _curl_server_batch_worker,
@@ -340,8 +465,12 @@ class BatchPerfImpl(object):
 
         return all_responses
 
-    def _curl_server(self, profile: bool = False) -> TestResultMetrics:
-        return analyze_results(self._curl_server_responses(profile))
+    def _curl_server(
+        self,
+        profile: bool = False,
+        input_queries: Optional[List[str]] = None,
+    ) -> TestResultMetrics:
+        return analyze_results(self._curl_server_responses(profile, input_queries))
 
     def dump_results(self, results: List[Dict[str, Any]]):
         for result in results:

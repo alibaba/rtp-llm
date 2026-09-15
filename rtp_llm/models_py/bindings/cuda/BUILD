@@ -169,6 +169,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/common/kernels:kernels_ep_util",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_kv_cache",
         "//rtp_llm/models_py/bindings/cuda/kernels:fast_topk",
+        "//rtp_llm/models_py/bindings/cuda/kernels:minimax_decode_topk",
         "//rtp_llm/models_py/bindings/cuda/kernels:persistent_topk",
         "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_persistent_topk",
         "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_top_k_per_row_prefill",
@@ -233,6 +234,7 @@ cc_library(
     copts = copts() + ["-fno-strict-aliasing"],
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
+        "//rtp_llm/models_py/bindings/cuda/kernels:mtp_target_verify_prepare",
         ":bf16_gemm_op",
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base"

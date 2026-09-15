@@ -245,6 +245,7 @@ class DashScShutdownManager:
 
 
 async def _create_proxy_servicer_on_loop(
+    dash_sc_grpc_config=None,
     *,
     rank_id: Optional[int] = None,
     server_id: str = "",
@@ -254,7 +255,11 @@ async def _create_proxy_servicer_on_loop(
     Outbound ``grpc.aio.Channel`` objects are event-loop affine, but the shared
     channel cache builds them lazily when a request first uses an address.
     """
-    return DashScProxyServicer(rank_id=rank_id, server_id=server_id)
+    return DashScProxyServicer(
+        dash_sc_grpc_config=dash_sc_grpc_config,
+        rank_id=rank_id,
+        server_id=server_id,
+    )
 
 
 DashScAppServicer = DashScInferenceServicer | DashScProxyServicer
@@ -740,6 +745,7 @@ class DashScApp:
             if is_proxy:
                 fut = asyncio.run_coroutine_threadsafe(
                     _create_proxy_servicer_on_loop(
+                        dash_sc_grpc_config=self.dash_sc_grpc_config,
                         rank_id=self.server_config.rank_id,
                         server_id=self.server_config.frontend_server_id,
                     ),

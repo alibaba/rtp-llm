@@ -1,9 +1,10 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "copts", "cuda_copts")
 
 cc_library(
     name = "multimodal_input_class",
     hdrs = [
         "MultimodalInputClass.h",
+        "MultimodalTokenUtils.h",
     ],
     visibility = ["//visibility:public"],
 )
@@ -56,6 +57,23 @@ cc_library(
 )
 
 cc_library(
+    name = "feature_hash_utils",
+    hdrs = ["FeatureHash.h"],
+)
+
+cc_library(
+    name = "feature_hash_kernel",
+    srcs = ["FeatureHashKernel.cu"],
+    hdrs = ["FeatureHashKernel.h"],
+    copts = cuda_copts(),
+    deps = [
+        ":feature_hash_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+)
+
+cc_library(
     name = "multimodal_processor",
     hdrs = glob(
         ["*.h"],
@@ -71,6 +89,7 @@ cc_library(
         exclude = ["MultimodalError.cc"],
     ),
     deps = [
+        ":feature_hash_utils",
         ":multimodal_types",
         ":multimodal_error",
         ":mm_processor_config",
@@ -82,6 +101,9 @@ cc_library(
         "//rtp_llm/cpp/embedding_engine:embedding_engine",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "//rtp_llm/cpp/pybind:py_utils",
-    ],
+    ] + select({
+        "@//:using_cuda": [":feature_hash_kernel"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
