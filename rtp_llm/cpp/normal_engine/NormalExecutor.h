@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -41,6 +42,7 @@ public:
                                RtpLLMTokenPSMetricsCollector&             tps_collector,
                                int64_t                                    tps_execute_time_us,
                                const StreamGroups::TokenCountsByPriority& token_counts_by_priority);
+    void         drainAsyncRunners() override;
 
     void setBatchProcessor(std::unique_ptr<NormalBatchStreamProcessor> processor) {
         batch_stream_processor_ = std::move(processor);

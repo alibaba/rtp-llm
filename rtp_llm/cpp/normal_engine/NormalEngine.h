@@ -1,11 +1,17 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <iostream>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/engine_base/sleep/SleepRoundFence.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
@@ -32,6 +38,14 @@ public:
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
+    void                              pause() override;
+    void                              restart() override;
+    absl::Status                      pauseAndWaitQuiesced(int64_t timeout_ms) override;
+    // Keep multi-rank peers polling during drain; the control plane freezes them later.
+    void armCollectiveSleepQuiesce() override;
+    bool         requiresCoordinatedSleepQuiesce() const override;
+    uint64_t     freezeSleepRounds() override;
+    absl::Status pauseAtSleepRound(uint64_t round, int64_t timeout_ms) override;
 
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
@@ -60,6 +74,11 @@ private:
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
     size_t                          getWarmUpInputLength() const;
     void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
+    absl::Status                    releasePendingTpCollectiveForPause(uint64_t pause_epoch);
+    bool                            collectiveSleepQuiesceEnabled() const;
+    bool                            acquireSleepRound();
+    void                            enterPausedState();
+    void                            markPauseQuiesced(uint64_t pause_epoch);
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 
@@ -68,8 +87,19 @@ private:
     bool isDSpark() override;
 
 private:
-    autil::ThreadPtr                              loop_thread_;
-    std::atomic<bool>                             running_{false};
+    autil::ThreadPtr  loop_thread_;
+    std::atomic<bool> running_{false};
+    std::mutex        process_mutex_;
+    SleepRoundFence         sleep_round_fence_;
+    std::mutex              pause_mutex_;
+    std::condition_variable pause_cv_;
+    // Monotonic quiesce acknowledgement: the highest pause epoch a quiesce has
+    // completed for. pauseAndWaitQuiesced() waits for this to reach the epoch it
+    // captured. Monotonic-and-epoch-stamped so a fresh pause() (which only bumps
+    // pause_epoch_) can never race-erase a quiesce already recorded for that epoch.
+    uint64_t                                      quiesced_pause_epoch_{0};
+    std::atomic<uint64_t>                         pause_epoch_{0};
+    std::atomic<uint64_t>                         processed_pause_epoch_{0};
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     ParallelismConfig                             parallelism_config;

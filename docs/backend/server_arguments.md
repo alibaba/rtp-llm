@@ -177,6 +177,17 @@ This page lists server arguments used to configure the behavior and performance 
 |-----------|-------------|----------|
 | `--max-lora-model-size` | Maximum size limit for LoRA models | -1 |
 
+## Sleep Lifecycle Configuration
+
+| Arguments | Environment variable | Description | Defaults |
+|-----------|----------------------|-------------|----------|
+| `--enable-sleep-mode` | `ENABLE_SLEEP_MODE` | Enable sleep/wake lifecycle APIs | 0 |
+| `--sleep-mode-level` | `SLEEP_MODE_LEVEL` | Startup level: 1 = host backup, 2 = checkpoint reload | 1 |
+| `--sleep-release-collective-memory` | `SLEEP_RELEASE_COLLECTIVE_MEMORY` | Opt in to NCCL memory suspend/resume | 0 |
+
+See [Sleep and wake up](sleep_mode.md) for runtime prerequisites, HTTP APIs,
+distributed membership, timeout/rollback semantics and recovery guidance.
+
 ## System Debugging
 
 | Arguments | Description | Defaults |
@@ -189,3 +200,30 @@ This page lists server arguments used to configure the behavior and performance 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
 | `--load_method` | Specify the weight loading method.<br>Options: auto, fastsafetensors, scratch | auto |
+
+### FastSafeTensors loader configuration
+
+When `LOAD_METHOD=fastsafetensors`, RTP-LLM uses the config-driven `AutoLoader`.
+Pass the standard fastsafetensors configuration as either an inline JSON string
+or a JSON file path. Inline JSON has higher priority when both are set:
+
+```bash
+export FASTSAFETENSORS_CONFIG_JSON='{"loader":"base","base":{"copier_type":"nogds"}}'
+export FASTSAFETENSORS_CONFIG=/path/to/fastsafetensors.json
+```
+
+For compatibility with existing deployments, `FASTSAFETENSORS_NOGDS=1` and
+the sleep reload path's `force_nogds` switch directly override
+`FASTSAFETENSORS_CONFIG_JSON` with the equivalent base/nogds configuration.
+
+The automatic memory gate reserves three times the largest checkpoint shard
+plus 2048 MiB by default. The extra RTP reserve can be tuned independently:
+
+```bash
+export RTP_FASTSAFETENSORS_RESERVE_MB=2048
+```
+
+Set it to `0` to disable only the extra RTP reserve. Stacked MoE checkpoints use
+the bounded per-expert delivery provided by the pinned FastSafeTensors wrapper.
+Ordinary tensors continue to use the FastSafeTensors bucket and rank-local-copy
+settings.

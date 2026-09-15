@@ -6,6 +6,7 @@ py_library(
         "*.py",
     ]),
     deps = [
+        "//rtp_llm:torch_memory_saver",
         "//rtp_llm:utils",
         "//rtp_llm/model_loader/tipc:tipc"
     ]

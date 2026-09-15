@@ -1,5 +1,6 @@
 import types
 import unittest
+from unittest import mock
 
 import torch
 
@@ -54,6 +55,29 @@ class MtpHiddenBufferTest(unittest.TestCase):
         self.assertIs(first, second)
         # No MTP requested → no shared storage allocated at all.
         self.assertIsNone(first._mtp_hidden_storage)
+
+    def test_shared_scratch_uses_pausable_allocation_only_on_cache_miss(self):
+        with mock.patch(
+            "rtp_llm.model_loader.weight_memory_saver.pausable_empty",
+            wraps=torch.empty,
+        ) as allocate:
+            first = self._make_store(mtp=True)
+            second = self._make_store(mtp=True)
+        self.assertIs(first, second)
+        allocate.assert_called_once_with(
+            7, 3, dtype=torch.bfloat16, device=torch.device("cpu")
+        )
+
+        # Simulate discarded level-2 contents. A new target forward overwrites
+        # every row the next MTP step consumes, without rebinding storage.
+        module = _RuntimeModule()
+        buf = first.bind(module)
+        address = buf.data_ptr()
+        buf.fill_(float("nan"))
+        fresh = torch.arange(9, dtype=torch.bfloat16).reshape(3, 3)
+        V4Transformer._write_mtp_hidden_buffer(module, fresh, is_cuda_graph=False)
+        self.assertEqual(buf.data_ptr(), address)
+        self.assertTrue(torch.equal(buf[:3], fresh))
 
     def test_accessor_slices_requested_rows(self) -> None:
         v4 = types.SimpleNamespace()
@@ -180,6 +204,25 @@ class MtpHiddenBufferTest(unittest.TestCase):
 
         self.assertNotIn("_mtp_last_hidden_buffer", module.state_dict())
         self.assertIn("_mtp_last_hidden_buffer", module._buffers)
+
+    def test_mega_se_output_is_pausable_and_reused_with_graph_addresses(self):
+        import torch
+        from rtp_llm.models_py.modules.dsv4.moe import mega_se_buf
+
+        with mock.patch.object(
+            mega_se_buf, "_MEGA_SE_OUTPUT_CACHE", {}
+        ), mock.patch.object(mega_se_buf, "_MEGA_SE_BUF_CACHE", {}), mock.patch(
+            "rtp_llm.model_loader.weight_memory_saver.pausable_empty", wraps=torch.empty
+        ) as allocate:
+            first = mega_se_buf._get_or_create_mega_se_output(
+                8, 4, torch.bfloat16, "cpu"
+            )
+            second = mega_se_buf._get_or_create_mega_se_output(
+                4, 4, torch.bfloat16, "cpu"
+            )
+            self.assertIs(first, second)
+            allocate.assert_called_once_with((8, 4), dtype=torch.bfloat16, device="cpu")
+            self.assertEqual(mega_se_buf.mega_se_buffer_bytes(), (64, 0))
 
 
 if __name__ == "__main__":

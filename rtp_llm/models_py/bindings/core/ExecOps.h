@@ -99,8 +99,9 @@ void            execBroadcastCpu(const BroadcastParams& params);
 bool            isCpuTpBroadcasterInitialized();
 AllReduceOutput execAllReduce(const AllReduceParams& params);
 void            execAllGather(const AllGatherParams& params);
-void            execSyncCommunication(bool timeout = true);
-void            execSyncCommunication(ParallelMode mode, bool timeout = true);
+
+void execSyncCommunication(bool timeout = true);
+void execSyncCommunication(ParallelMode mode, bool timeout = true);
 
 // ===================================================================
 // MOE / EPLB

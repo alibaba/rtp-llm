@@ -11,6 +11,7 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
+from rtp_llm.config.exceptions import ExceptionType
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
@@ -362,7 +363,15 @@ class FrontendServer(object):
                 },
             )
 
-        rep = ORJSONResponse(exception_json, status_code=500)
+        # Closed admission is a retryable availability condition, not an
+        # internal error. Streaming responses that already sent headers report
+        # the same error code in their SSE body via stream_response instead.
+        status_code = (
+            503
+            if exception_json.get("error_code") == ExceptionType.ENGINE_UNAVAILABLE
+            else 500
+        )
+        rep = ORJSONResponse(exception_json, status_code=status_code)
         return rep
 
     async def _call_generate_with_report(

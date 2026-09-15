@@ -147,6 +147,9 @@ class ExceptionType(IntEnum):
     BATCH_TOKEN_CAPACITY_EXCEEDED = 8514, ExceptionCategory.CAPACITY
     SCHEDULER_PLAN_CONFLICT = 8515, ExceptionCategory.CAPACITY
 
+    # engine sleep/wake_up error (AdmissionGate): instance not RUNNING, retryable
+    ENGINE_UNAVAILABLE = 8600
+
     # multimodal error
     MM_LONG_PROMPT_ERROR = 901, ExceptionCategory.TOO_LONG
     MM_WRONG_FORMAT_ERROR = 902, ExceptionCategory.BAD_REQUEST

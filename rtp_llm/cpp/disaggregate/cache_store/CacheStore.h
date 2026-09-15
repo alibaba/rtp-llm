@@ -6,7 +6,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RemoteStoreTask.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreMetricsCollector.h"
 
-
 #include <memory>
 
 namespace rtp_llm {
@@ -52,6 +51,12 @@ public:
     virtual std::shared_ptr<BlockBuffer> findUserBuffer(const std::string& buffer_key)                            = 0;
 
     virtual const std::shared_ptr<MemoryUtil>& getMemoryUtil() const = 0;
+
+    // Global in-flight transfer count (store/load tasks + remote store tasks).
+    // Used by DrainManager to decide drain completion before sleep.
+    virtual size_t activeTransferCount() const {
+        return 0;
+    }
 
     virtual void debugInfo() = 0;
 };
