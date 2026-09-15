@@ -35,6 +35,7 @@ std::vector<StagePeerGroup> buildStagePeerGroups(const ParallelismConfig&       
         group.range.size  = static_cast<uint32_t>(end - begin);
         const auto first  = workers.begin() + static_cast<ptrdiff_t>(stage * tp_size);
         group.peer_addrs.assign(first, first + static_cast<ptrdiff_t>(tp_size));
+        group.is_last_stage = (stage == pp_size - 1);
         groups.push_back(std::move(group));
     }
     return groups;
@@ -77,7 +78,8 @@ std::vector<StagePeerSlice> planStagePeerSlices(int prefill_tp, int decode_tp, i
 void validateStagePeerGroups(const std::vector<StagePeerGroup>& groups, int64_t total_layers) {
     RTP_LLM_CHECK_WITH_INFO(!groups.empty(), "stage peer groups must not be empty");
     uint32_t expected_begin = 0;
-    for (const auto& group : groups) {
+    for (size_t i = 0; i < groups.size(); ++i) {
+        const auto& group = groups[i];
         RTP_LLM_CHECK_WITH_INFO(group.range.begin == expected_begin,
                                 "stage peer groups do not tile the layer space: expected begin %u, got %u",
                                 expected_begin,
@@ -85,6 +87,8 @@ void validateStagePeerGroups(const std::vector<StagePeerGroup>& groups, int64_t 
         RTP_LLM_CHECK_WITH_INFO(group.range.size > 0, "stage peer group at layer %u has no layers", group.range.begin);
         RTP_LLM_CHECK_WITH_INFO(
             !group.peer_addrs.empty(), "stage peer group [%u, %u) has no peers", group.range.begin, group.range.end());
+        RTP_LLM_CHECK_WITH_INFO(group.is_last_stage == (i + 1 == groups.size()),
+                                "is_last_stage must mark exactly the final stage group");
         expected_begin = group.range.end();
     }
     RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(expected_begin) == total_layers,

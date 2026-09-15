@@ -342,6 +342,7 @@ void PrefillRpcServer::fillStagePeerGroups(GenerateRequestPB& alloc_request, con
         auto* group_pb = alloc_request.add_stage_peer_groups();
         group_pb->set_layer_begin(group.range.begin);
         group_pb->set_layer_count(group.range.size);
+        group_pb->set_is_last_stage(group.is_last_stage);
         for (const auto& peer : group.peer_addrs) {
             group_pb->add_peer_addrs(peer);
         }

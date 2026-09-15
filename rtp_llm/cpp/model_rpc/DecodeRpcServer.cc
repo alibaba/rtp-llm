@@ -74,8 +74,9 @@ parseStagePeerGroups(const google::protobuf::RepeatedPtrField<StagePeerGroupPB>&
     groups.reserve(static_cast<size_t>(pb_groups.size()));
     for (const auto& group_pb : pb_groups) {
         StagePeerGroup group;
-        group.range.begin = group_pb.layer_begin();
-        group.range.size  = group_pb.layer_count();
+        group.range.begin   = group_pb.layer_begin();
+        group.range.size    = group_pb.layer_count();
+        group.is_last_stage = group_pb.is_last_stage();
         group.peer_addrs.assign(group_pb.peer_addrs().begin(), group_pb.peer_addrs().end());
         groups.push_back(std::move(group));
     }
@@ -87,6 +88,7 @@ void appendStagePeerGroups(BroadcastLoadRequestPB& request, const std::vector<St
         auto* group_pb = request.add_stage_peer_groups();
         group_pb->set_layer_begin(group.range.begin);
         group_pb->set_layer_count(group.range.size);
+        group_pb->set_is_last_stage(group.is_last_stage);
         for (const auto& peer : group.peer_addrs) {
             group_pb->add_peer_addrs(peer);
         }
@@ -994,7 +996,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             int                i,
                             int                peer_cnt,
                             int                src_partition_count,
-                            int                src_partition_id) -> ErrorInfo {
+                            int                src_partition_id,
+                            bool               include_mtp) -> ErrorInfo {
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
         RTP_LLM_LOG_DEBUG("load context request id is %d", load_context.request_id);
 
@@ -1101,7 +1104,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             }
         }
 
-        if (engine_->isMTPEagle() && layout.hasLmHead()) {
+        if (include_mtp && engine_->isMTPEagle() && layout.hasLmHead()) {
             if (propose_maga_init_params_ && propose_maga_init_params_->mtp_model_params_
                 && !propose_maga_init_params_->mtp_model_params_->empty()) {
                 const auto mtp_load_plan = makeMTPModuleLoadPlan(propose_maga_init_params_);
@@ -1291,7 +1294,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                            i,
                                            peer_cnt,
                                            load_context.partition_count,
-                                           load_context.partition_id);
+                                           load_context.partition_id,
+                                           /*include_mtp=*/true);
             if (!error_info.ok()) {
                 return error_info;
             }
@@ -1317,7 +1321,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                slice.dst_partition_id,
                                                slice.dst_partition_count,
                                                slice.src_partition_count,
-                                               slice.src_partition_id);
+                                               slice.src_partition_id,
+                                               /*include_mtp=*/spg.is_last_stage);
                 if (!error_info.ok()) {
                     return error_info;
                 }

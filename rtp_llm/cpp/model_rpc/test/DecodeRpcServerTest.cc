@@ -94,8 +94,8 @@ TEST(DecodeRpcServerTest, PpLoadRequestCarriesStagePeerGroups) {
     const std::vector<std::string>    peer_addrs  = {"prefill-0", "prefill-1", "prefill-2", "prefill-3"};
     const std::vector<CacheKeyType>   cache_keys  = {101};
     const GroupBlockIds               block_ids_by_group;
-    const std::vector<StagePeerGroup> groups = {{{0, 2}, {"prefill-0", "prefill-1"}},
-                                                {{2, 2}, {"prefill-2", "prefill-3"}}};
+    const std::vector<StagePeerGroup> groups = {{{0, 2}, {"prefill-0", "prefill-1"}, false},
+                                                {{2, 2}, {"prefill-2", "prefill-3"}, true}};
     const auto                        load_context =
         makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1, /*reuse=*/0, groups);
 
@@ -112,6 +112,8 @@ TEST(DecodeRpcServerTest, PpLoadRequestCarriesStagePeerGroups) {
     EXPECT_EQ(request.stage_peer_groups(0).peer_addrs(1), "prefill-1");
     EXPECT_EQ(request.stage_peer_groups(1).layer_begin(), 2);
     EXPECT_EQ(request.stage_peer_groups(1).peer_addrs(0), "prefill-2");
+    EXPECT_FALSE(request.stage_peer_groups(0).is_last_stage());
+    EXPECT_TRUE(request.stage_peer_groups(1).is_last_stage());
 }
 
 TEST(DecodeRpcServerTest, PpMlaLoadRequestCarriesStagePeerGroups) {

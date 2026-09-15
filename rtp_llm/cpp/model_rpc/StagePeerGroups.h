@@ -14,6 +14,7 @@ namespace rtp_llm {
 struct StagePeerGroup {
     StageLayerRange          range;
     std::vector<std::string> peer_addrs;
+    bool                     is_last_stage = false;
 };
 
 // One load unit from a single prefill peer: which peer of the stage group to

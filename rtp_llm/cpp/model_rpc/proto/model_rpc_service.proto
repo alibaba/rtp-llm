@@ -325,6 +325,7 @@ message StagePeerGroupPB {
     uint32 layer_begin = 1;
     uint32 layer_count = 2;
     repeated string peer_addrs = 3;
+    bool is_last_stage = 4;
 }
 
 message GenerateRequestPB {

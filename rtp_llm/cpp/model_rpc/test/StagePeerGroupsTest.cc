@@ -37,6 +37,7 @@ TEST(StagePeerGroups, PpSlicesRangesAndPeers) {
     for (size_t stage = 0; stage < groups.size(); ++stage) {
         EXPECT_EQ(groups[stage].range.begin, expected[stage].first) << "stage=" << stage;
         EXPECT_EQ(groups[stage].range.size, expected[stage].second) << "stage=" << stage;
+        EXPECT_EQ(groups[stage].is_last_stage, stage + 1 == groups.size()) << "stage=" << stage;
         ASSERT_EQ(groups[stage].peer_addrs.size(), 2u) << "stage=" << stage;
         EXPECT_EQ(groups[stage].peer_addrs[0], "10.0.0." + std::to_string(stage * 2 + 1) + ":100:200");
         EXPECT_EQ(groups[stage].peer_addrs[1], "10.0.0." + std::to_string(stage * 2 + 2) + ":100:200");
@@ -57,13 +58,18 @@ TEST(StagePeerGroups, ValidateAcceptsTilingGroups) {
 }
 
 TEST(StagePeerGroups, ValidateRejectsGap) {
-    std::vector<StagePeerGroup> groups = {{{0, 3}, {"a"}}, {{4, 3}, {"b"}}};
+    std::vector<StagePeerGroup> groups = {{{0, 3}, {"a"}, false}, {{4, 3}, {"b"}, true}};
     EXPECT_THROW(validateStagePeerGroups(groups, 7), std::exception);
 }
 
 TEST(StagePeerGroups, ValidateRejectsTotalMismatch) {
-    std::vector<StagePeerGroup> groups = {{{0, 3}, {"a"}}, {{3, 3}, {"b"}}};
+    std::vector<StagePeerGroup> groups = {{{0, 3}, {"a"}, false}, {{3, 3}, {"b"}, true}};
     EXPECT_THROW(validateStagePeerGroups(groups, 10), std::exception);
+}
+
+TEST(StagePeerGroups, ValidateRejectsWrongLastStageFlag) {
+    std::vector<StagePeerGroup> groups = {{{0, 3}, {"a"}, true}, {{3, 3}, {"b"}, false}};
+    EXPECT_THROW(validateStagePeerGroups(groups, 6), std::exception);
 }
 
 TEST(StagePeerGroups, PlanSlicesSymmetricTpCopiesWholeBlock) {
