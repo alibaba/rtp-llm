@@ -301,9 +301,10 @@ class BatchPerfImpl(object):
                     json=payload,
                     timeout=60,
                 )
+                # Per-DP RPC failures can arrive in an HTTP 200 error body.
                 if (
                     response.status_code == 200
-                    and response.json().get("status", "ok") == "ok"
+                    and response.json().get("status") == "ok"
                 ):
                     return
                 last_error = f"{response.text}, {response.status_code}"

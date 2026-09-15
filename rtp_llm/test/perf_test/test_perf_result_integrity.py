@@ -107,6 +107,35 @@ def test_benchmark_requests_the_full_per_dp_batch(is_decode):
     )
 
 
+@pytest.mark.parametrize("payload", [{"error": "Failed on some addresses"}, {}])
+def test_scheduler_update_http_200_error_cannot_start_benchmark(payload):
+    with patch("rtp_llm.test.perf_test.batch_perf_impl.ProcessPoolExecutor"):
+        runner = BatchPerfImpl(1234, 8, 128, "query")
+    response = Mock(status_code=200, text=json.dumps(payload))
+    response.json.return_value = payload
+    with patch(
+        "rtp_llm.test.perf_test.batch_perf_impl.requests.post", return_value=response
+    ) as post, patch("rtp_llm.test.perf_test.batch_perf_impl.time.sleep"):
+        with pytest.raises(Exception, match="failed to set concurrency after retries"):
+            runner._set_concurrency()
+    assert post.call_count == 20
+
+
+def test_scheduler_update_retries_dp_error_until_explicit_success():
+    with patch("rtp_llm.test.perf_test.batch_perf_impl.ProcessPoolExecutor"):
+        runner = BatchPerfImpl(1234, 8, 128, "query")
+    failed = Mock(status_code=200, text='{"error": "DP update failed"}')
+    failed.json.return_value = {"error": "DP update failed"}
+    success = Mock(status_code=200)
+    success.json.return_value = {"status": "ok"}
+    with patch(
+        "rtp_llm.test.perf_test.batch_perf_impl.requests.post",
+        side_effect=[failed, success],
+    ) as post, patch("rtp_llm.test.perf_test.batch_perf_impl.time.sleep"):
+        runner._set_concurrency()
+    assert post.call_count == 2
+
+
 def _query_cache_status(cache):
     cache_response = Mock()
     cache_response.json.return_value = cache
