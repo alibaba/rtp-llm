@@ -218,7 +218,6 @@ TEST_F(TcpSenderReceiverTest, C1_RecvCancelledBeforeRpcArrives_Integration) {
     recv_req.unique_key  = "k_c1_integ";
     recv_req.block_info  = makeBlocks(1, gpu_buf_recv.data_ptr(), 64);
     recv_req.deadline_ms = currentTimeMs() + 5000;
-    req.timeout_ms = 5000;
 
     auto task = receiver_->recv(recv_req);
     ASSERT_NE(task, nullptr);
@@ -256,7 +255,6 @@ TEST_F(TcpSenderReceiverTest, A1_NormalTransfer_EndToEnd_Success) {
     recv_req.unique_key  = "k_a1_integ";
     recv_req.block_info  = makeBlocks(1, gpu_buf.data_ptr(), size);
     recv_req.deadline_ms = currentTimeMs() + 5000;
-    req.timeout_ms = 5000;
 
     auto task = receiver_->recv(recv_req);
     ASSERT_NE(task, nullptr);
@@ -319,7 +317,6 @@ TEST_F(TcpSenderReceiverTest, G2_MultipleSenders_ConcurrentKeys) {
         recv_req.unique_key  = "k_g2_" + std::to_string(i);
         recv_req.block_info  = makeBlocks(1, dst_bufs[i].data_ptr(), size);
         recv_req.deadline_ms = currentTimeMs() + 5000;
-    req.timeout_ms = 5000;
         tasks[i]             = receiver_->recv(recv_req);
         ASSERT_NE(tasks[i], nullptr);
     }
