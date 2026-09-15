@@ -61,6 +61,12 @@ each rank does ~1.5 expert-applications per token and the sum across ranks is
 exactly the 6 required. Only the tokens are duplicated on the wire. This uses
 plain NCCL collectives, so unlike DeepEP it needs no NVSHMEM and no
 ``init_deepep_wrapper``.
+
+Eager DP decode can have unequal local batch sizes. For non-LL roles with a
+small fixed ``max_tokens_per_rank`` budget, each rank pads its exchange to that
+budget and trims the result back to its original rows. Padding is selected from
+configuration, never the local runtime batch size. Large-budget CP prefill keeps
+the unpadded exchange and requires equal per-rank token counts.
 """
 
 from __future__ import annotations
@@ -90,11 +96,9 @@ from ..warmup_sync import cuda_graph_warmup_forward_enabled
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from ...quant_layouts import FP8_BLOCK
 
-# Set to 1 to verify every rank enters each MoE layer with the same token count.
-# Off by default because the check needs a device->host sync per layer. Equal
-# per-rank token counts are a CP invariant, not an assumption added here:
-# ``cp.cp_all_gather_full`` already uses plain ``all_gather`` on the local
-# hidden states, which requires identical shapes across ranks.
+# Set to 1 to verify equal exchange row counts, after any bounded decode padding.
+# Off by default because the check needs a device->host sync per layer. CP shards
+# are equal-sized, but independent eager DP decode batches need not be.
 _EP_CHECK_SIZES_ENV = "DSV4_EP_CHECK_SIZES"
 
 # ep_scatter needs m_indices.shape[0] % BLOCK_E == 0 (BLOCK_E=128), and
@@ -686,19 +690,16 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
                 f"{self.name} with ep_size={cfg.ep_size} needs an initialised "
                 "Group.TP process group for the combine."
             )
-        if os.environ.get(_EP_CHECK_SIZES_ENV) == "1":
-            self._assert_uniform_token_count(N, group, device)
-
         ep = cfg.ep_size
 
-        # Every term below is host-side and equal on every rank -- an env var, this
-        # rank's token count (a CP invariant, see _EP_CHECK_SIZES_ENV) and a buffer
-        # size fixed at load. So all ranks take the same branch and no collective is
-        # left half-entered. N == 0 keeps the all-gather path, whose zero-token case
-        # is already handled below; LL dispatch has no such contract.
+        # Validate the original batch before padding; padding must not conceal an
+        # unsupported graph size. LL keeps its existing positive-batch contract:
+        # N == 0 falls through to all-gather, not LL dispatch.
         self._assert_one_captured_size(N)
 
         if self._ll_ok and N > 0:
+            if os.environ.get(_EP_CHECK_SIZES_ENV) == "1":
+                self._assert_uniform_token_count(N, group, device)
             buf, ll_max_tokens = _ll_buffer(ep, D, cfg.n_routed_experts)
             if N > ll_max_tokens:
                 # _ll_gate already established max_tokens_per_rank <=
@@ -720,6 +721,28 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
                 x, weights, indices, buf, ll_max_tokens
             ).float()
 
+        exchange_n = N
+        # The configured budget is rank-uniform even when eager DP batches are
+        # not. Keep this independent of N and the configurable LL buffer size so
+        # large CP-prefill roles never opt into a small decode exchange locally.
+        if not self._ll_ok and 0 < cfg.max_tokens_per_rank * ep <= _MASKED_MAX_N:
+            exchange_n = cfg.max_tokens_per_rank
+            if N > exchange_n:
+                raise RuntimeError(
+                    f"grouped_fp8: {N} tokens on this rank exceeds the fixed "
+                    f"all-gather exchange capacity {exchange_n} "
+                    "(cfg.max_tokens_per_rank). The scheduler must respect "
+                    "the declared per-rank token budget."
+                )
+            if N < exchange_n:
+                padding = (0, 0, 0, exchange_n - N)
+                x = F.pad(x, padding, value=0)
+                weights = F.pad(weights, padding, value=0)
+                indices = F.pad(indices, padding, value=-1)
+
+        if os.environ.get(_EP_CHECK_SIZES_ENV) == "1":
+            self._assert_uniform_token_count(exchange_n, group, device)
+
         x_full = _all_gather_cat(x.contiguous(), ep, group)
         w_full = _all_gather_cat(weights.contiguous(), ep, group)
         i_full = _all_gather_cat(indices.contiguous(), ep, group)
@@ -733,13 +756,13 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         # reduce_scatter sums element-wise across ranks and hands rank r the
         # r-th chunk. Each rank contributed only its own experts' terms, so the
         # sum is the full top-k total, and chunk r is exactly this rank's shard.
-        out = torch.empty((N, D), dtype=partial.dtype, device=device)
+        out = torch.empty((exchange_n, D), dtype=partial.dtype, device=device)
         dist.reduce_scatter_tensor(out, partial.contiguous(), group=group)
-        return out.float()
+        return out[:N].float()
 
     @staticmethod
     def _assert_uniform_token_count(n: int, group, device) -> None:
-        """Fail loudly (not deadlock) if ranks disagree on the token count."""
+        """Fail loudly if ranks disagree on the effective exchange row count."""
         import torch.distributed as dist
 
         counts = torch.empty(
@@ -753,7 +776,9 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
             raise RuntimeError(
                 f"{GroupedFP8Strategy.name} EP combine requires an equal token "
                 f"count on every rank, got {seen}. The all-gather/reduce-scatter "
-                "combine would need per-rank padding to support ragged shards."
+                "combine requires rank-uniform exchange rows. Small non-LL "
+                "budgets pad to cfg.max_tokens_per_rank; large budgets remain "
+                "unpadded."
             )
 
     def _local_experts(

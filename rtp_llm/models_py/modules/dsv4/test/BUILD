@@ -232,3 +232,9 @@ py_test(
     srcs = ["test_grouped_fp8_sleep_guard.py"],
     deps = _DSV4_TEST_DEPS,
 )
+
+py_test(
+    name = "test_grouped_fp8_ep_padding",
+    srcs = ["test_grouped_fp8_ep_padding.py"],
+    deps = _DSV4_TEST_DEPS,
+)
