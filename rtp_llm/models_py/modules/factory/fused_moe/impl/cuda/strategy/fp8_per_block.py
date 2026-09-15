@@ -107,8 +107,10 @@ class CudaFp8PerBlockPureDPStrategy(MoeStrategy):
         checker.check(is_pure_dp_ep)
 
     def get_attributes(self) -> StrategyAttributes:
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor_v2 import (
-            DeepGemmMaskedExecutorV2,
+        # Long prefills must pack only routed tokens instead of reserving the
+        # full gathered token count for every local expert.
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor import (
+            DeepGemmHybridExecutor,
         )
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_dp_router import (
             PureDpRouterFp8PerBlock,
@@ -120,7 +122,7 @@ class CudaFp8PerBlockPureDPStrategy(MoeStrategy):
         )
         return StrategyAttributes(
             router_class=PureDpRouterFp8PerBlock,
-            executor_class=DeepGemmMaskedExecutorV2,
+            executor_class=DeepGemmHybridExecutor,
             quant_config=quant_config,
         )
 

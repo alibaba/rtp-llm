@@ -23,11 +23,11 @@ MultimodalInputsPB MultimodalPbConverter::inputsToPb(const std::vector<Multimoda
 ErrorResult<MultimodalOutput> MultimodalPbConverter::inlineOutputFromPb(const MultimodalOutputPB& output_pb) {
     // Convert malformed remote data into an error instead of propagating torch exceptions.
     try {
-        torch::Tensor mm_embedding = TensorPbConvert::pbToTorch(output_pb.multimodal_embedding()), mm_position_id;
+        torch::Tensor mm_embedding = TensorPbConvert::pbToPinnedTorch(output_pb.multimodal_embedding()), mm_position_id;
         bool          contain_pos  = output_pb.has_multimodal_pos_id();
         bool          contain_extra_input = output_pb.multimodal_extra_input_size() > 0;
         if (contain_pos) {
-            mm_position_id = TensorPbConvert::pbToTorch(output_pb.multimodal_pos_id());
+            mm_position_id = TensorPbConvert::pbToPinnedTorch(output_pb.multimodal_pos_id());
         }
         // RDMA receipts have no inline embedding and must not reach this decoder.
         if (mm_embedding.dim() == 0) {
@@ -66,7 +66,7 @@ ErrorResult<MultimodalOutput> MultimodalPbConverter::inlineOutputFromPb(const Mu
             std::vector<torch::Tensor> extra_inputs;
             extra_inputs.reserve(output_pb.multimodal_extra_input_size());
             for (const auto& extra_input_pb : output_pb.multimodal_extra_input()) {
-                extra_inputs.emplace_back(TensorPbConvert::pbToTorch(extra_input_pb));
+                extra_inputs.emplace_back(TensorPbConvert::pbToPinnedTorch(extra_input_pb));
             }
             mm_output.mm_extra_input = std::move(extra_inputs);
         }

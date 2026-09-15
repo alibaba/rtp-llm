@@ -55,6 +55,9 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
             "QWEN35_VIT_ATTN_BACKEND", "auto"
         )
         self.visual = Qwen3_5MoeVisionModel._from_config(config_hf)
+        from .vision_graph import VisionGraphCache
+
+        self._vision_graph_cache = VisionGraphCache(self.visual)
 
     @property
     def _data_type(self):
@@ -202,9 +205,14 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
         # Keep shape bookkeeping on CPU instead of copying it back from CUDA
         # inside every vision layer.
         grid_thw = torch.cat([data[1] for data in data_list], dim=0)
-        embeds = self.visual(
-            pixel_values, grid_thw=grid_thw, return_dict=True, **kwargs
-        ).pooler_output
+        # Lazy construction also supports weight-loading and test-created modules.
+        if not hasattr(self, "_vision_graph_cache"):
+            from .vision_graph import VisionGraphCache
+
+            self._vision_graph_cache = VisionGraphCache(self.visual)
+        embeds = self._vision_graph_cache.run(
+            pixel_values, grid_thw, return_dict=True, **kwargs
+        )
         per_item_embeds = embeds.split(
             [estimate.output_tokens for estimate in estimates]
         )

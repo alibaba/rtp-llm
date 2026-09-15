@@ -24,6 +24,12 @@ def qos_priority_tag(qos_level: Any) -> str:
 
 
 class AccMetrics(Enum):
+    VIT_GRAPH_EVENT_QPS_METRIC = "vit_graph_event_qps"
+
+    VIT_EMBEDDING_CACHE_MISS_QPS_METRIC = "py_rtp_vit_embedding_cache_miss_qps"
+    VIT_EMBEDDING_CACHE_INFLIGHT_QPS_METRIC = "py_rtp_vit_embedding_cache_inflight_qps"
+    VIT_EMBEDDING_CACHE_HIT_QPS_METRIC = "py_rtp_vit_embedding_cache_hit_qps"
+    VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC = "py_rtp_vit_embedding_cache_eviction_qps"
     CANCEL_QPS_METRIC = "py_rtp_cancal_qps_metric"
     SUCCESS_QPS_METRIC = "py_rtp_success_qps_metric"
     QPS_METRIC = "py_rtp_framework_qps"
@@ -85,10 +91,6 @@ class AccMetrics(Enum):
     OUTPUT_REPETITION_QPS_METRIC = "py_rtp_output_repetition_qps"
     SAME_TOKEN_RUN_QPS_METRIC = "py_rtp_same_token_run_qps"
 
-    VIT_EMBEDDING_CACHE_HIT_QPS_METRIC = "py_rtp_vit_embedding_cache_hit_qps"
-    VIT_EMBEDDING_CACHE_MISS_QPS_METRIC = "py_rtp_vit_embedding_cache_miss_qps"
-    VIT_EMBEDDING_CACHE_INFLIGHT_QPS_METRIC = "py_rtp_vit_embedding_cache_inflight_qps"
-    VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC = "py_rtp_vit_embedding_cache_eviction_qps"
 
     # Multimodal download proxy: download attempts routed through the region
     # egress proxy, and connect-failure fallbacks to direct. Both carry the
@@ -150,6 +152,9 @@ class AccMetrics(Enum):
 
 
 class GaugeMetrics(Enum):
+
+    VIT_EMBEDDING_CACHE_TOKENS_METRIC = "py_rtp_vit_embedding_cache_tokens"
+    VIT_EMBEDDING_CACHE_BYTES_METRIC = "py_rtp_vit_embedding_cache_bytes"
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
     RESPONSE_ITER_RT_METRIC = "py_rtp_response_iterate_rt"
     RESPONSE_ITERATE_COUNT = "py_rtp_response_iterate_count"
@@ -276,8 +281,6 @@ class GaugeMetrics(Enum):
     VIT_IMAGE_COUNT_METRIC = "py_rtp_vit_image_count"
     VIT_EMBEDDING_QUEUE_SIZE_METRIC = "py_rtp_vit_embedding_queue_size"
     VIT_EMBEDDING_QUEUE_WAIT_RT_METRIC = "py_rtp_vit_embedding_queue_wait_rt"
-    VIT_EMBEDDING_CACHE_TOKENS_METRIC = "py_rtp_vit_embedding_cache_tokens"
-    VIT_EMBEDDING_CACHE_BYTES_METRIC = "py_rtp_vit_embedding_cache_bytes"
     # Configured GPU + CPU capacity / successful new admission bytes per second.
     # All shards share one activity-driven window of at least 60s. Idle periods
     # emit no samples. This is an estimated turnover time, not a per-entry TTL.
