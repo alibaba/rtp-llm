@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 
+#include <cinttypes>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -107,7 +108,8 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
     for (const CopyItem& item : request.copy_items()) {
         const size_t group_set_id = item.group_set_id();
         if (group_set_id >= group_sets.size()) {
-            RTP_LLM_LOG_WARNING("cannot resolve BlockTree GroupSet id=%lu", item.group_set_id());
+            RTP_LLM_LOG_WARNING("cannot resolve BlockTree GroupSet id=%" PRIu64,
+                                static_cast<uint64_t>(item.group_set_id()));
             return false;
         }
         const GroupSet&    group_set = *group_sets[group_set_id];
@@ -115,7 +117,7 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
         switch (request.copy_direction()) {
             case MemoryOperationRequestPB::D2H: {
                 std::vector<BlockIdxType> device_blocks;
-                if (!group_set.hostPool()->validBlock(item.mem_block())
+                if (!group_set.hostPool() || !group_set.hostPool()->validBlock(item.mem_block())
                     || !decodeDeviceBlocks(item, group_set, device_blocks)) {
                     return false;
                 }
@@ -125,7 +127,7 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
             }
             case MemoryOperationRequestPB::H2D: {
                 std::vector<BlockIdxType> device_blocks;
-                if (!group_set.hostPool()->validBlock(item.mem_block())
+                if (!group_set.hostPool() || !group_set.hostPool()->validBlock(item.mem_block())
                     || !decodeDeviceBlocks(item, group_set, device_blocks)) {
                     return false;
                 }
@@ -134,16 +136,16 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
                 break;
             }
             case MemoryOperationRequestPB::H2DISK:
-                if (!group_set.hostPool()->validBlock(item.mem_block())
-                    || !group_set.diskPool()->validBlock(item.disk_block())) {
+                if (!group_set.hostPool() || !group_set.hostPool()->validBlock(item.mem_block())
+                    || !group_set.diskPool() || !group_set.diskPool()->validBlock(item.disk_block())) {
                     return false;
                 }
                 descriptor =
                     TransferDescriptor::hostToDisk(group_set.groupSetId(), item.mem_block(), item.disk_block());
                 break;
             case MemoryOperationRequestPB::DISK2H:
-                if (!group_set.hostPool()->validBlock(item.mem_block())
-                    || !group_set.diskPool()->validBlock(item.disk_block())) {
+                if (!group_set.hostPool() || !group_set.hostPool()->validBlock(item.mem_block())
+                    || !group_set.diskPool() || !group_set.diskPool()->validBlock(item.disk_block())) {
                     return false;
                 }
                 descriptor =
@@ -151,7 +153,7 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
                 break;
             case MemoryOperationRequestPB::D2DISK: {
                 std::vector<BlockIdxType> device_blocks;
-                if (!group_set.diskPool()->validBlock(item.disk_block())
+                if (!group_set.diskPool() || !group_set.diskPool()->validBlock(item.disk_block())
                     || !decodeDeviceBlocks(item, group_set, device_blocks)) {
                     return false;
                 }
@@ -161,7 +163,7 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
             }
             case MemoryOperationRequestPB::DISK2D: {
                 std::vector<BlockIdxType> device_blocks;
-                if (!group_set.diskPool()->validBlock(item.disk_block())
+                if (!group_set.diskPool() || !group_set.diskPool()->validBlock(item.disk_block())
                     || !decodeDeviceBlocks(item, group_set, device_blocks)) {
                     return false;
                 }

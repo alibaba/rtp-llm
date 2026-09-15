@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstdint>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -16,7 +17,7 @@ using block_transfer_engine_test::makeTestGroupBase;
 using block_transfer_engine_test::makeTestGroupSet;
 using block_transfer_engine_test::makeTestTopology;
 
-std::vector<GroupSetPtr> makeGroupSets() {
+std::vector<GroupSetPtr> makeGroupSets(bool with_host = true, bool with_disk = true) {
     MemoryLayoutConfig memory_layout;
     memory_layout.layer_num                = 1;
     memory_layout.block_num                = 128;
@@ -56,8 +57,8 @@ std::vector<GroupSetPtr> makeGroupSets() {
                                           topology,
                                           membership,
                                           std::vector<DeviceBlockPoolPtr>(membership.size(), device_pool),
-                                          host_pool,
-                                          disk_pool);
+                                          with_host ? host_pool : nullptr,
+                                          with_disk ? disk_pool : nullptr);
         group_sets.push_back(std::move(group_set));
     }
     return group_sets;
@@ -295,6 +296,40 @@ TEST(BlockTransferRequestConverterTest, EncodesBatchAcrossGroupSets) {
     EXPECT_EQ(descriptors[1].group_set_id, 2);
 }
 
+TEST(BlockTransferRequestConverterTest, DecodeRequiresOnlyPoolsUsedByTheDirection) {
+    const std::vector<TransferDescriptor> inputs{
+        TransferDescriptor::deviceToHost(0, {1}, 2),
+        TransferDescriptor::hostToDevice(0, 2, {1}),
+        TransferDescriptor::hostToDisk(0, 2, 3),
+        TransferDescriptor::diskToHost(0, 3, 2),
+        TransferDescriptor::deviceToDisk(0, {1}, 3),
+        TransferDescriptor::diskToDevice(0, 3, {1}),
+    };
+    for (const bool with_host : {false, true}) {
+        for (const bool with_disk : {false, true}) {
+            const auto group_sets = makeGroupSets(with_host, with_disk);
+            for (const auto& input : inputs) {
+                MemoryOperationRequestPB request;
+                ASSERT_TRUE(
+                    BlockTransferRequestConverter::encodeTransfer(request, makeTransferTask({input}), groupSets()));
+                SCOPED_TRACE(::testing::Message() << "direction=" << request.copy_direction() << " host=" << with_host
+                                                  << " disk=" << with_disk);
+                const bool requires_host = input.source_tier == Tier::HOST || input.target_tier == Tier::HOST;
+                const bool requires_disk = input.source_tier == Tier::DISK || input.target_tier == Tier::DISK;
+                const bool expected      = (!requires_host || with_host) && (!requires_disk || with_disk);
+                std::vector<TransferDescriptor> descriptors;
+                EXPECT_EQ(BlockTransferRequestConverter::decodeTransfer(request, descriptors, group_sets), expected);
+                if (expected) {
+                    ASSERT_EQ(descriptors.size(), 1u);
+                    EXPECT_TRUE(descriptors.front().isExecutable());
+                } else {
+                    EXPECT_TRUE(descriptors.empty());
+                }
+            }
+        }
+    }
+}
+
 TEST(BlockTransferRequestConverterTest, DecodeRejectsEmptyRequest) {
     MemoryOperationRequestPB        request;
     std::vector<TransferDescriptor> descriptors;
@@ -307,7 +342,7 @@ TEST(BlockTransferRequestConverterTest, DecodeRejectsInvalidGroupSetId) {
     MemoryOperationRequestPB request;
     request.set_copy_direction(MemoryOperationRequestPB::D2H);
     auto* item = request.add_copy_items();
-    item->set_group_set_id(99);
+    item->set_group_set_id(uint64_t{1} << 40);
     item->set_mem_block(2);
     auto* group_block = item->add_group_blocks();
     group_block->set_group_id(0);

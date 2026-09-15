@@ -3,6 +3,7 @@
 #include <exception>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -111,11 +112,25 @@ std::vector<HostStagingBlockPool::ReadyBatch> HostStagingBlockPool::collectReady
 
 void HostStagingBlockPool::dispatchReadyBatches(std::vector<ReadyBatch> ready_batches) {
     for (auto& ready : ready_batches) {
-        ready.callback(std::move(ready.leases));
+        // Dispatch can run from a lease destructor or noexcept move assignment.
+        // An observer failure must not unwind that boundary or suppress waiters.
+        try {
+            ready.callback(std::move(ready.leases));
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_ERROR("staging ready callback failed: %s", error.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("staging ready callback failed with unknown exception");
+        }
     }
 }
 
 HostBufferView HostStagingBlockPool::blockBuffer(size_t block_id, size_t payload_bytes) const {
+    if (block_id >= block_count_) {
+        throw std::out_of_range("host staging block id is outside the pool");
+    }
+    if (payload_bytes > stride_bytes_) {
+        throw std::invalid_argument("host staging payload exceeds block capacity");
+    }
     void* base = backing_.data() + block_id * stride_bytes_;
     return HostBufferView{base, payload_bytes, stride_bytes_};
 }

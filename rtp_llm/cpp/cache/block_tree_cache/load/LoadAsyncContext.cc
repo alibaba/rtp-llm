@@ -144,9 +144,16 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
         return;
     }
     RTP_LLM_CHECK(storage_request_.keys && storage_request_.keys->size() == storage_request_.handles.size()
-                  && storage_request_.local_matched_blocks_num == local_matched_blocks_
-                  && matched_blocks_num >= local_matched_blocks_
-                  && matched_blocks_num <= storage_request_.handles.size());
+                  && storage_request_.local_matched_blocks_num == local_matched_blocks_);
+    if (matched_blocks_num < local_matched_blocks_ || matched_blocks_num > storage_request_.handles.size()) {
+        RTP_LLM_LOG_ERROR("invalid storage match count=%zu, local=%zu, requested=%zu",
+                          matched_blocks_num,
+                          local_matched_blocks_,
+                          storage_request_.handles.size());
+        malloc_status_.store(MallocStatus::INTERNAL_ERROR, std::memory_order_release);
+        failBeforeCommit();
+        return;
+    }
     backend_matched_blocks_ = matched_blocks_num;
     if (matched_blocks_num < storage_request_.handles.size()) {
         storage_request_.keys = std::make_shared<CacheKeysType>(storage_request_.keys->begin(),

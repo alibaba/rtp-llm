@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstring>
 #include <future>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <thread>
@@ -21,6 +22,50 @@ TEST(HostStagingBlockPoolTest, UsesCallerProvidedStride) {
     ASSERT_TRUE(leases.has_value());
     const auto view = (*leases)[0].blockBuffer(65);
     EXPECT_EQ(view.capacity_bytes, 65u);
+}
+
+TEST(HostStagingBlockPoolTest, RejectsOversizedPayloadWithoutLosingTheLease) {
+    HostStagingBlockPool pool(1, 65);
+    auto                 leases = pool.tryMallocBatch(1);
+    ASSERT_TRUE(leases.has_value());
+    EXPECT_THROW((void)leases->front().blockBuffer(66), std::invalid_argument);
+    EXPECT_FALSE(pool.tryMallocBatch(1).has_value());
+    const auto view = leases->front().blockBuffer(65);
+    EXPECT_EQ(view.payload_bytes, 65u);
+    EXPECT_EQ(view.capacity_bytes, 65u);
+    EXPECT_EQ(leases->front().blockBuffer(0).payload_bytes, 0u);
+    leases.reset();
+    EXPECT_TRUE(pool.tryMallocBatch(1).has_value());
+}
+
+TEST(HostStagingBlockPoolTest, ThrowingReadyCallbackCannotEscapeLeaseDestruction) {
+    for (bool standard_exception : {true, false}) {
+        HostStagingBlockPool pool(1, 4096);
+        auto                 held = pool.tryMallocBatch(1);
+        ASSERT_TRUE(held.has_value());
+        // Callbacks own their observations even if an assertion exits early.
+        auto       calls    = std::make_shared<std::vector<int>>(2, 0);
+        const auto deadline = HostStagingBlockPool::Clock::now() + std::chrono::seconds(30);
+        pool.requestBatch(1, deadline, [calls, standard_exception](auto leases) {
+            EXPECT_TRUE(leases.has_value());
+            ++(*calls)[0];
+            if (standard_exception) {
+                throw std::runtime_error("expected ready callback failure");
+            }
+            throw 7;
+        });
+        pool.requestBatch(1, deadline, [calls](auto leases) {
+            EXPECT_TRUE(leases.has_value());
+            ++(*calls)[1];
+        });
+        EXPECT_NO_THROW(held.reset());
+        EXPECT_EQ((*calls)[0], 1);
+        EXPECT_EQ((*calls)[1], 1);
+        EXPECT_TRUE(pool.tryMallocBatch(1).has_value());
+        pool.cancelAllBatchWaiters();
+        EXPECT_EQ((*calls)[0], 1);
+        EXPECT_EQ((*calls)[1], 1);
+    }
 }
 
 TEST(HostStagingBlockPoolTest, PinnedBackingServesLeases) {
