@@ -975,20 +975,22 @@ public class EndpointRegistry {
      * Trigger TTL eviction on all prefill and decode endpoints.
      *
      * @param ttlMs max age before eviction
+     * @param retainForSchedulerCleanup current directory lookup, called under endpoint locks;
+     *                                  must not acquire request locks or use a historical snapshot
      */
     public void evictExpiredOrphans(long ttlMs,
-                                    LongPredicate schedulerOwnsRequest) {
+                                    LongPredicate retainForSchedulerCleanup) {
         endpoints(RoleType.PREFILL).forEach((endpoint, worker) -> {
             PrefillEndpoint ep = (PrefillEndpoint) worker;
             logEndpointEviction(RoleType.PREFILL, endpoint,
                     ep.evictExpiredInflight(
-                            ttlMs, schedulerOwnsRequest), ttlMs);
+                            ttlMs, retainForSchedulerCleanup), ttlMs);
         });
         endpoints(RoleType.DECODE).forEach((endpoint, worker) -> {
             DecodeEndpoint ep = (DecodeEndpoint) worker;
             logEndpointEviction(RoleType.DECODE, endpoint,
                     ep.evictExpiredRequests(
-                            ttlMs, schedulerOwnsRequest), ttlMs);
+                            ttlMs, retainForSchedulerCleanup), ttlMs);
         });
         endpoints(RoleType.PDFUSION).forEach((endpoint, worker) -> {
             PrefillEndpoint ep = (PrefillEndpoint) worker;
