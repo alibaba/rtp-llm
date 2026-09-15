@@ -480,14 +480,13 @@ public class RequestRegistry {
         }
     }
 
-    public boolean ownsRequestGeneration(long requestId) {
-        RequestSlot slot = requestSlots.get(requestId);
-        if (slot == null) {
-            return false;
-        }
-        synchronized (slot) {
-            return isCurrentSlot(slot) && slot.isLiveGeneration();
-        }
+    /**
+     * Retain registered IDs, including terminal records, during endpoint orphan cleanup.
+     * Called under endpoint locks: never acquire a Slot lock here. Read the current
+     * directory rather than a snapshot, which could miss a newly registered request.
+     */
+    boolean retainForSchedulerCleanup(long requestId) {
+        return requestSlots.containsKey(requestId);
     }
 
     public void onQueuedItemExpired(ScheduledRequest exact) {
