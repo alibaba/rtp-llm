@@ -3,23 +3,22 @@
 import math
 import threading
 from io import BytesIO
-from typing import Any, List
+from typing import Any, List, Optional
 
 import torch
 import torch.nn as nn
 from PIL import Image
 from transformers.configuration_utils import PretrainedConfig
 
-from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
-    ImageEmbeddingInterface,
-)
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
-    K3_MAX_IMAGE_FILE_SIZE_KB,
-    K3_MAX_IMAGE_PIXELS,
     KimiK3VisionProcessor,
 )
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_moonvit import (
     MoonViT3dPretrainedModel,
+)
+from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
+    ImageEmbeddingInterface,
+    MMWorkEstimate,
 )
 from rtp_llm.multimodal.multimodal_util import MMUrlType, get_bytes_io_from_url
 
@@ -160,7 +159,7 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
         )
         self.vision_tower = MoonViT3dPretrainedModel(self.vision_config)
         self.mm_projector = KimiK3PatchMergerMLPV2(self.vision_config)
-        self.image_processor = KimiK3VisionProcessor()
+        self.image_processor = KimiK3VisionProcessor(config["media_proc_cfg"])
 
     @property
     def _device(self):
@@ -169,6 +168,139 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
     @property
     def _data_type(self):
         return self.vision_tower.patch_embed.proj.weight.dtype
+
+    def _work_geometry(self, image: Image.Image) -> tuple[int, int]:
+        """Return exact post-resize input patches and projected tokens."""
+        if not isinstance(image, Image.Image):
+            raise TypeError(
+                f"Kimi-K3 work estimation expects PIL.Image, got {type(image)}"
+            )
+
+        processor_config = self.image_processor.media_proc_cfg
+        patch_size = int(processor_config["patch_size"])
+        vision_patch_size = int(self.vision_config.patch_size)
+        if patch_size != vision_patch_size:
+            raise ValueError(
+                "Kimi-K3 processor and MoonViT patch sizes differ: "
+                f"{patch_size} != {vision_patch_size}"
+            )
+
+        processor_merge_size = int(processor_config["merge_kernel_size"])
+        merge_h, merge_w = map(int, self.vision_config.merge_kernel_size)
+        if (merge_h, merge_w) != (
+            processor_merge_size,
+            processor_merge_size,
+        ):
+            raise ValueError(
+                "Kimi-K3 processor and MoonViT merge sizes differ: "
+                f"{processor_merge_size} != {(merge_h, merge_w)}"
+            )
+
+        resize = self.image_processor.resize_config_for_size(*image.size)
+        padded_height = int(resize["new_height"]) + int(resize["pad_height"])
+        padded_width = int(resize["new_width"]) + int(resize["pad_width"])
+        if padded_height <= 0 or padded_width <= 0:
+            raise ValueError(
+                "Kimi-K3 resize produced a non-positive padded size: "
+                f"{(padded_height, padded_width)}"
+            )
+        if padded_height % patch_size or padded_width % patch_size:
+            raise ValueError(
+                "Kimi-K3 resized image is not patch-aligned: "
+                f"{(padded_height, padded_width)} vs patch size {patch_size}"
+            )
+
+        grid_h = padded_height // patch_size
+        grid_w = padded_width // patch_size
+        if grid_h % merge_h or grid_w % merge_w:
+            raise ValueError(
+                f"Kimi-K3 patch grid {(grid_h, grid_w)} is not merge-aligned "
+                f"to {(merge_h, merge_w)}"
+            )
+        return grid_h * grid_w, (grid_h // merge_h) * (grid_w // merge_w)
+
+    def _estimated_workspace_bytes(self, input_patches: int, output_tokens: int) -> int:
+        """Conservatively estimate batch-scaled MoonViT live activations."""
+        config = self.vision_config
+        dtype_bytes = torch.empty((), dtype=self._data_type).element_size()
+        qkv_hidden_size = config.qkv_hidden_size or config.vt_hidden_size
+
+        # Pixel staging, residual/norm, QKV/RoPE/attention and MLP temporaries.
+        vision_elements = input_patches * (
+            config.num_channels * config.patch_size**2
+            + 2 * config.vt_hidden_size
+            + 6 * qkv_hidden_size
+            + 2 * config.vt_intermediate_size
+        )
+        # The merger flattens merge_h * merge_w patches before its first linear.
+        projector_elements = (
+            2 * input_patches * config.mm_hidden_size
+            + 2 * output_tokens * config.text_hidden_size
+        )
+        return dtype_bytes * (vision_elements + projector_elements)
+
+    def estimate_work(
+        self, data: Any, mm_type: Optional[MMUrlType] = None
+    ) -> MMWorkEstimate:
+        """Compute K3 MoonViT work without materializing image patches."""
+        if mm_type not in (None, MMUrlType.DEFAULT, MMUrlType.IMAGE):
+            raise ValueError("Kimi-K3 only supports image multimodal inputs")
+
+        input_patches, output_tokens = self._work_geometry(data)
+        return MMWorkEstimate(
+            input_patches=input_patches,
+            output_tokens=output_tokens,
+            estimated_workspace_bytes=self._estimated_workspace_bytes(
+                input_patches, output_tokens
+            ),
+            # Every image is an independent varlen-attention segment.
+            max_attention_segment=input_patches,
+            attention_work=input_patches**2,
+        )
+
+    def get_batch_work_budget(self, max_batch_media: int) -> Optional[MMWorkEstimate]:
+        """Map the existing media-count cap to K3-equivalent work limits."""
+        # Serial mode passes sys.maxsize and must preserve its historical path.
+        if max_batch_media >= 1 << 30:
+            return None
+
+        processor_config = self.image_processor.media_proc_cfg
+        reference_patches = int(processor_config["in_patch_limit"])
+        if reference_patches <= 0:
+            raise ValueError(
+                "Kimi-K3 in_patch_limit must be positive, got " f"{reference_patches}"
+            )
+
+        # Validate the shared processor/model geometry before deriving a budget.
+        patch_size = int(processor_config["patch_size"])
+        processor_merge_size = int(processor_config["merge_kernel_size"])
+        merge_h, merge_w = map(int, self.vision_config.merge_kernel_size)
+        if patch_size != int(self.vision_config.patch_size):
+            raise ValueError(
+                "Kimi-K3 processor and MoonViT patch sizes differ: "
+                f"{patch_size} != {self.vision_config.patch_size}"
+            )
+        if (merge_h, merge_w) != (
+            processor_merge_size,
+            processor_merge_size,
+        ):
+            raise ValueError(
+                "Kimi-K3 processor and MoonViT merge sizes differ: "
+                f"{processor_merge_size} != {(merge_h, merge_w)}"
+            )
+
+        merge_area = merge_h * merge_w
+        reference_output_tokens = max(1, reference_patches // merge_area)
+        reference = MMWorkEstimate(
+            input_patches=reference_patches,
+            output_tokens=reference_output_tokens,
+            estimated_workspace_bytes=self._estimated_workspace_bytes(
+                reference_patches, reference_output_tokens
+            ),
+            max_attention_segment=reference_patches,
+            attention_work=reference_patches**2,
+        )
+        return reference.scaled(max_batch_media)
 
     @staticmethod
     def preprocess_input(mm_inputs, vit_config, **kwargs):
@@ -181,10 +313,14 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
                 raise ValueError("Kimi-K3 image tensor must be a 1-D uint8 tensor")
             # Third byte entry point: a direct model RPC call skips the renderer
             # preflight, so the shared per-image cap has to be enforced here too.
-            if mm_input.tensor.numel() > K3_MAX_IMAGE_FILE_SIZE_KB * 1024:
+            if (
+                vit_config.mm_image_max_file_size_kb > 0
+                and mm_input.tensor.numel()
+                > vit_config.mm_image_max_file_size_kb * 1024
+            ):
                 raise ValueError(
                     "Kimi K3 image bytes exceed the per-image limit: "
-                    f"{mm_input.tensor.numel()} > {K3_MAX_IMAGE_FILE_SIZE_KB * 1024}"
+                    f"{mm_input.tensor.numel()} > {vit_config.mm_image_max_file_size_kb * 1024}"
                 )
             # memoryview, not .tobytes(): BytesIO copies its initializer anyway.
             data = BytesIO(mm_input.tensor.detach().cpu().contiguous().numpy().data)
@@ -192,17 +328,9 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
             data = get_bytes_io_from_url(
                 mm_input.url,
                 vit_config.download_headers,
-                max_file_size_kb=K3_MAX_IMAGE_FILE_SIZE_KB,
+                max_file_size_kb=vit_config.mm_image_max_file_size_kb,
             )
         with Image.open(data) as image:
-            # Direct model RPC calls skip frontend preflight, so the backend
-            # must still enforce pixel limits and fully materialize the image.
-            width, height = image.size
-            if width * height > K3_MAX_IMAGE_PIXELS:
-                raise ValueError(
-                    "Kimi K3 image pixel count exceeds the per-image limit: "
-                    f"{width}x{height} > {K3_MAX_IMAGE_PIXELS}"
-                )
             if image.format in ("HEIF", "HEIC"):
                 return Image.frombytes(image.mode, image.size, image.tobytes())
             return image.copy()
@@ -221,9 +349,7 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
             staged.copy_(pixel_values)
             pixel_values = staged.to(device=self._device, non_blocking=True)
         else:
-            pixel_values = pixel_values.to(
-                device=self._device, dtype=self._data_type
-            )
+            pixel_values = pixel_values.to(device=self._device, dtype=self._data_type)
         # Shape metadata stays on CPU so Python consumers never synchronize CUDA.
         grid_thws = processed["grid_thws"]
         vision_outputs = self.vision_tower(pixel_values, grid_thws)
@@ -233,9 +359,7 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
     def embedding(self, data, **kwargs):
         """Single-image entry used by the multimodal processing engine."""
         with mm_lock:
-            features = (
-                self.image_embedding([data])[0].to(self._data_type).contiguous()
-            )
+            features = self.image_embedding([data])[0].to(self._data_type).contiguous()
         return features, None
 
     @torch.inference_mode()

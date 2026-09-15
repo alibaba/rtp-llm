@@ -27,10 +27,7 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.kimi_k3_request_contract import (
-    apply_kimi_k3_request_contract,
-    validate_kimi_k3_tool_history,
-)
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
@@ -55,6 +52,7 @@ from rtp_llm.dash_sc.codec import (
     parse_messages_from_request,
     parse_multimodal_parts_from_request,
     prepend_to_generated_ids_tensor,
+    slice_generate_output_tokens,
 )
 from rtp_llm.dash_sc.grpc_metrics import (
     report_arrival,
@@ -65,6 +63,11 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
+from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
+    apply_kimi_k3_request_contract,
+    kimi_k3_pending_prompt_token_count,
+    validate_kimi_k3_tool_history,
+)
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
     KimiK3VisionProcessor,
     preflight_kimi_k3_images_async,
@@ -90,8 +93,9 @@ _EMPTY_THINK_BODY = "\n"
 _DEFAULT_TERMINATE_TOKEN_ID = 1
 _INT32_MAX = 2_147_483_647
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
+
 _KIMI_K3_IMAGE_PLACEHOLDER = "<|kimi_image_placeholder|>"
-_KIMI_K3_MEDIA_CONTENT = "<|media_content|>"
+_KIMI_K3_MEDIA_PAD = "<|media_pad|>"
 
 
 def _build_mm_inputs(
@@ -161,21 +165,19 @@ def _find_token_sequence_offsets(
     return offsets
 
 
-async def _prepare_multimodal_request(
+async def _prepare_kimi_k3_multimodal_request(
     request: Any,
     input_ids_list: list[int],
     *,
     tokenizer: Any,
-    is_kimi_k3: bool = False,
-    download_headers: str = "",
+    vit_config: Optional[VitConfig] = None,
+    mm_parts: Optional[list] = None,
 ) -> tuple[list[int], list]:
     """Expand K3 chat-template placeholders and build backend multimodal inputs."""
-    mm_parts = parse_multimodal_parts_from_request(request)
+    if mm_parts is None:
+        mm_parts = parse_multimodal_parts_from_request(request)
     if not mm_parts:
         return input_ids_list, []
-
-    if not is_kimi_k3:
-        return input_ids_list, _build_mm_inputs(mm_parts)
 
     if any(part.mm_type != MMUrlType.IMAGE for part in mm_parts):
         raise FtRuntimeException(
@@ -184,20 +186,18 @@ async def _prepare_multimodal_request(
         )
 
     urls = [part.url for part in mm_parts]
-    placeholder_ids = _encode_kimi_k3_prompt(tokenizer, _KIMI_K3_IMAGE_PLACEHOLDER)
-    media_content_ids = _encode_kimi_k3_prompt(tokenizer, _KIMI_K3_MEDIA_CONTENT)
-    if not placeholder_ids or not media_content_ids:
+    placeholder_ids = _encode_kimi_k3_prompt(
+        tokenizer, _KIMI_K3_IMAGE_PLACEHOLDER
+    )
+    media_pad_ids = _encode_kimi_k3_prompt(tokenizer, _KIMI_K3_MEDIA_PAD)
+    if not placeholder_ids or not media_pad_ids:
         raise FtRuntimeException(
             ExceptionType.MM_WRONG_FORMAT_ERROR,
-            "Kimi K3 image markers could not be tokenized",
+            "Kimi K3 multimodal markers could not be tokenized",
         )
 
-    placeholder_offsets = _find_token_sequence_offsets(
-        input_ids_list, placeholder_ids
-    )
-    expanded_count = len(
-        _find_token_sequence_offsets(input_ids_list, media_content_ids)
-    )
+    placeholder_offsets = _find_token_sequence_offsets(input_ids_list, placeholder_ids)
+    expanded_count = len(_find_token_sequence_offsets(input_ids_list, media_pad_ids))
     if placeholder_offsets:
         if expanded_count or len(placeholder_offsets) != len(urls):
             raise FtRuntimeException(
@@ -214,7 +214,7 @@ async def _prepare_multimodal_request(
 
     try:
         tensors, sizes = await preflight_kimi_k3_images_async(
-            urls, download_headers
+            urls, vit_config or VitConfig()
         )
     except ValueError as error:
         raise FtRuntimeException(
@@ -671,7 +671,7 @@ async def iter_real_model_stream_infer(
     access_agg: Any = None,
     mm_inputs: Optional[list] = None,
     is_kimi_k3: bool = False,
-    mm_download_headers: str = "",
+    vit_config: Optional[VitConfig] = None,
     yield_access_stats: bool = False,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
@@ -712,22 +712,7 @@ async def iter_real_model_stream_infer(
         len(input_ids_list),
         sampling,
     )
-    matched_echo_ids = _matched_echo_prefix_ids(input_ids_list, echo_prefix_ids)
-    should_echo = bool(matched_echo_ids)
-    echoed = False
     try:
-        if is_kimi_k3:
-            messages = parse_messages_from_request(request)
-            if messages is not None:
-                validate_kimi_k3_tool_history(messages)
-        if mm_inputs is None:
-            input_ids_list, mm_inputs = await _prepare_multimodal_request(
-                request,
-                input_ids_list,
-                tokenizer=tokenizer,
-                is_kimi_k3=is_kimi_k3,
-                download_headers=mm_download_headers,
-            )
         generate_config = sampling.to_generate_config(other=other)
         generate_config.trace_id = trace_str
         if generate_env_config is not None:
@@ -755,12 +740,115 @@ async def iter_real_model_stream_infer(
         ):
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
         _apply_request_overrides(generate_config, sampling, other, runtime)
-        if is_kimi_k3:
-            apply_kimi_k3_request_contract(
-                generate_config,
-                specified_fields=sampling.specified_fields,
-                thinking=bool(getattr(generate_config, "in_think_mode", False)),
+
+        prompt_token_offset = 0
+        wire_n_inputs = tuple(
+            f"{inp.name}:{inp.datatype}:raw_bytes="
+            f"{len(request.raw_input_contents[index])}"
+            if index < len(request.raw_input_contents)
+            else f"{inp.name}:{inp.datatype}:raw_bytes=missing"
+            for index, inp in enumerate(request.inputs)
+            if inp.name in ("n", "num_return_sequences")
+        )
+        wire_n_parameters = tuple(
+            name
+            for name in ("n", "num_return_sequences")
+            if name in request.parameters
+        )
+        has_wire_n = bool(wire_n_inputs or wire_n_parameters)
+        trace_n_contract_result = has_wire_n or "n" in sampling.specified_fields
+        if is_kimi_k3 or has_wire_n:
+            wire_input_names = tuple(inp.name for inp in request.inputs)
+            wire_parameter_names = tuple(sorted(request.parameters))
+            logging.info(
+                "[DashScGrpc] [%s] Kimi K3 n trace: stage=pre_contract "
+                "wire_input_names=%s wire_parameter_names=%s wire_n_inputs=%s "
+                "wire_n_parameters=%s parsed_n=%s n_explicit=%s config_n=%s "
+                "thinking=%s gate=%s action=%s",
+                tag,
+                wire_input_names,
+                wire_parameter_names,
+                wire_n_inputs or ("none",),
+                wire_n_parameters or ("none",),
+                sampling.num_return_sequences,
+                "n" in sampling.specified_fields,
+                generate_config.num_return_sequences,
+                bool(getattr(generate_config, "in_think_mode", False)),
+                is_kimi_k3,
+                "apply" if is_kimi_k3 else "skip",
             )
+        if is_kimi_k3:
+            parsed_mm_parts = parse_multimodal_parts_from_request(request)
+            input_token_count_before_mm = len(input_ids_list)
+            messages = parse_messages_from_request(request)
+            if messages is not None:
+                validate_kimi_k3_tool_history(messages, allow_partial=True)
+            if mm_inputs is None:
+                input_ids_list, mm_inputs = (
+                    await _prepare_kimi_k3_multimodal_request(
+                        request,
+                        input_ids_list,
+                        tokenizer=tokenizer,
+                        vit_config=vit_config,
+                        mm_parts=parsed_mm_parts,
+                    )
+                )
+            logging.info(
+                "[DashScGrpc] [%s] Kimi K3 multimodal usage trace: "
+                "stage=request_prepared wire_payload_parameters=%s "
+                "parsed_mm_count=%s parsed_mm_types=%s backend_mm_count=%s "
+                "input_tokens_before_mm=%s input_tokens_after_mm=%s",
+                tag,
+                tuple(
+                    name
+                    for name in ("payload", "__messages__")
+                    if name in request.parameters
+                )
+                or ("none",),
+                len(parsed_mm_parts),
+                tuple(
+                    getattr(part.mm_type, "name", str(part.mm_type))
+                    for part in parsed_mm_parts
+                )
+                or ("none",),
+                len(mm_inputs or []),
+                input_token_count_before_mm,
+                len(input_ids_list),
+            )
+            try:
+                apply_kimi_k3_request_contract(
+                    generate_config,
+                    specified_fields=sampling.specified_fields,
+                    thinking=bool(getattr(generate_config, "in_think_mode", False)),
+                )
+            except FtRuntimeException as e:
+                if trace_n_contract_result:
+                    logging.warning(
+                        "[DashScGrpc] [%s] Kimi K3 n trace: "
+                        "stage=contract_result result=reject config_n=%s error=%s",
+                        tag,
+                        generate_config.num_return_sequences,
+                        e,
+                    )
+                raise
+            if trace_n_contract_result:
+                logging.info(
+                    "[DashScGrpc] [%s] Kimi K3 n trace: "
+                    "stage=contract_result result=accept config_n=%s",
+                    tag,
+                    generate_config.num_return_sequences,
+                )
+            prompt_token_offset = kimi_k3_pending_prompt_token_count(
+                _hf_tokenizer(tokenizer), input_ids_list
+            )
+        elif mm_inputs is None:
+            mm_inputs = _build_mm_inputs(
+                parse_multimodal_parts_from_request(request)
+            )
+
+        matched_echo_ids = _matched_echo_prefix_ids(input_ids_list, echo_prefix_ids)
+        should_echo = bool(matched_echo_ids)
+        echoed = False
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list
             if existing:
@@ -907,6 +995,9 @@ async def iter_real_model_stream_infer(
                         _request_shape=request_shape,
                         stream_finished=False,
                         token_ids=generated_ids,
+                        top_logprobs=sampling.top_logprobs,
+                        prompt_token_offset=prompt_token_offset,
+                        trace_multimodal_usage=is_kimi_k3,
                     )
                     if should_echo and not echoed:
                         if prepend_to_generated_ids_tensor(
@@ -942,6 +1033,10 @@ async def iter_real_model_stream_infer(
                         _request_shape=request_shape,
                         stream_finished=not will_do_phase2,
                         token_ids=list(runtime.eos_tokens),
+                        top_logprobs=sampling.top_logprobs,
+                        emit_logprobs=False,
+                        prompt_token_offset=prompt_token_offset,
+                        trace_multimodal_usage=is_kimi_k3,
                     )
                     eos_finished = not will_do_phase2
                     eos_finish_reason = (
@@ -984,6 +1079,9 @@ async def iter_real_model_stream_infer(
                 generate_think_token_num=generate_think_token_num,
                 finish_reason_override=finish_reason_override,
                 _request_shape=request_shape,
+                top_logprobs=sampling.top_logprobs,
+                prompt_token_offset=prompt_token_offset,
+                trace_multimodal_usage=is_kimi_k3,
             )
             if should_echo and not echoed and generated_ids:
                 if prepend_to_generated_ids_tensor(
@@ -1158,6 +1256,8 @@ async def iter_real_model_stream_infer(
                     generate_think_token_num=generate_think_token_num,
                     finish_reason_override=finish_reason_override,
                     _request_shape=request_shape,
+                    top_logprobs=sampling.top_logprobs,
+                    trace_multimodal_usage=is_kimi_k3,
                 )
                 stats = (
                     len(resp_ids),
@@ -1205,9 +1305,7 @@ async def iter_real_model_stream_infer(
                         buf_ids = _token_ids_list_from_generate_output(buf_out)
                         cleaned = _strip_trailing_eos(buf_ids, runtime.eos_tokens)
                         if cleaned != buf_ids:
-                            buf_out.output_ids = torch.tensor(
-                                cleaned, dtype=torch.int32
-                            )
+                            slice_generate_output_tokens(buf_out, 0, len(cleaned))
                     resp, stats = _build_phase2_response(buf_go)
                     yield (resp, stats) if yield_access_stats else resp
 
@@ -1226,9 +1324,7 @@ async def iter_real_model_stream_infer(
                         cleaned = _strip_trailing_eos(generated_ids, runtime.eos_tokens)
                         if cleaned != generated_ids:
                             generated_ids = cleaned
-                            out_py.output_ids = torch.tensor(
-                                generated_ids, dtype=torch.int32
-                            )
+                            slice_generate_output_tokens(out_py, 0, len(generated_ids))
                     if generated_ids or out_py.finished:
                         resp, stats = _build_phase2_response(go)
                         yield (resp, stats) if yield_access_stats else resp
@@ -1250,16 +1346,19 @@ async def iter_real_model_stream_infer(
                     # Case A: discard pending + emit post-close.
                     phase2_pending = []
                     phase2_seen_close = True
+                    post_start = len(generated_ids) - len(post_close)
                     if out_py.finished and runtime.eos_tokens:
                         post_close = _strip_trailing_eos(post_close, runtime.eos_tokens)
-                    out_py.output_ids = torch.tensor(post_close, dtype=torch.int32)
+                    slice_generate_output_tokens(
+                        out_py, post_start, post_start + len(post_close)
+                    )
                     if post_close or out_py.finished:
                         resp, stats = _build_phase2_response(go)
                         yield (resp, stats) if yield_access_stats else resp
                 elif out_py.finished:
                     # Case B: pre-close is real content; keep it, drop close.
                     pre_close = list(generated_ids[:close_idx])
-                    out_py.output_ids = torch.tensor(pre_close, dtype=torch.int32)
+                    slice_generate_output_tokens(out_py, 0, len(pre_close))
                     phase2_pending.append(go)
                     for item in _flush_phase2_pending():
                         yield item
@@ -1330,7 +1429,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         generate_env_config: Any = None,
         think_runtime: Optional[_ThinkRuntime] = None,
         model_type: Optional[str] = None,
-        mm_download_headers: str = "",
+        vit_config: Optional[VitConfig] = None,
         rank_id: Optional[int] = None,
         repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
     ):
@@ -1346,10 +1445,8 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         )
         self._tokenizer = tokenizer
         self._generate_env_config = generate_env_config
-        self._is_kimi_k3 = (
-            str(model_type or "").replace("-", "_").lower() == "kimi_k3"
-        )
-        self._mm_download_headers = mm_download_headers
+        self._is_kimi_k3 = str(model_type or "").replace("-", "_").lower() == "kimi_k3"
+        self._vit_config = vit_config or VitConfig()
         # Empty runtime is a safe default — phase-2 disabled, all dashllm limit
         # params null. Production callers (``DashScApp``) pre-build via
         # ``build_think_runtime`` so the per-request hot path is allocation-free.
@@ -1587,7 +1684,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         phase2_request_id_factory=self._next_rtp_llm_request_id,
                         access_agg=record,
                         is_kimi_k3=self._is_kimi_k3,
-                        mm_download_headers=self._mm_download_headers,
+                        vit_config=self._vit_config,
                         yield_access_stats=True,
                     ):
                         (

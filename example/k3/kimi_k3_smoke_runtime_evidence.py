@@ -11,18 +11,17 @@ import json
 import pathlib
 
 
-def ordered_subsequence(values, expected):
-    position = 0
-    for value in values:
-        if value == expected[position]:
-            position += 1
-            if position == len(expected):
-                return True
-    return False
+def adjacent_unique(values):
+    return [
+        value
+        for index, value in enumerate(values)
+        if index == 0 or value != values[index - 1]
+    ]
 
 
 def _verify(events: list[dict], role: str, replay_seen: bool = False) -> dict:
     checks = {}
+    observations = {}
     if role == "prefill":
         rounds = [e for e in events if e.get("kind") == "chunk"]
         checks["chunk_rounds_present"] = bool(rounds)
@@ -86,14 +85,27 @@ def _verify(events: list[dict], role: str, replay_seen: bool = False) -> dict:
             checks[f"target_verify_bucket_{bucket}"] = any(
                 e["bucket"] == bucket for e in graph
             )
-        checks["bucket8_slot_reuse_7_5_6"] = ordered_subsequence(
-            [e["valid"][7] for e in graph if e["bucket"] == 8], [7, 5, 6]
+        # The request runner synchronously validates the 7 -> 5 -> 6 owner-7
+        # waves. Their HTTP barrier cannot guarantee that every request is
+        # resident in one Decode step, so gate on the exercised Graph path and
+        # retain instantaneous occupancy only as diagnostic evidence.
+        owner7_bucket8 = [
+            e
+            for e in graph
+            if e["bucket"] == 8
+            and e["valid"][:7] == [0] * 7
+            and e["valid"][7] > 0
+        ]
+        checks["bucket8_owner7_target_verify"] = bool(owner7_bucket8)
+        observations["bucket8_owner7_valid_transitions"] = adjacent_unique(
+            [e["valid"][7] for e in owner7_bucket8]
         )
         checks["graph_replay_observed"] = replay_seen
     return {
         "role": role,
         "passed": all(checks.values()),
         "checks": checks,
+        "observations": observations,
         "event_count": len(events),
     }
 

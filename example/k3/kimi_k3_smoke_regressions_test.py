@@ -450,16 +450,37 @@ class RuntimeEvidenceTest(unittest.TestCase):
         events = self.events()
         self.assertTrue(verify(events + events, "decode", True)["passed"])
 
+    def test_owner7_bucket8_does_not_require_instantaneous_wave_sizes(self):
+        events = copy.deepcopy(self.events())
+        for event in events:
+            if event["step"] in (3, 4, 5):
+                event["valid"][-1] = {3: 6, 4: 5, 5: 6}[event["step"]]
+        report = verify(events, "decode", True)
+        self.assertTrue(report["passed"])
+        self.assertEqual(
+            report["observations"]["bucket8_owner7_valid_transitions"],
+            [6, 5, 6],
+        )
+        self.assertNotIn("bucket8_slot_reuse_7_5_6", report["checks"])
+
     def test_missing_rank_or_disagreed_plan_or_fake_graph_fails(self):
         events = self.events()
         variants = [events[:-1], [dict(e, graph=False) for e in events]]
         bad = copy.deepcopy(events)
         bad[1]["bucket"] = 8
         variants.append(bad)
-        variants.append([e for e in events if e["step"] != 4])
         for data in variants:
             self.assertFalse(verify(data, "decode", True)["passed"])
         self.assertFalse(verify(events, "decode", False)["passed"])
+
+    def test_bucket8_on_another_owner_does_not_cover_owner7(self):
+        events = copy.deepcopy(self.events())
+        for event in events:
+            if event["step"] in (3, 4, 5):
+                event["valid"] = [event["valid"][-1]] + [0] * 7
+        report = verify(events, "decode", True)
+        self.assertFalse(report["passed"])
+        self.assertFalse(report["checks"]["bucket8_owner7_target_verify"])
 
     def test_prefill_requires_actual_padding_both_boundaries(self):
         events = [

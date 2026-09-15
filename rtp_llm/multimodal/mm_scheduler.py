@@ -32,6 +32,10 @@ class OutputCountMismatchError(RuntimeError):
     """
 
 
+class GPUMemoryHeadroomError(torch.cuda.OutOfMemoryError):
+    """A forward was rejected before launch to preserve configured headroom."""
+
+
 def _run_embedding(
     mm_part: MultiModalEmbeddingInterface,
     items: List[MMWorkItem],
@@ -143,6 +147,7 @@ class MMScheduler:
         batch_wait_ms: int = 10,
         max_batch_size: int = 8,
         max_batch_images: int = 32,
+        gpu_memory_reserve_bytes: int = 0,
     ):
         if batch_wait_ms < 0:
             raise ValueError(f"batch_wait_ms must be >= 0, got {batch_wait_ms}")
@@ -150,11 +155,17 @@ class MMScheduler:
             raise ValueError(f"max_batch_size must be > 0, got {max_batch_size}")
         if max_batch_images <= 0:
             raise ValueError(f"max_batch_images must be > 0, got {max_batch_images}")
+        if gpu_memory_reserve_bytes < 0:
+            raise ValueError(
+                "gpu_memory_reserve_bytes must be >= 0, got "
+                f"{gpu_memory_reserve_bytes}"
+            )
 
         self._mm_part = mm_part
         self._batch_wait_ms = batch_wait_ms
         self._max_batch_size = max_batch_size
         self._max_batch_images = max_batch_images
+        self._gpu_memory_reserve_bytes = gpu_memory_reserve_bytes
         self._work_budget = mm_part.get_batch_work_budget(max_batch_images)
         if self._work_budget is not None and not isinstance(
             self._work_budget, MMWorkEstimate
@@ -165,6 +176,19 @@ class MMScheduler:
             )
         if self._work_budget is not None:
             logging.info("MMScheduler: model work budget=%s", self._work_budget)
+        if self._gpu_memory_reserve_bytes > 0:
+            if (
+                self._work_budget is None
+                or self._work_budget.estimated_workspace_bytes <= 0
+            ):
+                raise ValueError(
+                    "gpu_memory_reserve_bytes requires a cost-aware model with "
+                    "a positive estimated_workspace_bytes budget"
+                )
+            logging.info(
+                "MMScheduler: GPU memory reserve=%d bytes",
+                self._gpu_memory_reserve_bytes,
+            )
 
         self._waiting: queue.Queue[_EmbeddingChunk] = queue.Queue()
         # A chunk popped from _waiting that would have overflowed the current
@@ -224,6 +248,57 @@ class MMScheduler:
             )
             > budget.max_attention_segment
         )
+
+    def _check_gpu_memory_headroom(self, items: List[MMWorkItem]) -> None:
+        """Reject a forward that would consume the configured GPU reserve.
+
+        Driver-free bytes and allocator-reserved-but-unused bytes are both
+        available to the PyTorch allocator. The latter is only an approximation
+        because fragmented cached blocks may not satisfy a large allocation;
+        operators should size the reserve to absorb that uncertainty.
+        """
+        if self._gpu_memory_reserve_bytes <= 0:
+            return
+
+        work_estimate = self._sum_work_estimates(items)
+        if work_estimate is None or work_estimate.estimated_workspace_bytes <= 0:
+            raise RuntimeError(
+                "GPU memory headroom admission requires every work item to have "
+                "a positive estimated_workspace_bytes"
+            )
+
+        device = torch.device(self._mm_part._device)
+        if device.type != "cuda":
+            return
+
+        driver_free, _ = torch.cuda.mem_get_info(device)
+        allocated = torch.cuda.memory_allocated(device)
+        reserved = torch.cuda.memory_reserved(device)
+        allocator_reusable = max(0, reserved - allocated)
+        runtime_available = max(
+            0,
+            driver_free
+            + allocator_reusable
+            - self._gpu_memory_reserve_bytes,
+        )
+        estimated_workspace = work_estimate.estimated_workspace_bytes
+        if estimated_workspace <= runtime_available:
+            return
+
+        raise GPUMemoryHeadroomError(
+            "multimodal forward rejected before launch: estimated workspace "
+            f"{estimated_workspace} bytes exceeds runtime allowance "
+            f"{runtime_available} bytes (driver_free={driver_free}, "
+            f"allocator_reusable={allocator_reusable}, "
+            f"reserve={self._gpu_memory_reserve_bytes})"
+        )
+
+    @staticmethod
+    def _release_after_oom(error: torch.cuda.OutOfMemoryError) -> None:
+        # A predicted headroom rejection has not allocated anything. Calling
+        # empty_cache here would add allocator lock contention without helping.
+        if not isinstance(error, GPUMemoryHeadroomError):
+            torch.cuda.empty_cache()
 
     def _build_chunks(self, request: _EmbeddingRequest) -> None:
         if not request.work_items:
@@ -548,17 +623,24 @@ class MMScheduler:
         return batch
 
     def _run_items_with_oom_split(self, items: List[MMWorkItem]) -> None:
-        """Run one chunk, recursively halving its items after a CUDA OOM."""
+        """Run one chunk, halving it after OOM or headroom rejection."""
         try:
+            self._check_gpu_memory_headroom(items)
             _run_embedding(self._mm_part, items)
-        except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
+        except torch.cuda.OutOfMemoryError as error:
+            self._release_after_oom(error)
             if len(items) <= 1:
                 raise
             midpoint = len(items) // 2
+            reason = (
+                "GPU memory headroom"
+                if isinstance(error, GPUMemoryHeadroomError)
+                else "OOM"
+            )
             logging.warning(
-                "MMScheduler: OOM retry splitting one request chunk "
+                "MMScheduler: %s retry splitting one request chunk "
                 "from %d items into %d + %d",
+                reason,
                 len(items),
                 midpoint,
                 len(items) - midpoint,
@@ -567,7 +649,7 @@ class MMScheduler:
             self._run_items_with_oom_split(items[midpoint:])
 
     def _execute_batch(self, batch: List[_EmbeddingChunk]) -> None:
-        """Run a batch, isolating CUDA OOMs by binary split and retry."""
+        """Run a batch, isolating OOM/headroom failures by binary split."""
         # Drop chunks whose callers already timed out, so the forward never runs
         # for work nobody awaits.
         batch = [chunk for chunk in batch if not chunk.request.cancelled]
@@ -581,12 +663,19 @@ class MMScheduler:
             work_estimate = self._sum_work_estimates(items)
             t0 = time.time()
         try:
+            self._check_gpu_memory_headroom(items)
             _run_embedding(self._mm_part, items)
         except torch.cuda.OutOfMemoryError as error:
-            torch.cuda.empty_cache()
+            self._release_after_oom(error)
+            reason = (
+                "GPU memory headroom"
+                if isinstance(error, GPUMemoryHeadroomError)
+                else "OOM"
+            )
             if self._work_budget is None:
                 logging.error(
-                    "MMScheduler: batch OOM with cost-aware scheduling disabled: %s",
+                    "MMScheduler: batch %s with cost-aware scheduling disabled: %s",
+                    reason,
                     error,
                     exc_info=True,
                 )
@@ -595,8 +684,9 @@ class MMScheduler:
             if len(batch) > 1:
                 midpoint = len(batch) // 2
                 logging.warning(
-                    "MMScheduler: OOM retry splitting batch from %d chunks "
+                    "MMScheduler: %s retry splitting batch from %d chunks "
                     "into %d + %d",
+                    reason,
                     len(batch),
                     midpoint,
                     len(batch) - midpoint,
@@ -624,7 +714,8 @@ class MMScheduler:
                 return
 
             logging.error(
-                "MMScheduler: one work item still OOM after isolation: %s",
+                "MMScheduler: one work item still exceeds %s after isolation: %s",
+                reason,
                 error,
                 exc_info=True,
             )

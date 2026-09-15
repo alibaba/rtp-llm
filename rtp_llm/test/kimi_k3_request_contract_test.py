@@ -2,8 +2,10 @@ import unittest
 from types import SimpleNamespace
 
 from rtp_llm.config.exceptions import FtRuntimeException
-from rtp_llm.config.kimi_k3_request_contract import (
+from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
     apply_kimi_k3_request_contract,
+    kimi_k3_pending_prompt_token_count,
+    kimi_k3_pending_prompt_token_ids,
 )
 
 
@@ -80,6 +82,50 @@ class KimiK3RequestContractTest(unittest.TestCase):
             ):
                 apply_kimi_k3_request_contract(
                     config, specified_fields={field}, thinking=True
+                )
+
+    def test_rejects_multiple_sequences_with_public_range_message(self) -> None:
+        for thinking in (False, True):
+            with self.subTest(thinking=thinking), self.assertRaisesRegex(
+                FtRuntimeException, r"Range of n should be \[1, 1\]"
+            ):
+                apply_kimi_k3_request_contract(
+                    self.config(num_return_sequences=3),
+                    specified_fields={"n"},
+                    thinking=thinking,
+                )
+
+
+class KimiK3PendingPromptTest(unittest.TestCase):
+    def test_matches_only_complete_structural_suffix(self):
+        class Tokenizer:
+            def encode(self, text):
+                return {
+                    "<|open|>response<|sep|>": [10, 11, 12],
+                    "<|open|>think<|sep|>": [10, 13, 14, 12],
+                }[text]
+
+        tokenizer = Tokenizer()
+        for ids, expected in (
+            ([99, 10, 11, 12], 3),
+            ([99, 10, 13, 14, 12], 4),
+            ([10, 11, 12, 99], 0),
+            ([99, 11, 12], 0),
+            ([99, 10, 11], 0),
+            ([99, 900, 901], 0),
+            ([], 0),
+        ):
+            with self.subTest(ids=ids):
+                self.assertEqual(
+                    kimi_k3_pending_prompt_token_count(tokenizer, ids), expected
+                )
+        self.assertEqual(kimi_k3_pending_prompt_token_count(None, [99]), 0)
+
+    def test_rejects_invalid_tokenizer_results(self):
+        for result in (None, [], "123", ["10"], (10, 11, 12)):
+            with self.subTest(result=result), self.assertRaises(TypeError):
+                kimi_k3_pending_prompt_token_ids(
+                    SimpleNamespace(encode=lambda text: result), False
                 )
 
 

@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any, NamedTuple
 
+import torch
+
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.structural_tag import (
     DashScStructuralTagError,
@@ -75,19 +77,19 @@ DASHSERVING_INNER_ENGINE_ERROR_NO = 19
 
 DASH_ERROR_BAD_REQUEST = DashErrorSpec(
     error_no=LLMFinishReason.STOP_ENGINE_PARAM,
-    finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=400,
     status_name="InvalidParameter",
 )
 DASH_ERROR_TOO_LONG = DashErrorSpec(
     error_no=LLMFinishReason.STOP_ENGINE_PARAM,
-    finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=413,
     status_name="InvalidParameter",
 )
 DASH_ERROR_UNSUPPORTED = DashErrorSpec(
     error_no=LLMFinishReason.STOP_ENGINE_PARAM,
-    finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=422,
     status_name="InvalidParameter",
 )
@@ -194,6 +196,21 @@ def _parse_optional_scalar_float(request, tensor_name: str) -> float | None:
         return float(struct.unpack_from("<i", raw, 0)[0])
     if dt == "INT64" and len(raw) >= 8:
         return float(struct.unpack_from("<q", raw, 0)[0])
+    return None
+
+
+def _parse_optional_scalar_bool(request, tensor_name: str) -> bool | None:
+    inp, raw = _find_input_raw(request, tensor_name)
+    if inp is None or raw is None or not raw:
+        return None
+    if inp.datatype == "BOOL":
+        return raw[0] != 0
+    value = _parse_optional_scalar_int(request, tensor_name)
+    if value is not None:
+        return value != 0
+    value_float = _parse_optional_scalar_float(request, tensor_name)
+    if value_float is not None:
+        return value_float != 0.0
     return None
 
 
@@ -672,6 +689,8 @@ class SamplingParams:
     repetition_penalty: float = 1.0
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
+    logprobs: bool = False
+    top_logprobs: int = 0
     stop_words_list: tuple[tuple[int, ...], ...] = field(default_factory=tuple)
     max_new_think_tokens: int | None = None
     response_format: str | None = None
@@ -723,6 +742,7 @@ class SamplingParams:
             repetition_penalty=self.repetition_penalty,
             frequency_penalty=self.frequency_penalty,
             presence_penalty=self.presence_penalty,
+            return_all_probs=self.logprobs,
             stop_words_list=self.stop_words_list_py(),
             max_thinking_tokens=max_thinking_tokens,
             return_input_ids=return_input_ids,
@@ -773,6 +793,8 @@ def parse_sampling_params(
     repetition_penalty = 1.0
     frequency_penalty = 0.0
     presence_penalty = 0.0
+    logprobs = False
+    top_logprobs = 0
     specified_fields: set[str] = set()
     max_new_think_tokens: int | None = None
     stop_words_list: tuple[tuple[int, ...], ...] = tuple()
@@ -786,6 +808,10 @@ def parse_sampling_params(
     v = _parse_optional_scalar_int(request, "num_return_sequences")
     if v is None:
         v = _parse_optional_scalar_int(request, "n")
+    if v is None:
+        v = _parse_optional_parameter_int(request, "num_return_sequences")
+    if v is None:
+        v = _parse_optional_parameter_int(request, "n")
     if v is not None:
         num_return_sequences = max(0, v)
         if v != 0:
@@ -833,6 +859,26 @@ def parse_sampling_params(
         presence_penalty = vf
         specified_fields.add("presence_penalty")
 
+    vb = _parse_optional_scalar_bool(request, "logprobs")
+    if vb is None:
+        vb = _parse_optional_parameter_bool(request, "logprobs")
+    if vb is None:
+        vb = _parse_optional_bool(_lookup_ds_request_control(ds_attrs, "logprobs"))
+    if vb is not None:
+        logprobs = vb
+        specified_fields.add("logprobs")
+
+    v = _parse_optional_scalar_int(request, "top_logprobs")
+    if v is None:
+        v = _parse_optional_parameter_int(request, "top_logprobs")
+    if v is None:
+        v = _parse_optional_int_value(
+            _lookup_ds_request_control(ds_attrs, "top_logprobs")
+        )
+    if v is not None:
+        top_logprobs = v
+        specified_fields.add("top_logprobs")
+
     for tensor_name in ("max_think_length", "max_new_think_tokens"):
         v = _parse_optional_scalar_int(request, tensor_name)
         if v is not None:
@@ -860,6 +906,8 @@ def parse_sampling_params(
         repetition_penalty=repetition_penalty,
         frequency_penalty=frequency_penalty,
         presence_penalty=presence_penalty,
+        logprobs=logprobs,
+        top_logprobs=top_logprobs,
         max_new_think_tokens=max_new_think_tokens,
         stop_words_list=stop_words_list,
         response_format=response_format,
@@ -1192,18 +1240,14 @@ def _load_multimodal_payload(request) -> Any:
 
 
 def parse_messages_from_request(request) -> list[Any] | None:
-    """Return original messages when a DashSc request carries its JSON payload.
+    """Read the structured messages supplied alongside pre-tokenized input.
 
-    Text-only callers are allowed to omit the payload because ``input_ids`` are
-    authoritative on this wire.  When the payload is present, model-specific
-    request contracts can validate the original structured conversation before
-    the engine is enqueued.
+    ``payload`` / ``__messages__`` may contain only media turns, not the full
+    conversation. Callers must not infer missing tool results from this subset.
+    Requests carrying only input IDs have no structured history to validate.
     """
-
     obj = _load_multimodal_payload(request)
-    if obj is None:
-        return None
-    return list(_iter_messages_from_payload(obj))
+    return None if obj is None else list(_iter_messages_from_payload(obj))
 
 
 def parse_multimodal_parts_from_request(request) -> list[MultimodalPart]:
@@ -1455,20 +1499,140 @@ def _append_multimodal_usage_parameters(
             infer.parameters[parameter_name].int64_param = token_count
 
 
+def _token_logprobs_payload(
+    out_py: Any,
+    emitted_token_ids: list[int],
+    top_logprobs: int,
+) -> list[dict[str, float]] | None:
+    """Return selected-token and top-candidate logprobs for each emitted token."""
+    if not emitted_token_ids:
+        return []
+    all_probs = getattr(out_py, "all_probs", None)
+    if all_probs is None:
+        return None
+
+    probabilities = all_probs.detach().to(device="cpu", dtype=torch.float32)
+    while probabilities.dim() > 2 and probabilities.shape[0] == 1:
+        probabilities = probabilities.squeeze(0)
+    if probabilities.dim() == 1:
+        probabilities = probabilities.unsqueeze(0)
+    source_token_ids = _token_ids_list_from_generate_output(out_py)
+    row_count = len(source_token_ids)
+    if probabilities.shape[0] != row_count:
+        return None
+    rows = probabilities
+
+    if source_token_ids[: len(emitted_token_ids)] != emitted_token_ids:
+        return None
+
+    payload: list[dict[str, float]] = []
+    candidate_count = max(0, min(int(top_logprobs), int(rows.shape[-1])))
+    for offset, selected_id in enumerate(emitted_token_ids):
+        row = rows[offset]
+        token_scores: dict[str, float] = {}
+        if candidate_count > 0:
+            candidate_probs, candidate_ids = row.topk(
+                candidate_count, largest=True, sorted=True
+            )
+            for candidate_id, probability in zip(
+                candidate_ids.tolist(), candidate_probs
+            ):
+                token_scores[str(int(candidate_id))] = probability.log().item()
+        token_scores[str(int(selected_id))] = row[selected_id].log().item()
+        payload.append(token_scores)
+    return payload or None
+
+
+def slice_generate_output_tokens(out_py: Any, start: int, stop: int) -> None:
+    """Slice tokens and probability rows together when removing thinking markers."""
+    ids = _token_ids_list_from_generate_output(out_py)
+    probabilities = getattr(out_py, "all_probs", None)
+    if probabilities is not None:
+        rows = probabilities.reshape(-1, probabilities.shape[-1])
+        if rows.shape[0] != len(ids):
+            raise ValueError("all_probs must contain one row per generated token")
+        out_py.all_probs = rows[start:stop]
+    out_py.output_ids = torch.tensor(ids[start:stop], dtype=torch.int32)
+
+
+def _append_logprobs_parameter(
+    infer: predict_v2_pb2.ModelInferResponse,
+    out_py: Any,
+    generated_ids: list[int],
+    *,
+    top_logprobs: int,
+) -> None:
+    payload = _token_logprobs_payload(out_py, generated_ids, top_logprobs)
+    if payload is None:
+        raise RuntimeError(
+            "all_probs is missing or cannot be aligned while logprobs is requested"
+        )
+    infer.parameters["logprobs"].string_param = json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":")
+    )
+
+
 def _append_aux_info_metrics_outputs(
     infer: predict_v2_pb2.ModelInferResponse,
     out_py: Any,
     prompt_token_fallback: int = 0,
+    prompt_token_offset: int = 0,
 ) -> None:
-    """``prompt_token_num`` = AuxInfo.input_len; ``prompt_cached_token_num`` = AuxInfo.reuse_len."""
+    """Write public usage without mutating the engine's input/cache lengths."""
     ax = getattr(out_py, "aux_info", None)
     input_len = int(ax.input_len) if ax is not None else int(prompt_token_fallback)
     reuse_len = int(ax.reuse_len) if ax is not None else 0
+    if prompt_token_offset:
+        if prompt_token_offset < 0 or input_len < prompt_token_offset:
+            raise ValueError("prompt usage is shorter than its token offset")
+        input_len -= prompt_token_offset
+        # Cached tokens are a prefix; exclude overlap with the hidden suffix.
+        reuse_len = min(reuse_len, input_len)
     _append_int32_scalar_output(infer, "prompt_token_num", input_len)
     _append_int32_scalar_output(infer, "prompt_cached_token_num", reuse_len)
     _append_prompt_cache_usage_parameters(infer, input_len, reuse_len)
     _append_multimodal_usage_parameters(
         infer, ax.multimodal_lengths if ax is not None else None
+    )
+
+
+def _log_multimodal_usage_trace(
+    infer: predict_v2_pb2.ModelInferResponse,
+    out_py: Any,
+    request_log_tag: str,
+    prompt_token_offset: int,
+) -> None:
+    """Trace engine and gRPC usage fields without logging request content."""
+    ax = getattr(out_py, "aux_info", None)
+    multimodal_lengths = getattr(ax, "multimodal_lengths", {}) if ax else {}
+    engine_mm_tokens = tuple(
+        sorted(
+            (
+                getattr(mm_type, "name", str(mm_type)),
+                int(token_count),
+            )
+            for mm_type, token_count in multimodal_lengths.items()
+        )
+    )
+    wire_mm_parameters = tuple(
+        (name, infer.parameters[name].int64_param)
+        for name in ("image_tokens", "video_tokens", "audio_tokens")
+        if name in infer.parameters
+    )
+    logging.info(
+        "[DashScGrpc] [%s] Kimi K3 multimodal usage trace: "
+        "stage=response_serialized aux_present=%s engine_input_tokens=%s "
+        "engine_cached_tokens=%s engine_mm_tokens=%s prompt_token_offset=%s "
+        "wire_prompt_tokens=%s wire_cached_tokens=%s wire_mm_parameters=%s",
+        request_log_tag,
+        ax is not None,
+        int(ax.input_len) if ax is not None else None,
+        int(ax.reuse_len) if ax is not None else None,
+        engine_mm_tokens or ("none",),
+        prompt_token_offset,
+        infer.parameters["prompt_token_num"].int64_param,
+        infer.parameters["prompt_cached_token_num"].int64_param,
+        wire_mm_parameters or ("none",),
     )
 
 
@@ -1489,6 +1653,10 @@ def build_stream_response_from_generate_outputs(
     *,
     stream_finished: bool | None = None,
     token_ids: list[int] | None = None,
+    top_logprobs: int = 0,
+    emit_logprobs: bool = True,
+    prompt_token_offset: int = 0,
+    trace_multimodal_usage: bool = False,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
 
@@ -1498,6 +1666,9 @@ def build_stream_response_from_generate_outputs(
 
     ``token_ids``: if provided, overrides the generated_ids from ``out_py``.
     Use when the servicer rewrites the token payload (e.g. injecting </think>).
+
+    ``prompt_token_offset``: backend-only prompt suffix length excluded from
+    public prompt/cache usage. The engine's accounting is left unchanged.
     """
     del _request_shape  # reserved for future shape alignment
     if not go.generate_outputs:
@@ -1520,6 +1691,7 @@ def build_stream_response_from_generate_outputs(
         if eos_token_id is None:
             raise RuntimeError("eos_token_id is required for terminal response")
         generated_ids = [int(eos_token_id)]
+        emit_logprobs = False  # Synthetic EOS has no model probability.
 
     if return_input_ids and request_input_ids is not None:
         _append_prompt_token_ids_output(infer, request_input_ids)
@@ -1531,7 +1703,15 @@ def build_stream_response_from_generate_outputs(
         infer,
         out_py,
         prompt_token_fallback=len(request_input_ids or []),
+        prompt_token_offset=prompt_token_offset,
     )
+    if emit_logprobs and bool(getattr(generate_config, "return_all_probs", False)):
+        _append_logprobs_parameter(
+            infer,
+            out_py,
+            generated_ids,
+            top_logprobs=top_logprobs,
+        )
     infer.parameters["incremental_output"].int64_param = 1 if is_streaming else 0
     _append_dashllm_limit_parameters(
         infer,
@@ -1540,6 +1720,13 @@ def build_stream_response_from_generate_outputs(
         max_token_id=max_token_id,
         generate_think_token_num=generate_think_token_num,
     )
+    if trace_multimodal_usage and finished:
+        _log_multimodal_usage_trace(
+            infer,
+            out_py,
+            request_log_tag,
+            prompt_token_offset,
+        )
 
     logging.debug("[DashScGrpc] [%s] generated_ids: %s", request_log_tag, generated_ids)
     logging.debug(
@@ -1607,4 +1794,7 @@ def build_dash_error_response(
     infer.parameters["incremental_output"].int64_param = 1
     infer.parameters["error_no"].int64_param = int(error_spec.error_no)
     infer.parameters["error_msg"].string_param = error_msg
+    infer.parameters["status_code"].int64_param = int(error_spec.status_code)
+    infer.parameters["status_name"].string_param = error_spec.status_name
+    infer.parameters["status_message"].string_param = status_message
     return resp
