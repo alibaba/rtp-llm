@@ -96,3 +96,10 @@ cc_test(
     deps = google_test_deps + ["//rtp_llm/cpp/utils:torch_cuda_oom"],
     timeout = "short",
 )
+
+cc_test(
+    name = "access_logger_test",
+    srcs = ["AccessLoggerTest.cc"],
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:core_utils"],
+    copts = copts(),
+)
