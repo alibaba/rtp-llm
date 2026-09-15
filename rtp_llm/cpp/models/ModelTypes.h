@@ -100,6 +100,9 @@ enum GptModelInputIndex : size_t {
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
     isTargetVerify,
+    // PREFILL-role flag; synced so non-root lanes of a non-first PP stage
+    // (which get an empty relayed plan) pack cache_keys like the root.
+    pdSeparation,
     gptModelInputLength,
 };
 

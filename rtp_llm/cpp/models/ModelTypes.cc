@@ -81,8 +81,9 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::skipRun] = inputs.skip_run;
     shape_hints[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
-    shape_hints[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    shape_hints[GptModelInputIndex::isFakeStream]   = inputs.is_fake_stream;
     shape_hints[GptModelInputIndex::isTargetVerify] = inputs.is_target_verify;
+    shape_hints[GptModelInputIndex::pdSeparation]   = inputs.pd_separation;
     shape_hints[GptModelInputIndex::mtpHiddenStatesRows] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
 
@@ -170,6 +171,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.skip_run                        = shape_hints_ptr[GptModelInputIndex::skipRun];
     inputs.is_fake_stream                  = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     inputs.is_target_verify                = shape_hints_ptr[GptModelInputIndex::isTargetVerify];
+    inputs.pd_separation                   = shape_hints_ptr[GptModelInputIndex::pdSeparation];
     if (inputs.skip_run) {
         return;
     }
@@ -286,9 +288,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
                          {checkedHint(GptModelInputIndex::kvCacheUpdateCopyNum, "kvCacheUpdateCopyNum"), 3});
         }
-        inputs.kv_cache_blocks_to_zero = allocBuf(
-            rtp_llm::DataType::TYPE_INT64,
-            {checkedHint(GptModelInputIndex::kvCacheZeroBlockNum, "kvCacheZeroBlockNum")});
+        inputs.kv_cache_blocks_to_zero =
+            allocBuf(rtp_llm::DataType::TYPE_INT64,
+                     {checkedHint(GptModelInputIndex::kvCacheZeroBlockNum, "kvCacheZeroBlockNum")});
         if (max_blocks != 0) {
             inputs.kv_cache_block_id = allocBuf(
                 rtp_llm::DataType::TYPE_INT32,
