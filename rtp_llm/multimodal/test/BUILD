@@ -94,6 +94,41 @@ py_test(
 )
 
 py_test(
+    name = "mm_kvcm_emb_config_test",
+    srcs = [
+        "mm_kvcm_emb_config_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
+    name = "mm_kvcm_emb_client_test",
+    srcs = [
+        "mm_kvcm_emb_client_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+# Opt-in cross-repo test. It starts a live KVCM KVMeta service and uses
+# the packaged generic client through RTP's public Python facade. KVCM remains
+# outside RTP's default dependency graph.
+py_test(
+    name = "mm_kvcm_emb_client_integration_test",
+    timeout = "long",
+    srcs = [
+        "mm_kvcm_emb_client_integration_test.py",
+    ],
+    tags = ["manual"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "minimax_m3_vl_rope_test",
     srcs = [
         "minimax_m3_vl_rope_test.py",
