@@ -752,6 +752,7 @@ void MtpBatchStreamProcessor::prepareOneStepSpecDecodeModelInput(const StreamGro
     }
 
     if (gatherMtpDecodeModelInputFromDeviceState(stream_groups, model_input, host_holder)) {
+        expandTargetVerifyPositionIds(stream_groups, model_input);
         return;
     }
 
