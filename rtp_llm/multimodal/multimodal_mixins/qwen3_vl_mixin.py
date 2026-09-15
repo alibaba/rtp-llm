@@ -32,16 +32,7 @@ from rtp_llm.multimodal.vit_metrics import (
 )
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
-from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
-
-default_attn_impl = "sdpa"
-try:
-    if can_use_flash_attn():
-        default_attn_impl = "flash_attention_2"
-except Exception as e:
-    logging.info(
-        f"initialize flash_attn failed, exception {e}, using sdpa attention in qwen2.5 vl vit"
-    )
+from rtp_llm.utils.vit_attn_utils import get_vit_attn_implementation
 
 if not hasattr(tl, "wrap_triton"):
 
@@ -60,7 +51,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
             mm_related_params.config["ckpt_path"]
         )
         config_hf = Qwen3VLConfig.from_pretrained(mm_related_params.config["ckpt_path"])
-        config_hf.vision_config._attn_implementation = default_attn_impl
+        config_hf.vision_config._attn_implementation = get_vit_attn_implementation()
         self.visual = Qwen3VLVisionModel._from_config(config_hf.vision_config)
         self.spatial_merge_size = self.visual.spatial_merge_size
 
