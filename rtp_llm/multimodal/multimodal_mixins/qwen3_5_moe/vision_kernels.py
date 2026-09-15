@@ -86,7 +86,9 @@ def _rope_kernel(
     S1: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    # Packed QKV strides and the flattened output can exceed signed int32.
+    # Widen before multiplying so both input and output offsets stay valid.
+    i = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     mask = i < elements
     token = i // (HEADS * DIM)
     head = (i // DIM) % HEADS
