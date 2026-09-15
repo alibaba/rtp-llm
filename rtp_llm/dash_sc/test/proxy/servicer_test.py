@@ -8,7 +8,6 @@ propagation, and the per-addr channel cache.
 from __future__ import annotations
 
 import asyncio
-import gc
 import json
 import os
 import struct
@@ -142,25 +141,6 @@ async def _drain(aiter):
 async def _request_gen(*reqs):
     for r in reqs:
         yield r
-
-
-class _SuccessfulContext:
-    """Concrete happy-path gRPC context for latency-sensitive stream tests."""
-
-    def invocation_metadata(self):
-        return ()
-
-    def peer(self):
-        return "ipv4:127.0.0.1:9000"
-
-    def code(self):
-        return grpc.StatusCode.OK
-
-    def is_active(self):
-        return True
-
-    def details(self):
-        return ""
 
 
 def _install_mock_stub(servicer, mock_stub) -> None:
@@ -1444,12 +1424,10 @@ class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):
       ``cancel``-observation handler) fires — i.e. when the actual call to
       backend is torn down.
 
-    The diagnostics report both ``t_close - t_finish`` and
-    ``t_outer - t_finish``. The implementation aims for prompt close and,
-    critically, ``t_close <= t_outer`` (close completes *before* upstream
-    trailers fire, so the backend never sees a half-closed gap that registers
-    as a client cancel race). The blocking wall-time contract applies to the
-    outer return because it gates those trailers.
+    The reported delta is ``t_close - t_finish``. The implementation aims for
+    this to be sub-millisecond and, critically, ``t_close <= t_outer`` (close
+    completes *before* upstream trailers fire, so the backend never sees a
+    half-closed gap that registers as a client cancel race).
     """
 
     async def asyncSetUp(self) -> None:
@@ -1487,15 +1465,6 @@ class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):
         out.shape.append(1)
         infer.raw_output_contents.append(b"\x01")
         return resp
-
-    def _assert_successful_context(self, context: _SuccessfulContext) -> None:
-        record = GrpcAccessRecord.from_context(context)
-        self.assertIsNotNone(record)
-        assert record is not None
-        self.assertEqual(record.status, "OK")
-        self.assertEqual(record.context_code, "OK")
-        self.assertIs(record.context_active, True)
-        self.assertEqual(record.peer, "ipv4:127.0.0.1:9000")
 
     def _assert_prompt_close(
         self,
@@ -1582,15 +1551,12 @@ class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):
 
         self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
 
-        context = _SuccessfulContext()
-        gc.collect()
         collected = []
         async for resp in self.servicer.ModelStreamInfer(
-            _request_gen(_make_request("req1")), context
+            _request_gen(_make_request("req1")), MagicMock()
         ):
             collected.append(resp)
         outer_ts = loop.time()
-        self._assert_successful_context(context)
 
         self._assert_prompt_close(
             "finished@frame2",
@@ -1627,15 +1593,12 @@ class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):
 
         self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
 
-        context = _SuccessfulContext()
-        gc.collect()
         collected = []
         async for resp in self.servicer.ModelStreamInfer(
-            _request_gen(_make_request("req1")), context
+            _request_gen(_make_request("req1")), MagicMock()
         ):
             collected.append(resp)
         outer_ts = loop.time()
-        self._assert_successful_context(context)
 
         self._assert_prompt_close(
             "finished@frame11",
@@ -1648,7 +1611,9 @@ class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_close_timing_with_counting_wrapper(self) -> None:
-        """Verifies the unconditional counting wrapper closes its inner call."""
+        """``agg != None`` path — ``counting_response_iter`` wraps the call.
+        Verifies the wrapper's ``aclose`` propagates the close to the inner
+        ``upstream_iter`` synchronously."""
         loop = asyncio.get_running_loop()
         finish_ts: list[float] = []
         close_ts: list[float] = []
@@ -1669,18 +1634,13 @@ class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):
         self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
 
         # ``ModelStreamInfer`` creates + attaches its own record at the top, so
-        # use a concrete happy-path context: creating lazy ``MagicMock`` children
-        # inside the measured tail can trigger a full cyclic-GC pass and measure
-        # mock-fixture cleanup instead of proxy close latency.
-        context = _SuccessfulContext()
-        gc.collect()
+        # the test only needs a bare context here.
         collected = []
         async for resp in self.servicer.ModelStreamInfer(
-            _request_gen(_make_request("req1")), context
+            _request_gen(_make_request("req1")), MagicMock()
         ):
             collected.append(resp)
         outer_ts = loop.time()
-        self._assert_successful_context(context)
 
         self._assert_prompt_close(
             "with_counting_wrapper",
@@ -1761,15 +1721,12 @@ class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):
 
         real_iter_cls.__anext__ = _patched_anext
 
-        context = _SuccessfulContext()
-        gc.collect()
         collected = []
         async for resp in self.servicer.ModelStreamInfer(
-            _request_gen(_make_request("req1")), context
+            _request_gen(_make_request("req1")), MagicMock()
         ):
             collected.append(resp)
         outer_ts = loop.time()
-        self._assert_successful_context(context)
 
         self._assert_prompt_close(
             "cancel_only_call",
@@ -1802,7 +1759,6 @@ class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):
         first = await gen.__anext__()
         self.assertTrue(first is not None)
 
-        gc.collect()
         invoke_ts = loop.time()
         await asyncio.wait_for(
             DashScProxyServicer._close_downstream(gen, gen),

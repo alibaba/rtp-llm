@@ -6,14 +6,11 @@
 using namespace std;
 namespace rtp_llm {
 
-EmbeddingScheduler::EmbeddingScheduler(const ModelConfig&                 model_config,
-                                       const ConcurrencyConfig&           concurrency_config,
-                                       const RuntimeConfig&               runtime_config,
+EmbeddingScheduler::EmbeddingScheduler(const ModelConfig& model_config,
+                                       const ConcurrencyConfig& concurrency_config,
+                                       const RuntimeConfig& runtime_config,
                                        const kmonitor::MetricsReporterPtr metrics_reporter):
-    model_config_(model_config),
-    concurrency_config_(concurrency_config),
-    runtime_config_(runtime_config),
-    metrics_reporter_(metrics_reporter) {}
+    model_config_(model_config), concurrency_config_(concurrency_config), runtime_config_(runtime_config), metrics_reporter_(metrics_reporter) {}
 
 EmbeddingScheduler::~EmbeddingScheduler() {
     (void)stop();
@@ -43,8 +40,7 @@ absl::StatusOr<list<EmbeddingStreamPtr>> EmbeddingScheduler::scheduleNew() {
     auto                          it        = waiting_streams_.begin();
     while (it != waiting_streams_.end()) {
         const auto& stream = *it;
-        if (total_len + stream->inputLength()
-            > runtime_config_.fifo_scheduler_config.max_context_batch_size * model_config_.max_seq_len) {
+        if (total_len + stream->inputLength() > runtime_config_.fifo_scheduler_config.max_context_batch_size * model_config_.max_seq_len) {
             break;
         }
         stream->setStart();
