@@ -17,28 +17,6 @@
 
 namespace rtp_llm {
 
-std::shared_ptr<KVCacheResource>
-KVCacheAllocator::incrKVCacheRefWithReleaseCallback(const KVCacheResource& kvcache_resource,
-                                                    const CacheKeysType&   cache_keys,
-                                                    bool                   is_connector,
-                                                    std::function<void()>  release_callback) {
-    auto resource = incrKVCacheRef(kvcache_resource, cache_keys, is_connector);
-    if (!resource || !release_callback) {
-        return resource;
-    }
-
-    // Keep the allocator-owned resource as the inner owner. Releasing the outer
-    // handle first runs the allocator's custom deleter, then publishes the
-    // resulting capacity change. The callback owns no KVCacheManager lifetime.
-    auto* resource_ptr = resource.get();
-    return std::shared_ptr<KVCacheResource>(
-        resource_ptr,
-        [resource = std::move(resource), release_callback = std::move(release_callback)](KVCacheResource*) mutable {
-            resource.reset();
-            release_callback();
-        });
-}
-
 bool KVCacheAllocator::init() {
     RTP_LLM_CHECK_WITH_INFO(doInit(), "init failed");
 
@@ -86,9 +64,7 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
 
     std::shared_ptr<LoadAsyncContext> load_context =
         std::dynamic_pointer_cast<LoadAsyncContext>(init_result.async_context);
-    if (load_context && load_context->needBackendMatch()) {
-        load_context->startBackendMatch();
-    } else {
+    if (!load_context || !load_context->needBackendMatch()) {
         std::shared_ptr<AsyncContext> pending_async_context = std::move(init_result.async_context);
         MallocResult                  incr_result           = incrMalloc(malloc_info);
         if (!incr_result.success) {
@@ -184,7 +160,7 @@ MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
     // in one transaction.  Decode-side P/D admission invokes this entry point
     // from concurrent RPC threads, while running streams can allocate from the
     // engine thread at the same time.
-    std::lock_guard<std::mutex> lock(malloc_mutex_);
+    std::unique_lock<std::mutex> lock(malloc_mutex_);
 
     if (!malloc_info.batch_kv_cache_resource) {
         RTP_LLM_LOG_ERROR("BatchKVCacheResource is null");
@@ -197,7 +173,13 @@ MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
     }
 
     if (malloc_info.batch_kv_cache_resource->curBlocksNum() == 0) {
-        return initMalloc(malloc_info);
+        auto result = initMalloc(malloc_info);
+        lock.unlock();
+        auto context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+        if (result.success && context && context->needBackendMatch()) {
+            context->startBackendMatch();
+        }
+        return result;
     } else {
         return incrMalloc(malloc_info);
     }
@@ -493,9 +475,9 @@ std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots()
 
         const size_t               pool_index = static_cast<size_t>(group->group_id());
         KVCachePoolMetricsSnapshot snapshot;
-        snapshot.pool_index             = pool_index;
-        snapshot.pool_name              = pool->poolName();
-        snapshot.block_size_bytes       = pool->blockSizeBytes();
+        snapshot.pool_index                 = pool_index;
+        snapshot.pool_name                  = pool->poolName();
+        snapshot.block_size_bytes           = pool->blockSizeBytes();
         snapshot.total_blocks               = pool->totalBlocksNum();
         snapshot.free_blocks                = pool->freeBlocksNum();
         snapshot.used_blocks                = snapshot.total_blocks - snapshot.free_blocks;

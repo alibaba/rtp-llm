@@ -181,13 +181,13 @@ DeviceBlockPoolPtr makeTestDevicePool(size_t usable_blocks, const std::string& n
     layout.seq_size_per_block         = 1;
     layout.kernel_blocks_per_kv_block = 1;
 
-    auto config                     = std::make_shared<DeviceBlockPoolConfig>();
-    config->pool_type               = BlockPoolType::DEVICE;
-    config->pool_name               = name;
-    config->physical_block_count    = physical_blocks;
-    config->total_size_bytes        = layout.total_size_bytes;
-    config->memory_layouts          = {layout};
-    config->use_cuda_malloc_backing = true;
+    auto config                       = std::make_shared<DeviceBlockPoolConfig>();
+    config->pool_type                 = BlockPoolType::DEVICE;
+    config->pool_name                 = name;
+    config->physical_block_count      = physical_blocks;
+    config->total_size_bytes          = layout.total_size_bytes;
+    config->memory_layouts            = {layout};
+    config->use_device_malloc_backing = true;
 
     auto pool = std::make_shared<DeviceBlockPool>(config);
     if (!pool->init()) {
@@ -291,9 +291,9 @@ public:
         BlockTreeEvictor::IsTierEnabledFn is_tier_enabled           = [](Tier) { return true; },
         BlockTreeTaskPool*                task_pool                 = nullptr,
         size_t                            max_descriptors_per_batch = 8) {
-        transfer_engine_     = std::make_shared<ScriptedTransferEngine>(tree->groupSets(), false);
-        transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(
-            transfer_engine_, nullptr, max_descriptors_per_batch);
+        transfer_engine_ = std::make_shared<ScriptedTransferEngine>(tree->groupSets(), false);
+        transfer_dispatcher_ =
+            std::make_unique<BlockTransferDispatcher>(transfer_engine_, nullptr, max_descriptors_per_batch);
         return std::make_unique<BlockTreeEvictor>(tree,
                                                   device_policy,
                                                   host_policy,
@@ -1504,7 +1504,7 @@ TEST_F(BlockTreeEvictorTest, DirectDeviceDropsConvergePastTransferBatchLimit) {
         ASSERT_EQ(device_blocks.front().size(), 1u);
 
         GroupSetResource resource = makeResource(Tier::DEVICE, device_blocks.front().front());
-        auto result               = insert({key}, {{resource}});
+        auto             result   = insert({key}, {{resource}});
         ASSERT_NE(insertedNode(result), nullptr);
         unreferenceDeviceBlocksForTest(*group_, device_blocks, BlockTreeRefType::CACHE);
     }
@@ -2436,10 +2436,6 @@ TEST_F(BlockTreeEvictorTest, DropLockedDropsSelectedVictim) {
     EXPECT_EQ(device_pool_->freeBlocksNum(), 128u);
 }
 
-
-
-
-
 TEST_F(BlockTreeEvictorTest, ChooseVictimUsesNearestEnabledTargetTier) {
     MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
     ASSERT_EQ(device_blocks.size(), 1u);
@@ -2619,7 +2615,7 @@ TEST_F(BlockTreeEvictorTest, ExistingGroupFillAdmitsChildAndRemovesFullParentCan
     ASSERT_EQ(evictor_->candidateStats().device_candidates, 1u);
 
     GroupSetResource empty_resource;
-    empty_resource.device_blocks      = {NULL_BLOCK_IDX};
+    empty_resource.device_blocks = {NULL_BLOCK_IDX};
     BlockTreeInsertResult empty_child =
         tree_->insertNode({100, 200},
                           {{makeResource(Tier::DEVICE, parent_block)}, {empty_resource}},

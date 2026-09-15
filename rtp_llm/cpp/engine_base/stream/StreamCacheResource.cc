@@ -331,18 +331,28 @@ void StreamCacheResource::reportCacheReuseMetrics() {
     if (stream_->metrics_reporter_ == nullptr || !reuseCache()) {
         return;
     }
-    const int64_t input_length       = stream_->inputLength();
-    const int64_t total_reuse_length = stream_->initialReuseLength();
+    const int64_t input_length                 = stream_->inputLength();
+    const int64_t total_reuse_length           = stream_->initialReuseLength();
     cache_reuse_metrics_.kv_cache_reuse_length = total_reuse_length;
     cache_reuse_metrics_.device_reuse_length   = stream_->deviceReuseLength();
     cache_reuse_metrics_.host_reuse_length     = stream_->hostReuseLength();
     cache_reuse_metrics_.disk_reuse_length     = stream_->diskReuseLength();
     cache_reuse_metrics_.remote_reuse_length   = stream_->remoteReuseLength();
     resource_context_.cache_manager->recordCacheHitTokens(input_length, cache_reuse_metrics_);
-    cache_reuse_metrics_.report_reuse_metrics  = true;
+    cache_reuse_metrics_.report_reuse_metrics = true;
     kmonitor::MetricsTags tags;
     stream_->metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(
         &tags, &cache_reuse_metrics_);
+}
+
+std::optional<absl::Status> StreamCacheResource::pollAllocatorLoad() {
+    if (!allocator_load_context_) {
+        return absl::OkStatus();
+    }
+    if (!allocator_load_context_->done()) {
+        return std::nullopt;
+    }
+    return finalizeAllocatorLoad();
 }
 
 absl::Status StreamCacheResource::waitForAllocatorLoad() {

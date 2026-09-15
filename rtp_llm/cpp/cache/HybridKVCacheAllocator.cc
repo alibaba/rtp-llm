@@ -293,7 +293,8 @@ bool HybridKVCacheAllocator::finishDeferredMalloc(const MallocInfo& malloc_info,
                                                   PreparedKVCache&  prepared,
                                                   LoadAsyncContext& context,
                                                   size_t            matched_blocks) {
-    bool success = materializeInitialBlocks(malloc_info, prepared, &context, matched_blocks);
+    std::lock_guard<std::mutex> lock(malloc_mutex_);
+    bool                        success = materializeInitialBlocks(malloc_info, prepared, &context, matched_blocks);
     if (success) {
         const auto incr_result = incrMalloc(malloc_info);
         success                = incr_result.success;

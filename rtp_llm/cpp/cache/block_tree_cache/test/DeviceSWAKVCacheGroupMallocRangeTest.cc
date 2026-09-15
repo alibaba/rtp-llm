@@ -32,12 +32,12 @@ DeviceBlockPoolConfig makeDeviceBlockPoolConfig() {
     layout.total_size_bytes         = layout.kv_block_pool_size_bytes;
 
     DeviceBlockPoolConfig config;
-    config.pool_type               = BlockPoolType::DEVICE;
-    config.pool_name               = "swa_malloc_range_test";
-    config.physical_block_count    = kBlockNum;
-    config.total_size_bytes        = layout.total_size_bytes;
-    config.memory_layouts          = {layout};
-    config.use_cuda_malloc_backing = true;
+    config.pool_type                 = BlockPoolType::DEVICE;
+    config.pool_name                 = "swa_malloc_range_test";
+    config.physical_block_count      = kBlockNum;
+    config.total_size_bytes          = layout.total_size_bytes;
+    config.memory_layouts            = {layout};
+    config.use_device_malloc_backing = true;
     return config;
 }
 

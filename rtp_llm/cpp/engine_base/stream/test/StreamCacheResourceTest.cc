@@ -606,7 +606,7 @@ TEST_F(StreamCacheResourceTest, testStoreTargetUsesDeploymentLocalTiers) {
                                     {true, false, true, Tier::DEVICE},
                                     {true, true, false, Tier::DEVICE},
                                     {true, true, true, Tier::DEVICE}};
-    deployment.reuse_cache         = true;
+    deployment.reuse_cache       = true;
     for (const bool remote_on : {false, true}) {
         deployment.enable_remote_cache = remote_on;
         SCOPED_TRACE(remote_on);
@@ -1306,6 +1306,41 @@ TEST_F(StreamCacheResourceTest, testReleaseResetsAllocatorContextBeforeFreeingRe
     EXPECT_EQ(resource.allocator_load_context_, nullptr);
     EXPECT_EQ(resource.curBlocksNum(), 0);
     EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
+}
+
+TEST_F(StreamCacheResourceTest, PollAllocatorLoadPreservesRetryableMaterializationStatus) {
+    auto  backend     = prepareStorageBackendResource(false, false, RoleType::DECODE);
+    auto& resource    = stream_->streamCacheResource();
+    auto  coordinator = std::make_shared<LoadContextCoordinator>(
+        [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{0, NULL_BLOCK_IDX}}}};
+    auto           context = coordinator->create({}, {}, 0, backend, std::move(request));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback(
+        [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}; });
+    resource.allocator_load_context_ = context;
+    EXPECT_FALSE(resource.pollAllocatorLoad().has_value());
+    context->startBackendMatch();
+    context->waitDone();
+    const auto status = resource.pollAllocatorLoad();
+    ASSERT_TRUE(status.has_value());
+    EXPECT_TRUE(absl::IsUnavailable(*status));
+    EXPECT_FALSE(stream_->hasEvent(StreamEvents::LoadInitiated));
+    EXPECT_FALSE(stream_->hasError());
+    EXPECT_EQ(resource.allocator_load_context_, nullptr);
+}
+
+TEST_F(StreamCacheResourceTest, PollAllocatorLoadCompletesOnlyAfterTransfersSettle) {
+    prepareResource(true);
+    auto& resource                   = stream_->streamCacheResource();
+    auto  context                    = makeAllocatorLoadContext(1, {Tier::HOST});
+    resource.allocator_load_context_ = context;
+    EXPECT_FALSE(resource.pollAllocatorLoad().has_value());
+    ASSERT_TRUE(context->completeTransfers(1, true));
+    auto status = resource.pollAllocatorLoad();
+    ASSERT_TRUE(status.has_value());
+    EXPECT_TRUE(status->ok());
+    EXPECT_EQ(resource.allocator_load_context_, nullptr);
 }
 
 }  // namespace rtp_llm

@@ -3,6 +3,8 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -30,14 +32,14 @@ class KVCacheAllocationWaitState;
 class KVCacheManager {
 public:
     KVCacheManager(const CacheConfig&                 config,
-                   bool                               warmup                     = false,
-                   const kmonitor::MetricsReporterPtr metrics_reporter           = nullptr,
-                   const KVCacheConfig&               kv_cache_config            = KVCacheConfig{},
-                   const ParallelismConfig&           parallelism_config         = ParallelismConfig{},
-                   const RuntimeConfig&               runtime_config             = RuntimeConfig{},
-                   const SpeculativeExecutionConfig&  sp_config                  = SpeculativeExecutionConfig{},
-                   const PDSepConfig&                 pd_sep_config              = PDSepConfig{},
-                   const CacheStoreConfig&            cache_store_config         = CacheStoreConfig{},
+                   bool                               warmup                       = false,
+                   const kmonitor::MetricsReporterPtr metrics_reporter             = nullptr,
+                   const KVCacheConfig&               kv_cache_config              = KVCacheConfig{},
+                   const ParallelismConfig&           parallelism_config           = ParallelismConfig{},
+                   const RuntimeConfig&               runtime_config               = RuntimeConfig{},
+                   const SpeculativeExecutionConfig&  sp_config                    = SpeculativeExecutionConfig{},
+                   const PDSepConfig&                 pd_sep_config                = PDSepConfig{},
+                   const CacheStoreConfig&            cache_store_config           = CacheStoreConfig{},
                    bool                               use_device_malloc_block_pool = false);
     ~KVCacheManager();
 
@@ -67,7 +69,7 @@ public:
     // Capture the generation before an allocation attempt; waitForAllocationChange() then cannot
     // miss a release racing with that attempt.
     uint64_t allocationGeneration() const;
-    bool     waitForAllocationChange(uint64_t observed_generation, int64_t timeout_ms);
+    bool     waitForAllocationChange(uint64_t observed_generation, int64_t timeout_ms, int64_t minimum_wait_ms = 0);
 
     int
     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
@@ -169,8 +171,9 @@ public:
     }
 
 private:
-    void allocateAndSync();
-    void reportMetricsLoop();
+    void                  allocateAndSync();
+    std::function<void()> allocationChangeCallback() const;
+    void                  reportMetricsLoop();
     bool collectCacheHitRates(std::chrono::steady_clock::time_point now, RtpLLMCacheReuseMetricsCollector& metrics);
     void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
@@ -185,7 +188,7 @@ private:
     const RuntimeConfig                runtime_config_;
     const SpeculativeExecutionConfig   sp_config_;
     const PDSepConfig                  pd_sep_config_;
-    const bool                         use_cuda_malloc_block_pool_;
+    const bool                         use_device_malloc_block_pool_;
     const bool                         warmup_;
     KVCacheEventPublisherPtr           cache_event_publisher_;
     void                               initCacheEventPublisher();
@@ -205,7 +208,8 @@ private:
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
 
-    BlockTreeCachePtr block_tree_cache_;
+    BlockTreeCachePtr                           block_tree_cache_;
+    std::shared_ptr<KVCacheAllocationWaitState> allocation_wait_state_;
 
     mutable std::mutex                 cache_status_snapshot_mutex_;
     std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;

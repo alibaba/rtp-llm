@@ -305,4 +305,29 @@ TEST(IBlockPoolTest, BatchDecTreeRefRejectsInvalidTailWithoutMutatingPrefix) {
     }
     pool->decTreeRef(blocks->back(), BlockTreeRefType::LOAD);
 }
+
+TEST(IBlockPoolTest, CapacityNotificationsOnlyPublishReleasedCapacityOutsidePoolLock) {
+    auto   pool          = makeInitializedPool(4);
+    size_t notifications = 0;
+    pool->setCapacityChangeCallback([&] {
+        ++notifications;
+        // Re-entering a getter verifies the observer is not called under the pool mutex.
+        EXPECT_GT(pool->availableBlocksNum(), 0u);
+    });
+    const auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    EXPECT_EQ(notifications, 0u);
+    pool->incTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_EQ(notifications, 1u);
+    pool->incTreeRef(*block, BlockTreeRefType::LOAD);
+    pool->incTreeRef(*block, BlockTreeRefType::STORE);
+    pool->decTreeRef(*block, BlockTreeRefType::LOAD);
+    EXPECT_EQ(notifications, 1u);
+    pool->decTreeRef(*block, BlockTreeRefType::STORE);
+    EXPECT_EQ(notifications, 2u);
+    pool->decTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_EQ(notifications, 3u);
+    EXPECT_EQ(pool->freeBlocksNum(), 3u);
+}
+
 }  // namespace rtp_llm

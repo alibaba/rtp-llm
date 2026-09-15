@@ -46,12 +46,12 @@ DeviceBlockPoolPtr BenchmarkFixture::createDevicePool(size_t             layer_s
     const size_t physical_block_count = usable_count + 1;
     const size_t block_stride_bytes   = layer_stride_bytes * layer_num;
 
-    auto config                     = std::make_shared<DeviceBlockPoolConfig>();
-    config->pool_type               = BlockPoolType::DEVICE;
-    config->pool_name               = pool_name;
-    config->physical_block_count    = physical_block_count;
-    config->use_cuda_malloc_backing = true;
-    config->total_size_bytes        = physical_block_count * block_stride_bytes;
+    auto config                       = std::make_shared<DeviceBlockPoolConfig>();
+    config->pool_type                 = BlockPoolType::DEVICE;
+    config->pool_name                 = pool_name;
+    config->physical_block_count      = physical_block_count;
+    config->use_device_malloc_backing = true;
+    config->total_size_bytes          = physical_block_count * block_stride_bytes;
 
     MemoryLayoutConfig layout;
     layout.layer_num                  = static_cast<uint32_t>(layer_num);
@@ -207,19 +207,16 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
     }
 
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(nullptr);
-    auto engine =
-        std::make_shared<PerRankBlockTransferEngine>(group_sets,
-                                                     config.enable_disk_cache,
-                                                     DeviceHostCopyOptions{},
-                                                     config.device_disk_staging_block_count,
-                                                     config.max_descriptors_per_transfer_batch,
-                                                     config.transfer_worker_count,
-                                                     config.transfer_queue_max_size,
-                                                     cache_metrics_reporter);
+    auto engine                 = std::make_shared<PerRankBlockTransferEngine>(group_sets,
+                                                               config.enable_disk_cache,
+                                                               DeviceHostCopyOptions{},
+                                                               config.device_disk_staging_block_count,
+                                                               config.max_descriptors_per_transfer_batch,
+                                                               config.transfer_worker_count,
+                                                               config.transfer_queue_max_size,
+                                                               cache_metrics_reporter);
     auto dispatcher =
-        std::make_unique<BlockTransferDispatcher>(engine,
-                                                  nullptr,
-                                                  config.max_descriptors_per_transfer_batch);
+        std::make_unique<BlockTransferDispatcher>(engine, nullptr, config.max_descriptors_per_transfer_batch);
     auto task_pool =
         std::make_unique<BlockTreeTaskPool>(config.task_pool_size, 1000, "BlockTreeCacheBenchmarkTaskPool");
     auto tree = std::make_unique<BlockTree>(group_sets);
