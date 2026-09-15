@@ -23,6 +23,7 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
 )
+from rtp_llm.models_py.kernel_tuning import configure_kernel_tuning
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
@@ -90,6 +91,7 @@ def local_rank_start(
         py_env_configs.distribute_config.set_local_rank(local_rank)
         configure_kv_cache_event_host_ip_port(py_env_configs)
         setup_cuda_device_and_accl_env(local_rank)
+        configure_kernel_tuning()
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
