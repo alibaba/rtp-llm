@@ -248,6 +248,9 @@ bool P2PConnectorWorkerPrefill::writeByLayerTag(int                             
     }
 
     auto        layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, tag);
+    if (config_.tp_rank == 0) {
+        layer_cache_buffer->setKVCacheResource(resource);
+    }
     const auto& cache_keys         = resource->cacheKeys();
     const auto& block_ids          = resource->blocksForLayer(layer_id, tag);
     for (size_t i = 0; i < cache_keys.size(); ++i) {
@@ -917,9 +920,9 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                   request_id,
         handle_cancel_flags_.erase(unique_key);
     }
 
-    // Always remove the computed buffer entry. On Prefill rank 0, processRead holds the
-    // request-level KVCacheResourcePtr until all rank RPCs return. Per-layer buffers on
-    // every rank only describe block locations and do not own allocator references.
+    // Remove the computed buffer entry even on cancellation. Already-started send tasks
+    // retain their layer buffers, including rank-0 source references from writeByLayerTag,
+    // until sender->send() returns. Other ranks still carry only block descriptions.
     // This also marks the request_id as removed, preventing late-arriving layers from
     // StoreWaitContextChecker from creating orphan description entries.
     computed_buffers_->removeBuffer(request_id);

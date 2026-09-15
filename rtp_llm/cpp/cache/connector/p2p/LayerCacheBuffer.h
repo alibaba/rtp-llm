@@ -6,6 +6,8 @@
 #include <mutex>
 #include <string>
 
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
+
 namespace rtp_llm {
 
 class LayerCacheBuffer {
@@ -30,10 +32,14 @@ public:
     const std::map<int64_t, int>& blockIdMap() const {
         return block_id_map_;
     }
+    void setKVCacheResource(const KVCacheResourcePtr& resource) {
+        resource_ = resource;
+    }
 private:
     int                    layer_id_;
     std::string            cache_tag_;
     std::map<int64_t, int> block_id_map_;  // [cache_key, block_id]
+    KVCacheResourcePtr     resource_;  // Rank-0 source hold for the sender's synchronous copy.
 };
 
 class LayerCacheBufferStore {

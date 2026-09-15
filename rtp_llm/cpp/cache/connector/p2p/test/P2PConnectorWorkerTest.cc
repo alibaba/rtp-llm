@@ -5,6 +5,7 @@
 #include <future>
 #include <iterator>
 #include <thread>
+#include <utility>
 #include <gtest/gtest.h>
 #include <limits>
 #include <memory>
@@ -495,6 +496,17 @@ protected:
         return resource;
     }
 
+    std::pair<KVCacheResourcePtr, std::future<void>> createTrackedKVCacheResource(int layer_id) {
+        auto released = std::make_shared<std::promise<void>>();
+        auto signal   = released->get_future();
+        KVCacheResourcePtr resource(new KVCacheResource(*createKVCacheResource(layer_id)),
+                                    [released](KVCacheResource* value) {
+                                        delete value;
+                                        released->set_value();
+                                    });
+        return {std::move(resource), std::move(signal)};
+    }
+
     // Create a c10::Event that is immediately queryable (already recorded on current stream).
     std::optional<c10::Event> createReadyEvent() {
         return std::nullopt;  // nullopt means "immediately ready" in StoreWaitContext logic
@@ -554,6 +566,115 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {
     // Wait for cleanup thread to check once — event is immediately ready so buffer should appear
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
     ASSERT_NE(computed_buffers_->getBuffer(request_id), nullptr);
+}
+
+TEST_F(P2PConnectorWorkerTest, WriteByLayerTag_RankZeroReleasesSourceAfterSuccessfulSend) {
+    const int64_t request_id  = 1010;
+    const int64_t deadline_ms = currentTimeMs() + 10000;
+    mock_sender_->setAsyncCallback(false);
+    mock_sender_->setCallbackDelayMs(0);
+
+    std::vector<std::future<void>> released;
+    for (int layer_id = 0; layer_id < 2; ++layer_id) {
+        auto [resource, signal] = createTrackedKVCacheResource(layer_id);
+        ASSERT_TRUE(prefill_->writeByLayerTag(
+            layer_id, "group" + std::to_string(layer_id), resource, request_id, nullptr, deadline_ms));
+        resource.reset();
+        EXPECT_EQ(signal.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+        released.push_back(std::move(signal));
+    }
+
+    const auto result = prefill_->sendKVCache(
+        request_id, "source-hold-success", deadline_ms, makeRoutePlan({{"127.0.0.1", 12345}}), deadline_ms);
+    EXPECT_TRUE(result.ok());
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 2);
+    EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr);
+    for (auto& signal : released) {
+        EXPECT_EQ(signal.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    }
+}
+
+TEST_F(P2PConnectorWorkerTest, WriteByLayerTag_NonZeroRankDoesNotHoldSourceResource) {
+    worker_config_.tp_rank = 1;
+    prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(
+        worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+    ASSERT_TRUE(prefill_->init());
+    computed_buffers_ = prefill_->getComputedBuffersStore();
+
+    const int64_t request_id  = 1011;
+    const int64_t deadline_ms = currentTimeMs() + 10000;
+    auto [resource, released] = createTrackedKVCacheResource(0);
+    ASSERT_TRUE(prefill_->writeByLayerTag(0, "group0", resource, request_id, nullptr, deadline_ms));
+    resource.reset();
+
+    EXPECT_EQ(released.wait_for(std::chrono::milliseconds(0)), std::future_status::ready);
+    EXPECT_NE(computed_buffers_->getBuffer(request_id), nullptr);
+    EXPECT_TRUE(prefill_->cancelRequest(request_id, "nonzero-source-description", deadline_ms, deadline_ms));
+    EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr);
+}
+
+TEST_F(P2PConnectorWorkerTest, CancelHandleRead_HoldsStartedSourceAndReleasesQueuedSource) {
+    worker_config_.p2p_prefill_sender_thread_count = 1;
+    prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(
+        worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+    ASSERT_TRUE(prefill_->init());
+    computed_buffers_ = prefill_->getComputedBuffersStore();
+
+    const int64_t     request_id  = 1012;
+    const std::string unique_key  = "cancel-during-source-copy";
+    const int64_t     deadline_ms = currentTimeMs() + 10000;
+    mock_sender_->setAsyncCallback(false);
+    mock_sender_->setCallbackDelayMs(0);
+    mock_sender_->setBlockSend(true);
+
+    std::vector<std::future<void>> released;
+    for (int layer_id = 0; layer_id < 2; ++layer_id) {
+        auto [resource, signal] = createTrackedKVCacheResource(layer_id);
+        ASSERT_TRUE(prefill_->writeByLayerTag(
+            layer_id, "group" + std::to_string(layer_id), resource, request_id, nullptr, deadline_ms));
+        resource.reset();
+        released.push_back(std::move(signal));
+    }
+
+    auto handle_read = std::async(std::launch::async, [&] {
+        return prefill_->sendKVCache(
+            request_id, unique_key, deadline_ms, makeRoutePlan({{"127.0.0.1", 12345}}), deadline_ms);
+    });
+    // Unblock send before the async future is destroyed, including on fatal assertions.
+    auto unblock_sender = std::shared_ptr<void>(nullptr, [sender = mock_sender_](void*) {
+        sender->setBlockSend(false);
+    });
+    ASSERT_TRUE(mock_sender_->waitForTransferCallCount(1, std::chrono::seconds(2)));
+    const int started_layer = mock_sender_->getTransferCalls().front().layer_id;
+    ASSERT_GE(started_layer, 0);
+    ASSERT_LT(started_layer, 2);
+
+    // Wait for both task registrations, so cancellation exercises the pending-task path.
+    bool       both_registered = false;
+    const auto wait_until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < wait_until) {
+        {
+            std::lock_guard<std::mutex> lock(prefill_->handle_cancel_mutex_);
+            const auto it = prefill_->handle_cancel_flags_.find(unique_key);
+            both_registered = it != prefill_->handle_cancel_flags_.end() && it->second.async_send_tasks.size() == 2;
+        }
+        if (both_registered) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(both_registered);
+    EXPECT_TRUE(prefill_->cancelRequest(request_id, unique_key, deadline_ms, deadline_ms));
+    ASSERT_EQ(handle_read.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(handle_read.get().code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED);
+    EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr);
+    EXPECT_EQ(released[started_layer].wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    EXPECT_EQ(released[1 - started_layer].wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+    mock_sender_->setBlockSend(false);
+    EXPECT_EQ(released[started_layer].wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    prefill_.reset();  // Drain the skipped task before checking that it never called send.
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 1);
 }
 
 // ==================== sendKVCache 测试 (Prefill 端) ====================

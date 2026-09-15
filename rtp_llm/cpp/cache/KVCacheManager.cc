@@ -648,6 +648,26 @@ bool KVCacheManager::writeP2PLayer(size_t                                model_i
     layer_resource->setCacheKeys(cache_keys);
     layer_resource->mutableBlockIdsForLayer(static_cast<int>(global_layer_id), tag).assign(block_ids);
 
+    // Only rank 0 owns allocator bookkeeping. Keep its source blocks referenced
+    // while an already-started sender is still copying after request cancellation.
+    if (!cache_keys.empty() && parallelism_config_.tp_rank == 0) {
+        for (size_t i = 0; i < block_ids.size(); ++i) {
+            if (block_ids[i] < 0) {
+                RTP_LLM_LOG_WARNING("writeP2PLayer invalid block, request_id=%ld layer_id=%u tag=%s "
+                                    "cache_key=%ld block_id=%d",
+                                    request_id, global_layer_id, tag.c_str(), cache_keys[i], block_ids[i]);
+                return false;
+            }
+        }
+        layer_resource = allocator_->incrKVCacheRef(*layer_resource, cache_keys, true);
+        if (!layer_resource || layer_resource->cacheKeys() != cache_keys
+            || layer_resource->blocksForLayer(static_cast<int>(global_layer_id), tag) != block_ids) {
+            RTP_LLM_LOG_WARNING("writeP2PLayer failed to hold exact source blocks, request_id=%ld layer_id=%u tag=%s",
+                                request_id, global_layer_id, tag.c_str());
+            return false;
+        }
+    }
+
     return p2p_connector_->writeByLayerTag(static_cast<int>(global_layer_id),
                                            tag,
                                            layer_resource,
