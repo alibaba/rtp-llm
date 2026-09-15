@@ -221,17 +221,16 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
 
     if (malloc_info.enable_device_cache) {
         // CP-sharded: subsample to last-rank canonical key namespace before matching.
-        CacheKeysType bounded_keys = cache_keys;
-        if (malloc_info.max_reuse_len >= 0) {
-            bounded_keys.resize(std::min(bounded_keys.size(),
-                                         static_cast<size_t>(malloc_info.max_reuse_len) / config_.seq_size_per_block));
-        }
-        CacheKeysType cp_keys = cpCanonicalCacheKeys(cp_mapper, bounded_keys);
+        CacheKeysType cp_keys = cpCanonicalCacheKeys(cp_mapper, cache_keys);
         // Always drop the last match key, CP-sharded or not. It may be a partial
         // tail; and even when it is a full block, fully reusing the input leaves
         // no prefill tokens to compute. Keeping every canonical key under CP
         // sharding is exactly that degenerate case: zero prefill tokens left.
         CacheKeysType match_keys(cp_keys.begin(), cp_keys.empty() ? cp_keys.end() : cp_keys.end() - 1);
+        if (malloc_info.max_reuse_len >= 0) {
+            match_keys.resize(
+                std::min(match_keys.size(), static_cast<size_t>(malloc_info.max_reuse_len / reuse_unit_tokens)));
+        }
         auto          begin_us = currentTimeUs();
         reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper);
         match_cost_time_us     = currentTimeUs() - begin_us;

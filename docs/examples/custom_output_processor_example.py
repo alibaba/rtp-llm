@@ -9,6 +9,10 @@ The checkpoint must contain this example's score_head.dense/out weights.
 Choose the hidden-state stage used to train the head. Keep output tensors on
 the device; the engine transfers them and returns custom_output unchanged.
 OpenAI-compatible responses expose it as extra_outputs.custom_output.
+Return a nonempty [context_batch] or [context_batch, width] tensor with dtype
+float32, float16, bfloat16 or int32. Token selectors refer to the original input;
+the engine preserves text-token identity across prefix insertion and multimodal
+expansion. Selecting a multimodal placeholder that is replaced is unsupported.
 """
 
 from typing import Any, Dict, List
@@ -64,7 +68,8 @@ class ScoreHandler(CustomHandler):
         return Trigger.CONTEXT
 
     def hidden_state_stage(self) -> HiddenStateStage:
-        # Match training: use PRE_FINAL_NORM for the last decoder block output.
+        # This example uses the final normalized output. Switch to PRE_FINAL_NORM
+        # only when the head was trained on the last decoder block output.
         return HiddenStateStage.POST_FINAL_NORM
 
     def extend_forward(self, **kwargs: Any) -> torch.Tensor:

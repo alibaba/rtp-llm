@@ -65,8 +65,14 @@ void waitAsyncContextDone(const std::shared_ptr<rtp_llm::AsyncContext>& ctx) {
 
 class MetaImpl: public Meta {
 public:
-    MetaImpl(bool enable_memory_cache, bool enable_remote_cache, std::string trace_id):
-        enable_memory_cache_(enable_memory_cache), enable_remote_cache_(enable_remote_cache), trace_id_(trace_id) {}
+    MetaImpl(bool        enable_memory_cache,
+             bool        enable_remote_cache,
+             std::string trace_id,
+             size_t      max_reuse_blocks = std::numeric_limits<size_t>::max()):
+        enable_memory_cache_(enable_memory_cache),
+        enable_remote_cache_(enable_remote_cache),
+        trace_id_(trace_id),
+        max_reuse_blocks_(max_reuse_blocks) {}
     virtual ~MetaImpl() = default;
 
 public:
@@ -86,12 +92,17 @@ public:
         return tokens_;
     }
 
+    size_t maxReuseBlocks() const override {
+        return max_reuse_blocks_;
+    }
+
 private:
     bool                 enable_memory_cache_{false};
     bool                 enable_remote_cache_{false};
     std::string          trace_id_;
     std::string          unique_id_ = "";
     std::vector<int64_t> tokens_;  // TODO : get tokens (remote connector)
+    size_t               max_reuse_blocks_;
 };
 
 class RemoteConnectorMockOnlyFullTest: public RemoteConnectorMockTestBase {
@@ -151,6 +162,23 @@ private:
         cache_config_.fromGroupedSpecs({mha_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
     }
 };
+
+TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_respects_reusable_prefix_limit) {
+    auto resource        = std::make_shared<KVCacheResource>();
+    resource->cache_keys = {1, 2, 3, 4};
+    resource->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
+    initializeResourceTopology(*resource, cache_config_);
+    auto meta = std::make_shared<MetaImpl>(false, true, "limited", 1);
+    EXPECT_CALL(*meta_clients_[0],
+                MatchLocation(
+                    Eq("match_limited"), _, std::vector<int64_t>({1}), _, Eq(BlockMask(static_cast<size_t>(0))), _, _))
+        .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, genFullotherLocations({1})})));
+    auto match = remote_connectors_[0]->asyncMatch(resource, meta);
+    waitAsyncContextDone(match);
+    ASSERT_TRUE(match->success());
+    EXPECT_EQ(match->matchedBlockCount(), 1u);
+    EXPECT_EQ(resource->cacheKeys(), CacheKeysType({1, 2, 3, 4}));
+}
 
 // 初始reuse_len = 0
 TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu_reuse_len_zero) {

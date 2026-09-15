@@ -385,6 +385,21 @@ class ModelRpcClientTest(TestCase):
 
         self.assertEqual(input_pb.custom_output_token_position.value, 1)
 
+    def test_explicit_position_retains_expected_token_validation(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([42, 8, 9]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+            custom_output_token_position=0,
+        )
+        input_pb = trans_input(
+            input_py, CustomOutputSelector(token_position=-1, expected_token_id=42)
+        )
+        self.assertEqual(input_pb.custom_output_token_position.value, 0)
+        self.assertEqual(input_pb.custom_output_expected_token_id.value, 42)
+        self.assertFalse(input_pb.HasField("custom_output_tracked_token_id"))
+
     def test_trans_input_leaves_position_bounds_check_to_cpp(self):
         input_py = GenerateInput(
             request_id=123,

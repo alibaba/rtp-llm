@@ -444,9 +444,14 @@ class CustomOutputSelector:
         )
         return cls(position, tracked_token_id, expected_token_id)
 
-    def write_to(self, input_pb: GenerateInputPB) -> None:
-        if self.token_position is not None:
-            input_pb.custom_output_token_position.value = self.token_position
+    def write_to(
+        self, input_pb: GenerateInputPB, position_override: Optional[int] = None
+    ) -> None:
+        position = (
+            self.token_position if position_override is None else position_override
+        )
+        if position is not None:
+            input_pb.custom_output_token_position.value = position
         elif self.tracked_token_id is not None:
             input_pb.custom_output_tracked_token_id.value = self.tracked_token_id
         if self.expected_token_id is not None:
@@ -527,10 +532,10 @@ def trans_input(
         raise ValueError("custom_output_token_position must be -1 or non-negative")
     if selector is None:
         selector = CustomOutputSelector.from_env()
-    if custom_output_token_position >= 0:
-        input_pb.custom_output_token_position.value = custom_output_token_position
-    else:
-        selector.write_to(input_pb)
+    selector.write_to(
+        input_pb,
+        custom_output_token_position if custom_output_token_position >= 0 else None,
+    )
 
     request_info = getattr(input_py, "request_info", None)
     if request_info is not None:

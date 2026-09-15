@@ -20,7 +20,9 @@ py::dict runCustomOutput(py::object                   py_model,
                          int64_t                      decode_batch,
                          bool                         python_norm,
                          bool                         all_logits,
-                         std::optional<torch::Tensor> pre_hidden) {
+                         std::optional<torch::Tensor> pre_hidden,
+                         bool                         full_forward,
+                         bool                         prepare_first) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() { initRuntime(0, false, false, MlaOpsType::AUTO); });
     const auto width = hidden.size(1);
@@ -50,7 +52,25 @@ py::dict runCustomOutput(py::object                   py_model,
     inputs.lm_output_indexes     = lm_indexes;
     inputs.custom_output_indexes = custom_indexes.value_or(torch::Tensor());
     inputs.need_all_logits       = all_logits;
-    auto outputs = model.callForwardPostLayers(hidden, inputs, python_norm, -1, pre_hidden.value_or(torch::Tensor()));
+    GptModelOutputs outputs;
+    if (full_forward) {
+        // Run the production input preparation, Python forward and post-layers
+        // handoff. Only the Python decoder math is replaced by the test model.
+        inputs.combo_tokens   = torch::arange(hidden.size(0), torch::kInt32).pin_memory();
+        const auto batch_size = lm_indexes.size(0);
+        inputs.prefix_lengths = torch::zeros({batch_size - decode_batch}, torch::kInt32).pin_memory();
+        if (decode_batch == 0) {
+            auto starts = torch::cat({torch::zeros({1}, torch::kInt32), lm_indexes.slice(0, 0, batch_size - 1) + 1});
+            inputs.input_lengths = (lm_indexes + 1 - starts).pin_memory();
+        }
+        inputs.lm_output_lengths = torch::ones({batch_size}, torch::kInt32).pin_memory();
+        if (prepare_first) {
+            model.prepareAttentionInputs(inputs);
+        }
+        outputs = model.forward(inputs);
+    } else {
+        outputs = model.callForwardPostLayers(hidden, inputs, python_norm, -1, pre_hidden.value_or(torch::Tensor()));
+    }
     py::dict result;
     result["custom_output"]       = outputs.custom_output;
     result["custom_output_error"] = outputs.custom_output_error;
@@ -63,7 +83,19 @@ py::dict runCustomOutput(py::object                   py_model,
 
 PYBIND11_MODULE(libth_pywrapped_model_custom_output_test, m) {
     torch_ext::registerPyOpDefs(m);
-    m.def("run_post_layers", &rtp_llm::test::runCustomOutput);
+    m.def("run_post_layers",
+          &rtp_llm::test::runCustomOutput,
+          py::arg("model"),
+          py::arg("handler"),
+          py::arg("hidden"),
+          py::arg("lm_indexes"),
+          py::arg("custom_indexes"),
+          py::arg("decode_batch"),
+          py::arg("python_norm"),
+          py::arg("all_logits"),
+          py::arg("pre_hidden"),
+          py::arg("full_forward")  = false,
+          py::arg("prepare_first") = false);
     py::class_<rtp_llm::PostLayersProcessor>(m, "PostLayersProcessor")
         .def(py::init<>())
         .def("set_handler", &rtp_llm::PostLayersProcessor::setHandler)

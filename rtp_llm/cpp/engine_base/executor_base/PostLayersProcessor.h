@@ -35,6 +35,10 @@ public:
         return uses_pre_final_norm_;
     }
 
+    bool usesSelectedHiddenStates() const {
+        return HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::SELECTED_HIDDEN_STATES);
+    }
+
     // True when the handler should run on this step (CONTEXT trigger).
     bool shouldRunOnContext(bool has_context_request) const {
         return has_handler_ && wants_context_ && has_context_request;
@@ -43,7 +47,8 @@ public:
     // lm_rows: [total_batch, hidden] lm_output rows of this step, decode rows
     // first, context rows at the tail. Runs the handler over the context rows
     // (one GIL acquire, one batched extend_forward call; the slice is a view).
-    // Returns [context_batch, ...] or an undefined tensor. Handler failures
+    // Returns nonempty [context_batch] or [context_batch, width] (FP32, FP16,
+    // BF16 or INT32), or an undefined tensor. Handler failures
     // propagate to PyWrappedModel, which records them in the model output for
     // per-stream error dispatch without terminating the engine loop.
     torch::Tensor runOnContext(const torch::Tensor& lm_rows, int64_t decode_batch_size) const;

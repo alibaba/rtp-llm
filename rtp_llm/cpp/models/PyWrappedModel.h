@@ -113,6 +113,7 @@ private:
     // Context-only row indexes shared by Python pre-norm capture and C++
     // post-layers selection. Existing selector/prefix-cache logic owns positions.
     torch::Tensor                   customOutputIndexes(const GptModelInputs& inputs);
+    bool                            needsPreFinalNormCapture(const GptModelInputs& inputs) const;
     torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
     // Methods absorbed from GptModel

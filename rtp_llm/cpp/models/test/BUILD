@@ -171,10 +171,16 @@ cc_library(
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/engine_base/executor_base:post_layers_processor",
         "//rtp_llm/models_py/bindings:op_defs",
-        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-        "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
-    ] + torch_deps(),
+    ] + select({
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+        ],
+        "//conditions:default": [
+            "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+            "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+            "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
+        ],
+    }) + torch_deps(),
 )
 
 cc_binary(
@@ -190,4 +196,15 @@ py_test(
     deps = ["//rtp_llm:torch"],
     env = {"TEST_USING_DEVICE": "CUDA"},
     exec_properties = {"gpu": "H20"},
+)
+
+py_test(
+    name = "pywrapped_model_custom_output_rocm_test",
+    srcs = ["pywrapped_model_custom_output_test.py"],
+    main = "pywrapped_model_custom_output_test.py",
+    data = [":th_pywrapped_model_custom_output_test"],
+    deps = ["//rtp_llm:torch"],
+    env = {"TEST_USING_DEVICE": "ROCM"},
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
 )

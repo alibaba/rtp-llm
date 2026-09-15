@@ -1277,6 +1277,31 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DefaultHybridLinearPrefixReuseSupportsIns
     EXPECT_EQ(result.reuse_len, 12);
 }
 
+TEST_F(HybridTypeKVCacheAllocatorTest, SelectedTokenBoundsReuseWithoutDroppingAnotherBlock) {
+    for (int position : {0, 3, 4, 5, 8, 11}) {
+        SCOPED_TRACE(position);
+        auto config      = makeTinyHybridConfig();
+        config.block_num = 64;
+        auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+        auto cache       = std::make_shared<SharedBlockCache>();
+        allocator->setSharedBlockCache(cache);
+        ASSERT_TRUE(allocator->init());
+        const CacheKeysType cached_keys{100, 101, 102};
+        for (int group = 0; group < config.groupNums(); ++group) {
+            allocateAndCache(allocator->getBlockPool(), cache, config.groupNums(), group, cached_keys);
+        }
+        auto       resource = makeBatchResource(1, config, CacheKeysType{100, 101, 102, 103});
+        auto       tokens   = makeCompleteTokenIds(1, 13, 4);
+        MallocInfo info{resource, tokens};
+        info.max_reuse_len = position;
+        const auto result  = allocator->malloc(info);
+        ASSERT_TRUE(result.success);
+        EXPECT_EQ(result.reuse_len, position / 4 * 4);
+        EXPECT_LE(result.reuse_len, position);
+        allocator->free(FreeInfo{resource, nullptr});
+    }
+}
+
 TEST_F(HybridTypeKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseSmoke) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);

@@ -7,6 +7,7 @@ import torch
 
 from rtp_llm.cpp.models.test.libth_pywrapped_model_custom_output_test import (
     PostLayersProcessor,
+    PyModelOutputs,
     run_post_layers,
 )
 
@@ -44,6 +45,33 @@ class Model:
 
     def initialize(self, resources):
         return True
+
+    def forward(self, inputs):
+        raise AssertionError("post-layers tests must not run the decoder")
+
+
+class ForwardModel(Model):
+    def __init__(self):
+        self.seen_indexes = None
+        self.forward_calls = 0
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        return None
+
+    def forward(self, inputs, fmha_impl=None):
+        self.forward_calls += 1
+        hidden = inputs.input_ids.float().unsqueeze(1) * 4
+        hidden = hidden + torch.arange(4, device=hidden.device) + 1
+        indexes = inputs.pre_final_norm_output_indexes
+        self.seen_indexes = indexes
+        capture = hidden.index_select(0, indexes) if indexes is not None else None
+        # Mutate in place to catch accidentally passing normalized storage as
+        # a pre-norm capture across the actual C++/Python forward boundary.
+        hidden.mul_(torch.rsqrt(hidden.square().mean(-1, keepdim=True) + 1e-5))
+        outputs = PyModelOutputs(hidden)
+        if capture is not None:
+            outputs.pre_final_norm_hidden_states = capture
+        return outputs
 
 
 class CustomOutputTestBase(unittest.TestCase):
@@ -92,14 +120,21 @@ class CustomOutputPostLayersTest(CustomOutputTestBase):
         )
 
     def run_case(
-        self, stage, python_norm, selected, all_logits, pre_hidden=None, model=None
+        self,
+        stage,
+        python_norm,
+        selected,
+        all_logits,
+        pre_hidden=None,
+        model=None,
+        handler=None,
     ):
         env = {"CUSTOM_OUTPUT_TRACKED_TOKEN_ID": "42"} if selected else {}
         with mock.patch.dict(os.environ, env):
             # One decode row, then two variable-length context requests.
             return run_post_layers(
                 model or Model(),
-                Handler(stage, selected),
+                handler or Handler(stage, selected),
                 self.normalized if python_norm else self.hidden,
                 torch.tensor([0, 2, 5], dtype=torch.int32),
                 torch.tensor([1, 4], dtype=torch.int32) if selected else None,
@@ -162,6 +197,21 @@ class CustomOutputPostLayersTest(CustomOutputTestBase):
         with self.assertRaisesRegex(RuntimeError, "does not support pre_final_norm"):
             self.run_case(Stage.PRE, True, True, False, model=model)
 
+    def test_unserializable_output_dtype_fails_warmup(self):
+        for dtype in (torch.int64, torch.bool, torch.float64):
+            with self.subTest(dtype=dtype):
+
+                class DtypeHandler(Handler):
+                    def extend_forward(self, **kwargs):
+                        return super().extend_forward(**kwargs).to(dtype)
+
+                with self.assertRaisesRegex(
+                    RuntimeError, "output dtype.*RPC serialization"
+                ):
+                    self.run_case(
+                        Stage.POST, True, False, False, handler=DtypeHandler()
+                    )
+
     def test_decode_does_not_invoke_handler(self):
         result = run_post_layers(
             Model(),
@@ -176,6 +226,81 @@ class CustomOutputPostLayersTest(CustomOutputTestBase):
         )
         self.assertIsNone(result["custom_output"])
         self.assertEqual(result["custom_output_error"], "")
+
+    def test_explicit_selection_rejects_last_hidden_states_handler(self):
+        for stage in (Stage.PRE, Stage.POST):
+            result = run_post_layers(
+                Model(),
+                Handler(stage),
+                self.normalized,
+                torch.tensor([0, 2, 5], dtype=torch.int32),
+                torch.tensor([1, 4], dtype=torch.int32),
+                1,
+                True,
+                False,
+                self.hidden[[2, 5]],
+            )
+            self.assertIsNone(result["custom_output"])
+            self.assertIn(
+                "requires a handler declaring selected_hidden_states",
+                result["custom_output_error"],
+            )
+
+    def test_real_forward_transfers_capture_and_preserves_logits(self):
+        for prepare_first in (False, True):
+            for selected in (False, True):
+                env = {"CUSTOM_OUTPUT_TOKEN_POSITION": "-1"} if selected else {}
+                rows = [1, 4] if selected else [2, 5]
+                results = {}
+                for stage in (Stage.PRE, Stage.POST):
+                    model = ForwardModel()
+                    with mock.patch.dict(os.environ, env):
+                        result = run_post_layers(
+                            model,
+                            Handler(stage, selected),
+                            self.hidden,
+                            torch.tensor([2, 5], dtype=torch.int32),
+                            torch.tensor(rows, dtype=torch.int32) if selected else None,
+                            0,
+                            True,
+                            False,
+                            None,
+                            full_forward=True,
+                            prepare_first=prepare_first,
+                        )
+                    self.assertEqual(model.forward_calls, 1)
+                    self.assertEqual(result["custom_output_error"], "")
+                    expected = (
+                        self.hidden[rows]
+                        if stage == Stage.PRE
+                        else self.normalized[rows]
+                    )
+                    torch.testing.assert_close(result["custom_output"], expected)
+                    if stage == Stage.PRE:
+                        self.assertEqual(model.seen_indexes.tolist(), rows)
+                    else:
+                        self.assertIsNone(model.seen_indexes)
+                    results[stage] = result
+                torch.testing.assert_close(
+                    results[Stage.PRE]["logits"],
+                    results[Stage.POST]["logits"],
+                    rtol=0,
+                    atol=0,
+                )
+
+    def test_invalid_output_shape_fails_warmup(self):
+        for trailing_shape in ((0,), (1, 1)):
+            with self.subTest(trailing_shape=trailing_shape):
+
+                class ShapeHandler(Handler):
+                    def extend_forward(self, **kwargs):
+                        rows = super().extend_forward(**kwargs)
+                        return rows.new_empty((rows.shape[0], *trailing_shape))
+
+                with self.assertRaisesRegex(RuntimeError, "nonempty.*batch"):
+                    self.run_case(
+                        Stage.POST, True, False, False, handler=ShapeHandler()
+                    )
 
     def test_disabled_handler_and_legacy_post_path_preserve_generation(self):
         disabled = run_post_layers(

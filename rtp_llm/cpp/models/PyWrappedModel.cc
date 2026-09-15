@@ -513,10 +513,18 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidd
                              std::move(pre_final_norm_hidden));
 }
 
+bool PyWrappedModel::needsPreFinalNormCapture(const GptModelInputs& inputs) const {
+    return post_layers_processor_ && post_layers_processor_->usesPreFinalNorm()
+           && post_layers_processor_->shouldRunOnContext(inputs.input_lengths.size(0)
+                                                         > inputs.sequence_lengths.size(0));
+}
+
 torch::Tensor PyWrappedModel::customOutputIndexes(const GptModelInputs& inputs) {
     const auto decode_batch_size  = inputs.sequence_lengths.size(0);
     const auto context_batch_size = inputs.input_lengths.size(0) - decode_batch_size;
-    auto       indexes            = inputs.custom_output_indexes;
+    auto       indexes            = post_layers_processor_ && post_layers_processor_->usesSelectedHiddenStates() ?
+                                        inputs.custom_output_indexes :
+                                        torch::Tensor();
     if (!indexes.defined() || indexes.numel() == 0) {
         // Last-token mode (also used for model warmup's synthetic requests).
         indexes = inputs.lm_output_indexes.narrow(0, decode_batch_size, context_batch_size);
@@ -811,7 +819,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
                                            torch_ext::BertEmbeddingInputs()});
     auto* runner          = selectGraphRunner(attention_inputs_);
     auto& state           = selectGraphState(attention_inputs_);
-    if (enable_cuda_graph_ && runner != nullptr
+    if (enable_cuda_graph_ && !needsPreFinalNormCapture(inputs) && runner != nullptr
         && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         runner->prepareAttentionInputs(py_model_inputs, state, skip_forward_event_sync);
@@ -829,7 +837,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     attention_inputs_by_tag_ = setupKVCacheForAttentionInputs(attention_inputs_, inputs);
     fusedCopy(d2d_copies_);
 
-    if (enable_cuda_graph_) {
+    if (enable_cuda_graph_ && !needsPreFinalNormCapture(inputs)) {
         auto  empty           = torch::Tensor();
         auto  py_model_inputs = PyModelInputs({empty,
                                                empty,
@@ -937,8 +945,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                         attention_inputs_,
                                                         attention_inputs_by_tag_,
                                                         bert_embedding_inputs});
-        if (post_layers_processor_ && post_layers_processor_->usesPreFinalNorm()
-            && post_layers_processor_->shouldRunOnContext(has_context_request)) {
+        if (needsPreFinalNormCapture(inputs)) {
             py_model_inputs.pre_final_norm_output_indexes = customOutputIndexes(inputs);
         }
         PyModelOutputs py_model_outputs;
@@ -1205,6 +1212,9 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         std::string   custom_output_error;
         if (run_custom) {
             try {
+                TORCH_CHECK(post_layers_processor_->usesSelectedHiddenStates()
+                                || !inputs.custom_output_indexes.defined() || inputs.custom_output_indexes.numel() == 0,
+                            "custom output token selection requires a handler declaring selected_hidden_states");
                 if (use_pre_final_norm) {
                     // Missing output is a protocol error, never a post-norm fallback.
                     TORCH_CHECK(pre_final_norm_hidden.defined(),

@@ -51,6 +51,9 @@ class MultiSequencesPipelineResponse(BaseModel):
     response: List[str]
     finished: bool
     aux_info: List[Dict[str, Any]] = {}
+    custom_output: Optional[List[Optional[Union[List[float], List[List[float]]]]]] = (
+        None
+    )
 
 
 class BatchPipelineResponse(BaseModel):
@@ -337,6 +340,10 @@ class FrontendWorker:
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         if generate_config.num_return_sequences > 0:
+            custom_outputs = [
+                seq.custom_output.tolist() if seq.custom_output is not None else None
+                for seq in gen_responses.generate_outputs.generate_outputs
+            ]
             aux_info = []
             if generate_config.aux_info:
                 aux_info = []
@@ -352,6 +359,11 @@ class FrontendWorker:
                     ]
                 ),
                 aux_info=aux_info,
+                custom_output=(
+                    custom_outputs
+                    if any(value is not None for value in custom_outputs)
+                    else None
+                ),
             )
             return sequences_pipeline_response
         else:

@@ -328,6 +328,54 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
 }
 
+TEST_F(StreamCacheResourceTest, testCustomOutputBoundsConnectorLoadAndPublishedReuse) {
+    for (bool async : {false, true}) {
+        for (int position : {0, 1, 2, 3, 5}) {
+            SCOPED_TRACE(testing::Message() << "async=" << async << ", position=" << position);
+            prepareResource(/*reuse_cache=*/true);
+            auto& resource                                                 = stream_->streamCacheResource();
+            stream_->generate_input_->custom_output_token_position         = position;
+            stream_->generate_input_->generate_config->reuse_cache         = true;
+            stream_->generate_input_->generate_config->enable_memory_cache = true;
+            resource.resource_context_.enable_memory_cache                 = true;
+            auto coordinator =
+                std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                                     cache_manager_->kv_cache_config_,
+                                                                                     cache_manager_->runtime_config_,
+                                                                                     cache_manager_->allocator_);
+            ON_CALL(*coordinator, hasActiveConnectors()).WillByDefault(testing::Return(true));
+            cache_manager_->coordinator_ = coordinator;
+
+            // Simulate a connector returning a longer prefix as a defense-in-depth
+            // check. Real memory/remote matches are separately tested against Meta.
+            auto loaded = std::make_shared<KVCacheResource>();
+            loaded->setMemoryReuseBlockNum(1);
+            loaded->setRemoteReuseBlockNum(2);
+            auto match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{});
+            auto read  = std::make_shared<FusedAsyncReadContext>(match, loaded, nullptr);
+            read->setFusedReadContext(nullptr);
+            EXPECT_CALL(*coordinator, asyncRead(testing::_))
+                .WillOnce(testing::Invoke([&](const std::shared_ptr<KVCacheConnectorReadWriteContext>& context) {
+                    EXPECT_EQ(context->meta()->maxReuseBlocks(), static_cast<size_t>(position / 2));
+                    return std::static_pointer_cast<AsyncContext>(read);
+                }));
+            ASSERT_TRUE(resource.initKVBlock().ok());
+            if (async) {
+                ASSERT_TRUE(resource.asyncLoadCache());
+                ASSERT_TRUE(resource.loadCacheDone());
+            } else {
+                resource.loadCacheSync();
+            }
+            const int expected = position / 2 * 2;
+            EXPECT_EQ(stream_->reuseLength(), expected);
+            EXPECT_EQ(stream_->initialReuseLength(), expected);
+            EXPECT_LE(stream_->memoryReuseLength() + stream_->remoteReuseLength(), expected);
+            EXPECT_LE(stream_->reuseLength(), position);
+            resource.releaseResource();
+        }
+    }
+}
+
 TEST_F(StreamCacheResourceTest, testAlignedFullMemoryHitRetainsFinalBaseBlock) {
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();

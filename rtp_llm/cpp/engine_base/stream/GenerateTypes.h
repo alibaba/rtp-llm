@@ -70,6 +70,9 @@ public:
         auto prefix_tensor =
             torch::from_blob(const_cast<int*>(prefix_prompt.data()), {(int64_t)prefix_prompt.size()}, torch::kInt32);
         input_ids = torch::cat({prefix_tensor, input_ids}, 0);
+        if (custom_output_token_position >= 0) {
+            custom_output_token_position += prefix_length;
+        }
     }
 
 public:
@@ -95,7 +98,7 @@ public:
     // tagging only — never used for engine-side scheduling decisions.
     int32_t priority = 0;
 
-    // Absolute, zero-based position in input_ids; -1 selects the last token.
+    // Resolved zero-based position in input_ids; -1 means no selector (last-token fallback).
     int custom_output_token_position = -1;
 
     // Batch grouping params

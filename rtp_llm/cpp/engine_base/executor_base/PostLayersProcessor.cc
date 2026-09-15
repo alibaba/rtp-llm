@@ -21,6 +21,9 @@ namespace {
 
 int parseSelectorEnv(const char* name, bool require_non_negative) {
     const char* value = std::getenv(name);
+    if (value == nullptr) {
+        throw std::runtime_error(std::string(name) + " is not configured");
+    }
     errno             = 0;
     char*      end    = nullptr;
     const long parsed = std::strtol(value, &end, 10);
@@ -143,8 +146,16 @@ torch::Tensor PostLayersProcessor::invokeHandler(const torch::Tensor& context_ro
     if (output.dim() == 0) {
         throw std::runtime_error("post-layers handler output must have a batch dimension");
     }
+    if (output.dim() > 2 || output.numel() == 0) {
+        throw std::runtime_error("post-layers handler output must be a nonempty [batch] or [batch, width] tensor");
+    }
     if (!output.is_cuda()) {
         throw std::runtime_error("post-layers handler output must remain on CUDA");
+    }
+    const auto dtype = output.scalar_type();
+    if (dtype != torch::kFloat32 && dtype != torch::kFloat16 && dtype != torch::kBFloat16 && dtype != torch::kInt32) {
+        throw std::runtime_error("post-layers handler output dtype must be float32, float16, bfloat16 or int32 "
+                                 "for RPC serialization");
     }
     if (output.size(0) != context_rows.size(0)) {
         throw std::runtime_error("post-layers handler returned " + std::to_string(output.size(0)) + " rows for "

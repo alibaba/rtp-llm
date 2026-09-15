@@ -45,9 +45,10 @@ ErrorInfo MultimodalProcessor::getFeatureHash(int32_t* token_ids, const torch::T
 ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vector<torch::Tensor>& mm_embedding,
                                                                 const torch::Tensor&              token_ids,
                                                                 const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                                torch::Tensor token_type_ids) {
+                                                                torch::Tensor token_type_ids,
+                                                                int           selected_token_position) {
     if (mm_embedding.size() == 0) {
-        return ExpandedOutput(token_ids, token_type_ids);
+        return ExpandedOutput(token_ids, token_type_ids, {}, {}, selected_token_position);
     }
 
     assert(token_ids.dim() == 1);
@@ -62,8 +63,17 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
                       << ", get " << mm_num;
         return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, exception_str.str());
     }
+    int expanded_selected_position = selected_token_position;
     for (int i = 0; i < mm_num; i++) {
-        expanded_len += mm_embedding[i].sizes()[0] - locs[i].second + locs[i].first;
+        const int delta = mm_embedding[i].sizes()[0] - locs[i].second + locs[i].first;
+        expanded_len += delta;
+        if (selected_token_position >= locs[i].first && selected_token_position < locs[i].second) {
+            return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR,
+                             "custom output cannot select a placeholder replaced by multimodal features");
+        }
+        if (selected_token_position >= locs[i].second) {
+            expanded_selected_position += delta;
+        }
     }
 
     auto expanded_ids = torch::empty({(int64_t)expanded_len}, torch::kInt32);
@@ -112,8 +122,11 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
                token_type_ids.data_ptr<int32_t>() + old_loc_idx,
                sizeof(int32_t) * (expanded_ids.size(0) - new_loc_idx));
     }
-    return ExpandedOutput(
-        std::move(expanded_ids), std::move(expanded_token_type_ids), std::move(token_masks), std::move(new_locs));
+    return ExpandedOutput(std::move(expanded_ids),
+                          std::move(expanded_token_type_ids),
+                          std::move(token_masks),
+                          std::move(new_locs),
+                          expanded_selected_position);
 }
 
 ErrorResult<std::vector<std::pair<int32_t, int32_t>>>
@@ -196,13 +209,19 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     input->multimodal_features = std::move(mm_embedding_res.mm_features);
     input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
     input->mm_extra_input      = std::move(mm_embedding_res.mm_extra_input);
-    CHECK_AND_RETURN_REF(
-        expanded_ids,
-        expandTokenIds(input->multimodal_features.value(), input->input_ids, input->multimodal_inputs.value()));
+    CHECK_AND_RETURN_REF(expanded_ids,
+                         expandTokenIds(input->multimodal_features.value(),
+                                        input->input_ids,
+                                        input->multimodal_inputs.value(),
+                                        {},
+                                        input->custom_output_token_position));
     RETURN_IF_STATUS_ERROR(checkExpandLength(expanded_ids));
     input->input_ids        = expanded_ids.expanded_ids;
     input->text_tokens_mask = expanded_ids.text_tokens_mask;
     input->mm_locs          = expanded_ids.locs;
+    // Preserve the selected prompt token's identity after placeholder expansion.
+    // The remapped position also controls the prefix-cache reuse boundary.
+    input->custom_output_token_position = expanded_ids.selected_token_position;
     return ErrorInfo::OkStatus();
 }
 

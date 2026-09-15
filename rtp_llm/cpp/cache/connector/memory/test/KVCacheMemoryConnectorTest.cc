@@ -257,8 +257,14 @@ struct LayerBlock {
 
 class TestReadMeta: public rtp_llm::Meta {
 public:
-    TestReadMeta(bool enable_memory_cache, bool enable_remote_cache = false, std::string trace_id = ""):
-        enable_memory_cache_(enable_memory_cache), enable_remote_cache_(enable_remote_cache), trace_id_(trace_id) {}
+    TestReadMeta(bool        enable_memory_cache,
+                 bool        enable_remote_cache = false,
+                 std::string trace_id            = "",
+                 size_t      max_reuse_blocks    = std::numeric_limits<size_t>::max()):
+        enable_memory_cache_(enable_memory_cache),
+        enable_remote_cache_(enable_remote_cache),
+        trace_id_(trace_id),
+        max_reuse_blocks_(max_reuse_blocks) {}
     ~TestReadMeta() override = default;
 
     bool enableMemoryCache() const override {
@@ -277,12 +283,17 @@ public:
         return tokens_;
     }
 
+    size_t maxReuseBlocks() const override {
+        return max_reuse_blocks_;
+    }
+
 private:
     bool                 enable_memory_cache_{false};
     bool                 enable_remote_cache_{false};
     std::string          trace_id_;
     std::string          unique_id_ = "";
     std::vector<int64_t> tokens_;  // TODO : get tokens (remote connector)
+    size_t               max_reuse_blocks_;
 };
 
 class KVCacheMemoryConnectorTest: public ::testing::Test {
@@ -1957,6 +1968,37 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ExcludesPartialLastKey) {
     auto match_ctx = connector_->asyncMatch(res, std::make_shared<TestReadMeta>(true));
     ASSERT_NE(match_ctx, nullptr);
     EXPECT_EQ(match_ctx->matchedBlockCount(), cache_keys.size() - 1);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, asyncRead_RespectsReusablePrefixLimit) {
+    const std::vector<std::vector<BlockIdxType>> blocks(4, {1, 2, 3});
+    for (bool aligned : {false, true}) {
+        for (size_t limit : {0u, 1u, 2u, 3u}) {
+            SCOPED_TRACE(testing::Message() << "aligned=" << aligned << ", limit=" << limit);
+            // Reads release their memory-cache entries. Each case gets its
+            // own populated prefix so preceding cases cannot turn it into a miss.
+            const CacheKeyType  first_key = 71211 + (aligned ? 40 : 0) + static_cast<CacheKeyType>(limit) * 4;
+            const CacheKeysType cache_keys{first_key, first_key + 1, first_key + 2};
+            putItemsToCache(cache_keys, memoryCacheBlockBytes());
+            auto resource = makeCacheResource(cache_keys, blocks);
+            resource->setLastBlockAligned(aligned);
+            auto         meta     = std::make_shared<TestReadMeta>(true, false, "", limit);
+            auto         match    = connector_->asyncMatch(resource, meta);
+            const size_t expected = std::min(limit, cache_keys.size() - (aligned ? 0 : 1));
+            if (expected == 0) {
+                EXPECT_EQ(match, nullptr);
+                continue;
+            }
+            ASSERT_NE(match, nullptr);
+            ASSERT_EQ(match->matchedBlockCount(), expected);
+            auto read = connector_->asyncRead(resource, meta, match, 0, static_cast<int>(expected));
+            ASSERT_NE(read, nullptr);
+            ASSERT_TRUE(waitUntilDone(read));
+            ASSERT_TRUE(read->success());
+            EXPECT_EQ(resource->memoryReuseBlockNum(), expected);
+            EXPECT_EQ(resource->cacheKeys(), cache_keys);
+        }
+    }
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnMatchedNum_WithHybridGroups) {

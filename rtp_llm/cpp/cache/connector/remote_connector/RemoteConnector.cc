@@ -589,6 +589,7 @@ void RemoteConnector::asyncMatchTask(const std::shared_ptr<KVCacheResource>&    
     if (!keys.empty()) {
         keys.pop_back();
     }
+    keys.resize(std::min(keys.size(), meta->maxReuseBlocks()));
 
     std::string                       match_trace_id = "match_" + meta->trace_id();
     kv_cache_manager::BlockMaskOffset block_mask     = resource->reuseBlockNum();
