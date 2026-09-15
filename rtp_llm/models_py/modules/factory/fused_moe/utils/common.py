@@ -44,7 +44,7 @@ def _fp8_quantize(
         if not per_act_token:
             A_q, A_scale = scaled_fp8_per_tensor_quant(A, A_scale)
         else:
-            A_q, A_scale = scaled_fp8_per_token_quant(A, A_scale)
+            A_q, A_scale = scaled_fp8_per_token_quant(A, scale=A_scale)
     else:
         raise NotImplementedError("per token group fp8 quant not supported yet")
 

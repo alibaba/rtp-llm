@@ -9,6 +9,7 @@ from rtp_llm.config.quant_config import (
     CompressedW8A8Int8PerChannelQuantConfig,
     Fp8BlockWiseQuantConfig,
     Fp8DynamicPerTensorQuantConfig,
+    Fp8PerTensorCompressedQuantConfig,
     MXFp4QuarkQuantConfig,
     W4a8Int4PerChannelQuantConfig,
 )
@@ -65,6 +66,16 @@ def create_model_config_with_fp8_per_tensor_quant() -> ModelConfig:
     """Create ModelConfig with FP8 per-tensor quantization"""
     model_config = ModelConfig()
     model_config.quant_config = Fp8DynamicPerTensorQuantConfig()
+    return model_config
+
+
+def create_model_config_with_fp8_per_tensor_compressed_quant() -> ModelConfig:
+    """Create compressed-tensors FP8 per-tensor quantization config."""
+    model_config = ModelConfig()
+    model_config.quant_config = Fp8PerTensorCompressedQuantConfig(
+        is_quanted=True,
+        dynamic=True,
+    )
     return model_config
 
 
@@ -152,12 +163,40 @@ def create_moe_config_adapter(
         model_config=model_config,
         parallelism_config=parallelism_config,
         moe_config=moe_config,
+        quant_config=model_config.quant_config,
         enable_cuda_graph=enable_cuda_graph,
     )
 
 
 class TestCudaNoQuantFallbackStrategies(unittest.TestCase):
     """No-quant strategy conditions must reject quantized checkpoints."""
+
+    def test_masked_executor_checks_quantization_specific_architecture(self) -> None:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor import (
+            DeepGemmMaskedExecutor,
+        )
+
+        for quantized in (False, True):
+            model_config = (
+                create_model_config_with_fp8_block_quant()
+                if quantized
+                else create_model_config_without_quant()
+            )
+            model_config.data_type = "bf16"
+            for sm_major in (8, 9, 10):
+                with self.subTest(quantized=quantized, sm_major=sm_major), patch(
+                    "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm",
+                    return_value=True,
+                ), patch(
+                    "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor.get_sm",
+                    return_value=(sm_major, 0),
+                ):
+                    self.assertEqual(
+                        self._conditions_pass(
+                            DeepGemmMaskedExecutor, model_config, "auto"
+                        ),
+                        sm_major >= 9 if quantized else sm_major == 9,
+                    )
 
     def _conditions_pass(
         self, strategy: type, model_config: ModelConfig, moe_strategy: str
@@ -212,19 +251,26 @@ class TestRocmEpStrategyQuantFiltering(unittest.TestCase):
     """Unsupported quant methods must leave ROCm EP candidate probing cleanly."""
 
     def test_unsupported_quant_methods_return_false(self) -> None:
-        for quant_config in (
-            CompressedW8A8Int8PerChannelQuantConfig(),
-            MXFp4QuarkQuantConfig(),
+        with patch.object(
+            RocmEpNormalStrategy,
+            "get_attributes",
+            side_effect=AssertionError(
+                "unsupported quantization must be rejected before backend resolution"
+            ),
         ):
-            with self.subTest(quant_method=quant_config.get_method()):
-                model_config = ModelConfig()
-                model_config.quant_config = quant_config
-                config = create_moe_config_adapter(
-                    model_config=model_config,
-                    parallelism_config=create_parallelism_config(),
-                    moe_config=create_moe_config(),
-                )
-                self.assertFalse(RocmEpNormalStrategy().can_handle(config))
+            for quant_config in (
+                CompressedW8A8Int8PerChannelQuantConfig(),
+                MXFp4QuarkQuantConfig(),
+            ):
+                with self.subTest(quant_method=quant_config.get_method()):
+                    model_config = ModelConfig()
+                    model_config.quant_config = quant_config
+                    config = create_moe_config_adapter(
+                        model_config=model_config,
+                        parallelism_config=create_parallelism_config(),
+                        moe_config=create_moe_config(),
+                    )
+                    self.assertFalse(RocmEpNormalStrategy().can_handle(config))
 
 
 class TestCudaNoQuantSingleGpuStrategy(unittest.TestCase):
@@ -325,6 +371,34 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
         self.assertTrue(strategy.can_handle(config))
         config.enable_cuda_graph = True
         self.assertFalse(strategy.can_handle(config))
+
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor.get_sm",
+        return_value=(9, 0),
+    )
+    @patch(
+        "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm",
+        return_value=False,
+    )
+    def test_rejects_backend_missing_required_executor_symbols(
+        self, mock_has_deep_gemm: Any, _mock_get_sm: Any
+    ) -> None:
+        config = create_moe_config_adapter(
+            model_config=create_model_config_with_fp8_block_quant(),
+            parallelism_config=create_parallelism_config(),
+            moe_config=create_moe_config(use_all_gather=True),
+            enable_cuda_graph=False,
+        )
+
+        self.assertFalse(CudaFp8PerBlockNoDPStrategy().can_handle(config))
+        mock_has_deep_gemm.assert_called_once_with(
+            (
+                "get_num_sms",
+                "set_num_sms",
+                "m_grouped_fp8_gemm_nt_masked",
+                "m_grouped_fp8_gemm_nt_contiguous",
+            )
+        )
 
     def test_priority(self) -> None:
         """Test priority"""
@@ -562,7 +636,7 @@ class TestCudaFp8PerTensorNoDPStrategy(unittest.TestCase):
     def test_can_handle_fp8_per_tensor_compressed(self) -> None:
         """Test FP8_PER_TENSOR_COMPRESSED case"""
         config = create_moe_config_adapter(
-            model_config=create_model_config_with_fp8_per_tensor_quant(),
+            model_config=create_model_config_with_fp8_per_tensor_compressed_quant(),
             parallelism_config=create_parallelism_config(
                 ep_size=1, tp_size=1, dp_size=1
             ),

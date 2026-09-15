@@ -60,6 +60,19 @@ bool validAllocatorDumpId(const std::string& dump_id) {
     });
 }
 
+std::string truncateUtf8(std::string value, size_t max_bytes) {
+    if (value.size() <= max_bytes) {
+        return value;
+    }
+    size_t end = max_bytes;
+    while (end > 0 && end < value.size()
+           && (static_cast<unsigned char>(value[end]) & 0xC0) == 0x80) {
+        --end;
+    }
+    value.resize(end);
+    return value;
+}
+
 std::string formatRequestLogTag(const std::string& request_key, const RequestInfo& request_info) {
     std::string tag = "request [" + request_key + "]";
     if (!request_info.trace_id.empty()) {
@@ -488,6 +501,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_execution_time_ms(task.execution_time_ms);
         task_info->set_priority_preemption_progress(
             static_cast<PriorityPreemptionProgressPB>(task.priority_preemption_progress));
+        task_info->set_priority(task.priority);
         if (task.error_code != 0) {
             task_info->mutable_error_info()->set_error_code(task.error_code);
             task_info->mutable_error_info()->set_error_message(task.error_message);
@@ -509,6 +523,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_execution_time_ms(task.execution_time_ms);
         task_info->set_priority_preemption_progress(
             static_cast<PriorityPreemptionProgressPB>(task.priority_preemption_progress));
+        task_info->set_priority(task.priority);
         if (task.error_code != 0) {
             task_info->mutable_error_info()->set_error_code(task.error_code);
             task_info->mutable_error_info()->set_error_message(task.error_message);
@@ -1005,25 +1020,36 @@ grpc::Status LocalRpcServer::SetRestart(grpc::ServerContext* context, const Empt
 grpc::Status
 LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response) {
     RTP_LLM_LOG_DEBUG("Receive update weights request from: %s", context->peer().c_str());
+    // Keep the GIL for the complete Python exception lifetime, including the
+    // destruction of py::error_already_set after its catch handler returns.
+    py::gil_scoped_acquire acquire;
     try {
+        if (!weight_manager_ || weight_manager_.is_none()) {
+            const std::string error_msg = "UpdateWeights is unavailable because no weight manager is configured; "
+                                          "restart with a loader configuration that supports online weight updates";
+            RTP_LLM_LOG_WARNING(
+                "Reject update weights request from %s: %s", context->peer().c_str(), error_msg.c_str());
+            return {grpc::StatusCode::UNIMPLEMENTED, error_msg};
+        }
         if (request->name().empty() || request->desc().empty() || request->method().empty()) {
-            throw std::runtime_error("Missing required field(s) in request");
+            return {grpc::StatusCode::INVALID_ARGUMENT, "Missing required field(s) in request"};
         }
-        {
-            py::gil_scoped_acquire acquire;
-            py::dict               req;
-            req["name"]   = request->name();
-            req["desc"]   = request->desc();
-            req["method"] = request->method();
-            weight_manager_.attr("update")(req);
-        }
+        py::dict req;
+        req["name"]   = request->name();
+        req["desc"]   = request->desc();
+        req["method"] = request->method();
+        weight_manager_.attr("update")(req);
         return grpc::Status::OK;
     } catch (const py::error_already_set& e) {
-        PyObject *type, *value, *traceback;
-        PyErr_Fetch(&type, &value, &traceback);
-        std::string err_msg = value ? PyUnicode_AsUTF8(value) : "Unknown Python error";
-        return {grpc::StatusCode::INTERNAL, "exception from python: " + err_msg};
+        const std::string details = e.what();
+        RTP_LLM_LOG_ERROR("UpdateWeights Python exception: %s", details.c_str());
+        const auto       newline               = details.find('\n');
+        std::string      summary               = details.substr(0, newline);
+        constexpr size_t kMaxClientErrorLength = 512;
+        summary = truncateUtf8(std::move(summary), kMaxClientErrorLength);
+        return {grpc::StatusCode::INTERNAL, "exception from python: " + summary};
     } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("UpdateWeights C++ exception: %s", e.what());
         return {grpc::StatusCode::INTERNAL, "exception from C++: " + std::string(e.what())};
     }
 }

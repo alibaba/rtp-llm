@@ -1,17 +1,16 @@
 import logging
 from collections.abc import Mapping
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
-from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
-from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
     select_attention_inputs_for_tag,
 )
+from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
 from rtp_llm.ops import DeviceResourceConfig
@@ -21,16 +20,30 @@ from rtp_llm.ops.compute_ops import (
     PyModelInputs,
     PyModelOutputs,
 )
-from rtp_llm.utils.model_weight import W
+
+if TYPE_CHECKING:
+    from rtp_llm.model_loader.model_weight_info import ModelWeights
 
 
-class GptModelBase(nn.Module):
+def required_config_value(config: Any, *names: str) -> Any:
+    for name in names:
+        value = (
+            config.get(name)
+            if isinstance(config, dict)
+            else getattr(config, name, None)
+        )
+        if value is not None:
+            return value
+    raise ValueError(f"Model config requires one of {names}")
+
+
+class GptModelBase(RtpModule):
     def __init__(
         self,
         config: ModelConfig,
         parallelism_config,
-        weight: ModelWeights,
-        max_generate_batch_size: int,
+        weight: Optional["ModelWeights"] = None,
+        max_generate_batch_size: int = 0,
         fmha_config=None,  # Optional FMHAConfig
         py_hw_kernel_config=None,  # Optional HWKernelConfig
         device_resource_config: Optional[
@@ -49,13 +62,17 @@ class GptModelBase(nn.Module):
             and device_resource_config.enable_layer_micro_batch == 0
             else 2
         )
-        self.layer_num: int = config.num_layers
-        self.vocab_size: int = config.vocab_size
+        self.layer_num = required_config_value(
+            config, "num_layers", "num_hidden_layers"
+        )
+        self.vocab_size = required_config_value(config, "vocab_size")
 
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device_type()
+        # Auxiliary capture is opt-in. NewLoader also accepts lightweight/HF
+        # configs that do not carry this optional service-level setting.
         self._mtp_aux_capture_layer_ids = tuple(
-            config.capture_aux_hidden_layer_ids or ()
+            getattr(config, "capture_aux_hidden_layer_ids", None) or ()
         )
         self._mtp_aux_capture_layer_id_set = frozenset(
             self._mtp_aux_capture_layer_ids

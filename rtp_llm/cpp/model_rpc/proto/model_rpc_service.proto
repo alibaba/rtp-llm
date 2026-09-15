@@ -908,6 +908,10 @@ service RpcService {
     rpc DumpTorchAllocatorInternal(TorchAllocatorDumpRequestPB) returns (TorchAllocatorDumpResultPB);
     rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
 
+    // Returns UNIMPLEMENTED when the selected loader has no weight manager,
+    // INVALID_ARGUMENT for missing request fields, and INTERNAL when the
+    // configured manager fails. Select a loader that supports online weight
+    // updates before startup when this RPC is required.
     rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);

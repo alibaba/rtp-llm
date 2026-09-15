@@ -68,6 +68,18 @@ class TaggedDecodePaddingModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
+class TaggedDecodeActiveMaskModel(TaggedBlockTableModel):
+    """Expose each cache group's real-token mask, not its dummy planner rows."""
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        full = inputs.attention_inputs["full"].input_lengths_device
+        aux = inputs.attention_inputs["aux"].input_lengths_device
+        signature = torch.stack((full.sum(), full[-1], aux.sum(), aux[-1])).to(
+            inputs.input_hiddens.dtype
+        )
+        return PyModelOutputs(inputs.input_hiddens + signature)
+
+
 class StaticInputTailModel:
     """Expose stale hidden rows retained by a reused graph input buffer."""
 
@@ -645,6 +657,41 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             output.hidden_states,
             expected_signature.unsqueeze(0).expand_as(output.hidden_states),
         )
+
+    def test_decode_preserves_active_token_mask_after_batch_shrink(
+        self,
+    ) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            TaggedDecodeActiveMaskModel(),
+            HIDDEN_SIZE,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4],
+            GROUP_TAGS,
+        )
+        # Main's target-verify test above intentionally retains dummy Q rows.
+        # Plain decode instead needs zero-length tails for NewLoader's planner.
+        for batch_size in (4, 3, 1, 4, 2):
+            with self.subTest(batch_size=batch_size):
+                inputs = _build_decode_inputs(
+                    GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=batch_size
+                )
+                self.assertTrue(runner.canRun(inputs))
+                self.assertEqual(runner.getCurrentRealGraphSize(), 4)
+                output = runner.forward(inputs)
+                torch.cuda.synchronize()
+                tail = int(batch_size == 4)
+                expected = torch.tensor(
+                    [batch_size, tail, batch_size, tail],
+                    dtype=output.hidden_states.dtype,
+                    device=output.hidden_states.device,
+                )
+                torch.testing.assert_close(
+                    output.hidden_states,
+                    expected.unsqueeze(0).expand_as(output.hidden_states),
+                )
 
     def test_decode_clears_hidden_rows_after_batch_shrink(self) -> None:
         runner = CudaGraphRunner()
