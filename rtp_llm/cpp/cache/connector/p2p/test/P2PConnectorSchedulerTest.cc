@@ -85,7 +85,7 @@ protected:
             }
         }
 
-        for (int i = 0; i < num_layers * blocks_per_layer; ++i) {
+        for (int i = 0; i < blocks_per_layer; ++i) {
             resource->cacheKeys().push_back(1000 + i);
         }
 
@@ -138,8 +138,10 @@ protected:
 
     bool allBlockRefsEqual(const AllocatedConnectorResource& allocated, uint32_t expected) const {
         const auto block_pool = allocated.allocator->getDeviceBlockPool();
+        // refCount() rejects reclaimed blocks; inspect the counts under the pool lock.
+        std::lock_guard<std::mutex> lock(block_pool->mutex_);
         return std::all_of(allocated.blocks.begin(), allocated.blocks.end(), [&](BlockIdxType block) {
-            return block_pool->refCount(block) == expected;
+            return block_pool->refcounts_[block] == expected;
         });
     }
 
@@ -518,7 +520,7 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnFalse_BroadcastCancelled) {
 
     // 验证 BroadcastTp 被调用，且 CANCEL_HANDLE_READ 也被发送
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
-        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
+        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getP2PRequestCallCount(P2PConnectorBroadcastType::HANDLE_READ), 1);
         const auto cancel_check_deadline = currentTimeMs() + 1000;
         while (tp_broadcast_servers_[i]->service()->getBroadcastTpCancelCallCount() == 0
                && currentTimeMs() < cancel_check_deadline) {

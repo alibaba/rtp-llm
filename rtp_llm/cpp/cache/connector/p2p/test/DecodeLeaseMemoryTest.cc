@@ -437,7 +437,7 @@ INSTANTIATE_TEST_SUITE_P(CancelStages,
                          DecodeLeaseMemoryTest,
                          ::testing::Values(0, 1, 2),
                          [](const ::testing::TestParamInfo<int>& info) {
-                             return std::vector<std::string>{"AllPending", "Mixed", "AllTransferring"}[info.param];
+                             return (std::vector<std::string>{"AllPending", "Mixed", "AllTransferring"})[info.param];
                          });
 
 }  // namespace

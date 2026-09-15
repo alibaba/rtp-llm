@@ -1404,6 +1404,10 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackTimeoutSkipsQueued
     worker_config_.tp_rank       = 0;
     worker_config_.layer_all_num = 12;
     worker_config_.topology      = makeOneGroupPerLayerTopology(worker_config_.layer_all_num);
+    prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(
+        worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+    ASSERT_TRUE(prefill_->init());
+    computed_buffers_ = prefill_->getComputedBuffersStore();
 
     int64_t     request_id  = 3008;
     std::string unique_key  = "test_timeout_skips_queued_send";
@@ -1433,7 +1437,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackTimeoutSkipsQueued
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
         wait_count++;
     }
-    ASSERT_GE(mock_sender_->getTransferCallCount(), 4);
+    EXPECT_GE(mock_sender_->getTransferCallCount(), 4);
 
     wait_count = 0;
     while (!done && wait_count < 200) {

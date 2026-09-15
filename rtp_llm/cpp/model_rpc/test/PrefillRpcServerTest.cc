@@ -29,9 +29,9 @@ public:
 class PrefillRpcServerTest: public DeviceTestBase {};
 
 TEST_F(PrefillRpcServerTest, waitStreamBeforeRunReturnsSchedulerEnqueueErrorImmediately) {
-    // block_num=1, tokens_per_block=2 → maxAvailableTokensNum=2 < inputLength=3,
+    // One usable block (plus reserved block 0), tokens_per_block=2 < inputLength=3,
     // so checkInputLength fails synchronously with EXCEEDS_KV_CACHE_MAX_LEN.
-    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 1, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 2, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
 
@@ -73,9 +73,9 @@ TEST_F(PrefillRpcServerTest, waitStreamBeforeRunReturnsSchedulerEnqueueErrorImme
 }
 
 TEST_F(PrefillRpcServerTest, collectStreamOutputReturnsErrorForFailedBatchEnqueue) {
-    // block_num=1, tokens_per_block=2 → maxAvailableTokensNum=2 < inputLength=3,
+    // One usable block (plus reserved block 0), tokens_per_block=2 < inputLength=3,
     // so checkInputLength fails synchronously with EXCEEDS_KV_CACHE_MAX_LEN.
-    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 1, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 2, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
 
@@ -113,7 +113,7 @@ TEST_F(PrefillRpcServerTest, collectStreamOutputReturnsErrorForFailedBatchEnqueu
     ASSERT_EQ(err.code(), stream->statusInfo().code());
 }
 
-TEST_F(PrefillRpcServerTest, GetPeerInfoDoesNotInferDpAddrsFromRankOffsets) {
+TEST_F(PrefillRpcServerTest, GetPeerInfoRejectsMissingDpAddrsWithoutInferringRankOffsets) {
     PrefillRpcServerNew2 server;
     server.maga_init_params_.parallelism_config.tp_size = 4;
     server.maga_init_params_.parallelism_config.dp_size = 2;
@@ -127,9 +127,8 @@ TEST_F(PrefillRpcServerTest, GetPeerInfoDoesNotInferDpAddrsFromRankOffsets) {
     GetPeerInfoResponsePB response;
 
     auto status = server.GetPeerInfo(&context, &request, &response);
-    ASSERT_TRUE(status.ok());
-    ASSERT_EQ(response.tp_size(), 4);
-    ASSERT_EQ(response.dp_size(), 2);
+    ASSERT_FALSE(status.ok());
+    EXPECT_NE(status.error_message().find("address_count=0"), std::string::npos);
     EXPECT_EQ(response.dp_grpc_addrs_size(), 0);
 }
 

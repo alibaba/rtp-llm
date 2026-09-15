@@ -246,10 +246,9 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenStreamStoreIsNull) {
 TEST_F(P2PConnectorTest, HandleRead_ReturnGenerateTimeout_WhenWaitResourceEntryTimeout) {
     // 1. 创建并初始化 P2PConnector（已在 SetUp 中完成）
     // 2. 不添加 resource entry 到 stream_store_
-    // 3. 调用 handleRead，使用已过期的 deadline_ms
-    std::string unique_key  = "test_wait_timeout";
-    int64_t     deadline_ms = currentTimeMs() - 100;  // 使用已过期的时间
-    auto        request     = createValidStartLoadRequest(unique_key, deadline_ms);
+    // 3. 使用有效的相对预算，让资源等待实际超时。
+    auto request = createValidStartLoadRequest("test_wait_timeout", currentTimeMs() + 5000);
+    request.set_timeout_ms(20);
 
     P2PConnectorStartLoadResponsePB response;
     connector_->handleRead(request, response);
@@ -257,14 +256,14 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnGenerateTimeout_WhenWaitResourceEntryT
     EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::GENERATE_TIMEOUT));
 }
 
-TEST_F(P2PConnectorTest, HandleReadRejectsExpiredTransferBeforeRequestDeadline) {
+TEST_F(P2PConnectorTest, HandleReadRejectsNonPositiveTransferTimeout) {
     auto request = createValidStartLoadRequest("test_expired_transfer", currentTimeMs() - 100);
     request.set_request_timeout_ms(5000);
 
     P2PConnectorStartLoadResponsePB response;
     connector_->handleRead(request, response);
 
-    EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::GENERATE_TIMEOUT));
+    EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
 }
 
 TEST_F(P2PConnectorTest, HandleReadRejectsEmptyUniqueKeyWithoutWaiting) {

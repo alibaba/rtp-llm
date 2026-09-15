@@ -278,4 +278,24 @@ TEST_F(P2PBroadcastClientTest, Cancel_ReturnNotNull_Success) {
     }
 }
 
+
+TEST_F(P2PBroadcastClientTest, CancelSurvivesCallerReleaseAndReclaimsAfterFinish) {
+    for (auto& server : servers_) {
+        server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::CANCEL_HANDLE_READ, 50);
+    }
+    auto result = client_->cancel("cancel-release", P2PConnectorBroadcastType::CANCEL_HANDLE_READ,
+                                  currentTimeMs() + 5000, 3014, currentTimeMs() + 1000);
+    ASSERT_NE(result, nullptr);
+    std::weak_ptr<P2PBroadcastClient::TpBroadcastResult> pending = result->tp_broadcast_result_;
+    result.reset();
+    const auto deadline = currentTimeMs() + 2000;
+    while (!pending.expired() && currentTimeMs() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(pending.expired());
+    for (auto& server : servers_) {
+        EXPECT_EQ(server->service()->getBroadcastTpCancelCallCount(), 1);
+    }
+}
+
 }  // namespace rtp_llm

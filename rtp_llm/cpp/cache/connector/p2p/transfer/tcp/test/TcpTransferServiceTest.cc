@@ -303,9 +303,8 @@ TEST_F(TcpTransferServiceTest, B1_ContextTimeout_NoMatchingRecvTask) {
     EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_CONTEXT_TIMEOUT);
 }
 
-// B3: Task exists but its deadline is already past; notifyDone overrides any
-//     lower-level error with TIMEOUT.
-TEST_F(TcpTransferServiceTest, B3_ContextTimeout_OverridesErrorOnNotifyDone) {
+// B3: Preserve the observed transfer error even if the task deadline has elapsed.
+TEST_F(TcpTransferServiceTest, B3_BufferMismatchIsNotReclassifiedByElapsedTaskDeadline) {
     char dummy[64]{};
 
     // Task has expired deadline but done_=false, so waitCheckProc still matches it.
@@ -321,8 +320,7 @@ TEST_F(TcpTransferServiceTest, B3_ContextTimeout_OverridesErrorOnNotifyDone) {
     auto                                          closure = issueTransfer(&req, &resp);
 
     ASSERT_TRUE(closure->waitFor(kWait));
-    // notifyDone sees isTimeout()=true → TIMEOUT overrides BUFFER_MISMATCH.
-    EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_CONTEXT_TIMEOUT);
+    EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_BUFFER_MISMATCH);
 }
 
 // ===========================================================================

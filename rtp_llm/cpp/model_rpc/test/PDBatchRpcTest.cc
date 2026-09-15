@@ -348,7 +348,11 @@ TEST_F(PDBatchRpcTest, DestroyingCallerCancelsAndDrainsOutstandingRpc) {
     PrefillServerCaller client("test");
     auto call = std::move(client.callPrefillBatch(handoff(), prefill_rpc->address(), currentTimeMs() + 5000).value());
     ASSERT_NE(call, nullptr);
-    ASSERT_TRUE(waitUntil([&] { return prefill_engine->batch_calls > 0; }));
+    ASSERT_TRUE(waitUntil([&] {
+        // This direct asynchronous caller owns its CQ; polling advances the RPC.
+        (void)call->done();
+        return prefill_engine->batch_calls > 0;
+    }));
     call.reset();
     ASSERT_TRUE(waitUntil([&] { return prefill_rpc->service.completed_calls > 0; }));
     EXPECT_TRUE(prefill_engine->made[0]->hasError());
@@ -474,7 +478,10 @@ TEST_F(PDBatchRpcTest, CancellationOfOuterRpcCancelsBothSides) {
     PrefillServerCaller client("test-client");
     auto call = std::move(client.callPrefillBatch(request(), decode_rpc.address(), currentTimeMs() + 5000).value());
     ASSERT_NE(call, nullptr);
-    ASSERT_TRUE(waitUntil([&] { return decode_engine->batch_calls > 0 && prefill_engine->batch_calls > 0; }));
+    ASSERT_TRUE(waitUntil([&] {
+        (void)call->done();
+        return decode_engine->batch_calls > 0 && prefill_engine->batch_calls > 0;
+    }));
     call->cancel();
     ASSERT_TRUE(waitUntil([&] { return call->done(); }));
     EXPECT_EQ(call->status().error_code(), grpc::StatusCode::CANCELLED);

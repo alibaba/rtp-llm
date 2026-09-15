@@ -170,6 +170,11 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
         return nullptr;
     }
 
+    // The caller may return immediately. Retain this cleanup RPC until Finish;
+    // otherwise BroadcastResult destruction cancels the cancellation itself.
+    // complete() moves and releases this callback when all ranks finish.
+    result->setDoneCallback([result]() {});
+
     // 不等待结果，异步发送取消请求即可
     RTP_LLM_LOG_DEBUG("P2PBroadcastClient cancel: broadcast sent, unique_key: %s", unique_key.c_str());
     return std::make_shared<Result>(unique_key, result);
