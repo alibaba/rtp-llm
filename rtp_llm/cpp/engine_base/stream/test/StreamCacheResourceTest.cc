@@ -1,5 +1,6 @@
 
 #include "gtest/gtest.h"
+#include "gtest/gtest-spi.h"
 #include "gmock/gmock.h"
 
 #include "kmonitor/client/MetricsReporter.h"
@@ -33,6 +34,7 @@
 #include <condition_variable>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <limits>
 #include <thread>
 
@@ -76,7 +78,13 @@ public:
     explicit DestructionObserverContext(std::function<void()> observer): observer_(std::move(observer)) {}
 
     ~DestructionObserverContext() override {
-        observer_();
+        try {
+            observer_();
+        } catch (const std::exception& error) {
+            ADD_FAILURE() << "destruction observer threw: " << error.what();
+        } catch (...) {
+            ADD_FAILURE() << "destruction observer threw an unknown exception";
+        }
     }
 
     void waitDone() override {}
@@ -104,9 +112,11 @@ makeAllocatorLoadContext(size_t matched_blocks, const std::vector<Tier>& source_
     }
     auto context =
         coordinator->create(std::move(descriptors), std::vector<bool>(source_tiers.size(), false), matched_blocks);
-    EXPECT_TRUE(coordinator->registerContext(context));
-    if (commit) {
-        EXPECT_TRUE(context->commit());
+    if (!coordinator->registerContext(context)) {
+        throw std::runtime_error("failed to register allocator load context");
+    }
+    if (commit && !context->commit()) {
+        throw std::runtime_error("failed to commit allocator load context");
     }
     return context;
 }
@@ -1146,27 +1156,40 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
     kmonitor::MetricsTags tags;
     auto                  reporter = std::make_shared<kmonitor::MetricsReporter>("", "", tags);
     stream_->setMetricsReporter(reporter);
-    auto* metrics          = reporter->getMetricsGroup<RtpLLMCacheOperationMetrics>();
-    auto  expect_retry_qps = [&](double expected) {
-        auto* series = metrics->malloc_retry_qps_metric->DeclareMetric(&tags);
+    auto* metrics = reporter->getMetricsGroup<RtpLLMCacheOperationMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    auto* metric = metrics->malloc_retry_qps_metric;
+    ASSERT_NE(metric, nullptr);
+    auto expect_retry_qps = [&](double expected) {
+        const auto release = [metric](kmonitor::Metric* series) { EXPECT_TRUE(metric->UndeclareMetric(series)); };
+        std::unique_ptr<kmonitor::Metric, decltype(release)> series(metric->DeclareMetric(&tags), release);
         ASSERT_NE(series, nullptr);
         kmonitor::MetricsRecord record(nullptr, nullptr, 0);
         series->Snapshot(&record, 1000);
-        EXPECT_TRUE(metrics->malloc_retry_qps_metric->UndeclareMetric(series));
+        series.reset();
         ASSERT_EQ(record.Values().size(), 1u);
-        EXPECT_DOUBLE_EQ(std::stod(record.Values().front()->Value()), expected);
+        ASSERT_NE(record.Values().front(), nullptr);
+        const auto& text   = record.Values().front()->Value();
+        double      value  = 0;
+        size_t      parsed = 0;
+        ASSERT_NO_THROW(value = std::stod(text, &parsed));
+        EXPECT_EQ(parsed, text.size());
+        EXPECT_DOUBLE_EQ(value, expected);
     };
     auto& resource = stream_->streamCacheResource();
     ASSERT_EQ(resource.resourceContext().role_type, RoleType::PREFILL);
 
-    size_t commits     = 0;
-    size_t aborts      = 0;
-    auto   coordinator = std::make_shared<LoadContextCoordinator>(
-        [&](const std::shared_ptr<LoadAsyncContext>&) {
-            ++commits;
+    struct LoadCounts {
+        size_t commits = 0;
+        size_t aborts  = 0;
+    };
+    auto counts      = std::make_shared<LoadCounts>();
+    auto coordinator = std::make_shared<LoadContextCoordinator>(
+        [counts](const std::shared_ptr<LoadAsyncContext>&) {
+            ++counts->commits;
             return true;
         },
-        [&](LoadAsyncContext&) { ++aborts; });
+        [counts](LoadAsyncContext&) { ++counts->aborts; });
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{/*group_id=*/0, NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
@@ -1180,7 +1203,8 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
     resource.malloc_failed_times_     = 9;
     EXPECT_FALSE(resource.loadCacheDone());
     EXPECT_FALSE(resource.loadCacheDone());
-    expect_retry_qps(0);
+    ASSERT_NO_FATAL_FAILURE(expect_retry_qps(0));
+    ASSERT_FALSE(HasFailure());
     context->startBackendMatch();
     context->waitDone();
     ASSERT_FALSE(context->success());
@@ -1193,12 +1217,14 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
     EXPECT_FALSE(stream_->hasEvent(StreamEvents::LoadInitiated));
     EXPECT_FALSE(stream_->hasError());
     EXPECT_EQ(resource.mallocFailedTimes(), 10);
-    expect_retry_qps(1);
+    ASSERT_NO_FATAL_FAILURE(expect_retry_qps(1));
+    ASSERT_FALSE(HasFailure());
     EXPECT_TRUE(resource.loadCacheDone());
     EXPECT_TRUE(resource.loadCacheDone());
-    expect_retry_qps(0);
-    EXPECT_EQ(commits, 0u);
-    EXPECT_EQ(aborts, 1u);
+    ASSERT_NO_FATAL_FAILURE(expect_retry_qps(0));
+    ASSERT_FALSE(HasFailure());
+    EXPECT_EQ(counts->commits, 0u);
+    EXPECT_EQ(counts->aborts, 1u);
 
     auto allocator             = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
     cache_manager_->allocator_ = allocator;
@@ -1215,7 +1241,8 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
 
     EXPECT_EQ(stream_->moveToNext(), StreamState::RUNNING);
     EXPECT_TRUE(stream_->hasEvent(StreamEvents::LoadInitiated));
-    expect_retry_qps(0);
+    ASSERT_NO_FATAL_FAILURE(expect_retry_qps(0));
+    ASSERT_FALSE(HasFailure());
     EXPECT_EQ(resource.curBlocksNum(), 1);
     coordinator->shutdown();
 }
@@ -1309,6 +1336,12 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadFailureIsTerminal) {
     EXPECT_EQ(stream_->deviceReuseLength(), 0);
 }
 
+TEST(DestructionObserverContextTest, ReportsCallbackExceptionWithoutTerminating) {
+    EXPECT_NONFATAL_FAILURE(
+        { DestructionObserverContext context([] { throw std::runtime_error("observer failure"); }); },
+        "destruction observer threw: observer failure");
+}
+
 TEST_F(StreamCacheResourceTest, testReleaseResetsAllocatorContextBeforeFreeingRequestBlocks) {
     prepareResource(/*reuse_cache=*/false);
     auto& resource = stream_->streamCacheResource();
@@ -1316,18 +1349,27 @@ TEST_F(StreamCacheResourceTest, testReleaseResetsAllocatorContextBeforeFreeingRe
     ASSERT_GT(resource.curBlocksNum(), 0);
     ASSERT_LT(cache_manager_->freeBlocksNum(), 8u);
 
-    bool context_destroyed_before_free       = false;
-    bool request_blocks_still_present        = false;
-    resource.allocator_load_context_         = std::make_shared<DestructionObserverContext>([&] {
-        context_destroyed_before_free = true;
-        request_blocks_still_present  = resource.curBlocksNum() > 0 && cache_manager_->freeBlocksNum() < 8u;
-    });
+    // The observer may outlive this test body if releaseResource regresses.
+    // Avoid references to stack state or fixture members in that failure path.
+    struct ReleaseObservation {
+        bool context_destroyed = false;
+        bool blocks_present    = false;
+    };
+    auto                          observed    = std::make_shared<ReleaseObservation>();
+    std::weak_ptr<GenerateStream> weak_stream = stream_;
+    resource.allocator_load_context_ =
+        std::make_shared<DestructionObserverContext>([observed, weak_stream, manager = cache_manager_] {
+            observed->context_destroyed = true;
+            const auto stream           = weak_stream.lock();
+            observed->blocks_present =
+                stream && stream->streamCacheResource().curBlocksNum() > 0 && manager->freeBlocksNum() < 8u;
+        });
     std::weak_ptr<AsyncContext> weak_context = resource.allocator_load_context_;
 
     stream_->releaseResource();
 
-    EXPECT_TRUE(context_destroyed_before_free);
-    EXPECT_TRUE(request_blocks_still_present);
+    EXPECT_TRUE(observed->context_destroyed);
+    EXPECT_TRUE(observed->blocks_present);
     EXPECT_TRUE(weak_context.expired());
     EXPECT_EQ(resource.allocator_load_context_, nullptr);
     EXPECT_EQ(resource.curBlocksNum(), 0);
