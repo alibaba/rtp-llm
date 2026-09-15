@@ -1,4 +1,5 @@
 load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
+load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "REMOTE_CACHE_DEVICE_STORE_ARGS")
 
 def h20_oss_suites():
     # H20 (SM9x) — Architecture-grouped suites
@@ -439,10 +440,18 @@ def h20_oss_suites():
                 smoke_args="--max_seq_len 16384 --ft_disable_custom_ar 1 --sp_type eagle --gen_num_per_cycle 4 --act_type FP16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/  --warm_up 0 --reserver_runtime_mem_mb 21954 --tp_size 2",
                 gpu_type=["H20"]
             ),
+            # Request tier flags remain accepted; deployments select DEVICE or HOST.
             smoke_test(
                 name="eagle_mtp_reuse",
                 task_info="data/model/qwen2_14b/q_r_mtp_reuse_cache.json",
-                smoke_args="--reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --max_seq_len 16384 --ft_disable_custom_ar 1 --sp_type eagle --gen_num_per_cycle 4 --act_type FP16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/  --warm_up 0 --reserver_runtime_mem_mb 21954 --tp_size 2",
+                smoke_args="--reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 1 --enable_disk_cache 0 --enable_remote_cache 0 --memory_cache_size_mb 1024 --max_seq_len 16384 --ft_disable_custom_ar 1 --sp_type eagle --gen_num_per_cycle 4 --act_type FP16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/  --warm_up 0 --reserver_runtime_mem_mb 21954 --tp_size 2",
+                gpu_type=["H20"]
+            ),
+            smoke_test(
+                name="eagle_mtp_reuse_host",
+                task_info="data/model/qwen2_14b/q_r_mtp_reuse_host_cache.json",
+                smoke_args="--reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --enable_disk_cache 0 --enable_remote_cache 0 --memory_cache_size_mb 1024 --max_seq_len 16384 --ft_disable_custom_ar 1 --sp_type eagle --gen_num_per_cycle 4 --act_type FP16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/  --warm_up 0 --reserver_runtime_mem_mb 21954 --tp_size 2",
+                sleep_time_qr=1,
                 gpu_type=["H20"]
             ),
             smoke_test(
@@ -472,7 +481,7 @@ def h20_oss_suites():
                 data=["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
                 kvcm_envs=["KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr=20,
-                smoke_args="--warm_up 0 --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --tp_size 2 --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --act_type FP16 --reuse_cache 1 --seq_size_per_block 8 --max_seq_len 16384 --ft_disable_custom_ar 1 --warm_up 0 --reserver_runtime_mem_mb 21954 --test_block_num 500 --enable_remote_cache true --enable_device_cache 0 --enable_memory_cache 0 --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000",
+                smoke_args="--warm_up 0 --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --tp_size 2 --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --act_type FP16 --reuse_cache 1 --seq_size_per_block 8 --max_seq_len 16384 --ft_disable_custom_ar 1 --warm_up 0 --reserver_runtime_mem_mb 21954 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
                 gpu_type=["H20"],
             ),
         ],
