@@ -1307,6 +1307,13 @@ void GenerateStream::setLoss(const torch::Tensor& loss) {
     loss_index_ += loss_size;
 }
 
+void GenerateStream::setCustomOutput(const torch::Tensor& custom_output) {
+    // The dispatcher stages custom_output to pinned CPU together with
+    // token_ids (one D2H sync for both); clone here releases the shared
+    // pinned staging buffer instead of pinning it for the stream's lifetime.
+    custom_output_ = custom_output.is_cuda() ? custom_output.cpu() : custom_output.clone();
+}
+
 void GenerateStream::setSoftmaxProbs(const torch::Tensor& softmax_probs,
                                      int                  start_pos,
                                      const torch::Tensor& src_batch_indices) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
@@ -23,6 +24,12 @@ public:
     virtual const std::string&          trace_id() const          = 0;
     virtual const std::string&          unique_id() const         = 0;
     virtual const std::vector<int64_t>& tokens() const            = 0;
+
+    // Maximum reusable prefix in canonical cache-key blocks. Read/match only;
+    // writes still publish the complete computed prefix.
+    virtual size_t maxReuseBlocks() const {
+        return std::numeric_limits<size_t>::max();
+    }
 
     // P2P read extension: returns GenerateStream pointer for type safety.
     // Non-P2P scenarios can return nullptr by default.

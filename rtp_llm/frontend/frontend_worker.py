@@ -44,12 +44,16 @@ class PipelineResponse(BaseModel):
     output_ids: Optional[List[List[int]]] = None
     input_ids: Optional[List[List[int]]] = None
     prompt_logprobs: Optional[Dict[str, Any]] = None
+    custom_output: Optional[Union[List[float], List[List[float]]]] = None
 
 
 class MultiSequencesPipelineResponse(BaseModel):
     response: List[str]
     finished: bool
     aux_info: List[Dict[str, Any]] = {}
+    custom_output: Optional[List[Optional[Union[List[float], List[List[float]]]]]] = (
+        None
+    )
 
 
 class BatchPipelineResponse(BaseModel):
@@ -193,6 +197,11 @@ class FrontendWorker:
                         else None
                     ),
                     prompt_logprobs=prompt_logits_dict,
+                    custom_output=(
+                        out.custom_output.tolist()
+                        if out.custom_output is not None
+                        else None
+                    ),
                 )
             )
         return BatchPipelineResponse(response_batch=pipeline_responses)
@@ -285,6 +294,7 @@ class FrontendWorker:
             if generate_config.return_prompt_logits
             else None
         )
+        custom_output = gen_responses.generate_outputs.generate_outputs[0].custom_output
 
         response = PipelineResponse(
             response=generate_texts[0],
@@ -316,6 +326,9 @@ class FrontendWorker:
                 else None
             ),
             prompt_logprobs=prompt_logits_dict,
+            custom_output=(
+                custom_output.tolist() if custom_output is not None else None
+            ),
         )
 
         return response
@@ -327,6 +340,10 @@ class FrontendWorker:
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         if generate_config.num_return_sequences > 0:
+            custom_outputs = [
+                seq.custom_output.tolist() if seq.custom_output is not None else None
+                for seq in gen_responses.generate_outputs.generate_outputs
+            ]
             aux_info = []
             if generate_config.aux_info:
                 aux_info = []
@@ -342,6 +359,11 @@ class FrontendWorker:
                     ]
                 ),
                 aux_info=aux_info,
+                custom_output=(
+                    custom_outputs
+                    if any(value is not None for value in custom_outputs)
+                    else None
+                ),
             )
             return sequences_pipeline_response
         else:

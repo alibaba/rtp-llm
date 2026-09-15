@@ -74,6 +74,8 @@ struct MallocInfo {
     // Override for incrMalloc's seqLength read; -1 = fall back to complete_token_ids->seqLength().
     // Lets the state machine feed the publish-time value instead of racing with the async worker.
     int incr_seq_len_override = -1;
+    // Upper bound in tokens for prefix reuse; -1 means unrestricted.
+    int max_reuse_len = -1;
 
     int incrSeqLen() const;
 };

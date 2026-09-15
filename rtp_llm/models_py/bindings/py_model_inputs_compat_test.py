@@ -101,6 +101,13 @@ class PyModelInputsCompatTest(unittest.TestCase):
 
         self.assertEqual(hidden_states.data_ptr(), outputs.hidden_states.data_ptr())
         self.assertIsNone(outputs.mtp_target_hidden_states)
+        self.assertIsNone(outputs.pre_final_norm_hidden_states)
+        self.assertIsNone(PyModelInputs().pre_final_norm_output_indexes)
+        selected = torch.ones(2, 4)
+        outputs.pre_final_norm_hidden_states = selected
+        self.assertEqual(
+            selected.data_ptr(), outputs.pre_final_norm_hidden_states.data_ptr()
+        )
         self.assertFalse(hasattr(outputs, "params_ptr"))
 
         target_features = torch.ones(2, 3)

@@ -74,6 +74,9 @@ class GenerateInput:
     enqueued_by_master: bool = False
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
+    # Absolute prompt position whose final prefill hidden state is requested.
+    # -1 selects the last token.
+    custom_output_token_position: int = -1
 
     class Config:
         arbitrary_types_allowed = True
@@ -144,6 +147,8 @@ class GenerateOutput:
     logits: Optional[torch.Tensor] = None
     all_probs: Optional[torch.Tensor] = None
     prompt_logits: Optional[Dict[str, Any]] = None
+    # output of the deployment-registered post-layers CustomHandler
+    custom_output: Optional[torch.Tensor] = None
 
     class Config:
         arbitrary_types_allowed = True

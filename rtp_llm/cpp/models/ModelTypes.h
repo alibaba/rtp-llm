@@ -10,6 +10,7 @@
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <array>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <memory>
@@ -86,6 +87,7 @@ enum GptModelInputIndex : size_t {
     kvCacheGroupTypesLen,
     kvCacheUpdateCopyNum,
     lmOutputIndexes,
+    customOutputIndexes,
     comboPositionIds,
     textTokensMask,
     mmFeaturesLocs,
@@ -148,6 +150,7 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitComboPositionIds    = 1u << 12,
     kDeviceBitTextTokensMask      = 1u << 13,
     kDeviceBitMmFeaturesLocs      = 1u << 14,
+    kDeviceBitCustomOutputIndexes = 1u << 15,
 };
 
 enum GptModelInputControlFlag : uint32_t {
@@ -184,6 +187,8 @@ struct TokenSliceInfo {
     size_t offset = 0;
     size_t count  = 0;
 };
+
+class PostLayersProcessor;
 
 class ModelBase {
 public:
@@ -234,6 +239,11 @@ public:
     // written row count.
     virtual torch::Tensor getMtpLastHiddenStates(int64_t /*num_tokens*/) {
         return torch::Tensor();
+    }
+
+    // A configured handler must not silently disappear on unsupported models.
+    virtual void setPostLayersProcessor(const std::shared_ptr<PostLayersProcessor>& processor) {
+        throw std::runtime_error("post-layers processor is not supported by this model");
     }
 
     rtp_llm::Weights            weights_;

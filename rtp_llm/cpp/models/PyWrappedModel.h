@@ -27,6 +27,7 @@
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #endif
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
+#include "rtp_llm/cpp/engine_base/executor_base/PostLayersProcessor.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
@@ -89,6 +90,7 @@ public:
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
     std::string     waitCacheStorePublication() override;
+    void            setPostLayersProcessor(const std::shared_ptr<PostLayersProcessor>& processor) override;
 
 private:
     friend struct test::PyWrappedModelTestPeer;
@@ -106,7 +108,12 @@ private:
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
                                                           const GptModelInputs& inputs,
                                                           bool                  skip_final_layernorm,
-                                                          size_t                num_valid_tokens = -1);
+                                                          size_t                num_valid_tokens      = -1,
+                                                          torch::Tensor         pre_final_norm_hidden = {});
+    // Context-only row indexes shared by Python pre-norm capture and C++
+    // post-layers selection. Existing selector/prefix-cache logic owns positions.
+    torch::Tensor                   customOutputIndexes(const GptModelInputs& inputs);
+    bool                            needsPreFinalNormCapture(const GptModelInputs& inputs) const;
     torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
     // Methods absorbed from GptModel
@@ -119,7 +126,8 @@ private:
                                       size_t                token_num,
                                       const GptModelInputs& inputs,
                                       torch::Tensor         merged_eagle3_hidden,
-                                      bool                  skip_final_layernorm = false);
+                                      bool                  skip_final_layernorm  = false,
+                                      torch::Tensor         pre_final_norm_hidden = {});
     // CP gather-last-hidden exit: `hidden` is already the lm_output_indexes-selected,
     // post-final-layernorm rows produced by handleOutputsLastHidden, so this runs
     // lm_head directly (no index_select, no final layernorm — matching the existing
@@ -167,6 +175,7 @@ private:
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::shared_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
+    std::shared_ptr<PostLayersProcessor>       post_layers_processor_;
 
     // Accumulated H2D copies from tensorHoldHostAndToCuda(); flushed as one kernel per forward.
     FusedD2DCopyParams d2d_copies_;

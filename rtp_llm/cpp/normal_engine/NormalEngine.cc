@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
+#include "rtp_llm/cpp/engine_base/executor_base/PostLayersProcessor.h"
 #include <c10/core/InferenceMode.h>
 #include <algorithm>
 #include <chrono>
@@ -832,6 +833,18 @@ bool NormalEngine::updateEplbConfig(const EPLBConfig& config) {
 
 void NormalEngine::startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {
     step_profiler_.configure(true, trace_name, start_step, num_steps);
+}
+
+void NormalEngine::setPostLayersProcessor(pybind11::object handler) {
+    if (parallelism_config.tp_rank != 0) {
+        // hidden is replicated across tp ranks after the final all-reduce and
+        // only rank 0 owns the streams, so the handler runs on rank 0 only.
+        RTP_LLM_LOG_INFO("skip post-layers handler on tp_rank %ld", parallelism_config.tp_rank);
+        return;
+    }
+    auto processor = std::make_shared<PostLayersProcessor>();
+    processor->setHandler(handler);  // throws on unsupported protocol: fail startup
+    executor_->setPostLayersProcessor(processor);
 }
 
 bool NormalEngine::isMTPEagle() {

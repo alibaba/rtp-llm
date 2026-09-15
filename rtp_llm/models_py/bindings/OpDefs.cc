@@ -265,7 +265,10 @@ void registerPyOpDefs(pybind11::module& m) {
             },
             "A PyAttentionInputs value or a tag-to-PyAttentionInputs mapping")
         .def_readwrite(
-            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
+            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
+        .def_readwrite("pre_final_norm_output_indexes",
+                       &PyModelInputs::pre_final_norm_output_indexes,
+                       "Optional device int64 indexes of context rows to retain before the final norm");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
@@ -277,7 +280,10 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
         .def_readwrite("mtp_target_hidden_states",
                        &PyModelOutputs::mtp_target_hidden_states,
-                       "Optional target features consumed by speculative decoding");
+                       "Optional target features consumed by speculative decoding")
+        .def_readwrite("pre_final_norm_hidden_states",
+                       &PyModelOutputs::pre_final_norm_hidden_states,
+                       "Optional selected pre-final-norm rows [context_batch, hidden]");
 }
 
 }  // namespace torch_ext

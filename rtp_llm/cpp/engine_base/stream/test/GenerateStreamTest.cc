@@ -21,6 +21,20 @@ using namespace std;
 
 namespace rtp_llm {
 
+TEST(GenerateInputTest, PrefixPreservesCustomOutputTokenIdentity) {
+    for (const int position : {-1, 0, 2}) {
+        GenerateInput input;
+        input.input_ids                    = torch::tensor({7, 8, 9}, torch::kInt32);
+        input.custom_output_token_position = position;
+        input.updatePrefix({2, 3});
+        EXPECT_TRUE(torch::equal(input.input_ids, torch::tensor({2, 3, 7, 8, 9}, torch::kInt32)));
+        EXPECT_EQ(input.custom_output_token_position, position < 0 ? -1 : position + 2);
+        if (position >= 0) {
+            EXPECT_EQ(input.input_ids[input.custom_output_token_position].item<int>(), 7 + position);
+        }
+    }
+}
+
 class GenerateStreamBuilder {
 public:
     GenerateStreamBuilder() {

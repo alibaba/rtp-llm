@@ -227,6 +227,10 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         // no prefill tokens to compute. Keeping every canonical key under CP
         // sharding is exactly that degenerate case: zero prefill tokens left.
         CacheKeysType match_keys(cp_keys.begin(), cp_keys.empty() ? cp_keys.end() : cp_keys.end() - 1);
+        if (malloc_info.max_reuse_len >= 0) {
+            match_keys.resize(
+                std::min(match_keys.size(), static_cast<size_t>(malloc_info.max_reuse_len / reuse_unit_tokens)));
+        }
         auto          begin_us = currentTimeUs();
         reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper);
         match_cost_time_us     = currentTimeUs() - begin_us;

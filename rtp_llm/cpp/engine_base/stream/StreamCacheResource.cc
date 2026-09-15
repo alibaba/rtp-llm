@@ -66,8 +66,14 @@ private:
 
 class MetaImpl: public Meta {
 public:
-    MetaImpl(bool enable_memory_cache, bool enable_remote_cache, std::string trace_id):
-        enable_memory_cache_(enable_memory_cache), enable_remote_cache_(enable_remote_cache), trace_id_(trace_id) {}
+    MetaImpl(bool        enable_memory_cache,
+             bool        enable_remote_cache,
+             std::string trace_id,
+             size_t      max_reuse_blocks = std::numeric_limits<size_t>::max()):
+        enable_memory_cache_(enable_memory_cache),
+        enable_remote_cache_(enable_remote_cache),
+        trace_id_(trace_id),
+        max_reuse_blocks_(max_reuse_blocks) {}
     virtual ~MetaImpl() = default;
 
 public:
@@ -85,6 +91,10 @@ public:
     }
     const std::vector<int64_t>& tokens() const override {
         return tokens_;
+    }
+
+    size_t maxReuseBlocks() const override {
+        return max_reuse_blocks_;
     }
 
     // P2P read extension field
@@ -121,6 +131,7 @@ private:
     std::string          trace_id_;
     std::string          unique_id_ = "";
     std::vector<int64_t> tokens_;  // TODO : get tokens (remote connector)
+    size_t               max_reuse_blocks_;
 };
 
 // ----------------------------- P2P Side-Channel Apply -----------------------------
@@ -397,6 +408,7 @@ absl::Status StreamCacheResource::initKVBlock() {
     malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
     malloc_info.request_id              = stream_->streamId();
+    malloc_info.max_reuse_len           = stream_->generateInput()->custom_output_token_position;
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
 
     const bool disable_first_malloc_reuse =
@@ -454,6 +466,7 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.batch_kv_cache_resource      = batch_kv_cache_resource_;
     malloc_info.complete_token_ids           = stream_->completeTokenIdsPtr();
     malloc_info.request_id                   = stream_->streamId();
+    malloc_info.max_reuse_len                = stream_->generateInput()->custom_output_token_position;
     malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
     malloc_info.reuse_cache                  = reuseCache();
     malloc_info.enable_device_cache          = reuseCache() && enableDeviceCache();
@@ -500,7 +513,7 @@ bool StreamCacheResource::asyncLoadCache() {
 
 bool StreamCacheResource::submitAsyncLoadCache() {
     auto meta = std::make_shared<MetaImpl>(
-        reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
+        reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId(), maxReuseBlocks());
     meta->generate_stream_ = stream_;
     meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
@@ -663,6 +676,11 @@ bool StreamCacheResource::enableTieredMemoryCache() const {
     return resource_context_.enable_tiered_memory_cache && enableMemoryCache() && enableDeviceCache();
 }
 
+size_t StreamCacheResource::maxReuseBlocks() const {
+    const auto position = stream_->generateInput()->custom_output_token_position;
+    return position < 0 ? std::numeric_limits<size_t>::max() : static_cast<size_t>(position / reuseBlockTokens());
+}
+
 void StreamCacheResource::loadCacheSync() {
     RTP_LLM_PROFILE_FUNCTION();
     if (!resource_context_.cache_manager || !resource_context_.cache_manager->hasActiveConnectors()) {
@@ -680,7 +698,7 @@ void StreamCacheResource::loadCacheSync() {
         return;
     }
     auto meta = std::make_shared<MetaImpl>(
-        reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
+        reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId(), maxReuseBlocks());
     meta->generate_stream_ = stream_;
     meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
@@ -728,7 +746,7 @@ void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<Fu
     // preserves a complete virtual block even when the prompt ends in an incomplete next virtual block.
     const int    reusable_tokens = std::max(stream_->seqLength() - 1, 0);
     const size_t reusable_block_cap =
-        std::min(resource.reuseBlockNum(), static_cast<size_t>(reusable_tokens / block_tokens));
+        std::min({resource.reuseBlockNum(), static_cast<size_t>(reusable_tokens / block_tokens), maxReuseBlocks()});
 
     size_t     remaining_reuse_blocks = reusable_block_cap;
     const auto take_reuse_blocks      = [&remaining_reuse_blocks](size_t block_count) {

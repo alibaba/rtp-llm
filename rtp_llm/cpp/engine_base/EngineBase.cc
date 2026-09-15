@@ -23,6 +23,10 @@ std::shared_ptr<GenerateStream> EngineBase::makeStream(const std::shared_ptr<Gen
     throw std::runtime_error("not implemeted");
 }
 
+void EngineBase::setPostLayersProcessor(pybind11::object handler) {
+    throw std::runtime_error("post-layers processor is not supported by this engine");
+}
+
 void EngineBase::initRuntime(const EngineInitParams& params) {
     const auto rank =
         params.parallelism_config.dp_rank * params.parallelism_config.tp_size + params.parallelism_config.tp_rank;

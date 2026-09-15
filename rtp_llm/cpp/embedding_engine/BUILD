@@ -12,6 +12,7 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/engine_base:executor",
+        "//rtp_llm/cpp/engine_base/executor_base:handler_args",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/engine_base:worker_status_info",
         "//rtp_llm/cpp/engine_base/stream:stream",

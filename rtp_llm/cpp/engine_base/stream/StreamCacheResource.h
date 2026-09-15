@@ -124,6 +124,7 @@ public:
     }
 
 private:
+    size_t maxReuseBlocks() const;
     void loadCacheSync();
     bool submitAsyncLoadCache();
     void waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context, bool report_error = true);

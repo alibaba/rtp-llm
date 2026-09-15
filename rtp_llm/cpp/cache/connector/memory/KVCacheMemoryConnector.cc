@@ -682,7 +682,8 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
 
     const auto& cache_keys = resource->cacheKeys();
     const auto  cache_keys_size =
-        cache_keys.empty() ? 0 : (resource->lastBlockAligned() ? cache_keys.size() : cache_keys.size() - 1);
+        std::min(cache_keys.empty() ? 0 : (resource->lastBlockAligned() ? cache_keys.size() : cache_keys.size() - 1),
+                 meta->maxReuseBlocks());
     if (cache_keys_size == 0) {
         RTP_LLM_LOG_DEBUG("async match skip, cache keys is empty");
         return nullptr;

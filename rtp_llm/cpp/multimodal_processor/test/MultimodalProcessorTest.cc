@@ -47,6 +47,36 @@ TEST_F(MultimodalProcessorTest, testSimple) {
     EXPECT_EQ(input->multimodal_features.value().size(), 1);
 }
 
+TEST_F(MultimodalProcessorTest, testCustomOutputPositionFollowsTextAcrossMultipleImages) {
+    const std::vector<std::pair<int, int>> positions{{-1, -1}, {0, 0}, {2, 4}, {4, 7}, {5, 8}};
+    for (const auto& [original, expanded] : positions) {
+        SCOPED_TRACE(original);
+        auto processor                      = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 32);
+        auto input                          = std::make_shared<GenerateInput>();
+        input->input_ids                    = torch::tensor({0, 1, 4, 1, 5, 6}, torch::kInt32);
+        input->custom_output_token_position = original;
+        input->multimodal_inputs            = std::vector<MultimodalInput>{MultimodalInput("3"), MultimodalInput("2")};
+        ASSERT_TRUE(processor.updateMultimodalFeatures(input).ok());
+        EXPECT_EQ(input->custom_output_token_position, expanded);
+        if (original >= 0) {
+            const std::array<int, 6> original_ids{0, 1, 4, 1, 5, 6};
+            EXPECT_EQ(input->input_ids.data_ptr<int32_t>()[expanded], original_ids[original]);
+        }
+    }
+}
+
+TEST_F(MultimodalProcessorTest, testCustomOutputRejectsReplacedPlaceholder) {
+    auto processor                      = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 32);
+    auto input                          = std::make_shared<GenerateInput>();
+    input->input_ids                    = torch::tensor({0, 1, 2}, torch::kInt32);
+    input->custom_output_token_position = 1;
+    input->multimodal_inputs            = std::vector<MultimodalInput>{MultimodalInput("3")};
+    auto result                         = processor.updateMultimodalFeatures(input);
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.code(), ErrorCode::MM_NOT_SUPPORTED_ERROR);
+    EXPECT_NE(result.ToString().find("placeholder"), std::string::npos);
+}
+
 TEST_F(MultimodalProcessorTest, testMultiInput) {
     FakeMultimodalProcessor processor =
         FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}, {2, 3}}, false, 10);
