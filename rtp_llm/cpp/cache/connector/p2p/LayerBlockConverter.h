@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 /// @brief 封装 KVCacheAllocator 的 convertIndexToBuffer 接口，将 block_id 转换为 BlockInfo
 class LayerBlockConverter {
@@ -21,4 +21,4 @@ public:
     virtual std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const = 0;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

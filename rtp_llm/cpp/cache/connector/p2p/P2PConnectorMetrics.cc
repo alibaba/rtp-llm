@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 bool P2PConnectorMetrics::init(kmonitor::MetricsGroupManager* manager) {
     // decode schedule metrics
@@ -161,4 +161,4 @@ void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, PrefillWorke
         REPORT_MUTABLE_METRIC(prefill_worker_store_store_wait_done_time_us_metric, collector->store_wait_done_time_us);
     }
 }
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

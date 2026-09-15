@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class StoreWaitContextTest: public ::testing::Test {
 protected:
@@ -71,4 +71,4 @@ TEST_F(StoreWaitContextTest, CheckerCheckOnce_Timeout) {
     EXPECT_EQ(computed_buffer, nullptr);
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

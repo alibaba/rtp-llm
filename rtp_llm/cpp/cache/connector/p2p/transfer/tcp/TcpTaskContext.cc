@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 namespace transfer {
 namespace tcp {
 
@@ -167,4 +167,4 @@ void TcpTaskContext::run(bool success, TransferErrorCode error_code, const std::
 
 }  // namespace tcp
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

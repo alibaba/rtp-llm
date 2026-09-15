@@ -8,7 +8,7 @@
 #include <chrono>
 #include <limits>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 PrefillLoadCaller::PrefillLoadCaller(const std::vector<std::string>& worker_addrs): worker_addrs_(worker_addrs) {
     rpc_pool_ = std::make_shared<RPCPool>();
@@ -251,4 +251,4 @@ void PrefillLoadCaller::Result::checkDone() {
     total_cost_time_us = currentTimeUs() - start_time_us;
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

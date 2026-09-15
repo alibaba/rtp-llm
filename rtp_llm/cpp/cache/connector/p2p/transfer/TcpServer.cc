@@ -5,7 +5,7 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 namespace transfer {
 
@@ -108,4 +108,4 @@ void TcpServer::stop() {
 
 }  // namespace transfer
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

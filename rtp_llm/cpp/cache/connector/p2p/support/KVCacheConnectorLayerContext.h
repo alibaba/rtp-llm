@@ -7,7 +7,7 @@
 
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class KVCacheConnectorLayerContext {
 public:
@@ -18,4 +18,4 @@ public:
     virtual std::optional<c10::Event>         attentionEvent() const  = 0;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

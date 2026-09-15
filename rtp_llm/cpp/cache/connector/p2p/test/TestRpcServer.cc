@@ -2,7 +2,7 @@
 #include <thread>
 #include <atomic>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 ::grpc::Status TestRpcService::ExecuteFunction(::grpc::ServerContext*     context,
                                                const ::FunctionRequestPB* request,
@@ -196,4 +196,4 @@ void TestRpcServer::shutdown() {
     }
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

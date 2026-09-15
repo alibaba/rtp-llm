@@ -11,7 +11,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/Types.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 namespace transfer {
 
 /// @brief 单次 recv 任务（一层一个 partition），实现 IKVCacheRecvTask
@@ -86,4 +86,4 @@ private:
 };
 
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

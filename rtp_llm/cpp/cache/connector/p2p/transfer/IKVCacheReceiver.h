@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 namespace transfer {
 
 /// @brief 单次 recv 操作的任务句柄（对应一层一个 partition 的接收）
@@ -71,4 +71,4 @@ public:
 using IKVCacheReceiverPtr = std::shared_ptr<IKVCacheReceiver>;
 
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

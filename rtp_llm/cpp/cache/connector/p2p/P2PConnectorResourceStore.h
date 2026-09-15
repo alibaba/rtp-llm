@@ -18,7 +18,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 struct P2PConnectorResourceEntry {
     int64_t            request_id;         // 请求 ID
@@ -93,4 +93,4 @@ private:
     int                  timeout_check_interval_ms_;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

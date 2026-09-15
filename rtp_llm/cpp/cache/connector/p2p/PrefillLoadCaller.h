@@ -18,7 +18,7 @@ namespace rtp_llm {
 class GenerateStream;
 }
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 // Side-channel payload for P2P bypass (carries first token, reuse, SP info, position_ids)
 struct P2PSideChannelPayload {
@@ -109,4 +109,4 @@ private:
     std::vector<TPWorkerInfoPB> tp_worker_infos_;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

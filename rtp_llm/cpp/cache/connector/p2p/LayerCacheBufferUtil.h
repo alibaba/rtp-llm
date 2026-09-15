@@ -7,7 +7,7 @@
 #include <vector>
 #include <memory>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 /// @brief LayerCacheBuffer 转换工具类
 /// 提供 KVCacheResource 到 LayerCacheBuffer 的转换功能
@@ -61,4 +61,4 @@ public:
                                                         int                                         partition_id = 0);
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

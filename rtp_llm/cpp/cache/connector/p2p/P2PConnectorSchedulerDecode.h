@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class P2PConnectorSchedulerDecode {
 public:
@@ -66,4 +66,4 @@ private:
     std::shared_ptr<P2PConnectorAsyncReadContextChecker> checker_;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

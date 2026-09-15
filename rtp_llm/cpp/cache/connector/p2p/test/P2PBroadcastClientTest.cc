@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/utils/Exception.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/TestRpcServer.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class P2PBroadcastClientTest: public ::testing::Test {
 protected:
@@ -248,4 +248,4 @@ TEST_F(P2PBroadcastClientTest, Cancel_ReturnNotNull_Success) {
     }
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

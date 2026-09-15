@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class P2PConnectorResourceStoreTest: public ::testing::Test {
 protected:
@@ -343,4 +343,4 @@ TEST_F(P2PConnectorResourceStoreTest, ResourceTimeout_AutoRemoval) {
     EXPECT_EQ(entry, nullptr);
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

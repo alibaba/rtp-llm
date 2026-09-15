@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 using transfer::TransferTask;
 using transfer::TransferTaskStore;
@@ -127,4 +127,4 @@ TEST_F(TransferTaskStoreTest, Concurrent_AddSteal_NoCrash) {
     EXPECT_EQ(store_->getTaskCount(), 0);
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

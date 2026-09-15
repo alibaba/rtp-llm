@@ -14,7 +14,7 @@
 #include <mutex>
 #include <vector>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class P2PConnectorAsyncReadContextChecker;
 
@@ -34,7 +34,7 @@ private:
     const KVCacheResourcePtr resource_;
 };
 
-class P2PConnectorAsyncReadContext: public AsyncContext {
+class P2PConnectorAsyncReadContext: public ::rtp_llm::legacy::p2p::AsyncContext {
 public:
     P2PConnectorAsyncReadContext(const KVCacheResourcePtr&                               resource,
                                  const std::shared_ptr<P2PBroadcastClient::Result>&      tp_sync_result,
@@ -114,7 +114,7 @@ private:
 /// @brief P2P 按层写入的异步上下文。
 /// Write-by-layer is fire-and-forget; actual transfer status is tracked separately.
 /// @note done()/success() 恒为 true，仅满足 AsyncContext 接口形态，不得据此推断真实传输结果。
-class P2PConnectorAsyncWriteByLayerContext: public AsyncContext {
+class P2PConnectorAsyncWriteByLayerContext: public ::rtp_llm::legacy::p2p::AsyncContext {
 public:
     P2PConnectorAsyncWriteByLayerContext(const KVCacheResourcePtr& resource): resource_(resource) {}
     virtual ~P2PConnectorAsyncWriteByLayerContext() {}
@@ -154,4 +154,4 @@ private:
     autil::LoopThreadPtr                                       check_done_thread_;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

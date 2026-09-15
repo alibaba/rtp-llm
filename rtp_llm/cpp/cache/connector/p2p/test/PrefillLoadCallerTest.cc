@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/TestRpcServer.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class PrefillLoadCallerTest: public ::testing::Test {
 protected:
@@ -232,4 +232,4 @@ TEST_F(PrefillLoadCallerTest, CheckDone_TotalCostTimeUs) {
     EXPECT_GT(cost_time_us, 0);
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

@@ -22,7 +22,7 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 namespace test {
 
@@ -1256,4 +1256,4 @@ TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_StartIdxNegative) {
 }
 
 }  // namespace test
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

@@ -9,7 +9,7 @@
 #include <condition_variable>
 #include <string>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class LayerCacheBuffer {
 public:
@@ -62,4 +62,4 @@ private:
     // [unique_key, expired_time]
     std::map<std::string, int64_t> expired_time_map_;
 };
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

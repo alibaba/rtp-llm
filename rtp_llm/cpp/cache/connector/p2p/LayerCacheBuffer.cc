@@ -5,7 +5,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 // ==================== LayerCacheBuffer ====================
 
@@ -66,4 +66,4 @@ void LayerCacheBufferStore::checkTimeout() {
     }
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

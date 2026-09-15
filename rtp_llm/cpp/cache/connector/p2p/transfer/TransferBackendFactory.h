@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <memory>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 namespace transfer {
 
 enum class TransferBackend {
@@ -24,4 +24,4 @@ TransferBackendPair createTransferBackend(TransferBackend                     ba
                                           const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr);
 
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

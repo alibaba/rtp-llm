@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 /// @brief P2PBroadcastClient 在 rank0 上向所有 TP worker 广播 P2P 传输请求
 class P2PBroadcastClient {
@@ -83,4 +83,4 @@ private:
     std::shared_ptr<BroadcastManager> tp_broadcast_manager_;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

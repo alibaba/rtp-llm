@@ -3,7 +3,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <torch/torch.h>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 namespace transfer {
 namespace tcp {
 
@@ -58,4 +58,4 @@ bool CudaCopyUtil::batchCopyToDevice(std::vector<CopyTask>& tasks) {
 
 }  // namespace tcp
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

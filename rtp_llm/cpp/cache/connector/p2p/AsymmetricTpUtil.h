@@ -4,7 +4,7 @@
 #include <vector>
 #include <cstdint>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 struct AsymmetricTPContext {
     std::string decode_ip;
@@ -59,4 +59,4 @@ private:
     const int64_t tp_rank_;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

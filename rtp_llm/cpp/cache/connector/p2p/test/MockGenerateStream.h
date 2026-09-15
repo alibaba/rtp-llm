@@ -12,7 +12,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 /// @brief GenerateStream 的最小具体实现，用于测试 P2P 路由路径，不实现真正的推理逻辑。
 class MockGenerateStream: public GenerateStream {
@@ -94,4 +94,4 @@ private:
     GenerateStream*   stream_ = nullptr;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 namespace transfer {
 
 struct TransferBackendConfig {
@@ -23,4 +23,4 @@ struct TransferBackendConfig {
 };
 
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

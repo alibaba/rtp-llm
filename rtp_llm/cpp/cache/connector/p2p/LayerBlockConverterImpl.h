@@ -10,7 +10,7 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class LayerBlockConverterImpl: public LayerBlockConverter {
 public:
@@ -76,4 +76,4 @@ private:
     std::shared_ptr<KVCacheAllocator> allocator_;
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

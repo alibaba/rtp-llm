@@ -2,7 +2,7 @@
 
 #include "rtp_llm/cpp/cache/connector/p2p/AsymmetricTpUtil.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class AsymmetricTpUtilTest: public ::testing::Test {
 protected:
@@ -128,4 +128,4 @@ TEST_F(AsymmetricTpUtilTest, HandleND1P_InvalidDivisibility) {
     EXPECT_TRUE(contexts.empty());
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

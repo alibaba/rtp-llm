@@ -2,7 +2,7 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 P2PConnectorScheduler::P2PConnectorScheduler(P2PConnectorSchedulerConfig         config,
                                              const kmonitor::MetricsReporterPtr& metrics_reporter):
@@ -54,4 +54,4 @@ P2PConnectorScheduler::sendKVCache(const KVCacheResourcePtr&                    
         resource, unique_key, request_id, decode_transfer_servers, deadline_ms, std::move(is_cancelled));
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

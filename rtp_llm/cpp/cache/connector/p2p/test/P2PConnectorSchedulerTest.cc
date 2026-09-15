@@ -16,7 +16,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 class P2PConnectorSchedulerTest: public ::testing::Test {
 protected:
@@ -669,4 +669,4 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_TransferNotDone_ZeroHold_CompletesIm
     EXPECT_EQ(async_context->errorInfo().code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE);
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

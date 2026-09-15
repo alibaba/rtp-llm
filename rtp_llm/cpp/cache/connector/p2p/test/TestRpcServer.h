@@ -5,7 +5,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include <atomic>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 // 测试用RpcService，用于模拟RPC服务
 class TestRpcService final: public RpcService::Service {
@@ -75,4 +75,4 @@ private:
     int                             listen_port_{0};
 };
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

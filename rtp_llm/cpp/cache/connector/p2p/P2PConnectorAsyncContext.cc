@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <functional>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 /*----------------------------------------------- P2PConnectorAsyncMatchContext
  * -------------------------------------------------*/
@@ -361,4 +361,4 @@ void P2PConnectorAsyncReadContextChecker::checkOnce() {
     }
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

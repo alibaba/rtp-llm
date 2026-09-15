@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "autil/NetUtil.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 P2PBroadcastClient::P2PBroadcastClient(const std::vector<std::string>& worker_addrs,
                                        int64_t                         cancel_broadcast_timeout_ms):
@@ -221,4 +221,4 @@ std::string P2PBroadcastClient::Result::errorMessage() const {
     return "";
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

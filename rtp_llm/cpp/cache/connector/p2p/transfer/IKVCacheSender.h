@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 namespace transfer {
 
 /// @brief 发送一层 KV cache 到远端 Decode 节点的请求参数
@@ -40,4 +40,4 @@ public:
 using IKVCacheSenderPtr = std::shared_ptr<IKVCacheSender>;
 
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

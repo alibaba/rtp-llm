@@ -3,7 +3,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 ComputedLayerCacheBuffer::ComputedLayerCacheBuffer(int64_t                                  request_id,
                                                    const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer,
@@ -118,4 +118,4 @@ void ComputedLayerCacheBufferStore::checkTimeout() {
     }
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

@@ -18,7 +18,7 @@
 #include <torch/torch.h>
 #include <c10/cuda/CUDAStream.h>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 namespace transfer {
 namespace tcp {
 
@@ -499,4 +499,4 @@ TEST_F(TcpTaskContextTest, Destructor_AfterRunCompleted_NoDoubleRun) {
 
 }  // namespace tcp
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

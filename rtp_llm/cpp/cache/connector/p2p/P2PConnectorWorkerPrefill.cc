@@ -13,7 +13,7 @@
 #include <thread>
 #include <utility>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 P2PConnectorWorkerPrefill::P2PConnectorWorkerPrefill(P2PConnectorWorkerConfig                    config,
                                                      const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
@@ -396,4 +396,4 @@ bool P2PConnectorWorkerPrefill::cancelSend(const std::string& unique_key) {
     return true;
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

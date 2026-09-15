@@ -50,7 +50,7 @@ bool waitWithBackoff(Lock&                                 lock,
 
 }  // namespace
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 P2PConnectorResourceStore::P2PConnectorResourceStore(const kmonitor::MetricsReporterPtr& metrics_reporter,
                                                      int                                 timeout_check_interval_ms):
@@ -259,4 +259,4 @@ bool P2PConnectorResourceStore::waitSideChannelReady(const std::string&    uniqu
     return ready;
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

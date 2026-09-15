@@ -11,7 +11,7 @@
 #include <chrono>
 #include <thread>
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 P2PConnectorWorkerDecode::P2PConnectorWorkerDecode(P2PConnectorWorkerConfig                    config,
                                                    const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
@@ -269,4 +269,4 @@ bool P2PConnectorWorkerDecode::cancelRead(const std::string& unique_key) {
     return true;
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

@@ -4,7 +4,7 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 namespace transfer {
 
@@ -133,4 +133,4 @@ std::shared_ptr<arpc::RPCChannelBase> TcpClient::openChannel(const std::string& 
 }
 
 }  // namespace transfer
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm

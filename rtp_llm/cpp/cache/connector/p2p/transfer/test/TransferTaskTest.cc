@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
-namespace rtp_llm::legacy::p2p {
+namespace rtp_llm {
 
 using transfer::TransferErrorCode;
 using transfer::TransferTask;
@@ -429,4 +429,4 @@ TEST_F(TransferTaskTest, WorkerScenario_NotifyDone_AfterDeadline_IsTimeout) {
     EXPECT_EQ(task.errorCode(), TransferErrorCode::TIMEOUT);
 }
 
-}  // namespace rtp_llm::legacy::p2p
+}  // namespace rtp_llm
