@@ -24,6 +24,12 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "generation_prefill_cuda_graph_replay_metadata",
+    hdrs = ["generation_prefill_cuda_graph_replay_metadata.h"],
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "cuda_graph_srcs",
     srcs = [
@@ -41,6 +47,7 @@ filegroup(
     srcs = [
         "cuda_graph_base.h",
         "combo_position_ids_validation.h",
+        "generation_prefill_cuda_graph_replay_metadata.h",
         "cuda_graph_device_shims.h",
         "prepared_attention_inputs_guard.h",
         "cuda_graph_utils.h",
@@ -58,6 +65,7 @@ cc_library(
         "cuda_graph_runner.h",
     ],
     deps = [
+        "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/models_py/bindings:op_defs",
     ],
     visibility = ["//visibility:public"],
@@ -82,7 +90,9 @@ cc_library(
         ":cuda_graph_base",
         ":combo_position_ids_validation",
         ":prepared_attention_inputs_guard",
+        ":generation_prefill_cuda_graph_replay_metadata",
         ":cuda_graph_hdrs_lib",
+        "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:profiling_scope",

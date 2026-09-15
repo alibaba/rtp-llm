@@ -18,6 +18,65 @@ enum class AllocationType {
     DEVICE = 1,
 };
 
+// Internal representation of the single request-visible
+// `aux_info.generation_prefill_cuda_graph_status` string.
+enum class GenerationPrefillCudaGraphStatus : std::uint8_t {
+    NOT_REQUESTED,
+    REPLAYED,
+    CAPTURE_UNAVAILABLE,
+    ATTENTION_BACKEND_UNSUPPORTED,
+    MIXED_PREFILL_DECODE_NOT_SUPPORTED,
+    INPUT_METADATA_INVALID,
+    REQUEST_COUNT_EXCEED_CAPTURE_LIMIT,
+    PREFIX_CACHE_NOT_SUPPORTED,
+    REQUEST_NOT_SUPPORTED,
+    PD_CACHE_STORE_NOT_SUPPORTED,
+    TOKEN_TYPE_INPUT_NOT_SUPPORTED,
+    MULTIMODAL_INPUT_NOT_SUPPORTED,
+    MODEL_NOT_SUPPORTED,
+    MOE_CONFIG_NOT_SUPPORTED,
+    INPUT_TOKENS_EXCEED_CAPTURE_LIMIT,
+    GRAPH_INPUT_SHAPE_MISMATCH,
+};
+
+inline const char* generationPrefillCudaGraphStatusString(GenerationPrefillCudaGraphStatus status) {
+    switch (status) {
+        case GenerationPrefillCudaGraphStatus::NOT_REQUESTED:
+            return "not_requested";
+        case GenerationPrefillCudaGraphStatus::REPLAYED:
+            return "replayed";
+        case GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE:
+            return "capture_unavailable";
+        case GenerationPrefillCudaGraphStatus::ATTENTION_BACKEND_UNSUPPORTED:
+            return "attention_backend_unsupported";
+        case GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED:
+            return "mixed_prefill_decode_not_supported";
+        case GenerationPrefillCudaGraphStatus::INPUT_METADATA_INVALID:
+            return "input_metadata_invalid";
+        case GenerationPrefillCudaGraphStatus::REQUEST_COUNT_EXCEED_CAPTURE_LIMIT:
+            return "request_count_exceed_capture_limit";
+        case GenerationPrefillCudaGraphStatus::PREFIX_CACHE_NOT_SUPPORTED:
+            return "prefix_cache_not_supported";
+        case GenerationPrefillCudaGraphStatus::REQUEST_NOT_SUPPORTED:
+            return "request_not_supported";
+        case GenerationPrefillCudaGraphStatus::PD_CACHE_STORE_NOT_SUPPORTED:
+            return "pd_cache_store_not_supported";
+        case GenerationPrefillCudaGraphStatus::TOKEN_TYPE_INPUT_NOT_SUPPORTED:
+            return "token_type_input_not_supported";
+        case GenerationPrefillCudaGraphStatus::MULTIMODAL_INPUT_NOT_SUPPORTED:
+            return "multimodal_input_not_supported";
+        case GenerationPrefillCudaGraphStatus::MODEL_NOT_SUPPORTED:
+            return "model_not_supported";
+        case GenerationPrefillCudaGraphStatus::MOE_CONFIG_NOT_SUPPORTED:
+            return "moe_config_not_supported";
+        case GenerationPrefillCudaGraphStatus::INPUT_TOKENS_EXCEED_CAPTURE_LIMIT:
+            return "input_tokens_exceed_capture_limit";
+        case GenerationPrefillCudaGraphStatus::GRAPH_INPUT_SHAPE_MISMATCH:
+            return "graph_input_shape_mismatch";
+    }
+    return "unknown";
+}
+
 enum QScheme : size_t {
     NoQuantize = 0,
     Qint8WeightOnly,
