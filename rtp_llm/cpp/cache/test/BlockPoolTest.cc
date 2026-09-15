@@ -85,7 +85,8 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
                                                            kv_cache_config,
                                                            sp_config,
                                                            /*warm_up_result=*/std::nullopt,
-                                                           /*is_mtp=*/true);
+                                                           /*is_mtp=*/true,
+                                                           /*is_eagle=*/false);
     return cfg;
 }
 
@@ -259,7 +260,8 @@ TEST_F(BlockPoolTest, MTPLayoutUsesSubConfigScaleStrideOverride) {
                                                                  kv_cache_config,
                                                                  sp_config,
                                                                  /*warm_up_result=*/std::nullopt,
-                                                                 /*is_mtp=*/true);
+                                                                 /*is_mtp=*/true,
+                                                                 /*is_eagle=*/false);
 
     ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 1u);
     const auto& mtp_config = cache_cfg.mtp_sub_configs[0];
@@ -324,7 +326,8 @@ TEST_F(BlockPoolTest, MTPModelCapabilityEnablesOpaqueDraftTransfer) {
                                                                  kv_cache_config,
                                                                  sp_config,
                                                                  /*warm_up_result=*/std::nullopt,
-                                                                 /*is_mtp=*/true);
+                                                                 /*is_mtp=*/true,
+                                                                 /*is_eagle=*/false);
 
     ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 1u);
     ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
@@ -360,6 +363,7 @@ TEST_F(BlockPoolTest, Eagle3UsesSingleRecurrentDraftCache) {
     sp_config.type              = SP_TYPE_EAGLE3;
     sp_config.gen_num_per_cycle = 3;
 
+    // Mirrors production: NormalEngine::isEagle() reports true for EAGLE3.
     auto cache_cfg = rtp_llm::CacheConfigCreator::createSpConfig(score_model_config,
                                                                  propose_model_config,
                                                                  parallelism_config,
@@ -367,7 +371,8 @@ TEST_F(BlockPoolTest, Eagle3UsesSingleRecurrentDraftCache) {
                                                                  kv_cache_config,
                                                                  sp_config,
                                                                  /*warm_up_result=*/std::nullopt,
-                                                                 /*is_mtp=*/true);
+                                                                 /*is_mtp=*/true,
+                                                                 /*is_eagle=*/true);
 
     EXPECT_EQ(cache_cfg.layer_all_num, score_model_config.num_layers + propose_model_config.num_layers);
     ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 1u);
@@ -399,7 +404,8 @@ TEST_F(BlockPoolTest, NativeMtpPhysicalModuleCapabilityUsesSingleDraftCache) {
                                                                  kv_cache_config,
                                                                  sp_config,
                                                                  /*warm_up_result=*/std::nullopt,
-                                                                 /*is_mtp=*/true);
+                                                                 /*is_mtp=*/true,
+                                                                 /*is_eagle=*/false);
 
     EXPECT_EQ(cache_cfg.layer_all_num, score_model_config.num_layers + propose_model_config.num_layers);
     ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 1u);

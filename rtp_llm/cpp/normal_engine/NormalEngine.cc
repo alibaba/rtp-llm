@@ -470,7 +470,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                          kv_cache_config,
                                                          sp_config,
                                                          warm_up_result,
-                                                         isMTPEagle());
+                                                         isMTPEagle(),
+                                                         isEagle());
 
         resource_context_.cache_manager = make_shared<KVCacheManager>(config,
                                                                       false,

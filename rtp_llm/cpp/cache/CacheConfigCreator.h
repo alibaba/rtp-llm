@@ -44,7 +44,8 @@ public:
                                       const KVCacheConfig&               kv_cache_config,
                                       const SpeculativeExecutionConfig&  sp_config,
                                       const std::optional<WarmUpResult>& warm_up_result,
-                                      bool                               is_mtp);
+                                      bool                               is_mtp,
+                                      bool                               is_eagle);
 
     // Unified desc->spec conversion. Callers provide the runtime build context;
     // descs remain read-only.

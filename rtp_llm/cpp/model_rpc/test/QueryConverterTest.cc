@@ -218,9 +218,11 @@ TEST_F(QueryConverterTest, testTransMMPreprocessConfigFractionalFps) {
     query.add_token_ids(1);
     *query.add_multimodal_inputs() = output.multimodal_inputs(0);
     auto round_trip                = QueryConverter::transQuery(&query);
-    ASSERT_EQ(round_trip->multimodal_inputs.size(), 1);
-    EXPECT_FLOAT_EQ(round_trip->multimodal_inputs[0].mm_preprocess_config.fps, 0.2f);
-    EXPECT_EQ(round_trip->multimodal_inputs[0].mm_preprocess_config.max_long_side_pixel, 1008);
+    ASSERT_TRUE(round_trip->multimodal_inputs.has_value());
+    const auto& round_trip_inputs = round_trip->multimodal_inputs.value();
+    ASSERT_EQ(round_trip_inputs.size(), 1);
+    EXPECT_FLOAT_EQ(round_trip_inputs[0].mm_preprocess_config.fps, 0.2f);
+    EXPECT_EQ(round_trip_inputs[0].mm_preprocess_config.max_long_side_pixel, 1008);
 }
 
 TEST_F(QueryConverterTest, testTransOutput) {
