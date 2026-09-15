@@ -103,7 +103,7 @@ protected:
                                                                           const std::string& content) {
         ::tcp_transfer::TcpLayerBlockTransferRequest req;
         req.set_unique_key(unique_key);
-        req.set_deadline_ms(deadline_ms);
+        req.set_timeout_ms(deadline_ms - currentTimeMs());
         addRequestBlock(req, cache_key, {{len, content}});
         return req;
     }
@@ -113,7 +113,7 @@ protected:
                                                                          int64_t            deadline_ms) {
         ::tcp_transfer::TcpLayerBlockTransferRequest req;
         req.set_unique_key(unique_key);
-        req.set_deadline_ms(deadline_ms);
+        req.set_timeout_ms(deadline_ms - currentTimeMs());
         return req;
     }
 
@@ -213,7 +213,7 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_CacheKeyMissingInRequest_ReturnsFalse) {
     // Request contains cache_key=99, but task expects cache_key=1.
     ::tcp_transfer::TcpLayerBlockTransferRequest req;
     req.set_unique_key("k1");
-    req.set_deadline_ms(currentTimeMs() + 5000);
+    req.set_timeout_ms(5000);
     addRequestBlock(req, 99, {{64, std::string(64, 'A')}});
 
     ::tcp_transfer::TcpLayerBlockTransferResponse resp;
@@ -235,7 +235,7 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_SubBlockOutOfRange_ReturnsFalse) {
 
     ::tcp_transfer::TcpLayerBlockTransferRequest req;
     req.set_unique_key("k1");
-    req.set_deadline_ms(currentTimeMs() + 5000);
+    req.set_timeout_ms(5000);
     addRequestBlock(req, key, {{size, std::string(size, 'B')}});  // only 1 sub-block
 
     ::tcp_transfer::TcpLayerBlockTransferResponse resp;
@@ -294,7 +294,7 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_DuplicateRequestKey_ReturnsFalse) {
 
     ::tcp_transfer::TcpLayerBlockTransferRequest req;
     req.set_unique_key("k1");
-    req.set_deadline_ms(currentTimeMs() + 5000);
+    req.set_timeout_ms(5000);
     addRequestBlock(req, key, {{size, std::string(size, 'A')}});
     addRequestBlock(req, key, {{size, std::string(size, 'B')}});
 
@@ -314,7 +314,7 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_AllBlocksEmpty_ReturnsFalse) {
 
     ::tcp_transfer::TcpLayerBlockTransferRequest req;
     req.set_unique_key("k1");
-    req.set_deadline_ms(currentTimeMs() + 5000);
+    req.set_timeout_ms(5000);
     addRequestBlock(req, key, {{64, std::string(64, 'D')}});
 
     ::tcp_transfer::TcpLayerBlockTransferResponse resp;
@@ -363,7 +363,7 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_MixedBlocks_RejectsNullDecodeBlock) {
     // Index 1: real data.
     ::tcp_transfer::TcpLayerBlockTransferRequest req;
     req.set_unique_key("k1");
-    req.set_deadline_ms(currentTimeMs() + 5000);
+    req.set_timeout_ms(5000);
     addRequestBlock(req, key, {{0, ""}, {data_size, content}});
 
     ::tcp_transfer::TcpLayerBlockTransferResponse resp;

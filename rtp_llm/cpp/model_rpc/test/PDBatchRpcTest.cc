@@ -10,6 +10,10 @@
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServerNew2.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 
@@ -21,7 +25,6 @@ GenerateInputPB batchItem(int64_t id) {
     item.set_request_id(id);
     item.add_token_ids(1);
     item.add_token_ids(2);
-    item.set_request_deadline_ms(currentTimeMs() + 5000);
     auto* config = item.mutable_generate_config();
     config->set_can_use_pd_separation(true);
     config->set_max_new_tokens(8);
@@ -198,6 +201,12 @@ public:
         prefill_engine                = std::make_shared<BatchTestEngine>();
         decode.engine_                = decode_engine;
         prefill.engine_               = prefill_engine;
+        // Stub model execution, but use the real per-request timeout store.
+        prefill_engine->cache_manager_ = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(1, 2, 1, DataType::TYPE_FP16), true);
+        auto connector = std::make_shared<P2PConnector>(P2PConnectorConfig{}, nullptr, nullptr);
+        connector->prefill_ = std::make_unique<P2PConnectorPrefill>(P2PConnectorConfig{}, nullptr, nullptr);
+        connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr, 10);
+        prefill_engine->cache_manager_->p2p_connector_ = connector;
         decode.meta_                  = std::make_shared<RpcServerRuntimeMeta>();
         prefill.meta_                 = std::make_shared<RpcServerRuntimeMeta>();
         decode.prefill_server_caller_ = std::make_shared<PrefillServerCaller>("batch-test");
@@ -257,7 +266,7 @@ TEST_F(PDBatchRpcTest, OneRpcAndOneEnqueuePerSidePreserveIdentityKeysAndOutputOr
         const auto& sent = prefill_rpc->service.received.inputs(i);
         EXPECT_EQ(sent.generate_config().unique_key(), stream->uniqueKey());
         EXPECT_NE(sent.generate_config().unique_key(), "business-key");
-        EXPECT_EQ(sent.request_deadline_ms(), stream->generateInput()->request_deadline_ms);
+        EXPECT_EQ(sent.generate_config().timeout_ms(), stream->generateConfig()->timeout_ms);
         EXPECT_TRUE(sent.has_pd_input_snapshot());
         EXPECT_EQ(stream->generateInput()->batch_group_size, 2);
         EXPECT_EQ(stream->generateInput()->batch_group_id, 77);
@@ -423,7 +432,7 @@ TEST_F(PDBatchRpcTest, PrefillRejectsDuplicateKeysAndExpiredDeadline) {
     BatchGenerateOutputsPB response;
     EXPECT_EQ(prefill.BatchGenerateCall(&context, &batch, &response).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
     batch = handoff();
-    batch.mutable_inputs(1)->set_request_deadline_ms(currentTimeMs() - 1);
+    batch.mutable_inputs(1)->mutable_generate_config()->set_timeout_ms(0);
     EXPECT_EQ(prefill.BatchGenerateCall(&context, &batch, &response).error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
     EXPECT_EQ(prefill_engine->batch_calls, 0);
 }

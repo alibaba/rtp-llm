@@ -268,14 +268,12 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadUsesConfiguredLoadBudgetAndRequestDea
     const int64_t request_deadline_ms = before + 60000;
     auto meta = createMockMeta(9010, "configured_load_budget", request_deadline_ms);
     auto result = decode_scheduler_->asyncRead(createValidKVCacheResource(), meta, {2, 0}, true);
-    const int64_t after = currentTimeMs();
     ASSERT_TRUE(result.ok());
     waitAsyncContextDone(result.context);
     ASSERT_TRUE(result.context->success());
     auto request = prefill_server_->service()->getLastStartLoadRequest();
-    EXPECT_EQ(request.request_deadline_ms(), request_deadline_ms);
-    EXPECT_GE(request.deadline_ms(), before + 1000);
-    EXPECT_LE(request.deadline_ms(), after + 1000);
+    EXPECT_GT(request.request_timeout_ms(), 0);
+    EXPECT_EQ(request.timeout_ms(), 1000);
 }
 
 TEST_F(P2PConnectorSchedulerTest, AsyncReadLoadBudgetCannotExceedRemainingRequestTime) {
@@ -286,8 +284,8 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadLoadBudgetCannotExceedRemainingReques
     waitAsyncContextDone(result.context);
     ASSERT_TRUE(result.context->success());
     auto request = prefill_server_->service()->getLastStartLoadRequest();
-    EXPECT_EQ(request.deadline_ms(), request_deadline_ms);
-    EXPECT_EQ(request.request_deadline_ms(), request_deadline_ms);
+    EXPECT_EQ(request.timeout_ms(), 5000);
+    EXPECT_GT(request.request_timeout_ms(), 0);
 }
 
 TEST(P2PConnectorConfigTest, LoadTimeoutComesFromSharedPDSepConfig) {

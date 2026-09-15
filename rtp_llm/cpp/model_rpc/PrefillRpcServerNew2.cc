@@ -247,6 +247,8 @@ grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*      
         return serializeErrorMsg(std::to_string(request->request_id()), handoff_status);
     }
 
+    const auto local_deadline = engine_->getCacheManager()->prefillRequestDeadline(
+        request->generate_config().unique_key(), request->generate_config().timeout_ms());
     AtomicGuard request_guard(onflight_requests_);
     auto        request_id = request->request_id();
     // [HANG-DIAG] step 1/4: entry. Coupled with OnflightScope so the watchdog
@@ -258,6 +260,10 @@ grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*      
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), server_context, metrics_reporter_, meta_);
     auto input                            = QueryConverter::transQuery(request);
+    input->request_deadline_ms = local_deadline;
+    if (local_deadline <= currentTimeMs() || server_context->IsCancelled()) {
+        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "prefill request expired");
+    }
     int64_t mm_cost_us = 0, enqueue_cost_us = 0, poll_cost_us = 0;
     int64_t phase_start = currentTimeUs();
 
@@ -353,11 +359,14 @@ grpc::Status PrefillRpcServerNew2::BatchGenerateCall(grpc::ServerContext*       
     AtomicGuard                                 request_guard(onflight_requests_);
     std::vector<std::shared_ptr<GenerateInput>> inputs;
     std::unordered_set<std::string>             keys;
+    std::vector<int64_t> local_deadlines;
     for (int i = 0; i < request->inputs_size(); ++i) {
         const auto& item   = request->inputs(i);
         auto        status = validatePDHandoff(item);
         if (!status.ok())
             return serializeErrorMsg("batch item " + std::to_string(i), status);
+        local_deadlines.push_back(engine_->getCacheManager()->prefillRequestDeadline(
+            item.generate_config().unique_key(), item.generate_config().timeout_ms()));
         if (!keys.insert(item.generate_config().unique_key()).second) {
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "duplicate batch handoff key");
         }
@@ -367,6 +376,7 @@ grpc::Status PrefillRpcServerNew2::BatchGenerateCall(grpc::ServerContext*       
             return grpc::Status(grpc::StatusCode::CANCELLED, "batch cancelled by user");
         const auto& item   = request->inputs(i);
         auto        input  = QueryConverter::transQuery(&item);
+        input->request_deadline_ms = local_deadlines[i];
         auto        status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle());
         if (status.ok())
             status = validatePDInput(*input, item);
@@ -388,10 +398,9 @@ grpc::Status PrefillRpcServerNew2::BatchGenerateCall(grpc::ServerContext*       
         scopes.back()->markStep(GenerateStreamStep::kAfterTransQuery);
     }
     // Recheck the whole batch after MM processing, before queue admission.
-    for (const auto& item : request->inputs()) {
-        auto status = validatePDHandoff(item);
-        if (!status.ok())
-            return serializeErrorMsg(std::to_string(item.request_id()), status);
+    for (const auto& input : inputs) {
+        if (input->request_deadline_ms <= currentTimeMs())
+            return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "prefill batch request expired");
     }
     if (context->IsCancelled())
         return grpc::Status(grpc::StatusCode::CANCELLED, "batch cancelled by user");

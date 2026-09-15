@@ -138,8 +138,8 @@ protected:
     createValidStartLoadRequest(const std::string& unique_key, int64_t deadline_ms, int num_workers = 1) {
         P2PConnectorStartLoadRequestPB request;
         request.set_unique_key(unique_key);
-        request.set_deadline_ms(deadline_ms);
-        request.set_request_deadline_ms(deadline_ms);
+        request.set_timeout_ms(deadline_ms - currentTimeMs());
+        request.set_request_timeout_ms(std::max<int64_t>(1, deadline_ms - currentTimeMs()));
 
         for (int i = 0; i < num_workers; ++i) {
             auto* worker = request.add_workers();
@@ -259,7 +259,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnGenerateTimeout_WhenWaitResourceEntryT
 
 TEST_F(P2PConnectorTest, HandleReadRejectsExpiredTransferBeforeRequestDeadline) {
     auto request = createValidStartLoadRequest("test_expired_transfer", currentTimeMs() - 100);
-    request.set_request_deadline_ms(currentTimeMs() + 5000);
+    request.set_request_timeout_ms(5000);
 
     P2PConnectorStartLoadResponsePB response;
     connector_->handleRead(request, response);
@@ -771,7 +771,7 @@ TEST_F(P2PConnectorTest, HandleRead_TimeoutReleasesPrefillResourceAfterCancelBro
     }
 
     auto request = createValidStartLoadRequest(unique_key, deadline_ms, 1);
-    request.set_request_deadline_ms(request_deadline_ms);
+    request.set_request_timeout_ms(5000);
     auto handle_read_future = std::async(std::launch::async, [&]() {
         P2PConnectorStartLoadResponsePB response;
         connector_->handleRead(request, response);

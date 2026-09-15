@@ -9,7 +9,7 @@ namespace {
 GenerateInputPB makeRequest() {
     GenerateInputPB request;
     request.set_request_id(42);
-    request.set_request_deadline_ms(12345);
+    request.mutable_generate_config()->set_timeout_ms(12345);
     request.add_token_ids(10);
     request.add_token_ids(1);
     request.add_token_ids(20);
@@ -60,7 +60,8 @@ TEST(PDRequestUtilsTest, TextPreprocessingPreservesRequestAndAppliesSameSpPolicy
         EXPECT_TRUE(input->generate_config->pd_separation);
         EXPECT_EQ(input->generate_config->force_disable_sp_run, !is_mtp_eagle);
         EXPECT_EQ(input->generate_config->unique_key, "pd-test");
-        EXPECT_EQ(input->request_deadline_ms, 12345);
+        EXPECT_EQ(input->request_deadline_ms, 0);
+        EXPECT_EQ(input->generate_config->timeout_ms, 12345);
         EXPECT_TRUE(torch::equal(input->input_ids, torch::tensor({10, 1, 20}, torch::kInt32)));
         auto handoff                         = request;
         *handoff.mutable_pd_input_snapshot() = snapshotPDInput(*input);

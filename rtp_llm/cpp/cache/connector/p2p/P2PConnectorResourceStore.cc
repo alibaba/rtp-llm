@@ -70,6 +70,21 @@ bool P2PConnectorResourceStore::init() {
     return true;
 }
 
+int64_t P2PConnectorResourceStore::requestDeadline(const std::string& unique_key, int64_t timeout_ms) {
+    const int64_t now = currentTimeMs();
+    if (unique_key.empty() || timeout_ms <= 0 || timeout_ms > std::numeric_limits<int32_t>::max()) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> lock(resource_map_mutex_);
+    auto [it, inserted] = request_states_.try_emplace(unique_key, RequestState{now + timeout_ms});
+    if (inserted) {
+        // Match the existing default cancelled-key retention window.
+        it->second.retain_until_ms = now + timeout_ms + 3600 * 1000;
+    }
+    scheduleDeadlineCheckLocked();
+    return it->second.request_deadline_ms;
+}
+
 void P2PConnectorResourceStore::setOnRequestReleased(std::function<void(int64_t, int64_t)> callback) {
     on_request_released_ = std::move(callback);
 }
@@ -213,7 +228,7 @@ void P2PConnectorResourceStore::checkTimeout() {
                     resource_map_.erase(resource);
                 }
             }
-            if (now >= state.request_deadline_ms) {
+            if (now >= std::max(state.request_deadline_ms, state.retain_until_ms)) {
                 it = request_states_.erase(it);
             } else {
                 ++it;
@@ -243,7 +258,7 @@ std::optional<int64_t> P2PConnectorResourceStore::nextDeadlineMsLocked() const {
     std::optional<int64_t> next_deadline_ms;
     for (const auto& [unique_key, state] : request_states_) {
         (void)unique_key;
-        const int64_t cleanup_deadline_ms = state.terminal ? state.request_deadline_ms : state.deadlineMs();
+        const int64_t cleanup_deadline_ms = state.terminal ? std::max(state.request_deadline_ms, state.retain_until_ms) : state.deadlineMs();
         if (!next_deadline_ms || cleanup_deadline_ms < *next_deadline_ms) {
             next_deadline_ms = cleanup_deadline_ms;
         }

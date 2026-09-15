@@ -94,10 +94,6 @@ PrefillServerCaller::callPrefill(const GenerateInputPB* request,
                                  uint32_t               port,
                                  const std::string&     unique_key,
                                  int64_t                request_deadline_ms) {
-    if (request_deadline_ms != request->request_deadline_ms()) {
-        return ErrorInfo(ErrorCode::INVALID_PARAMS,
-                         "Prefill GenerateStreamCall inconsistent request deadline key=" + unique_key);
-    }
     if (request_deadline_ms <= currentTimeMs()) {
         return ErrorInfo(ErrorCode::GENERATE_TIMEOUT,
                          "Prefill GenerateStreamCall request deadline exceeded key=" + unique_key);

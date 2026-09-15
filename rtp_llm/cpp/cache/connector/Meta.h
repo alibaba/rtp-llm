@@ -33,6 +33,7 @@ public:
         int64_t                          request_id = 0;
         std::string                      unique_key;
         int64_t                          deadline_ms = 0;
+        int64_t                          request_timeout_ms = 0;
         std::pair<std::string, uint32_t> prefill_addr;
         int                              prefill_tp_size = 0;
         int                              prefill_cp_size = 0;

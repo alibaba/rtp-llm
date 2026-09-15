@@ -31,7 +31,7 @@ message TcpCacheKeyBlockBufferInfo {
 message TcpLayerBlockTransferRequest {
     repeated TcpCacheKeyBlockBufferInfo blocks     = 1;
     optional string                     unique_key = 2;
-    optional int64                      deadline_ms = 3;
+    optional int64                      timeout_ms = 3;
 }
 
 message TcpLayerBlockTransferResponse {

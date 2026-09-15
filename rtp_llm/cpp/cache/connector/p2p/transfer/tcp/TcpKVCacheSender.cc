@@ -124,8 +124,7 @@ TcpKVCacheSender::makeTransferRequest(const transfer::SendRequest&              
                                       const std::shared_ptr<TransferClientMetricsCollector>& collector) {
     auto transfer_request = std::make_shared<::tcp_transfer::TcpLayerBlockTransferRequest>();
     transfer_request->set_unique_key(request.unique_key);
-    transfer_request->set_deadline_ms(
-        std::max(request.deadline_ms - 10, currentTimeMs()));  // 10ms for network latency and processing time
+    transfer_request->set_timeout_ms(request.timeout_ms);
 
     if (request.block_info.empty()) {
         return nullptr;

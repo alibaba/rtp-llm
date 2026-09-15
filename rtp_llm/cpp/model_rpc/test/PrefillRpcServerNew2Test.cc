@@ -112,7 +112,7 @@ TEST(PrefillRpcServerNew2Test, StartLoadRejectsMissingEngine) {
     EXPECT_EQ(status.error_message(), "engine is null");
 }
 
-TEST(PrefillRpcServerNew2Test, GenerateStreamCallRejectsMissingRequestDeadline) {
+TEST(PrefillRpcServerNew2Test, GenerateStreamCallRejectsMissingRequestTimeout) {
     PrefillRpcServerNew2 server;
     grpc::ServerContext context;
     GenerateInputPB request;
@@ -133,9 +133,9 @@ TEST(PrefillRpcServerNew2Test, GenerateStreamCallRejectsPdRequestWithoutUniqueKe
     grpc::ServerContext  context;
     GenerateInputPB      request;
     request.set_request_id(42);
-    request.set_request_deadline_ms(currentTimeMs() + 5000);
     request.add_token_ids(1);
     auto* config = request.mutable_generate_config();
+    config->set_timeout_ms(5000);
     config->set_max_new_tokens(8);
     config->set_num_beams(1);
     config->set_num_return_sequences(1);

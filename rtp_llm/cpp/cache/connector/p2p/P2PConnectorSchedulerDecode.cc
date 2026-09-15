@@ -216,7 +216,8 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
     const int64_t     request_deadline_ms = routing->deadline_ms;
     const int64_t     now_ms              = currentTimeMs();
     if (request_deadline_ms <= 0 || request_deadline_ms == std::numeric_limits<int64_t>::max()
-        || now_ms >= request_deadline_ms || config_.load_cache_timeout_ms <= 0) {
+        || now_ms >= request_deadline_ms || config_.load_cache_timeout_ms <= 0
+        || routing->request_timeout_ms <= 0) {
         RTP_LLM_LOG_WARNING("asyncRead: request deadline expired, unique_key: %s", unique_key.c_str());
         return {nullptr, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "P2P request deadline expired")};
     }
@@ -325,6 +326,7 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
          unique_key,
          request_deadline_ms,
          transfer_deadline_ms,
+         request_timeout_ms = routing->request_timeout_ms,
          rank_routes = std::move(rank_routes),
          active_route_ids = std::move(active_route_ids),
          plan_digest,
@@ -343,6 +345,7 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
                                                    unique_key,
                                                    request_deadline_ms,
                                                    transfer_deadline_ms,
+                                                   request_timeout_ms,
                                                    collector,
                                                    start_error,
                                                    prefill_tp_size,
@@ -391,6 +394,7 @@ P2PConnectorSchedulerDecode::startAsyncReadCalls(int64_t            request_id,
                                                  const std::string& unique_key,
                                                  int64_t            request_deadline_ms,
                                                  int64_t            transfer_deadline_ms,
+                                                 int64_t request_timeout_ms,
                                                  const std::shared_ptr<DecodeSchedulerMetricsCollector>& collector,
                                                  ErrorInfo&                                              out_error,
                                                  int                            prefill_tp_size,
@@ -418,6 +422,8 @@ P2PConnectorSchedulerDecode::startAsyncReadCalls(int64_t            request_id,
                                                    unique_key,
                                                    request_deadline_ms,
                                                    transfer_deadline_ms,
+                                                   request_timeout_ms,
+                                                   config_.load_cache_timeout_ms,
                                                    no_transfer,
                                                    plan_digest,
                                                    active_route_ids);

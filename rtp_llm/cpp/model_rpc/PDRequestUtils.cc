@@ -59,9 +59,8 @@ ErrorInfo checkPDBatchSupport(const BatchGenerateInputPB& request, bool& pd_sepa
 }
 
 ErrorInfo validatePDHandoff(const GenerateInputPB& request) {
-    if (request.request_deadline_ms() <= currentTimeMs()
-        || request.request_deadline_ms() == std::numeric_limits<int64_t>::max()) {
-        return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "invalid or expired P2P request deadline");
+    if (request.generate_config().timeout_ms() <= 0) {
+        return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "invalid P2P request timeout");
     }
     if (request.generate_config().unique_key().empty()) {
         return ErrorInfo(ErrorCode::INVALID_PARAMS, "decode_entrance handoff requires non-empty unique_key");

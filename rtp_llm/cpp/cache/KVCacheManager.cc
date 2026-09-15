@@ -579,6 +579,11 @@ KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysT
     return allocator_->incrKVCacheRef(resource, cache_keys, is_connector);
 }
 
+int64_t KVCacheManager::prefillRequestDeadline(const std::string& unique_key, int64_t timeout_ms) {
+    auto store = p2p_connector_ ? p2p_connector_->streamStore() : nullptr;
+    return store ? store->requestDeadline(unique_key, timeout_ms) : 0;
+}
+
 bool KVCacheManager::hasP2PConnector() const {
     return p2p_connector_ != nullptr;
 }

@@ -619,4 +619,25 @@ TEST_F(P2PConnectorResourceStoreTest, MissingOrInfiniteDeadlineDoesNotCreateReso
     }
 }
 
+TEST(P2PRequestTimeoutTest, FirstArrivalWinsAndTerminalCannotRenew) {
+    P2PConnectorResourceStore store(nullptr, 10);
+    const auto before = currentTimeMs();
+    const auto deadline = store.requestDeadline("relative-timeout", 5000);
+    EXPECT_GE(deadline, before + 5000);
+    EXPECT_LE(deadline, currentTimeMs() + 5000);
+    EXPECT_EQ(store.requestDeadline("relative-timeout", 60000), deadline);
+    store.markTerminal("relative-timeout", deadline);
+    EXPECT_EQ(store.requestDeadline("relative-timeout", 60000), deadline);
+    EXPECT_TRUE(store.isMarkedCancelled("relative-timeout"));
+}
+
+TEST(P2PRequestTimeoutTest, InvalidDurationsDoNotCreateRequest) {
+    P2PConnectorResourceStore store(nullptr, 10);
+    EXPECT_EQ(store.requestDeadline("", 1000), 0);
+    EXPECT_EQ(store.requestDeadline("key", 0), 0);
+    EXPECT_EQ(store.requestDeadline("key", -1), 0);
+    EXPECT_EQ(store.requestDeadline("key", std::numeric_limits<int64_t>::max()), 0);
+    EXPECT_GT(store.requestDeadline("key", 1000), currentTimeMs());
+}
+
 }  // namespace rtp_llm

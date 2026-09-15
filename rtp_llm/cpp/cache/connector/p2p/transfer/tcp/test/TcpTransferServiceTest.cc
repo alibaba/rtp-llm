@@ -139,7 +139,7 @@ static void addRequestBlock(::tcp_transfer::TcpLayerBlockTransferRequest&       
 static ::tcp_transfer::TcpLayerBlockTransferRequest makeRequest(const std::string& unique_key, int64_t deadline_ms) {
     ::tcp_transfer::TcpLayerBlockTransferRequest req;
     req.set_unique_key(unique_key);
-    req.set_deadline_ms(deadline_ms);
+    req.set_timeout_ms(deadline_ms - currentTimeMs());
     return req;
 }
 

@@ -107,6 +107,8 @@ public:
                                  const std::string& unique_key,
                                  int64_t            request_deadline_ms,
                                  int64_t            transfer_deadline_ms,
+                                 int64_t            request_timeout_ms,
+                                 int64_t            load_timeout_ms,
                                  bool               no_transfer = false,
                                  uint64_t           plan_digest = 0,
                                  const std::vector<int>& active_route_ids = {});
@@ -116,6 +118,8 @@ private:
                                const std::string&             unique_key,
                                int64_t                        request_deadline_ms,
                                int64_t                        transfer_deadline_ms,
+                               int64_t                        request_timeout_ms,
+                               int64_t                        load_timeout_ms,
                                int64_t                        request_id,
                                bool                           no_transfer,
                                uint64_t                       plan_digest,

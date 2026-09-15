@@ -180,13 +180,13 @@ grpc::Status DecodeRpcServerNew2::preparePDRequest(const GenerateInputPB&       
                                                    PrefillPeerInfo&                peer_info) {
     input                              = QueryConverter::transQuery(&request);
     input->request_deadline_ms         = deadline_ms;
-    input->generate_config->timeout_ms = clampRpcTimeoutMsToInt32(std::max<int64_t>(1, deadline_ms - currentTimeMs()));
+    // Preserve the configured duration on the wire; D keeps its own deadline.
+    input->generate_config->timeout_ms = request.generate_config().timeout_ms();
     auto status                        = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle());
     if (!status.ok())
         return serializeErrorMsg(std::to_string(request.request_id()), status);
     prefill_request.CopyFrom(request);
     prefill_request.mutable_pd_input_snapshot()->CopyFrom(snapshotPDInput(*input));
-    prefill_request.set_request_deadline_ms(deadline_ms);
     prefill_request.mutable_generate_config()->set_timeout_ms(input->generate_config->timeout_ms);
     const auto  address = prefillAddress(request);
     std::string ip;
@@ -243,6 +243,7 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
         auto decode_entrance_keys =
             buildDecodeEntranceKeys(*request, autil::NetUtil::getBindIp(), handoff_id, currentTimeUs());
         request_with_handoff_key = makeDecodeEntranceHandoffRequest(*request, decode_entrance_keys.handoff_unique_key);
+        request_with_handoff_key.mutable_generate_config()->set_timeout_ms(normalized_timeout_ms_i32);
         effective_request        = &request_with_handoff_key;
     }
     if (!pd_separation) {
@@ -373,8 +374,7 @@ grpc::Status DecodeRpcServerNew2::BatchGenerateCall(grpc::ServerContext*        
         const auto timeout =
             normalizeRpcTimeoutMs(config->timeout_ms(), maga_init_params_.pd_sep_config.max_rpc_timeout_ms);
         config->set_timeout_ms(clampRpcTimeoutMsToInt32(timeout));
-        item.set_request_deadline_ms(entry_ms + timeout);
-        rpc_deadline_ms = std::max(rpc_deadline_ms, item.request_deadline_ms());
+        rpc_deadline_ms = std::max(rpc_deadline_ms, entry_ms + timeout);
     }
     std::vector<std::unique_ptr<GenerateContext>> contexts;
     std::vector<GenerateStreamPtr>                streams;
@@ -391,7 +391,7 @@ grpc::Status DecodeRpcServerNew2::BatchGenerateCall(grpc::ServerContext*        
             auto       effective = makeDecodeEntranceHandoffRequest(item, keys.handoff_unique_key);
             std::shared_ptr<GenerateInput> input;
             PrefillPeerInfo                peer;
-            auto status = preparePDRequest(effective, item.request_deadline_ms(), input, item, peer);
+            auto status = preparePDRequest(effective, entry_ms + item.generate_config().timeout_ms(), input, item, peer);
             if (!status.ok())
                 return grpc::Status(status.error_code(),
                                     "batch item " + std::to_string(i) + ": " + status.error_message(),
@@ -436,7 +436,7 @@ grpc::Status DecodeRpcServerNew2::BatchGenerateCall(grpc::ServerContext*        
             }
         }
         for (const auto& item : forwarded.inputs()) {
-            if (item.request_deadline_ms() <= currentTimeMs()) {
+            if (entry_ms + item.generate_config().timeout_ms() <= currentTimeMs()) {
                 startup_error.record(ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "batch preparation deadline exceeded"));
                 return grpcStatusFromErrorInfo(startup_error.snapshot().error);
             }

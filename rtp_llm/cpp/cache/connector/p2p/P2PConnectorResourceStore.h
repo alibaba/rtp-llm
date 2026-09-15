@@ -55,6 +55,9 @@ public:
 public:
     bool init();
 
+    // First arrival establishes the local deadline; later messages cannot renew it.
+    int64_t requestDeadline(const std::string& unique_key, int64_t timeout_ms);
+
 public:
     // addResource from Meta (extracts routing from Meta::p2pRouting())
     // Routing fields (unique_key, deadline_ms, request_id) are read from Meta::P2PRoutingContext
@@ -104,6 +107,7 @@ private:
     struct RequestState {
         int64_t request_deadline_ms;
         int64_t load_deadline_ms = 0;
+        int64_t retain_until_ms = 0;
         bool consumed = false;
         bool terminal = false;
         std::optional<P2PConnectorResourceEntry::SideChannelData> side_channel_data;

@@ -330,8 +330,8 @@ protected:
         request.set_request_id(request_id);
         request.add_token_ids(1);
         request.mutable_generate_config()->set_timeout_ms(5000);
-        request.set_request_deadline_ms(currentTimeMs() + deadline_us / 1000);
-        return caller_.callPrefill(&request, "127.0.0.1", server.port(), unique_key, request.request_deadline_ms())
+        const auto request_deadline_ms = currentTimeMs() + deadline_us / 1000;
+        return caller_.callPrefill(&request, "127.0.0.1", server.port(), unique_key, request_deadline_ms)
             .value();
     }
 
@@ -450,9 +450,9 @@ TEST_F(PrefillServerCallerTest, AsyncDecodeEntrancePrefillPreservesPdSeparationR
     request.mutable_generate_config()->set_num_return_sequences(1);
     request.mutable_generate_config()->set_can_use_pd_separation(true);
 
-    request.set_request_deadline_ms(currentTimeMs() + 5000);
+    const auto request_deadline_ms = currentTimeMs() + 1000;
     auto context =
-        caller_.callPrefill(&request, "127.0.0.1", server.port(), "decode-entrance-key", request.request_deadline_ms())
+        caller_.callPrefill(&request, "127.0.0.1", server.port(), "decode-entrance-key", request_deadline_ms)
             .value();
     ASSERT_NE(context, nullptr);
     ASSERT_TRUE(waitDone(context));
@@ -460,7 +460,7 @@ TEST_F(PrefillServerCallerTest, AsyncDecodeEntrancePrefillPreservesPdSeparationR
 
     const auto captured_request = server.service()->capturedRequest();
     EXPECT_EQ(captured_request.request_id(), 1010);
-    EXPECT_EQ(captured_request.request_deadline_ms(), request.request_deadline_ms());
+    EXPECT_EQ(captured_request.generate_config().timeout_ms(), request.generate_config().timeout_ms());
     EXPECT_EQ(captured_request.generate_config().max_new_tokens(), 64);
     EXPECT_TRUE(captured_request.generate_config().can_use_pd_separation());
     EXPECT_EQ(captured_request.generate_config().unique_key(), "decode-entrance-key");
@@ -500,8 +500,8 @@ TEST_F(PrefillServerCallerTest, AsyncReaderCreationFailurePreservesCause) {
     request.add_token_ids(1);
     request.mutable_generate_config()->set_timeout_ms(5000);
 
-    request.set_request_deadline_ms(currentTimeMs() + 5000);
-    auto result = caller_.callPrefill(&request, "127.0.0.1", 1, "null-reader", request.request_deadline_ms());
+    const auto request_deadline_ms = currentTimeMs() + 5000;
+    auto result = caller_.callPrefill(&request, "127.0.0.1", 1, "null-reader", request_deadline_ms);
     ASSERT_FALSE(result.ok());
     EXPECT_EQ(result.status().code(), ErrorCode::RPC_FINISH_FAILED);
     EXPECT_NE(result.status().ToString().find("null-reader"), std::string::npos);
@@ -514,8 +514,8 @@ TEST_F(PrefillServerCallerTest, AsyncPrefillNormalizesRawIpv6TargetAddress) {
     request.add_token_ids(1);
     request.mutable_generate_config()->set_timeout_ms(1);
 
-    request.set_request_deadline_ms(currentTimeMs() + 5000);
-    auto context = caller_.callPrefill(&request, "::1", 65535, "ipv6-target", request.request_deadline_ms()).value();
+    const auto request_deadline_ms = currentTimeMs() + 5000;
+    auto context = caller_.callPrefill(&request, "::1", 65535, "ipv6-target", request_deadline_ms).value();
     ASSERT_NE(context, nullptr);
     EXPECT_EQ(context->prefill_addr_, "[::1]:65535");
     context->cancel();
@@ -527,8 +527,8 @@ TEST_F(PrefillServerCallerTest, AsyncPrefillRejectsInvalidTargetPort) {
     request.add_token_ids(1);
     request.mutable_generate_config()->set_timeout_ms(1);
 
-    request.set_request_deadline_ms(currentTimeMs() + 5000);
-    auto result = caller_.callPrefill(&request, "::1", 0, "bad-port", request.request_deadline_ms());
+    const auto request_deadline_ms = currentTimeMs() + 5000;
+    auto result = caller_.callPrefill(&request, "::1", 0, "bad-port", request_deadline_ms);
     ASSERT_FALSE(result.ok());
     EXPECT_EQ(result.status().code(), ErrorCode::INVALID_PARAMS);
     EXPECT_NE(result.status().ToString().find("bad-port"), std::string::npos);

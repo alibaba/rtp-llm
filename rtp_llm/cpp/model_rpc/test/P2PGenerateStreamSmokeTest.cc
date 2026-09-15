@@ -65,7 +65,6 @@ struct PayloadTimeouts {
 };
 
 PayloadTimeouts payloadTimeouts() {
-    const bool remote = !environment("P2P_SMOKE_CONTROL_ADDR", "").empty();
     const auto read   = [](const char* name, int fallback) {
         const auto value = environment(name, "");
         if (value.empty())
@@ -76,10 +75,9 @@ PayloadTimeouts payloadTimeouts() {
                 std::string(name) + " must be between 1 and 600000 ms");
         return timeout;
     };
-    // Payload integrity is independent of clock synchronization. Production
-    // still checks absolute deadlines, so allow bounded skew in cross-host runs.
-    PayloadTimeouts result{read("P2P_SMOKE_REQUEST_TIMEOUT_MS", remote ? 120000 : 10000),
-                           read("P2P_SMOKE_LOAD_TIMEOUT_MS", remote ? 90000 : 3000)};
+    // Cross-host runs use the same short budgets; wire timeouts do not depend on clock offsets.
+    PayloadTimeouts result{read("P2P_SMOKE_REQUEST_TIMEOUT_MS", 10000),
+                           read("P2P_SMOKE_LOAD_TIMEOUT_MS", 3000)};
     require(result.load_ms < result.request_ms, "payload load timeout must be less than request timeout");
     return result;
 }
@@ -783,7 +781,6 @@ protected:
     GenerateInputPB request(int64_t id, int prompt_length) const {
         GenerateInputPB request;
         request.set_request_id(id);
-        request.set_request_deadline_ms(currentTimeMs() + timeouts_.request_ms);
         for (int token = 1; token <= prompt_length; ++token) {
             request.add_token_ids(token);
         }

@@ -139,9 +139,12 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     }
 
     const std::string& unique_key           = request.unique_key();
-    int64_t            transfer_deadline_ms = request.deadline_ms();
-    const int64_t      request_deadline_ms  = request.request_deadline_ms();
-    const int64_t      now_ms               = currentTimeMs();
+    const int64_t      now_ms = currentTimeMs();
+    const int64_t      request_deadline_ms =
+        stream_store_->requestDeadline(unique_key, request.request_timeout_ms());
+    int64_t transfer_deadline_ms = request.timeout_ms() > 0
+        && request.timeout_ms() <= std::numeric_limits<int32_t>::max()
+        ? std::min(request_deadline_ms, now_ms + request.timeout_ms()) : 0;
     if (unique_key.empty()) {
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
         response.set_error_message("invalid StartLoad unique_key");

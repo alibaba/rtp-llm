@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <unordered_map>
+#include <limits>
 
 namespace rtp_llm {
 namespace transfer {
@@ -21,7 +22,9 @@ TcpTaskContext::TcpTaskContext(::google::protobuf::RpcController*               
     metrics_reporter_(metrics_reporter),
     unique_key_(request->unique_key()),
     collector_(std::make_shared<TransferServerMetricsCollector>()),
-    start_time_us_(currentTimeUs()) {}
+    start_time_us_(currentTimeUs()),
+    deadline_ms_(request->timeout_ms() > 0 && request->timeout_ms() <= std::numeric_limits<int32_t>::max()
+                     ? start_time_us_ / 1000 + request->timeout_ms() : 0) {}
 
 TcpTaskContext::~TcpTaskContext() {
     if (done_) {
@@ -47,11 +50,11 @@ const std::string& TcpTaskContext::getUniqueKey() const {
 }
 
 bool TcpTaskContext::isTimeout() const {
-    return currentTimeMs() > request_->deadline_ms();
+    return currentTimeMs() > deadline_ms_;
 }
 
 uint64_t TcpTaskContext::getDeadlineMs() const {
-    return static_cast<uint64_t>(request_->deadline_ms());
+    return static_cast<uint64_t>(deadline_ms_);
 }
 
 bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
