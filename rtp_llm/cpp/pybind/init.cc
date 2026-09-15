@@ -1,10 +1,13 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpEmbeddingOp.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/XGrammarBootstrap.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingQuery.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
 #include "pybind11/stl.h"
@@ -50,6 +53,8 @@ void registerEmbeddingOutput(const py::module& m) {
 }
 
 PYBIND11_MODULE(libth_transformer, m) {
+    m.def("refresh_logger_after_scr", &Logger::refreshRuntimeIdentity, py::arg("pod_ip"));
+    m.def("resume_kmonitor_after_scr", &resumeKmonitorAfterScr, py::call_guard<py::gil_scoped_release>());
     registerRtpLLMOp(m);
     registerXGrammarBootstrap(m);
     registerMultimodalInput(m);

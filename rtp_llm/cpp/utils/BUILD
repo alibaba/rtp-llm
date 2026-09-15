@@ -3,6 +3,11 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//:__subpackages__"])
 
+filegroup(
+    name = "scr_logger_test_sources",
+    srcs = ["Logger.cc", "Logger.h"],
+    visibility = ["//rtp_llm/utils/test:__pkg__"],
+)
 
 
 # KVCache utilities - simple inline functions, no external dependencies

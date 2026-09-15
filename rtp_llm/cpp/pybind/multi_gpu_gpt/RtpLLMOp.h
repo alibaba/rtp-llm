@@ -24,7 +24,10 @@ public:
                  py::object vit_config,
                  py::object mm_process_engine,
                  py::object propose_model,
-                 py::object token_processor);
+                 py::object token_processor,
+                 bool       defer_service_start = false);
+    void    startRPCServer();
+    void    updateRuntimeEndpoints(py::object runtime_config);
     size_t  onflightRequestNum() const;
     int64_t completedSteps() const;
     void    armStop(int64_t target_step);
@@ -47,10 +50,17 @@ private:
     EngineInitParams initModel(py::object model, py::object engine_config, py::object vit_config);
     std::unique_ptr<ProposeModelEngineInitParams> initProposeModel(py::object              propose_model,
                                                                    const EngineInitParams& base_params);
-    void                                          initRPCServer(const EngineInitParams                        maga_init_params,
+    void                                          initRPCServer(const EngineInitParams&                       maga_init_params,
                                                                 py::object                                    mm_process_engine,
                                                                 std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                                                                 py::object                                    token_processor);
+    void                                          prepareRPCService(const EngineInitParams&                       maga_init_params,
+                                                                     py::object                                    mm_process_engine,
+                                                                     std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                                                                     py::object                                    token_processor,
+                                                                     bool                                          defer_network_services);
+    void                                          startRPCServerInternal(const EngineInitParams& maga_init_params);
+    void                                          setServerStartError(const std::string& error);
 
 private:
     std::unique_ptr<RpcServiceImpl> model_rpc_service_;
@@ -64,6 +74,16 @@ private:
     bool                            is_engine_stopped_{false};
     size_t                          active_force_stops_{0};
     std::atomic<bool>               is_server_shutdown_{false};
+    bool                            rpc_server_deferred_{false};
+    std::unique_ptr<EngineInitParams> deferred_init_params_;
+    py::object                      deferred_mm_process_engine_ = py::none();
+    std::unique_ptr<ProposeModelEngineInitParams> deferred_propose_params_;
+    py::object                      deferred_token_processor_ = py::none();
+    std::string                     deferred_server_address_;
+    std::atomic<bool>               server_start_failed_{false};
+    std::atomic<bool>               stop_requested_{false};
+    std::mutex                      server_state_mutex_;
+    std::string                     server_start_error_;
     size_t                          model_id_ = 0;
 };
 

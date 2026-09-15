@@ -20,6 +20,7 @@ def create_engine(
     alog_conf_path: str,
     world_info=None,
     propose_model: Optional["ProposeModel"] = None,
+    defer_service_start: bool = False,
 ) -> "BaseEngine":
     """
     Create an engine for the given model and config.
@@ -49,6 +50,7 @@ def create_engine(
             engine_config=engine_config,
             world_info=world_info,
             propose_model=propose_model,
+            defer_service_start=defer_service_start,
         )
         logging.info("create llm engine")
     else:

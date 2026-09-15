@@ -148,7 +148,8 @@ void preallocateTorchCudaPoolForPrefill(RoleType role_type, int device_id) {
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
-                           std::unique_ptr<ProposeModelEngineInitParams> propose_params):
+                           std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                           bool defer_loop_start):
     EngineBase(params),
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
@@ -205,7 +206,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 #else
     RTP_LLM_LOG_INFO("skip warm up on non-CUDA platform.");
 #endif
-    initCacheManager(warm_up_result);
+    initCacheManager(warm_up_result, defer_loop_start);
     RTP_LLM_LOG_INFO("create cache manager done");
 
     initExecutor(params, propose_params_);
@@ -217,7 +218,13 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     releaseHostMemoryCache();
 
     initScheduler();
-    (void)startLoop();
+    if (defer_loop_start) {
+        // DP dummy streams also launch kernels without incoming requests.
+        // Keep the loop absent until the template has been released.
+        RTP_LLM_LOG_INFO("normal engine loop deferred until SCR release");
+    } else {
+        (void)startLoop();
+    }
 }
 
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
@@ -478,7 +485,8 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     return stream;
 }
 
-void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
+void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result,
+                                    bool defer_connector_start) {
     const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
     if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,
@@ -502,7 +510,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       cache_store_config,
                                                                       use_cuda_malloc_block_pool);
         resource_context_.role_type     = pd_sep_config.role_type;
-        if (!resource_context_.cache_manager->init()) {
+        if (!resource_context_.cache_manager->init(defer_connector_start)) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
 
@@ -528,7 +536,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       cache_store_config,
                                                                       use_cuda_malloc_block_pool);
         resource_context_.role_type     = pd_sep_config.role_type;
-        if (!resource_context_.cache_manager->init()) {
+        if (!resource_context_.cache_manager->init(defer_connector_start)) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
         const auto& cache_cfg    = resource_context_.cache_manager->cacheConfig();
@@ -557,6 +565,13 @@ KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_c
 }
 
 absl::Status NormalEngine::startLoop() {
+    if (loop_thread_) {
+        return absl::OkStatus();
+    }
+    // External cache connectors can allocate large host-memory pools and open
+    // remote/P2P resources. Keep them out of the checkpoint template and only
+    // create them when the controller releases the SCR barrier.
+    resource_context_.cache_manager->startDeferredServices();
     if (parallelism_config.tp_rank == 0) {
         RTP_LLM_LOG_INFO("start init system prompt");
         THROW_IF_STATUS_ERROR(initSystemPrompt());
