@@ -556,6 +556,15 @@ def _collect_base_files(rootdir: Path) -> List[str]:
     extras_toml = rootdir / "_build" / "oss_optional_extras.toml"
     if extras_toml.is_file():
         files.append(str(extras_toml.relative_to(rootdir)))
+    # MORI is built with the CI controller's native toolchain. Ship its wheel
+    # so GPU workers do not recursively clone GitHub repositories during setup.
+    wheelhouse = rootdir / ".pytest_cache/remote_inputs/mori_wheel"
+    for pattern in ("manifest.json", "*.whl"):
+        files.extend(
+            str(path.relative_to(rootdir))
+            for path in wheelhouse.glob(pattern)
+            if path.is_file()
+        )
     return files
 
 
