@@ -468,6 +468,9 @@ def build_remote_setup_command(rootdir: Path, *, setup_env: Optional[dict] = Non
         + gpu_diag
         + 'echo ">>>PHASE:pip_install_start $(date +%s)"; '
         "mkdir -p logs; "
+        "if [ -f internal_source/ci/prepare_rocm_deps.sh ]; then "
+        "  source internal_source/ci/prepare_rocm_deps.sh >&2 || exit $?; "
+        "fi; "
         "if [ -f internal_source/ci/prepare_venv.py ]; then "
         # Dependency installers invoke system Git, whose Kerberos libraries
         # cannot use Conda's OpenSSL (EVP_KDF_ctrl / OPENSSL_1_1_1b). Keep the
@@ -492,6 +495,9 @@ def build_remote_setup_command(rootdir: Path, *, setup_env: Optional[dict] = Non
         '  echo ">>>PHASE:prepare_venv_skipped $(date +%s)"; '
         "fi; "
         'echo ">>>PHASE:pip_install_done $(date +%s)"; '
+        'if [ -n "${_rocm_native_library_path:-}" ]; then '
+        '  export LD_LIBRARY_PATH="${_rocm_native_library_path}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"; '
+        "fi; "
         f"if [ -f {shlex.quote(str(_RUNTIME_LIBS_ARCHIVE))} ]; then "
         f"  tar -xf {shlex.quote(str(_RUNTIME_LIBS_ARCHIVE))}; "
         '  echo "[remote_setup] restored rtp_llm/libs from runtime libs archive"; '
@@ -519,6 +525,7 @@ def _collect_base_files(rootdir: Path) -> List[str]:
         "setup.cfg",
         "conftest.py",
         "internal_source/ci/prepare_venv.py",
+        "internal_source/ci/prepare_rocm_deps.sh",
         "internal_source/ci/ci_pip_install.sh",
     ):
         if (rootdir / name).exists():

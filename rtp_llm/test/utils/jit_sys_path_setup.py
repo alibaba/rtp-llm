@@ -12,6 +12,7 @@ import importlib.metadata
 import logging
 import os
 import shutil
+import site
 import subprocess
 import sys
 from contextlib import suppress
@@ -266,6 +267,19 @@ def setup_jit_cache():
         os.environ["PYTHONPATH"] = os.pathsep.join(
             [*copied_paths, *([current_pythonpath] if current_pythonpath else [])]
         )
+        # Relocating torch separates its $ORIGIN RPATHs from the NVIDIA wheels.
+        # Expose the active venv's libraries before the child imports torch.
+        nvidia_lib_dirs = [
+            str(path)
+            for site_dir in site.getsitepackages()
+            for path in sorted(Path(site_dir).glob("nvidia/*/lib"))
+            if path.is_dir()
+        ]
+        if nvidia_lib_dirs:
+            existing = os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+            os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(
+                dict.fromkeys(path for path in [*existing, *nvidia_lib_dirs] if path)
+            )
         logging.info(
             "[Package Setup] Prepended cached packages to native child PYTHONPATH"
         )

@@ -2,6 +2,7 @@ import importlib.util
 import os
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
@@ -69,17 +70,27 @@ class DeviceResourceMainContractTest(TestCase):
         jit_setup = _load_jit_sys_path_setup_module()
         cached_paths = ["/cache/torch/site-packages", "/cache/deep_gemm/site-packages"]
         with (
+            TemporaryDirectory() as venv_dir,
             patch.dict(os.environ, {"PYTHONPATH": "/workspace"}, clear=True),
             patch.object(sys, "argv", ["device_resource.py", "pytest"]),
+            patch.object(jit_setup.site, "getsitepackages", return_value=[venv_dir]),
             patch.object(
                 jit_setup,
                 "copy_package_with_lock",
                 Mock(side_effect=[*cached_paths, None, None]),
             ),
         ):
+            cupti_dir = Path(venv_dir) / "nvidia" / "cuda_cupti" / "lib"
+            cupti_dir.mkdir(parents=True)
+            (Path(venv_dir) / "nvidia" / "not_a_library").mkdir()
+            os.environ["LD_LIBRARY_PATH"] = "/runtime/lib"
             self.assertEqual(jit_setup.setup_jit_cache(), cached_paths)
             self.assertEqual(
                 os.environ["PYTHONPATH"], os.pathsep.join([*cached_paths, "/workspace"])
+            )
+            self.assertEqual(
+                os.environ["LD_LIBRARY_PATH"],
+                os.pathsep.join(["/runtime/lib", str(cupti_dir)]),
             )
 
     def test_default_uses_cpu_when_no_device_is_available(self):

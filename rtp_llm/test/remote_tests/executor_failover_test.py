@@ -1071,7 +1071,7 @@ def test_remote_setup_eviction_uses_venv_lock():
     assert "restored rtp_llm/libs from runtime libs archive" in command
 
 
-def test_remote_setup_and_pytest_keep_heartbeat_alive_during_long_work():
+def test_remote_setup_and_pytest_keep_heartbeat_alive_during_long_work(tmp_path):
     command = remote_exec_rtp.build_remote_setup_command(Path("."))
 
     assert "prepare_venv.py >logs/prepare_venv.out" in command
@@ -1082,6 +1082,32 @@ def test_remote_setup_and_pytest_keep_heartbeat_alive_during_long_work():
     assert subprocess.run(
         ["bash", "-n"], input=command, text=True, capture_output=True, check=False
     ).returncode == 0
+
+    helper_rel = "internal_source/ci/prepare_rocm_deps.sh"
+    helper = tmp_path / helper_rel
+    helper.parent.mkdir(parents=True)
+    helper.write_text("return 37\n")
+    assert helper_rel in remote_exec_rtp._collect_base_files(tmp_path)
+    native_setup = command.split("mkdir -p logs; ", 1)[1].split(
+        "if [ -f internal_source/ci/prepare_venv.py ]; then ", 1
+    )[0]
+    failed = subprocess.run(
+        ["bash", "-c", native_setup + "echo installer_started"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    )
+    assert failed.returncode == 37
+    assert "installer_started" not in failed.stdout
+    helper.write_text("export CMAKE_PREFIX_PATH=/native/grpc\n")
+    ready = subprocess.run(
+        ["bash", "-c", native_setup + 'echo "$CMAKE_PREFIX_PATH"'],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert ready.stdout.strip() == "/native/grpc"
 
     heartbeat_plugin = remote_plugin._heartbeat_plugin_shell()
     assert (
