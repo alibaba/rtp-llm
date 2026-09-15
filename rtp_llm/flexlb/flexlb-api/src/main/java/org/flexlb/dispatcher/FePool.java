@@ -146,7 +146,7 @@ public class FePool {
 
     Mono<Void> probeOnce() {
         List<String> snapshot = urls.get();
-        failures.keySet().retainAll(Set.copyOf(snapshot));
+        failures.keySet().retainAll(Set.copyOf(snapshot)); // Collection duplicates are coalesced, not rejected.
         metrics.reportFePool(snapshot.size(), (int) snapshot.stream().filter(this::isAlive).count());
         return Flux.fromIterable(snapshot).flatMap(url -> probeClient.get().uri(url + cfg.getProbePath())
                 .retrieve().onStatus(status -> !status.is2xxSuccessful(), ClientResponse::createException)

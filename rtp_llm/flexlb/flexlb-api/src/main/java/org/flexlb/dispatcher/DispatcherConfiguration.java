@@ -91,7 +91,7 @@ public class DispatcherConfiguration {
                 .build();
     }
 
-    // Probe traffic must not queue behind inference requests and falsely mark busy FEs dead.
+    // Separate from inference; Reactor Netty pools by remote address, so the limit below is per FE endpoint.
     @Bean(name = "dispatcherProbeConnectionProvider", destroyMethod = "dispose")
     public ConnectionProvider dispatcherProbeConnectionProvider() {
         return ConnectionProvider.builder("dispatcher-fe-probe")
