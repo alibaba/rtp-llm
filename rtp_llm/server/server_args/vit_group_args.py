@@ -240,6 +240,25 @@ def init_vit_group_args(parser, vit_config):
         default=4,
         help="多模态预处理时最大线程数量",
     )
+    for name, default, help_text in (
+        ("vit_concurrency", 64, "ViT background task concurrency"),
+        ("vit_max_queue_size", 64, "Maximum queued ViT background tasks"),
+        ("mm_cache_gpu_max_bytes", 0, "Per-process GPU embedding cache byte budget"),
+        ("mm_cache_cpu_max_bytes", 0, "Per-process CPU embedding cache byte budget"),
+        (
+            "mm_hash_key_cache_max_bytes",
+            0,
+            "Per-process CPU feature hash cache byte budget",
+        ),
+    ):
+        vit_group.add_argument(
+            "--" + name,
+            env_name=name.upper(),
+            bind_to=(vit_config, name),
+            type=int,
+            default=default,
+            help=help_text,
+        )
     vit_group.add_argument(
         "--biencoder_preprocess",
         env_name="BIENCODER_PREPROCESS",

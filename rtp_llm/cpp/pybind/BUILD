@@ -80,6 +80,7 @@ cc_library(
     }),
     hdrs = [],
     deps = [
+        "//rtp_llm/cpp/multimodal_processor:feature_hash_op",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:block_info",
         "//rtp_llm/cpp/cache:cache_config",

@@ -11,7 +11,8 @@ public:
 
 private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                      std::string                                 ip_port = "") {
+                                                      std::string                                 ip_port    = "",
+                                                      int64_t                                     request_id = 0) {
         if (mm_inputs.size() == 0) {
             return MultimodalOutput();
         } else if (!mm_process_engine_.is_none()) {
@@ -45,7 +46,8 @@ private:
                     mm_preprocess_configs.push_back(mm_preprocess_config);
                 }
 
-                auto res = mm_process_engine_.attr("mm_embedding_cpp")(urls, types, tensors, mm_preprocess_configs);
+                auto res = mm_process_engine_.attr("mm_embedding_cpp")(
+                    urls, types, tensors, mm_preprocess_configs, request_id);
                 auto mm_embedding_vec = convertPyObjectToVec(res.attr("embeddings"));
 
                 MultimodalOutput           mm_embedding_res;
@@ -71,9 +73,9 @@ private:
                     }
                     mm_embedding_res.mm_extra_input = extra_input;
                 }
-                if (py::hasattr(res, "token_layouts")) {
-                    for (auto& layout : convertPyObjectToVec(res.attr("token_layouts"))) {
-                        mm_embedding_res.mm_token_layouts.emplace_back(convertPyObjectToTensor(layout));
+                if (py::hasattr(res, "feature_hashes")) {
+                    for (auto hash : convertPyObjectToVec(res.attr("feature_hashes"))) {
+                        mm_embedding_res.feature_hashes.emplace_back(convertPyObjectToTensor(hash));
                     }
                 }
                 return mm_embedding_res;

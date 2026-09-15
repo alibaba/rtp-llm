@@ -1,11 +1,12 @@
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 
 namespace rtp_llm {
 
-torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
+static torch::Tensor pbToTorchImpl(const TensorPB& tensor_pb, bool pinned_memory) {
     std::vector<int64_t> shape(tensor_pb.shape().begin(), tensor_pb.shape().end());
     const std::string*   payload      = nullptr;
     c10::ScalarType      scalar_type  = torch::kFloat32;
@@ -62,8 +63,20 @@ torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
         throw std::runtime_error("TensorPB payload size does not match shape and dtype.");
     }
 
-    void* data_ptr = const_cast<char*>(payload->data());
-    return torch::from_blob(data_ptr, shape, torch::TensorOptions().dtype(scalar_type)).clone();
+    auto result =
+        torch::empty(shape, torch::TensorOptions().dtype(scalar_type).device(torch::kCPU).pinned_memory(pinned_memory));
+    if (expected_bytes > 0) {
+        std::memcpy(result.data_ptr(), payload->data(), expected_bytes);
+    }
+    return result;
+}
+
+torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
+    return pbToTorchImpl(tensor_pb, false);
+}
+
+torch::Tensor TensorPbConvert::pbToPinnedTorch(const TensorPB& tensor_pb) {
+    return pbToTorchImpl(tensor_pb, true);
 }
 
 void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const torch::Tensor& tensor) {

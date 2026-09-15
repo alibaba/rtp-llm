@@ -25,6 +25,7 @@ __all__: list[str] = [
     "PyPrefillCudaGaphCopyParams",
     "TypeMeta",
     "get_device_id",
+    "get_multimodal_feature_hash",
     "preprocess_gemm_weight_by_key",
     "preprocess_weight_scale",
     "get_scalar_type",
@@ -467,3 +468,6 @@ def clear_comm_ops() -> None:
 
 def init_cpu_tp_broadcaster(tp_rank: int, tp_size: int, base_path: str) -> None: ...
 def destroy_cpu_tp_broadcaster() -> None: ...
+
+
+def get_multimodal_feature_hash(embedding: torch.Tensor) -> torch.Tensor: ...

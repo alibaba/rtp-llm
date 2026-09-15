@@ -74,12 +74,13 @@ bool assembleMMRdmaOutput(const std::vector<torch::Tensor>&      mm_tensors,
         if (!extra_inputs.empty()) {
             assembled.mm_extra_input = std::move(extra_inputs);
         }
-        if (output_pb->multimodal_token_layout_size() != 0
-            && output_pb->multimodal_token_layout_size() != static_cast<int>(split_sizes.size())) {
-            return false;
-        }
-        for (const auto& layout : output_pb->multimodal_token_layout()) {
-            assembled.mm_token_layouts.emplace_back(TensorPbConvert::pbToTorch(layout));
+        if (output_pb->has_multimodal_feature_hash()) {
+            auto hashes = TensorPbConvert::pbToTorch(output_pb->multimodal_feature_hash());
+            if (output_pb->feature_hash_version() != 1 || hashes.dim() != 1 || hashes.scalar_type() != torch::kInt32
+                || hashes.numel() != split_total) {
+                return false;
+            }
+            assembled.feature_hashes = hashes.split(split_sizes, 0);
         }
         *mm_output = std::move(assembled);
         return true;

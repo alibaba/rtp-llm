@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/multimodal_processor/FeatureHashOp.h"
 #include <torch/library.h>
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -16,6 +17,9 @@ void registerExecCtxOps(pybind11::module& m);
 using namespace torch_ext;
 
 PYBIND11_MODULE(librtp_compute_ops, m) {
+    m.def("get_multimodal_feature_hash",
+          &rtp_llm::getMultimodalFeatureHash,
+          pybind11::call_guard<pybind11::gil_scoped_release>());
 #if USING_CUDA || USING_ROCM
     registerExecCtxOps(m);
 #endif

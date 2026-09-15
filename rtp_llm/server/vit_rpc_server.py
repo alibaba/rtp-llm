@@ -2,6 +2,7 @@ import time
 from concurrent import futures
 
 import grpc
+import torch
 
 from rtp_llm.config.exceptions import (
     ExceptionCategory,
@@ -66,9 +67,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         local_device_id: int = 0,
     ):
         self.engine = mm_process_engine
-        self._transport = create_mm_output_transport(
-            transport_config, local_device_id
-        )
+        self._transport = create_mm_output_transport(transport_config, local_device_id)
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         tags = {"source": "vit_server"}
@@ -103,6 +102,13 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             )
             res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
             output_pb = self._transport.transfer(multimodal_inputs, res)
+            if res.feature_hashes:
+                from rtp_llm.utils.grpc_util import trans_from_tensor
+
+                output_pb.feature_hash_version = 1
+                trans_from_tensor(
+                    torch.cat(res.feature_hashes), output_pb.multimodal_feature_hash
+                )
             kmonitor.report(
                 GaugeMetrics.VIT_RPC_SERVER_HANDLER_RT_US_METRIC,
                 _now_us() - start_us,

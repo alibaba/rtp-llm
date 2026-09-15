@@ -21,7 +21,6 @@ from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MMWorkEstimate,
     MultiModalEmbeddingInterface,
 )
-from rtp_llm.multimodal.multimodal_util import vit_emb_cache_
 from rtp_llm.utils.time_util import Timer, current_time_ms
 
 if TYPE_CHECKING:
@@ -108,8 +107,9 @@ def _run_embedding(
 
     for wi, result in zip(items, batch_outputs):
         wi.embedding_result = result
-        if wi.need_check_cache:
-            vit_emb_cache_.insert_cache(wi.cache_key, result)
+        complete_cache = getattr(wi, "complete_cache", None)
+        if complete_cache is not None:
+            complete_cache(result)
 
 
 class _EmbeddingRequest:

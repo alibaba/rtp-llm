@@ -178,6 +178,7 @@ message MultimodalInputsPB {
     repeated MultimodalInputPB multimodal_inputs = 1;
     // LLM can receive the output through GPUDirect RDMA.
     bool support_rdma = 2;
+    int64 request_id = 3;
 }
 
 enum TensorDataTypePB {
@@ -229,10 +230,9 @@ message MultimodalOutputPB {
     repeated int32 split_size = 4;
     // Non-empty means fields 1/2/3 are stored in these slots; split_size remains inline.
     repeated MMRdmaSlotPB output_rdma_slots = 5;
-    // Optional per-media prompt replacements, always inline (also for RDMA).
-    // Empty tensor keeps legacy expansion. Non-negative values are text token IDs;
-    // -N inserts the next N visual feature rows. Includes enclosing vision tags.
-    repeated TensorPB multimodal_token_layout = 6;
+    reserved 6;
+    TensorPB multimodal_feature_hash = 7;
+    uint32 feature_hash_version = 8;
 }
 
 message ReleaseLeasePB {

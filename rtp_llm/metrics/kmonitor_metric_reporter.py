@@ -24,6 +24,12 @@ def qos_priority_tag(qos_level: Any) -> str:
 
 
 class AccMetrics(Enum):
+    VIT_GRAPH_EVENT_QPS_METRIC = "vit_graph_event_qps"
+
+    VIT_EMBEDDING_CACHE_MISS_QPS_METRIC = "py_rtp_vit_embedding_cache_miss_qps"
+    VIT_EMBEDDING_CACHE_INFLIGHT_QPS_METRIC = "py_rtp_vit_embedding_cache_inflight_qps"
+    VIT_EMBEDDING_CACHE_HIT_QPS_METRIC = "py_rtp_vit_embedding_cache_hit_qps"
+    VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC = "py_rtp_vit_embedding_cache_eviction_qps"
     CANCEL_QPS_METRIC = "py_rtp_cancal_qps_metric"
     SUCCESS_QPS_METRIC = "py_rtp_success_qps_metric"
     QPS_METRIC = "py_rtp_framework_qps"
@@ -79,6 +85,9 @@ class AccMetrics(Enum):
 
 
 class GaugeMetrics(Enum):
+
+    VIT_EMBEDDING_CACHE_TOKENS_METRIC = "py_rtp_vit_embedding_cache_tokens"
+    VIT_EMBEDDING_CACHE_BYTES_METRIC = "py_rtp_vit_embedding_cache_bytes"
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
     RESPONSE_ITER_RT_METRIC = "py_rtp_response_iterate_rt"
     RESPONSE_ITERATE_COUNT = "py_rtp_response_iterate_count"

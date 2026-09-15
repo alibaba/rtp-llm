@@ -16,8 +16,8 @@ namespace rtp_llm {
 class TestDecodeRpcService final: public RpcService::Service {
 public:
     explicit TestDecodeRpcService(bool fail_first_allocate):
-        first_allocate_failure_(fail_first_allocate ? std::optional<grpc::Status>(
-                                    grpc::Status(grpc::StatusCode::INTERNAL, "allocate failed once")) :
+        first_allocate_failure_(fail_first_allocate ? std::optional<grpc::Status>(grpc::Status(
+                                                          grpc::StatusCode::INTERNAL, "allocate failed once")) :
                                                       std::nullopt) {}
 
     explicit TestDecodeRpcService(grpc::Status first_allocate_failure):
@@ -99,7 +99,8 @@ public:
 
 private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput> mm_inputs,
-                                                      std::string                        ip_port = "") override {
+                                                      std::string                        ip_port    = "",
+                                                      int64_t                            request_id = 0) override {
         const auto result_code = result_codes_[std::min<size_t>(call_count_, result_codes_.size() - 1)];
         ++call_count_;
         if (result_code != ErrorCode::NONE_ERROR) {
@@ -214,8 +215,7 @@ protected:
         ModelConfig model_config;
         model_config.max_seq_len = 2048;
         model_config.vocab_size  = 1024;
-        return std::make_shared<NormalGenerateStream>(
-            input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+        return std::make_shared<NormalGenerateStream>(input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
     }
 
     std::unique_ptr<PrefillGenerateContext> makeContext(GenerateInputPB* request, int64_t timeout_ms = 0) {
@@ -545,8 +545,7 @@ TEST_F(PrefillRpcServerTest, retrySleepSaturatesOverflowingInterval) {
     request.set_request_id(12);
     auto context = makeContext(&request);
 
-    EXPECT_EQ(context->cappedRetrySleepUs(std::numeric_limits<int64_t>::max()),
-              std::numeric_limits<int64_t>::max());
+    EXPECT_EQ(context->cappedRetrySleepUs(std::numeric_limits<int64_t>::max()), std::numeric_limits<int64_t>::max());
 }
 
 TEST_F(PrefillRpcServerTest, mergeMultimodalLengthsUsesPrefillMetadata) {

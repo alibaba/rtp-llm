@@ -139,3 +139,23 @@ py_test(
     srcs = ["qwen35_vision_kernels_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "mm_embedding_cache_test",
+    srcs = ["mm_embedding_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "qwen35_vision_graph_test",
+    srcs = ["qwen35_vision_graph_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+
+
+py_test(
+    name = "mm_feature_hash_test",
+    srcs = ["mm_feature_hash_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

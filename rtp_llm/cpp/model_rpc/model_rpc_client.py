@@ -627,6 +627,10 @@ def get_multimodal_preprocess_value(value: Optional[int], default: int):
 def trans_multimodal_input(
     input_py: GenerateInput, input_pb: GenerateInputPB, generate_config: GenerateConfig
 ):
+    input_pb.multimodal_inputs.extend(iter_multimodal_inputs(input_py, generate_config))
+
+
+def iter_multimodal_inputs(input_py: GenerateInput, generate_config: GenerateConfig):
     resized_shape = [-1, -1]
     if generate_config.resized_shape:
         if len(generate_config.resized_shape) != 2:
@@ -669,7 +673,38 @@ def trans_multimodal_input(
         mm_preprocess_config_pb.mm_timeout_ms = get_multimodal_preprocess_value(
             generate_config.mm_timeout_ms, mm_input.mm_preprocess_config.mm_timeout_ms
         )
-        input_pb.multimodal_inputs.append(mm_input_pb)
+        yield mm_input_pb
+
+
+def multimodal_cache_keys(input_py: GenerateInput) -> list[str]:
+    from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+
+    keys = []
+    for original, item in zip(
+        input_py.mm_inputs, iter_multimodal_inputs(input_py, input_py.generate_config)
+    ):
+        if not item.multimodal_url or (
+            original.tensor is not None and original.tensor.numel() > 0
+        ):
+            return []
+        cfg = item.mm_preprocess_config
+        resolved = MMPreprocessConfig(
+            cfg.width,
+            cfg.height,
+            cfg.min_pixels,
+            cfg.max_pixels,
+            cfg.fps,
+            cfg.min_frames,
+            cfg.max_frames,
+            list(cfg.crop_positions),
+            cfg.mm_timeout_ms,
+        )
+        keys.append(
+            MultimodalInput(
+                item.multimodal_url, item.multimodal_type, original.tensor, resolved
+            ).cache_key()
+        )
+    return keys
 
 
 # 假设 trans_tensor 函数将 Protobuf 的 TensorPB 转换为 numpy array

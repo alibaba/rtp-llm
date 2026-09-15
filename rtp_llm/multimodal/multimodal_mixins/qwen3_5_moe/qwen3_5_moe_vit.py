@@ -590,6 +590,42 @@ class Qwen3_5MoeVisionModel(PreTrainedModel):
         patch_pos_embeds = torch.cat(patch_pos_embeds_permute)
         return patch_pos_embeds
 
+    def prepare_graph_metadata(self, grid_thw, hidden_states):
+        grid_thw = grid_thw.cpu()
+        segment_lengths = [h * w for t, h, w in grid_thw.tolist() for _ in range(t)]
+        if not segment_lengths:
+            raise ValueError("empty vision grid")
+        attention_backend = _select_attention_backend(
+            hidden_states, getattr(self.config, "vit_attention_backend", "auto")
+        )
+        if getattr(self, "last_backend", None) != attention_backend:
+            logging.info("Qwen3.5 ViT attention backend: %s", attention_backend)
+        self.last_backend = attention_backend
+
+        pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
+
+        rotary_pos_emb = self.rot_pos_emb(grid_thw)
+
+        seq_len = hidden_states.shape[0]
+        rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        position_embeddings = (emb.cos(), emb.sin())
+
+        offsets = [0]
+        for length in segment_lengths:
+            offsets.append(offsets[-1] + length)
+        cu_seqlens = torch.tensor(
+            offsets, dtype=torch.int32, device=hidden_states.device
+        )
+
+        return dict(
+            pos_embeds=pos_embeds,
+            position_embeddings=position_embeddings,
+            cu_seqlens=cu_seqlens,
+            segment_lengths=segment_lengths,
+            attention_backend=attention_backend,
+        )
+
     def forward(
         self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, **kwargs
     ) -> torch.Tensor:
@@ -603,35 +639,14 @@ class Qwen3_5MoeVisionModel(PreTrainedModel):
         Returns:
             `torch.Tensor`: hidden_states.
         """
-        grid_thw = grid_thw.cpu()
-        segment_lengths = [h * w for t, h, w in grid_thw.tolist() for _ in range(t)]
-        if not segment_lengths:
-            raise ValueError("empty vision grid")
-        attention_backend = _select_attention_backend(
-            hidden_states, getattr(self.config, "vit_attention_backend", "auto")
-        )
-        if getattr(self, "last_backend", None) != attention_backend:
-            logging.info("Qwen3.5 ViT attention backend: %s", attention_backend)
-        self.last_backend = attention_backend
-        hidden_states = self.patch_embed(hidden_states)
-
-        pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
-        hidden_states = hidden_states + pos_embeds
-
-        rotary_pos_emb = self.rot_pos_emb(grid_thw)
-
-        seq_len, _ = hidden_states.size()
-        hidden_states = hidden_states.reshape(seq_len, -1)
-        rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
-        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
-        position_embeddings = (emb.cos(), emb.sin())
-
-        offsets = [0]
-        for length in segment_lengths:
-            offsets.append(offsets[-1] + length)
-        cu_seqlens = torch.tensor(
-            offsets, dtype=torch.int32, device=hidden_states.device
-        )
+        metadata = kwargs.pop("_graph_metadata", None)
+        if metadata is None:
+            metadata = self.prepare_graph_metadata(grid_thw, hidden_states)
+        hidden_states = self.patch_embed(hidden_states) + metadata["pos_embeds"]
+        position_embeddings = metadata["position_embeddings"]
+        cu_seqlens = metadata["cu_seqlens"]
+        segment_lengths = metadata["segment_lengths"]
+        attention_backend = metadata["attention_backend"]
 
         for blk in self.blocks:
             hidden_states = blk(

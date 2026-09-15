@@ -511,7 +511,7 @@ class MMProcessEngineGpuBatchTest(TestCase):
 
     def test_gpu_batch_cache_hit(self):
         """A repeated url is served from cache without a second embedding call."""
-        engine, part = self._make_engine(mm_cache_item_num=10)
+        engine, part = self._make_engine(mm_cache_cpu_max_bytes=4096)
         # tearDown restores the global cache to disabled for other tests.
 
         url = "fake://7"

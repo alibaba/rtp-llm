@@ -881,7 +881,7 @@ class TestCudaFp8PerBlockPureDPStrategy(unittest.TestCase):
         """Test priority"""
         strategy = CudaFp8PerBlockPureDPStrategy()
         router_type = RouterType.PURE_TP
-        executor_type = ExecutorType.DEEPGEMM_MASKED
+        executor_type = ExecutorType.DEEPGEMM_CONTINUOUS
         expected_priority = router_type.value * 10 + executor_type.value
 
         attributes = strategy.get_attributes()

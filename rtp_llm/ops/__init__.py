@@ -165,6 +165,7 @@ try:
         CPRotateMethod,
         PrefillCPConfig,
     )
+
     # Alias for backward compatibility
     from libth_transformer_config import (
         QuantAlgo,
@@ -182,6 +183,7 @@ try:
         HybridAttentionType,
         LinearAttentionConfig,
     )
+
     # Alias for backward compatibility
     EplbConfig = EPLBConfig
     from libth_transformer_config import (
@@ -385,6 +387,14 @@ def ensure_compute_ops_loaded() -> None:
 
 def ensure_engine_ops_loaded() -> None:
     _load_engine_ops(required=True)
+
+
+def get_multimodal_feature_hash(embedding: torch.Tensor) -> torch.Tensor:
+    # Routing metadata uses the compute library without initializing the LLM engine.
+    ensure_compute_ops_loaded()
+    from librtp_compute_ops import get_multimodal_feature_hash as hash_features
+
+    return hash_features(embedding)
 
 
 def ensure_rdma_ops_loaded() -> None:

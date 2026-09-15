@@ -352,6 +352,12 @@ class VitConfig:
         self.igraph_table_name: str = ""
         self.default_key: Optional[str] = None
         self.mm_preprocess_max_workers: int = 4
+        self.vit_concurrency: int = 64
+        self.vit_max_queue_size: int = 64
+        # Per-process cache budgets; zero disables caching, including in-flight reuse.
+        self.mm_cache_gpu_max_bytes: int = 0
+        self.mm_cache_cpu_max_bytes: int = 0
+        self.mm_hash_key_cache_max_bytes: int = 0
         self.biencoder_preprocess: bool = False
         self.extra_input_in_mm_embedding = ""
         self.mm_timeout_ms: int = VitConfig.DEFAULT_MM_TIMEOUT_MS
@@ -430,6 +436,11 @@ class VitConfig:
             f"igraph_table_name: {self.igraph_table_name}\n"
             f"igraph_default_key: {self.default_key}\n"
             f"mm_preprocess_max_workers: {self.mm_preprocess_max_workers}\n"
+            f"vit_concurrency: {self.vit_concurrency}\n"
+            f"vit_max_queue_size: {self.vit_max_queue_size}\n"
+            f"mm_cache_gpu_max_bytes: {self.mm_cache_gpu_max_bytes}\n"
+            f"mm_cache_cpu_max_bytes: {self.mm_cache_cpu_max_bytes}\n"
+            f"mm_hash_key_cache_max_bytes: {self.mm_hash_key_cache_max_bytes}\n"
             f"biencoder_preprocess: {self.biencoder_preprocess}\n"
             f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}\n"
             f"mm_timeout_ms: {self.mm_timeout_ms}\n"
