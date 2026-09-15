@@ -117,4 +117,82 @@ TEST_F(GenerateStreamTest, P2PRequestDeadlineDoesNotRestartWithStreamBeginTime) 
     EXPECT_EQ(stream->deadlineMs(), deadline_ms);
 }
 
+TEST_F(GenerateStreamTest, PrefillFallbackVariableBeamOutputUsesCompletedStep) {
+    autil::EnvGuard perf_scope("PERF_TEST", "0");
+    // Stop before the next width change, both after prefill and after a decode step.
+    for (const auto& widths : std::vector<std::vector<int>>{{4, 2, 4}, {2, 4, 2}}) {
+        for (const int max_new_tokens : {1, 2}) {
+            SCOPED_TRACE(::testing::Message()
+                         << "first_width=" << widths.front() << ", max_new_tokens=" << max_new_tokens);
+            auto input                   = std::make_shared<GenerateInput>();
+            input->input_ids             = torch::tensor({1, 2}, torch::kInt32);
+            input->generate_config       = std::make_shared<GenerateConfig>();
+            auto& config                 = *input->generate_config;
+            config.variable_num_beams    = widths;
+            config.max_new_tokens        = max_new_tokens;
+            config.can_use_pd_separation = false;
+            config.is_streaming          = true;
+            config.ignore_eos            = true;
+            config.reuse_cache           = false;
+            config.return_cum_log_probs  = true;
+
+            ModelConfig model_config;
+            model_config.max_seq_len                  = 32;
+            model_config.vocab_size                   = 128;
+            model_config.attn_config.tokens_per_block = 2;
+            ResourceContext resource_context;
+            resource_context.role_type       = RoleType::PREFILL;
+            resource_context.decode_entrance = true;
+            resource_context.reuse_cache     = false;
+            auto stream =
+                std::make_shared<NormalGenerateStream>(input, model_config, RuntimeConfig{}, resource_context, nullptr);
+            // Exercise sampled-token updates and output queuing without a model or KV allocation.
+            stream->generate_status_->status = StreamState::RUNNING;
+            ASSERT_FALSE(stream->queryPdSep());
+            ASSERT_FALSE(stream->isStreaming());
+
+            torch::Tensor sampled_tokens;
+            for (int step = 0; step < max_new_tokens; ++step) {
+                const int beam_count = widths[step];
+                sampled_tokens       = torch::empty({beam_count, input->inputLength() + step + 1}, torch::kInt32);
+                for (int beam = 0; beam < beam_count; ++beam) {
+                    auto* row = sampled_tokens.data_ptr<int32_t>() + beam * sampled_tokens.size(1);
+                    row[0]    = 1;
+                    row[1]    = 2;
+                    for (int token = 0; token <= step; ++token) {
+                        row[input->inputLength() + token] = 10 * (beam + 1) + token;
+                    }
+                }
+                StreamUpdateInfo update_info{.new_tokens     = sampled_tokens,
+                                             .num_new_tokens = 1,
+                                             .cum_log_probs  = torch::arange(beam_count, torch::kFloat32)};
+                stream->update(update_info);
+                ASSERT_FALSE(stream->hasError());
+                if (step + 1 < max_new_tokens) {
+                    ASSERT_FALSE(stream->hasOutput());
+                }
+            }
+
+            ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+            ASSERT_TRUE(stream->hasOutput());
+            auto result = stream->nextOutput();
+            ASSERT_TRUE(result.ok());
+            const auto& outputs = result.value().generate_outputs;
+            ASSERT_EQ(outputs.size(), static_cast<size_t>(widths[max_new_tokens - 1]));
+            for (size_t beam = 0; beam < outputs.size(); ++beam) {
+                const auto& output = outputs[beam];
+                EXPECT_TRUE(output.finished);
+                EXPECT_FALSE(output.aux_info.pd_sep);
+                EXPECT_EQ(output.aux_info.output_len, max_new_tokens);
+                EXPECT_TRUE(
+                    torch::equal(output.output_ids,
+                                 sampled_tokens.narrow(0, beam, 1).narrow(1, input->inputLength(), max_new_tokens)));
+                ASSERT_TRUE(output.aux_info.cum_log_probs.has_value());
+                EXPECT_FLOAT_EQ(output.aux_info.cum_log_probs->item<float>(), static_cast<float>(beam));
+            }
+            EXPECT_FALSE(stream->hasOutput());
+        }
+    }
+}
+
 }  // namespace rtp_llm
