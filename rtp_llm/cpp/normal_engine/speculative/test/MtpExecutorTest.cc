@@ -95,6 +95,7 @@ struct MtpExecutorTestConfig {
     int     position_id_len_factor = 1;
 
     SpeculativeType sp_type              = SP_TYPE_MTP;
+    std::string     sp_model_type;
     int64_t         dspark_mask_token_id = -1;
     RoleType        role_type            = RoleType::PDFUSION;
 };
@@ -225,6 +226,9 @@ public:
     }
 
     void prepareAttentionInputs(const GptModelInputs& inputs) override {
+#ifdef RTP_MTP_GRAPH_PREPARATION_REGRESSION
+        prepared_inputs_.push_back(inputs);
+#endif
         if (prepare_input_holder.test_data.empty()) {
             return;
         }
@@ -299,6 +303,9 @@ private:
         }
     }
 
+#ifdef RTP_MTP_GRAPH_PREPARATION_REGRESSION
+    std::vector<GptModelInputs> prepared_inputs_;
+#endif
     TestDataHolder<GptModelInputs>           input_holder;
     TestDataHolder<GptModelInputs>           prepare_input_holder;
     TestDataHolder<GptModelOutputs>          output_holder;
@@ -559,6 +566,7 @@ public:
         model_config.mm_model_config.mm_position_ids_style = test_config.mm_position_ids_style;
         model_config.attn_config.rope_config.index_factor  = test_config.position_id_len_factor;
         sp_config.type                                     = test_config.sp_type;
+        sp_config.model_type                               = test_config.sp_model_type;
         sp_config.gen_num_per_cycle                        = test_config.gen_num_per_cycle;
         sp_config.sp_dspark_mask_token_id                  = test_config.dspark_mask_token_id;
 
@@ -1942,6 +1950,7 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
     model_input.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     model_input.last_hidden_states = torch::tensor({0.1f, 0.2f, 1.1f, 1.2f}, torch::kFloat32).reshape({2, 2});
     model_input.combo_position_ids = torch::tensor({5, 5, 5, 7, 7, 7}, torch::kInt32);
+    model_input.text_tokens_mask   = torch::ones({2}, torch::kInt32);
 
     auto makeDraftInput = [](std::vector<int> combo_tokens,
                              std::vector<int> sequence_lengths,
@@ -1999,6 +2008,8 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
 
     EXPECT_EQ((std::vector<int>{10, 11, 12, 13, 14, 20, 21, 22, 23, 24}), toVec<int>(model_input.combo_tokens));
     EXPECT_EQ((std::vector<int>{5, 5}), toVec<int>(model_input.input_lengths));
+    EXPECT_EQ((std::vector<int>{1, 1, 1, 1, 1, 1, 1, 1, 1, 1}),
+              toVec<int>(model_input.text_tokens_mask));
     // Post draft-position fix: target verification starts one position below
     // the draft-decode base so it first re-writes the carried target token.
     EXPECT_EQ((std::vector<int>{4, 6}), toVec<int>(model_input.prefix_lengths));
@@ -2271,5 +2282,179 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
     EXPECT_TRUE(status.ok());
     EXPECT_TRUE(stream->hasError());
 }
+
+#ifdef RTP_MTP_GRAPH_PREPARATION_REGRESSION
+TEST_F(MtpExecutorTest, testQwenMropePrepareAfterRejection) {
+    // Separate Bazel targets supply the env before static executor flags are read.
+#ifdef RTP_MTP_DENSE_PREPARATION_REGRESSION
+    constexpr bool dense_device_state = true;
+#else
+    constexpr bool dense_device_state = false;
+#endif
+    MtpExecutorTestConfig config;
+    config.sp_type                = SP_TYPE_EAGLE;
+    config.sp_model_type          = "qwen35_moe_mtp";
+    config.gen_num_per_cycle      = 4;
+    config.mm_position_ids_style  = 2;
+    config.position_id_len_factor = 3;
+    auto components               = createMtpExecutorComponents(config);
+    auto* draft                   = components.fake_draft_prefill_model.get();
+    auto* executor                = components.executor.get();
+    executor->setDraftPrefillModel(std::move(components.fake_draft_prefill_model));
+
+    const auto host_i32 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+    const std::vector<std::vector<int32_t>> accept_lens{{1, 3}, {3, 1}};
+    const std::vector<std::vector<int64_t>> accepted_rows{{0, 5, 6, 7}, {0, 1, 2, 5}};
+    for (size_t round = 0; round < accept_lens.size(); ++round) {
+        SCOPED_TRACE(round);
+        GptModelInputs inputs;
+        inputs.combo_tokens      = torch::arange(10, host_i32);
+        inputs.input_lengths     = torch::tensor({5, 5}, host_i32);
+        inputs.sequence_lengths  = torch::empty({0}, host_i32);
+        inputs.prefix_lengths    = torch::tensor({63, 127}, host_i32);
+        inputs.lm_output_indexes = torch::tensor({4, 9}, host_i32);
+        // Token-major [T,H,W], with each request and each axis distinguishable.
+        std::vector<int32_t> positions;
+        for (int request = 0; request < 2; ++request) {
+            for (int step = 0; step < 5; ++step) {
+                for (int axis = 0; axis < 3; ++axis) {
+                    positions.push_back(static_cast<int32_t>(round * 1000) + request * 300 + axis * 70 + step);
+                }
+            }
+        }
+        inputs.combo_position_ids = torch::tensor(positions, host_i32);
+        const auto dense_inputs   = inputs;
+        executor->launchDraftPrefillPrepareAsync(inputs);
+        executor->draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+        if (dense_device_state) {
+            ASSERT_EQ(draft->prepared_inputs_.size(), round + 1);
+            const auto& prepared = draft->prepared_inputs_.back();
+            checkTensorEqual(prepared.input_lengths, dense_inputs.input_lengths);
+            checkTensorEqual(prepared.combo_position_ids, dense_inputs.combo_position_ids);
+        } else {
+            // Before the fix this is 1: the async worker prepared dense [5,5].
+            ASSERT_TRUE(draft->prepared_inputs_.empty());
+        }
+
+        GptModelOutputs target_output;
+        target_output.all_hidden_states =
+            (torch::arange(40, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))
+             + static_cast<int64_t>(round * 100))
+                .reshape({10, 4});
+        spec::SpeculativeSamplerOutput rejection;
+        rejection.accept_len = torch::tensor(accept_lens[round], host_i32);
+        rejection.accept_tokens =
+            (torch::arange(10, host_i32) + static_cast<int64_t>(round * 100 + 10)).reshape({2, 5});
+        torch::Tensor compact_hidden;
+        TensorHolder host_holder;
+        executor->batch_stream_processor_->updateDecodePostDraftModelInput(
+            inputs, target_output, rejection, 2, compact_hidden, host_holder);
+
+        // The oracle is explicit per-request row selection, not a call to the
+        // production compactAcceptedPositionIds helper or a first-N slice.
+        auto rows = torch::tensor(accepted_rows[round], torch::kInt64);
+        GptModelInputs expected = dense_inputs;
+        if (dense_device_state) {
+            expected.combo_tokens       = rejection.accept_tokens.reshape({10});
+            expected.last_hidden_states = target_output.all_hidden_states;
+            expected.lm_output_indexes =
+                torch::tensor(std::vector<int32_t>{accept_lens[round][0] - 1, 5 + accept_lens[round][1] - 1}, host_i32);
+        } else {
+            expected.combo_tokens = rejection.accept_tokens.reshape({10}).index_select(0, rows);
+            expected.input_lengths = torch::tensor(accept_lens[round], host_i32);
+            expected.lm_output_indexes = torch::tensor(std::vector<int32_t>{accept_lens[round][0] - 1, 3}, host_i32);
+            expected.last_hidden_states = target_output.all_hidden_states.index_select(0, rows.to(torch::kCUDA));
+            expected.combo_position_ids = dense_inputs.combo_position_ids.reshape({10, 3}).index_select(0, rows).reshape({12});
+            EXPECT_FALSE(torch::equal(expected.combo_position_ids, dense_inputs.combo_position_ids.narrow(0, 0, 12)));
+        }
+        draft->setInputs({expected});
+        GptModelOutputs draft_output;
+        draft_output.all_hidden_states = expected.last_hidden_states;
+        draft->setOutputs({draft_output});
+        (void)executor->runDraftPrefillForward(inputs);
+        EXPECT_EQ(draft->forwardCount(), round + 1);
+    }
+}
+TEST_F(MtpExecutorTest, testQwenMropeTargetPrepareWaitsForFinalPositions) {
+    struct Scenario {
+        SpeculativeType type;
+        size_t          gamma;
+        bool            early_prepare;
+    };
+    // One-step uses already-expanded input here. Its device-state gathering
+    // contract is tested separately; preserving a route is not an accuracy proof.
+    const std::vector<Scenario> scenarios{{SP_TYPE_EAGLE, 4, false},
+                                           {SP_TYPE_EAGLE, 1, true},
+                                           {SP_TYPE_DSPARK, 4, true}};
+    const auto host_i32 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+    for (const auto& scenario : scenarios) {
+        SCOPED_TRACE(static_cast<int>(scenario.type));
+        SCOPED_TRACE(scenario.gamma);
+        MtpExecutorTestConfig config;
+        config.sp_type                = scenario.type;
+        config.sp_model_type          = scenario.type == SP_TYPE_EAGLE ? "qwen35_moe_mtp" : "";
+        config.gen_num_per_cycle      = scenario.gamma;
+        config.dspark_mask_token_id   = scenario.type == SP_TYPE_DSPARK ? 1 : -1;
+        config.mm_position_ids_style  = 2;
+        config.position_id_len_factor = 3;
+        if (scenario.type == SP_TYPE_DSPARK) {
+            // MockEngine otherwise resets vocab to 100, but the fixture's
+            // Markov weights use config.vocab_size rows.
+            config.vocab_size_override = config.vocab_size;
+        }
+        auto components               = createMtpExecutorComponents(config);
+        auto* target                  = components.fake_target_model.get();
+        auto* executor                = components.executor.get();
+        executor->setTargetModel(std::move(components.fake_target_model));
+        const int64_t width = static_cast<int64_t>(scenario.gamma + 1);
+        std::vector<int32_t> final_positions;
+        for (int request = 0; request < 2; ++request) {
+            for (int step = 0; step < width; ++step) {
+                for (int axis = 0; axis < 3; ++axis) {
+                    final_positions.push_back(request * 300 + axis * 70 + step + 10);
+                }
+            }
+        }
+        GptModelInputs final_inputs;
+        final_inputs.combo_tokens      = torch::arange(2 * width, host_i32);
+        final_inputs.input_lengths     = torch::full({2}, width, host_i32);
+        final_inputs.sequence_lengths  = torch::empty({0}, host_i32);
+        final_inputs.prefix_lengths    = torch::tensor({63, 127}, host_i32);
+        final_inputs.lm_output_indexes = torch::tensor(std::vector<int32_t>{0, static_cast<int32_t>(width)}, host_i32);
+        final_inputs.combo_position_ids = torch::tensor(final_positions, host_i32);
+
+        auto before_draft_decode = final_inputs;
+        if (!scenario.early_prepare) {
+            before_draft_decode.combo_tokens      = torch::tensor({1, 2}, host_i32);
+            before_draft_decode.input_lengths     = torch::tensor({1, 1}, host_i32);
+            before_draft_decode.sequence_lengths  = torch::tensor({64, 128}, host_i32);
+            before_draft_decode.lm_output_indexes = torch::tensor({0, 1}, host_i32);
+            before_draft_decode.combo_position_ids = torch::tensor({10, 80, 150, 310, 380, 450}, host_i32);
+        }
+        executor->launchTargetVerifyPrepareAsync(before_draft_decode, 2);
+        executor->target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+        ASSERT_EQ(target->prepared_inputs_.size(), scenario.early_prepare ? 1 : 0);
+        if (scenario.early_prepare) {
+            checkTensorEqual(target->prepared_inputs_.front().input_lengths, final_inputs.input_lengths);
+            checkTensorEqual(target->prepared_inputs_.front().combo_position_ids, final_inputs.combo_position_ids);
+        }
+
+        // Invoke the real target-forward entry after the caller has produced
+        // complete token-major positions. The fake target checks this contract
+        // even when no CUDA graph exists to replace stale attention metadata.
+        GptModelInputs expected = final_inputs;
+        expected.combo_position_ids = torch::tensor(final_positions, host_i32);
+        target->setInputs({expected});
+        target->expectTargetVerify(true);
+        GptModelOutputs output;
+        output.all_hidden_states =
+            torch::zeros({2 * width, 4}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        target->setOutputs({output});
+        const StreamGroups no_streams(std::list<GenerateStreamPtr>{});
+        (void)executor->runTargetVerifyForward(final_inputs, no_streams);
+        EXPECT_EQ(target->forwardCount(), 1);
+    }
+}
+#endif
 
 }  // namespace rtp_llm

@@ -145,3 +145,18 @@ py_test(
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X-ROCM7'},
 )
+
+# Diagnostic only: actual 397B LINEAR geometry, BF16 state feedback across tokens.
+py_test(
+    name = "qwen35_mtp_bf16_state_test",
+    srcs = ["test_qwen35_mtp_bf16_state.py"],
+    main = "test_qwen35_mtp_bf16_state.py",
+    deps = [
+        "//rtp_llm/models_py:utils",
+        "//rtp_llm/models_py/triton_kernels:fla",
+        "//rtp_llm/models_py/triton_kernels:causal_conv1d",
+    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
+    visibility = ["//visibility:public"],
+    tags = ["manual"],
+    exec_properties = {"gpu": "SM100_ARM"},
+)

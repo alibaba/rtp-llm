@@ -1718,6 +1718,12 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     if (!useAsyncPrepare()) {
         return;
     }
+    // Multi-step MTP expands per-request mRoPE positions after draft decode.
+    // Preparing now would retain short positions in the non-graph fallback.
+    if (!is_dspark_ && propose_step_ > 1 && model_input.combo_position_ids.defined()
+        && model_input.combo_position_ids.numel() > 0) {
+        return;
+    }
     const auto& cache_cfg = cache_manager_->cacheConfig();
     // NOTE: combo_tokens never used in prepare stage, so it is safe to use shallow copy
     auto model_input_copy                    = model_input;
@@ -1804,6 +1810,12 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
 
 void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_input) {
     if (!useAsyncPrepare()) {
+        return;
+    }
+    // Host-state MTP compacts each request to accept_len after rejection. Its
+    // positions and lengths are not final yet; prepare them in forward instead.
+    // DSpARK commit and device-state MTP keep the dense verify-row geometry.
+    if (!is_dspark_ && !useStreamAsync() && !useAsyncDeviceState()) {
         return;
     }
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
@@ -2513,6 +2525,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         model_input.input_lengths  = std::move(input_lengths);
         model_input.prefix_lengths    = spec_prefix_lengths;
         model_input.combo_tokens      = draft_token_ids_t.reshape({(int64_t)(batch_size * (propose_step_ + 1))});
+        batch_stream_processor_->resetDecodeTextTokensMask(model_input);
         batch_stream_processor_->expandTargetVerifyPositionIds(stream_groups, model_input);
         model_input.sequence_lengths =
             torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));

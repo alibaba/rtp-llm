@@ -22,8 +22,8 @@ py_test(
         "//rtp_llm:config",
     ],
     env = {"GPU_COUNT": "1"},
-    # CPU-only contract test (mocks + CPU tensors); needs an accelerator image
-    # solely to import librtp_compute_ops, so any CUDA worker works — no H20 pin.
+    # CPU contracts plus a real CUDA BF16 gating regression; one CUDA worker
+    # suffices. The regression checks local TP input, not multi-rank NCCL.
     exec_properties = {'gpu':'A10', 'gpu_count': '1'},
 )
 
@@ -80,4 +80,12 @@ py_test(
     env = {"GPU_COUNT": "1"},
     tags = ["rocm"],
     exec_properties = {'gpu': 'MI308X-ROCM7', 'gpu_count': '1'},
+)
+
+py_test(
+    name = "qwen35_mtp_multimodal_test",
+    srcs = ["qwen35_mtp_multimodal_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "A10", "gpu_count": "1"},
 )

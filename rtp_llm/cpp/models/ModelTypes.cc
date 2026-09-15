@@ -96,6 +96,9 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     if (inputs.kv_cache_kernel_block_id.defined() && inputs.kv_cache_kernel_block_id.is_cuda()) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitKernelBlockId;
     }
+    if (inputs.combo_position_ids.defined() && inputs.combo_position_ids.is_cuda()) {
+        device_bits |= GptModelInputDeviceBit::kDeviceBitComboPositionIds;
+    }
     shape_hints[GptModelInputIndex::tensorDeviceMap] = static_cast<int64_t>(device_bits);
     return shape_hints;
 }
@@ -293,7 +296,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                                 {checkedHint(GptModelInputIndex::lmOutputIndexes, "lmOutputIndexes")},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
         if (combo_position_ids_size) {
-            inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {combo_position_ids_size});
+            inputs.combo_position_ids =
+                allocBuf(rtp_llm::DataType::TYPE_INT32,
+                         {combo_position_ids_size},
+                         pickAlloc(GptModelInputDeviceBit::kDeviceBitComboPositionIds));
         } else {
             // An in-place CP remap from the previous forward leaves a rank-local
             // vector here; the root publishing none means this pass has no position
@@ -315,9 +321,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         if (text_tokens_mask_size) {
             inputs.text_tokens_mask = allocBuf(rtp_llm::DataType::TYPE_INT32, {text_tokens_mask_size});
+        } else {
+            inputs.text_tokens_mask = torch::Tensor();
         }
         if (mm_features_locs_size) {
             inputs.mm_features_locs = allocBuf(rtp_llm::DataType::TYPE_INT32, {mm_features_locs_size});
+        } else {
+            inputs.mm_features_locs = torch::Tensor();
         }
         if (mm_features_num) {
             std::vector<torch::Tensor> mm_features;
@@ -329,6 +339,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                 mm_features.emplace_back(allocBuf(mm_data_type, {mm_rows, mm_cols}, rtp_llm::AllocationType::DEVICE));
             }
             inputs.multimodal_features = std::move(mm_features);
+        } else {
+            // The MTP shift can remove the last visual row. Do not retain
+            // the target pass's features after rank 0 publishes an empty list.
+            inputs.multimodal_features.reset();
         }
         if (mm_extra_input_num) {
             std::vector<torch::Tensor> mm_extra_input;
@@ -339,6 +353,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                     allocBuf(extra_data_type, {mm_extra_input_shape_ptr[i]}, rtp_llm::AllocationType::DEVICE));
             }
             inputs.mm_extra_input = std::move(mm_extra_input);
+        } else {
+            inputs.mm_extra_input.reset();
         }
     }
 

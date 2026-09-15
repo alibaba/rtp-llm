@@ -74,6 +74,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common:common",
@@ -98,4 +99,20 @@ py_test(
         "TEST_USING_DEVICE": "CUDA",
     },
     exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "pywrapped_model_mrope_graph_prepare_test",
+    srcs = ["pywrapped_model_mrope_graph_prepare_test.py"],
+    data = [":th_pywrapped_model_cache_store_integration_test"],
+    deps = ["//rtp_llm:torch"],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+        "GPU_COUNT": "1",
+        "RTP_LLM_STREAM_ASYNC": "0",
+        "RTP_LLM_MTP_ASYNC_DEVICE_STATE": "0",
+        "RTP_LLM_DEVICE_INPUT": "0",
+        "RTP_LLM_DEVICE_INPUT_CHECK": "0",
+    },
+    exec_properties = {"gpu": "SM100_ARM"},
 )

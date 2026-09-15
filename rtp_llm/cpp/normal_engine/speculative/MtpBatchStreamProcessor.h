@@ -19,7 +19,12 @@ public:
         propose_step_(sp_config.gen_num_per_cycle),
         vocab_size_(model_config.vocab_size),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
-        dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)) {}
+        dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
+        // Qwen3.5 MTP also runs under the EAGLE executor; gate on its draft descriptor.
+        align_qwen_mtp_multimodal_((sp_config.type == SP_TYPE_MTP || sp_config.type == SP_TYPE_EAGLE)
+                                   && (sp_config.model_type == "qwen35_moe_mtp"
+                                       || sp_config.model_type == "qwen35_dense_mtp"
+                                       || sp_config.model_type == "qwen3_next_mtp")) {}
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
@@ -59,6 +64,9 @@ public:
     bool gatherMtpDecodeModelInputFromDeviceState(const StreamGroups& stream_groups,
                                                   GptModelInputs&     model_input,
                                                   TensorHolder&       host_holder) const;
+
+    // Generated decode rows are all text, even for a multimodal request.
+    static void resetDecodeTextTokensMask(GptModelInputs& model_input);
 
     void expandTargetVerifyPositionIds(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 
@@ -134,6 +142,9 @@ public:
                                            std::vector<torch::Tensor>& draft_token_probs_list);
 
 protected:
+    // Run once on the global input, before TP broadcast and the draft CP split.
+    void alignPrefillMultimodalInputs(GptModelInputs& model_input, const torch::Tensor& input_lengths_host) const;
+
     void updateProposeTokens(const StreamGroups&                stream_groups,
                              const MergedOutput&                draft_prefill_output,
                              std::vector<StreamSpecUpdateInfo>& spec_update_infos) const;
@@ -165,6 +176,7 @@ protected:
     size_t  vocab_size_           = 0;
     bool    is_dspark_            = false;
     int32_t dspark_mask_token_id_ = -1;
+    bool    align_qwen_mtp_multimodal_ = false;
 
     // Decode-round constants are grow-only device buffers.  Keeping them on
     // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is

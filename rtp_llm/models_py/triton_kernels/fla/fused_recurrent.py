@@ -43,6 +43,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     block_map,
     sequence_lengths,
     block_map_stride_b: tl.int64,
+    max_block_size: tl.int32,
     scale,
     N,  # num of sequences
     T,  # num of tokens
@@ -117,6 +118,12 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
             load_block_offset = cal_block_idx(sequence_length - 1, SEQ_SIZE_PER_BLOCK)
+            # Clamp to the last allocated block (branchless): when sequence_length
+            # exceeds max_block_size * SEQ_SIZE_PER_BLOCK, load_block_offset reaches
+            # max_block_size — one past the end. Use tl.minimum to avoid if-branch
+            # which can cause phi-node type mismatch or register overflow during
+            # CUDA Graph capture on some backends.
+            load_block_offset = tl.minimum(load_block_offset, (max_block_size - 1).to(tl.int64))
             read_block_id = tl.load(
                 block_map + i_n * block_map_stride_b + load_block_offset
             ).to(tl.int64)
@@ -158,14 +165,29 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             write_block_offset = (
                 cal_block_idx(sequence_length, SEQ_SIZE_PER_BLOCK) + i_t
             )
+            # Guard OOB (branchless): clamp write_block_offset so block_map load
+            # stays in-bounds, then use write_ok flag to skip the actual store.
+            # Avoids an if-branch that can fail during CUDA Graph capture.
+            write_ok = write_block_offset < max_block_size
+            safe_write_offset = tl.minimum(write_block_offset, (max_block_size - 1).to(tl.int64))
             write_block_id = tl.load(
-                block_map + i_n * block_map_stride_b + write_block_offset
+                block_map + i_n * block_map_stride_b + safe_write_offset
             ).to(tl.int64)
-            p_ht = ht + write_block_id * stride_final_state_token
+            if write_ok:
+                p_ht = ht + write_block_id * stride_final_state_token
+                p_ht = p_ht + i_hv * K * V + o_v[:, None] * K + o_k[None, :]
+                tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
         else:
             p_ht = ht + (bos + i_t) * stride_final_state_token
-        p_ht = p_ht + i_hv * K * V + o_v[:, None] * K + o_k[None, :]
-        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+            p_ht = p_ht + i_hv * K * V + o_v[:, None] * K + o_k[None, :]
+            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+
+        if USE_INITIAL_STATE and INPLACE_FINAL_STATE and IS_CONTINUOUS_BATCHING:
+            # The next token must read the same stored state as a separate
+            # one-token decode. Keep this token's output above in FP32, then
+            # round feedback to the actual cache dtype (FP32 stays unchanged).
+            # ht is defined even when an out-of-range state write was skipped.
+            b_h = b_h.to(ht.dtype.element_ty).to(tl.float32)
 
         p_q += stride_qs
         p_k += stride_ks
@@ -218,9 +240,11 @@ def fused_recurrent_gated_delta_rule_fwd(
     ), "stride_qd, stride_kd, stride_vd must be 1"
 
     block_map_stride_b = 0
+    max_block_size = 0
     if block_map is not None:
         assert block_map.ndim == 2, "block_map must be a 2D tensor"
         block_map_stride_b = block_map.stride(0)
+        max_block_size = block_map.shape[1]
 
     grid = (NK, NV, N * HV)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
@@ -236,6 +260,7 @@ def fused_recurrent_gated_delta_rule_fwd(
         block_map=block_map,
         sequence_lengths=sequence_lengths,
         block_map_stride_b=block_map_stride_b,
+        max_block_size=max_block_size,
         scale=scale,
         N=N,
         T=T,

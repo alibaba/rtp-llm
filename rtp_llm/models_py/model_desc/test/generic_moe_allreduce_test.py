@@ -1,4 +1,4 @@
-"""CPU contract tests for GenericMoeLayer's unified TP all-reduce path."""
+"""GenericMoeLayer TP contracts and CUDA BF16 shared-expert rounding regression."""
 
 from types import SimpleNamespace
 from unittest import TestCase, main
@@ -7,7 +7,10 @@ from unittest.mock import MagicMock, Mock, patch
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group
-from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
+from rtp_llm.models_py.model_desc.generic_moe import (
+    GenericMoeLayer,
+    SigmoidGateScaleAdd,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
 from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 from rtp_llm.utils.model_weight import W
@@ -166,23 +169,83 @@ class GenericMoeUnifiedAllreduceTest(TestCase):
         self.assertTrue(layer.shared_expert.call_args.kwargs["skip_allreduce"])
 
     @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
-    def test_pure_tp_gate_is_merged_in_place_before_reduce(self, mock_all_reduce):
+    def test_pure_tp_gate_is_combined_before_reduce(self, mock_all_reduce):
         layer = _make_layer()
         hidden_states, routed_output, shared_output, gate_output, fused_moe = (
             _configure_forward(layer, gate_enabled=True)
         )
-        expected_input = routed_output.clone()
-        expected_input.add_(torch.sigmoid(gate_output) * shared_output)
+        expected_input = routed_output + torch.sigmoid(gate_output) * shared_output
         mock_all_reduce.side_effect = lambda tensor, group: tensor * 2
 
         result = layer(hidden_states)
 
         reduce_input = mock_all_reduce.call_args.args[0]
-        self.assertIs(reduce_input, routed_output)
         self.assertIs(layer.shared_expert_gate.call_args.args[0], hidden_states)
         torch.testing.assert_close(reduce_input, expected_input)
         torch.testing.assert_close(result, expected_input * 2)
         self.assertTrue(fused_moe.call_args.kwargs["skip_tp_allreduce"])
+
+    @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
+    def test_cuda_bf16_gate_rounds_before_single_tp_reduce(self, mock_all_reduce):
+        if not torch.cuda.is_available() or torch.version.hip is not None:
+            self.skipTest("CUDA BF16 kernel regression; CPU contracts run separately")
+        # Qwen3.5-397B hidden width and one-token / gamma4 verify widths.
+        # sigmoid(1) rounded to BF16 is exactly 0.73046875. With shared=1
+        # and routed=-0.73046875 the separately materialized BF16 sum is zero.
+        # Keeping sigmoid/mul/add in FP32 until the final cast is nonzero.
+        for tokens in (1, 5):
+            with self.subTest(tokens=tokens):
+                mock_all_reduce.reset_mock()
+                layer = _make_layer(ffn_tp_size=4, attn_tp_size=4, ep_size=1)
+                hidden = torch.zeros(tokens, 4096, device="cuda", dtype=torch.bfloat16)
+                routed = torch.full_like(hidden, -0.73046875)
+                shared = torch.ones_like(hidden)
+                gate = torch.ones(tokens, 1, device="cuda", dtype=torch.bfloat16)
+                layer.gate = Mock(return_value=torch.zeros(tokens, 4, device="cuda"))
+                layer.select_topk = Mock(
+                    side_effect=lambda logits, ids, weights: (
+                        ids.zero_(),
+                        weights.fill_(0.5),
+                    )
+                )
+                fused_moe = MagicMock(spec=FusedMoe, return_value=routed)
+                fused_moe.topk_ids_dtype = torch.int32
+                layer.fused_moe = fused_moe
+                layer.shared_expert = MagicMock(spec=DenseMLP, return_value=shared)
+                layer.shared_expert_gate = Mock(return_value=gate)
+                layer.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
+                layer.correction_bias = None
+                expected = torch.zeros_like(hidden)
+                # Exercise the real old CUDA kernel as a discriminating control,
+                # rather than approximating that backend with a mock merge.
+                fused_result = layer.sigmoid_gate_scale_add(
+                    gate, shared, routed.clone()
+                )
+                self.assertTrue(torch.isfinite(fused_result).all().item())
+                self.assertGreater(torch.count_nonzero(fused_result).item(), 0)
+                self.assertTrue(
+                    torch.equal(torch.sigmoid(gate), torch.full_like(gate, 0.73046875))
+                )
+                # Inspect the actual local tensor entering the one collective;
+                # a real multi-rank NCCL/model acceptance run is a separate test.
+                mock_all_reduce.side_effect = lambda tensor, group: tensor.clone()
+                result = layer(hidden)
+                mock_all_reduce.assert_called_once()
+                self.assertIs(mock_all_reduce.call_args.kwargs["group"], Group.TP)
+                self.assertTrue(
+                    torch.equal(mock_all_reduce.call_args.args[0], expected)
+                )
+                self.assertTrue(torch.equal(result, expected))
+                self.assertEqual(result.dtype, torch.bfloat16)
+                self.assertTrue(fused_moe.call_args.kwargs["skip_tp_allreduce"])
+                self.assertTrue(layer.shared_expert.call_args.kwargs["skip_allreduce"])
+                print(
+                    f"shared_expert_bf16 tokens={tokens} hidden=4096 "
+                    f"old_fused_nonzero={torch.count_nonzero(fused_result).item()} "
+                    f"old_fused_max_abs={fused_result.float().abs().max().item()} "
+                    "materialized_bf16_exact_zero=True",
+                    flush=True,
+                )
 
     @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
     def test_ep_reduces_shared_output_only(self, mock_all_reduce):

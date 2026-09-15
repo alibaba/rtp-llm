@@ -187,6 +187,69 @@ def test_fused_recurrent_narrow_block_map_view():
     assert_close("narrow cache", contiguous_cache, narrow_cache, 0.0)
 
 
+def test_fused_recurrent_logical_block_map_boundary():
+    """Logical bounds must exclude padded columns and preserve BF16 feedback."""
+    torch.manual_seed(42)
+    block_size = 2048
+    tokens, heads, value_heads, dim = 5, 2, 4, 32
+    huge_block_id = 1 << 22
+    # The extra physical columns contain invalid IDs. Using stride as the
+    # logical width would access them instead of suppressing an invalid write.
+    storage = torch.tensor(
+        [[1, 2] + [huge_block_id] * 6], dtype=torch.int32, device="cuda"
+    )
+    bounded_map = storage[:, :2]
+    assert bounded_map.shape == (1, 2) and bounded_map.stride(0) == 8
+    for dtype in (torch.bfloat16, torch.float32):
+        q = torch.randn(1, tokens, heads, dim, device="cuda", dtype=dtype)
+        k = torch.randn_like(q)
+        v = torch.randn(1, tokens, value_heads, dim, device="cuda", dtype=dtype)
+        beta = torch.rand(1, tokens, value_heads, device="cuda", dtype=dtype)
+        g = -torch.rand(1, tokens, value_heads, device="cuda")
+        initial = torch.randn(9, value_heads, dim, dim, device="cuda", dtype=dtype)
+        # Partial writes, write-only OOB, and both read/write OOB. These use
+        # actual LINEAR block spacing, but are synthetic operator tests.
+        for length in (block_size + 1, 2 * block_size + 1, 2 * block_size + 2):
+            bounded_state = initial.clone()
+            reference_state = initial.clone()
+            reference_ids = list(range(1, 9))
+            read_column = (length - 2) // block_size
+            if read_column >= 2:
+                # A valid control table selects the bounded path's last state;
+                # all later outputs persist to private valid slots.
+                reference_ids[read_column] = 2
+            reference_map = torch.tensor(
+                [reference_ids], dtype=torch.int32, device="cuda"
+            )
+            lengths = torch.tensor([length], dtype=torch.int32, device="cuda")
+
+            def run(state, table):
+                return fused_recurrent_gated_delta_rule(
+                    q=q, k=k, v=v, beta=beta, g=g, initial_state=state,
+                    block_map=table, sequence_lengths=lengths,
+                    seq_size_per_block=block_size, use_qk_l2norm_in_kernel=True,
+                    inplace_final_state=True,
+                )[0]
+
+            expected_output = run(reference_state, reference_map)
+            actual_output = run(bounded_state, bounded_map)
+            torch.cuda.synchronize()
+            torch.testing.assert_close(actual_output, expected_output, rtol=0, atol=0)
+            assert torch.isfinite(actual_output).all()
+            expected_state = initial.clone()
+            first_write_column = (length - 1) // block_size
+            for step in range(tokens):
+                column = first_write_column + step
+                if column < 2:
+                    block_id = column + 1
+                    expected_state[block_id].copy_(reference_state[block_id])
+            # Every skipped destination, including the adjacent sentinel states,
+            # stays unchanged. This also checks all five iterations when p_ht
+            # is never constructed in the guarded store path.
+            torch.testing.assert_close(bounded_state, expected_state, rtol=0, atol=0)
+            assert torch.equal(storage[:, 2:], torch.full_like(storage[:, 2:], huge_block_id))
+
+
 if __name__ == "__main__":
     H = 16
     HV = 32
@@ -200,3 +263,4 @@ if __name__ == "__main__":
                 bs, seq, H, HV, D, scale, gate_logit_normalizer, torch.bfloat16
             )
     test_fused_recurrent_narrow_block_map_view()
+    test_fused_recurrent_logical_block_map_boundary()

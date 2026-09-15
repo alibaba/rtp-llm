@@ -231,9 +231,17 @@ class GenericMoeLayer(nn.Module):
                 # rank-consistent because hidden_states are replicated across
                 # TP ranks, so it is safe to apply it before the single
                 # all-reduce.
-                experts_output = self._merge_shared_expert_output(
-                    hidden_states, experts_output, shared_expert_output
-                )
+                if self.shared_expert_gate is not None:
+                    gate_output = self.shared_expert_gate(hidden_states)
+                    # Materialize each BF16 elementwise step before the local
+                    # routed/shared sum, then reduce once (vLLM late-reduce
+                    # semantics) instead of the fused sigmoid-gate scale-add.
+                    shared_expert_output = (
+                        torch.sigmoid(gate_output) * shared_expert_output
+                    )
+                    experts_output = experts_output + shared_expert_output
+                else:
+                    experts_output = experts_output + shared_expert_output
                 experts_output = all_reduce(experts_output, group=Group.TP)
             elif self.use_ep_shared_allreduce:
                 # EP mode: routed expert output is already complete

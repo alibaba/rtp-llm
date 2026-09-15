@@ -412,17 +412,9 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
 class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
     def _get_fla_block_map(self, attn_inputs: PyAttentionInputs) -> torch.Tensor:
         block_map = attn_inputs.kv_cache_kernel_block_id_device
-        if (
-            attn_inputs.is_cuda_graph
-            and block_map is not None
-            and block_map.ndim == 2
-            and block_map.shape[1] > 1
-        ):
-            # CUDA graph capture allocates a fixed-width block table, while the
-            # recurrent FLA decode kernel consumes only the first logical block.
-            # Keep the original row stride in this narrow view: FLA receives it
-            # explicitly and uses it to advance between batch rows.
-            return block_map[:, :1]
+        # Continuous decoding can read a later logical block and verification
+        # writes one state slot per token. Preserve both the true logical width
+        # and the row stride so kernel bounds checks never discard live slots.
         return block_map
 
     def _conv1d(

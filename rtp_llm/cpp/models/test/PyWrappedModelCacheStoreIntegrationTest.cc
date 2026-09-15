@@ -11,14 +11,18 @@
 #include <utility>
 #include <vector>
 
+#include <c10/core/InferenceMode.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <torch/extension.h>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -484,7 +488,7 @@ py::dict serializeResult(const RecordingCacheStore& store, const std::map<std::s
     return result;
 }
 
-py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::string& scenario_name) {
+void ensureTestRuntime() {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() {
         initRuntime(/*device_id=*/0,
@@ -492,7 +496,10 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
                     /*enable_comm_overlap=*/false,
                     MlaOpsType::AUTO);
     });
+}
 
+py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::string& scenario_name) {
+    ensureTestRuntime();
     auto scenario    = makeScenario(scenario_name);
     auto cache_store = std::make_shared<RecordingCacheStore>();
     auto manager     = std::make_shared<KVCacheManager>(scenario.manager_config,
@@ -543,6 +550,187 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
     return serializeResult(*cache_store, scenario.base_addresses);
 }
 
+CacheConfig makeMropeGraphCacheConfig(const AttentionConfigs& attention) {
+    ParallelismConfig parallelism;
+    KVCacheSpecDesc desc;
+    desc.tag        = "full";
+    desc.cache_type = KVCacheSpecType::MultiHeadAttention;
+    desc.dtype      = DataType::TYPE_FP32;
+    SpecBuildContext context;
+    context.dtype                   = desc.dtype;
+    context.seq_size_per_block       = 64;
+    context.kernel_tokens_per_block  = 64;
+    context.attn_config              = &attention;
+    context.parallelism_config      = &parallelism;
+    auto spec = MHAKVCacheSpec::build(desc, context);
+
+    CacheConfig config;
+    config.dtype                          = desc.dtype;
+    config.layer_num                      = 1;
+    config.layer_all_num                  = 1;
+    config.block_num                      = kPhysicalBlocks;
+    config.seq_size_per_block             = 64;
+    config.kernel_seq_size_per_block      = 64;
+    config.kv_block_stride_bytes          = spec->block_size_bytes();
+    config.kv_block_size_bytes            = config.kv_block_stride_bytes;
+    config.block_size_bytes               = config.kv_block_stride_bytes;
+    config.use_independent_block_pools    = true;
+    config.group_block_layout_initialized = true;
+
+    GroupBase group;
+    group.tag                       = desc.tag;
+    group.spec                      = std::move(spec);
+    group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.policy.explicit_block_num = kPhysicalBlocks;
+    group.layer_ids                 = {kLayerId};
+    group.block_num                 = kPhysicalBlocks;
+    group.local_kv_head_num         = 1;
+    group.seq_size_per_block        = 64;
+    group.kernel_seq_size_per_block = 64;
+    group.kv_block_stride_bytes     = config.kv_block_stride_bytes;
+    LayerBase layer;
+    layer.layer_id   = kLayerId;
+    layer.group_tags = {desc.tag};
+    config.setTopology({std::move(group)}, {std::move(layer)});
+    return config;
+}
+
+py::list runMropeGraphPreparationScenario(py::object py_model) {
+    // Match NormalEngine::loop/preRun across capture, preparation and replay.
+    // Capture creates inference tensors that prepare updates in place.
+    c10::InferenceMode inference_guard(true);
+    ensureTestRuntime();
+    Weights weights;
+    weights.layers.resize(1);
+    GptModelDescription description;
+    description.data_type                        = DataType::TYPE_FP32;
+    description.norm_type                        = NormType::rmsnorm;
+    description.attention_conf.head_num          = 1;
+    description.attention_conf.kv_head_num       = 1;
+    description.attention_conf.size_per_head    = 4;
+    description.attention_conf.rope_config.style = RopeStyle::Mrope;
+    description.attention_conf.rope_config.index_factor = 3;
+    auto config = makeMropeGraphCacheConfig(description.attention_conf);
+    // Real MHA elements and dtype: [physical block, K/V, head, token, dim].
+    // The opaque cache-store fixtures above intentionally use byte buffers;
+    // those buffers do not satisfy KVCache::getLayerCache's MHA view contract.
+    auto storage = torch::zeros({static_cast<int64_t>(kPhysicalBlocks), 2, 1, 64, 4},
+                                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    GroupedCacheLayerLayout::GroupLayouts group_layouts;
+    group_layouts.emplace("full", CacheLayerLayout(std::vector<BlockBufferPtrInfo>{{storage, torch::Tensor()}}));
+    GroupedCacheLayerLayout layout(config.topologyPtr(), std::move(group_layouts));
+    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
+    HWKernelConfig hw_config;
+    hw_config.enable_cuda_graph = true;
+    // MTP prefill captures multiples of gamma+1, i.e. [5,10] for B<=2.
+    ConcurrencyConfig concurrency;
+    concurrency.concurrency_limit = 2;
+    RuntimeConfig runtime;
+    runtime.fifo_scheduler_config.max_context_batch_size = 2;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_EAGLE;
+    sp_config.model_type        = "qwen35_moe_mtp";
+    sp_config.gen_num_per_cycle = 4;
+    GptModelInitParams params{weights,
+                              description,
+                              layout,
+                              /*model_id=*/1,
+                              ParallelismConfig{},
+                              hw_config,
+                              ProfilingDebugLoggingConfig{},
+                              runtime,
+                              concurrency,
+                              sp_config,
+                              DeviceResourceConfig{},
+                              MlaOpsType::AUTO,
+                              /*max_seq_len=*/256,
+                              /*hidden_size=*/4,
+                              /*tokens_per_block=*/64,
+                              /*kernel_tokens_per_block=*/64,
+                              manager};
+    PyWrappedModel model(params, py_model, /*is_prefill_cuda_graph_mode=*/true);
+    auto* runner = dynamic_cast<CudaGraphRunner*>(model.graph_runner_);
+    if (!runner) {
+        throw std::runtime_error("mRoPE preparation regression requires the real CUDA graph runner");
+    }
+
+    ModelConfig model_config;
+    model_config.max_seq_len                           = 256;
+    model_config.vocab_size                            = 32;
+    model_config.num_layers                            = 1;
+    model_config.mm_model_config.mm_position_ids_style = 2;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, config, sp_config, /*warm_up=*/false);
+    py::list results;
+    const std::vector<std::vector<int32_t>> accept_lengths{{1, 3}, {3, 1}};
+    for (size_t round = 0; round < accept_lengths.size(); ++round) {
+        auto inputs = makeInputs({5, 5},
+                                 {701, 702},
+                                 {11, 12, 13, 14, 21, 22, 23, 24},
+                                 4,
+                                 {1, 2, 3, 4, 2, 3, 4, 5},
+                                 1,
+                                 4,
+                                 64,
+                                 config.kv_block_stride_bytes);
+        inputs.pd_separation          = false;
+        inputs.use_opaque_kv_cache_store = false;
+        inputs.request_pd_separation = pinnedBoolTensor(2, false);
+        inputs.prefix_lengths        = pinnedTensor({63, 127}, {2});
+        std::vector<int32_t> positions;
+        for (int request = 0; request < 2; ++request) {
+            for (int step = 0; step < 5; ++step) {
+                for (int axis = 0; axis < 3; ++axis) {
+                    positions.push_back(static_cast<int32_t>(round * 1000) + request * 300 + axis * 70 + step);
+                }
+            }
+        }
+        inputs.combo_position_ids = pinnedTensor(positions, {30});
+        GptModelOutputs target_output;
+        target_output.all_hidden_states =
+            torch::arange(40, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).reshape({10, 4});
+        speculative::SpeculativeSamplerOutput rejection;
+        rejection.accept_len    = pinnedTensor(accept_lengths[round], {2});
+        rejection.accept_tokens = pinnedTensor({10, 11, 12, 13, 14, 20, 21, 22, 23, 24}, {2, 5});
+        torch::Tensor compact_hidden;
+        TensorHolder host_holder;
+        processor.updateDecodePostDraftModelInput(inputs, target_output, rejection, 2, compact_hidden, host_holder);
+
+        // The executor test covers when preparation is allowed. This fixture
+        // follows its host-state contract: prepare only after real rejection.
+        model.prepareAttentionInputs(inputs);
+        py::dict result;
+        result["prepared_before_forward"] = runner->prepared_attention_inputs_.load(std::memory_order_acquire);
+        result["graph_key"]               = model.graph_state_.current_real_graph_seq_len;
+        result["token_count"]             = inputs.combo_tokens.numel();
+        auto& captured = runner->graph_instances_.at(model.graph_state_.current_real_graph_seq_len).mem_hold_.py_model_inputs_;
+        // Single-group graph capture and setupKVCacheForAttentionInputs both
+        // intentionally expose the direct PyAttentionInputs fast path.
+        result["attention_group_count"] = layout.topology().groups().size();
+        result["legacy_attention_inputs"] = captured.attention_inputs_by_tag.empty();
+        result["capture_token_capacity"] = captured.input_ids.numel();
+        result["capture_position_capacity"] = captured.combo_position_ids.numel();
+        result["positions_before_forward"] = captured.combo_position_ids.narrow(0, 0, 12).reshape({4, 3}).cpu().clone();
+        result["lengths_before_forward"] = captured.attention_inputs.input_lengths_device.cpu().clone();
+        result["prefixes_before_forward"] = captured.attention_inputs.prefix_lengths_device.cpu().clone();
+
+        // Exercise the second PyWrappedModel graph view separately: only a
+        // block-table refresh occurs between preparation and actual replay.
+        inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id.clone().pin_memory();
+        inputs.kv_cache_kernel_block_id[0][0][0] = static_cast<int32_t>(round + 3);
+        model.updateKVCacheKernelBlockId(inputs);
+        result["block_before_forward"] =
+            captured.attention_inputs.kv_cache_kernel_block_id_device[0][0].cpu().item<int32_t>();
+        const int calls_before = py_model.attr("forward_calls").cast<int>();
+        result["output"] = model.forward(inputs).all_hidden_states.cpu().clone();
+        result["python_forward_delta"] = py_model.attr("forward_calls").cast<int>() - calls_before;
+        result["prepared_after_forward"] = runner->prepared_attention_inputs_.load(std::memory_order_acquire);
+        results.append(std::move(result));
+    }
+    return results;
+}
+
 }  // namespace
 }  // namespace rtp_llm::test
 
@@ -552,4 +740,5 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
           &rtp_llm::test::runPyWrappedModelCacheStoreScenario,
           py::arg("py_model"),
           py::arg("scenario_name"));
+    m.def("run_mrope_graph_preparation", &rtp_llm::test::runMropeGraphPreparationScenario, py::arg("py_model"));
 }
