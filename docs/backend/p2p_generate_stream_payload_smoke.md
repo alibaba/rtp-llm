@@ -71,9 +71,9 @@ D 完成后，两端测试均应 PASSED，P 自动清理退出。换用 INT8 或
 
 控制端口 29800、两端动态分配的 gRPC 和传输端口需互通。GPU 选择遵循各自远端运行环境的 `CUDA_VISIBLE_DEVICES`；测试内部使用可见设备 0。
 
-跨机默认请求预算 120 秒、加载预算 90 秒；同机仍为 10 秒、3 秒。可在 D 设置 `P2P_SMOKE_REQUEST_TIMEOUT_MS` 和 `P2P_SMOKE_LOAD_TIMEOUT_MS`，加载预算必须小于请求预算，均不超过 600000 毫秒；D 通过控制通道告知 P。外层 gRPC watchdog 比请求预算多 2 秒，控制通道和清理等待使用单调时钟。
+同机和跨机默认请求预算均为 10 秒、加载预算均为 3 秒。可在 D 设置 `P2P_SMOKE_REQUEST_TIMEOUT_MS` 和 `P2P_SMOKE_LOAD_TIMEOUT_MS`，加载预算必须小于请求预算，均不超过 600000 毫秒；D 通过控制通道告知 P。外层 gRPC watchdog 比请求预算多 2 秒，控制通道和清理等待使用单调时钟。
 
-用例不要求修改宿主机时间。生产 P2P 仍传递并检查绝对 deadline，因此加载预算需覆盖 P 比 D 快的时差和实际传输耗时；这只能容纳预算范围内的时差，不是时钟无关的生产协议。缺层反例仍等待真实加载错误，不能仅凭外层 watchdog 超时通过。
+用例不要求修改宿主机时间。D 向 P 传递完整配置 timeout，不扣除 D 已耗时；P 在请求首次到达时建立本地 deadline，同 key 的后续调用不能续期。StartLoad 和 TCP/RDMA 数据请求也传相对时长，接收侧转换为本地 deadline；D 仍按自己的本地 deadline 约束等待。本次修改不包含 TP 组内的 deadline 广播，因此单 rank 的跨机通过不代表跨机 TP 组也消除了时钟依赖。缺层反例仍等待真实加载错误，不能仅凭外层 watchdog 超时通过。
 
 ## PD 取消传播测试
 
@@ -104,4 +104,11 @@ D 完成后，两端测试均应 PASSED，P 自动清理退出。换用 INT8 或
 
 归档目录：111 的 `/home/yanzhan.yzh/p2p-payload-20260915/build_logs/`。`p2p_portfix_build.log` 为构建日志，`payload_112/{tcp,rdma}_stability112.log` 为三轮记录，对应 `.signal` 均为 0。测试运行副本位于两台机器的 `/dev/shm/yzh-p2p-payload-20260915/runtime-rdma-2663f60457/`。
 
-跨机验证尚未完成：112 时钟比 111 慢约 46 秒，导致绝对 deadline 在 P 端已过期；尚未校准宿主机时钟。默认多网卡的 RDMA 首轮也出现超时，单网卡通过不能证明其他网卡可用。112 根盘写满后，重跑日志改存 `/dev/shm` 并归档回 111。
+上述旧版本的跨机验证未完成：112 时钟比 111 慢约 46 秒，导致绝对 deadline 在 P 端已过期；未校准宿主机时钟。默认多网卡的 RDMA 首轮也出现超时，单网卡通过不能证明其他网卡可用。112 根盘写满后，重跑日志改存 `/dev/shm` 并归档回 111。
+
+
+## 相对 timeout 协议验证
+
+`75155a03d2`：111/112 时差约 47 秒、时钟未调整，TCP/RDMA 跨机各五场景全部通过（请求 20 秒、加载 10 秒）；112 同机双进程两种传输各五场景 × 三轮通过（默认 10 秒、3 秒）。跨机 RDMA 使用 `mlx5_bond_0` 和 `ACCL_CONTEXT_CQE=1024`，未强制 IPv6。
+
+相关 UT 共 10 个目标，4 通过、6 失败，尚未全部闭环。版本、日志、预算差异和失败清单见 [相对 timeout 验证记录](p2p_relative_timeout_validation.md)。
