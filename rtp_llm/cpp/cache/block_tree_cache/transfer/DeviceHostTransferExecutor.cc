@@ -1,6 +1,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
 
+#include <algorithm>
+#include <cstdlib>
 #include <map>
+#include <string_view>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
@@ -8,6 +11,23 @@
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
 namespace rtp_llm {
+
+namespace {
+
+std::string_view configurableStrategyName(const DeviceHostCopyStrategy& strategy) {
+    if (dynamic_cast<const CudaBatchDeviceHostCopyStrategy*>(&strategy) != nullptr) {
+        return "cuda_batch";
+    }
+    if (dynamic_cast<const StagedSmDeviceHostCopyStrategy*>(&strategy) != nullptr) {
+        return "sm";
+    }
+    if (dynamic_cast<const GenericMultiCopyDeviceHostCopyStrategy*>(&strategy) != nullptr) {
+        return "generic";
+    }
+    return {};
+}
+
+}  // namespace
 
 DeviceHostTransferExecutor::DeviceHostTransferExecutor(BlockTreeTaskPool&    transfer_task_pool,
                                                        size_t                max_descriptors_per_batch,
@@ -18,6 +38,22 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(BlockTreeTaskPool&    tra
     strategies_.push_back(std::make_unique<CudaBatchDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<StagedSmDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<GenericMultiCopyDeviceHostCopyStrategy>());
+
+    // Promote only a configurable existing strategy. Additional strategies retain
+    // their default relative order unless one of these names is selected.
+    const char* preferred = std::getenv("BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY");
+    if (preferred != nullptr && preferred[0] != '\0') {
+        const std::string_view requested(preferred);
+        const auto selected = std::find_if(strategies_.begin(), strategies_.end(), [&](const auto& strategy) {
+            return configurableStrategyName(*strategy) == requested;
+        });
+        if (selected == strategies_.end()) {
+            RTP_LLM_LOG_WARNING("invalid BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY='%s'; keeping default copy order",
+                                preferred);
+        } else {
+            std::rotate(strategies_.begin(), selected, selected + 1);
+        }
+    }
 }
 
 TransferStatus DeviceHostTransferExecutor::executeBatch(const std::vector<HostBufferView>&     hosts,
