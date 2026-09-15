@@ -14,7 +14,7 @@ final class MockMemoryBlockCache {
     private final int capacity;
     private final LongSupplier clock;
     private final LinkedHashMap<Long, Entry> entries = new LinkedHashMap<>(16, .75f, true);
-    private final Map<Long, Entry> pending = new HashMap<>();
+    private final Set<Entry> pending = new HashSet<>();
     private final DoubleConsumer onEviction;
     private long evictions, writeRejected, generation;
     private int pinned;
@@ -78,10 +78,15 @@ final class MockMemoryBlockCache {
                 closed = true;
                 boolean changed = false;
                 for (var r : reserved.entrySet()) {
-                    if (pending.remove(r.getKey(), r.getValue())) {
-                        r.getValue().born = clock.getAsLong();
-                        entries.put(r.getKey(), r.getValue());
-                        changed = true;
+                    if (pending.remove(r.getValue())) {
+                        // putCommitted touches an existing complete key, retaining its
+                        // backing, birth time and in-flight readers. The duplicate copy
+                        // backing is released rather than replacing the existing entry.
+                        if (entries.get(r.getKey()) == null) {
+                            r.getValue().born = clock.getAsLong();
+                            entries.put(r.getKey(), r.getValue());
+                            changed = true;
+                        }
                     }
                 }
                 return changed;
@@ -91,22 +96,32 @@ final class MockMemoryBlockCache {
             synchronized (MockMemoryBlockCache.this) {
                 if (closed) return;
                 closed = true;
-                reserved.forEach((k, e) -> pending.remove(k, e));
+                reserved.values().forEach(pending::remove);
             }
         }
     }
 
     synchronized WriteLease beginWrite(List<Long> keys) {
-        Set<Long> missing = new LinkedHashSet<>();
-        // No get(): an already committed prefix needs no copy or LRU refresh.
-        for (Long k : keys) if (!entries.containsKey(k) && !pending.containsKey(k)) missing.add(k);
-        if (missing.size() > availableBlocks()) { writeRejected++; return null; }
-        while (capacity - entries.size() - pending.size() < missing.size()) {
-            if (!evictOne()) { writeRejected++; return null; }
-        }
+        // Real asyncWrite skips only the contiguous committed prefix, without
+        // touching it. A hole starts a copy plan for the entire remaining suffix.
+        int start = 0;
+        while (start < keys.size() && entries.containsKey(keys.get(start))) start++;
         Map<Long, Entry> reserved = new LinkedHashMap<>();
-        for (Long k : missing) {
-            Entry e = new Entry(0); pending.put(k, e); reserved.put(k, e);
+        for (int i = start; i < keys.size(); i++) {
+            Long key = keys.get(i);
+            if (reserved.containsKey(key)) continue;
+            // Allocate one backing at a time, including already-cached suffix
+            // keys and concurrent copies. Prior evictions survive a later failure.
+            while (entries.size() + pending.size() >= capacity) {
+                if (!evictOne()) {
+                    reserved.values().forEach(pending::remove);
+                    writeRejected++;
+                    return null;
+                }
+            }
+            Entry e = new Entry(0);
+            pending.add(e);
+            reserved.put(key, e);
         }
         return new WriteLease(reserved);
     }
@@ -123,13 +138,10 @@ final class MockMemoryBlockCache {
         return false;
     }
 
-    /** Compatibility path when copy lifecycle is disabled. */
+    /** Synchronous copy path; the lifecycle switch only controls explicit pins. */
     synchronized void write(List<Long> keys) {
-        for (Long k : keys) {
-            if (entries.get(k) != null || pending.containsKey(k)) continue;
-            if (entries.size() + pending.size() == capacity && !evictOne()) { writeRejected++; break; }
-            entries.put(k, new Entry(clock.getAsLong()));
-        }
+        var write = beginWrite(keys);
+        if (write != null) write.commit();
     }
     synchronized int pinnedBlocks() { return pinned; }
     synchronized int pendingBlocks() { return pending.size(); }

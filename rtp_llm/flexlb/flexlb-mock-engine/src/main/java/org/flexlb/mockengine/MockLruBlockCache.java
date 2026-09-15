@@ -175,10 +175,6 @@ final class MockLruBlockCache {
             hitKeys = new ArrayList<>(hitKeys.subList(0, needBlocks));
         }
         int newBlocks = needBlocks - hitKeys.size();
-        int avail = availableBlocks();
-        if (newBlocks > avail || avail - newBlocks < reserveBlocks()) {
-            return new AllocationOutcome(null, failureFamily(newBlocks));
-        }
         // Allocation coupling: free first, then whole-chain eviction.
         // Pin hits before selecting an eviction chain: a reused block must
         // never disappear between matching and reference acquisition.
@@ -186,6 +182,13 @@ final class MockLruBlockCache {
             if (blocks.get(key) == 0) referencedBlocks++;
             blocks.put(key, blocks.get(key) + 1);
             refreshLeaf(key);
+        }
+        // Real initMalloc references hits before checking available capacity.
+        // Roll back our references on rejection, retaining other owners' pins.
+        int avail = availableBlocks();
+        if (newBlocks > avail || avail - newBlocks < reserveBlocks()) {
+            dereference(hitKeys);
+            return new AllocationOutcome(null, failureFamily(newBlocks));
         }
         evictChains(newBlocks - freeBlocks(), "admission");
         if (freeBlocks() < newBlocks) {
@@ -284,10 +287,6 @@ final class MockLruBlockCache {
             hitKeys = new ArrayList<>(hitKeys.subList(0, totalBlocksDemand));
         }
         int netNew = totalBlocksDemand - hitKeys.size();
-        int avail = availableBlocks();
-        if (netNew > avail || avail - netNew < reserveBlocks()) {
-            return new AllocationOutcome(null, failureFamily(netNew));
-        }
         // Pin the reused blocks FIRST: each reference moves the key out of the
         // evictable pure-LRU set, so the LRU-tail eviction below can never
         // sacrifice a block this request is about to reuse.
@@ -295,6 +294,13 @@ final class MockLruBlockCache {
             if (blocks.get(key) == 0) referencedBlocks++;
             blocks.put(key, blocks.get(key) + 1);
             refreshLeaf(key);
+        }
+        // Real initMalloc references hits before checking available capacity.
+        // Roll back our references on rejection, retaining other owners' pins.
+        int avail = availableBlocks();
+        if (netNew > avail || avail - netNew < reserveBlocks()) {
+            dereference(hitKeys);
+            return new AllocationOutcome(null, failureFamily(netNew));
         }
         // Free-first allocation for the net-new part (same coupling as
         // acquire: eviction trades prefix reuse for capacity).

@@ -23,7 +23,7 @@ class MockMemoryBlockCacheTest {
         cache.write(List.of(3L)); // key 2 is now oldest
         assertEquals(List.of(1L, 3L), cache.keys());
         time.set(20_000_000);
-        cache.write(List.of(1L)); // touches without restarting age
+        cache.match(List.of(1L), 0); // a read touches without restarting age
         cache.write(List.of(4L));
         time.set(30_000_000);
         cache.write(List.of(5L));
@@ -193,6 +193,126 @@ class MockMemoryBlockCacheTest {
             }
             assertEquals(java.util.Set.of(1L, 2L, 3L), new java.util.HashSet<>(mem.keys()));
             assertEquals(3, p.whaleMetrics().get("mock_memory_cache_read_blocks_total").longValue());
+        }
+    }
+
+    @Test void holeCopiesExistingSuffixAndCommitTouchesWithoutReplacingPinnedEntry() {
+        var time = new AtomicLong();
+        var ages = new ArrayList<Double>();
+        var c = new MockMemoryBlockCache(6, ages::add, time::get);
+        c.write(List.of(1L, 3L, 4L));
+        var read = c.pinRead(List.of(3L), 0);
+        var copy = c.beginWrite(List.of(1L, 2L, 3L));
+        assertEquals(List.of(2L, 3L), copy.keys(), "only the continuous prefix skips copying");
+        assertEquals(2, c.pendingBlocks(), "existing suffix still needs a temporary backing");
+        time.set(10_000_000);
+        copy.commit();
+        assertEquals(List.of(1L, 4L, 2L, 3L), c.keys());
+        assertEquals(1, c.pinnedBlocks(), "duplicate commit must preserve existing readers");
+        assertEquals(0, c.pendingBlocks());
+        read.close();
+        assertEquals(0, c.pinnedBlocks());
+        time.set(20_000_000);
+        c.write(List.of(5L, 6L, 7L, 8L, 9L, 10L));
+        assertEquals(List.of(20.0, 20.0, 10.0, 20.0), ages,
+                "suffix refresh preserves the original birth time of key 3");
+    }
+
+    @Test void failedWriteKeepsPriorEvictionsButReleasesItsReservations() {
+        var c = new MockMemoryBlockCache(3, ignored -> {});
+        c.write(List.of(1L, 2L, 3L));
+        var read = c.pinRead(List.of(1L), 0);
+        assertNull(c.beginWrite(List.of(4L, 5L, 6L)));
+        assertEquals(List.of(1L), c.keys());
+        assertEquals(2, c.evictions(), "failed write does not restore already evicted keys");
+        assertEquals(0, c.pendingBlocks());
+        assertEquals(2, c.availableBlocks());
+        assertEquals(1, c.writeRejected());
+        read.close();
+        c.write(List.of(4L, 5L, 6L));
+        assertEquals(List.of(4L, 5L, 6L), c.keys());
+    }
+
+    @Test void concurrentCopiesOwnSeparateBackingsAndCommitCannotResetReaders() {
+        var c = new MockMemoryBlockCache(3, ignored -> {});
+        var first = c.beginWrite(List.of(1L));
+        var second = c.beginWrite(List.of(1L));
+        assertEquals(2, c.pendingBlocks());
+        first.commit();
+        var read = c.pinRead(List.of(1L), 0);
+        assertFalse(second.commit(), "duplicate backing is discarded");
+        assertEquals(1, c.size());
+        assertEquals(1, c.pinnedBlocks());
+        assertEquals(0, c.pendingBlocks());
+        read.close();
+        assertEquals(3, c.availableBlocks());
+    }
+
+    @Test void nativePrefillCompletionHonorsDeviceAndMemoryWriteFlags() throws Exception {
+        var m = model("{\"enabled\":true,\"capacity_blocks\":10,\"copy_lifecycle\":true}");
+        m.nativeTokenCacheKeys = true;
+        try (var cluster = MockEngineTestCluster.create(m, 61060, 1, 0)) {
+            var p = cluster.prefill(0);
+            var gpu = (MockLruBlockCache) field(p, "cache");
+            var mem = (MockMemoryBlockCache) field(p, "memoryCache");
+            for (int mode = 0; mode < 4; mode++) {
+                gpu.clear(); mem.clear();
+                var cfg = EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(1);
+                // Descriptors preserve compatibility with the pinned master's proto jar.
+                for (String name : List.of("reuse_cache", "enable_device_cache", "enable_memory_cache")) {
+                    boolean enabled = name.equals("reuse_cache") ? mode != 0
+                            : name.equals("enable_device_cache") ? mode == 1 || mode == 3 : mode >= 2;
+                    cfg.setField(cfg.getDescriptorForType().findFieldByName(name), enabled);
+                }
+                var input = EngineRpcService.GenerateInputPB.newBuilder().setRequestId(900 + mode)
+                        .addAllTokenIds(java.util.Collections.nCopies(128, 19 + mode)).setGenerateConfig(cfg).build();
+                var done = new java.util.concurrent.CountDownLatch(1);
+                var error = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+                p.generateStreamCall(input, new io.grpc.stub.StreamObserver<EngineRpcService.GenerateOutputsPB>() {
+                    public void onNext(EngineRpcService.GenerateOutputsPB v) {
+                        if (v.hasErrorInfo()) error.set(new AssertionError(v.getErrorInfo()));
+                    }
+                    public void onError(Throwable t) { error.set(t); done.countDown(); }
+                    public void onCompleted() { done.countDown(); }
+                });
+                assertTrue(done.await(3, java.util.concurrent.TimeUnit.SECONDS));
+                assertNull(error.get());
+                long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+                while (gpu.availableBlocks() != gpu.totalBlocks() && System.nanoTime() < deadline) Thread.sleep(5);
+                assertEquals(gpu.totalBlocks(), gpu.availableBlocks());
+                assertEquals(mode == 1 || mode == 3 ? 2 : 0, gpu.lruKeyBlocks());
+                assertEquals(mode >= 2 ? 2 : 0, mem.size());
+                assertEquals(0, mem.pendingBlocks());
+            }
+        }
+    }
+
+    @Test void cancelledPrefillCannotPublishCacheFromItsLateForwardCallback() throws Exception {
+        var m = model("{\"enabled\":true,\"capacity_blocks\":10,\"copy_lifecycle\":true}");
+        m.setOverrideFixedPrefillMs(100.0);
+        try (var cluster = MockEngineTestCluster.create(m, 61080, 1, 0)) {
+            var p = cluster.prefill(0);
+            var gpu = (MockLruBlockCache) field(p, "cache");
+            var mem = (MockMemoryBlockCache) field(p, "memoryCache");
+            var input = EngineRpcService.GenerateInputPB.newBuilder().setRequestId(950)
+                    .addAllTokenIds(java.util.Collections.nCopies(128, 17))
+                    .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(1)
+                            .setUniqueKey("{\"input_len\":128,\"output_len\":1,\"block_cache_keys\":[91,92]}"))
+                    .build();
+            p.generateStreamCall(input, new io.grpc.stub.StreamObserver<EngineRpcService.GenerateOutputsPB>() {
+                public void onNext(EngineRpcService.GenerateOutputsPB v) { }
+                public void onError(Throwable t) { }
+                public void onCompleted() { }
+            });
+            p.cancel(950);
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3);
+            var active = (java.util.concurrent.atomic.AtomicInteger) field(p, "activePrefillBatches");
+            while (active.get() != 0 && System.nanoTime() < deadline) Thread.sleep(5);
+            assertEquals(0, active.get(), "the late forward callback must have run");
+            assertEquals(0, gpu.lruKeyBlocks());
+            assertEquals(gpu.totalBlocks(), gpu.availableBlocks());
+            assertEquals(0, mem.size());
+            assertEquals(0, mem.pendingBlocks());
         }
     }
 

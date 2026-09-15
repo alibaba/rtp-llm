@@ -89,6 +89,28 @@ class BlockPoolCapacityTest {
     }
 
     @Test
+    void cachedHitsMustBeChargedBeforeWatermarkForBothAdmissionPaths() {
+        for (boolean decode : new boolean[] {false, true}) {
+            var cache = new MockLruBlockCache(6, .05);
+            var keys = List.of(1L, 2L, 3L);
+            cache.admit(keys);
+            var other = cache.acquire(1, List.of());
+            assertEquals(5, cache.availableBlocks());
+            var rejected = decode ? cache.acquireWithReuseDetailed(5, keys) : cache.acquireDetailed(5, keys);
+            assertEquals(MockLruBlockCache.AllocationFailure.RETRYABLE, rejected.failure());
+            assertEquals(5, cache.availableBlocks(), "failed admission rolls back newly pinned hits");
+            assertEquals(0, cache.referencedKeyBlocks());
+            assertEquals(0, cache.evictions());
+            cache.release(other);
+            var admitted = decode ? cache.acquireWithReuseDetailed(5, keys) : cache.acquireDetailed(5, keys);
+            assertNotNull(admitted.lease());
+            assertEquals(1, cache.availableBlocks());
+            cache.release(admitted.lease());
+            assertEquals(6, cache.availableBlocks());
+        }
+    }
+
+    @Test
     void prefillAdmissionChargesOnlyNewBlocksAndPreservesWatermark() {
         var cache = new MockLruBlockCache(10, .1);
         var keys = List.of(1L, 2L, 3L, 4L, 5L, 6L);

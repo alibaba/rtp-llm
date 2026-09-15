@@ -653,7 +653,7 @@ public final class JavaMockEngineCluster {
                     if (host.commit()) cacheVersion.incrementAndGet();
                 } else host.close();
                 // A crash has already reset GPU reference accounting.
-                if (epoch == crashEpoch.get()) cache.release(device);
+                if (device != null && epoch == crashEpoch.get()) cache.release(device);
                 wakeFifoOnCapacityRelease();
             }
         }
@@ -693,26 +693,44 @@ public final class JavaMockEngineCluster {
             return prepared;
         }
 
-        private void writePrefillMemory(MockPerformanceModel.RequestShape shape) {
-            if (memoryCache == null) return;
-            if (!performance.memoryCopyLifecycle) { memoryCache.write(shape.blockKeys()); return; }
+        private boolean prefillCacheEnabled(MockPerformanceModel.RequestShape shape, String flag) {
+            // Explicit synthetic block-key cases predate the real request flags.
+            // Native-token requests use the same protobuf booleans as QueryConverter.
+            if (!shape.nativeKeys()) return true;
+            var config = shape.input().getGenerateConfig();
+            var field = config.getDescriptorForType().findFieldByName(flag);
+            return field != null && Boolean.TRUE.equals(config.getField(field));
+        }
+
+        private boolean storePrefillDevice(MockPerformanceModel.RequestShape shape) {
+            return prefillCacheEnabled(shape, "reuse_cache")
+                    && prefillCacheEnabled(shape, "enable_device_cache");
+        }
+
+        /** Successful FINISHED resource handover, under the same lock as cancellation. */
+        private void finishPrefillCache(MockPerformanceModel.RequestShape shape) {
             long id = shape.input().getRequestId();
-            synchronized (completionLock) {
-                if (cancelledRequests.containsKey(id) || shuttingDown || !activeBlockLeases.containsKey(id)) return;
-                // Compute completion publishes GPU keys but retains the request's reference.
+            if (cancelledRequests.containsKey(id) || shuttingDown || !activeBlockLeases.containsKey(id)) return;
+            boolean deviceCache = storePrefillDevice(shape);
+            if (deviceCache) {
+                // Publish once at FINISHED. Retain the connector's ownership for P->D.
                 activeBlockLeases.computeIfPresent(id, (ignored, lease) -> cache.retainComputed(lease, shape.blockKeys()));
-                long before = memoryCache.evictions();
-                var host = memoryCache.beginWrite(shape.blockKeys());
-                if (memoryCache.evictions() != before) cacheVersion.incrementAndGet();
-                if (host == null) return; // optional cache write: no request failure on host pressure
-                var device = cache.pinExisting(host.keys());
-                if (device == null) { host.close(); return; }
-                var copy = new MemoryWrite(host, device);
-                var previous = memoryWrites.put(id, copy);
-                if (previous != null) previous.finish(false);
-                // Keep source pins and commit visibility, without a simulated copy timer.
-                if (memoryWrites.remove(id, copy)) copy.finish(!cancelledRequests.containsKey(id));
+                cacheVersion.incrementAndGet();
             }
+            if (memoryCache == null || !prefillCacheEnabled(shape, "reuse_cache")
+                    || !prefillCacheEnabled(shape, "enable_memory_cache")) return;
+            long before = memoryCache.evictions();
+            var host = memoryCache.beginWrite(shape.blockKeys());
+            if (memoryCache.evictions() != before) cacheVersion.incrementAndGet();
+            if (host == null) return; // optional cache write failure never fails the request
+            // With device indexing disabled, the active request's naked allocation
+            // remains the source owner until this synchronous copy has committed.
+            var device = deviceCache ? cache.pinExisting(host.keys()) : null;
+            if (deviceCache && device == null) { host.close(); return; }
+            var copy = new MemoryWrite(host, device);
+            var previous = memoryWrites.put(id, copy);
+            if (previous != null) previous.finish(false);
+            if (memoryWrites.remove(id, copy)) copy.finish(true);
         }
 
         private final java.util.concurrent.atomic.LongAdder memoryReadBlocks = new java.util.concurrent.atomic.LongAdder();
@@ -3747,6 +3765,8 @@ public final class JavaMockEngineCluster {
                             } else {
                                 recordCompletion(shape, member.batchId(), executionMs,
                                         member.dpRank());
+                                recordLifecycleEnd(requestId, false);
+                                finishPrefillCache(shape);
                             }
                             // Keep the deliberate zombie fault as a report fault.
                             if (!faultConfig.isStatusZombieRunning()) {
@@ -3780,7 +3800,6 @@ public final class JavaMockEngineCluster {
                         // excluded), with_cache = il (the
                         // rtp_llm_context_tps_with_cache numerator, the
                         // DeepSeek-style "input tokens/s incl. cache hits").
-                        if (!asyncFail) writePrefillMemory(shape);
                         MockCacheDiagnostics diag = cacheDiagnostics;
                         if (!asyncFail && diag != null) diag.completed(engineName, shape.blockKeys());
                         long inputLen = shape.inputLen();
@@ -3838,9 +3857,6 @@ public final class JavaMockEngineCluster {
                     } else if (session != null) {
                         // P's scheduler slot is finished; the RPC context still
                         // owns connector KV until Fetch/auto-fetch transfers it.
-                        activeBlockLeases.computeIfPresent(requestId, (id, lease) ->
-                                cache.retainComputed(lease, shape.blockKeys()));
-                        cacheVersion.incrementAndGet();
                         requestStates.put(requestId, "waiting_fetch");
                         session.prefillDone();
                         continuePrefillSession(session);
@@ -5328,7 +5344,8 @@ public final class JavaMockEngineCluster {
             if (lease == null) {
                 return false;
             }
-            if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE && !performance.decodeReuseCache) {
+            if ((roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE && !performance.decodeReuseCache)
+                    || (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL && !storePrefillDevice(shape))) {
                 cache.release(lease);
                 return false;
             }
