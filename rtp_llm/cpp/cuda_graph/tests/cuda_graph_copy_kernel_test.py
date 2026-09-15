@@ -137,9 +137,10 @@ class CudaGraphCopyKernelTest(unittest.TestCase):
         d_input_lengths = torch.tensor(
             input_lengths, dtype=torch.int32, device=self.device
         )
-        # batch_size and cu_seq_len should be CPU pinned memory for CUDA Graph
-        d_batch_size = torch.tensor([batch_size], dtype=torch.int32).pin_memory()
-        d_cu_seq_len = torch.tensor(cu_seq_len, dtype=torch.int32).pin_memory()
+        # Captured kernels consume fixed-address device metadata so replay
+        # preparation can update it with stream ordering and no host race.
+        d_batch_size = torch.tensor([batch_size], dtype=torch.int32, device=self.device)
+        d_cu_seq_len = torch.tensor(cu_seq_len, dtype=torch.int32, device=self.device)
         # Warm up
         cuda_graph_copy_small2large(
             d_input_compact,
@@ -324,9 +325,8 @@ class CudaGraphCopyKernelTest(unittest.TestCase):
         d_input_lengths = torch.tensor(
             input_lengths, dtype=torch.int32, device=self.device
         )
-        # batch_size and cu_seq_len should be CPU pinned memory for CUDA Graph
-        d_batch_size = torch.tensor([batch_size], dtype=torch.int32).pin_memory()
-        d_cu_seq_len = torch.tensor(cu_seq_len, dtype=torch.int32).pin_memory()
+        d_batch_size = torch.tensor([batch_size], dtype=torch.int32, device=self.device)
+        d_cu_seq_len = torch.tensor(cu_seq_len, dtype=torch.int32, device=self.device)
 
         # Measure execution time
         start_event = torch.cuda.Event(enable_timing=True)
@@ -468,9 +468,8 @@ class CudaGraphCopyKernelTest(unittest.TestCase):
         d_input_lengths = torch.tensor(
             input_lengths, dtype=torch.int32, device=self.device
         )
-        # batch_size and cu_seq_len should be CPU pinned memory for CUDA Graph
-        d_batch_size = torch.tensor([batch_size], dtype=torch.int32).pin_memory()
-        d_cu_seq_len = torch.tensor(cu_seq_len, dtype=torch.int32).pin_memory()
+        d_batch_size = torch.tensor([batch_size], dtype=torch.int32, device=self.device)
+        d_cu_seq_len = torch.tensor(cu_seq_len, dtype=torch.int32, device=self.device)
 
         # Measure execution time
         start_event = torch.cuda.Event(enable_timing=True)
@@ -526,6 +525,152 @@ class CudaGraphCopyKernelTest(unittest.TestCase):
 
     def test_round_trip_bfloat16(self):
         self._test_cuda_graph_copy_round_trip(torch.bfloat16)
+
+    def test_replay_updates_device_metadata_and_checks_capacities(self):
+        # Both directions keep the same graph, tensor addresses and shapes while
+        # replay changes the device batch count, lengths and cumulative lengths.
+        # Length/prefix-sum consistency is the caller's contract, checked by the
+        # generation-prefill metadata builder before replay, not by each CTA.
+        cases = (
+            ("zero_slot", 3, [2, 0, 1], [0, 2, 2, 3], True),
+            ("leading_zero_slot", 3, [0, 2, 1], [0, 0, 2, 3], True),
+            ("full_capacity", 2, [4, 4, 0], [0, 4, 8, 8], True),
+            ("empty", 0, [0, 0, 0], [0, 0, 0, 0], True),
+            ("zero_lengths", 3, [0, 0, 0], [0, 0, 0, 0], True),
+            ("negative_batch", -1, [2, 0, 1], [0, 2, 2, 3], False),
+            ("excess_batch", 4, [2, 0, 1], [0, 2, 2, 3], False),
+            ("excess_total", 3, [4, 4, 1], [0, 4, 8, 9], False),
+            ("int32_max", 1, [4, 0, 0], [0, 2**31 - 1, 0, 0], False),
+            ("int32_min", 1, [4, 0, 0], [0, -(2**31), 0, 0], False),
+        )
+        max_batch, max_seq_len, width, compact_rows = 3, 4, 5, 8
+        for small_to_large in (True, False):
+            copy_op = (
+                cuda_graph_copy_small2large
+                if small_to_large
+                else cuda_graph_copy_large2small
+            )
+            input_rows = compact_rows if small_to_large else max_batch * max_seq_len
+            output_rows = max_batch * max_seq_len if small_to_large else compact_rows
+            source = torch.arange(
+                input_rows * width, device=self.device, dtype=torch.bfloat16
+            ).reshape(input_rows, width)
+            guarded_output = torch.full(
+                (output_rows + 2, width), -7, device=self.device, dtype=source.dtype
+            )
+            output = guarded_output[1:-1]
+            batch = torch.tensor([3], dtype=torch.int32, device=self.device)
+            lengths = torch.tensor([2, 0, 1], dtype=torch.int32, device=self.device)
+            cumulative = torch.tensor(
+                [0, 2, 2, 3], dtype=torch.int32, device=self.device
+            )
+
+            def copy():
+                copy_op(
+                    source,
+                    output,
+                    batch,
+                    max_batch,
+                    max_seq_len,
+                    lengths,
+                    width,
+                    cumulative,
+                )
+
+            warmup_stream = torch.cuda.Stream()
+            warmup_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(warmup_stream):
+                copy()
+            torch.cuda.current_stream().wait_stream(warmup_stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                copy()
+            source_host = source.cpu()
+
+            for name, count, host_lengths, host_cumulative, valid in cases:
+                with self.subTest(small_to_large=small_to_large, case=name):
+                    batch.fill_(count)
+                    lengths.copy_(torch.tensor(host_lengths, dtype=torch.int32))
+                    cumulative.copy_(torch.tensor(host_cumulative, dtype=torch.int32))
+                    guarded_output.fill_(-7)
+                    graph.replay()
+                    expected = torch.full(
+                        (output_rows + 2, width), -7, dtype=source.dtype
+                    )
+                    if valid:
+                        for slot in range(count):
+                            length = host_lengths[slot]
+                            compact_start = host_cumulative[slot]
+                            aligned_start = (slot + 1) * max_seq_len - length
+                            source_start = (
+                                compact_start if small_to_large else aligned_start
+                            )
+                            output_start = (
+                                aligned_start if small_to_large else compact_start
+                            )
+                            expected[
+                                1 + output_start : 1 + output_start + length
+                            ].copy_(source_host[source_start : source_start + length])
+                    torch.testing.assert_close(
+                        guarded_output.cpu(), expected, rtol=0, atol=0
+                    )
+
+    def test_dimension_products_use_int64_and_reject_int64_overflow(self):
+        compact = torch.zeros((1, 1), dtype=torch.bfloat16, device=self.device)
+        aligned = torch.zeros_like(compact)
+        batch_size = torch.tensor([1], dtype=torch.int32, device=self.device)
+        input_lengths = torch.tensor([1, 0], dtype=torch.int32, device=self.device)
+        cu_seq_len = torch.tensor([0, 1, 1], dtype=torch.int32, device=self.device)
+
+        copy_cases = (
+            ("small2large", cuda_graph_copy_small2large, compact, aligned),
+            ("large2small", cuda_graph_copy_large2small, aligned, compact),
+        )
+        for name, copy_op, input_tensor, output_tensor in copy_cases:
+            with self.subTest(copy=name, boundary="above_int32"):
+                # 2 * 2**30 crosses INT_MAX. The validation error must retain
+                # the positive int64 result instead of observing a narrowed or
+                # wrapped 32-bit row count.
+                with self.assertRaisesRegex(RuntimeError, "2147483648"):
+                    copy_op(
+                        input_tensor,
+                        output_tensor,
+                        batch_size,
+                        2,
+                        1 << 30,
+                        input_lengths,
+                        1,
+                        cu_seq_len,
+                    )
+
+            with self.subTest(copy=name, boundary="int64_overflow"):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    r"max_batch_size \* max_seq_len overflows int64",
+                ):
+                    copy_op(
+                        input_tensor,
+                        output_tensor,
+                        batch_size,
+                        1 << 62,
+                        4,
+                        input_lengths,
+                        1,
+                        cu_seq_len,
+                    )
+
+            with self.subTest(copy=name, boundary="no_binding_narrowing"):
+                with self.assertRaisesRegex(RuntimeError, str(1 << 31)):
+                    copy_op(
+                        input_tensor,
+                        output_tensor,
+                        batch_size,
+                        1,
+                        1,
+                        input_lengths,
+                        1 << 31,
+                        cu_seq_len,
+                    )
 
 
 if __name__ == "__main__":

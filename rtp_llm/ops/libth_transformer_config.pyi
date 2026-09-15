@@ -609,6 +609,9 @@ class GrpcConfig:
     def to_string(self) -> str:
         ...
 class HWKernelConfig:
+    generation_prefill_cuda_graph_max_capture_buckets: typing.ClassVar[int]
+    generation_prefill_cuda_graph_max_capture_tokens: typing.ClassVar[int]
+    generation_prefill_cuda_graph_max_requests_limit: typing.ClassVar[int]
     arm_gemm_use_kai: bool
     decode_capture_batch_sizes: list[int]
     deep_gemm_num_sm: int
@@ -623,6 +626,8 @@ class HWKernelConfig:
     ft_disable_custom_ar: bool
     num_native_cuda_graph: int
     prefill_capture_seq_lens: list[int]
+    generation_prefill_capture_token_buckets: list[int]
+    generation_prefill_cuda_graph_max_requests: int
     rocm_disable_custom_ag: bool
     rocm_hipblaslt_config: str
     use_swizzleA: bool
