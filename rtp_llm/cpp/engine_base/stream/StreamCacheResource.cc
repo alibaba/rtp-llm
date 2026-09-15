@@ -563,7 +563,8 @@ absl::Status StreamCacheResource::incrKVBlock() {
 
 bool StreamCacheResource::asyncLoadCache() {
     RTP_LLM_PROFILE_FUNCTION();
-    if (!p2p_load_context_ && resource_context_.cache_manager && resource_context_.cache_manager->hasP2PConnector()) {
+    if (stream_->queryPdSep() && !p2p_load_context_ && resource_context_.cache_manager
+        && resource_context_.cache_manager->hasP2PConnector()) {
         auto meta = std::make_shared<MetaImpl>(
             reuseCache() && enableHostCache(), reuseCache() && resource_context_.enable_remote_cache, stream_->traceId());
         meta->generate_stream_ = stream_;

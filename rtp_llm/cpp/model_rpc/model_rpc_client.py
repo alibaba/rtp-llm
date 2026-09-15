@@ -590,7 +590,7 @@ class ModelRpcClient(object):
         ModelRpcClient._raise_backend_error(code, f"{request_desc}: {error.error_message}")
 
     def _handle_grpc_error(self, e: grpc.RpcError, request_desc: str) -> None:
-        metadata = dict(e.trailing_metadata() or ())
+        metadata = {key: value for key, value in (e.trailing_metadata() or ())}
         details = ErrorDetailsPB()
         try:
             encoded = metadata.get("grpc-status-details-bin")

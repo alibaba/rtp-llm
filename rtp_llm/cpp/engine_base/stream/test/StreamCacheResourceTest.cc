@@ -16,6 +16,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
@@ -195,6 +198,26 @@ protected:
         prepareResourceWithInputTokens(/*input_tokens=*/{1, 2, 3, 4, 5, 6}, reuse_cache, role_type);
     }
 
+    void prepareP2PRegistrationResource(bool query_pd, const std::string& key) {
+        PDSepConfig pd;
+        pd.role_type = RoleType::PREFILL;
+        prepareResourceWithCacheConfig(init_config(), {1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL, {}, 8, pd);
+        stream_->generateConfig()->pd_separation      = query_pd;
+        stream_->generateConfig()->unique_key         = key;
+        stream_->generateInput()->request_deadline_ms = currentTimeMs() + 30000;
+        P2PConnectorConfig config;
+        config.role_type = RoleType::PREFILL;
+        config.tp_rank   = 0;
+        auto connector   = std::make_unique<P2PConnector>(config, nullptr, nullptr);
+        // Exercise real registration without starting transport workers.
+        connector->prefill_                = std::make_unique<P2PConnectorPrefill>(config, nullptr, nullptr);
+        connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr, 100);
+        cache_manager_->p2p_connector_     = std::move(connector);
+        ASSERT_TRUE(cache_manager_->hasP2PConnector());
+        ASSERT_TRUE(stream_->streamCacheResource().initKVBlock().ok());
+        ASSERT_FALSE(stream_->cacheKeys().empty());
+    }
+
     void prepareHybridResource(bool reuse_cache = false, RoleType role_type = RoleType::PDFUSION) {
         prepareHybridResourceWithInputTokens(/*input_tokens=*/{1, 2, 3, 4, 5, 6}, reuse_cache, role_type);
     }
@@ -223,9 +246,16 @@ protected:
                                         bool                    reuse_cache,
                                         RoleType                role_type,
                                         const KVCacheConfig&    kv_cache_config      = {},
-                                        size_t                  expected_free_blocks = 8) {
-        cache_manager_ = std::make_shared<KVCacheManager>(
-            cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr, kv_cache_config);
+                                        size_t                  expected_free_blocks = 8,
+                                        const PDSepConfig&      pd_sep_config        = {}) {
+        cache_manager_ = std::make_shared<KVCacheManager>(cache_config,
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          kv_cache_config,
+                                                          ParallelismConfig{},
+                                                          RuntimeConfig{},
+                                                          SpeculativeExecutionConfig{},
+                                                          pd_sep_config);
         ASSERT_TRUE(cache_manager_->init());
         ASSERT_EQ(cache_manager_->freeBlocksNum(), expected_free_blocks);
         ResourceContext resource_context;
@@ -584,6 +614,48 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_WithoutAllocatorContext_Retur
 
     // No allocator-owned load context is in flight.
     ASSERT_FALSE(resource.asyncLoadCache());
+}
+
+TEST_F(StreamCacheResourceTest, NonPDRequestSkipsRegistrationWithEmptyOrBusinessKey) {
+    for (const std::string key : {std::string{}, std::string{"business-key"}}) {
+        SCOPED_TRACE(key);
+        prepareP2PRegistrationResource(/*query_pd=*/false, key);
+        auto& resource = stream_->streamCacheResource();
+        ASSERT_FALSE(stream_->queryPdSep());
+        EXPECT_FALSE(resource.asyncLoadCache());
+        EXPECT_EQ(resource.p2p_load_context_, nullptr);
+        EXPECT_TRUE(cache_manager_->p2p_connector_->streamStore()->resource_map_.empty());
+        EXPECT_TRUE(resource.loadCacheDone());
+        EXPECT_FALSE(stream_->hasError());
+        resource.releaseResource();
+    }
+}
+
+TEST_F(StreamCacheResourceTest, NonPDRequestStillWaitsForAllocatorLoadWithP2PConnector) {
+    prepareP2PRegistrationResource(/*query_pd=*/false, "business-key");
+    auto& resource                   = stream_->streamCacheResource();
+    auto  load_context               = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST});
+    resource.allocator_load_context_ = load_context;
+    EXPECT_TRUE(resource.asyncLoadCache());
+    EXPECT_EQ(resource.p2p_load_context_, nullptr);
+    EXPECT_FALSE(resource.loadCacheDone());
+    EXPECT_EQ(resource.allocator_load_context_, load_context);
+    EXPECT_TRUE(load_context->completeOne(true));
+    EXPECT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(resource.allocator_load_context_, nullptr);
+    EXPECT_TRUE(cache_manager_->p2p_connector_->streamStore()->resource_map_.empty());
+    EXPECT_FALSE(stream_->hasError());
+}
+
+TEST_F(StreamCacheResourceTest, PDRequestStillRegistersPrefillResource) {
+    prepareP2PRegistrationResource(/*query_pd=*/true, "handoff-key");
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.asyncLoadCache());
+    ASSERT_NE(resource.p2p_load_context_, nullptr);
+    EXPECT_TRUE(resource.p2p_load_context_->success());
+    EXPECT_EQ(cache_manager_->p2p_connector_->streamStore()->resource_map_.count("handoff-key"), 1u);
+    EXPECT_TRUE(resource.loadCacheDone());
+    EXPECT_FALSE(stream_->hasError());
 }
 
 TEST_F(StreamCacheResourceTest, testTreeCoveredBlockNumFallsBackToDeviceReuseWithoutLoadContext) {

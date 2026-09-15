@@ -728,6 +728,15 @@ class FirstCauseRpcErrorTest(TestCase):
 
         return Failure()
 
+    def test_aio_metadata_preserves_backend_error(self):
+        details = ErrorDetailsPB(error_code=903, error_message="original backend failure")
+        metadata = grpc.aio.Metadata(("grpc-status-details-bin", details.SerializeToString()))
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        with self.assertRaises(FtRuntimeException) as caught:
+            client._handle_grpc_error(self.rpc_error(metadata), "relay")
+        self.assertEqual(caught.exception.exception_type, ExceptionType.MM_PROCESS_ERROR)
+        self.assertEqual(caught.exception.message, f"relay: {details.error_message}")
+
     def test_structured_cause_survives_generic_grpc_status(self):
         details = ErrorDetailsPB(error_code=903, error_message="Prefill VIT request=42 failed")
         client = ModelRpcClient.__new__(ModelRpcClient)
