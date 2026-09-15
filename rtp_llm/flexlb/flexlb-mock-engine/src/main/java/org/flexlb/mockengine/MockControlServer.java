@@ -87,6 +87,7 @@ final class MockControlServer {
         httpServer.createContext("/requests", this::handleRequests);
         httpServer.createContext("/cache_diagnostics", this::handleCacheDiagnostics);
         httpServer.createContext("/set_perf", this::handleSetPerf);
+        httpServer.createContext("/prefill_formula", this::handlePrefillFormula);
         httpServer.createContext("/set_kv_pressure", this::handleSetKvPressure);
         httpServer.createContext("/set_queue_depth", this::handleSetQueueDepth);
         httpServer.createContext("/cache_evict", this::handleCacheEvict);
@@ -426,6 +427,37 @@ final class MockControlServer {
             response.put(service.getEngineName(), service.getRequestLifecycleSnapshot());
         }
         sendJson(exchange, 200, response);
+    }
+
+    private synchronized void handlePrefillFormula(HttpExchange exchange) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod()) && !"POST".equals(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
+            return;
+        }
+        try {
+            var targets = orderedServices().stream().filter(s -> s.isDiagnosticPrefill()).toList();
+            if ("POST".equals(exchange.getRequestMethod())) {
+                byte[] bytes = exchange.getRequestBody().readNBytes(65537);
+                if (bytes.length > 65536) throw new IllegalArgumentException("body too large");
+                JsonNode body = MAPPER.readTree(bytes);
+                if (body == null || !body.isObject() || !body.path("expression").isTextual())
+                    throw new IllegalArgumentException("expression string required");
+                if (body.has("engine")) {
+                    String engine = body.path("engine").asText();
+                    targets = targets.stream().filter(s -> s.getEngineName().equals(engine)).toList();
+                }
+                if (targets.isEmpty()) throw new IllegalArgumentException("no matching prefill engine");
+                String expression = body.path("expression").asText();
+                MockPerformanceModel.validatePrefillExpression(expression);
+                for (var service : targets) service.getPerformance().setPrefillExpression(expression);
+            }
+            Map<String, Object> states = new LinkedHashMap<>();
+            for (var service : targets)
+                states.put(service.getEngineName(), service.getPerformance().prefillExpressionState());
+            sendJson(exchange, 200, Map.of("engines", states, "scope", "mock execution only; subsequent batches; volatile until restart"));
+        } catch (IllegalArgumentException | com.fasterxml.jackson.core.JsonProcessingException error) {
+            sendJson(exchange, 400, Map.of("error", String.valueOf(error.getMessage())));
+        }
     }
 
     private void handleSetPerf(HttpExchange exchange) throws IOException {

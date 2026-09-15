@@ -131,6 +131,24 @@ class PythonCompatControlApiTest {
     // ════════════════════════════════════════════════════════════════
 
     @Test
+    void prefillFormulaUpdateIsScopedAndInvalidUpdatePreservesState() throws Exception {
+        startCluster(model("100", 1.0), 2, 1);
+        httpPost("/prefill_formula", "{\"engine\":\"prefill-0\",\"expression\":\"200 + sum(computeTokens)\"}");
+        JsonNode state = MAPPER.readTree(httpGet("/prefill_formula")).path("engines");
+        assertEquals("200 + sum(computeTokens)", state.path("prefill-0").path("expression").asText());
+        assertEquals("100", state.path("prefill-1").path("expression").asText());
+        assertFalse(state.has("decode-0"));
+        assertEquals(400, httpPostResponse("/prefill_formula", "{\"expression\":\"bad_function(1)\"}").statusCode());
+        assertEquals("200 + sum(computeTokens)", MAPPER.readTree(httpGet("/prefill_formula"))
+                .path("engines").path("prefill-0").path("expression").asText());
+        assertEquals(400, httpPostResponse("/prefill_formula", "{\"engine\":\"decode-0\",\"expression\":\"200\"}").statusCode());
+        httpPost("/prefill_formula", "{\"expression\":\"300\"}");
+        state = MAPPER.readTree(httpGet("/prefill_formula")).path("engines");
+        assertEquals("300", state.path("prefill-0").path("expression").asText());
+        assertEquals("300", state.path("prefill-1").path("expression").asText());
+    }
+
+    @Test
     void engineNameAddressingForInjectAndStopEngine() throws Exception {
         startCluster(model("10", 0.1), 2, 1);
 

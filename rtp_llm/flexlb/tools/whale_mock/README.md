@@ -41,7 +41,7 @@ mock 控制端口 `/health` 的 `healthy` 和 `engines`，以及实际 decode �
 控制端口使用 Pod IP；引擎 RPC 使用独立 loopback IP 和端口，保证 master 的 engineIp 指标不互相覆盖。同 Pod P→D 仍使用现有 RPC 协议。
 框架自动接续，不等待客户端 Fetch；启动任何对端失败时 supervisor 会关闭另一 JVM。
 
-指标保留真实 Pod 的 `hippo_role` 和 `container_ip`，用 `engine`、`engine_port`、`dp_rank` 区分逻辑引擎。
+指标默认保留真实 Pod 的 `hippo_role` 和 `container_ip`；可通过 `MOCK_PREFILL_HIPPO_ROLE`、`MOCK_DECODE_HIPPO_ROLE` 显式覆盖 P/D 的监控 role，按 `engine`、`engine_port` 区分逻辑引擎。
 每个引擎的累计计数、时间基准和执行轮采样单独维护；不能把共享 Pod 的总数当作单引擎值。
 现有 Grafana 查询应选择 master 角色，并按 engine 或 dp_rank 查看逻辑实例，不能要求出现不存在的 P/D Pod。
 不修改 Grafana 面板。
@@ -99,10 +99,22 @@ is sampled per removed block, and direct eviction block count per chain event;
 there is no simulated memory-tier writeback. Cumulative eviction and cache-key
 hit/request counters are also exposed by the Whale metric adapter.
 
-In bundled mode `hippo_role` identifies the physical master Pod. Split logical
-engines by `role=ROLE_TYPE_PREFILL|ROLE_TYPE_DECODE` and `engine`/`dp_rank`; do not
-interpret a role-merged running-stream series as the P batch size. The existing
-running/context/generate batch metrics are emitted for both logical roles.
+### P/D monitoring role aliases
+
+Set these environment variables on the mock process (the master zone for a bundle):
+
+- `MOCK_PREFILL_HIPPO_ROLE`: complete `hippo_role` label for P engines.
+- `MOCK_DECODE_HIPPO_ROLE`: complete `hippo_role` label for D engines.
+
+Values are used verbatim. No suffix replacement, prefix inference, or automatic role
+naming is performed. Missing or blank values preserve the original `HIPPO_ROLE`.
+Set both aliases before upgrading a bundle that previously relied on automatic
+`.master_part` replacement, using the existing dashboard's exact P/D role names.
+The aliases affect only mock metric labels, not master metrics, service discovery,
+`hippo_app`, Pod/container IP, or the process environment's original `HIPPO_ROLE`.
+These environment variables are read by the running mock process; changing deployment
+envs requires restarting it. Per-engine breakdown uses `engine` and `engine_port`;
+`dp_rank` remains 0 because each mock engine is single-DP.
 
 ### 按负载扩缩逻辑引擎
 

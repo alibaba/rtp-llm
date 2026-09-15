@@ -15,6 +15,27 @@ class WhaleModeConfigurationTest {
     @TempDir Path directory;
 
     @Test
+    void contextBatchSizeDoesNotMixIdlePollSamples() {
+        var values = new ArrayList<Double>();
+        var sink = (org.flexlb.metric.FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{org.flexlb.metric.FlexMonitor.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("report") && args.length == 3
+                            && args[0].equals("rtp_llm_context_batch_size"))
+                        values.add(((Number) args[2]).doubleValue());
+                    return null;
+                });
+        var monitor = new WhaleMockMonitor(sink);
+        var tags = java.util.Map.<String, String>of();
+        var idle = java.util.Map.<String, Number>of("rtp_llm_context_batch_size", 0);
+        monitor.sample(idle, tags, System.nanoTime());
+        monitor.reportEvent(java.util.Map.of("rtp_llm_context_batch_size", 1), tags);
+        monitor.sample(idle, tags, System.nanoTime());
+        monitor.sample(idle, tags, System.nanoTime());
+        assertEquals(List.of(1.0), values);
+    }
+
+    @Test
     void wrapperAcceptsLiteralJsonWithoutShellCommandQuoting() throws Exception {
         Path javaExecutable = directory.resolve("java");
         Files.writeString(javaExecutable, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
@@ -290,19 +311,28 @@ class WhaleModeConfigurationTest {
     }
 
     @Test
-    void derivesMonitoringRolesFromPlatformIdentityWithoutBusinessPrefixes() {
+    void monitoringRoleAliasesAreExplicitAndDoNotRewritePlatformIdentity() {
         var env = java.util.Map.of("HIPPO_APP", "whale_prod_master_test",
-                "HIPPO_ROLE", "master_test_deployment_g07.master_part");
+                "HIPPO_ROLE", "master_test_deployment_g07.master_part",
+                "MOCK_PREFILL_HIPPO_ROLE", "configured_p_alias",
+                "MOCK_DECODE_HIPPO_ROLE", "configured_d_alias");
         var p = WhaleMockMonitor.engineTags(env, "10.1.0.2", "ROLE_TYPE_PREFILL");
         var d = WhaleMockMonitor.engineTags(env, "10.1.0.2", "ROLE_TYPE_DECODE");
-        assertEquals("master_test_deployment_g07.prefill_part0", p.get("hippo_role"));
-        assertEquals("master_test_deployment_g07.decode_part0", d.get("hippo_role"));
+        assertEquals("configured_p_alias", p.get("hippo_role"));
+        assertEquals("configured_d_alias", d.get("hippo_role"));
         assertEquals("whale_prod_master_test", p.get("hippo_app"));
         assertEquals(p.get("hippo_app"), d.get("hippo_app"));
         assertEquals("master_test_deployment_g07.master_part", env.get("HIPPO_ROLE"));
         assertEquals(p.get("container_ip"), d.get("container_ip"));
         assertEquals(env.get("HIPPO_ROLE"), WhaleMockMonitor.engineTags(
                 env, "10.1.0.2", "ROLE_TYPE_UNKNOWN").get("hippo_role"));
+        var unset = java.util.Map.of("HIPPO_ROLE", "original.master_part");
+        for (String role : List.of("ROLE_TYPE_PREFILL", "ROLE_TYPE_DECODE")) {
+            assertEquals("original.master_part", WhaleMockMonitor.engineTags(unset, "10.1.0.2", role).get("hippo_role"));
+        }
+        assertEquals("original.master_part", WhaleMockMonitor.engineTags(java.util.Map.of(
+                "HIPPO_ROLE", "original.master_part", "MOCK_PREFILL_HIPPO_ROLE", "  "),
+                "10.1.0.2", "ROLE_TYPE_PREFILL").get("hippo_role"));
         assertEquals("", WhaleMockMonitor.engineTags(
                 java.util.Map.of(), "10.1.0.2", "ROLE_TYPE_PREFILL").get("hippo_role"));
     }

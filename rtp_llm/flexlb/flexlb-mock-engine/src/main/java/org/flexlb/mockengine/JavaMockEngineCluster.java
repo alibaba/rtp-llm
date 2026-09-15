@@ -3804,12 +3804,15 @@ public final class JavaMockEngineCluster {
                         if (!asyncFail && diag != null) diag.completed(engineName, shape.blockKeys());
                         long inputLen = shape.inputLen();
                         long hitTokens = shape.hitTokens();
+                        long hostTokens = memoryCache == null ? 0L
+                                : Math.min(hitTokens, (long) shape.memoryHitBlocks() * seqSizePerBlock);
+                        reportMetricEvent(Map.of(
+                                "rtp_llm_stream_cache_device_reuse_length", hitTokens - hostTokens,
+                                "rtp_llm_device_reuse_length", hitTokens - hostTokens,
+                                "rtp_llm_kv_cache_reuse_length", hitTokens,
+                                "rtp_llm_kv_cache_hit_rate", inputLen == 0 ? 0 : 100.0 * hitTokens / inputLen));
                         if (memoryCache != null) {
-                            long hostTokens = Math.min(hitTokens, (long) shape.memoryHitBlocks() * seqSizePerBlock);
                             reportMetricEvent(Map.of("rtp_llm_stream_cache_memory_reuse_length", hostTokens,
-                                    "rtp_llm_stream_cache_device_reuse_length", hitTokens - hostTokens,
-                                    "rtp_llm_kv_cache_reuse_length", hitTokens,
-                                    "rtp_llm_kv_cache_hit_rate", inputLen == 0 ? 0 : 100.0 * hitTokens / inputLen,
                                     "rtp_llm_kv_cache_memory_cache_read_token", hostTokens,
                                     "rtp_llm_kv_cache_memory_cache_read_latency_us",
                                     0.0));
@@ -3996,7 +3999,6 @@ public final class JavaMockEngineCluster {
             try {
                 reporter.accept(Map.of(
                         "rtp_llm_running_stream_size", prefill + decode,
-                        "rtp_llm_context_batch_size", prefill,
                         "rtp_llm_generate_batch_size", decode));
             } catch (RuntimeException error) {
                 // Observability must never prevent execution or strand a lease.
@@ -4005,6 +4007,7 @@ public final class JavaMockEngineCluster {
         }
 
         private void startPrefillBatch(List<BatchMember> members) {
+            reportMetricEvent(Map.of("rtp_llm_context_batch_size", members.size()));
             reportSchedulerStep(executingPrefillRequests.addAndGet(members.size()), 0);
             // activePrefillBatches is reserved at admission (schedulePrefillCompletion)
             // and drain time, not here, so maxPrefillConcurrency acts as a real hard

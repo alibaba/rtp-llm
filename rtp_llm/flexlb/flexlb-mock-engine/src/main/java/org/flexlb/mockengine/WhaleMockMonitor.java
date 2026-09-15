@@ -92,6 +92,7 @@ final class WhaleMockMonitor implements AutoCloseable {
             // Preserve execution-round samples. A periodic zero between two
             // short P batches must not dilute them. With no rounds this period,
             // retain the instantaneous gauge so idle engines return to zero.
+            if (name.equals("rtp_llm_context_batch_size")) return;
             if (hadSchedulerSteps && STEP_METRICS.contains(name)) return;
             if (registered.add(name)) monitor.register(name, FlexMetricType.GAUGE);
             monitor.report(name, tags, value.doubleValue());
@@ -137,18 +138,14 @@ final class WhaleMockMonitor implements AutoCloseable {
         tags.put("priority", "0"); // Aggregate mock series, not a per-priority breakdown.
         tags.put("mtp_model_type", "main");
         tags.put("pool", "0"); // The mock has one physical KV pool, matching C++ gid=0.
-        String engineRole = switch (role) {
-            case "ROLE_TYPE_PREFILL" -> "prefill_part0";
-            case "ROLE_TYPE_DECODE" -> "decode_part0";
+        String aliasVariable = switch (role) {
+            case "ROLE_TYPE_PREFILL" -> "MOCK_PREFILL_HIPPO_ROLE";
+            case "ROLE_TYPE_DECODE" -> "MOCK_DECODE_HIPPO_ROLE";
             default -> null;
         };
-        String platformRole = tags.get("hippo_role");
-        String masterSuffix = ".master_part";
-        if (engineRole != null && platformRole.endsWith(masterSuffix)) {
-            // Derive only the terminal role component. Preserve app, deployment,
-            // group index and physical Pod identity, including "master" in a biz name.
-            tags.put("hippo_role", platformRole.substring(0, platformRole.length() - masterSuffix.length())
-                    + "." + engineRole);
+        String alias = aliasVariable == null ? null : environment.get(aliasVariable);
+        if (alias != null && !alias.isBlank()) {
+            tags.put("hippo_role", alias);
         }
         return tags;
     }

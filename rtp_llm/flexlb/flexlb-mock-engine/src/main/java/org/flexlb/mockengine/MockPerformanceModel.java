@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
 final class MockPerformanceModel {
@@ -173,6 +174,9 @@ final class MockPerformanceModel {
     private final int maxBatchTokens;
     private final int maxBatchRequests;
     private final PrefillTimeFormula prefillFormula;
+    private record RuntimePrefill(String expression, PrefillTimeFormula formula) {}
+    private volatile RuntimePrefill runtimePrefill;
+    private String configuredPrefillExpression = "";
     // Decode step-latency sources, exactly one active per model:
     //   - explicit step_ms_by_batch curve (decodePoints non-empty; legacy
     //     declared channel, kept for suites that price steps themselves), or
@@ -281,6 +285,8 @@ final class MockPerformanceModel {
         copy.prefillBatchPolicy = prefillBatchPolicy;
         copy.nativeTokenCacheKeys = nativeTokenCacheKeys;
         copy.overrideFixedPrefillMs = overrideFixedPrefillMs;
+        copy.runtimePrefill = runtimePrefill;
+        copy.configuredPrefillExpression = configuredPrefillExpression;
         copy.overrideDecodeStepMs = overrideDecodeStepMs;
         copy.overrideDecodeScale = overrideDecodeScale;
         copy.overrideMaxWaitingPrefillBatches = overrideMaxWaitingPrefillBatches;
@@ -308,7 +314,8 @@ final class MockPerformanceModel {
         int maxBatchRequests = prefill.path("max_batch_requests")
                 .asInt(DEFAULT_MAX_BATCH_REQUESTS);
 
-        PrefillTimeFormula formula = PrefillTimeFormula.parse(loadPrefillExpression(masterConfigFile));
+        String prefillExpression = loadPrefillExpression(masterConfigFile);
+        PrefillTimeFormula formula = PrefillTimeFormula.parse(prefillExpression);
 
         JsonNode decode = performance.path("decode");
         // per_token_ms is REMOVED (task #69, wrong-version-deleted-clean rule):
@@ -373,6 +380,7 @@ final class MockPerformanceModel {
             if (role.has("enable_gpu_prefix_tree") && !role.get("enable_gpu_prefix_tree").isBoolean())
                 throw new IllegalStateException("enable_gpu_prefix_tree must be boolean");
         }
+        model.configuredPrefillExpression = prefillExpression;
         model.prefillGpuPrefixTree = prefill.path("enable_gpu_prefix_tree").asBoolean(true);
         model.decodeGpuPrefixTree = decode.path("enable_gpu_prefix_tree").asBoolean(true);
         if (decode.has("reuse_cache")) {
@@ -500,15 +508,16 @@ final class MockPerformanceModel {
     }
 
     long prefillMs(List<RequestShape> requests) {
+        RuntimePrefill runtime = runtimePrefill;
         if (requests.isEmpty()) {
             return 0;
         }
         double latency;
-        if (overrideFixedPrefillMs != null) {
+        if (runtime == null && overrideFixedPrefillMs != null) {
             // Runtime override (Python /set_perf prefill_fixed_ms): explicit
             // test-time control, length-blind by design.
             latency = overrideFixedPrefillMs;
-        } else if (configuredFixedPrefillMs != null) {
+        } else if (runtime == null && configuredFixedPrefillMs != null) {
             // Explicit performance-JSON "prefill.fixed_ms": the declared flat
             // prefill for duration-blind suites. Declared explicitly, so it
             // wins over the formula (priority: runtime > JSON > formula).
@@ -528,11 +537,35 @@ final class MockPerformanceModel {
                 vars[4] = request.hitTokens > 0 ? 1 : 0;
                 itemVars.add(vars);
             }
-            latency = prefillFormula.evaluate(batchVars, itemVars);
+            latency = (runtime == null ? prefillFormula : runtime.formula()).evaluate(batchVars, itemVars);
         }
-        long result = scaledMs(latency * prefillScale);
+        long result = scaledMs(latency * (runtime == null ? prefillScale : 1.0));
         // Clamp on the final (post-scale) value: min_ms is the actual-sleep floor.
         return prefillMinMs != null ? Math.max(result, Math.round(prefillMinMs)) : result;
+    }
+
+    static PrefillTimeFormula validatePrefillExpression(String expression) {
+        if (expression == null || expression.isBlank() || expression.length() > 32768)
+            throw new IllegalArgumentException("expression must contain 1..32768 characters");
+        PrefillTimeFormula formula = PrefillTimeFormula.parse(expression);
+        for (double[] values : List.of(new double[]{1, 512, 0, 512, 0},
+                new double[]{1, 512, 512, 0, 1}, new double[]{1, 0, 0, 0, 0})) {
+            double result = formula.evaluateAsDouble(values, List.of(values));
+            if (!Double.isFinite(result) || result < 0)
+                throw new IllegalArgumentException("formula must return finite nonnegative milliseconds");
+        }
+        return formula;
+    }
+
+    void setPrefillExpression(String expression) {
+        runtimePrefill = new RuntimePrefill(expression, validatePrefillExpression(expression));
+    }
+
+    Map<String, Object> prefillExpressionState() {
+        RuntimePrefill runtime = runtimePrefill;
+        return Map.of("runtime_override", runtime != null,
+                "expression", runtime == null ? configuredPrefillExpression : runtime.expression(),
+                "scale", runtime == null ? prefillScale : 1.0);
     }
 
     void setOverrideFixedPrefillMs(Double ms) {
