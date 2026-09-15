@@ -502,6 +502,7 @@ py_library(
         ":config_ops",
         ":warmup",
         ":jit_cache_manager_lib",
+        "//rtp_llm/models_py/kernel_tuning",
     ],
     data = jit_deps(),
     imports = ["."],
