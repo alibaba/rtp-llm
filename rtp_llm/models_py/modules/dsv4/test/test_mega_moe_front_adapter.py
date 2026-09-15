@@ -261,9 +261,11 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
     def test_front_support_is_bounded_by_extension_and_mega_buffer(self) -> None:
         adapter, _ = _fake_adapter()
 
-        self.assertTrue(adapter.supports(_TensorContract(64, 2, 4, adapter.dim)))
-        self.assertTrue(adapter.supports(_TensorContract(128, 2, 4, adapter.dim)))
-        self.assertTrue(adapter.supports(_TensorContract(256, 1, 4, adapter.dim)))
+        for tokens in (1, 128, 129, 256):
+            with self.subTest(tokens=tokens):
+                self.assertTrue(
+                    adapter.supports(_TensorContract(tokens, 1, 4, adapter.dim))
+                )
         self.assertFalse(adapter.supports(_TensorContract(257, 1, 4, adapter.dim)))
         self.assertTrue(adapter.supports(_TensorContract(43, 3, 4, adapter.dim)))
         self.assertFalse(adapter.supports(_TensorContract(43, 6, 4, adapter.dim)))
