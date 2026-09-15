@@ -3,7 +3,20 @@
 #include <exception>
 #include <utility>
 
+#include "rtp_llm/cpp/utils/Logger.h"
+
 namespace rtp_llm {
+namespace {
+void invokeDoneCallback(const AsyncContext::DoneCallback& callback, const ErrorInfo& error) {
+    try {
+        callback(error);
+    } catch (const std::exception& exception) {
+        RTP_LLM_LOG_WARNING("transfer completion callback threw: %s", exception.what());
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("transfer completion callback threw an unknown exception");
+    }
+}
+}  // namespace
 
 void TransferBatchAsyncContext::waitDone() {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -26,7 +39,7 @@ void TransferBatchAsyncContext::onDone(DoneCallback callback) {
         }
     }
     if (run_now) {
-        callback(std::move(error));
+        invokeDoneCallback(callback, error);
     }
 }
 
@@ -58,18 +71,8 @@ void TransferBatchAsyncContext::complete(ErrorInfo error) {
         callbacks.swap(callbacks_);
     }
     done_cv_.notify_all();
-    std::exception_ptr callback_error;
     for (auto& callback : callbacks) {
-        try {
-            callback(error_);
-        } catch (...) {
-            if (!callback_error) {
-                callback_error = std::current_exception();
-            }
-        }
-    }
-    if (callback_error) {
-        std::rethrow_exception(callback_error);
+        invokeDoneCallback(callback, error_);
     }
 }
 
