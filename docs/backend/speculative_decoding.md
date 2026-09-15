@@ -68,7 +68,7 @@ And supplement in the request's `extra_config`:
 |-----------|---------------|-------------|
 | --sp_type | eagle3 | Speculative sampling strategy |
 | --sp_checkpoint_path | <small model ckpt> | Small model weight path |
-| --sp_model_type | qwen_3_moe_eagle3 | EAGLE3 small model type |
+| --sp_model_type | angelslim_qwen3_eagle3 | AngelSlim Qwen3 EAGLE3 draft model type |
 | --gen_num_per_cycle | 5 | How many tokens the small model proposes per cycle |
 | --sp_quantization | FP8_PER_BLOCK/FP8 | Small model quantization method: FP8, FP8_PER_BLOCK, etc. |
 

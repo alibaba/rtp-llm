@@ -13,6 +13,7 @@ from flashinfer.prefill import (
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
     MhaRotaryEmbeddingOp,
+    TextMropeEmbeddingOp,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
@@ -48,6 +49,14 @@ DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
 # directly to float8_e4m3fn and FA3 FP8 kernels run with scale_q/k/v = 1.0.
 FP8_UNIT_SCALE = 1.0
 _g_fp8_unit_scale_tensors: dict[torch.device, torch.Tensor] = {}
+
+
+def _use_text_mrope(
+    attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+) -> bool:
+    return attn_configs.rope_config.style == RopeStyle.Mrope and (
+        attn_inputs.is_target_verify or attn_inputs.is_spec_draft_prefill
+    )
 
 
 def _get_fp8_unit_scale_tensor(device: torch.device) -> torch.Tensor:
@@ -196,34 +205,6 @@ def attn_kv_dtype(attn_configs: AttentionConfigs) -> torch.dtype:
     if attn_configs.kv_cache_dtype == KvCacheDataType.FP8:
         return torch.float8_e4m3fn
     return attn_configs.dtype
-
-
-def supports_scalar_prefill_rope(
-    attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
-) -> bool:
-    """Scalar RoPE also handles text MRoPE when every axis has scalar positions."""
-    if attn_configs.rope_config.style != RopeStyle.Mrope:
-        return True
-    # Do not silently apply scalar RoPE to image/video axes or graph replays
-    # whose position values can change after this host-side validation.
-    if attn_inputs.is_cuda_graph:
-        return False
-    positions = attn_inputs.combo_position_ids
-    if positions is None or positions.numel() == 0:
-        return False
-    lengths = _host_i32(attn_inputs.input_lengths).to(torch.int64)
-    prefixes = _host_i32(attn_inputs.prefix_lengths).to(torch.int64)
-    if lengths.numel() != prefixes.numel():
-        return False
-    count = int(lengths.sum())
-    if positions.numel() != count * 3:
-        return False
-    starts = lengths.cumsum(0) - lengths
-    scalar_positions = torch.arange(count) + torch.repeat_interleave(
-        prefixes - starts, lengths
-    )
-    axes = positions.cpu().reshape(count, 3)
-    return torch.equal(axes, scalar_positions[:, None].expand(-1, 3))
 
 
 def attn_q_dtype(attn_configs: AttentionConfigs) -> torch.dtype:
@@ -1199,6 +1180,8 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.fmha_impl.prepare(attn_inputs, forbid_realloc=True)
+        if isinstance(self.rope_impl, TextMropeEmbeddingOp):
+            self.rope_impl.prepare_cuda_graph(attn_inputs)
 
     def create_params(self, attn_inputs: PyAttentionInputs):
         """Create FlashInfer MLA attention parameters.
@@ -1222,8 +1205,11 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         raise NotImplementedError("Subclass must implement _create_fmha_impl")
 
     def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
-        """Create RoPE implementation. To be overridden by subclasses."""
-        raise NotImplementedError("Subclass must implement _create_rope_impl")
+        if attn_configs.rope_config.style == RopeStyle.No:
+            return None
+        if _use_text_mrope(attn_configs, self.attn_inputs):
+            return TextMropeEmbeddingOp(attn_configs, self.attn_inputs)
+        return MhaRotaryEmbeddingOp(attn_configs)
 
     def _split_qkv(
         self, qkv: torch.Tensor
@@ -1310,19 +1296,13 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
 
 
 class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
-    """FlashInfer prefill implementation with paged KV cache layout using MhaRotaryEmbeddingOp."""
+    """FlashInfer paged prefill with separate RoPE and KV cache write."""
 
     def _create_fmha_impl(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> Any:
         """Create paged FMHA implementation."""
         return PyFlashinferPrefillPagedAttnOp(attn_configs, attn_inputs)
-
-    def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
-        """Create RoPE implementation for paged layout."""
-        if attn_configs.rope_config.style == RopeStyle.No:
-            return None
-        return MhaRotaryEmbeddingOp(attn_configs)
 
     def _prepare_fmha_input(
         self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
@@ -1345,8 +1325,8 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
             not is_sm10x()
             and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
             and (
-                supports_scalar_prefill_rope(attn_configs, attn_inputs)
-                or _supports_prefill_rope(attn_configs, attn_inputs)
+                _supports_prefill_rope(attn_configs, attn_inputs)
+                or _use_text_mrope(attn_configs, attn_inputs)
             )
         )
 
@@ -1367,12 +1347,6 @@ class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):
     ) -> Any:
         """Create hybrid FMHA implementation."""
         return PyFlashinferHybridPrefillAttnOp(attn_configs, attn_inputs)
-
-    def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
-        """Create RoPE implementation for hybrid layout."""
-        if attn_configs.rope_config.style == RopeStyle.No:
-            return None
-        return MhaRotaryEmbeddingOp(attn_configs)
 
     def forward(
         self,
@@ -1414,7 +1388,10 @@ class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):
             not attn_inputs.is_cuda_graph
             and not is_sm10x()
             and PyFlashinferHybridPrefillAttnOp.support(attn_inputs)
-            and _supports_prefill_rope(attn_configs, attn_inputs)
+            and (
+                _supports_prefill_rope(attn_configs, attn_inputs)
+                or _use_text_mrope(attn_configs, attn_inputs)
+            )
         )
 
     def support_cuda_graph(self) -> bool:
@@ -1422,19 +1399,13 @@ class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):
 
 
 class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
-    """FlashInfer prefill implementation with ragged KV cache layout using MhaRotaryEmbeddingOp."""
+    """FlashInfer ragged prefill with separate RoPE and KV cache write."""
 
     def _create_fmha_impl(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> Any:
         """Create ragged FMHA implementation."""
         return PyFlashinferPrefillAttnOp(attn_configs)
-
-    def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
-        """Create RoPE implementation for ragged layout."""
-        if attn_configs.rope_config.style == RopeStyle.No:
-            return None
-        return MhaRotaryEmbeddingOp(attn_configs)
 
     def _prepare_fmha_input(
         self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
@@ -1452,8 +1423,7 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
         Returns True if:
         1. The underlying ragged FMHA op supports the inputs
            (requires prefix_lengths to be empty or zero)
-        2. MhaRotaryEmbeddingOp supports the inputs
-        3. Mrope is not used
+        2. RoPE is not MRoPE, or MRoPE is used for MTP text tokens
 
         Note: Unlike the paged variant, ragged prefill is kept enabled on
         Blackwell: TRT-LLM Gen prefill requires a paged kv cache and
@@ -1461,9 +1431,10 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
         one. Without this fallback, sm_120 has no usable prefill impl for
         such cases.
         """
-        return PyFlashinferPrefillAttnOp.support(
-            attn_inputs
-        ) and _supports_prefill_rope(attn_configs, attn_inputs)
+        return PyFlashinferPrefillAttnOp.support(attn_inputs) and (
+            _supports_prefill_rope(attn_configs, attn_inputs)
+            or _use_text_mrope(attn_configs, attn_inputs)
+        )
 
 
 def determine_use_tensor_core_from_configs(attn_configs: AttentionConfigs) -> bool:

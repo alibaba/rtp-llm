@@ -160,10 +160,13 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         if int(self._v4_args.window_size) <= 0:
             raise ValueError("DeepSeek-V4 DSpark requires a sliding window")
 
+        self.input_hidden_size = len(self._dspark_target_layer_ids) * int(
+            self._v4_args.dim
+        )
         self.init_dspark_proposer(
             width=int(self._gen_num_per_cycle),
             noise_token_id=int(noise_token_id),
-            aux_feature_dim=len(self._dspark_target_layer_ids) * int(self._v4_args.dim),
+            aux_feature_dim=self.input_hidden_size,
             hidden_dim=int(self._v4_args.dim),
         )
         # Model-level weights are attached by ``_load_extra_weights`` after
@@ -184,11 +187,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     # ------------------------------------------------------------------
     # Initialization / graph policy
     # ------------------------------------------------------------------
-
-    def cuda_graph_input_hidden_size(self) -> int:
-        """Return the target-feature row width consumed by commit graphs."""
-
-        return int(self._dspark_aux_feature_dim)
 
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False

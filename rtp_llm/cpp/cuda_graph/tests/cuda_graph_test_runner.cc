@@ -21,7 +21,9 @@ public:
                       int64_t                  kernel_tokens_per_block,
                       std::vector<int>         prefill_capture_seq_lens,
                       int64_t                  hidden_size,
-                      std::vector<std::string> group_tags) {
+                      std::vector<std::string> group_tags,
+                      int64_t                  num_tokens_per_bs,
+                      int64_t                  sp_steps) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = true;
@@ -29,7 +31,8 @@ public:
         params.max_seq_len                  = static_cast<int>(max_seq_len);
         params.tokens_per_block             = static_cast<int>(tokens_per_block);
         params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
-        params.num_tokens_per_bs            = static_cast<int>(max_seq_len);
+        params.num_tokens_per_bs            = static_cast<int>(num_tokens_per_bs);
+        params.sp_steps                     = static_cast<int>(sp_steps);
         params.max_context_batch_size       = static_cast<size_t>(max_context_batch_size);
         params.hidden_size                  = static_cast<size_t>(hidden_size);
         params.input_hidden_size            = static_cast<size_t>(hidden_size);
@@ -117,7 +120,9 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("kernel_tokens_per_block"),
              py::arg("prefill_capture_seq_lens"),
              py::arg("hidden_size"),
-             py::arg("group_tags") = std::vector<std::string>{})
+             py::arg("group_tags")        = std::vector<std::string>{},
+             py::arg("num_tokens_per_bs") = 0,
+             py::arg("sp_steps")          = 0)
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),

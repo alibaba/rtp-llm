@@ -249,7 +249,9 @@ def _register_builtin_lazy_models() -> None:
         "qwen_3_moe", "rtp_llm.models.qwen_v3_moe", ["Qwen3MoeForCausalLM"]
     )
     register_lazy_model(
-        "qwen_3_moe_eagle3", "rtp_llm.models.qwen_v3_moe", ["Qwen3MoeForCausalLMEagle"]
+        "angelslim_qwen3_eagle3",
+        "rtp_llm.models.qwen_v3_moe",
+        ["LlamaForCausalLMEagle3"],
     )
     register_lazy_model("qwen3_coder_moe", "rtp_llm.models.qwen_v3_moe")
     register_lazy_model(

@@ -20,7 +20,7 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 1777289051,
+                "created": 1787203644,
                 "model": "",
                 "choices": [
                     {
@@ -28,6 +28,7 @@
                         "message": {
                             "role": "assistant",
                             "content": "Here's a thinking process that leads to the suggested questions about English listening methods:\n\n1.  **Analyze the Request:**\n    *   **Topic:** English Listening Methods (英语听力方法).\n    *   **Task:** Propose several questions (提出几个问题).\n    *   **Language:** The user asked in Chinese, so the output should be in Chinese (with English terms where appropriate for clarity).\n    *   **Goal:** The questions should be thought-prov",
+                            "name": null,
                             "reasoning_content": null,
                             "function_call": null,
                             "tool_calls": null,
@@ -47,14 +48,14 @@
                 },
                 "debug_info": null,
                 "aux_info": {
-                    "cost_time": 3143.197,
-                    "iter_count": 25,
+                    "cost_time": 13260.185,
+                    "iter_count": 26,
                     "prefix_len": 0,
                     "input_len": 18,
                     "output_len": 100,
                     "step_output_len": 100,
-                    "first_token_cost_time": 264.576,
-                    "wait_time": 0.0,
+                    "first_token_cost_time": 2791.057,
+                    "wait_time": 0.225,
                     "pd_sep": false,
                     "cum_log_probs": [],
                     "beam_responses": [],
@@ -95,7 +96,7 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 1777289052,
+                "created": 1787203645,
                 "model": "",
                 "choices": [
                     {
@@ -103,6 +104,7 @@
                         "message": {
                             "role": "assistant",
                             "content": "Here's a thinking process that leads to the suggested revisions:\n\n1.  **Analyze the",
+                            "name": null,
                             "reasoning_content": null,
                             "function_call": null,
                             "tool_calls": null,
@@ -122,14 +124,14 @@
                 },
                 "debug_info": null,
                 "aux_info": {
-                    "cost_time": 684.577,
+                    "cost_time": 759.331,
                     "iter_count": 5,
                     "prefix_len": 0,
                     "input_len": 467,
                     "output_len": 20,
                     "step_output_len": 20,
-                    "first_token_cost_time": 243.41,
-                    "wait_time": 0.0,
+                    "first_token_cost_time": 293.765,
+                    "wait_time": 0.198,
                     "pd_sep": false,
                     "cum_log_probs": [],
                     "beam_responses": [],

@@ -27,7 +27,7 @@
 
 namespace rtp_llm {
 namespace {
-constexpr int64_t     kSchemaVersion   = 1;
+constexpr int64_t     kSchemaVersion   = 2;
 constexpr size_t      kChunkMaxBytes   = 64ULL * 1024ULL * 1024ULL;
 constexpr size_t      kChunkMaxRecords = 256;
 constexpr size_t      kQueueMaxBytes   = 256ULL * 1024ULL * 1024ULL;
@@ -48,6 +48,9 @@ const char* roleName(ModelInputsModelRole role) {
 const char* executionStage(const GptModelInputs& inputs) {
     if (inputs.is_target_verify) {
         return "target_verify";
+    }
+    if (inputs.is_spec_draft_prefill) {
+        return "spec_draft_prefill";
     }
     const bool prefill = inputs.prefix_lengths.defined() && inputs.prefix_lengths.numel() > 0;
     const bool decode  = inputs.sequence_lengths.defined() && inputs.sequence_lengths.numel() > 0;
@@ -169,6 +172,7 @@ c10::impl::GenericDict snapshotPayload(const GptModelInputs&     inputs,
     payload.insert("skip_run", inputs.skip_run);
     payload.insert("is_fake_stream", inputs.is_fake_stream);
     payload.insert("is_target_verify", inputs.is_target_verify);
+    payload.insert("is_spec_draft_prefill", inputs.is_spec_draft_prefill);
     return payload;
 }
 std::vector<std::shared_ptr<c10::Event>> readyEvents(const std::vector<c10::Device>& devices) {

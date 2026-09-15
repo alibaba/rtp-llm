@@ -7,7 +7,10 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_primary_attention_inputs,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
@@ -412,6 +415,40 @@ class GenericMoeModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self._capture_aux_hidden_layer_ids = tuple(
+            int(layer_id)
+            for layer_id in (model_config.capture_aux_hidden_layer_ids or ())
+        )
+        self._capture_aux_hidden_layer_id_set = set(self._capture_aux_hidden_layer_ids)
+        capture_width = (
+            len(self._capture_aux_hidden_layer_ids) * model_config.hidden_size
+        )
+        final_norm_weight = weights.get_global_weight(W.final_ln_gamma)
+        # Captured target auxiliary hidden exported to the Eagle3 draft. Two
+        # storages hold it for different execution phases:
+        #   * graph buffer: fixed address/capacity for CUDA-graph target verify
+        #     replay, which cannot allocate or rebind Python tensors during replay.
+        #   * eager tensor: exact-size, allocated per non-graph prefill forward,
+        #     whose row count can exceed the verify graph capacity.
+        # Capacity covers the largest verify batch: max_batch * (gamma + 1).
+        self._mtp_target_hidden_graph_capacity = max_generate_batch_size * max(
+            int(model_config.gen_num_per_cycle) + 1, 1
+        )
+        self.register_buffer(
+            "_mtp_target_hidden_graph_buffer",
+            (
+                torch.empty(
+                    (self._mtp_target_hidden_graph_capacity, capture_width),
+                    dtype=final_norm_weight.dtype,
+                    device=final_norm_weight.device,
+                )
+                if capture_width > 0
+                else None
+            ),
+            persistent=False,
+        )
+        self._mtp_target_hidden_eager_tensor: Optional[torch.Tensor] = None
+        self._mtp_target_hidden_eager_valid_tokens = 0
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
@@ -421,7 +458,42 @@ class GenericMoeModel(GptModelBase):
                 inputs
             )  # pyright: ignore[reportUnreachable]
         residual = torch.zeros_like(hidden_states)
+        captured_count = 0
+        captured_rows = hidden_states.size(0)
+        capture_buffer: Optional[torch.Tensor] = None
+        is_target_verify = False
+        if self._capture_aux_hidden_layer_ids:
+            attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
+            is_target_verify = bool(attention_inputs.is_target_verify)
+            if is_target_verify:
+                capture_buffer = self._mtp_target_hidden_graph_buffer
+                if capture_buffer is None:
+                    raise RuntimeError(
+                        "Qwen3-MoE Eagle3 target verify buffer is missing"
+                    )
+                if captured_rows > capture_buffer.size(0):
+                    raise ValueError(
+                        "Qwen3-MoE Eagle3 target hidden states exceed Graph capacity: "
+                        f"rows={captured_rows}, capacity={capture_buffer.size(0)}"
+                    )
+            else:
+                capture_buffer = hidden_states.new_empty(
+                    captured_rows,
+                    len(self._capture_aux_hidden_layer_ids) * self.config.hidden_size,
+                )
+                self._mtp_target_hidden_eager_tensor = capture_buffer
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
+            if i in self._capture_aux_hidden_layer_id_set:
+                if capture_buffer is None:
+                    raise RuntimeError(
+                        "Qwen3-MoE Eagle3 target hidden buffer is missing"
+                    )
+                start = captured_count * self.config.hidden_size
+                end = start + self.config.hidden_size
+                capture_buffer[:captured_rows, start:end].copy_(
+                    hidden_states + residual
+                )
+                captured_count += 1
             layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
             output = decoder_layer(
                 hidden_states,
@@ -432,9 +504,38 @@ class GenericMoeModel(GptModelBase):
             hidden_states = output.hidden_states
             residual = output.residual
 
+        if self._capture_aux_hidden_layer_ids:
+            if captured_count != len(self._capture_aux_hidden_layer_ids):
+                raise RuntimeError(
+                    "Qwen3-MoE Eagle3 did not capture every configured hidden state"
+                )
+            if not is_target_verify:
+                self._mtp_target_hidden_eager_valid_tokens = captured_rows
         hidden_states, _ = self.norm(hidden_states, residual)
 
         return PyModelOutputs(hidden_states)
+
+    def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
+        # num_tokens < 0: eager prefill reads the producer's exact row count.
+        # num_tokens >= 0: graph target verify reads an explicit row count,
+        # since graph replay does not update the Python-side valid-token counter.
+        if num_tokens < 0:
+            buffer = self._mtp_target_hidden_eager_tensor
+            requested = self._mtp_target_hidden_eager_valid_tokens
+        else:
+            buffer = self._mtp_target_hidden_graph_buffer
+            requested = int(num_tokens)
+        if buffer is None or requested <= 0:
+            return None
+        if requested > buffer.size(0):
+            raise ValueError(
+                "Qwen3-MoE Eagle3 hidden-state request exceeds buffer capacity: "
+                f"requested={requested}, capacity={buffer.size(0)}"
+            )
+        return buffer[:requested]
+
+    def has_mtp_hidden_buffer(self) -> bool:
+        return bool(self._capture_aux_hidden_layer_ids)
 
 
 __all__ = [

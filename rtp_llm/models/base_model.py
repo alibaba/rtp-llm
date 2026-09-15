@@ -273,6 +273,14 @@ class BaseModel(object):
         ]
 
     @classmethod
+    def target_aux_hidden_capture_layer_ids(
+        cls,
+        target_model_config: ModelConfig,
+        draft_model_config: ModelConfig,
+    ) -> tuple[int, ...]:
+        return ()
+
+    @classmethod
     def speculative_weight_alias_names(
         cls, target_model: "BaseModel", draft_model_config: ModelConfig
     ) -> tuple[str, ...]:
