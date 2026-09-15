@@ -694,7 +694,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNotNull_AllSuccess) {
 
     // 验证 BroadcastTp 和 StartLoad 都被调用
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
-        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
+        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getP2PRequestCallCount(P2PConnectorBroadcastType::READ), 1);
     }
     EXPECT_EQ(prefill_server_->service()->getStartLoadCallCount(), 1);
 }
@@ -813,7 +813,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_WaitDone_UnblocksWhenCheckDoneComple
     EXPECT_TRUE(async_context->success());
 
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
-        EXPECT_GE(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
+        EXPECT_GE(tp_broadcast_servers_[i]->service()->getP2PRequestCallCount(P2PConnectorBroadcastType::READ), 1);
     }
     EXPECT_EQ(prefill_server_->service()->getStartLoadCallCount(), 1);
 }
@@ -867,7 +867,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_BroadcastFailed) {
 
     // 验证 BroadcastTp 和 StartLoad 都被调用
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
-        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
+        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getP2PRequestCallCount(P2PConnectorBroadcastType::READ), 1);
     }
     EXPECT_EQ(prefill_server_->service()->getStartLoadCallCount(), 1);
 }
@@ -1024,7 +1024,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_CancelPrefill_WhenBroadcastFailed) {
 
     // 验证 BroadcastTp 被调用
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
-        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
+        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getP2PRequestCallCount(P2PConnectorBroadcastType::READ), 1);
     }
 
     // 验证 StartLoad 被调用（可能被取消）
