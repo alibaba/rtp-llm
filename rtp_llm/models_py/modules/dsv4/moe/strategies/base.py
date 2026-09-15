@@ -57,6 +57,7 @@ class MoeCfg:
     local_expert_start: int
     local_expert_end: int
     max_tokens_per_rank: int
+    is_decode_role: bool = False
 
 
 class RoutedExpertsStrategy(nn.Module):

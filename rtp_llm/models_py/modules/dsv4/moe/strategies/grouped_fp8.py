@@ -62,11 +62,12 @@ exactly the 6 required. Only the tokens are duplicated on the wire. This uses
 plain NCCL collectives, so unlike DeepEP it needs no NVSHMEM and no
 ``init_deepep_wrapper``.
 
-Eager DP decode can have unequal local batch sizes. For non-LL roles with a
-small fixed ``max_tokens_per_rank`` budget, each rank pads its exchange to that
-budget and trims the result back to its original rows. Padding is selected from
-configuration, never the local runtime batch size. Large-budget CP prefill keeps
-the unpadded exchange and requires equal per-rank token counts.
+Eager DP decode can have unequal local batch sizes. Non-LL decode roles pad each
+exchange to their fixed ``max_tokens_per_rank`` budget and trim the result back
+to the original rows. Small budgets retain this behavior for callers without
+explicit role metadata. Padding is selected from configuration, never the local
+runtime batch size. Non-decode large-budget exchanges stay unpadded and require
+equal per-rank token counts, as supplied by CP prefill.
 """
 
 from __future__ import annotations
@@ -96,7 +97,7 @@ from ..warmup_sync import cuda_graph_warmup_forward_enabled
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from ...quant_layouts import FP8_BLOCK
 
-# Set to 1 to verify equal exchange row counts, after any bounded decode padding.
+# Set to 1 to verify equal exchange row counts, after any fixed-budget padding.
 # Off by default because the check needs a device->host sync per layer. CP shards
 # are equal-sized, but independent eager DP decode batches need not be.
 _EP_CHECK_SIZES_ENV = "DSV4_EP_CHECK_SIZES"
@@ -513,6 +514,11 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
     name = "grouped_fp8"
 
     def __init__(self, cfg: MoeCfg):
+        if getattr(cfg, "is_decode_role", False) and cfg.max_tokens_per_rank <= 0:
+            raise ValueError(
+                "grouped_fp8 decode requires a positive cfg.max_tokens_per_rank "
+                "for its fixed per-rank token budget"
+            )
         from rtp_llm.model_loader.weight_memory_saver import is_enabled
 
         # Routed tensors are popped from ModelWeights without a wake consumer.
@@ -722,10 +728,18 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
             ).float()
 
         exchange_n = N
-        # The configured budget is rank-uniform even when eager DP batches are
-        # not. Keep this independent of N and the configurable LL buffer size so
-        # large CP-prefill roles never opt into a small decode exchange locally.
-        if not self._ll_ok and 0 < cfg.max_tokens_per_rank * ep <= _MASKED_MAX_N:
+        # Explicit decode roles need a fixed exchange even above the masked-GEMM
+        # limit; their large eager batches use the existing contiguous compute.
+        # Preserve the small-budget fallback for callers without role metadata.
+        # Both choices are rank-uniform and independent of runtime N/LL capacity.
+        if (
+            not self._ll_ok
+            and cfg.max_tokens_per_rank > 0
+            and (
+                cfg.is_decode_role
+                or cfg.max_tokens_per_rank * ep <= _MASKED_MAX_N
+            )
+        ):
             exchange_n = cfg.max_tokens_per_rank
             if N > exchange_n:
                 raise RuntimeError(
@@ -776,9 +790,9 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
             raise RuntimeError(
                 f"{GroupedFP8Strategy.name} EP combine requires an equal token "
                 f"count on every rank, got {seen}. The all-gather/reduce-scatter "
-                "combine requires rank-uniform exchange rows. Small non-LL "
-                "budgets pad to cfg.max_tokens_per_rank; large budgets remain "
-                "unpadded."
+                "combine requires rank-uniform exchange rows. Non-LL decode "
+                "roles and small budgets pad to cfg.max_tokens_per_rank; "
+                "non-decode large budgets remain unpadded."
             )
 
     def _local_experts(
