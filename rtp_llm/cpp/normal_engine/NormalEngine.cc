@@ -702,14 +702,10 @@ absl::Status NormalEngine::startLoop() {
     return absl::OkStatus();
 }
 
-absl::Status NormalEngine::requestStop() {
-    running_ = false;
-    return scheduler_->stop();
-}
-
 absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
-    RETURN_IF_STATUS_ERROR(requestStop());
+    running_ = false;
+    RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
     resource_context_.cache_manager->stopMetricsReporter();
     return absl::OkStatus();
