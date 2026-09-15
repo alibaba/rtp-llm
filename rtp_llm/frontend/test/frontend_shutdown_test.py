@@ -5,12 +5,10 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, create_autospec, patch
+from unittest.mock import AsyncMock, Mock, create_autospec, patch
 
 from fastapi.responses import ORJSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
-from uvicorn import Config, Server
-
 from rtp_llm.frontend.frontend_app import (
     FrontendApp,
     GracefulShutdownServer,
@@ -19,7 +17,9 @@ from rtp_llm.frontend.frontend_app import (
 )
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
+from uvicorn import Config, Server
 
 
 class FakeController:
@@ -29,6 +29,8 @@ class FakeController:
 class FakeFrontendServer:
     def __init__(self, is_embedding=False):
         self._global_controller = FakeController()
+        self.rank_id = 0
+        self.server_id = 0
         self.is_embedding = is_embedding
         self.close_called = False
 
@@ -118,6 +120,29 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         client = TestClient(app)
         self.assertEqual(client.get("/health").status_code, 200)
 
+        registry = app.state.frontend_request_metrics
+        registry.reporter = Mock()
+        for path, body in [
+            ("/", "{"),
+            ("/v1/chat/completions", "{}"),
+            ("/batch_infer", "[]"),
+        ]:
+            registry.reporter.reset_mock()
+            invalid = client.post(
+                path, content=body, headers={"content-type": "application/json"}
+            )
+            self.assertEqual(invalid.status_code, 422)
+            self.assertIn("detail", invalid.json())
+            self.assertEqual(
+                [
+                    c.args[2]["event"]
+                    for c in registry.reporter.report.call_args_list
+                    if c.args[0] == AccMetrics.FRONTEND_ADMISSION_QPS
+                ],
+                ["received", "reject_invalid"],
+            )
+        registry.reporter.reset_mock()
+
         app_owner.shutdown_manager.start_draining("unit test")
 
         self.assertEqual(client.get("/liveness").status_code, 200)
@@ -131,6 +156,16 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         )
         self.assertEqual(chat_response.status_code, 503)
         self.assertEqual(chat_response.headers.get("retry-after"), "1")
+
+        self.assertEqual(
+            [
+                c.args[2]["event"]
+                for c in registry.reporter.report.call_args_list
+                if c.args[0] == AccMetrics.FRONTEND_ADMISSION_QPS
+            ],
+            ["received", "reject_unavailable"] * 2,
+        )
+        self.assertEqual(sum(registry.snapshot().values()), 0)
 
         embedding_app_owner = FrontendApp.__new__(FrontendApp)
         embedding_app_owner.frontend_server = FakeFrontendServer(is_embedding=True)

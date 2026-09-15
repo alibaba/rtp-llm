@@ -20,13 +20,11 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi import Request
 from fastapi import Request as RawRequest
 from fastapi import status
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse, StreamingResponse
-from typing_extensions import override
-from uvicorn import Config, Server
-from uvicorn.loops.auto import auto_loop_setup
-
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
@@ -35,6 +33,12 @@ from rtp_llm.distribute.distributed_server import (
     get_world_info,
 )
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
+from rtp_llm.frontend.frontend_request_metrics import (
+    FrontendRequestMetricsMiddleware,
+    get_frontend_request_registry,
+    reject_current_request,
+    report_concurrency_rejection,
+)
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
 from rtp_llm.openai.api_datatype import (
@@ -54,6 +58,9 @@ from rtp_llm.utils.shutdown_config import (
 )
 from rtp_llm.utils.util import async_request_server
 from rtp_llm.utils.version_info import VersionInfo
+from typing_extensions import override
+from uvicorn import Config, Server
+from uvicorn.loops.auto import auto_loop_setup
 
 # make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
@@ -566,6 +573,14 @@ class FrontendApp(object):
                 allow_headers=["*"],
             )
         ]
+        registry = get_frontend_request_registry(
+            self.frontend_server.rank_id,
+            self.frontend_server.server_id,
+            self.frontend_server.is_embedding,
+        )
+        middleware.insert(
+            0, Middleware(FrontendRequestMetricsMiddleware, registry=registry)
+        )
         app = FastAPI(middleware=middleware)
         allocator_dump_enabled = bool(
             getattr(self.server_config, "enable_torch_allocator_dump", False)
@@ -594,6 +609,17 @@ class FrontendApp(object):
             )
         )
 
+        app.state.frontend_request_metrics = registry
+
+        @app.exception_handler(RequestValidationError)
+        async def validation_error(request, error):
+            reject_current_request("reject_invalid")
+            return await request_validation_exception_handler(request, error)
+
+        @app.on_event("shutdown")
+        async def stop_request_metrics():
+            registry.stop()
+
         @app.on_event("startup")
         async def startup():
             # PD 不分离时在 Uvicorn 的 loop 里等后端就绪，channel 在此 loop 创建并一直复用
@@ -604,6 +630,7 @@ class FrontendApp(object):
                     self.frontend_server._global_controller.max_concurrency * 2
                 )
             )
+            registry.start()
 
         def draining_response():
             reason = (
@@ -623,6 +650,7 @@ class FrontendApp(object):
 
         async def track_business_request(call):
             if not self.shutdown_manager.try_begin_request():
+                reject_current_request("reject_unavailable")
                 return draining_response()
             should_finish = True
             try:
@@ -633,7 +661,13 @@ class FrontendApp(object):
                     )
                     should_finish = False
                 return response
+            except json.JSONDecodeError:
+                reject_current_request("reject_invalid")
+                raise
             except ConcurrencyException as e:
+                report_concurrency_rejection(
+                    e, self.frontend_server.rank_id, self.frontend_server.server_id
+                )
                 # Safety net: never let concurrency-limit overflow surface as 500.
                 return ORJSONResponse(format_exception(e), status_code=429)
             finally:
@@ -934,6 +968,8 @@ class FrontendApp(object):
                     parsed_req = json.loads(req)
                 else:
                     parsed_req = req
+                if not isinstance(parsed_req, dict):
+                    reject_current_request("reject_invalid")
                 return await self.frontend_server.batch_infer(parsed_req, raw_request)
 
             return await track_business_request(call)

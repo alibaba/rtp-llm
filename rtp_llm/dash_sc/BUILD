@@ -63,6 +63,7 @@ py_library(
         "//rtp_llm:config",
         "//rtp_llm/dash_sc/proto:predict_v2_py_proto",
         "//rtp_llm:frontend",
+        "//rtp_llm:frontend_request_metrics",
         "//rtp_llm/metrics:metrics",
         "//rtp_llm:orjson",
         "//rtp_llm:sentencepiece",

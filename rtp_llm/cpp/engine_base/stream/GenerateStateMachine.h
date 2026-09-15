@@ -13,6 +13,7 @@
 
 namespace rtp_llm {
 
+struct SchedulerRoundContext;
 class StreamCacheResource;  // forward declaration
 
 // Stream 生命周期状态机，将原先分散在 FIFOScheduler 中的状态转移逻辑集中管理。
@@ -43,7 +44,7 @@ public:
         return events_.has(event);
     }
 
-    StreamState moveToNext();
+    StreamState moveToNext(const SchedulerRoundContext* round = nullptr);
 
     StreamState getStatus() const {
         return status.load(std::memory_order_acquire);
@@ -76,7 +77,7 @@ public:
     ErrorInfo                error_info;
 
 private:
-    void handleWaiting();
+    void handleWaiting(const SchedulerRoundContext* round);
     void handleLoading();
     void handleRunning();
     void releaseResource();

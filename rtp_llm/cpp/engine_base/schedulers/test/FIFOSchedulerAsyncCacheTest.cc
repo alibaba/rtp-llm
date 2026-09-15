@@ -23,6 +23,7 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 using namespace std;
 using testing::Return;
@@ -161,6 +162,12 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_NoReuseCache_DirectlyRunning
     auto scheduler = createScheduler();
     auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/false);
 
+    scheduler->activateCacheScheduleMetrics(stream);
+    NormalGenerateStream copy(*stream);
+    EXPECT_FALSE(copy.cacheScheduleMetricsWithoutLock().active());
+    copy.setIsFakeStream(true);
+    copy.activateCacheScheduleMetrics(1);
+    EXPECT_FALSE(copy.cacheScheduleMetricsWithoutLock().active());
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
 
     // Single schedule: stream transitions directly to RUNNING (no cache loading needed)
@@ -170,6 +177,11 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_NoReuseCache_DirectlyRunning
     ASSERT_EQ(scheduler->loading_cache_streams_.size(), 0u);
     ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler->runningStreamsSize(), 1);
+    const auto sample = stream->cacheScheduleMetricsWithoutLock().takeReport();
+    ASSERT_TRUE(sample);
+    EXPECT_FALSE(sample->has_async_cache_dependency);
+    EXPECT_EQ(sample->schedule_rounds, 1);
+    EXPECT_FALSE(stream->cacheScheduleMetricsWithoutLock().takeReport());
 }
 
 // ============================================================================
@@ -206,12 +218,15 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCheck_LoadDone_MovesToRunning) {
     ON_CALL(*mock_ctx, done()).WillByDefault(Return(true));
     ON_CALL(*mock_ctx, success()).WillByDefault(Return(true));
     ON_CALL(*mock_ctx, waitDone()).WillByDefault(Return());
+    ON_CALL(*mock_ctx, cacheLoadMetricsSnapshot())
+        .WillByDefault(Return(CacheLoadTerminalSnapshot{true, true, currentTimeUs()}));
 
     EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(mock_ctx)));
 
     auto scheduler = createScheduler();
     auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
 
+    scheduler->activateCacheScheduleMetrics(stream);
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
 
     // First schedule: stream enters loading_ queue
@@ -227,6 +242,11 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCheck_LoadDone_MovesToRunning) {
     ASSERT_EQ(result2.value().size(), 1);
     ASSERT_EQ(scheduler->loading_cache_streams_.size(), 0u);
     ASSERT_EQ(scheduler->runningStreamsSize(), 1);
+    const auto sample = stream->cacheScheduleMetricsWithoutLock().takeReport();
+    ASSERT_TRUE(sample);
+    EXPECT_TRUE(sample->has_async_cache_dependency);
+    EXPECT_EQ(sample->schedule_rounds, 2);
+    EXPECT_LE(sample->ready_wait_us, sample->loading_latency_us);
 }
 
 // ============================================================================
@@ -708,6 +728,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPreparedGroupFinishesLoadingInOneRound) 
     auto loading_stream = createStream({3, 4}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
     auto waiting_stream = createStream({5, 6}, /*reuse_cache=*/false);
 
+    scheduler->activateCacheScheduleMetrics(direct_stream);
+    scheduler->activateCacheScheduleMetrics(loading_stream);
     ASSERT_EQ(scheduler->enqueueGroup({direct_stream, loading_stream}).first, std::vector<bool>({true, true}));
 
     auto first_result = scheduler->schedule();
@@ -727,6 +749,9 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPreparedGroupFinishesLoadingInOneRound) 
     EXPECT_EQ(waiting_stream->getStatus(), StreamState::WAITING);
     EXPECT_TRUE(scheduler->loading_cache_group_queue_.empty());
     EXPECT_EQ(scheduler->waitingStreamsSize(), 1);
+
+    EXPECT_EQ(direct_stream->cacheScheduleMetricsWithoutLock().takeReport()->schedule_rounds, 1);
+    EXPECT_EQ(loading_stream->cacheScheduleMetricsWithoutLock().takeReport()->schedule_rounds, 2);
 
     direct_stream->reportEvent(StreamEvents::GenerateDone);
     loading_stream->reportEvent(StreamEvents::GenerateDone);

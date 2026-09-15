@@ -140,14 +140,19 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         return nullptr;
     }
 
+    bool                                       has_async_cache_dependency = false;
     std::vector<std::shared_ptr<AsyncContext>> match_contexts(connectors_.size());
     for (int i = 0; i < connectors_.size(); i++) {
         match_contexts.at(i) = connectors_.at(i)->asyncMatch(resource, connector_context->meta());
+#ifdef USE_REMOTE_KV_CACHE
+        // Remote lookup is an async dependency even when the result is a miss.
+        has_async_cache_dependency |= match_contexts.at(i) && connectors_.at(i) == remote_connector_;
+#endif
     }
 
     auto fused_match_context = std::make_shared<FusedAsyncContext>(std::move(match_contexts));
-    auto fused_read_context =
-        std::make_shared<FusedAsyncReadContext>(fused_match_context, resource, connector_context->meta());
+    auto fused_read_context  = std::make_shared<FusedAsyncReadContext>(
+        fused_match_context, resource, connector_context->meta(), has_async_cache_dependency);
     {
         std::lock_guard<std::mutex> lock(update_mutex_);
         fused_async_read_context_list_.push_back(fused_read_context);

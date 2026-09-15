@@ -127,6 +127,7 @@ TEST(AsyncContextTest, FusedAsyncReadContext_DoneTrue_WhenMatchContextNull) {
     auto meta     = std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
     auto ctx      = std::make_shared<FusedAsyncReadContext>(nullptr, resource, meta);
     EXPECT_TRUE(ctx->done());
+    EXPECT_FALSE(ctx->cacheLoadMetricsSnapshot()->has_async_cache_dependency);
     EXPECT_FALSE(ctx->success());  // fused_match_context_ is null => success() must be false
 }
 
@@ -137,10 +138,13 @@ TEST(AsyncContextTest, FusedAsyncReadContext_DoneFalse_WhenMatchNotDone) {
 
     auto match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
     auto meta  = std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
-    auto ctx   = std::make_shared<FusedAsyncReadContext>(match, std::shared_ptr<KVCacheResource>{}, meta);
+    auto ctx   = std::make_shared<FusedAsyncReadContext>(
+        match, std::shared_ptr<KVCacheResource>{}, meta, /*async remote lookup=*/true);
 
     EXPECT_FALSE(ctx->done());
     EXPECT_FALSE(ctx->success());
+    EXPECT_TRUE(ctx->cacheLoadMetricsSnapshot()->has_async_cache_dependency);
+    EXPECT_FALSE(ctx->cacheLoadMetricsSnapshot()->terminal_time_us);
 }
 
 TEST(AsyncContextTest, FusedAsyncReadContext_DoneTrue_WhenMatchDoneButFailed) {
@@ -154,6 +158,8 @@ TEST(AsyncContextTest, FusedAsyncReadContext_DoneTrue_WhenMatchDoneButFailed) {
 
     EXPECT_TRUE(ctx->done());
     EXPECT_FALSE(ctx->success());
+    EXPECT_TRUE(ctx->cacheLoadMetricsSnapshot()->terminal_time_us);
+    EXPECT_FALSE(ctx->cacheLoadMetricsSnapshot()->success);
 }
 
 TEST(AsyncContextTest, FusedAsyncReadContext_DoneFalse_WhenMatchSuccessButReadNotSet) {
@@ -208,6 +214,7 @@ TEST(AsyncContextTest, FusedAsyncReadContext_WaitDone_WaitsForLateReadContext) {
     auto meta = std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
     auto ctx  = std::make_shared<FusedAsyncReadContext>(match, std::shared_ptr<KVCacheResource>{}, meta);
 
+    EXPECT_FALSE(ctx->cacheLoadMetricsSnapshot()->has_async_cache_dependency);
     std::atomic<bool> returned{false};
     std::thread       waiter([&] {
         ctx->waitDone();
@@ -224,6 +231,8 @@ TEST(AsyncContextTest, FusedAsyncReadContext_WaitDone_WaitsForLateReadContext) {
     read_child->setDone(false);
     auto read = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{read_child});
     ctx->setFusedReadContext(read);
+    EXPECT_TRUE(ctx->cacheLoadMetricsSnapshot()->has_async_cache_dependency);
+    EXPECT_FALSE(ctx->cacheLoadMetricsSnapshot()->terminal_time_us);
     // In production, coordinator periodically checks `done()` and calls `notifyDone()` to wake waiters.
     ctx->notifyDone();
 
@@ -235,6 +244,11 @@ TEST(AsyncContextTest, FusedAsyncReadContext_WaitDone_WaitsForLateReadContext) {
     ctx->notifyDone();
     waiter.join();
     EXPECT_TRUE(returned.load(std::memory_order_acquire));
+    const auto snapshot = ctx->cacheLoadMetricsSnapshot();
+    ASSERT_TRUE(snapshot->terminal_time_us);
+    EXPECT_TRUE(snapshot->success);
+    EXPECT_TRUE(ctx->done());
+    EXPECT_EQ(ctx->cacheLoadMetricsSnapshot()->terminal_time_us, snapshot->terminal_time_us);
 }
 
 TEST(AsyncContextTest, FusedAsyncReadContext_WaitDone_ReturnsWhenLateReadContextSetNull) {
@@ -294,7 +308,8 @@ TEST(AsyncContextTest, FusedAsyncReadContext_DoneTrue_WhenReadContextSetNullAfte
     auto match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
 
     auto meta = std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
-    auto ctx  = std::make_shared<FusedAsyncReadContext>(match, std::shared_ptr<KVCacheResource>{}, meta);
+    auto ctx  = std::make_shared<FusedAsyncReadContext>(
+        match, std::shared_ptr<KVCacheResource>{}, meta, /*async remote lookup=*/true);
 
     // Not set yet => not done
     EXPECT_FALSE(ctx->done());
@@ -303,6 +318,8 @@ TEST(AsyncContextTest, FusedAsyncReadContext_DoneTrue_WhenReadContextSetNullAfte
     ctx->setFusedReadContext(nullptr);
     EXPECT_TRUE(ctx->done());
     EXPECT_TRUE(ctx->success());
+    EXPECT_TRUE(ctx->cacheLoadMetricsSnapshot()->has_async_cache_dependency);
+    EXPECT_TRUE(ctx->cacheLoadMetricsSnapshot()->terminal_time_us);
 }
 
 }  // namespace test

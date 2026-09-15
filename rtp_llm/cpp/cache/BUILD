@@ -378,3 +378,9 @@ cc_library(
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps(),
 )
+
+cc_library(
+    name = "cache_load_metrics",
+    hdrs = ["CacheLoadMetrics.h"],
+    visibility = ["//visibility:public"],
+)

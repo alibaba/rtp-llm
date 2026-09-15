@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
+#include <algorithm>
 
 namespace rtp_llm {
 
@@ -54,8 +56,11 @@ ErrorInfo FusedAsyncContext::errorInfo() const {
 
 FusedAsyncReadContext::FusedAsyncReadContext(const std::shared_ptr<FusedAsyncContext>& fused_match_context,
                                              const std::shared_ptr<KVCacheResource>&   resource,
-                                             const std::shared_ptr<Meta>&              meta):
-    fused_match_context_(fused_match_context), resource_(resource), meta_(meta) {}
+                                             const std::shared_ptr<Meta>&              meta,
+                                             bool                                      has_async_cache_dependency):
+    fused_match_context_(fused_match_context), resource_(resource), meta_(meta) {
+    metrics_snapshot_.has_async_cache_dependency = has_async_cache_dependency;
+}
 
 void FusedAsyncReadContext::waitDone() {
     RTP_LLM_PROFILE_FUNCTION();
@@ -69,20 +74,29 @@ void FusedAsyncReadContext::notifyDone() {
 }
 
 bool FusedAsyncReadContext::done() const {
-    if (!fused_match_context_) {
-        return true;
-    }
-    if (!fused_match_context_->done()) {
-        return false;
-    }
-    if (!fused_match_context_->success()) {
-        return true;
-    }
     std::lock_guard<std::mutex> lock(read_ctx_mutex_);
-    if (!read_ctx_set_.load()) {
-        return false;
+    if (fused_match_context_) {
+        if (!fused_match_context_->done()) {
+            return false;
+        }
+        if (fused_match_context_->success()
+            && (!read_ctx_set_.load() || (fused_read_context_ && !fused_read_context_->done()))) {
+            return false;
+        }
     }
-    return !fused_read_context_ || fused_read_context_->done();
+    // The legacy context publishes completion when its aggregate done() first
+    // succeeds, whether polled by the coordinator or the scheduler.
+    if (!metrics_snapshot_.terminal_time_us) {
+        metrics_snapshot_.success = fused_match_context_ && fused_match_context_->success()
+                                    && (!fused_read_context_ || fused_read_context_->success());
+        metrics_snapshot_.terminal_time_us = currentTimeUs();
+    }
+    return true;
+}
+
+std::optional<CacheLoadTerminalSnapshot> FusedAsyncReadContext::cacheLoadMetricsSnapshot() const {
+    std::lock_guard<std::mutex> lock(read_ctx_mutex_);
+    return metrics_snapshot_;
 }
 
 bool FusedAsyncReadContext::success() const {
@@ -107,6 +121,11 @@ ErrorInfo FusedAsyncReadContext::errorInfo() const {
 void FusedAsyncReadContext::setFusedReadContext(const std::shared_ptr<FusedAsyncContext>& fused_read_context) {
     std::lock_guard<std::mutex> lk(read_ctx_mutex_);
     fused_read_context_ = fused_read_context;
+    if (fused_read_context_) {
+        const auto& contexts = fused_read_context_->contexts();
+        metrics_snapshot_.has_async_cache_dependency |=
+            std::any_of(contexts.begin(), contexts.end(), [](const auto& context) { return context != nullptr; });
+    }
     read_ctx_set_.store(true);
 }
 

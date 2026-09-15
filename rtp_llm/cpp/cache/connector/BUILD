@@ -45,6 +45,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:cache_load_metrics",
         "//rtp_llm/cpp/utils:error_code",
     ],
 )

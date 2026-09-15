@@ -206,6 +206,8 @@ bool RtpLLMStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(total_latency_us_metric, "rtp_llm_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(first_token_latency_us_metric, "rtp_llm_first_token_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(wait_latency_us_metric, "rtp_llm_wait_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(schedule_rounds_metric, "rtp_llm_stream_canrun_to_running_schedule_rounds");
+    REGISTER_GAUGE_MUTABLE_METRIC(ready_wait_us_metric, "rtp_llm_stream_loading_cache_ready_wait_us");
     REGISTER_GAUGE_MUTABLE_METRIC(enqueue_to_canrun_us_metric, "rtp_llm_stream_enqueue_to_canrun_us");
     REGISTER_GAUGE_MUTABLE_METRIC(canrun_to_running_us_metric, "rtp_llm_stream_canrun_to_running_us");
     REGISTER_GAUGE_MUTABLE_METRIC(loading_cache_latency_us_metric, "rtp_llm_stream_loading_cache_latency_us");
@@ -237,10 +239,14 @@ void RtpLLMStreamMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMStream
     REPORT_GAUGE(total_latency_us);
     REPORT_GAUGE(first_token_latency_us);
     REPORT_GAUGE(wait_latency_us);
-    REPORT_GAUGE(enqueue_to_canrun_us);
-    REPORT_GAUGE(canrun_to_running_us);
-    REPORT_GAUGE(loading_cache_latency_us);
-    REPORT_GAUGE(load_done_to_running_us);
+    if (!collector->cache_schedule_target) {
+        REPORT_GAUGE(enqueue_to_canrun_us);
+        REPORT_GAUGE(canrun_to_running_us);
+        REPORT_GAUGE(loading_cache_latency_us);
+        REPORT_GAUGE(load_done_to_running_us);
+    } else if (collector->cache_schedule) {
+        reportCacheScheduleMetrics(tags, *collector->cache_schedule);
+    }
     REPORT_GAUGE(pause_latency_us);
     REPORT_GAUGE(iterate_count);
     REPORT_GAUGE(reuse_length);
@@ -254,6 +260,31 @@ void RtpLLMStreamMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMStream
     REPORT_GAUGE(batch_with_prefill_len);
 
     REPORT_GAUGE(malloc_failed_times);
+}
+
+void RtpLLMStreamMetrics::reportCacheScheduleMetrics(const kmonitor::MetricsTags* parent_tags,
+                                                     const CacheScheduleSnapshot& snapshot) {
+    kmonitor::MetricsTags metric_tags = parent_tags ? *parent_tags : kmonitor::MetricsTags();
+    metric_tags.AddTag("cache_dependency", snapshot.has_async_cache_dependency ? "cache" : "none");
+    const auto* tags = &metric_tags;
+    if (snapshot.enqueue_to_canrun_us > 0) {
+        REPORT_MUTABLE_METRIC(enqueue_to_canrun_us_metric, snapshot.enqueue_to_canrun_us);
+    }
+    if (snapshot.canrun_to_running_us > 0) {
+        REPORT_MUTABLE_METRIC(canrun_to_running_us_metric, snapshot.canrun_to_running_us);
+    }
+    if (snapshot.loading_latency_us > 0) {
+        REPORT_MUTABLE_METRIC(loading_cache_latency_us_metric, snapshot.loading_latency_us);
+    }
+    if (snapshot.load_done_to_running_us > 0) {
+        REPORT_MUTABLE_METRIC(load_done_to_running_us_metric, snapshot.load_done_to_running_us);
+    }
+    if (snapshot.schedule_rounds > 0) {
+        REPORT_MUTABLE_METRIC(schedule_rounds_metric, snapshot.schedule_rounds);
+    }
+    if (snapshot.ready_wait_us > 0) {
+        REPORT_MUTABLE_METRIC(ready_wait_us_metric, snapshot.ready_wait_us);
+    }
 }
 
 // for rpc request

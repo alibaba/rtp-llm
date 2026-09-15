@@ -22,7 +22,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, AsyncIterator, Callable, Iterable, Optional, Protocol
 
 import torch
-
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
     ExceptionCategory,
@@ -87,6 +86,10 @@ from rtp_llm.dash_sc.inference.grammar_validator import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
+from rtp_llm.frontend.frontend_request_metrics import (
+    admit_current_request,
+    reject_current_request,
+)
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
 from rtp_llm.server.request_headers import (
@@ -1693,6 +1696,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                             "[DashScGrpc] body traceparent differs from traceparent_new"
                         )
                 except (DashScParameterError, DashScInputIdsError) as e:
+                    reject_current_request("reject_invalid")
                     if first_request:
                         record.record_request_frame(request)
                         record.mark_request_done("eof")
@@ -1718,6 +1722,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     yield resp
                     return
                 if parsed_input_ids is None:
+                    reject_current_request("reject_invalid")
                     if first_request:
                         record.record_request_frame(request)
                         record.mark_request_done("eof")
@@ -1768,6 +1773,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     partial_metadata_sent = True
 
                 if sampling is not None and sampling.max_new_tokens <= 0:
+                    reject_current_request("reject_invalid")
                     param_name = (
                         "max_completion_tokens"
                         if sampling.max_new_tokens_from_completion_alias
@@ -1795,6 +1801,8 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 )
                 if invalid_grammar is not None:
                     error_spec, status_message = invalid_grammar
+                    if error_spec == DASH_ERROR_BAD_REQUEST:
+                        reject_current_request("reject_invalid")
                     resp = build_dash_error_response(
                         str(request.id),
                         request.model_name,
@@ -1811,6 +1819,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     yield resp
                     return
 
+                admit_current_request()
                 response_iter = iter_real_model_stream_infer(
                     request,
                     input_ids_list,

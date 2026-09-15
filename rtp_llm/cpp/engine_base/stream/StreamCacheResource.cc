@@ -276,7 +276,16 @@ void StreamCacheResource::init(int batch_size) {
     resource_released_ = false;
 }
 
+void StreamCacheResource::captureCacheLoadEvidenceWithoutLock() {
+    if (load_cache_context_ && stream_->cacheScheduleMetricsWithoutLock().active()) {
+        if (auto snapshot = load_cache_context_->cacheLoadMetricsSnapshot()) {
+            stream_->cacheScheduleMetricsWithoutLock().absorb(snapshot->has_async_cache_dependency);
+        }
+    }
+}
+
 void StreamCacheResource::releaseResource() {
+    captureCacheLoadEvidenceWithoutLock();
     RTP_LLM_PROFILE_FUNCTION();
     if (!resource_context_.cache_manager) {
         return;
@@ -501,6 +510,9 @@ bool StreamCacheResource::asyncLoadCache() {
     meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
     load_cache_context_    = resource_context_.cache_manager->asyncLoadCache(connector_context);
+    const auto snapshot    = load_cache_context_ ? load_cache_context_->cacheLoadMetricsSnapshot() : std::nullopt;
+    stream_->cacheScheduleMetricsWithoutLock().beginAttempt(snapshot && snapshot->has_async_cache_dependency,
+                                                            load_cache_context_ != nullptr);
     return load_cache_context_ != nullptr;
 }
 
@@ -510,6 +522,11 @@ bool StreamCacheResource::loadCacheDone() {
     }
     if (!load_cache_context_->done()) {
         return false;  // coordinator 后台线程尚未处理完
+    }
+    if (stream_->cacheScheduleMetricsWithoutLock().active()) {
+        const auto observed_us = currentTimeUs();
+        stream_->cacheScheduleMetricsWithoutLock().observe(load_cache_context_->cacheLoadMetricsSnapshot(),
+                                                           observed_us);
     }
     // 加载完成（无论成功失败），更新 reuse lengths
     waitLoadCacheDone(load_cache_context_);
@@ -651,6 +668,7 @@ bool StreamCacheResource::enableTieredMemoryCache() const {
 }
 
 void StreamCacheResource::loadCacheSync() {
+    stream_->cacheScheduleMetricsWithoutLock().invalidate();
     RTP_LLM_PROFILE_FUNCTION();
     if (!resource_context_.cache_manager || !resource_context_.cache_manager->hasActiveConnectors()) {
         return;

@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/cache/CacheLoadMetrics.h"
 
 namespace rtp_llm {
 
@@ -22,6 +23,9 @@ public:
     virtual void      waitDone()      = 0;
     virtual bool      done() const    = 0;
     virtual bool      success() const = 0;
+    virtual std::optional<CacheLoadTerminalSnapshot> cacheLoadMetricsSnapshot() const {
+        return std::nullopt;
+    }
     virtual ErrorInfo errorInfo() const {
         return ErrorInfo::OkStatus();
     }
@@ -58,7 +62,8 @@ class FusedAsyncReadContext: public AsyncContext {
 public:
     FusedAsyncReadContext(const std::shared_ptr<FusedAsyncContext>& fused_match_context,
                           const std::shared_ptr<KVCacheResource>&   resource,
-                          const std::shared_ptr<Meta>&              meta);
+                          const std::shared_ptr<Meta>&              meta,
+                          bool                                      has_async_cache_dependency = false);
     ~FusedAsyncReadContext() override = default;
 
 public:
@@ -67,6 +72,7 @@ public:
     ErrorInfo errorInfo() const override;
     void      waitDone() override;
     void      notifyDone();
+    std::optional<CacheLoadTerminalSnapshot> cacheLoadMetricsSnapshot() const override;
     // NOTE: `setFusedReadContext()` must be called eventually to avoid blocking waitDone() on the read stage.
     void setFusedReadContext(const std::shared_ptr<FusedAsyncContext>& fused_read_context);
     const std::shared_ptr<FusedAsyncContext>  fusedReadContext() const;
@@ -80,6 +86,7 @@ private:
     std::shared_ptr<KVCacheResource>   resource_;
     std::shared_ptr<Meta>              meta_;
 
+    mutable CacheLoadTerminalSnapshot metrics_snapshot_;
     std::atomic<bool>  read_ctx_set_{false};
     mutable std::mutex read_ctx_mutex_;
 

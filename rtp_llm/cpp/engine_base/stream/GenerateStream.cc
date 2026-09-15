@@ -168,6 +168,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
 void GenerateStream::resetBeginTime(int64_t begin_time_us) {
     std::lock_guard<std::mutex> lock(*mutex_);
+    cache_schedule_metrics_.reset();
     begin_time_us_               = begin_time_us;
     wait_time_us_                = 0;
     scheduler_enqueue_time_us_   = 0;
@@ -680,38 +681,62 @@ void GenerateStream::recordWaitLatency() {
     wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
 }
 
+void GenerateStream::activateCacheScheduleMetrics(uint64_t owner) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (isFakeStream()) {
+        return;
+    }
+    cache_schedule_metrics_.activate(owner);
+    // A pre-enqueue state transition cannot acquire a scheduler round retroactively.
+    if (generate_status_->hasEvent(StreamEvents::CanRun) || first_running_time_us_ != 0) {
+        cache_schedule_metrics_.invalidate();
+    }
+}
+
+void GenerateStream::reportCanRun(const SchedulerRoundContext& round) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    recordCanRunTime(&round);
+    generate_status_->reportEvent(StreamEvents::CanRun);
+}
+
 void GenerateStream::recordSchedulerEnqueueTime(int64_t time_us) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    cache_schedule_metrics_.enqueue(time_us);
     if (scheduler_enqueue_time_us_ == 0) {
         scheduler_enqueue_time_us_ = time_us;
     }
 }
 
-void GenerateStream::recordCanRunTime() {
+void GenerateStream::recordCanRunTime(const SchedulerRoundContext* round) {
     if (can_run_time_us_ == 0) {
         can_run_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+        cache_schedule_metrics_.canRun(can_run_time_us_, round);
     }
 }
 
 void GenerateStream::recordLoadingCacheStartTime() {
     if (loading_cache_start_time_us_ == 0) {
         loading_cache_start_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+        cache_schedule_metrics_.loadingStart(loading_cache_start_time_us_);
     }
 }
 
 void GenerateStream::recordLoadingCacheDoneTime() {
     if (loading_cache_done_time_us_ == 0) {
         loading_cache_done_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+        cache_schedule_metrics_.loadingDone(loading_cache_done_time_us_);
         if (loading_cache_start_time_us_ > 0) {
             loading_cache_latency_us_ = loading_cache_done_time_us_ - loading_cache_start_time_us_;
         }
     }
 }
 
-void GenerateStream::recordRunningTime() {
+void GenerateStream::recordRunningTime(const SchedulerRoundContext* round) {
     if (first_running_time_us_ != 0) {
         return;
     }
     first_running_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+    cache_schedule_metrics_.running(first_running_time_us_, round);
     if (loading_cache_done_time_us_ > 0) {
         load_done_to_running_us_ = first_running_time_us_ - loading_cache_done_time_us_;
     }
@@ -762,14 +787,14 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
     complete_token_ids_->setReserveStep(static_cast<int>(reserve_step));
 }
 
-StreamState GenerateStream::moveToNext() {
+StreamState GenerateStream::moveToNext(const SchedulerRoundContext* round) {
     StreamState state;
     bool        should_report_metric = false;
     {
         std::lock_guard<std::mutex> lock(*mutex_);
         checkTimeoutWithoutLock();
         const auto old_status = getStatus();
-        state                 = generate_status_->moveToNext();
+        state                 = generate_status_->moveToNext(round);
         const auto new_status = getStatus();
 
         if ((old_status == StreamState::WAITING && new_status != StreamState::WAITING)
@@ -1284,10 +1309,13 @@ void GenerateStream::setMetricsReporter(kmonitor::MetricsReporterPtr metrics_rep
 }
 
 void GenerateStream::reportMetricOnce() {
-    if (metrics_reported_) {
-        return;
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        if (metrics_reported_) {
+            return;
+        }
+        metrics_reported_ = true;
     }
-    metrics_reported_ = true;
     reportMetric();
 }
 
@@ -1302,6 +1330,12 @@ void GenerateStream::reportStreamMetrics() {
         bool                         cancelled = statusInfo().code() == ErrorCode::CANCELLED;
         bool                         timeout   = statusInfo().code() == ErrorCode::GENERATE_TIMEOUT;
         RtpLLMStreamMetricsCollector collector;
+        {
+            std::lock_guard<std::mutex> lock(*mutex_);
+            collector.cache_schedule_target = cache_schedule_metrics_.active();
+            stream_cache_resource_->captureCacheLoadEvidenceWithoutLock();
+            collector.cache_schedule = cache_schedule_metrics_.takeReport();
+        }
         collector.qps               = true;
         collector.cancel_qps        = cancelled;
         collector.error_qps         = hasError() && !cancelled;

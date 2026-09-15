@@ -38,6 +38,7 @@ from rtp_llm.dash_sc.repetition_monitor import (
     ToolCallMarkerConfig,
 )
 from rtp_llm.dash_sc.server import DashScGrpcServer
+from rtp_llm.frontend.frontend_request_metrics import get_frontend_request_registry
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
@@ -62,6 +63,8 @@ _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
 _PROXY_SERVICER_STARTUP_TIMEOUT_S = 30.0
 _SERVICER_CLOSE_TIMEOUT_S = 10.0
 _BIND_BARRIER_TIMEOUT_S = 600.0
+
+
 def _init_trace_telemetry() -> None:
     try:
         # Every DashScApp process is an external server owner. Unlike the
@@ -422,6 +425,7 @@ class DashScApp:
 
         self._enqueue_loop: Optional[asyncio.AbstractEventLoop] = None
         self._enqueue_loop_thread: Optional[threading.Thread] = None
+        self._frontend_request_registry = None
         self._shutdown_event = threading.Event()
         self._shutdown_started_at: Optional[float] = None
         self._shutdown_requested = False
@@ -727,6 +731,11 @@ class DashScApp:
             # so dashboards/alerts see gRPC and HTTP paths under the same metric family
             # (split via the ``protocol`` tag ``grpc_metrics`` injects).
             kmonitor.init()
+            if not is_proxy:
+                self._frontend_request_registry = get_frontend_request_registry(
+                    self.server_config.rank_id, self.server_config.frontend_server_id
+                )
+                self._frontend_request_registry.start()
 
             _wait_for_bind_barrier(
                 bind_barrier,
@@ -745,6 +754,9 @@ class DashScApp:
                 port=port,
                 servicer=servicer,
                 shutdown_manager=self._shutdown_manager,
+                frontend_request_registry=getattr(
+                    self, "_frontend_request_registry", None
+                ),
                 server_id=self.server_config.frontend_server_id,
                 log_path=get_log_path(),
                 backup_count=self.py_env_configs.profiling_debug_logging_config.log_file_backup_count,
@@ -773,6 +785,7 @@ class DashScApp:
             if servicer is not None:
                 self._close_servicer_on_loop(servicer)
             self._stop_enqueue_loop()
+            self._stop_request_metrics()
             _shutdown_trace_telemetry()
             raise
 
@@ -834,6 +847,13 @@ class DashScApp:
         except Exception as e:
             logging.warning("[DashScApp] grpc_server.stop failed: %s", e)
         self._stop_enqueue_loop()
+        self._stop_request_metrics()
+
+    def _stop_request_metrics(self):
+        registry = getattr(self, "_frontend_request_registry", None)
+        if registry is not None:
+            self._frontend_request_registry = None
+            registry.stop()
 
     def _remaining_grpc_stop_grace_seconds(self) -> Optional[float]:
         to = self.server_config.shutdown_timeout

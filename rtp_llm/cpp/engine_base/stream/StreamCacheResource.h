@@ -36,6 +36,7 @@ public:
     int                  tryReleaseKVBlock(size_t nums);
     void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                 releaseResource();
+    void                 captureCacheLoadEvidenceWithoutLock();
     bool                 asyncLoadCache();
     bool                 loadCacheDone();
 

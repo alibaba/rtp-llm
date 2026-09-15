@@ -11,10 +11,10 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+from contextlib import aclosing
 from typing import Optional, Protocol, runtime_checkable
 
 import grpc
-
 from rtp_llm.dash_sc.access_log import (
     DASH_SC_GRPC_ACCESS_LOG_FILENAME,
     DASH_SC_GRPC_QUERY_LOG_FILENAME,
@@ -23,6 +23,11 @@ from rtp_llm.dash_sc.access_log import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
 from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
+from rtp_llm.frontend.frontend_request_metrics import (
+    CURRENT_FRONTEND_REQUEST,
+    FrontendRequestToken,
+    reject_current_request,
+)
 
 
 def _resolve_dash_sc_grpc_config(dash_sc_grpc_config):
@@ -145,6 +150,7 @@ class DashScGrpcServer:
         log_path: str = "",
         backup_count: int = 0,
         rank_id: Optional[int] = None,
+        frontend_request_registry=None,
     ) -> grpc.aio.Server:
         """Bind + start the aio gRPC server. Must be awaited on the owning loop.
 
@@ -204,10 +210,14 @@ class DashScGrpcServer:
         # server only opens the proxy's lazy outbound channel cache.
         if isinstance(servicer, DashScProxyServicer):
             await servicer.open()
-        # The only interceptor left is the graceful pre-stop drain (the shared
-        # access-log interceptor was dissolved into the servicers), and it is
-        # installed only when the caller wired a ``shutdown_manager``.
+        # Metrics owns the entire inference RPC, including drain rejection.
         interceptors: list[grpc.aio.ServerInterceptor] = []
+        if frontend_request_registry is not None and not isinstance(
+            servicer, DashScProxyServicer
+        ):
+            interceptors.append(
+                DashScFrontendMetricsInterceptor(frontend_request_registry)
+            )
         if shutdown_manager is not None:
             interceptors.append(DashScGrpcDrainAioInterceptor(shutdown_manager))
         # Deliberately no ``maximum_concurrent_rpcs`` — under grpc.aio concurrent
@@ -245,6 +255,7 @@ class DashScGrpcServer:
         backup_count: int = 0,
         rank_id: Optional[int] = None,
         startup_timeout_s: float = _DEFAULT_DASH_SC_GRPC_STARTUP_TIMEOUT_S,
+        frontend_request_registry=None,
     ) -> None:
         """Schedule ``start()`` on ``loop`` and block until it returns or raises.
 
@@ -259,6 +270,7 @@ class DashScGrpcServer:
                 port=port,
                 servicer=servicer,
                 shutdown_manager=shutdown_manager,
+                frontend_request_registry=frontend_request_registry,
                 server_id=server_id,
                 log_path=log_path,
                 backup_count=backup_count,
@@ -335,6 +347,43 @@ class DashScGrpcServer:
         asyncio.run_coroutine_threadsafe(server.wait_for_termination(), loop).result()
 
 
+class DashScFrontendMetricsInterceptor(grpc.aio.ServerInterceptor):
+    """Inference-only token owner; installed before the optional drain wrapper."""
+
+    def __init__(self, registry):
+        self.registry = registry
+
+    async def intercept_service(self, continuation, handler_call_details):
+        handler = await continuation(handler_call_details)
+        if (
+            handler is None
+            or handler_call_details.method
+            != "/inference.GRPCInferenceService/ModelStreamInfer"
+        ):
+            return handler
+        return grpc.stream_stream_rpc_method_handler(
+            self.wrap(handler.stream_stream),
+            request_deserializer=handler.request_deserializer,
+            response_serializer=handler.response_serializer,
+        )
+
+    def wrap(self, inner):
+        async def behavior(request_iterator, context):
+            token = FrontendRequestToken(self.registry, "inference", protocol="grpc")
+            binding = CURRENT_FRONTEND_REQUEST.set(token)
+            try:
+                async with aclosing(inner(request_iterator, context)) as responses:
+                    async for response in responses:
+                        yield response
+            finally:
+                try:
+                    token.close_once()
+                finally:
+                    CURRENT_FRONTEND_REQUEST.reset(binding)
+
+        return behavior
+
+
 class DashScGrpcDrainAioInterceptor(grpc.aio.ServerInterceptor):
     """Track DashSc RPCs during pre-stop drain.
 
@@ -398,6 +447,7 @@ class DashScGrpcDrainAioInterceptor(grpc.aio.ServerInterceptor):
         logging.info(
             "[DashScGrpc] rejecting new RPC during %s: %s %s", state, method, detail
         )
+        reject_current_request("reject_unavailable")
         await context.abort(grpc.StatusCode.UNAVAILABLE, detail)
         return False
 
@@ -456,8 +506,9 @@ class DashScGrpcDrainAioInterceptor(grpc.aio.ServerInterceptor):
             if not began:
                 return
             try:
-                async for resp in inner(request_iterator, context):
-                    yield resp
+                async with aclosing(inner(request_iterator, context)) as responses:
+                    async for resp in responses:
+                        yield resp
             finally:
                 if began:
                     self._finish(method)
