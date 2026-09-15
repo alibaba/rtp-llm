@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import torch
 from attention_ref import compute_flashinfer_decode_reference
-from base_attention_test import BaseAttentionTest
+from base_attention_test import BaseAttentionTest, compare_tensors
 
 from rtp_llm.models_py.model_desc.minimax_m3 import _target_verify_impl_class
 from rtp_llm.models_py.modules.factory.attention.cuda_impl import py_flashinfer_mha
@@ -477,6 +477,11 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
         )
 
     def test_target_verify_fa4_is_independent_of_flashinfer(self):
+        try:
+            from flash_attn.cute import flash_attn_varlen_func as _fa4_varlen  # noqa: F401
+        except (ImportError, OSError):
+            self.skipTest("flash-attn-4 is not installed")
+        _target_verify_impl_class.cache_clear()
         config = self._create_config(
             head_num=32,
             head_num_kv=8,
