@@ -6,6 +6,12 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models.glm53_prefill_parallel import (
+    MlaCPParallelismView,
+    glm53_moe_enabled,
+    mla_cp_enabled,
+    shared_expert_local_enabled,
+)
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
 from rtp_llm.models_py.distributed.sequence_parallel import (
     shard_tokens,
@@ -136,7 +142,7 @@ class GenericMoeLayer(nn.Module):
 
         # Get quant_config from model_config
         quant_config = config.quant_config
-        if config.model_type == "glm5_3_flash" or (
+        if glm53_moe_enabled(config) or (
             config.model_type == "glm_5_mtp"
             and weights[W.moe_gate].dtype == torch.float32
         ):
@@ -166,7 +172,7 @@ class GenericMoeLayer(nn.Module):
         # while preserving the original GEMM shapes at shard boundaries.
         self.routed_tp_size = (
             parallelism_config.get_attn_tp_size()
-            if config.model_type == "glm5_3_flash"
+            if glm53_moe_enabled(config)
             and moe_config.moe_strategy
             in ("mega_moe", "mega_moe_fp8", "mega_moe_fp8_se")
             and self.ep_size > 1
@@ -176,15 +182,14 @@ class GenericMoeLayer(nn.Module):
             else 1
         )
         self.routed_tp_rank = parallelism_config.tp_rank
-        self.route_local_tokens = (
-            config.model_type == "glm5_3_flash" and self.routed_tp_size > 1
-        )
-        from rtp_llm.models.glm53_prefill_parallel import shared_expert_local_enabled
+        self.route_local_tokens = glm53_moe_enabled(config) and self.routed_tp_size > 1
 
         self.shared_expert_local = (
             self.add_shared_expert
             and shared_expert_local_enabled(
-                config.model_type, getattr(parallelism_config, "role_type", None)
+                config.model_type,
+                getattr(parallelism_config, "role_type", None),
+                is_glm53_mtp=getattr(config, "is_glm53_mtp", False),
             )
         )
         if self.shared_expert_local and (
@@ -659,7 +664,15 @@ class GenericMoeDecoderLayer(nn.Module):
         if config.attn_config.use_mla:
             self.self_attn = MlaAttention(
                 config.attn_config,
-                parallelism_config,
+                (
+                    MlaCPParallelismView(parallelism_config)
+                    if mla_cp_enabled(
+                        config.model_type,
+                        parallelism_config.role_type,
+                        is_glm53_mtp=getattr(config, "is_glm53_mtp", False),
+                    )
+                    else parallelism_config
+                ),
                 weights,
                 layer_idx,
                 config.layernorm_eps,
@@ -893,6 +906,27 @@ class GenericMoeDecoderLayer(nn.Module):
 
         return DecodeLayerOutput(hidden_states, output_residual, topk_indices)
 
+    def _forward_mla_cp(
+        self, hidden_states, residual, fmha_impl, kv_cache, global_kv_cache, cp_layout
+    ) -> DecodeLayerOutput:
+        # Residuals and MoE stay in contiguous SP order. Only the MLA activation
+        # enters per-request zigzag order, exactly as in the GLM53 main model.
+        hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states = cp_layout.sp_to_cp(hidden_states)
+        hidden_states, topk_indices = self.self_attn(
+            hidden_states=hidden_states,
+            fmha_impl=fmha_impl,
+            kv_cache=kv_cache,
+            global_kv_cache=global_kv_cache,
+            return_topk=True,
+        )
+        hidden_states = cp_layout.cp_to_sp(hidden_states)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states = self.mlp(
+            hidden_states, sequence_parallel_layout=cp_layout.sp_layout
+        )
+        return DecodeLayerOutput(hidden_states, residual, topk_indices)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -903,7 +937,19 @@ class GenericMoeDecoderLayer(nn.Module):
         prev_topk_indices: Optional[torch.Tensor] = None,
         enable_cmp: bool = False,
         force_reuse_topk_indices: bool = False,
+        mla_cp_layout=None,
     ) -> DecodeLayerOutput:
+        if mla_cp_layout is not None:
+            if enable_cmp or force_reuse_topk_indices:
+                raise ValueError("Prefill MLA CP cannot use a decode indexer/CMP path")
+            return self._forward_mla_cp(
+                hidden_states,
+                residual,
+                fmha_impl,
+                kv_cache,
+                global_kv_cache,
+                mla_cp_layout,
+            )
         if enable_cmp:
             return self._forward_cmp(
                 hidden_states,

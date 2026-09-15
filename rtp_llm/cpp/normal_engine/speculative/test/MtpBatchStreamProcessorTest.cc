@@ -987,9 +987,14 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
     draft_output.sampler_output.all_probs =
         torch::tensor({0.2f, 0.1f, 0.3f, 0.5f, 0.3f, 0.1f, 0.4f, 0.2f}, torch::kFloat32).reshape({2, 4});
 
+    draft_output.model_output.mtp_indexer_topk = torch::tensor({1, 2, -1, 7, 3, -1}, torch::kInt32).reshape({2, 3});
+
     auto status = processor.dispatchPrefill(stream_groups, target_output, draft_output);
     EXPECT_TRUE(status.ok());
     draft_output.model_output.all_hidden_states.fill_(9.0f);
+    draft_output.model_output.mtp_indexer_topk.fill_(99);
+    EXPECT_EQ(toVec<int32_t>(stream1->getMtpAsyncDeviceState().mtp_indexer_topk_gpu), (std::vector<int32_t>{1, 2, -1}));
+    EXPECT_EQ(toVec<int32_t>(stream2->getMtpAsyncDeviceState().mtp_indexer_topk_gpu), (std::vector<int32_t>{7, 3, -1}));
 
     checkOutput(stream1, {2, 1}, {1, 2}, {0.2, 0.1, 0.3, 0.5}, {0.3, 0.4});
     checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {1.7, 1.8});

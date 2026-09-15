@@ -106,6 +106,8 @@ def _configure_glm53_mtp_attention_layout(
         )
     _configure_glm53_indexer_compression(config.attn_config, text_config)
 
+    config.is_glm53_mtp = True
+
     # MTP layers live after ``layer_types`` in the checkpoint.  The reference
     # implementation classifies every such out-of-range layer as MLA, while
     # RTP remaps them to local layer ids [0, num_mtp_layers).  Keep the cache

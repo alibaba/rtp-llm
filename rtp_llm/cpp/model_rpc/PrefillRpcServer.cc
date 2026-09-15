@@ -813,6 +813,11 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
         QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);
     }
 
+    const auto& indexer_seed = stream->getMtpAsyncDeviceState().mtp_indexer_topk_gpu;
+    if (indexer_seed.defined()) {
+        QueryConverter::transTensorPB(generate_request.mutable_propose_mtp_indexer_topk(), indexer_seed.cpu());
+    }
+
     generate_request.set_stage(RemoteStage::GENERATE);
 
     CLIENT_GRPC_RET_IF_ERROR(

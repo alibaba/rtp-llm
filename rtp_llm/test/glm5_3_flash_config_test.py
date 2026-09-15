@@ -139,6 +139,7 @@ class Glm53FlashConfigTest(unittest.TestCase):
 
         self.assertEqual(config.hidden_size, 4096)
         self.assertEqual(config.mtp_layer_offset, 45)
+        self.assertTrue(config.is_glm53_mtp)
         self.assertEqual(config.num_layers, 1)
         self.assertEqual(config.attn_config.indexer_topk, 512)
         self.assertEqual(config.attn_config.indexer_compress_ratio, 4)
@@ -161,6 +162,8 @@ class Glm53FlashConfigTest(unittest.TestCase):
     def test_mtp_loads_glm53_indexer_compressor_weights(self):
         loader = object.__new__(Glm5MtpWeight)
         loader.checkpoint_prefix = "model.language_model."
+        loader.model_config = SimpleNamespace(model_type="glm_5_mtp", is_glm53_mtp=True)
+        loader.role_type = None
         with mock.patch.object(
             DeepSeekV2Weight, "_get_hf_layer_weight_info", return_value=[]
         ):
@@ -231,6 +234,7 @@ class Glm53FlashConfigTest(unittest.TestCase):
         prefill.local_num_v_heads = 1
         prefill.head_k_dim = 2
         prefill.head_v_dim = 2
+        prefill.conv_output_groups = 1
         prefill.gate_lower_bound = -5.0
         prefill.alog = torch.zeros(1)
         prefill.dt_bias = torch.zeros(2)
@@ -704,6 +708,7 @@ class Glm53FlashConfigTest(unittest.TestCase):
         prefill = object.__new__(kimi_linear.KimiLinearKDAPrefill)
         nn.Module.__init__(prefill)
         prefill.conv_weights = torch.ones(3, 1)
+        prefill.conv_output_groups = 1
         mixed_qkv = torch.ones(2, 3)
         prefix_lengths = torch.tensor([0], dtype=torch.int32)
         attention_inputs = SimpleNamespace(

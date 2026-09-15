@@ -6,6 +6,13 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models.glm53_prefill_parallel import MlaCPParallelismView, mla_cp_enabled
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_gather_trim,
+    all_reduce,
+)
+from rtp_llm.models_py.distributed.sequence_parallel import shard_tokens
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeDecoderLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
@@ -90,6 +97,16 @@ class GenericMoeMTPModel(GptModelBase):
         self.context_parallel_enabled = bool(
             cp_config is not None and cp_config.is_enabled()
         )
+        self.prefill_mla_cp = mla_cp_enabled(
+            model_config.model_type,
+            parallelism_config.role_type,
+            is_glm53_mtp=getattr(model_config, "is_glm53_mtp", False),
+        )
+        self.mla_parallelism = (
+            MlaCPParallelismView(parallelism_config)
+            if self.prefill_mla_cp
+            else parallelism_config
+        )
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
@@ -136,6 +153,8 @@ class GenericMoeMTPModel(GptModelBase):
             model_config, parallelism_config, self.layer_num, topk
         )
         self._mtp_indexer_role = _MTP_INDEXER_ROLE_NORMAL
+        if getattr(model_config, "is_glm53_mtp", False):
+            topk = int(model_config.attn_config.sparse_attention_topk)
         buffer_device = weights.global_weights[W.multi_tokens_predict_enorm].device
         buffer_shape = (
             (max_generate_batch_size, topk)
@@ -177,6 +196,8 @@ class GenericMoeMTPModel(GptModelBase):
         clone.max_generate_batch_size = self.max_generate_batch_size
         clone.device_resource_config = self.device_resource_config
         clone.context_parallel_enabled = self.context_parallel_enabled
+        clone.prefill_mla_cp = self.prefill_mla_cp
+        clone.mla_parallelism = self.mla_parallelism
 
         clone.embed_tokens = self.embed_tokens
         clone.multimodal_embedding_injector = self.multimodal_embedding_injector
@@ -240,13 +261,17 @@ class GenericMoeMTPModel(GptModelBase):
         self, hidden_states: torch.Tensor, fmha_impl: Any
     ) -> torch.Tensor:
         batch_size = hidden_states.size(0)
-        topk = int(self.config.attn_config.indexer_topk)
+        topk = self._mtp_shared_topk_indices.size(1)
         if batch_size > self._mtp_shared_topk_indices.size(0):
             raise RuntimeError(
                 "MTP indexer share batch exceeds fixed buffer: "
                 f"batch={batch_size}, capacity={self._mtp_shared_topk_indices.size(0)}"
             )
         topk_indices = self._mtp_shared_topk_indices[:batch_size, :topk]
+        if getattr(self.config, "is_glm53_mtp", False):
+            # Official index_share_for_mtp_iteration freezes the expanded raw
+            # selection, including the first step's incomplete KPool tail.
+            return topk_indices
         positions = getattr(fmha_impl.fmha_params, "positions_d", None)
         if (
             not torch.is_tensor(positions)
@@ -281,10 +306,18 @@ class GenericMoeMTPModel(GptModelBase):
         return topk_indices
 
     def _store_mtp_topk_indices(
-        self, topk_indices: torch.Tensor, seed_rows: torch.Tensor
+        self, topk_indices: torch.Tensor, seed_rows: torch.Tensor, positions=None
     ) -> None:
         batch_size = seed_rows.numel()
         topk = int(self.config.attn_config.indexer_topk)
+        if topk_indices is None and getattr(self.config, "is_glm53_mtp", False):
+            if positions is None:
+                raise RuntimeError("GLM53 MTP seed requires raw token positions")
+            selected = self._expand_mtp_seed(
+                None, positions.index_select(0, seed_rows.long()) + 1
+            )
+            self._mtp_shared_topk_indices[:batch_size].copy_(selected)
+            return
         valid = (
             torch.is_tensor(topk_indices)
             and topk_indices.dtype == torch.int32
@@ -303,7 +336,106 @@ class GenericMoeMTPModel(GptModelBase):
                 f"batch={batch_size}, topk={topk}"
             )
         selected = topk_indices.index_select(0, seed_rows.to(torch.int64))
+        if getattr(self.config, "is_glm53_mtp", False):
+            if positions is None:
+                raise RuntimeError("GLM53 MTP seed requires raw token positions")
+            selected = self._expand_mtp_seed(
+                selected, positions.index_select(0, seed_rows.long()) + 1
+            )
         self._mtp_shared_topk_indices[:batch_size].copy_(selected)
+
+    def _expand_mtp_seed(self, pooled, raw_lengths):
+        from rtp_llm.models_py.modules.indexer_grouping import (
+            append_incomplete_tail_indices,
+            expand_indexer_group_indices,
+            fused_expand_indexer_groups_with_tail,
+        )
+
+        group_size = int(self.config.attn_config.indexer_compress_ratio)
+        if pooled is None:
+            # Dense short-context fast path attends to every causal token.
+            pooled = torch.arange(
+                int(self.config.attn_config.indexer_topk),
+                dtype=torch.int32,
+                device=raw_lengths.device,
+            ).expand(raw_lengths.numel(), -1)
+        expanded = fused_expand_indexer_groups_with_tail(
+            pooled, raw_lengths, group_size
+        )
+        if expanded is None:
+            expanded = append_incomplete_tail_indices(
+                expand_indexer_group_indices(
+                    pooled, group_size, raw_sequence_lengths=raw_lengths
+                ),
+                raw_lengths,
+                group_size,
+            )
+        return expanded
+
+    def _store_prefill_cp_seed(self, topk_indices, fmha, attn_inputs):
+        layout = fmha.glm53_cp_layout
+        batch_size = len(layout.q_lens)
+        if batch_size > self._mtp_shared_topk_indices.size(0):
+            raise RuntimeError("MTP CP seed batch exceeds fixed buffer")
+        device = self._mtp_shared_topk_indices.device
+        raw_lengths = attn_inputs.prefix_lengths.to(
+            device=device, dtype=torch.int32
+        ) + torch.tensor(layout.q_lens, device=device, dtype=torch.int32)
+        selected = None
+        if topk_indices is not None:
+            # Indexer returns valid local queries, excluding CP padding. Restore
+            # their CP offsets, then communicate only each request's final row.
+            local = torch.full(
+                (layout.local_cp_tokens, topk_indices.shape[-1]),
+                -1,
+                dtype=torch.int32,
+                device=device,
+            )
+            local.index_copy_(0, fmha.cp_params.total_local_ids.long(), topk_indices)
+            selected = torch.zeros(
+                (batch_size, local.shape[1]), dtype=torch.int32, device=device
+            )
+            end = 0
+            for request, length in enumerate(layout.q_lens):
+                end += length
+                for fragment in layout.fragments:
+                    if (
+                        fragment.cp_rank == layout.rank
+                        and fragment.canonical_offset
+                        <= end - 1
+                        < fragment.canonical_offset + fragment.length
+                    ):
+                        row = fragment.cp_offset + end - 1 - fragment.canonical_offset
+                        selected[request].copy_(local[row])
+                        break
+            selected = all_reduce(selected, Group.TP)
+        self._mtp_shared_topk_indices[:batch_size].copy_(
+            self._expand_mtp_seed(selected, raw_lengths)
+        )
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        if not self.prefill_mla_cp:
+            return super().prepare_fmha_impl(inputs, is_cuda_graph)
+        from rtp_llm.models_py.distributed.glm53_mla_cp import prepare_mla_cp_fmha
+
+        return prepare_mla_cp_fmha(self, inputs, is_cuda_graph)
+
+    @staticmethod
+    def _mask_prefill_position_zero_embeddings(inputs_embeds, attention_inputs):
+        # CP positions describe rank-local zigzag rows. The embedding still has
+        # canonical rows here; mask each zero-prefix request's first row before
+        # sharding, including ragged/multimodal batches and cache-hit suffixes.
+        starts = attention_inputs.cu_seqlens[:-1].to(
+            device=inputs_embeds.device, dtype=torch.int64
+        )
+        prefix = attention_inputs.prefix_lengths.to(device=inputs_embeds.device)
+        if starts.numel() != prefix.numel():
+            raise ValueError("MTP CP prefix lengths disagree with request boundaries")
+        mask = torch.zeros(
+            inputs_embeds.shape[0], dtype=torch.bool, device=inputs_embeds.device
+        )
+        mask.scatter_(0, starts, prefix == 0)
+        return torch.where(mask.unsqueeze(-1), 0, inputs_embeds)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
@@ -328,8 +460,20 @@ class GenericMoeMTPModel(GptModelBase):
             )
         else:
             inputs_embeds = self.embed_tokens(input_ids)
-        inputs_embeds = self._mask_position_zero_embeddings(inputs_embeds, fmha_impl)
         last_hidden_states = inputs.input_hiddens
+        cp_layout = fmha_impl.glm53_cp_layout if self.prefill_mla_cp else None
+        if cp_layout is not None:
+            if inputs_embeds.shape != last_hidden_states.shape:
+                raise ValueError("MTP CP embedding and input hidden rows must align")
+            inputs_embeds = self._mask_prefill_position_zero_embeddings(
+                inputs_embeds, inputs.attention_inputs
+            )
+            inputs_embeds = shard_tokens(inputs_embeds, cp_layout.sp_layout)
+            last_hidden_states = shard_tokens(last_hidden_states, cp_layout.sp_layout)
+        else:
+            inputs_embeds = self._mask_position_zero_embeddings(
+                inputs_embeds, fmha_impl
+            )
 
         e_norm = self.pre_fc_norm_embedding(inputs_embeds)
         h_norm = self.pre_fc_norm_hidden(last_hidden_states)
@@ -364,6 +508,8 @@ class GenericMoeMTPModel(GptModelBase):
         )
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)
+            if cp_layout is not None:
+                select_block_map_for_layer(fmha_impl.attn_inputs, i)
             output = decoder_layer(
                 hidden_states,
                 residual,
@@ -373,21 +519,37 @@ class GenericMoeMTPModel(GptModelBase):
                 prev_topk_indices=prev_topk_indices,
                 enable_cmp=enable_cmp,
                 force_reuse_topk_indices=reuse_topk_indices,
+                mla_cp_layout=cp_layout,
             )
             hidden_states = output.hidden_states
             residual = output.residual
             prev_topk_indices = output.topk_indices
             write_typed_aux_cache_regions(typed_aux_cache_store, self.kv_cache, i)
 
-        if (
-            self._mtp_indexer_share_enabled
-            and self._mtp_indexer_role == _MTP_INDEXER_ROLE_SEED
-        ):
-            self._store_mtp_topk_indices(
-                prev_topk_indices, inputs.attention_inputs.mtp_indexer_seed_rows
+        if self._mtp_indexer_share_enabled and (
+            self._mtp_indexer_role == _MTP_INDEXER_ROLE_SEED
+            or (
+                inputs.attention_inputs.is_prefill
+                and not getattr(inputs.attention_inputs, "is_draft_extend", False)
+                and not inputs.attention_inputs.is_target_verify
             )
+        ):
+            if cp_layout is not None:
+                self._store_prefill_cp_seed(
+                    prev_topk_indices, fmha_impl, inputs.attention_inputs
+                )
+            else:
+                self._store_mtp_topk_indices(
+                    prev_topk_indices,
+                    inputs.attention_inputs.mtp_indexer_seed_rows,
+                    fmha_impl.fmha_params.positions_d,
+                )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        if cp_layout is not None:
+            hidden_states = all_gather_trim(
+                hidden_states, cp_layout.sp_layout.logical_tokens, Group.TP
+            )
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 
     def _mask_position_zero_embeddings(

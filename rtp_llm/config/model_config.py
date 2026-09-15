@@ -58,6 +58,7 @@ class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
     _python_fields = {
         "is_mtp",
+        "is_glm53_mtp",
         "mtp_layer_offset",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
@@ -500,6 +501,7 @@ class ModelConfig(CppModelConfig):
         super().__init__(*args, **kwargs)
         # Additional Python-only fields
         self.is_mtp: bool = False
+        self.is_glm53_mtp: bool = False
         self.mtp_layer_offset: int = 0
         self.normalize_lm_head_weight: bool = False
         self.enable_fp32_lm_head: bool = True

@@ -285,6 +285,10 @@ class SparseMlaOp(object):
                 f"got shape={tuple(topk_indices.shape)}"
             )
         topk_2d = _topk_2d(topk_indices)
+        if self.indexer_group_size > 1 and int(topk_2d.shape[1]) == self.top_k:
+            # GLM53 MTP reuse supplies the first step's frozen raw-token seed.
+            # Re-expanding or appending the current tail changes its selection.
+            return topk_2d
         if int(topk_2d.shape[1]) != self.indexer_top_k:
             raise ValueError(
                 f"indexer topk {topk_2d.shape[1]} does not match configured "

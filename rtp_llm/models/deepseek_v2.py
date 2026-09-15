@@ -851,6 +851,23 @@ class Glm5MtpWeight(DeepSeekV2Weight):
 
     checkpoint_prefix = "model."
 
+    def _get_hf_ffn_layer_weight_info(self, layer_id: int):
+        from rtp_llm.models.glm53_prefill_parallel import shared_expert_local_enabled
+
+        weights = super()._get_hf_ffn_layer_weight_info(layer_id)
+        if layer_id in self.moe_layer_index_ and shared_expert_local_enabled(
+            self.model_config.model_type,
+            self.role_type,
+            is_glm53_mtp=getattr(self.model_config, "is_glm53_mtp", False),
+        ):
+            for weight in weights:
+                if isinstance(weight, FfnWeight):
+                    weight.config.replicate_for_prefill_tokens = True
+                    for atomic in weight.sub_weights.values():
+                        if isinstance(atomic, FfnAtomicWeight):
+                            atomic.config.replicate_for_prefill_tokens = True
+        return weights
+
     def _process_meta(self, meta_dict, weight_keys):
         self.checkpoint_prefix = (
             "model.language_model."
@@ -864,10 +881,7 @@ class Glm5MtpWeight(DeepSeekV2Weight):
         layer_prefix = f"{self.checkpoint_prefix}layers.{mtp_layer_idx}."
         if f"{layer_prefix}self_attn.q_a_proj.weight" in weight_keys:
             self.q_use_lora = True
-        if (
-            f"{layer_prefix}mlp.gate.e_score_correction_bias"
-            in weight_keys
-        ):
+        if f"{layer_prefix}mlp.gate.e_score_correction_bias" in weight_keys:
             self.has_e_score_correction_bias = True
 
     @staticmethod
@@ -880,6 +894,19 @@ class Glm5MtpWeight(DeepSeekV2Weight):
 
     def _get_hf_layer_weight_info(self, layer_id: int):
         weights = super()._get_hf_layer_weight_info(layer_id)
+        from rtp_llm.models.glm53_prefill_parallel import mla_cp_enabled
+
+        if mla_cp_enabled(
+            self.model_config.model_type,
+            self.role_type,
+            is_glm53_mtp=getattr(self.model_config, "is_glm53_mtp", False),
+        ):
+            for weight in weights:
+                if (
+                    isinstance(weight, MlaAttnAtomicWeight)
+                    and weight.config is not None
+                ):
+                    weight.config.replicate_for_prefill_cp = True
         if self.checkpoint_prefix == "model.language_model.":
             from rtp_llm.models.glm5_3_flash import (
                 _glm53_indexer_compressor_weight_info,

@@ -7,6 +7,7 @@ py_library(
     srcs = [
         "collective_torch.py",
         "glm53_collective_gemm.py",
+        "glm53_mla_cp.py",
         "pynccl_cp.py",
         "rocm_rccl.py",
         "symm_mem.py",

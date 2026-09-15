@@ -99,6 +99,133 @@ class MtpIndexerShareTest(unittest.TestCase):
         )
         return model
 
+    def _glm53_model(self, capacity=3):
+        model = self._model(topk=4, capacity=capacity, compress_ratio=4)
+        model.config.is_glm53_mtp = True
+        model._mtp_shared_topk_indices = torch.zeros((capacity, 19), dtype=torch.int32)
+        return model
+
+    def test_glm53_freezes_first_step_raw_indices_across_kpool_boundary(self):
+        model = self._glm53_model(capacity=2)
+        # At raw lengths 11 and 12, the first request has an incomplete tail;
+        # the second has three complete pools. Select different query rows.
+        pooled = torch.tensor(
+            [[0, 1, -1, -1], [2, 0, 1, -1], [1, 0, -1, -1]], dtype=torch.int32
+        )
+        model._store_mtp_topk_indices(
+            pooled,
+            torch.tensor([2, 1], dtype=torch.int32),
+            torch.tensor([5, 11, 10], dtype=torch.int32),
+        )
+        expected = torch.tensor(
+            [
+                [4, 5, 6, 7, 0, 1, 2, 3, -1, -1, -1, -1, -1, -1, -1, -1, 8, 9, 10],
+                [8, 9, 10, 11, 0, 1, 2, 3, 4, 5, 6, 7, -1, -1, -1, -1, -1, -1, -1],
+            ],
+            dtype=torch.int32,
+        )
+        torch.testing.assert_close(model.snapshot_mtp_indexer_topk(2), expected)
+        for positions in ([11, 12], [12, 13], [15, 16]):
+            actual = model._get_mtp_reuse_topk_indices(
+                torch.zeros((2, 8)),
+                SimpleNamespace(
+                    fmha_params=SimpleNamespace(
+                        positions_d=torch.tensor(positions, dtype=torch.int32)
+                    )
+                ),
+            )
+            torch.testing.assert_close(actual, expected)
+
+    def test_glm53_sparse_attention_does_not_expand_frozen_seed_again(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
+            SparseMlaOp,
+        )
+
+        op = object.__new__(SparseMlaOp)
+        op.indexer_group_size, op.indexer_top_k, op.top_k = 4, 4, 19
+        seed = torch.tensor(
+            [[0, 1, 2, 3, 4, 5, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]],
+            dtype=torch.int32,
+        )
+        actual = op._prepare_local_topk_indices(
+            seed, torch.tensor([8], dtype=torch.int32)
+        )
+        self.assertIs(actual, seed)
+
+    def test_glm53_cp_seed_collects_each_requests_last_valid_query(self):
+        from rtp_llm.models_py.distributed.sequence_parallel import token_shard_layout
+        from rtp_llm.models_py.distributed.zigzag_token_layout import ZigzagTokenLayout
+
+        q_lens = [3, 17, 33]
+        expected = torch.tensor(
+            [[2, 0, -1, -1], [19, 0, -1, -1], [52, 0, -1, -1]], dtype=torch.int32
+        )
+        contributions = []
+        for rank in range(8):
+            model = self._glm53_model()
+            layout = ZigzagTokenLayout(
+                q_lens,
+                token_shard_layout(sum(q_lens), 8, rank),
+                8,
+                rank,
+                torch.device("cpu"),
+            )
+            rows = {}
+            for fragment in layout.fragments:
+                if fragment.cp_rank == rank:
+                    for offset in range(fragment.length):
+                        rows[fragment.cp_offset + offset] = (
+                            fragment.canonical_offset + offset
+                        )
+            local_ids = sorted(rows)
+            topk = torch.tensor(
+                [[rows[row], 0, -1, -1] for row in local_ids], dtype=torch.int32
+            ).reshape(-1, 4)
+            fmha = SimpleNamespace(
+                glm53_cp_layout=layout,
+                cp_params=SimpleNamespace(
+                    total_local_ids=torch.tensor(local_ids, dtype=torch.int32)
+                ),
+            )
+
+            def reduce_seed(tensor, group):
+                contributions.append(tensor.clone())
+                return expected
+
+            with patch(
+                "rtp_llm.models_py.model_desc.generic_moe_mtp.all_reduce",
+                side_effect=reduce_seed,
+            ):
+                model._store_prefill_cp_seed(
+                    topk,
+                    fmha,
+                    SimpleNamespace(
+                        prefix_lengths=torch.tensor([512, 512, 512], dtype=torch.int32)
+                    ),
+                )
+            torch.testing.assert_close(
+                model.snapshot_mtp_indexer_topk(3),
+                model._expand_mtp_seed(
+                    expected, torch.tensor([515, 529, 545], dtype=torch.int32)
+                ),
+            )
+        torch.testing.assert_close(
+            torch.stack(contributions).sum(0).to(torch.int32), expected
+        )
+
+    def test_cp_position_zero_mask_uses_global_request_boundaries(self):
+        embeddings = torch.arange(20).reshape(10, 2)
+        result = GenericMoeMTPModel._mask_prefill_position_zero_embeddings(
+            embeddings,
+            SimpleNamespace(
+                cu_seqlens=torch.tensor([0, 3, 7, 10]),
+                prefix_lengths=torch.tensor([0, 128, 0]),
+            ),
+        )
+        expected = embeddings.clone()
+        expected[[0, 7]] = 0
+        torch.testing.assert_close(result, expected)
+
     def test_role_is_gated_and_validated(self):
         model = self._model()
         model.set_mtp_indexer_role(_MTP_INDEXER_ROLE_SEED)

@@ -6,7 +6,6 @@ Hybrid architecture:
   - MoE FFN with sigmoid routing (layer 1+), Dense FFN (layer 0)
 """
 
-import copy
 import logging
 import os
 from typing import Any, Dict, Optional
@@ -38,7 +37,6 @@ from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.generic_moe import DecodeLayerOutput, GenericMoeLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
-    AttnImplFactory,
     DenseMLP,
     Embedding,
     FMHAImplBase,
@@ -1443,34 +1441,9 @@ class KimiLinearModel(GptModelBase):
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
         if not self.prefill_mla_cp:
             return super().prepare_fmha_impl(inputs, is_cuda_graph)
-        attn_inputs = inputs.attention_inputs
-        if not attn_inputs.is_prefill or attn_inputs.is_target_verify or is_cuda_graph:
-            raise ValueError("GLM53 dedicated MLA CP supports ordinary Prefill only")
-        q_lens = attn_inputs.input_lengths.cpu().tolist()
-        layout = token_shard_layout(
-            sum(q_lens),
-            self.parallelism_config.tp_size,
-            self.parallelism_config.tp_rank,
-        )
-        cp_layout = ZigzagTokenLayout(
-            q_lens,
-            layout,
-            self.parallelism_config.tp_size,
-            self.parallelism_config.tp_rank,
-            inputs.input_ids.device,
-        )
-        cp_inputs = copy.copy(attn_inputs)
-        cp_inputs.context_parallel_info = cp_layout.context_parallel_info()
-        fmha = AttnImplFactory.get_fmha_impl(
-            self.config,
-            self.mla_parallelism,
-            self.weight,
-            cp_inputs,
-            self.fmha_config,
-            is_cuda_graph,
-        )
-        fmha.glm53_cp_layout = cp_layout
-        return fmha
+        from rtp_llm.models_py.distributed.glm53_mla_cp import prepare_mla_cp_fmha
+
+        return prepare_mla_cp_fmha(self, inputs, is_cuda_graph)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids

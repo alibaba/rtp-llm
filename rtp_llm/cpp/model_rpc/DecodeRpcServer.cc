@@ -323,6 +323,16 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         sp_output_buffer->all_probs     = propose_probs_t.to(getTorchCudaDevice());
         sp_output_buffer->hidden_states = propose_hidden_t.to(getTorchCudaDevice());
 
+        torch::Tensor indexer_seed_gpu;
+        if (generate_request.has_propose_mtp_indexer_topk()) {
+            auto seed = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_mtp_indexer_topk()));
+            RTP_LLM_CHECK_WITH_INFO(seed.scalar_type() == torch::kInt32 && seed.dim() == 2 && seed.size(0) == 1
+                                        && seed.size(1) > 0,
+                                    "invalid PD MTP indexer seed: expected int32 [1, topk]");
+            indexer_seed_gpu = seed.to(getTorchCudaDevice());
+            sp_output_buffer->tensors_holder.push_back(std::move(seed));
+        }
+
         auto propose_tokens_gpu              = torch::empty({1}, cuda_i32);
         auto target_token_gpu                = torch::empty({1}, cuda_i32);
         auto accept_len                      = torch::ones({1}, cuda_i32);
@@ -347,6 +357,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
             .propose_tokens_gpu     = std::move(propose_tokens_gpu),
             .last_hidden_states_gpu = sp_output_buffer->hidden_states,
             .draft_all_probs_gpu    = sp_output_buffer->all_probs,
+            .mtp_indexer_topk_gpu   = std::move(indexer_seed_gpu),
             .last_real_seq_len      = generate_stream->seqLength(),
             .next_real_seq_len      = generate_stream->seqLength(),
         });

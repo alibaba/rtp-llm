@@ -572,6 +572,23 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&      s
         stageMtpLogprobsToCpu(spec_update_infos);
     }
 
+    // Publish the seed before specUpdate notifies the waiting Prefill RPC.
+    // Clone before updateProposeTokens' PD token D2H synchronization, so the
+    // RPC thread cannot read a still-pending clone on its own CUDA stream.
+    // Per-request storage also isolates the payload from later forwards.
+    const auto& indexer_seed = propose_output.model_output.mtp_indexer_topk;
+    if (indexer_seed.defined()) {
+        int64_t row = 0;
+        for (const auto& stream : stream_groups.allStreams()) {
+            const int64_t count        = stream->currentBatchSize();
+            auto          state        = stream->getMtpAsyncDeviceState();
+            state.mtp_indexer_topk_gpu = indexer_seed.narrow(0, row, count).clone();
+            stream->setMtpAsyncDeviceState(std::move(state));
+            row += count;
+        }
+        RTP_LLM_CHECK(row == indexer_seed.size(0));
+    }
+
     // we set propose token in extra loop to avoid cuda sync
     updateProposeTokens(stream_groups, propose_output, spec_update_infos);
 

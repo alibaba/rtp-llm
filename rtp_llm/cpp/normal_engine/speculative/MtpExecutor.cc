@@ -1344,8 +1344,13 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         && !params.device_resource_config.enable_layer_micro_batch && !context_parallel_enabled
         && draft_model_config.index_share_for_mtp_iteration && draft_model_config.num_layers == 1
         && draft_model_config.attn_config.indexer_topk > 0 && propose_step_ >= 3;
-    mtp_indexer_topk_           = draft_model_config.attn_config.indexer_topk;
-    mtp_indexer_compress_ratio_ = std::max<int64_t>(draft_model_config.attn_config.indexer_compress_ratio, 1);
+    mtp_indexer_prefill_seed_enabled_ =
+        kMtpIndexerShareFlag.on && python_draft_share_capable && !context_parallel_enabled
+        && !params.device_resource_config.enable_layer_micro_batch && draft_model_config.index_share_for_mtp_iteration
+        && draft_model_config.num_layers == 1 && draft_model_config.attn_config.indexer_topk > 0;
+    mtp_indexer_topk_ = draft_model_config.attn_config.indexer_compress_ratio > 1 ?
+                            draft_model_config.attn_config.sparse_attention_topk :
+                            draft_model_config.attn_config.indexer_topk;
     RTP_LLM_LOG_INFO(
         "[MTP indexer share] enabled=%d %s=%s model_capability=%d python_draft=%d python_api_capability=%d "
         "layer_micro_batch=%d context_parallel=%d layers=%ld topk=%ld propose_step=%zu",
@@ -1495,13 +1500,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mtp_params->model_config_.hc_mult});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
-            draft_model_.reset(
-                new PyWrappedModel(model_params,
-                                   params.py_sp_model,
-                                   false,
-                                   false,
-                                   draft_cache_layer_layout.layer_to_groups,
-                                   mtp_indexer_share_enabled_ ? MtpIndexerRole::REUSE : MtpIndexerRole::NORMAL));
+            draft_model_.reset(new PyWrappedModel(
+                model_params,
+                params.py_sp_model,
+                false,
+                false,
+                draft_cache_layer_layout.layer_to_groups,
+                mtp_indexer_share_enabled_ ?
+                    MtpIndexerRole::REUSE :
+                    (mtp_indexer_prefill_seed_enabled_ ? MtpIndexerRole::SEED : MtpIndexerRole::NORMAL)));
             // Create separate model for speculative prefill with CUDA graph if enabled (from params)
             const bool enable_cuda_graph           = params.hw_kernel_config.enable_cuda_graph;
             const bool disable_sp_prefill_by_env   = kDisableSpPrefillCudaGraphByEnv;
@@ -1856,6 +1863,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                     model_input.combo_tokens.size(0));
         }
         draft_model_output = std::move(draft_model_->forward(model_input));
+        if (mtp_indexer_prefill_seed_enabled_) {
+            draft_model_output.mtp_indexer_topk =
+                draft_model_->snapshotMtpIndexerTopk(model_input.input_lengths.size(0)).clone();
+        }
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -3174,11 +3185,9 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
                     auto seed  = torch::full(
                         {1, mtp_indexer_topk_}, -1, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
                     const int64_t seq_len = std::max<int64_t>(stream->seqLength(), 0);
-                    // The shared selection uses indexer coordinates. For a
-                    // compressed KPool, only complete raw-token groups are
-                    // addressable; the live incomplete group is supplied by
-                    // SparseMLA's causal tail.
-                    const int64_t indexer_seq_len = seq_len / mtp_indexer_compress_ratio_;
+                    // GLM53 seeds contain expanded raw-token coordinates,
+                    // including the first step's incomplete KPool tail.
+                    const int64_t indexer_seq_len = seq_len;
                     const int64_t valid_count     = std::min<int64_t>(indexer_seq_len, mtp_indexer_topk_);
                     if (valid_count > 0) {
                         seed.narrow(/*dim=*/1, /*start=*/0, valid_count)
@@ -3341,7 +3350,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     const auto all_streams = stream_groups.allStreams();
 
     // Root owns request-scoped seeds. Rebuild the current batch order on GPU;
-    // no seed is sent across PD. The seed payload remains TP-local. Only the
+    // Prefill's first-step seed arrives with PD speculative state. Only the
     // one-element cold flag is reduced across DP+TP for MegaMoE, whose
     // symmetric-buffer collective requires every peer to enter the same model
     // clone. Other models retain the cheaper TP-only decision.

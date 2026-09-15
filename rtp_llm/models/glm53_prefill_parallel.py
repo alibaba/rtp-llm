@@ -13,18 +13,30 @@ def _enabled(name: str) -> bool:
     return value == "1"
 
 
-def mla_cp_enabled(model_type: str, role_type: Any) -> bool:
+def mla_cp_enabled(
+    model_type: str, role_type: Any, *, is_glm53_mtp: bool = False
+) -> bool:
     return bool(
-        model_type == "glm5_3_flash"
+        (model_type == "glm5_3_flash" or (model_type == "glm_5_mtp" and is_glm53_mtp))
         and role_type == RoleType.PREFILL
         and _enabled("GLM53_PREFILL_MLA_CP")
     )
 
 
-def shared_expert_local_enabled(model_type: str, role_type: Any) -> bool:
+def glm53_moe_enabled(config: Any) -> bool:
+    # glm_5_mtp also serves older GLM checkpoints. Only the GLM53 checkpoint
+    # adapter opts its draft into the main model's token-local FP32 router.
+    return config.model_type == "glm5_3_flash" or (
+        config.model_type == "glm_5_mtp" and getattr(config, "is_glm53_mtp", False)
+    )
+
+
+def shared_expert_local_enabled(
+    model_type: str, role_type: Any, *, is_glm53_mtp: bool = False
+) -> bool:
     """One selection shared by checkpoint loading and MoE execution."""
     return bool(
-        model_type == "glm5_3_flash"
+        (model_type == "glm5_3_flash" or (model_type == "glm_5_mtp" and is_glm53_mtp))
         and role_type == RoleType.PREFILL
         and _enabled("GLM53_PREFILL_SHARED_EXPERT_LOCAL")
     )

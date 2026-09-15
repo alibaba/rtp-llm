@@ -622,8 +622,8 @@ public:
         // before worker-side specUpdate has written sp_output_buffer fields.
         torch::Tensor last_hidden_states_gpu;
         torch::Tensor draft_all_probs_gpu;
-        // Request-scoped GLM-5.2 indexer seed. Keeping this beside the other
-        // next-cycle GPU state makes batch reordering harmless and avoids PD.
+        // Request-scoped indexer seed, also carried by the Prefill/Decode RPC.
+        // GLM53 stores expanded raw token ids, including the first step's tail.
         torch::Tensor mtp_indexer_topk_gpu;
         // True host seqLength observed when this state is published. MTP async
         // uses it as the base for the next KV allocation upper bound.

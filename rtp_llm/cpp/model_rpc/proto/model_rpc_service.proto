@@ -321,6 +321,8 @@ message GenerateRequestPB {
     // cp_size physical blocks per virtual block. Default 0 keeps backward
     // compatibility (treated as 1 by decode side).
     int32 prefill_cp_size = 13;
+    // First MTP step's request-local indexer selection (raw token ids for GLM53).
+    TensorPB propose_mtp_indexer_topk = 14;
 }
 
 // in tp case, decode master broadcast to decode worker
