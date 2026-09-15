@@ -117,6 +117,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, NullMapperIsPassthrough) {
     auto result = allocator->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(batch_res->blocksNum(0, full_group_id), 4);
+    EXPECT_EQ(result.block_aligned_input_length, 16);
 }
 
 // 2) With cp_slot_mapper(cp_rank=0, cp_size=2, block_size=4): a 4-block request allocates ceil(4/2)=2
@@ -138,6 +139,8 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocHalvesFullGroup) {
     ASSERT_TRUE(result.success);
     EXPECT_EQ(batch_res->blocksNum(0, full_group_id), 2)
         << "cp_size=2 should halve allocation to ceil(4/2)=2 physical blocks per rank";
+    EXPECT_EQ(batch_res->cacheKeys(0), (CacheKeysType{100, 101, 102, 103}));
+    EXPECT_EQ(result.block_aligned_input_length, 16);
 }
 
 // 3) Reuse path with CP canonical keys: reuse_len must stay in whole logical blocks
@@ -148,7 +151,8 @@ void expectCpCanonicalReuse(int                  seq_len,
                             const CacheKeysType& request_keys,
                             const CacheKeysType& cached_canonical_keys,
                             int                  expected_reuse_len,
-                            int                  expected_local_blocks) {
+                            int                  expected_local_blocks,
+                            int                  expected_input_length) {
     auto config    = makeCPHybridConfig();
     auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
@@ -165,6 +169,8 @@ void expectCpCanonicalReuse(int                  seq_len,
     ASSERT_TRUE(result.success);
 
     EXPECT_EQ(result.reuse_len, expected_reuse_len) << "seq_len=" << seq_len;
+    EXPECT_EQ(batch_res->cacheKeys(0), request_keys);
+    EXPECT_EQ(result.block_aligned_input_length, expected_input_length) << "seq_len=" << seq_len;
     EXPECT_EQ(batch_res->cacheResource(0).reuseBlockNum(), static_cast<size_t>(expected_reuse_len / 8))
         << "seq_len=" << seq_len;
     EXPECT_EQ(batch_res->blocksNum(0, /*full_group_id=*/1), expected_local_blocks) << "seq_len=" << seq_len;
@@ -172,10 +178,12 @@ void expectCpCanonicalReuse(int                  seq_len,
 
 TEST_F(HybridKVCacheAllocatorCPShardTest, ReuseOnCanonicalKeysStaysBelowQueryLength) {
     // block_size=4, cp_size=2 => one canonical key covers 8 tokens.
-    expectCpCanonicalReuse(/*seq_len=*/16, {100, 101, 102, 103}, {101, 103}, /*reuse_len=*/8, /*local_blocks=*/2);
-    expectCpCanonicalReuse(/*seq_len=*/12, {100, 101, 102}, {101}, /*reuse_len=*/8, /*local_blocks=*/2);
-    expectCpCanonicalReuse(/*seq_len=*/8, {100, 101}, {101}, /*reuse_len=*/0, /*local_blocks=*/1);
-    expectCpCanonicalReuse(/*seq_len=*/17, {100, 101, 102, 103, 104}, {101, 103}, /*reuse_len=*/16, /*local_blocks=*/3);
+    expectCpCanonicalReuse(
+        16, {100, 101, 102, 103}, {101, 103}, /*reuse_len=*/8, /*local_blocks=*/2, /*input_length=*/16);
+    expectCpCanonicalReuse(12, {100, 101, 102}, {101}, /*reuse_len=*/8, /*local_blocks=*/2, /*input_length=*/12);
+    expectCpCanonicalReuse(8, {100, 101}, {101}, /*reuse_len=*/0, /*local_blocks=*/1, /*input_length=*/8);
+    expectCpCanonicalReuse(
+        17, {100, 101, 102, 103, 104}, {101, 103}, /*reuse_len=*/16, /*local_blocks=*/3, /*input_length=*/20);
 }
 
 // 4) When reuse is disabled, cp_slot_mapper still translates seq_len for malloc and skips the match.
