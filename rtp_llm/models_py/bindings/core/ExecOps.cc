@@ -718,9 +718,8 @@ void execBroadcastCpu(const BroadcastParams& params) {
     auto& broadcaster = CpuTpBroadcaster::instance();
     if (broadcaster.isInitialized()) {
         for (auto& tensor : params.buffers) {
-            RTP_LLM_CHECK_WITH_INFO(tensor.is_cpu(),
-                                    "execBroadcastCpu requires CPU tensors (got device=%s)",
-                                    tensor.device().str().c_str());
+            RTP_LLM_CHECK_WITH_INFO(
+                tensor.is_cpu(), "execBroadcastCpu requires CPU tensors (got device=%s)", tensor.device().str().c_str());
             auto contiguous = tensor.contiguous();
             broadcaster.broadcast(contiguous.data_ptr(), contiguous.nbytes(), params.root);
             if (!contiguous.is_same(tensor)) {
@@ -900,10 +899,12 @@ void registerExecCtxOps(pybind11::module& m) {
         py::arg("tp_size"),
         py::arg("base_path"));
 
-    m.def("destroy_cpu_tp_broadcaster", []() {
-        py::gil_scoped_release release;
-        CpuTpBroadcaster::instance().reset();
-    });
+    m.def(
+        "destroy_cpu_tp_broadcaster",
+        []() {
+            py::gil_scoped_release release;
+            CpuTpBroadcaster::instance().reset();
+        });
 }
 
 }  // namespace rtp_llm

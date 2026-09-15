@@ -48,7 +48,9 @@ except ImportError as _deep_ep_import_err:
             )
 
         def __init_subclass__(cls, **kwargs):
-            raise NotImplementedError("deep_ep is not available in this build.")
+            raise NotImplementedError(
+                "deep_ep is not available in this build."
+            )
 
         @classmethod
         def get_low_latency_rdma_size_hint(cls, *args, **kwargs):
