@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <memory>
+#include <numeric>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
@@ -676,6 +678,184 @@ TEST_F(LinearKVCacheGroupTest, InsertIntoCacheWithEmptyInputsIsNoop) {
     group.insertIntoCache(CacheKeysType{}, BlockIndicesType{1, 2}, /*is_resident=*/false);
     group.insertIntoCache(CacheKeysType{100, 101}, BlockIndicesType{}, /*is_resident=*/false);
     EXPECT_EQ(shared_cache->size(), 0u);
+}
+
+// ---- Oracle helpers: independent reimplementation of the slot-cost simulation ----
+
+static bool oracleShouldMaterialize(int pos, int seq_slots, int M, int reserve_step, bool reuse, int step) {
+    const int  reserve_slots = reserve_step > 0 ? reserve_step - 1 : 0;
+    const int  total_slots    = seq_slots + reserve_slots;
+    const bool is_seq_tail    = (seq_slots > 0) && (pos >= std::max(0, seq_slots - M)) && (pos < seq_slots);
+    const bool is_reserve     = (reserve_step > 0) && (pos >= seq_slots) && (pos < total_slots);
+    const bool step_hit       = (step > 0) && ((pos + 1) % step == 0);
+    return is_reserve || (reuse ? (step_hit || is_seq_tail) : is_seq_tail);
+}
+
+static int oracleEstimateInitialBatchPeak(int common_slots, int seq_slots, int final_seq_slots,
+                                          int reserve_step, bool reuse, int step,
+                                          int M, int R, int batch_size) {
+    const int reserve_slots  = reserve_step > 0 ? reserve_step - 1 : 0;
+    const int initial_slots  = seq_slots + reserve_slots;
+    const int final_slots    = final_seq_slots + reserve_slots;
+
+    std::vector<int> costs;
+    costs.reserve(static_cast<size_t>(std::max(final_slots, 0)));
+    for (int pos = 0; pos < common_slots; ++pos) {
+        costs.push_back(oracleShouldMaterialize(pos, common_slots, M, 0, reuse, step) ? 1 : 0);
+    }
+    for (int pos = common_slots; pos < initial_slots; ++pos) {
+        costs.push_back(oracleShouldMaterialize(pos, seq_slots, M, reserve_step, reuse, step) ? batch_size : 0);
+    }
+
+    int physical = std::accumulate(costs.begin(), costs.end(), 0);
+    int peak     = physical;
+
+    while (static_cast<int>(costs.size()) < final_slots) {
+        costs.push_back(batch_size);
+        physical += batch_size;
+        peak = std::max(peak, physical);
+
+        for (int slot = static_cast<int>(costs.size()) - R - 1 - reserve_step; slot >= 0; --slot) {
+            auto& cost = costs[static_cast<size_t>(slot)];
+            if (cost == 0) {
+                continue;
+            }
+            if (reuse && step > 0 && (slot + 1) % step == 0) {
+                continue;
+            }
+            physical -= cost;
+            cost = 0;
+        }
+    }
+    return peak;
+}
+
+static int countPhysicalBlocks(const BlockIds& blocks) {
+    int count = 0;
+    for (auto b : blocks.blocks()) {
+        if (!isNullBlockIdx(b)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// ---- Closed-form vs. oracle simulation ----
+
+TEST_F(LinearKVCacheGroupTest, ClosedFormPeakEstimatesExactlyMatchSlotSimulation) {
+    for (int block_size : {1, 4}) {
+        auto block_pool = createBlockPoolWithSize(4096);
+        ASSERT_TRUE(block_pool->init());
+
+        for (int linear_step : {1, 2, 3, 5}) {
+            for (uint32_t configured_tail : {0u, 1u, 2u}) {
+                auto policy               = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+                policy.active_tail_blocks = configured_tail;
+                auto spec                 = makeTestLinearSpec(block_size);
+                LinearKVCacheGroup group({}, spec, block_pool, 0, linear_step, nullptr, nullptr, policy);
+                ASSERT_TRUE(group.init());
+
+                const int M = std::max(1, static_cast<int>(configured_tail));
+                const int R = std::max(2, M);
+
+                for (bool reuse : {false, true}) {
+                    for (int reserve_step : {0, 1, 2}) {
+                        for (int common_seq : {0, 3, 10}) {
+                            for (int seq_len : {1, 10, 20}) {
+                                for (int remaining : {0, 5, 20}) {
+                                    for (int batch : {1, 2, 4}) {
+                                        SCOPED_TRACE(testing::Message()
+                                                     << "bs=" << block_size << " step=" << linear_step
+                                                     << " reuse=" << reuse << " reserve=" << reserve_step
+                                                     << " tail=" << configured_tail << " common=" << common_seq
+                                                     << " seq=" << seq_len << " remaining=" << remaining
+                                                     << " batch=" << batch);
+
+                                        const int common_slots = (common_seq + block_size - 1) / block_size;
+                                        const int seq_slots    = (seq_len + block_size - 1) / block_size;
+                                        const int final_slots  = (seq_len + remaining + block_size - 1) / block_size;
+
+                                        const int oracle = oracleEstimateInitialBatchPeak(
+                                            common_slots, seq_slots, final_slots,
+                                            reserve_step, reuse, linear_step, M, R, batch);
+                                        const int estimate = group.estimateInitialBatchPeakNeedBlocks(
+                                            seq_len, common_seq, remaining,
+                                            reserve_step, reuse, batch);
+                                        EXPECT_EQ(estimate, oracle);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(LinearKVCacheGroupTest, ClosedFormPeakEstimatesMatchSimulationAtLargeScale) {
+    auto block_pool = createBlockPoolWithSize(65536);
+    ASSERT_TRUE(block_pool->init());
+
+    for (int linear_step : {1, 7, 13, 64}) {
+        for (bool reuse : {false, true}) {
+            for (int reserve_step : {0, 1, 4}) {
+                auto spec  = makeTestLinearSpec(1);
+                LinearKVCacheGroup group({}, spec, block_pool, 0, linear_step);
+                ASSERT_TRUE(group.init());
+
+                const int M = 1, R = 2;
+                const int common = 50, seq_len = 500, remaining = 1000, batch = 4;
+
+                const int oracle = oracleEstimateInitialBatchPeak(
+                    common, seq_len, seq_len + remaining,
+                    reserve_step, reuse, linear_step, M, R, batch);
+                const int estimate = group.estimateInitialBatchPeakNeedBlocks(
+                    seq_len, common, remaining, reserve_step, reuse, batch);
+
+                SCOPED_TRACE(testing::Message()
+                             << "step=" << linear_step << " reuse=" << reuse << " reserve=" << reserve_step);
+                EXPECT_EQ(estimate, oracle);
+            }
+        }
+    }
+}
+
+TEST_F(LinearKVCacheGroupTest, EstimateMatchesRealAllocatorPeak) {
+    for (int linear_step : {1, 2, 3, 5}) {
+        for (bool reuse : {false, true}) {
+            for (int reserve_step : {0, 1, 2}) {
+                auto block_pool = createBlockPoolWithSize(512);
+                ASSERT_TRUE(block_pool->init());
+
+                auto spec  = makeTestLinearSpec(1);
+                LinearKVCacheGroup group({}, spec, block_pool, 0, linear_step);
+                ASSERT_TRUE(group.init());
+
+                const int initial_seq_len = 10;
+                const int remaining       = 60;
+
+                const int estimate = group.estimatePeakNeedBlocks(
+                    initial_seq_len, {}, remaining, reserve_step, reuse);
+
+                BlockIds blocks;
+                ASSERT_TRUE(group.malloc(blocks, initial_seq_len, reuse, reserve_step));
+                int peak = countPhysicalBlocks(blocks);
+
+                int seq_len = initial_seq_len;
+                while (seq_len < initial_seq_len + remaining) {
+                    ++seq_len;
+                    ASSERT_TRUE(group.malloc(blocks, seq_len, reuse, reserve_step));
+                    peak = std::max(peak, countPhysicalBlocks(blocks));
+                    group.removeSkippedBlocks(blocks, reuse, reserve_step);
+                }
+
+                SCOPED_TRACE(testing::Message()
+                             << "step=" << linear_step << " reuse=" << reuse << " reserve=" << reserve_step);
+                EXPECT_EQ(estimate, peak);
+            }
+        }
+    }
 }
 
 }  // namespace test
