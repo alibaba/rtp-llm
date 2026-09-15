@@ -333,6 +333,36 @@ def multi_rank_start(
     if py_env_configs.distribute_config.fake_gang_env:
         return processes
 
+    # Install the backend manager's signal handlers before waiting for rank
+    # startup. Frontend health endpoints may become visible while this wait is
+    # still finishing, so the smoke-test owner can request shutdown before the
+    # external ready pipe is written. Leaving ProcessManager construction
+    # until after the wait makes that SIGTERM take the default action and
+    # orphan the rank processes.
+    manager = ProcessManager(
+        shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
+        monitor_interval=py_env_configs.server_config.monitor_interval,
+        termination_ack_timeout=10.0,
+    )
+    follower_indices, leader_indices = _shutdown_order_indices(
+        len(processes),
+        py_env_configs.parallelism_config.world_rank,
+        py_env_configs.parallelism_config.tp_size,
+    )
+    if follower_indices:
+        shutdown_order = follower_indices + leader_indices
+        manager.set_processes(
+            [processes[index] for index in shutdown_order],
+            [
+                shutdown_ready_events[index]
+                if index in follower_indices
+                else None
+                for index in shutdown_order
+            ],
+        )
+    else:
+        manager.set_processes(processes)
+
     # Wait for all ranks to report startup status
     try:
         _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size)
@@ -391,33 +421,6 @@ def multi_rank_start(
         else:
             raise Exception("Multi-rank startup failed")
 
-    # After successful startup, monitor processes
-    # Collective followers can already be waiting for a leader's next model
-    # step. Stop every follower scheduler first, then signal leaders so their
-    # final collective releases followers without starting an unmatched step.
-    manager = ProcessManager(
-        shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
-        monitor_interval=py_env_configs.server_config.monitor_interval,
-        termination_ack_timeout=10.0,
-    )
-    follower_indices, leader_indices = _shutdown_order_indices(
-        len(processes),
-        py_env_configs.parallelism_config.world_rank,
-        py_env_configs.parallelism_config.tp_size,
-    )
-    if follower_indices:
-        shutdown_order = follower_indices + leader_indices
-        manager.set_processes(
-            [processes[index] for index in shutdown_order],
-            [
-                shutdown_ready_events[index]
-                if index in follower_indices
-                else None
-                for index in shutdown_order
-            ],
-        )
-    else:
-        manager.set_processes(processes)
     if not manager.monitor_and_release_processes():
         raise RuntimeError("one or more backend ranks exited abnormally")
 
