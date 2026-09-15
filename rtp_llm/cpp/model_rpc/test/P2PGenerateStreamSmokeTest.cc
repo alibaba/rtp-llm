@@ -12,11 +12,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <mutex>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -34,10 +37,10 @@ extern char** environ;
 namespace rtp_llm {
 namespace {
 
-constexpr int kLayers           = 3;
-constexpr int kBlocks           = 32;
-constexpr int kTokensPerBlock   = 4;
-constexpr int kNewTokens        = 3;
+constexpr int kLayers         = 3;
+constexpr int kBlocks         = 32;
+constexpr int kTokensPerBlock = 4;
+constexpr int kNewTokens      = 3;
 
 void require(bool condition, const std::string& message) {
     if (!condition) {
@@ -65,7 +68,7 @@ struct PayloadTimeouts {
 };
 
 PayloadTimeouts payloadTimeouts() {
-    const auto read   = [](const char* name, int fallback) {
+    const auto read = [](const char* name, int fallback) {
         const auto value = environment(name, "");
         if (value.empty())
             return fallback;
@@ -76,8 +79,7 @@ PayloadTimeouts payloadTimeouts() {
         return timeout;
     };
     // Cross-host runs use the same short budgets; wire timeouts do not depend on clock offsets.
-    PayloadTimeouts result{read("P2P_SMOKE_REQUEST_TIMEOUT_MS", 10000),
-                           read("P2P_SMOKE_LOAD_TIMEOUT_MS", 3000)};
+    PayloadTimeouts result{read("P2P_SMOKE_REQUEST_TIMEOUT_MS", 10000), read("P2P_SMOKE_LOAD_TIMEOUT_MS", 3000)};
     require(result.load_ms < result.request_ms, "payload load timeout must be less than request timeout");
     return result;
 }
@@ -120,6 +122,18 @@ enum class Fault {
     None,
     CorruptByte,
     OmitLastLayer
+};
+
+enum class CancelStage : int32_t {
+    None,
+    BeforePublish,
+    AfterFirstLayer,
+    AfterFirstDecodeOutput
+};
+
+struct CancelControl {
+    int32_t stage         = static_cast<int32_t>(CancelStage::None);
+    int32_t step_delay_ms = 0;
 };
 
 // Only model execution/sampling is substituted. NormalGenerateStream, the FIFO
@@ -215,6 +229,33 @@ public:
         return error_;
     }
 
+    void configureCancel(CancelControl control) {
+        require(control.stage >= 0 && control.stage <= static_cast<int32_t>(CancelStage::AfterFirstDecodeOutput)
+                    && control.step_delay_ms >= 0 && control.step_delay_ms <= 1000,
+                "invalid cancel test control");
+        std::lock_guard<std::mutex> lock(execution_mutex_);
+        cancel_control_ = control;
+        layer_progress_.clear();
+        decode_steps_.clear();
+        next_step_ms_.clear();
+        stage_reached = false;
+    }
+
+    uint64_t blockRefs() const {
+        // The target already enables -fno-access-control for test observations.
+        const auto pool = getCacheManager()->allocator_->getDeviceBlockPool();
+        uint64_t   refs = 0;
+        for (int block = 1; block < kBlocks; ++block)
+            refs += pool->refCount(block);
+        return refs;
+    }
+
+    std::atomic<bool> stage_reached{false};
+
+    bool idle() const {
+        return scheduler_->empty();
+    }
+
     Fault               fault         = Fault::None;  // Set before starting the executor thread.
     size_t              baseline_free = 0;
     std::atomic<size_t> published_bytes{0};
@@ -223,11 +264,19 @@ public:
     std::atomic<int>    published_layers{0};
 
 private:
-    void cacheStep(const GenerateStreamPtr& stream, bool prefill) {
+    bool cacheStep(const GenerateStreamPtr& stream, bool prefill) {
         const auto&  resource      = stream->kvCache().cacheResource(0);
         const size_t prompt_blocks = (stream->inputLength() + kTokensPerBlock - 1) / kTokensPerBlock;
         require(prompt_blocks > 0, "empty prompt block coverage");
-        for (int layer = 0; layer < kLayers; ++layer) {
+        auto& progress = layer_progress_[stream->streamId()];
+        for (int layer = prefill ? progress : 0; layer < kLayers; ++layer) {
+            const auto stage = static_cast<CancelStage>(cancel_control_.stage);
+            if (prefill
+                && ((stage == CancelStage::BeforePublish && layer == 0)
+                    || (stage == CancelStage::AfterFirstLayer && layer == 1))) {
+                stage_reached = true;
+                return false;  // Keep scheduling so cancellation can reclaim this stream.
+            }
             if (prefill && fault == Fault::OmitLastLayer && layer == kLayers - 1) {
                 continue;
             }
@@ -274,11 +323,17 @@ private:
                                                          stream->generateInput()->request_deadline_ms),
                         "writeP2PLayer rejected real allocated buffers");
                 ++published_layers;
+                progress = layer + 1;
+                if (cancel_control_.step_delay_ms > 0 && progress < kLayers) {
+                    next_step_ms_[stream->streamId()] = steadyTimeMs() + cancel_control_.step_delay_ms;
+                    return false;
+                }
             }
         }
         if (!prefill) {
             ++checked_requests;
         }
+        return true;
     }
 
     void run() {
@@ -298,9 +353,19 @@ private:
                 try {
                     cudaCheck(device_status);
                     const bool prefill = pd_.role_type == RoleType::PREFILL;
+                    if (stream->hasError())
+                        continue;
+                    if (!prefill && cancel_control_.stage == static_cast<int32_t>(CancelStage::AfterFirstDecodeOutput)
+                        && decode_steps_[stream->streamId()] > 0) {
+                        stage_reached = true;
+                        continue;
+                    }
+                    if (steadyTimeMs() < next_step_ms_[stream->streamId()])
+                        continue;
                     if ((prefill && stream->queryPdSep())
                         || (!prefill && stream->seqLength() == stream->inputLength() + 1)) {
-                        cacheStep(stream, prefill);
+                        if (!cacheStep(stream, prefill))
+                            continue;
                     }
                     // D must have applied the real first-token side channel
                     // before becoming runnable. The remaining tokens are stubbed.
@@ -336,6 +401,9 @@ private:
                                             false,
                                             std::nullopt};
                     stream->update(update);
+                    if (!prefill)
+                        ++decode_steps_[stream->streamId()];
+                    next_step_ms_[stream->streamId()] = steadyTimeMs() + cancel_control_.step_delay_ms;
                 } catch (const std::exception& error) {
                     {
                         std::lock_guard<std::mutex> lock(error_mutex_);
@@ -347,14 +415,17 @@ private:
         }
     }
 
-    ModelConfig        model_;
-    RuntimeConfig      runtime_;
-    PDSepConfig        pd_;
-    std::atomic<bool>  stopping_{false};
-    std::thread        thread_;
-    std::mutex         execution_mutex_;
-    mutable std::mutex error_mutex_;
-    std::string        error_;
+    ModelConfig                          model_;
+    RuntimeConfig                        runtime_;
+    PDSepConfig                          pd_;
+    std::atomic<bool>                    stopping_{false};
+    std::thread                          thread_;
+    std::mutex                           execution_mutex_;
+    mutable std::mutex                   error_mutex_;
+    std::string                          error_;
+    CancelControl                        cancel_control_;
+    std::unordered_map<int64_t, int>     layer_progress_, decode_steps_;
+    std::unordered_map<int64_t, int64_t> next_step_ms_;
 };
 
 // Count wire RPCs while delegating all request handling to production servers.
@@ -363,12 +434,18 @@ public:
     LocalRpcServer*       target  = nullptr;
     PrefillRpcServerNew2* prefill = nullptr;
     std::atomic<int>      generate_calls{0}, peer_calls{0}, load_calls{0}, read_calls{0}, handle_read_calls{0};
+    std::atomic<int>      generate_done{0}, generate_cancelled{0}, load_done{0}, load_cancelled{0};
+    std::atomic<int>      read_done{0}, handle_read_done{0}, cancel_read_calls{0};
 
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
         ++generate_calls;
-        return target->GenerateStreamCall(context, request, writer);
+        const auto status = target->GenerateStreamCall(context, request, writer);
+        if (context->IsCancelled())
+            ++generate_cancelled;
+        ++generate_done;
+        return status;
     }
     grpc::Status GetPeerInfo(grpc::ServerContext*        context,
                              const GetPeerInfoRequestPB* request,
@@ -381,8 +458,12 @@ public:
                            const P2PConnectorStartLoadRequestPB* request,
                            P2PConnectorStartLoadResponsePB*      response) override {
         ++load_calls;
-        return prefill ? prefill->StartLoad(context, request, response) :
-                         grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "D");
+        const auto status = prefill ? prefill->StartLoad(context, request, response) :
+                                      grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "D");
+        if (context->IsCancelled())
+            ++load_cancelled;
+        ++load_done;
+        return status;
     }
     grpc::Status ExecuteFunction(grpc::ServerContext*     context,
                                  const FunctionRequestPB* request,
@@ -392,8 +473,17 @@ public:
                 ++read_calls;
             if (request->p2p_request().type() == P2PConnectorBroadcastType::HANDLE_READ)
                 ++handle_read_calls;
+            if (request->p2p_request().type() == P2PConnectorBroadcastType::CANCEL_READ)
+                ++cancel_read_calls;
         }
-        return target->ExecuteFunction(context, request, response);
+        const auto status = target->ExecuteFunction(context, request, response);
+        if (request->has_p2p_request()) {
+            if (request->p2p_request().type() == P2PConnectorBroadcastType::READ)
+                ++read_done;
+            if (request->p2p_request().type() == P2PConnectorBroadcastType::HANDLE_READ)
+                ++handle_read_done;
+        }
+        return status;
     }
 };
 
@@ -436,30 +526,33 @@ std::shared_ptr<PayloadEngine> makePayloadEngine(
     runtime.max_generate_batch_size                     = 4;
     runtime.fifo_scheduler_config.max_batch_tokens_size = 256;
     runtime.worker_grpc_addrs                           = {endpoint.address()};
-    runtime.worker_addrs     = {endpoint.host + ":" + std::to_string(transfer_port) + ":"
-                                + std::to_string(endpoint.grpc_port)};
-    runtime.p2p_worker_addrs = runtime.worker_addrs;
+    runtime.worker_addrs                                = {endpoint.host + ":" + std::to_string(transfer_port) + ":"
+                                                           + std::to_string(endpoint.grpc_port)};
+    runtime.p2p_worker_addrs                            = runtime.worker_addrs;
     return std::make_shared<PayloadEngine>(config, runtime, pd);
 }
 
 // Test control protocol carries configuration, counters and diagnostics only.
 // Cache bytes and the first token exclusively use the production RPC/transport.
 struct WorkerHello {
-    uint32_t magic              = 0x50325032;
-    int32_t  dtype = 0;
-    int32_t  fault = 0;
-    int32_t  rdma  = 0;
+    uint32_t magic              = 0x50325033;
+    int32_t  dtype              = 0;
+    int32_t  fault              = 0;
+    int32_t  rdma               = 0;
     int32_t  request_timeout_ms = 0;
     int32_t  load_timeout_ms    = 0;
 };
 
 struct WorkerReport {
-    uint32_t magic          = 0x50325032;
+    uint32_t magic          = 0x50325033;
     int32_t  pid            = 0;
     int32_t  grpc_port      = 0;
     int32_t  generate_calls = 0, peer_calls = 0, load_calls = 0, handle_read_calls = 0;
     int32_t  published_layers = 0;
     uint64_t published_bytes = 0, free_blocks = 0, baseline_free = 0;
+    uint64_t block_refs    = 0;
+    int32_t  generate_done = 0, generate_cancelled = 0, load_done = 0, load_cancelled = 0;
+    int32_t  handle_read_done = 0, stage_reached = 0, scheduler_idle = 0;
     char     host[64]      = {};
     char     failure[1024] = {};
 };
@@ -542,9 +635,9 @@ public:
                         "remote P control connection failed");
             }
             WorkerHello hello;
-            hello.dtype = dtype == DataType::TYPE_INT8 ? 1 : 0;
-            hello.fault = static_cast<int32_t>(fault);
-            hello.rdma  = rdma;
+            hello.dtype              = dtype == DataType::TYPE_INT8 ? 1 : 0;
+            hello.fault              = static_cast<int32_t>(fault);
+            hello.rdma               = rdma;
             hello.request_timeout_ms = timeouts.request_ms;
             hello.load_timeout_ms    = timeouts.load_ms;
             controlIO(control_.fd, &hello, sizeof(hello), true);
@@ -570,6 +663,13 @@ public:
         char command = 'S';
         controlIO(control_.fd, &command, 1, true);
         return receive(10000);
+    }
+
+    void configureCancel(CancelControl control) {
+        char command = 'C';
+        controlIO(control_.fd, &command, 1, true);
+        controlIO(control_.fd, &control, sizeof(control), true);
+        (void)receive(10000);
     }
 
     bool finish() {
@@ -710,23 +810,31 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
         PayloadEndpoint endpoint(prefill, &prefill, host);
         const auto      config = test::makeSimpleMhaCacheConfig(
             kLayers, kBlocks, kTokensPerBlock, hello.dtype == 1 ? DataType::TYPE_INT8 : DataType::TYPE_FP16, 2, 16);
-        auto engine = makePayloadEngine(config, RoleType::PREFILL, endpoint, hello.rdma, hello.load_timeout_ms);
-        prefill.engine_        = engine;
+        auto engine     = makePayloadEngine(config, RoleType::PREFILL, endpoint, hello.rdma, hello.load_timeout_ms);
+        prefill.engine_ = engine;
         prefill.dp_grpc_addrs_ = {endpoint.address()};
         engine->fault          = static_cast<Fault>(hello.fault);
         engine->start();
         const auto report = [&] {
             WorkerReport state;
-            state.pid               = ::getpid();
-            state.grpc_port         = endpoint.grpc_port;
-            state.generate_calls    = endpoint.service.generate_calls.load();
-            state.peer_calls        = endpoint.service.peer_calls.load();
-            state.load_calls        = endpoint.service.load_calls.load();
-            state.handle_read_calls = endpoint.service.handle_read_calls.load();
-            state.published_layers  = engine->published_layers.load();
-            state.published_bytes   = engine->published_bytes.load();
-            state.free_blocks       = engine->getCacheManager()->freeBlocksNum();
-            state.baseline_free     = engine->baseline_free;
+            state.pid                = ::getpid();
+            state.grpc_port          = endpoint.grpc_port;
+            state.generate_calls     = endpoint.service.generate_calls.load();
+            state.peer_calls         = endpoint.service.peer_calls.load();
+            state.load_calls         = endpoint.service.load_calls.load();
+            state.handle_read_calls  = endpoint.service.handle_read_calls.load();
+            state.published_layers   = engine->published_layers.load();
+            state.published_bytes    = engine->published_bytes.load();
+            state.free_blocks        = engine->getCacheManager()->freeBlocksNum();
+            state.baseline_free      = engine->baseline_free;
+            state.block_refs         = engine->blockRefs();
+            state.stage_reached      = engine->stage_reached.load();
+            state.scheduler_idle     = engine->idle();
+            state.generate_done      = endpoint.service.generate_done.load();
+            state.generate_cancelled = endpoint.service.generate_cancelled.load();
+            state.load_done          = endpoint.service.load_done.load();
+            state.load_cancelled     = endpoint.service.load_cancelled.load();
+            state.handle_read_done   = endpoint.service.handle_read_done.load();
             std::copy(host.begin(), host.end(), state.host);
             const auto failure = engine->failure();
             std::copy_n(failure.data(), std::min(failure.size(), sizeof(state.failure) - 1), state.failure);
@@ -741,7 +849,13 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
                 controlIO(control.fd, &command, 1, false, hello.request_timeout_ms + 60000);
                 if (command == 'Q')
                     break;
-                require(command == 'S', "unknown P worker control command");
+                if (command == 'C') {
+                    CancelControl config;
+                    controlIO(control.fd, &config, sizeof(config), false);
+                    engine->configureCancel(config);
+                } else {
+                    require(command == 'S', "unknown P worker control command");
+                }
                 report();
             }
         } catch (...) {
@@ -756,8 +870,14 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
 
 class P2PGenerateStreamSmokeTest: public DeviceTestBase {
 protected:
-    void initialize(DataType dtype, Fault fault = Fault::None) {
-        timeouts_            = payloadTimeouts();
+    void initialize(DataType dtype, Fault fault = Fault::None, bool cancellation_test = false) {
+        timeouts_ = payloadTimeouts();
+        if (cancellation_test) {
+            // The 30s drain assertion must expire before production deadlines;
+            // waiting for the regular timeout cannot make a cancel test pass.
+            timeouts_.load_ms    = std::max(timeouts_.load_ms, 90000);
+            timeouts_.request_ms = std::max(timeouts_.request_ms, std::min(600000, timeouts_.load_ms + 30000));
+        }
         const auto transport = environment("P2P_SMOKE_TRANSPORT", "tcp");
         require(transport == "tcp" || transport == "rdma", "P2P_SMOKE_TRANSPORT must be tcp or rdma");
         host_ = environment("P2P_SMOKE_HOST", "127.0.0.1");
@@ -773,7 +893,7 @@ protected:
         const auto cache_config = test::makeSimpleMhaCacheConfig(kLayers, kBlocks, kTokensPerBlock, dtype, 2, 16);
         decode_engine_ =
             makePayloadEngine(cache_config, RoleType::DECODE, *decode_rpc_, transport == "rdma", timeouts_.load_ms);
-        decode_.engine_         = decode_engine_;
+        decode_.engine_                = decode_engine_;
         decode_.prefill_server_caller_ = std::make_shared<PrefillServerCaller>("p2p-payload-smoke");
         decode_engine_->start();
     }
@@ -799,14 +919,23 @@ protected:
     }
 
     grpc::Status generate(const GenerateInputPB& request, std::vector<GenerateOutputsPB>& outputs) {
-        auto stub =
-            RpcService::NewStub(grpc::CreateChannel(decode_rpc_->address(), grpc::InsecureChannelCredentials()));
         grpc::ClientContext context;
         context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(timeouts_.request_ms + 2000));
+        return generate(request, outputs, context);
+    }
+
+    grpc::Status generate(const GenerateInputPB&          request,
+                          std::vector<GenerateOutputsPB>& outputs,
+                          grpc::ClientContext&            context,
+                          std::atomic<int>*               output_count = nullptr) {
+        auto stub =
+            RpcService::NewStub(grpc::CreateChannel(decode_rpc_->address(), grpc::InsecureChannelCredentials()));
         auto              reader = stub->GenerateStreamCall(&context, request);
         GenerateOutputsPB output;
         while (reader->Read(&output)) {
             outputs.push_back(output);
+            if (output_count)
+                ++*output_count;
         }
         return reader->Finish();
     }
@@ -817,6 +946,103 @@ protected:
             return prefill.free_blocks == prefill.baseline_free
                    && decode_engine_->getCacheManager()->freeBlocksNum() == decode_engine_->baseline_free;
         })) << "P/D cache or connector references were not released";
+    }
+
+    void expectCancelDrained() {
+        require(waitFor([this] {
+                    const auto  p = prefill_process_->snapshot();
+                    const auto& d = decode_rpc_->service;
+                    return p.generate_done == p.generate_calls && p.load_done == p.load_calls
+                           && p.handle_read_done == p.handle_read_calls && d.generate_done == d.generate_calls
+                           && d.read_done == d.read_calls && p.free_blocks == p.baseline_free
+                           && decode_engine_->getCacheManager()->freeBlocksNum() == decode_engine_->baseline_free
+                           && p.block_refs == 0 && decode_engine_->blockRefs() == 0 && p.scheduler_idle
+                           && decode_engine_->idle();
+                }),
+                "cancel did not drain P/D RPCs and KV block references before cleanup timeout");
+        const auto p = prefill_process_->snapshot();
+        require(std::string(p.failure).empty() && decode_engine_->failure().empty(),
+                "payload engine failure P=" + std::string(p.failure) + " D=" + decode_engine_->failure());
+    }
+
+    void configureCancel(CancelStage stage, int step_delay_ms) {
+        const CancelControl control{static_cast<int32_t>(stage), step_delay_ms};
+        prefill_process_->configureCancel(control);
+        decode_engine_->configureCancel(control);
+    }
+
+    void healthyAfterCancel(int64_t id) {
+        configureCancel(CancelStage::None, 0);
+        const auto                     checked = decode_engine_->checked_requests.load();
+        std::vector<GenerateOutputsPB> outputs;
+        const auto                     status = generate(request(id, 11), outputs);
+        require(status.ok(), "post-cancel request failed: " + status.error_message());
+        require(!outputs.empty() && outputs.back().flatten_output().finished_size() == 1
+                    && outputs.back().flatten_output().finished(0),
+                "post-cancel request did not finish");
+        require(decode_engine_->checked_requests == checked + 1, "post-cancel cache bytes were not checked");
+        expectCancelDrained();
+    }
+
+    bool cancelRound(int64_t id, CancelStage stage, int delay_ms) {
+        const auto before             = prefill_process_->snapshot();
+        const auto d_cancel_before    = decode_rpc_->service.generate_cancelled.load();
+        const auto read_before        = decode_rpc_->service.read_calls.load();
+        const auto cancel_read_before = decode_rpc_->service.cancel_read_calls.load();
+        configureCancel(stage, 10);
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(timeouts_.request_ms + 2000));
+        std::vector<GenerateOutputsPB> outputs;
+        std::atomic<int>               output_count{0};
+        auto                           call =
+            std::async(std::launch::async, [&] { return generate(request(id, 11), outputs, context, &output_count); });
+        try {
+            if (stage != CancelStage::None) {
+                require(waitFor([&] {
+                            const auto p = prefill_process_->snapshot();
+                            if (stage == CancelStage::AfterFirstDecodeOutput)
+                                return decode_engine_->stage_reached.load() && output_count.load() > 0;
+                            return p.stage_reached && p.load_calls > before.load_calls
+                                   && decode_rpc_->service.read_calls > read_before;
+                        }),
+                        "cancel stage was not reached");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+            context.TryCancel();
+            const auto status    = call.get();
+            const bool cancelled = status.error_code() == grpc::StatusCode::CANCELLED;
+            require(cancelled || (stage == CancelStage::None && status.ok()),
+                    "unexpected cancel result: " + std::to_string(status.error_code()) + " " + status.error_message());
+            if (status.ok()) {
+                require(!outputs.empty() && outputs.back().flatten_output().finished_size() == 1
+                            && outputs.back().flatten_output().finished(0),
+                        "successful racing request is incomplete");
+            }
+            expectCancelDrained();
+            const auto after = prefill_process_->snapshot();
+            if (stage != CancelStage::None) {
+                require(decode_rpc_->service.generate_cancelled > d_cancel_before,
+                        "D handler did not observe outer RPC cancellation");
+            }
+            if (stage == CancelStage::BeforePublish || stage == CancelStage::AfterFirstLayer) {
+                require(after.generate_cancelled > before.generate_cancelled,
+                        "cancellation did not reach P GenerateStreamCall");
+                require(after.load_cancelled > before.load_cancelled, "cancellation did not reach P StartLoad");
+                require(decode_rpc_->service.cancel_read_calls > cancel_read_before,
+                        "cancellation did not reach D READ workers");
+            }
+            std::cerr << "cancel request=" << id << " stage=" << static_cast<int>(stage) << " delay_ms=" << delay_ms
+                      << " result=" << status.error_code()
+                      << " P_cancel=" << after.generate_cancelled - before.generate_cancelled
+                      << " D_cancel=" << decode_rpc_->service.generate_cancelled - d_cancel_before << std::endl;
+            healthyAfterCancel(id + 1);
+            return cancelled;
+        } catch (...) {
+            context.TryCancel();
+            if (call.valid())
+                call.wait();
+            throw;
+        }
     }
 
     void TearDown() override {
@@ -899,6 +1125,44 @@ TEST_F(P2PGenerateStreamSmokeTest, GenerateStreamTransfersEveryFp16CacheByte) {
 
 TEST_F(P2PGenerateStreamSmokeTest, GenerateStreamTransfersInt8CacheAndScaleBytes) {
     roundTrips(DataType::TYPE_INT8);
+}
+
+TEST_F(P2PGenerateStreamSmokeTest, CancelAtEachPDStageDrainsBothSides) {
+    initialize(DataType::TYPE_FP16, Fault::None, true);
+    int64_t id = 2001;
+    for (const auto stage :
+         {CancelStage::BeforePublish, CancelStage::AfterFirstLayer, CancelStage::AfterFirstDecodeOutput}) {
+        SCOPED_TRACE(static_cast<int>(stage));
+        EXPECT_TRUE(cancelRound(id, stage, 0));
+        id += 2;
+    }
+}
+
+TEST_F(P2PGenerateStreamSmokeTest, RandomCancelRepeatedlyDrainsBothSides) {
+    const auto parse = [](const char* name, const char* fallback, unsigned long maximum) {
+        const auto text   = environment(name, fallback);
+        size_t     parsed = 0;
+        const auto value  = std::stoul(text, &parsed);
+        require(parsed == text.size() && value <= maximum, std::string("invalid ") + name);
+        return value;
+    };
+    const auto seed   = static_cast<uint32_t>(parse("P2P_CANCEL_SEED", "20260915", UINT32_MAX));
+    const auto rounds = parse("P2P_CANCEL_ROUNDS", "32", 1000);
+    require(rounds > 0, "P2P_CANCEL_ROUNDS must be positive");
+    initialize(DataType::TYPE_INT8, Fault::None, true);
+    std::mt19937                       random(seed);
+    std::uniform_int_distribution<int> delay(0, 80);
+    size_t                             cancelled = 0;
+    for (size_t round = 0; round < rounds; ++round) {
+        const auto delay_ms = delay(random);
+        SCOPED_TRACE(::testing::Message() << "seed=" << seed << " round=" << round << " delay_ms=" << delay_ms);
+        std::cerr << "random cancel seed=" << seed << " round=" << round << '/' << rounds << " delay_ms=" << delay_ms
+                  << std::endl;
+        cancelled += cancelRound(3001 + 2 * round, CancelStage::None, delay_ms);
+    }
+    EXPECT_GT(cancelled, 0u) << "all requests completed before cancellation; increase rounds or reduce delays";
+    std::cerr << "random cancel summary seed=" << seed << " rounds=" << rounds << " cancelled=" << cancelled
+              << " completed_before_cancel=" << rounds - cancelled << std::endl;
 }
 
 TEST_F(P2PGenerateStreamSmokeTest, NonPDQueriesFinishOnPrefillWithoutP2PTransfer) {

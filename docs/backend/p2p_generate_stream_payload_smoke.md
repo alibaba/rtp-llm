@@ -75,6 +75,19 @@ D 完成后，两端测试均应 PASSED，P 自动清理退出。换用 INT8 或
 
 用例不要求修改宿主机时间。生产 P2P 仍传递并检查绝对 deadline，因此加载预算需覆盖 P 比 D 快的时差和实际传输耗时；这只能容纳预算范围内的时差，不是时钟无关的生产协议。缺层反例仍等待真实加载错误，不能仅凭外层 watchdog 超时通过。
 
+## PD 取消传播测试
+
+同一 target 新增以下用例，从客户端 `GenerateStreamCall` 的 `TryCancel()` 进入：
+
+- `CancelAtEachPDStageDrainsBothSides`：P 发布缓存前、发布第一层后、D 已输出且请求未完成时取消。
+- `RandomCancelRepeatedlyDrainsBothSides`：默认 32 轮 INT8 KV/scale 请求，随机延迟 0～80 毫秒取消。`P2P_CANCEL_SEED` 默认 `20260915`；`P2P_CANCEL_ROUNDS` 可设为 1～1000。日志记录 seed、轮次、延迟及取消/正常完成数量。
+
+阶段暂停仅作用于模拟计算和层发布，调度器继续处理取消。每轮检查已启动的 P/D 生成、StartLoad 和传输派发 RPC 退出，两侧调度器清空、非保留 block 引用归零、空闲块恢复；随后发送正常请求并逐字节校验缓存。固定阶段必须返回取消；随机用例允许请求先正常完成，并单独计数，且必须实际发生过取消。
+
+取消用例的加载预算至少 90 秒，清理检查最多等待 30 秒，避免依靠普通请求超时通过。测试同步与轮次控制使用单调时钟。新增控制协议要求 P/D 使用同一版二进制。
+
+远端执行时选择对应 `--test_filter`，可追加 `--test_env=P2P_CANCEL_ROUNDS=100 --test_env=P2P_CANCEL_SEED=20260915`。跨机模式每个用例单独启动 P。以上新增用例尚未运行，不属于下方历史验证结果。
+
 ## 2026-09-15 验证记录
 
 代码版本 `2663f60457`，111 的 `yzh` 容器编译，产物由 111 SCP 到 112。CUDA 13.2 环境在 `sm9x`、`cuda12_9` 后追加 `cuda13`、`sm10x`，并使用远端独立 `arch-config-rdma` 覆盖配置启用真实内源 RDMA backend。
