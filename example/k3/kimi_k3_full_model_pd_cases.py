@@ -892,8 +892,8 @@ class Runner:
             concurrent=True,
         )
         # Reuse the same Graph allocation at bucket 8 across drained batches.
-        # Longer answers keep early arrivals decoding while the remaining PD
-        # transfers arrive. Runtime evidence must still prove 7 -> 5 -> 6.
+        # The request records prove that all 7 -> 5 -> 6 owner-7 waves finish;
+        # runtime evidence independently proves owner 7 executes in bucket 8.
         for wave, count in enumerate((7, 5, 6)):
             self.run_stage(
                 f"graph_slot_wave_{wave}",
