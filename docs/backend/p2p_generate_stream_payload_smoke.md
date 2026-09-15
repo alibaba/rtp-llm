@@ -20,6 +20,7 @@
 - 校验真实 RPC 次数、逐层发布次数、非零且一致的总字节数、完整输出 `[100, 101, 102]` 和两端空闲 block 恢复。
 - P 故意损坏一个字节：D 报出 request/layer/tag/block/buffer/byte，不能成功完成生成。
 - P 不发布最后一层：真实加载失败，D 不执行，资源最终释放。
+- query 绕过 PD：单 token、固定 beam、变宽 beam、多返回序列、显式关闭 PD；分别使用空 key 和业务 key，检查 P 本地完成、P2P 注册/传输不发生、缓存释放。
 
 ## 运行入口
 
@@ -39,7 +40,7 @@ RDMA 需要启用内源 backend 的构建、RDMA 网卡和对应驱动。后端�
 
 ## 跨机运行
 
-先在两台远端环境编译上述同一 target。按 `test-execution` 流程预检、运行，平台配置使用 `sm9x`、`cuda12_9`。下面列出两端各自需要的测试参数（追加到 `bazelisk test <target>`）；选择同一 transport，使用各自机器的可达网卡 IP。
+先编译上述 target；相同架构和运行环境可将二进制及其运行依赖从构建机器 SCP 到对端，无需两端分别构建。按 `test-execution` 流程预检、运行，平台配置使用 `sm9x`、`cuda12_9` 并按实际 CUDA 版本调整。下面列出两端各自需要的测试参数（追加到 `bazelisk test <target>`）；选择同一 transport，使用各自机器的可达网卡 IP。
 
 **P 机器先启动：**
 
