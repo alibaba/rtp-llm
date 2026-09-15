@@ -63,6 +63,21 @@ py_test (
     exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
+py_test (
+    name = "rocm_fp8_deterministic_tp2_test",
+    srcs = ["rocm_fp8_deterministic_tp2_test.py"],
+    main = "rocm_fp8_deterministic_tp2_test.py",
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+    ],
+    timeout = "eternal",
+    env = {"GPU_COUNT": "2"},
+    tags = ["rocm", "multi_device"],
+    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
+)
+
 # Quark MXFP4 fused_moe numerical test (MI355 / gfx950 only).
 # Not part of bulk MI308 ROCm CI: tag "rocm" is omitted; "manual" skips default
 # bazel test //...; "rocm_gfx950" only matches jobs that opt into that filter.
