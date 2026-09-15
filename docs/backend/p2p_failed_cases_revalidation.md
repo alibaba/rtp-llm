@@ -58,3 +58,38 @@ A=b20bdc9d50，B=215b99b6e1；首轮通过目标未重跑。
 - `cross_cancel_1ec8b53ec4.log`：双机汇总；工作区同名 `.py` 为驱动，参数 `tcp rdma`。
 
 历史验证见[原报告](p2p_relative_timeout_validation.md)，不计入本轮。
+
+## 远端最新提交复验（2026-09-15）
+
+外源从 `origin/codex/dsv4-block-tree-p2p-region@b67dbbe11` 开始复验，内源固定为
+`be63dd7004d4fefd266a14d66c3080f2b42f9d5d`。测试在 `yzh` 容器内以用户
+`yanzhan.yzh` 执行，配置为 CUDA 12.9 / SM9x，并强制使用
+`--nocache_test_results`。
+
+远端基线单轮 4 个 target、197 个 gtest 全部通过；但
+`p2p_connector_scheduler_test --runs_per_test=3` 在 3 轮中失败 2 轮：
+
+- `AsyncRead_ReturnFalse_BroadcastFailed` 两轮失败。
+- `AsyncRead_CancelPrefill_WhenBroadcastFailed` 一轮失败。
+- 失败断言预期 P2P RPC 总数为 1，实际为 2。
+
+根因是异步 READ 失败后可能继续发出 `QUERY_LEASE_STATUS` 或 `CANCEL_READ`。
+旧断言使用 `getBroadcastTpCallCount()` 汇总所有 P2P RPC，结果受后台线程时序影响；
+测试实际需要验证的是 READ 请求数。修复将 4 处同类异步断言改为按
+`P2PConnectorBroadcastType::READ` 计数，不修改产品 P2P 实现。
+
+修复提交：`7af54cbc4fb28a0d08b2b60e284567e3e089e7c2`。
+
+| 目标 | 用例数 | 最终结果 |
+| --- | ---: | --- |
+| `p2p_connector_scheduler_test` | 44 | PASSED；另做 3 轮稳定性验证，3/3 通过 |
+| `p2p_connector_worker_test` | 52 | PASSED |
+| `p2p_connector_worker_decode_lease_test` | 23 | PASSED |
+| `p2p_model_rpc_test` | 78 | PASSED |
+
+本轮日志：
+
+- `p2p_remote_b67_baseline_20260915.log`：远端基线单轮，4/4 target 通过。
+- `p2p_scheduler_b67_stability3_20260915.log`：修复前稳定性复现，2/3 轮失败。
+- `p2p_scheduler_fix_stability3_20260915.log`：修复后稳定性验证，3/3 轮通过。
+- `p2p_fix_final_all_20260915.log`：最终无缓存回归，4/4 target、197/197 gtest 通过。
