@@ -1291,10 +1291,11 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
     if (graph_it != graph_instances_.end()
         && graph_it->second.mem_hold_.py_model_inputs_.input_ids.defined()) {
         captured_inputs_ptr = &graph_it->second.mem_hold_.py_model_inputs_;
-    } else if (lazy_capture_ && capture_mem_hold_.py_model_inputs_.input_ids.defined()) {
-        // Before a lazy bucket is captured, validate against the shared backing
-        // storage. buildBucketInstance() will create the bucket-specific views
-        // only after the triggering eager forward completes.
+    } else if (lazy_capture_ && mode == CudaGraphCheckMode::FORWARD
+               && capture_mem_hold_.py_model_inputs_.input_ids.defined()) {
+        // Before a lazy bucket is captured, forward planning validates against
+        // shared storage. Preparation waits until buildBucketInstance() creates
+        // the bucket-specific destinations after the triggering eager forward.
         captured_inputs_ptr = &capture_mem_hold_.py_model_inputs_;
     } else {
         if (observe_fallback) {
