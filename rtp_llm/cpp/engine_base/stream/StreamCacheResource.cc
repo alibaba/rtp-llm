@@ -23,18 +23,16 @@ namespace {
 
 std::shared_ptr<const CacheTopology> warmupCacheTopology() {
     static const auto topology = []() {
-        constexpr auto kWarmupCacheTag = "__warmup__";
-        auto           spec            = std::make_shared<MHAKVCacheSpec>();
-        spec->tag                      = kWarmupCacheTag;
+        constexpr auto kWarmupCacheTag  = "__warmup__";
+        auto           spec             = std::make_shared<MHAKVCacheSpec>();
+        spec->tag                       = kWarmupCacheTag;
+        spec->seq_size_per_block        = 1;
+        spec->kernel_seq_size_per_block = 1;
 
         GroupBase group;
-        group.tag                       = kWarmupCacheTag;
-        group.spec                      = std::move(spec);
-        group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        group.layer_ids                 = {0};
-        group.seq_size_per_block        = 1;
-        group.kernel_seq_size_per_block = 1;
-
+        group.tag    = kWarmupCacheTag;
+        group.spec   = std::move(spec);
+        group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
         return CacheTopology::create({std::move(group)}, {{0, {kWarmupCacheTag}}});
     }();
     return topology;
@@ -240,13 +238,13 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
             auto next_seq_len   = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32);
 
             stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
-                .epoch                  = 0,
-                .accept_len_gpu         = std::move(accept_len),
-                .accept_tokens_gpu      = std::move(accept_tokens),
-                .next_seq_len_gpu       = std::move(next_seq_len),
-                .propose_tokens_gpu     = std::move(propose_tokens_gpu),
-                .last_hidden_states_gpu = sp_output_buffer->hidden_states,
-                .draft_all_probs_gpu    = sp_output_buffer->all_probs,
+                .epoch                        = 0,
+                .accept_len_gpu               = std::move(accept_len),
+                .accept_tokens_gpu            = std::move(accept_tokens),
+                .next_seq_len_gpu             = std::move(next_seq_len),
+                .propose_tokens_gpu           = std::move(propose_tokens_gpu),
+                .last_hidden_states_gpu       = sp_output_buffer->hidden_states,
+                .draft_all_probs_gpu          = sp_output_buffer->all_probs,
                 .previous_seq_len_upper_bound = stream->seqLength(),
                 .next_seq_len_upper_bound     = stream->seqLength(),
             });
@@ -833,11 +831,9 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
         return;
     }
 
-    auto type_list = resource_context_.cache_manager->cacheConfig().groupTypesSnapshot();
-
-    for (size_t i = 0; i < type_list.size(); i++) {
-        if (type_list[i] == CacheGroupType::LINEAR) {
-            batch_kv_cache_resource_->swapBlocks(batch_id, i, rhs, lhs);
+    for (const auto& group : resource_context_.cache_manager->cacheConfig().topology().groups()) {
+        if (group.policy.group_type == CacheGroupType::LINEAR) {
+            batch_kv_cache_resource_->swapBlocks(batch_id, group.tag, rhs, lhs);
         }
     }
 }

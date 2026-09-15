@@ -88,8 +88,7 @@ class StaticTokenMetadataTailModel:
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
         tail_signature = torch.stack(
             (
-                inputs.input_ids[-1]
-                + inputs.input_hiddens[-1].sum().to(torch.int32),
+                inputs.input_ids[-1] + inputs.input_hiddens[-1].sum().to(torch.int32),
                 inputs.combo_position_ids[-3],
                 inputs.combo_position_ids[-2],
                 inputs.combo_position_ids[-1],
@@ -128,6 +127,35 @@ class RetryableGraphPrepareModel(TaggedBlockTableModel):
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
         return self.graph_prepare
+
+
+class TaggedBlockRowModel:
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        full = inputs.attention_inputs["full"].kv_cache_kernel_block_id_device
+        aux = inputs.attention_inputs["aux"].kv_cache_kernel_block_id_device
+        signature = (full.sum(dim=1) + 16 * aux.sum(dim=1)).to(
+            inputs.input_hiddens.dtype
+        )
+        return PyModelOutputs(inputs.input_hiddens + signature.unsqueeze(1))
+
+
+class DraftBlockTableModel:
+    """Only draft owns layers; compatibility tags must not become consumers."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        attention = inputs.attention_inputs
+        if isinstance(attention, dict):
+            attention = attention["draft"]
+        signature = attention.kv_cache_kernel_block_id_device[:, 0].to(
+            inputs.input_hiddens.dtype
+        )
+        return PyModelOutputs(inputs.input_hiddens + signature.unsqueeze(1))
 
 
 def _tag_attention_inputs(
@@ -190,9 +218,7 @@ def _build_decode_inputs(
     attention_inputs = PyAttentionInputs()
     attention_inputs.is_prefill = False
     attention_inputs.is_target_verify = False
-    attention_inputs.prefix_lengths = torch.empty(
-        0, dtype=torch.int32
-    ).pin_memory()
+    attention_inputs.prefix_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
     attention_inputs.input_lengths = torch.ones(
         batch_size, dtype=torch.int32
     ).pin_memory()
@@ -268,16 +294,12 @@ def _build_target_verify_inputs(
     attention_inputs.prefix_lengths = torch.full(
         (batch_size,), prefix_len, dtype=torch.int32
     ).pin_memory()
-    attention_inputs.sequence_lengths = torch.empty(
-        0, dtype=torch.int32
-    ).pin_memory()
+    attention_inputs.sequence_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
     attention_inputs.sequence_lengths_plus_1_device = (
         attention_inputs.prefix_lengths.cuda() + 1
     )
 
-    cu_q = torch.arange(
-        0, token_count + 1, query_len, dtype=torch.int32
-    ).pin_memory()
+    cu_q = torch.arange(0, token_count + 1, query_len, dtype=torch.int32).pin_memory()
     attention_inputs.cu_seqlens = cu_q
     attention_inputs.cu_seqlens_device = cu_q.cuda()
     attention_inputs.cu_kv_seqlens_device = torch.arange(
@@ -294,13 +316,9 @@ def _build_target_verify_inputs(
         attention_inputs.decode_cu_seqlens.cuda()
     )
 
-    attention_inputs.context_total_kv_length = batch_size * (
-        query_len + prefix_len
-    )
+    attention_inputs.context_total_kv_length = batch_size * (query_len + prefix_len)
 
-    block_count = (
-        prefix_len + query_len + TOKENS_PER_BLOCK - 1
-    ) // TOKENS_PER_BLOCK
+    block_count = (prefix_len + query_len + TOKENS_PER_BLOCK - 1) // TOKENS_PER_BLOCK
     return _build_common_inputs(
         attention_inputs,
         tags,
@@ -312,6 +330,122 @@ def _build_target_verify_inputs(
 
 
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    def test_draft_placeholder_map_preserves_eager_graph_contract(self):
+        tags = ["unused", "draft", "other"]
+        model = DraftBlockTableModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+            tags,
+        )
+        for value, order in ((2, tags), (5, list(reversed(tags)))):
+            inputs = _build_decode_inputs(
+                order, {"unused": 31, "draft": value, "other": 47}
+            )
+            expected = model.forward(inputs).hidden_states.clone()
+            self.assertTrue(runner.canRun(inputs))
+            output = runner.forward(inputs)
+            torch.cuda.synchronize()
+            torch.testing.assert_close(output.hidden_states, expected)
+            torch.testing.assert_close(
+                output.hidden_states, torch.full_like(output.hidden_states, value)
+            )
+        self.assertFalse(
+            runner.canRun(
+                _build_decode_inputs(["draft", "other"], {"draft": 2, "other": 47})
+            )
+        )
+        self.assertFalse(
+            runner.canRun(
+                _build_decode_inputs(
+                    tags + ["extra"],
+                    {"unused": 31, "draft": 2, "other": 47, "extra": 99},
+                )
+            )
+        )
+
+    def test_single_draft_group_uses_direct_graph_inputs(self):
+        model = DraftBlockTableModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+            ["draft"],
+        )
+        for value in (2, 5):
+            inputs = _build_decode_inputs(["draft"], {"draft": value})
+            inputs.attention_inputs = inputs.attention_inputs["draft"]
+            expected = model.forward(inputs).hidden_states.clone()
+            self.assertTrue(runner.canRun(inputs))
+            output = runner.forward(inputs)
+            torch.cuda.synchronize()
+            torch.testing.assert_close(output.hidden_states, expected)
+
+    def test_decode_heterogeneous_block_width_replay(self) -> None:
+        for tags in (GROUP_TAGS, list(reversed(GROUP_TAGS))):
+            for bpk in (4, 128):
+                with self.subTest(tags=tags, bpk=bpk):
+                    runner = CudaGraphRunner()
+                    runner.init_decode(
+                        TaggedBlockRowModel(),
+                        HIDDEN_SIZE,
+                        TOKENS_PER_BLOCK,
+                        TOKENS_PER_BLOCK,
+                        TOKENS_PER_BLOCK,
+                        [2],
+                        tags,
+                        max_kernel_blocks_per_kv_block=bpk,
+                    )
+                    for value in (1, 2):
+                        inputs = _build_decode_inputs(tags, {"full": 0, "aux": value})
+                        tagged = inputs.attention_inputs
+                        rows = torch.stack(
+                            (
+                                torch.full((bpk,), value, dtype=torch.int32),
+                                torch.full((bpk,), value + 1, dtype=torch.int32),
+                            )
+                        ).pin_memory()
+                        tagged["full"].kv_cache_kernel_block_id = rows
+                        tagged["full"].kv_cache_kernel_block_id_device = rows.cuda()
+                        inputs.attention_inputs = tagged
+                        self.assertTrue(runner.canRun(inputs))
+                        output = runner.forward(inputs)
+                        torch.cuda.synchronize()
+                        expected = (
+                            torch.tensor(
+                                [
+                                    bpk * value + 16 * value,
+                                    bpk * (value + 1) + 16 * value,
+                                ],
+                                dtype=output.hidden_states.dtype,
+                                device="cuda",
+                            )
+                            .unsqueeze(1)
+                            .expand_as(output.hidden_states)
+                        )
+                        torch.testing.assert_close(output.hidden_states, expected)
+
+                    oversized = _build_decode_inputs(tags, {"full": 0, "aux": 1})
+                    tagged = oversized.attention_inputs
+                    rows = torch.ones((2, bpk + 1), dtype=torch.int32).pin_memory()
+                    tagged["full"].kv_cache_kernel_block_id = rows
+                    tagged["full"].kv_cache_kernel_block_id_device = rows.cuda()
+                    oversized.attention_inputs = tagged
+                    self.assertTrue(runner.canRun(oversized))
+                    output = runner.forward(oversized)
+                    torch.cuda.synchronize()
+                    expected = torch.full_like(output.hidden_states, bpk + 16)
+                    torch.testing.assert_close(output.hidden_states, expected)
+
     def _assert_replay_signature(
         self, runner: CudaGraphRunner, inputs: PyModelInputs, expected: int
     ) -> None:
@@ -340,7 +474,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         )
         self._assert_replay_signature(
             runner,
-            _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 3}),
+            _build_decode_inputs(list(reversed(GROUP_TAGS)), {"full": 5, "aux": 3}),
             53,
         )
 
@@ -408,7 +542,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         )
         self._assert_replay_signature(
             runner,
-            _build_prefill_inputs(GROUP_TAGS, {"full": 4, "aux": 3}),
+            _build_prefill_inputs(list(reversed(GROUP_TAGS)), {"full": 4, "aux": 3}),
             52,
         )
 
@@ -514,21 +648,16 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     expected_signature = torch.tensor(
                         [
                             graph_size * query_len,
-                            total_kv_length
-                            + (graph_size - batch_size) * query_len,
+                            total_kv_length + (graph_size - batch_size) * query_len,
                             graph_size * query_len,
-                            prefix_len + 1
-                            if batch_size == graph_size
-                            else query_len,
+                            prefix_len + 1 if batch_size == graph_size else query_len,
                         ],
                         dtype=output.hidden_states.dtype,
                         device=output.hidden_states.device,
                     )
                     torch.testing.assert_close(
                         output.hidden_states,
-                        expected_signature.unsqueeze(0).expand_as(
-                            output.hidden_states
-                        ),
+                        expected_signature.unsqueeze(0).expand_as(output.hidden_states),
                     )
 
     def test_target_verify_clears_static_token_metadata_after_shrink(self) -> None:
@@ -628,9 +757,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         runner.forward(full_inputs)
         torch.cuda.synchronize()
 
-        inputs = _build_decode_inputs(
-            GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3
-        )
+        inputs = _build_decode_inputs(GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3)
         self.assertTrue(runner.canRun(inputs))
         self.assertEqual(runner.getCurrentRealGraphSize(), 4)
 
@@ -666,9 +793,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         runner.forward(full_inputs)
         torch.cuda.synchronize()
 
-        inputs = _build_decode_inputs(
-            GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3
-        )
+        inputs = _build_decode_inputs(GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3)
         self.assertTrue(runner.canRun(inputs))
         output = runner.forward(inputs)
         torch.cuda.synchronize()
@@ -712,9 +837,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     (batch_size, HIDDEN_SIZE * 2),
                     tuple(output.mtp_target_hidden_states.shape),
                 )
-                torch.testing.assert_close(
-                    output.mtp_target_hidden_states, expected
-                )
+                torch.testing.assert_close(output.mtp_target_hidden_states, expected)
 
 
 if __name__ == "__main__":

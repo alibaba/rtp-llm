@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include <memory>
 #include <vector>
 #include <set>
@@ -77,16 +78,16 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = mtp_module_num;
 
-    // NOTE: createSpConfig builds main global layer routing and local MTP sub-config routing.
-    auto cfg = rtp_llm::CacheConfigCreator::createSpConfig(score_model_config,
-                                                           propose_model_config,
-                                                           parallelism_config,
-                                                           runtime_config,
-                                                           kv_cache_config,
-                                                           sp_config,
-                                                           /*warm_up_result=*/std::nullopt,
-                                                           /*is_mtp=*/true,
-                                                           /*is_eagle=*/false);
+    // createConfig builds main global layer routing and local MTP sub-config routing.
+    auto cfg = rtp_llm::test::finalizeCacheConfig(CacheConfigCreator::createConfig(score_model_config,
+                                                                                   parallelism_config,
+                                                                                   runtime_config,
+                                                                                   kv_cache_config,
+                                                                                   /*warm_up_result=*/std::nullopt,
+                                                                                   sp_config,
+                                                                                   &propose_model_config,
+                                                                                   /*is_mtp=*/true,
+                                                                                   /*is_eagle=*/false));
     return cfg;
 }
 
@@ -105,12 +106,12 @@ TEST_F(BlockPoolTest, ConstructorAndInit) {
 }
 
 TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
-    // Use createSpConfig logic so that group layer ids are filled for main + sub-model layers.
+    // Use Creator so that group layer ids are filled for main + sub-model layers.
     // main(2 layers) + mtp1(1 layer) + mtp2(1 layer)
     auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
 
     ASSERT_GT(cache_cfg.groupNums(), 0);
-    ASSERT_EQ(cache_cfg.layerIdsForGroup(0).size(), static_cast<size_t>(cache_cfg.layer_all_num));
+    ASSERT_EQ(cache_cfg.layerIdsForGroup(0).size(), static_cast<size_t>(cache_cfg.layer_all_num()));
 
     ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
     ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
@@ -131,7 +132,7 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->block_num, 3u);
     EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->block_num, 3u);
 
-    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
+    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfigForGroup(cache_cfg, cache_cfg.groupIdForTag("full"));
     ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
     ASSERT_EQ(pool_cfg.memory_layouts[0].layer_num, 2u);
     ASSERT_EQ(pool_cfg.memory_layouts[1].layer_num, 1u);
@@ -217,7 +218,7 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
 
 // Allocation Test
 
-TEST_F(BlockPoolTest, SharedPoolMTPLayoutsUseMainBlockNumAfterTpSync) {
+TEST_F(BlockPoolTest, GroupPoolMTPLayoutsUseGroupBlockNumAfterTpSync) {
     auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
 
     ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
@@ -226,11 +227,12 @@ TEST_F(BlockPoolTest, SharedPoolMTPLayoutsUseMainBlockNumAfterTpSync) {
     ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->block_num, 4u);
     ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->block_num, 4u);
 
-    // Shared default pool follows the main cache_config.block_num after TP sync.
-    // MTP sub-config block_num may still contain the pre-sync local value.
-    cache_cfg.block_num = 3;
+    // All layouts in the full pool use its synchronized group capacity,
+    // even if MTP sub-configs still contain the pre-sync local value.
+    const auto& group = cache_cfg.group("full");
+    rtp_llm::test::setGroupBlockLayout(cache_cfg, {3}, {group.kvBlockStrideBytes()}, {group.kvScaleStrideBytes()});
 
-    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
+    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfigForGroup(cache_cfg, cache_cfg.groupIdForTag("full"));
     ASSERT_EQ(pool_cfg.block_num, 3u);
     ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
     EXPECT_EQ(pool_cfg.memory_layouts[0].block_num, 3u);

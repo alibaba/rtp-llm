@@ -13,17 +13,19 @@ namespace rtp_llm {
 
 namespace {
 
-DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&               request_key,
-                                                    const std::vector<std::string>&  peer_addrs,
-                                                    const std::vector<CacheKeyType>& cache_keys,
-                                                    const GroupBlockIds&             block_ids_by_group,
-                                                    int32_t                          prefill_cp_size,
-                                                    int64_t                          reuse_block_size = 0) {
+DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&                      request_key,
+                                                    const std::vector<std::string>&         peer_addrs,
+                                                    const std::vector<CacheKeyType>&        cache_keys,
+                                                    const GroupBlockIds&                    block_ids_by_group,
+                                                    std::unordered_map<std::string, size_t> tag_to_group_id,
+                                                    int32_t                                 prefill_cp_size,
+                                                    int64_t                                 reuse_block_size = 0) {
     return {/*request_id=*/42,
             request_key,
             peer_addrs,
             cache_keys,
             block_ids_by_group,
+            std::move(tag_to_group_id),
             reuse_block_size,
             /*timeout_ms=*/1000,
             /*partition_count=*/1,
@@ -32,19 +34,17 @@ DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&          
             prefill_cp_size};
 }
 
-GroupBase makeRpcGroup(std::string tag, std::vector<int> layer_ids) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->tag                = tag;
-    spec->seq_size_per_block = 8;
+GroupBase makeRpcGroup(std::string tag) {
+    auto spec                       = std::make_shared<MHAKVCacheSpec>();
+    spec->tag                       = tag;
+    spec->seq_size_per_block        = 8;
+    spec->kernel_seq_size_per_block = 8;
 
     GroupBase group;
-    group.tag                       = std::move(tag);
-    group.spec                      = std::move(spec);
-    group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    group.layer_ids                 = std::move(layer_ids);
-    group.block_num                 = 8;
-    group.seq_size_per_block        = 8;
-    group.kernel_seq_size_per_block = 8;
+    group.tag       = std::move(tag);
+    group.spec      = std::move(spec);
+    group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.block_num = 8;
     return group;
 }
 
@@ -206,34 +206,140 @@ TEST(DecodeRpcServerTest, OddTpWorkersWaitForEveryCompletionQueueResponse) {
     EXPECT_TRUE(DecodeRpcServer::completionQueueExpectedResponseCounts(0).empty());
 }
 
-TEST(DecodeRpcServerTest, CompletedHandoffPublishesOnlyReusablePromptBlocks) {
+TEST(DecodeRpcServerTest, MultiGroupHandoffPublishesOnlyReusablePromptBlocks) {
     auto stream = makeGenerateStream(/*seq_length=*/2560);
 
     EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
                                                     {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/10},
                                                     /*seq_size_per_block=*/256,
-                                                    /*use_independent_block_pools=*/true),
+                                                    /*group_num=*/2),
               2304);
+    EXPECT_EQ(stream->pdKvReadyLength(), 2304);
     EXPECT_EQ(stream->initialReuseLength(), 2304);
     EXPECT_EQ(stream->reuseLength(), 2304);
     EXPECT_EQ(stream->localReuseLength(), 2304);
+    EXPECT_EQ(stream->deviceReuseLength(), 2304);
 }
 
-TEST(DecodeRpcServerTest, FailedOrSharedPoolHandoffDoesNotPublishReuse) {
-    auto stream = makeGenerateStream(/*seq_length=*/513);
+TEST(DecodeRpcServerTest, SingleGroupHandoffPreservesRemoteReuseAccounting) {
+    auto stream = makeGenerateStream(/*seq_length=*/149);
+    stream->setInitialReuseLength(128);
+    stream->setReuseLength(128);
+    stream->setRemoteReuseLength(128);
 
-    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(
-                  stream,
-                  {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load failed"), /*loaded_cache_block_count=*/2},
-                  /*seq_size_per_block=*/256,
-                  /*use_independent_block_pools=*/true),
-              0);
     EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
-                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/2},
-                                                    /*seq_size_per_block=*/256,
-                                                    /*use_independent_block_pools=*/false),
-              0);
-    EXPECT_EQ(stream->initialReuseLength(), 0);
+                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/19},
+                                                    /*seq_size_per_block=*/8,
+                                                    /*group_num=*/1),
+              144);
+    EXPECT_EQ(stream->pdKvReadyLength(), 144);
+    EXPECT_EQ(stream->initialReuseLength(), 128);
+    EXPECT_EQ(stream->reuseLength(), 128);
+    EXPECT_EQ(stream->localReuseLength(), 0);
+    EXPECT_EQ(stream->deviceReuseLength(), 0);
+    EXPECT_EQ(stream->remoteReuseLength(), 128);
+}
+
+TEST(DecodeRpcServerTest, FailedHandoffDoesNotPublishReuse) {
+    for (size_t group_num : {1u, 2u}) {
+        auto stream = makeGenerateStream(/*seq_length=*/513);
+        stream->setInitialReuseLength(128);
+        stream->setReuseLength(128);
+        stream->setLocalReuseLength(64);
+        stream->setMemoryReuseLength(16);
+        stream->setRemoteReuseLength(64);
+        stream->setPdKvReadyLength(256);
+        EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(
+                      stream,
+                      {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load failed"), /*loaded_cache_block_count=*/2},
+                      /*seq_size_per_block=*/256,
+                      group_num),
+                  0);
+        EXPECT_EQ(stream->initialReuseLength(), 128);
+        EXPECT_EQ(stream->reuseLength(), 128);
+        EXPECT_EQ(stream->localReuseLength(), 64);
+        EXPECT_EQ(stream->memoryReuseLength(), 16);
+        EXPECT_EQ(stream->deviceReuseLength(), 48);
+        EXPECT_EQ(stream->remoteReuseLength(), 64);
+        EXPECT_EQ(stream->pdKvReadyLength(), 256);
+    }
+}
+
+TEST(DecodeRpcServerTest, SingleGroupHandoffReadinessDoesNotRegressOrChangeCacheAttribution) {
+    auto stream = makeGenerateStream(/*seq_length=*/149);
+    stream->setInitialReuseLength(128);
+    stream->setReuseLength(128);
+    stream->setMemoryReuseLength(8);
+    stream->setLocalReuseLength(16);
+    stream->setRemoteReuseLength(112);
+    stream->setPdKvReadyLength(144);
+
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
+                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/16},
+                                                    /*seq_size_per_block=*/8,
+                                                    /*group_num=*/1),
+              128);
+    EXPECT_EQ(stream->pdKvReadyLength(), 144);
+    EXPECT_EQ(stream->initialReuseLength(), 128);
+    EXPECT_EQ(stream->reuseLength(), 128);
+    EXPECT_EQ(stream->localReuseLength(), 16);
+    EXPECT_EQ(stream->memoryReuseLength(), 8);
+    EXPECT_EQ(stream->deviceReuseLength(), 8);
+    EXPECT_EQ(stream->remoteReuseLength(), 112);
+    stream->initSpeculativeHandoffPositions();
+    EXPECT_EQ(stream->reuseLength(), 148);
+    EXPECT_EQ(stream->pdKvReadyLength(), 144);
+    EXPECT_EQ(stream->initialReuseLength(), 128);
+}
+
+TEST(DecodeRpcServerTest, MultiGroupHandoffPreservesMonotonicReuseAndRemoteMemoryCounters) {
+    auto stream = makeGenerateStream(/*seq_length=*/149);
+    stream->setInitialReuseLength(128);
+    stream->setReuseLength(128);
+    stream->setLocalReuseLength(16);
+    stream->setMemoryReuseLength(8);
+    stream->setRemoteReuseLength(112);
+
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
+                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/19},
+                                                    /*seq_size_per_block=*/8,
+                                                    /*group_num=*/2),
+              144);
+    EXPECT_EQ(stream->initialReuseLength(), 144);
+    EXPECT_EQ(stream->reuseLength(), 144);
+    EXPECT_EQ(stream->localReuseLength(), 144);
+    EXPECT_EQ(stream->deviceReuseLength(), 136);
+    EXPECT_EQ(stream->memoryReuseLength(), 8);
+    EXPECT_EQ(stream->remoteReuseLength(), 112);
+    EXPECT_EQ(stream->pdKvReadyLength(), 144);
+
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
+                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/16},
+                                                    /*seq_size_per_block=*/8,
+                                                    /*group_num=*/2),
+              128);
+    EXPECT_EQ(stream->initialReuseLength(), 144);
+    EXPECT_EQ(stream->reuseLength(), 144);
+    EXPECT_EQ(stream->localReuseLength(), 144);
+    EXPECT_EQ(stream->deviceReuseLength(), 136);
+    EXPECT_EQ(stream->memoryReuseLength(), 8);
+    EXPECT_EQ(stream->remoteReuseLength(), 112);
+    EXPECT_EQ(stream->pdKvReadyLength(), 144);
+}
+
+TEST(DecodeRpcServerTest, EmptyHandoffDoesNotPublishReuse) {
+    for (size_t group_num : {1u, 2u}) {
+        auto stream = makeGenerateStream(/*seq_length=*/513);
+        EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
+                                                        {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/0},
+                                                        /*seq_size_per_block=*/256,
+                                                        group_num),
+                  0);
+        EXPECT_EQ(stream->initialReuseLength(), 0);
+        EXPECT_EQ(stream->reuseLength(), 0);
+        EXPECT_EQ(stream->localReuseLength(), 0);
+        EXPECT_EQ(stream->pdKvReadyLength(), 0);
+    }
 }
 
 TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
@@ -245,7 +351,7 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     const std::vector<CacheKeyType> cache_keys  = {101, 102};
     const GroupBlockIds             block_ids_by_group;
     const auto                      load_context =
-        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2, /*reuse=*/3);
+        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, {}, /*cp_size=*/2, /*reuse=*/3);
 
     const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
 
@@ -270,7 +376,7 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     const std::vector<CacheKeyType> cache_keys  = {101};
     const GroupBlockIds             block_ids_by_group;
     const auto                      load_context =
-        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2, /*reuse=*/3);
+        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, {}, /*cp_size=*/2, /*reuse=*/3);
 
     const auto request = server.constructRemoteLoadRequestForMla(load_context, /*index=*/1, peer_addrs);
 
@@ -283,9 +389,29 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     EXPECT_EQ(request.peer_addrs(1), "prefill-1");
 }
 
+TEST(DecodeRpcServerTest, LoadContextUsesSourceGroupIdentity) {
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peers{"prefill"};
+    const std::vector<CacheKeyType> keys{101};
+    GroupBlockIds                   blocks{std::make_shared<BlockIds>(), std::make_shared<BlockIds>()};
+    blocks[0]->assign({20, NULL_BLOCK_IDX});
+    blocks[1]->assign({10});
+    const auto context = makeLoadContext(request_key, peers, keys, blocks, {{"linear", 0}, {"full", 1}}, 1);
+    EXPECT_EQ(&context.blockIdsForGroup("full"), blocks[1].get());
+    EXPECT_EQ(context.blockIdsForGroup("linear").blocks(), (BlockIndicesType{20, NULL_BLOCK_IDX}));
+    EXPECT_ANY_THROW(context.blockIdsForGroup("missing"));
+    EXPECT_ANY_THROW(makeLoadContext(request_key, peers, keys, blocks, {{"full", 1}}, 1));
+    EXPECT_ANY_THROW(makeLoadContext(request_key, peers, keys, blocks, {{"linear", 0}, {"full", 0}}, 1));
+    EXPECT_ANY_THROW(makeLoadContext(request_key, peers, keys, blocks, {{"linear", 0}, {"full", 2}}, 1));
+    EXPECT_ANY_THROW(makeLoadContext(request_key, peers, keys, blocks, {{"", 0}, {"full", 1}}, 1));
+    blocks[1].reset();
+    EXPECT_ANY_THROW(context.blockIdsForGroup("full"));
+    EXPECT_ANY_THROW(makeLoadContext(request_key, peers, keys, blocks, {{"linear", 0}, {"full", 1}}, 1));
+}
+
 TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByLocalTagOrder) {
-    auto                   topology = CacheTopology::create({makeRpcGroup("linear", {0}), makeRpcGroup("full", {1})},
-                                          {{0, {"linear"}}, {1, {"full"}}});
+    auto topology =
+        CacheTopology::create({makeRpcGroup("linear"), makeRpcGroup("full")}, {{0, {"linear"}}, {1, {"full"}}});
     BroadcastLoadRequestPB request;
     auto*                  full = request.add_tagged_group_block_ids();
     full->set_tag("full");
@@ -298,22 +424,21 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByLocalTagOrder) {
     EXPECT_EQ(blocks[topology->groupIdForTag("full")]->blocks(), (BlockIndicesType{10}));
     EXPECT_EQ(blocks[topology->groupIdForTag("linear")]->blocks(), (BlockIndicesType{20}));
 
-    auto reordered = CacheTopology::create({makeRpcGroup("full", {1}), makeRpcGroup("linear", {0})},
-                                           {{0, {"linear"}}, {1, {"full"}}});
+    auto reordered =
+        CacheTopology::create({makeRpcGroup("full"), makeRpcGroup("linear")}, {{0, {"linear"}}, {1, {"full"}}});
     EXPECT_NE(topology->groupIdForTag("full"), reordered->groupIdForTag("full"));
     EXPECT_EQ(DecodeRpcServer::makeTaggedRequestKey(42, 1, topology->group("full").tag),
               DecodeRpcServer::makeTaggedRequestKey(42, 1, reordered->group("full").tag));
 }
 
 TEST(DecodeRpcServerTest, EmptyTaggedBlockRowsAreRejected) {
-    auto                   topology = CacheTopology::create({makeRpcGroup("full", {0})}, {{0, {"full"}}});
+    auto                   topology = CacheTopology::create({makeRpcGroup("full")}, {{0, {"full"}}});
     BroadcastLoadRequestPB request;
     EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(request, *topology));
 }
 
 TEST(DecodeRpcServerTest, TaggedBlockRowsRejectTopologyMismatch) {
-    auto topology =
-        CacheTopology::create({makeRpcGroup("full", {0}), makeRpcGroup("linear", {0})}, {{0, {"full", "linear"}}});
+    auto topology = CacheTopology::create({makeRpcGroup("full"), makeRpcGroup("linear")}, {{0, {"full", "linear"}}});
     BroadcastLoadRequestPB missing_tag;
     auto*                  row = missing_tag.add_tagged_group_block_ids();
     row->set_tag("full");

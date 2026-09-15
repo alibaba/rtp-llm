@@ -228,6 +228,8 @@ public:
     int     prefixLength() const;
     int     reuseLength() const;
     int     initialReuseLength() const;
+    int     pdKvReadyLength() const;
+    void    setPdKvReadyLength(int length);
     size_t  maxTokenNum() const;
     void    setReuseLength(int reuse_length);
     void    setLocalReuseLength(int length);
@@ -338,7 +340,7 @@ public:
     // wait for scheduler-owned resource release; otherwise publish cancellation
     // and wait for the same terminal transition.
     bool finishOrCancel(int64_t wait_timeout_ms, const std::string& cancel_reason);
-    bool                isSubGenerateDoneWithoutLock(int batch_id) const;
+    bool isSubGenerateDoneWithoutLock(int batch_id) const;
 
     size_t iterCount() const;
     size_t spIterCount() const;
@@ -874,17 +876,18 @@ protected:
     // Prefill-to-decode transition is committed by the output/bookkeeping
     // worker and observed by the scheduler thread. Keep this flag atomic; the
     // shared_ptr preserves the existing CopyOnWrite sharing semantics.
-    std::shared_ptr<std::atomic<bool>>    is_context_stream_;
-    size_t                                iter_count_    = 0;
-    size_t                                sp_iter_count_ = 0;
-    std::vector<int32_t>                  speculative_accepted_tokens_per_pos_;
-    size_t                                last_output_pos_      = 0;
-    int                                   initial_reuse_length_ = 0;
-    int                                   reuse_length_         = 0;
-    int                                   local_reuse_length_   = 0;
-    int                                   device_reuse_length_  = 0;
-    int                                   remote_reuse_length_  = 0;
-    int                                   memory_reuse_length_  = 0;
+    std::shared_ptr<std::atomic<bool>> is_context_stream_;
+    size_t                             iter_count_    = 0;
+    size_t                             sp_iter_count_ = 0;
+    std::vector<int32_t>               speculative_accepted_tokens_per_pos_;
+    size_t                             last_output_pos_      = 0;
+    int                                initial_reuse_length_ = 0;
+    int                                pd_kv_ready_length_   = 0;  // tokens in the completed P/D KV prefix
+    int                                reuse_length_         = 0;
+    int                                local_reuse_length_   = 0;
+    int                                device_reuse_length_  = 0;
+    int                                remote_reuse_length_  = 0;
+    int                                memory_reuse_length_  = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;

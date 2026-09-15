@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
@@ -168,7 +168,7 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                  const SpeculativeExecutionConfig&         sp_config,
                                  void*                                     register_buffer_addr,
                                  size_t                                    register_buffer_size,
-                                 std::shared_ptr<KVCacheAllocator>         allocator,
+                                 std::shared_ptr<CoordinatorCacheManager>  coordinator_manager,
                                  const kmonitor::MetricsReporterPtr        metrics_reporter,
                                  const std::map<std::string, std::string>& lora_info_map):
     metrics_reporter_(metrics_reporter) {
@@ -183,19 +183,20 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
     RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() > 0,
                             "remote connector requires an initialized cache topology with at least one group");
     std::vector<int32_t> full_group_ids, linear_group_ids;
-    for (int32_t group_id = 0; group_id < cache_config.groupNums(); group_id++) {
-        if (cache_config.typeForGroup(static_cast<size_t>(group_id)) == CacheGroupType::FULL) {
+    for (const auto& group : cache_config.topology().groups()) {
+        const auto group_id = static_cast<int32_t>(cache_config.topology().groupIdForTag(group.tag));
+        if (group.policy.group_type == CacheGroupType::FULL) {
             full_group_ids.push_back(group_id);
         } else {
             linear_group_ids.push_back(group_id);
         }
     }
     if (linear_group_ids.empty()) {
-        group_policy_ =
-            std::make_unique<remote_connector::FullLayerGroupPolicy>(allocator, full_group_ids, linear_group_ids);
+        group_policy_ = std::make_unique<remote_connector::FullLayerGroupPolicy>(
+            coordinator_manager, full_group_ids, linear_group_ids);
     } else {
         group_policy_ = std::make_unique<remote_connector::FullLinearLayerGroupPolicy>(
-            allocator, full_group_ids, linear_group_ids, std::max(1, cache_config.linear_step));
+            coordinator_manager, full_group_ids, linear_group_ids, std::max(1, cache_config.linear_step));
     }
 }
 
@@ -215,9 +216,8 @@ RemoteConnector::genLocationSpecInfoMapAndGroups(int64_t tp_size) {
     RTP_LLM_CHECK_WITH_INFO(!group_policy_->groups().empty(), "remote connector requires at least one cache group");
     auto location_spec_info_map_ptr = std::make_shared<RemoteConnectorConfig::LocationSpecInfoMap>();
     for (const auto& entry : group_policy_->groups()) {
-        const auto  group_id         = static_cast<size_t>(entry.first);
-        const auto  group_block_size = init_params_->cache_config.blockSizeBytesForGroup(group_id);
         const auto& group            = entry.second;
+        const auto  group_block_size = init_params_->cache_config.blockSizeBytesForGroup(group.tag);
         auto [iter, success]         = location_spec_groups_ptr->insert({group.group_name, {}});
         assert(success);
         group_policy_->addLocationSpecGroup(group.group_name_bithash, group.group_name);
@@ -913,7 +913,7 @@ bool RemoteConnector::Read(const std::string&                 trace_id,
     SdkMetricsHelper helper(trace_id, true, metrics_reporter_);
     helper.collector.remote_sdk_block_num = block_ids.size();
     kv_cache_manager::BlockBuffers block_buffers;
-    if (!group_policy_->genBlockBuffersByTag(group_tags, block_ids, block_buffers)) {
+    if (!group_policy_->genBlockBuffers(group_tags, block_ids, block_buffers)) {
         return false;
     }
     static bool kvcm_sdk_check = autil::EnvUtil::getEnv("KVCM_SDK_CHECK", false);
@@ -944,7 +944,7 @@ bool RemoteConnector::Write(const std::string&                 trace_id,
     SdkMetricsHelper helper(trace_id, false, metrics_reporter_);
     helper.collector.remote_sdk_block_num = block_ids.size();
     kv_cache_manager::BlockBuffers block_buffers;
-    if (!group_policy_->genBlockBuffersByTag(group_tags, block_ids, block_buffers)) {
+    if (!group_policy_->genBlockBuffers(group_tags, block_ids, block_buffers)) {
         return false;
     }
     static bool kvcm_sdk_check = autil::EnvUtil::getEnv("KVCM_SDK_CHECK", false);

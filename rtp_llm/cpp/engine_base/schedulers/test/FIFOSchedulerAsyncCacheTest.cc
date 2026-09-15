@@ -34,9 +34,8 @@ namespace rtp_llm {
 namespace {
 
 bool enqueueIndividually(FIFOScheduler& scheduler, const vector<GenerateStreamPtr>& streams) {
-    return std::all_of(streams.begin(), streams.end(), [&scheduler](const auto& stream) {
-        return scheduler.enqueue(stream).ok();
-    });
+    return std::all_of(
+        streams.begin(), streams.end(), [&scheduler](const auto& stream) { return scheduler.enqueue(stream).ok(); });
 }
 
 }  // namespace
@@ -58,7 +57,7 @@ protected:
         mock_coord_ = std::make_shared<NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
                                                                                   cache_manager_->kv_cache_config_,
                                                                                   cache_manager_->runtime_config_,
-                                                                                  cache_manager_->allocator_,
+                                                                                  cache_manager_->coordinator_manager_,
                                                                                   nullptr);
         ON_CALL(*mock_coord_, hasActiveConnectors()).WillByDefault(Return(true));
         cache_manager_->coordinator_ = mock_coord_;
@@ -937,8 +936,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionCompletedAsyncLoadStaysInAdmissi
     auto done_ctx = createDoneAsyncContext();
     EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(done_ctx)));
 
-    auto scheduler = createPDFusionRatioScheduler();
-    auto loaded    = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto scheduler                           = createPDFusionRatioScheduler();
+    auto loaded                              = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
     loaded->generateConfig()->max_new_tokens = 2;
     ASSERT_TRUE(scheduler->enqueue(loaded).ok());
 
@@ -949,7 +948,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionCompletedAsyncLoadStaysInAdmissi
     ASSERT_EQ(cache_manager_->freeBlocksNum(), 1);
     ASSERT_EQ(loaded->estimatePeakNeedBlocks(/*remaining_tokens=*/1), 1);
 
-    auto candidate = createStream({3});
+    auto candidate                              = createStream({3});
     candidate->generateConfig()->max_new_tokens = 2;
     ASSERT_EQ(candidate->estimatePeakNeedBlocks(/*remaining_tokens=*/1), 1);
     ASSERT_TRUE(scheduler->enqueue(candidate).ok());
@@ -1020,10 +1019,10 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionLoadingCacheReservesDelayedBeamT
 
     auto scheduler = createPDFusionRatioScheduler();
     auto loaded    = createStream({1, 2, 3, 4, 5},
-                                  /*reuse_cache=*/true,
-                                  /*enable_memory_cache=*/true,
-                                  /*max_new_tokens=*/3,
-                                  /*variable_num_beams=*/{1, 4});
+                               /*reuse_cache=*/true,
+                               /*enable_memory_cache=*/true,
+                               /*max_new_tokens=*/3,
+                               /*variable_num_beams=*/{1, 4});
     ASSERT_EQ(loaded->currentBatchSize(), 1);
     ASSERT_EQ(loaded->maxBatchSize(), 4);
     ASSERT_TRUE(scheduler->enqueue(loaded).ok());

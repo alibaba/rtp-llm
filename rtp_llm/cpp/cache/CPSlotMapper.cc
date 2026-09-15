@@ -196,6 +196,9 @@ std::vector<BlockInfo> CPSlotMapper::sliceBlockForPeer(const CacheConfig&     co
 KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& source,
                                                        const CacheConfig&     config,
                                                        const CacheKeysType&   selected_keys) const {
+    const auto& groups = config.topology().groups();
+    RTP_LLM_CHECK_WITH_INFO(source.groupNums() == config.groupNums(),
+                            "cache resource and CP topology group counts differ");
     KVCacheResource selected = source;
     selected.initGroups(config.topologyPtr());
     selected.setCacheKeys(selected_keys);
@@ -213,8 +216,8 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
         selected.setLastBlockAligned(false);
     }
 
-    for (int gid = 0; gid < source.groupNums(); ++gid) {
-        const auto&      src_blocks = source.blocks(gid);
+    for (size_t gid = 0; gid < groups.size(); ++gid) {
+        const auto&      src_blocks = source.blocks(groups[gid].tag);
         BlockIndicesType dst_blocks;
         dst_blocks.reserve(selected_keys.size());
 
@@ -241,7 +244,7 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
             }
         }
 
-        selected.mutableBlockIds(gid).assign(std::move(dst_blocks));
+        selected.mutableBlockIds(groups[gid].tag).assign(std::move(dst_blocks));
     }
 
     return selected;

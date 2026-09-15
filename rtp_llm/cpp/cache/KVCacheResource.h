@@ -105,6 +105,9 @@ public:
 
     const BlockIds& blockIds(std::string_view tag) const;
     const BlockIds& blockIdsForLayer(int layer_id, std::string_view tag) const;
+    // Returns the original holder, or nullptr when the layer/tag row is unavailable.
+    std::shared_ptr<BlockIds>               blockIdsPtrForLayer(int layer_id, std::string_view tag) const;
+    std::unordered_map<std::string, size_t> tagToGroupIdSnapshot() const;
 
     const std::vector<std::string>& groupTagsForLayer(int layer_id) const;
     const std::string&              soleGroupTagForLayer(int layer_id) const;
@@ -117,7 +120,6 @@ public:
 
     LayerBlockIds            layerBlocks() const;
     const LayerAttnBlockIds& layerGroupBlocks() const;
-    int                      groupId(int layer_id, int group_id) const;
 
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
@@ -165,7 +167,7 @@ public:
     size_t remoteReuseBlocksNum() const;
     void   setRemoteReuseBlocksNum(size_t remote_reuse_blocks_num);
 
-    void swapBlocks(size_t group_id, size_t rhs, size_t lhs);
+    void swapBlocks(std::string_view group_tag, size_t rhs, size_t lhs);
 
     std::string debugString() const;
 

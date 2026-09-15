@@ -52,8 +52,7 @@ void releaseHostMemoryCache() {
 #endif
 }
 
-bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig& pd_sep_config,
-                                         const CacheStoreConfig& cache_store_config) {
+bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const CacheStoreConfig& cache_store_config) {
     // Only PD cache-store RDMA registers KV cache as user MR.  Keep the
     // raw device allocation backing out of direct KVCacheManager users and non-RDMA
     // paths so PyTorch allocator behavior is unchanged elsewhere.
@@ -388,24 +387,10 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
 
-    // Do NOT override seq_size_per_block here. createBasicConfig already
-    // returns the correct value: model_config.attn_config.tokens_per_block
-    // for non-DSV4 (via SingleConfigCreator / HybridConfigCreator), and the
-    // 256-token physical block for DSV4 (via DSV4CacheConfigHelper). Forcing
-    // it back to attn_config.tokens_per_block would clobber DSV4's promoted
-    // value when the user passed --seq_size_per_block < 256.
     const int cache_gen_num_per_cycle =
         sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
     auto cache_config =
-        CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, cache_gen_num_per_cycle);
-    cache_config.block_num = 5;
-    // createBasicConfig's SingleConfigCreator / HybridConfigCreator paths can
-    // leave kernel_seq_size_per_block at 0 (only the real createConfig path
-    // runs setupKernelSeqSize). PyWrappedModel asserts kernel_tokens_per_block
-    // > 0, so apply the same default here: kernel block == physical block.
-    if (cache_config.kernel_seq_size_per_block == 0) {
-        cache_config.kernel_seq_size_per_block = cache_config.seq_size_per_block;
-    }
+        CacheConfigCreator::createWarmupConfig(model_config_, parallelism_config, cache_gen_num_per_cycle);
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
     auto              cache_manager = make_shared<KVCacheManager>(
@@ -414,8 +399,11 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
     executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
+    auto previous_cache_manager     = std::move(resource_context_.cache_manager);
+    resource_context_.cache_manager = cache_manager;
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
-    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
+    resource_context_.cache_manager = std::move(previous_cache_manager);
+    const auto max_consumed         = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
@@ -462,61 +450,37 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
 }
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
-    const bool use_device_malloc_block_pool =
-        shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config);
-    if (propose_params_ && propose_params_->draftModel()) {
-        auto config = CacheConfigCreator::createSpConfig(model_config_,
-                                                         propose_params_->getEngineInitParams().model_config_,
-                                                         parallelism_config,
-                                                         runtime_config,
-                                                         kv_cache_config,
-                                                         sp_config,
-                                                         warm_up_result,
-                                                         isMTPEagle(),
-                                                         isEagle());
-
-        resource_context_.cache_manager = make_shared<KVCacheManager>(config,
-                                                                      false,
-                                                                      metrics_reporter_,
-                                                                      kv_cache_config,
-                                                                      parallelism_config,
-                                                                      runtime_config,
-                                                                      sp_config,
-                                                                      pd_sep_config,
-                                                                      cache_store_config,
-                                                                      use_device_malloc_block_pool);
-        resource_context_.role_type     = pd_sep_config.role_type;
-        if (!resource_context_.cache_manager->init()) {
-            RTP_LLM_FAIL("init kv cache manager failed");
-        }
-
-        const auto& cache_cfg = resource_context_.cache_manager->cacheConfig();
-        kv_cache_group_num_   = cache_cfg.groupNums();
-    } else {
-        auto result = CacheConfigCreator::createConfig(
-            model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result, sp_config);
-        RTP_LLM_LOG_INFO("create cache manager with config %s", result.debugString().c_str());
-        RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
-                         result.block_num,
-                         result.block_size_bytes / 1024);
-        RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
-        resource_context_.cache_manager = make_shared<KVCacheManager>(result,
-                                                                      false,
-                                                                      metrics_reporter_,
-                                                                      kv_cache_config,
-                                                                      parallelism_config,
-                                                                      runtime_config,
-                                                                      SpeculativeExecutionConfig{},
-                                                                      pd_sep_config,
-                                                                      cache_store_config,
-                                                                      use_device_malloc_block_pool);
-        resource_context_.role_type     = pd_sep_config.role_type;
-        if (!resource_context_.cache_manager->init()) {
-            RTP_LLM_FAIL("init kv cache manager failed");
-        }
-        const auto& cache_cfg = resource_context_.cache_manager->cacheConfig();
-        kv_cache_group_num_   = cache_cfg.groupNums();
+    const bool use_device_malloc_block_pool = shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config);
+    const ModelConfig* draft_model_config   = propose_params_ && propose_params_->draftModel() ?
+                                                  &propose_params_->getEngineInitParams().model_config_ :
+                                                  nullptr;
+    auto               config               = CacheConfigCreator::createConfig(model_config_,
+                                                   parallelism_config,
+                                                   runtime_config,
+                                                   kv_cache_config,
+                                                   warm_up_result,
+                                                   sp_config,
+                                                   draft_model_config,
+                                                   isMTPEagle(),
+                                                   isEagle());
+    resource_context_.cache_manager =
+        make_shared<KVCacheManager>(config,
+                                    false,
+                                    metrics_reporter_,
+                                    kv_cache_config,
+                                    parallelism_config,
+                                    runtime_config,
+                                    draft_model_config ? sp_config : SpeculativeExecutionConfig{},
+                                    pd_sep_config,
+                                    cache_store_config,
+                                    use_device_malloc_block_pool);
+    resource_context_.role_type = pd_sep_config.role_type;
+    if (!resource_context_.cache_manager->init()) {
+        RTP_LLM_FAIL("init kv cache manager failed");
     }
+    const auto& cache_cfg = resource_context_.cache_manager->cacheConfig();
+    kv_cache_group_num_   = cache_cfg.groupNums();
+    RTP_LLM_LOG_INFO("cache manager initialized with config %s", cache_cfg.debugString().c_str());
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
