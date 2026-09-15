@@ -20,8 +20,6 @@ test_copts = [
 ] + copts()
 
 test_deps = [
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-    "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/cache",
@@ -29,22 +27,23 @@ test_deps = [
     ":cache_config_test_utils",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
-    "@local_config_cuda//cuda:cuda_headers",
-    "@local_config_cuda//cuda:cudart",
-] + torch_deps() + cuda13_torch_link_deps
+] + select({
+    "@//:using_rocm": [
+        "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+    ],
+    "//conditions:default": [
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+}) + torch_deps() + cuda13_torch_link_deps
 
 block_cache_test_deps = [
-    "//rtp_llm/cpp/testing:device_test_utils",
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-    "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
-    "//rtp_llm/cpp/config:config_modules",
-    "//rtp_llm/cpp/config:model_config",
-    "//rtp_llm/cpp/cache",
+    "//rtp_llm/cpp/cache:block_pool",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
-    "@local_config_cuda//cuda:cuda_headers",
-    "@local_config_cuda//cuda:cudart",
-] + torch_deps() + cuda13_torch_link_deps
+]
 
 
 cc_library(
@@ -176,6 +175,22 @@ cc_library(
     deps = test_deps,
     alwayslink = 1,
     visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "block_pool_ref_test",
+    srcs = ["BlockPoolRefTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:block_pool",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {
+        "RTP_LLM_PIN_HOST_BLOCK_POOL": "0",
+    },
+    # Host allocation still links CUDA driver libraries through block_pool.
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
