@@ -358,12 +358,12 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                        std::shared_ptr<BroadcastManager>          broadcast_manager,
                                        std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
     const auto device_eviction_policy = parseEvictionPolicy(kv_cache_config.device_eviction_policy);
-    const auto host_eviction_policy   = parseEvictionPolicy(kv_cache_config.host_eviction_policy);
+    const auto host_eviction_policy   = parseEvictionPolicy(kv_cache_config.memory_eviction_policy);
     const auto disk_eviction_policy   = parseEvictionPolicy(kv_cache_config.disk_eviction_policy);
     if (!device_eviction_policy.has_value() || !host_eviction_policy.has_value() || !disk_eviction_policy.has_value()) {
-        RTP_LLM_LOG_ERROR("createBlockTreeCache: unsupported eviction policy, device=%s host=%s disk=%s",
+        RTP_LLM_LOG_ERROR("createBlockTreeCache: unsupported eviction policy, device=%s memory=%s disk=%s",
                           kv_cache_config.device_eviction_policy.c_str(),
-                          kv_cache_config.host_eviction_policy.c_str(),
+                          kv_cache_config.memory_eviction_policy.c_str(),
                           kv_cache_config.disk_eviction_policy.c_str());
         return nullptr;
     }
@@ -393,10 +393,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         group_pools[static_cast<size_t>(group_id)] = std::move(pool);
     }
 
-    const bool host_enabled = kv_cache_config.enable_host_cache;
+    const bool host_enabled = kv_cache_config.enable_memory_cache;
     const bool disk_enabled = kv_cache_config.enable_disk_cache;
-    if (host_enabled && kv_cache_config.host_cache_size_mb <= 0) {
-        RTP_LLM_LOG_ERROR("host cache size must be positive");
+    if (host_enabled && kv_cache_config.memory_cache_size_mb <= 0) {
+        RTP_LLM_LOG_ERROR("memory cache size must be positive");
         return nullptr;
     }
     if (disk_enabled && kv_cache_config.disk_cache_size_mb <= 0) {
@@ -434,7 +434,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
 
     std::vector<std::shared_ptr<HostBlockPool>> host_pools(group_members.size());
     if (host_enabled && !group_members.empty()) {
-        const size_t bytes  = static_cast<size_t>(kv_cache_config.host_cache_size_mb) * 1024UL * 1024UL;
+        const size_t bytes  = static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * 1024UL * 1024UL;
         const size_t usable = computeHostUsableBlockCount(bytes, combined_stride);
         if (usable == 0) {
             RTP_LLM_LOG_ERROR("host budget is too small for one complete tree coordinate");
@@ -522,8 +522,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                    kv_cache_config.block_tree_device_evict_high_watermark_ratio};
     }
     if (host_enabled) {
-        config.watermark_host = {kv_cache_config.block_tree_host_evict_low_watermark_ratio,
-                                 kv_cache_config.block_tree_host_evict_high_watermark_ratio};
+        config.watermark_host = {kv_cache_config.block_tree_memory_evict_low_watermark_ratio,
+                                 kv_cache_config.block_tree_memory_evict_high_watermark_ratio};
     }
     if (disk_enabled) {
         config.watermark_disk = {kv_cache_config.block_tree_disk_evict_low_watermark_ratio,
@@ -546,7 +546,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         }
     }
     config.host_cache_sync_timeout_ms =
-        checkedTimeout(kv_cache_config.host_cache_sync_timeout_ms, "host_cache_sync_timeout_ms");
+        checkedTimeout(kv_cache_config.memory_cache_sync_timeout_ms, "memory_cache_sync_timeout_ms");
     config.disk_cache_sync_timeout_ms =
         disk_enabled ? checkedTimeout(kv_cache_config.disk_cache_sync_timeout_ms, "disk_cache_sync_timeout_ms") :
                        config.host_cache_sync_timeout_ms;
@@ -590,23 +590,20 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     config.full_prefix_scan_interval_ms = owns_mutable_block_tree ? configured_scan_interval_ms : 0;
 
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));
-    auto per_rank_engine =
-        std::make_shared<PerRankBlockTransferEngine>(group_sets,
-                                                     kv_cache_config.enable_disk_cache,
-                                                     DeviceHostCopyOptions{},
-                                                     config.device_disk_staging_block_count,
-                                                     config.max_descriptors_per_transfer_batch,
-                                                     config.transfer_worker_count,
-                                                     config.transfer_queue_max_size,
-                                                     cache_metrics_reporter);
+    auto per_rank_engine        = std::make_shared<PerRankBlockTransferEngine>(group_sets,
+                                                                        kv_cache_config.enable_disk_cache,
+                                                                        DeviceHostCopyOptions{},
+                                                                        config.device_disk_staging_block_count,
+                                                                        config.max_descriptors_per_transfer_batch,
+                                                                        config.transfer_worker_count,
+                                                                        config.transfer_queue_max_size,
+                                                                        cache_metrics_reporter);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
     }
-    auto transfer_dispatcher =
-        std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine),
-                                                  std::move(multi_rank_engine),
-                                                  config.max_descriptors_per_transfer_batch);
+    auto transfer_dispatcher = std::make_unique<BlockTransferDispatcher>(
+        std::move(per_rank_engine), std::move(multi_rank_engine), config.max_descriptors_per_transfer_batch);
     const size_t business_queue_size = config.business_queue_max_size == 0 ?
                                            0 :
                                            config.business_queue_max_size + BlockTreeTaskPool::kLoadReservedSlots;

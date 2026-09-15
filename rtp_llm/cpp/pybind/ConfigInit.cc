@@ -459,8 +459,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("multi_task_prompt_tokens", &KVCacheConfig::multi_task_prompt_tokens)
         .def_readwrite("reserve_block_ratio", &KVCacheConfig::reserve_block_ratio)
         .def_readwrite("max_block_size_per_item", &KVCacheConfig::max_block_size_per_item)
-        .def_readwrite("host_cache_size_mb", &KVCacheConfig::host_cache_size_mb)
-        .def_readwrite("host_cache_sync_timeout_ms", &KVCacheConfig::host_cache_sync_timeout_ms)
+        .def_readwrite("memory_cache_size_mb", &KVCacheConfig::memory_cache_size_mb)
+        .def_readwrite("memory_cache_sync_timeout_ms", &KVCacheConfig::memory_cache_sync_timeout_ms)
         .def_readwrite("disk_cache_paths", &KVCacheConfig::disk_cache_paths)
         .def_readwrite("disk_cache_size_mb", &KVCacheConfig::disk_cache_size_mb)
         .def_readwrite("disk_cache_buffered_io", &KVCacheConfig::disk_cache_buffered_io)
@@ -475,10 +475,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &KVCacheConfig::block_tree_device_evict_low_watermark_ratio)
         .def_readwrite("block_tree_device_evict_high_watermark_ratio",
                        &KVCacheConfig::block_tree_device_evict_high_watermark_ratio)
-        .def_readwrite("block_tree_host_evict_low_watermark_ratio",
-                       &KVCacheConfig::block_tree_host_evict_low_watermark_ratio)
-        .def_readwrite("block_tree_host_evict_high_watermark_ratio",
-                       &KVCacheConfig::block_tree_host_evict_high_watermark_ratio)
+        .def_readwrite("block_tree_memory_evict_low_watermark_ratio",
+                       &KVCacheConfig::block_tree_memory_evict_low_watermark_ratio)
+        .def_readwrite("block_tree_memory_evict_high_watermark_ratio",
+                       &KVCacheConfig::block_tree_memory_evict_high_watermark_ratio)
         .def_readwrite("block_tree_disk_evict_low_watermark_ratio",
                        &KVCacheConfig::block_tree_disk_evict_low_watermark_ratio)
         .def_readwrite("block_tree_disk_evict_high_watermark_ratio",
@@ -491,10 +491,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("kernel_seq_size_per_block", &KVCacheConfig::kernel_seq_size_per_block)
         .def_readwrite("test_block_num", &KVCacheConfig::test_block_num)
         .def_readwrite("use_block_cache", &KVCacheConfig::use_block_cache)
-        .def_readwrite("enable_host_cache", &KVCacheConfig::enable_host_cache)
+        .def_readwrite("enable_memory_cache", &KVCacheConfig::enable_memory_cache)
         .def_readwrite("enable_disk_cache", &KVCacheConfig::enable_disk_cache)
         .def_readwrite("device_eviction_policy", &KVCacheConfig::device_eviction_policy)
-        .def_readwrite("host_eviction_policy", &KVCacheConfig::host_eviction_policy)
+        .def_readwrite("memory_eviction_policy", &KVCacheConfig::memory_eviction_policy)
         .def_readwrite("disk_eviction_policy", &KVCacheConfig::disk_eviction_policy)
         .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
         .def_readwrite("dsv4_hca_state_pool_blocks", &KVCacheConfig::dsv4_hca_state_pool_blocks)
@@ -559,8 +559,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.multi_task_prompt_tokens,
                                       self.reserve_block_ratio,
                                       self.max_block_size_per_item,
-                                      self.host_cache_size_mb,
-                                      self.host_cache_sync_timeout_ms,
+                                      self.memory_cache_size_mb,
+                                      self.memory_cache_sync_timeout_ms,
                                       self.linear_step,
                                       self.fp8_kv_cache,
                                       self.ssm_state_dtype,
@@ -570,7 +570,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.test_block_num,
                                       self.use_block_cache,
                                       self.enable_device_cache,
-                                      self.enable_host_cache,
+                                      self.enable_memory_cache,
                                       self.enable_disk_cache,
                                       self.enable_remote_cache,
                                       self.disk_cache_paths,
@@ -579,7 +579,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.disk_cache_sync_timeout_ms,
                                       self.disk_cache_staging_block_count,
                                       self.device_eviction_policy,
-                                      self.host_eviction_policy,
+                                      self.memory_eviction_policy,
                                       self.disk_eviction_policy,
                                       self.kvcm_enable_vipserver,
                                       self.kvcm_vipserver_domain,
@@ -611,8 +611,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.block_tree_transfer_queue_max_size,
                                       self.block_tree_device_evict_low_watermark_ratio,
                                       self.block_tree_device_evict_high_watermark_ratio,
-                                      self.block_tree_host_evict_low_watermark_ratio,
-                                      self.block_tree_host_evict_high_watermark_ratio,
+                                      self.block_tree_memory_evict_low_watermark_ratio,
+                                      self.block_tree_memory_evict_high_watermark_ratio,
                                       self.block_tree_disk_evict_low_watermark_ratio,
                                       self.block_tree_disk_evict_high_watermark_ratio,
                                       self.kv_cache_event_publisher_type,
@@ -625,7 +625,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 const py::tuple event_state = t;
                 const bool has_event_fields = t.size() == 69 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 7;
                 if (has_event_fields) {
-                    t = t[py::slice(0, 64, 1)].cast<py::tuple>();
+                    t    = t[py::slice(0, 64, 1)].cast<py::tuple>();
                     t[1] = py::int_(6);
                 }
                 constexpr size_t kLegacyFieldCount               = 55;
@@ -644,7 +644,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 const bool valid_write_sync_state = version == 2 && t.size() == kWriteSyncFieldCount + 2;
                 const bool valid_queue_write_sync_state =
                     version == 3 && t.size() == kQueueConfigWriteSyncFieldCount + 2;
-                const bool valid_pinned_host_state = version == 4 && t.size() == kPinnedHostFieldCount + 2;
+                const bool valid_pinned_host_state     = version == 4 && t.size() == kPinnedHostFieldCount + 2;
                 const bool valid_reserve_removed_state = version == 5 && t.size() == kReserveRemovedFieldCount + 2;
                 const bool valid_current_state         = version == 6 && t.size() == kCurrentFieldCount + 2;
                 if (t[0].cast<std::string>() != "KVCacheConfig"
@@ -664,8 +664,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.multi_task_prompt_tokens             = value(3).cast<std::map<std::string, std::vector<int>>>();
                 c.reserve_block_ratio                  = value(4).cast<int64_t>();
                 c.max_block_size_per_item              = value(5).cast<int>();
-                c.host_cache_size_mb                   = value(6).cast<int64_t>();
-                c.host_cache_sync_timeout_ms           = value(7).cast<int64_t>();
+                c.memory_cache_size_mb                 = value(6).cast<int64_t>();
+                c.memory_cache_sync_timeout_ms         = value(7).cast<int64_t>();
                 c.linear_step                          = value(8).cast<int>();
                 c.fp8_kv_cache                         = value(9).cast<int>();
                 c.ssm_state_dtype                      = value(10).cast<std::string>();
@@ -675,7 +675,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.test_block_num                       = value(14).cast<int>();
                 c.use_block_cache                      = value(15).cast<int>();
                 c.enable_device_cache                  = value(16).cast<bool>();
-                c.enable_host_cache                    = value(17).cast<bool>();
+                c.enable_memory_cache                  = value(17).cast<bool>();
                 c.enable_disk_cache                    = value(19).cast<bool>();
                 c.enable_remote_cache                  = value(20).cast<bool>();
                 c.disk_cache_paths                     = value(21).cast<std::string>();
@@ -684,7 +684,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.disk_cache_sync_timeout_ms           = value(24).cast<int64_t>();
                 c.disk_cache_staging_block_count       = value(25).cast<int64_t>();
                 c.device_eviction_policy               = value(26).cast<std::string>();
-                c.host_eviction_policy                 = value(27).cast<std::string>();
+                c.memory_eviction_policy               = value(27).cast<std::string>();
                 c.disk_eviction_policy                 = value(28).cast<std::string>();
                 c.kvcm_enable_vipserver                = value(29).cast<bool>();
                 c.kvcm_vipserver_domain                = value(30).cast<std::string>();
@@ -718,18 +718,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.block_tree_transfer_queue_max_size           = value(57).cast<int64_t>();
                     c.block_tree_device_evict_low_watermark_ratio  = value(58).cast<double>();
                     c.block_tree_device_evict_high_watermark_ratio = value(59).cast<double>();
-                    c.block_tree_host_evict_low_watermark_ratio    = value(60).cast<double>();
-                    c.block_tree_host_evict_high_watermark_ratio   = value(61).cast<double>();
+                    c.block_tree_memory_evict_low_watermark_ratio  = value(60).cast<double>();
+                    c.block_tree_memory_evict_high_watermark_ratio = value(61).cast<double>();
                     c.block_tree_disk_evict_low_watermark_ratio    = value(62).cast<double>();
                     c.block_tree_disk_evict_high_watermark_ratio   = value(63).cast<double>();
                 }
                 // Legacy write-sync fields are intentionally ignored.
                 if (has_event_fields) {
-                    c.kv_cache_event_publisher_type = event_state[64].cast<std::string>();
+                    c.kv_cache_event_publisher_type   = event_state[64].cast<std::string>();
                     c.kv_cache_event_manager_endpoint = event_state[65].cast<std::string>();
-                    c.kv_cache_event_instance_group = event_state[66].cast<std::string>();
-                    c.kv_cache_event_instance_id = event_state[67].cast<std::string>();
-                    c.kv_cache_event_host_ip_port = event_state[68].cast<std::string>();
+                    c.kv_cache_event_instance_group   = event_state[66].cast<std::string>();
+                    c.kv_cache_event_instance_id      = event_state[67].cast<std::string>();
+                    c.kv_cache_event_host_ip_port     = event_state[68].cast<std::string>();
                 }
                 return c;
             }));
@@ -1080,7 +1080,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.sp_dspark_mask_token_id = t[10].cast<int64_t>();
                     }
                     if (t.size() == 12) {
-                        c.sp_dspark_mask_token_id = t[10].cast<int64_t>();
+                        c.sp_dspark_mask_token_id      = t[10].cast<int64_t>();
                         c.sp_dspark_sample_from_anchor = t[11].cast<bool>();
                     }
                 } catch (const std::exception& e) {

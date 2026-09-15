@@ -156,8 +156,8 @@ struct FMHAConfig {
 
 constexpr double kDefaultDeviceLowWatermarkRatio  = 0.82;
 constexpr double kDefaultDeviceHighWatermarkRatio = 0.90;
-constexpr double kDefaultHostLowWatermarkRatio    = 0.90;
-constexpr double kDefaultHostHighWatermarkRatio   = 0.94;
+constexpr double kDefaultMemoryLowWatermarkRatio  = 0.90;
+constexpr double kDefaultMemoryHighWatermarkRatio = 0.94;
 constexpr double kDefaultDiskLowWatermarkRatio    = 0.92;
 constexpr double kDefaultDiskHighWatermarkRatio   = 0.97;
 
@@ -168,8 +168,8 @@ struct KVCacheConfig {
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     int64_t                                 reserve_block_ratio                             = 5;
     int                                     max_block_size_per_item                         = 16;
-    int64_t                                 host_cache_size_mb                              = 0;
-    int64_t                                 host_cache_sync_timeout_ms                      = 10000;
+    int64_t                                 memory_cache_size_mb                            = 0;
+    int64_t                                 memory_cache_sync_timeout_ms                    = 10000;
     std::string                             disk_cache_paths                                = "";
     int64_t                                 disk_cache_size_mb                              = 0;
     bool                                    disk_cache_buffered_io                          = true;
@@ -181,13 +181,13 @@ struct KVCacheConfig {
     int64_t                                 block_tree_transfer_queue_max_size              = 10000;
     double block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
     double block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
-    double block_tree_host_evict_low_watermark_ratio    = kDefaultHostLowWatermarkRatio;
-    double block_tree_host_evict_high_watermark_ratio   = kDefaultHostHighWatermarkRatio;
+    double block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
+    double block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
     double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
     double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
     int    linear_step                                  = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
-    int         fp8_kv_cache              = 0;
+    int fp8_kv_cache = 0;
     // "auto" preserves a model-declared recurrent-state dtype. Models
     // without such a declaration keep LinearAttentionConfig's BF16 default;
     // the legacy remote connector falls back to BF16 because it requires one
@@ -199,11 +199,11 @@ struct KVCacheConfig {
     int         test_block_num            = 0;
     int         use_block_cache           = -1;  // -1 means not set, use Optional<int> equivalent
     bool        enable_device_cache       = true;
-    bool        enable_host_cache         = false;
+    bool        enable_memory_cache       = false;
     bool        enable_disk_cache         = false;
     bool        enable_remote_cache       = false;
     std::string device_eviction_policy    = "lru";
-    std::string host_eviction_policy      = "lru";
+    std::string memory_eviction_policy    = "lru";
     std::string disk_eviction_policy      = "fifo";
 
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
@@ -220,11 +220,11 @@ struct KVCacheConfig {
     bool dsv4_fixed_pool_use_memory = false;
 
     // HBM cache event publishing. Only tp_rank=0 with pp_size=1 creates an active publisher for each DP replica.
-    std::string kv_cache_event_publisher_type        = "none";  // none | kvcm
-    std::string kv_cache_event_manager_endpoint      = "";      // KVCM Meta HTTP endpoint
-    std::string kv_cache_event_instance_group        = "";
-    std::string kv_cache_event_instance_id           = "";
-    std::string kv_cache_event_host_ip_port          = "";
+    std::string kv_cache_event_publisher_type   = "none";  // none | kvcm
+    std::string kv_cache_event_manager_endpoint = "";      // KVCM Meta HTTP endpoint
+    std::string kv_cache_event_instance_group   = "";
+    std::string kv_cache_event_instance_id      = "";
+    std::string kv_cache_event_host_ip_port     = "";
     // BlockTreeCache FULL prefix invariant scanner; interval 0 disables the scanner thread.
     // Batch size and detail cap are scanner-internal constants, not user-tunable.
     int64_t block_tree_full_prefix_scan_interval_ms = 0;
@@ -365,7 +365,7 @@ struct SpeculativeExecutionConfig {
     std::string     checkpoint_path               = "";
     // DSpARK noise/mask token used to build each fixed-width draft block.
     // Filled from the draft checkpoint by ModelFactory.
-    int64_t     sp_dspark_mask_token_id = -1;
+    int64_t sp_dspark_mask_token_id = -1;
     // True: gamma query rows, including the anchor prediction. False:
     // one conditioning anchor followed by gamma prediction rows.
     bool        sp_dspark_sample_from_anchor = true;

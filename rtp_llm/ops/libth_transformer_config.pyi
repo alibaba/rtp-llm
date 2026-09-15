@@ -693,11 +693,11 @@ class HybridAttentionType:
         ...
 class KVCacheConfig:
     enable_device_cache: bool
-    enable_host_cache: bool
+    enable_memory_cache: bool
     enable_disk_cache: bool
     enable_remote_cache: bool
     device_eviction_policy: str
-    host_eviction_policy: str
+    memory_eviction_policy: str
     disk_eviction_policy: str
     dsv4_fixed_pool_blocks: int
     dsv4_hca_state_pool_blocks: int
@@ -708,16 +708,16 @@ class KVCacheConfig:
     block_tree_transfer_queue_max_size: int
     block_tree_device_evict_low_watermark_ratio: float
     block_tree_device_evict_high_watermark_ratio: float
-    block_tree_host_evict_low_watermark_ratio: float
-    block_tree_host_evict_high_watermark_ratio: float
+    block_tree_memory_evict_low_watermark_ratio: float
+    block_tree_memory_evict_high_watermark_ratio: float
     block_tree_disk_evict_low_watermark_ratio: float
     block_tree_disk_evict_high_watermark_ratio: float
     fp8_kv_cache: int
     kv_cache_mem_mb: int
     linear_step: int
     max_block_size_per_item: int
-    host_cache_size_mb: int
-    host_cache_sync_timeout_ms: int
+    memory_cache_size_mb: int
+    memory_cache_sync_timeout_ms: int
     disk_cache_paths: str
     disk_cache_size_mb: int
     disk_cache_buffered_io: bool

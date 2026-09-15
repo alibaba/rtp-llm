@@ -472,18 +472,18 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     for (int index = 0; index < 4 * block_size; ++index) {
         input_data[index] = index;
     }
-    auto generate_input                                = std::make_shared<GenerateInput>();
-    generate_input->input_ids                          = std::move(input_ids);
-    generate_input->generate_config                    = std::make_shared<GenerateConfig>();
-    generate_input->generate_config->reuse_cache       = true;
-    generate_input->generate_config->enable_host_cache = true;
+    auto generate_input                                  = std::make_shared<GenerateInput>();
+    generate_input->input_ids                            = std::move(input_ids);
+    generate_input->generate_config                      = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->reuse_cache         = true;
+    generate_input->generate_config->enable_memory_cache = true;
 
     ResourceContext resource_context;
-    resource_context.cache_manager     = manager_;
-    resource_context.reuse_cache       = true;
-    resource_context.enable_host_cache = true;
-    resource_context.enable_disk_cache = true;
-    resource_context.role_type         = RoleType::PREFILL;
+    resource_context.cache_manager       = manager_;
+    resource_context.reuse_cache         = true;
+    resource_context.enable_memory_cache = true;
+    resource_context.enable_disk_cache   = true;
+    resource_context.role_type           = RoleType::PREFILL;
 
     ModelConfig model_config;
     model_config.max_seq_len                  = 2048;

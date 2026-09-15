@@ -1727,8 +1727,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesLowerTierBackfi
     auto allocator = makeAllocator(config);
 
     KVCacheConfig tiered_config;
-    tiered_config.enable_host_cache  = true;
-    tiered_config.host_cache_size_mb = 1;
+    tiered_config.enable_memory_cache  = true;
+    tiered_config.memory_cache_size_mb = 1;
     allocator->setBlockTreeCacheConfigForTest(std::move(tiered_config));
     ASSERT_TRUE(allocator->init());
 

@@ -39,21 +39,18 @@ from rtp_llm.structure.request_extractor import RequestExtractor
 
 
 class TestRawGenerateConfigParsing(unittest.TestCase):
-    def test_legacy_memory_cache_field_maps_to_host_cache(self):
-        legacy = GenerateConfig(**{"enable_memory_cache": False})
-        self.assertFalse(legacy.enable_host_cache)
+    def test_memory_cache_is_canonical_request_field(self):
+        config = GenerateConfig(enable_memory_cache=False)
+        self.assertFalse(config.enable_memory_cache)
+        self.assertIn("enable_memory_cache", config.model_dump())
+        self.assertNotIn("enable_host_cache", config.model_dump())
 
-        canonical = GenerateConfig(
-            **{"enable_memory_cache": False, "enable_host_cache": True}
+        config.update({"enable_memory_cache": True})
+        self.assertTrue(config.enable_memory_cache)
+        remain = config.update_and_pop(
+            {"enable_memory_cache": False, "unknown_cache_option": 1}
         )
-        self.assertTrue(canonical.enable_host_cache)
-
-        legacy.update({"enable_memory_cache": False})
-        self.assertFalse(legacy.enable_host_cache)
-        remain = legacy.update_and_pop(
-            {"enable_memory_cache": True, "unknown_cache_option": 1}
-        )
-        self.assertTrue(legacy.enable_host_cache)
+        self.assertFalse(config.enable_memory_cache)
         self.assertEqual(remain, {"unknown_cache_option": 1})
 
         extractor = RequestExtractor(GenerateConfig())
@@ -63,7 +60,23 @@ class TestRawGenerateConfigParsing(unittest.TestCase):
                 "generate_config": {"enable_memory_cache": False},
             }
         )
-        self.assertFalse(extracted.enable_host_cache)
+        self.assertFalse(extracted.enable_memory_cache)
+
+    def test_host_cache_is_not_a_request_alias(self):
+        config = GenerateConfig(**{"enable_host_cache": False})
+        self.assertTrue(config.enable_memory_cache)
+        self.assertNotIn("enable_host_cache", GenerateConfig.model_fields)
+        config.update({"enable_host_cache": False})
+        self.assertTrue(config.enable_memory_cache)
+        self.assertEqual(
+            config.update_and_pop({"enable_host_cache": False}),
+            {"enable_host_cache": False},
+        )
+        values, remain = RequestExtractor._partition_generate_config_fields(
+            {"enable_memory_cache": False, "enable_host_cache": True}
+        )
+        self.assertEqual(values, {"enable_memory_cache": False})
+        self.assertEqual(remain, {"enable_host_cache": True})
 
     def test_response_format_dict_is_validated(self):
         extractor = RequestExtractor(GenerateConfig(max_new_tokens=16))

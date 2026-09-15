@@ -15,9 +15,8 @@ from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
 
-class RecoConfigCompatibilityTest(TestCase):
-    # Keep the former public configuration surface explicit so a missing alias
-    # cannot disappear from both registration and test discovery.
+class CacheConfigArgumentsTest(TestCase):
+    # Keep the supported startup fields explicit, independently of parser registration.
     samples = {
         "enable_vipserver": True,
         "vipserver_domain": "vip.example",
@@ -41,6 +40,39 @@ class RecoConfigCompatibilityTest(TestCase):
         "client_config": '{"legacy":{}}',
     }
 
+    tier_samples = {
+        "enable_memory_cache": ("enable_host_cache", True),
+        "enable_disk_cache": ("enable_memory_cache_disk", True),
+        "memory_cache_size_mb": ("host_cache_size_mb", 1024),
+        "memory_cache_sync_timeout_ms": ("host_cache_sync_timeout_ms", 1234),
+        "block_tree_memory_evict_low_watermark_ratio": (
+            "block_tree_host_evict_low_watermark_ratio",
+            0.72,
+        ),
+        "block_tree_memory_evict_high_watermark_ratio": (
+            "block_tree_host_evict_high_watermark_ratio",
+            0.82,
+        ),
+        "disk_cache_paths": ("memory_cache_disk_paths", "/tmp/cache-args-test"),
+        "disk_cache_size_mb": ("memory_cache_disk_size_mb", 2048),
+        "disk_cache_buffered_io": ("memory_cache_disk_buffered_io", False),
+        "disk_cache_sync_timeout_ms": ("memory_cache_disk_sync_timeout_ms", 2345),
+    }
+
+    @classmethod
+    def startup_samples(cls):
+        return {
+            **{f"kvcm_{name}": value for name, value in cls.samples.items()},
+            **{name: value for name, (_, value) in cls.tier_samples.items()},
+        }
+
+    @classmethod
+    def removed_names(cls):
+        return {
+            **{f"kvcm_{name}": f"reco_{name}" for name in cls.samples},
+            **{name: old_name for name, (old_name, _) in cls.tier_samples.items()},
+        }
+
     def parse_cache_config(self, args, env, use_sys_argv=False):
         from rtp_llm.ops import KVCacheConfig
         from rtp_llm.server.server_args.kv_cache_group_args import (
@@ -57,58 +89,99 @@ class RecoConfigCompatibilityTest(TestCase):
             parser.parse_args(None if use_sys_argv else args)
         return config
 
-    def test_legacy_env_and_cli_bind_all_canonical_fields(self):
-        env = {
-            f"RECO_{name.upper()}": str(value) for name, value in self.samples.items()
-        }
+    def test_canonical_env_and_cli_bind_all_fields(self):
+        samples = self.startup_samples()
+        env = {name.upper(): str(value) for name, value in samples.items()}
         args = [
             part
-            for name, value in self.samples.items()
-            for part in (f"--reco_{name}", str(value))
+            for name, value in samples.items()
+            for part in (f"--{name}", str(value))
         ]
         for config in (
             self.parse_cache_config(None, env),
             self.parse_cache_config([], env),
             self.parse_cache_config(args, {}),
         ):
-            for name, value in self.samples.items():
+            for name, value in samples.items():
                 with self.subTest(name=name):
-                    self.assertEqual(getattr(config, f"kvcm_{name}"), value)
-                    self.assertEqual(getattr(config, f"reco_{name}"), value)
+                    self.assertEqual(getattr(config, name), value)
 
-    def test_canonical_env_wins_including_false_zero_and_empty(self):
-        env = {}
-        for name, value in self.samples.items():
-            env[f"RECO_{name.upper()}"] = str(value)
-            env[f"KVCM_{name.upper()}"] = str(type(value)())
+    def test_canonical_env_preserves_false_zero_and_empty(self):
+        samples = self.startup_samples()
+        env = {name.upper(): str(type(value)()) for name, value in samples.items()}
         for args in (None, []):
             config = self.parse_cache_config(args, env)
-            for name, value in self.samples.items():
+            for name, value in samples.items():
                 with self.subTest(name=name, args=args):
-                    self.assertEqual(getattr(config, f"kvcm_{name}"), type(value)())
+                    self.assertEqual(getattr(config, name), type(value)())
 
-    def test_both_cli_spellings_override_both_env_spellings(self):
+    def test_canonical_cli_overrides_environment(self):
+        samples = self.startup_samples()
+        env = {name.upper(): str(type(value)()) for name, value in samples.items()}
+        for equals in (False, True):
+            args = []
+            for name, value in samples.items():
+                flag = f"--{name}"
+                args.extend([f"{flag}={value}"] if equals else [flag, str(value)])
+            for use_sys_argv in (False, True):
+                config = self.parse_cache_config(args, env, use_sys_argv)
+                for name, value in samples.items():
+                    with self.subTest(
+                        name=name, equals=equals, use_sys_argv=use_sys_argv
+                    ):
+                        self.assertEqual(getattr(config, name), value)
+
+    def test_removed_cli_names_are_rejected(self):
+        samples = self.startup_samples()
+        for name, old_name in self.removed_names().items():
+            with self.subTest(old_name=old_name), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ) as stderr:
+                with self.assertRaises(SystemExit) as raised:
+                    self.parse_cache_config([f"--{old_name}", str(samples[name])], {})
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn(
+                    f"unrecognized arguments: --{old_name}", stderr.getvalue()
+                )
+
+    def test_removed_environment_names_do_not_change_defaults(self):
+        samples = self.startup_samples()
         env = {
-            f"{prefix}_{name.upper()}": str(type(value)())
-            for prefix in ("RECO", "KVCM")
-            for name, value in self.samples.items()
+            old_name.upper(): str(samples[name])
+            for name, old_name in self.removed_names().items()
         }
-        for prefix in ("reco", "kvcm"):
-            for equals in (False, True):
-                args = []
-                for name, value in self.samples.items():
-                    flag = f"--{prefix}_{name}"
-                    args.extend([f"{flag}={value}"] if equals else [flag, str(value)])
-                for use_sys_argv in (False, True):
-                    config = self.parse_cache_config(args, env, use_sys_argv)
-                    for name, value in self.samples.items():
-                        with self.subTest(
-                            name=name,
-                            prefix=prefix,
-                            equals=equals,
-                            use_sys_argv=use_sys_argv,
-                        ):
-                            self.assertEqual(getattr(config, f"kvcm_{name}"), value)
+        defaults = self.parse_cache_config([], {})
+        for args in (None, []):
+            config = self.parse_cache_config(args, env)
+            for name in samples:
+                with self.subTest(name=name, args=args):
+                    self.assertEqual(getattr(config, name), getattr(defaults, name))
+
+    def test_memory_names_match_config_attributes_and_pickle(self):
+        from rtp_llm.ops import KVCacheConfig
+        from rtp_llm.server.server_args.kv_cache_group_args import (
+            init_kv_cache_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        config = KVCacheConfig()
+        parser = EnvArgumentParser()
+        init_kv_cache_group_args(parser, config)
+        mappings = parser.get_env_mappings()
+        for field_name, (old_name, value) in self.tier_samples.items():
+            if "memory" not in field_name:
+                continue
+            with self.subTest(field_name=field_name):
+                action = parser._option_string_actions[f"--{field_name}"]
+                self.assertEqual(action.dest, field_name)
+                self.assertEqual(mappings[field_name], field_name.upper())
+                self.assertNotIn(f"--{old_name}", parser._option_string_actions)
+                self.assertFalse(hasattr(config, old_name))
+                setattr(config, field_name, value)
+        restored = pickle.loads(pickle.dumps(config))
+        for field_name, (_, value) in self.tier_samples.items():
+            if "memory" in field_name:
+                self.assertEqual(getattr(restored, field_name), value)
 
     def test_properties_share_storage_and_pickle(self):
         from rtp_llm.ops import KVCacheConfig
