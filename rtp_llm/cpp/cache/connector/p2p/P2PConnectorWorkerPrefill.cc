@@ -791,9 +791,10 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                   request_id,
                     ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED :
                     (currentTimeMs() >= deadline_ms ? ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT :
                                                       ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED);
-            transfer_result->error_msg = "Prefill dispatch stopped key=" + unique_key
-                                         + " sent=" + std::to_string(sent_transfer_count)
-                                         + " planned=" + std::to_string(total_transfers);
+            transfer_result->error_msg = "sendKVCache: dispatched transfer count mismatch, sent="
+                                         + std::to_string(sent_transfer_count)
+                                         + " planned=" + std::to_string(total_transfers)
+                                         + " routes=" + describeRoutes(worker_plan) + ", unique_key: " + unique_key;
         }
     }
     const int64_t dispatch_cost_us          = currentTimeUs() - dispatch_start_us;

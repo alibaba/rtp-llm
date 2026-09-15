@@ -1600,6 +1600,10 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Timeout_ReleasesQueuedLayerDescriptio
     worker_config_.tp_rank       = 0;
     worker_config_.layer_all_num = 6;
     worker_config_.topology      = makeOneGroupPerLayerTopology(worker_config_.layer_all_num);
+    prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(
+        worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+    ASSERT_TRUE(prefill_->init());
+    computed_buffers_ = prefill_->getComputedBuffersStore();
 
     const int64_t     request_id  = 5005;
     const std::string unique_key  = "test_timeout_releases_queued_layer_descriptions";

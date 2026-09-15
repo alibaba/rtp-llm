@@ -230,6 +230,12 @@ protected:
         }
     }
 
+    uint32_t blockRefs(BlockIdxType block) const {
+        // A reclaimed block has zero references; refCount() only accepts allocated blocks.
+        std::lock_guard<std::mutex> lock(pool_->mutex_);
+        return pool_->refcounts_[block];
+    }
+
     KVCacheResourcePtr allocate(size_t count) {
         const auto blocks = pool_->malloc(count);
         if (!blocks) {
@@ -293,11 +299,11 @@ TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedB
     auto request_a = allocate(1);
     ASSERT_NE(request_a, nullptr);
     const auto block_a = request_a->blocks(0).at(0);
-    EXPECT_EQ(pool_->refCount(block_a), 1u);
+    EXPECT_EQ(blockRefs(block_a), 1u);
     fill(*request_a, 0x11);
     auto connector_ref = allocator_->incrKVCacheRef(*request_a, request_a->cacheKeys(), true);
     ASSERT_NE(connector_ref, nullptr);
-    EXPECT_EQ(pool_->refCount(block_a), 2u);
+    EXPECT_EQ(blockRefs(block_a), 2u);
 
     P2PWorkerRoute route;
     route.route_id  = 0;
@@ -343,7 +349,7 @@ TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedB
     // Simulate the cancelled stream dropping its request reference. Only the
     // production async context may now keep the block alive.
     request_a.reset();
-    EXPECT_EQ(pool_->refCount(block_a), 1u);
+    EXPECT_EQ(blockRefs(block_a), 1u);
     std::weak_ptr<P2PConnectorAsyncReadContext> weak_context = context;
     context.reset();
 
@@ -351,7 +357,7 @@ TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedB
     if (GetParam() > 0) {
         ASSERT_TRUE(waitUntil([&] { return service_.lease_queries.load() > 0; }));
         EXPECT_FALSE(weak_context.expired());
-        EXPECT_EQ(pool_->refCount(block_a), 1u);
+        EXPECT_EQ(blockRefs(block_a), 1u);
         EXPECT_EQ(pool_->freeBlocksNum(), initial_free_ - 1);
         request_b = allocate(initial_free_ - 1);
         ASSERT_NE(request_b, nullptr);
@@ -361,14 +367,14 @@ TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedB
 
         for (int i = 0; i < GetParam(); ++i) {
             ASSERT_FALSE(tasks[i]->done());
-            EXPECT_EQ(pool_->refCount(block_a), 1u);
+            EXPECT_EQ(blockRefs(block_a), 1u);
             // Complete only after the assertions above; no timing-dependent
             // sleep decides whether the delayed writer has run.
             std::thread writer([&, i] { LeaseMemoryReceiver::finishWrite(tasks[i], 0xA0 + i); });
             writer.join();
             expectBytes(block_a, i, 0xA0 + i);
             for (const auto block : request_b->blocks(0)) {
-                EXPECT_EQ(pool_->refCount(block), 1u);
+                EXPECT_EQ(blockRefs(block), 1u);
                 expectBytes(block, 0, 0xB2);
                 expectBytes(block, 1, 0xB2);
             }
@@ -376,13 +382,13 @@ TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedB
                 const auto queries = service_.lease_queries.load();
                 ASSERT_TRUE(waitUntil([&] { return service_.lease_queries.load() > queries; }));
                 EXPECT_FALSE(weak_context.expired());
-                EXPECT_EQ(pool_->refCount(block_a), 1u);
+                EXPECT_EQ(blockRefs(block_a), 1u);
                 EXPECT_EQ(pool_->freeBlocksNum(), 0u);
             }
         }
     }
 
-    ASSERT_TRUE(waitUntil([&] { return weak_context.expired() && pool_->refCount(block_a) == 0; }));
+    ASSERT_TRUE(waitUntil([&] { return weak_context.expired() && blockRefs(block_a) == 0; }));
     EXPECT_EQ(pool_->freeBlocksNum(), request_b ? 1u : initial_free_);
     for (int layer = 0; layer < GetParam(); ++layer) {
         expectBytes(block_a, layer, 0xA0 + layer);
@@ -397,7 +403,7 @@ TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedB
     ASSERT_NE(request_c, nullptr);
     ASSERT_EQ(std::count(request_c->blocks(0).begin(), request_c->blocks(0).end(), block_a), 1);
     fill(*request_c, 0xC3);
-    EXPECT_EQ(pool_->refCount(block_a), 1u);
+    EXPECT_EQ(blockRefs(block_a), 1u);
     EXPECT_TRUE(worker_->cancelRead(key_));
     const auto late_read = worker_->read(2, key_, currentTimeMs() + 1000, service_.plan);
     EXPECT_EQ(late_read.code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED);
@@ -408,7 +414,7 @@ TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedB
         task->notifyDone(true);  // A duplicate completion must not release C's ref.
     }
     for (const auto block : request_c->blocks(0)) {
-        EXPECT_EQ(pool_->refCount(block), 1u);
+        EXPECT_EQ(blockRefs(block), 1u);
         expectBytes(block, 0, 0xC3);
         expectBytes(block, 1, 0xC3);
     }
@@ -416,18 +422,18 @@ TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedB
     const auto reused_blocks = request_c->blocks(0);
     request_c.reset();
     for (const auto block : reused_blocks) {
-        EXPECT_EQ(pool_->refCount(block), 0u);
+        EXPECT_EQ(blockRefs(block), 0u);
     }
     if (request_b) {
         const auto other_blocks = request_b->blocks(0);
         for (const auto block : other_blocks) {
-            EXPECT_EQ(pool_->refCount(block), 1u);
+            EXPECT_EQ(blockRefs(block), 1u);
             expectBytes(block, 0, 0xB2);
             expectBytes(block, 1, 0xB2);
         }
         request_b.reset();
         for (const auto block : other_blocks) {
-            EXPECT_EQ(pool_->refCount(block), 0u);
+            EXPECT_EQ(blockRefs(block), 0u);
         }
     }
     EXPECT_EQ(pool_->freeBlocksNum(), initial_free_);

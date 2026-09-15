@@ -333,6 +333,11 @@ protected:
         });
     }
 
+    std::shared_ptr<DecodeTargetWriteLease> leaseFor(const std::string& key) {
+        std::lock_guard<std::mutex> lock(decode_->lease_map_mutex_);
+        return decode_->lease_map_.at(key).task_group->lease;
+    }
+
 protected:
     P2PConnectorWorkerConfig                          config_;
     std::shared_ptr<LeaseTestMockLayerBlockConverter> mock_converter_;
@@ -377,9 +382,13 @@ TEST_F(DecodeLeaseRaceTest, PartialRecvRegistrationFailureKeepsLeaseUntilStarted
 
     auto tasks = inflight_receiver_->getAllTasks();
     ASSERT_EQ(tasks.size(), 1u);
+    const auto lease = leaseFor(key);
     tasks.front()->notifyDone(false);
-    EXPECT_TRUE(decode_->queryLeaseStatus(key, sealed, started, finished, stopped));
+    EXPECT_FALSE(decode_->queryLeaseStatus(key, sealed, started, finished, stopped));
     EXPECT_TRUE(stopped);
+    EXPECT_EQ(lease->startedOps(), 1);
+    EXPECT_EQ(lease->finishedOps(), 1);
+    EXPECT_TRUE(lease->isStopped());
 }
 
 // A1: After cancel with in-flight transfers, queryLeaseStatus must still report
@@ -798,6 +807,8 @@ TEST_F(DecodeLeaseRaceTest, D2_QueryLeaseStatus_NoDoubleCount) {
     }
     ASSERT_TRUE(result->done.load());
 
+    const auto lease = leaseFor(key);
+
     // Complete one task
     auto task_keys = inflight_receiver_->getTaskKeys();
     inflight_receiver_->getInflightTask(task_keys[0])->notifyDone(true);
@@ -822,8 +833,12 @@ TEST_F(DecodeLeaseRaceTest, D2_QueryLeaseStatus_NoDoubleCount) {
     // Now complete second task
     inflight_receiver_->getInflightTask(task_keys[1])->notifyDone(true);
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    decode_->queryLeaseStatus(key, sealed, started_ops, finished_ops, stopped);
-    EXPECT_EQ(finished_ops, 2);
+    // The final callback removes the stopped map entry. Its retained counters
+    // must still count both operations exactly once.
+    EXPECT_FALSE(decode_->queryLeaseStatus(key, sealed, started_ops, finished_ops, stopped));
+    EXPECT_EQ(lease->startedOps(), 2);
+    EXPECT_EQ(lease->finishedOps(), 2);
+    EXPECT_TRUE(lease->isStopped());
     EXPECT_TRUE(stopped);
 
     if (read_thread.joinable())
@@ -1210,10 +1225,12 @@ TEST_F(DecodeLeaseRaceTest, F4_RapidQueryDuringAsyncCompletion) {
     }
     ASSERT_TRUE(result->done.load());
 
+    const auto lease = leaseFor(key);
     auto task_keys = inflight_receiver_->getTaskKeys();
 
     // Start a thread that queries rapidly
     std::atomic<bool> query_stop{false};
+    std::atomic<bool> saw_stopped{false};
     std::atomic<int>  max_finished_seen{0};
     std::thread       query_thread([&]() {
         while (!query_stop) {
@@ -1223,8 +1240,10 @@ TEST_F(DecodeLeaseRaceTest, F4_RapidQueryDuringAsyncCompletion) {
             int cur_max = max_finished_seen.load();
             while (finished > cur_max && !max_finished_seen.compare_exchange_weak(cur_max, finished))
                 ;
-            if (stopped)
+            if (stopped) {
+                saw_stopped = true;
                 break;
+            }
             std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
     });
@@ -1236,11 +1255,19 @@ TEST_F(DecodeLeaseRaceTest, F4_RapidQueryDuringAsyncCompletion) {
     inflight_receiver_->getInflightTask(task_keys[1])->notifyDone(true);
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
+    for (int i = 0; i < 2000 && !saw_stopped; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     query_stop = true;
     query_thread.join();
 
-    // Verify finished count monotonically increased and reached 2
-    EXPECT_EQ(max_finished_seen.load(), 2);
+    // A query may observe map reclamation instead of the final count. Check the
+    // retained lease for exact completion, and query visibility for safe stop.
+    EXPECT_TRUE(saw_stopped.load());
+    EXPECT_LE(max_finished_seen.load(), 2);
+    EXPECT_EQ(lease->startedOps(), 2);
+    EXPECT_EQ(lease->finishedOps(), 2);
+    EXPECT_TRUE(lease->isStopped());
 
     // Final check: lease is stopped
     bool sealed, stopped;

@@ -890,7 +890,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_LoadFailed) {
 
     // 验证 BroadcastTp 和 StartLoad 都被调用
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
-        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
+        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getP2PRequestCallCount(P2PConnectorBroadcastType::READ), 1);
     }
     EXPECT_EQ(prefill_server_->service()->getStartLoadCallCount(), 1);
 }
@@ -985,7 +985,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_CancelBroadcast_WhenPrefillFailed) {
 
     // 验证 BroadcastTp 被调用
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
-        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
+        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getP2PRequestCallCount(P2PConnectorBroadcastType::READ), 1);
     }
 
     // 验证 CANCEL_READ 被发送给所有 worker（因为 prefill 失败，需要取消 broadcast）
