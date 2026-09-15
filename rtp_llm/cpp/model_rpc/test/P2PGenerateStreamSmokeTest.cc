@@ -409,7 +409,7 @@ makePayloadEngine(const CacheConfig& config, RoleType role, const PayloadEndpoin
     runtime.max_generate_batch_size                     = 4;
     runtime.fifo_scheduler_config.max_batch_tokens_size = 256;
     runtime.worker_grpc_addrs                           = {endpoint.address()};
-    runtime.worker_addrs     = {endpoint.host + ":" + std::to_string(pd.cache_store_listen_port) + ":"
+    runtime.worker_addrs     = {endpoint.host + ":" + std::to_string(transfer_port) + ":"
                                 + std::to_string(endpoint.grpc_port)};
     runtime.p2p_worker_addrs = runtime.worker_addrs;
     return std::make_shared<PayloadEngine>(config, runtime, pd);
