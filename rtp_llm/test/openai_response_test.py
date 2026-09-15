@@ -3,9 +3,11 @@ import copy
 import functools
 import json
 import os
+import threading
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncGenerator, Callable, List
-from unittest import IsolatedAsyncioTestCase, main
+from unittest import IsolatedAsyncioTestCase, TestCase, main
+from unittest.mock import Mock, patch
 
 import torch
 from typing_extensions import override
@@ -41,7 +43,10 @@ from rtp_llm.openai.api_datatype import (
     RoleEnum,
     ToolCall,
 )
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.openai.openai_endpoint import (
+    OpenaiEndpoint,
+    _enabled_without_anchor_warn_key,
+)
 from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderers import custom_renderer
 from rtp_llm.openai.renderers.chatglm45_renderer import ChatGlm45Renderer
@@ -3204,6 +3209,191 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             [expected_raw_output],
             f"raw_output_collected mismatch\nFull raw_output_collected: {raw_output_collected}\nAll debug_info_chunks: {debug_info_chunks}",
         )
+
+
+class BatchChatConstraintsTest(TestCase):
+    """批量入口必须与单请求入口共享 renderer 约束：tool_choice 强制的结构化
+    约束不能只在普通 chat 链路生效，否则批量请求会退化为无约束解码。"""
+
+    def _make_endpoint(self):
+        endpoint = object.__new__(OpenaiEndpoint)
+        endpoint.generate_env_config = GenerateEnvConfig()
+        renderer = Mock()
+        renderer.apply_chat_completion_constraints = Mock(
+            side_effect=lambda request, config: config.structural_tag.update(
+                {"type": "structural_tag"}
+            )
+        )
+        endpoint.chat_renderer = renderer
+        endpoint.template_renderer = renderer
+        endpoint.tokenizer = Mock()
+        endpoint.tokenizer.encode = Mock(return_value=[1, 2, 3])
+        rendered = Mock()
+        rendered.input_ids = [1, 2, 3]
+        rendered.multimodal_inputs = None
+        endpoint.render_chat = Mock(return_value=rendered)
+        config = GenerateConfig()
+        config.structural_tag = {"format": {"type": "tag"}}
+        endpoint._extract_generation_config = Mock(return_value=config)
+        endpoint._prepare_chat_input = OpenaiEndpoint._prepare_chat_input.__get__(
+            endpoint
+        )
+        return endpoint, renderer, config
+
+    def _make_request(self):
+        tool = GPTToolDefinition(
+            type="function",
+            function=GPTFunctionDefinition(
+                name="get_weather",
+                description="Get weather",
+                parameters={"type": "object"},
+            ),
+        )
+        return ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hi")],
+            tools=[tool],
+            tool_choice="required",
+        )
+
+    def test_prepare_chat_input_applies_renderer_constraints(self):
+        endpoint, renderer, config = self._make_endpoint()
+        request = self._make_request()
+
+        gen_input, generate_config = endpoint._prepare_chat_input(7, request)
+
+        renderer.apply_chat_completion_constraints.assert_called_once_with(
+            request, config
+        )
+        self.assertIs(generate_config, config)
+        self.assertEqual(generate_config.structural_tag["type"], "structural_tag")
+        self.assertEqual(gen_input.request_id, 7)
+
+
+class EnabledWithoutAnchorWarningTest(TestCase):
+    """ENABLED 且模板无锚点是合法配置（R1 风格）：告警不能逐请求刷日志。"""
+
+    def _make_endpoint(self):
+        endpoint = object.__new__(OpenaiEndpoint)
+        endpoint.generate_env_config = GenerateEnvConfig()
+        endpoint.generate_env_config.think_start_tag = "<think>"
+        endpoint.tokenizer = Mock()
+        endpoint.tokenizer.encode = Mock(return_value=[])
+        endpoint._reasoning_format_for_prompt = (
+            OpenaiEndpoint._reasoning_format_for_prompt.__get__(endpoint)
+        )
+        renderer = Mock()
+        renderer.get_reasoning_format = Mock(return_value=Mock())
+        return endpoint, renderer
+
+    def _make_request(self, user_template=None, template_key=None):
+        return ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hi")],
+            user_template=user_template,
+            template_key=template_key,
+        )
+
+    def test_warning_is_emitted_once_per_tag(self):
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            for _ in range(3):
+                endpoint._reasoning_format_for_prompt(config, renderer, [1, 2, 3])
+
+        self.assertEqual(mock_logging.warning.call_count, 1)
+
+    def test_switching_templates_on_one_renderer_warns_per_template(self):
+        """template_renderer 实例按请求切换模板（user_template/template_key）：
+        去重键必须带上模板标识，否则后一个无锚点模板的告警会被前一个抑制。"""
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+        request_a = self._make_request(user_template="template-a")
+        request_b = self._make_request(user_template="template-b")
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            endpoint._reasoning_format_for_prompt(config, renderer, [1], request_a)
+            endpoint._reasoning_format_for_prompt(config, renderer, [1], request_b)
+            endpoint._reasoning_format_for_prompt(config, renderer, [1], request_a)
+            endpoint._reasoning_format_for_prompt(config, renderer, [1], request_b)
+
+        self.assertEqual(mock_logging.warning.call_count, 2)
+
+    def test_named_template_key_is_part_of_the_dedup_key(self):
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            for template_key in ("default", "tool_use", "default", "tool_use"):
+                endpoint._reasoning_format_for_prompt(
+                    config,
+                    renderer,
+                    [1],
+                    self._make_request(template_key=template_key),
+                )
+
+        self.assertEqual(mock_logging.warning.call_count, 2)
+
+    def test_concurrent_first_requests_warn_once(self):
+        """gate 的 check-then-set 必须原子：并发首请求不能各刷一条告警。"""
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+        request = self._make_request(user_template="template-a")
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            threads = [
+                threading.Thread(
+                    target=endpoint._reasoning_format_for_prompt,
+                    args=(config, renderer, [1], request),
+                )
+                for _ in range(8)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(mock_logging.warning.call_count, 1)
+
+    def test_anchored_enabled_request_skips_tokenizer_and_warning_lock(self):
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+        request = self._make_request(user_template="anchored-template")
+        request.set_prompt_has_think_anchor(True)
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            endpoint._reasoning_format_for_prompt(config, renderer, [1], request)
+
+        endpoint.tokenizer.encode.assert_not_called()
+        mock_logging.warning.assert_not_called()
+
+    def test_warning_cache_is_bounded_and_does_not_retain_template_bodies(self):
+        endpoint, renderer = self._make_endpoint()
+        config = GenerateConfig(thinking_mode=ThinkingMode.ENABLED)
+
+        with patch("rtp_llm.openai.openai_endpoint.logging"):
+            for index in range(160):
+                endpoint._reasoning_format_for_prompt(
+                    config,
+                    renderer,
+                    [1],
+                    self._make_request(user_template=f"template-{index}"),
+                )
+
+        cache = renderer._enabled_without_anchor_warned_keys
+        self.assertEqual(len(cache), 128)
+        oldest_key = _enabled_without_anchor_warn_key(
+            self._make_request(user_template="template-0"), "<think>"
+        )
+        newest_key = _enabled_without_anchor_warn_key(
+            self._make_request(user_template="template-159"), "<think>"
+        )
+        self.assertNotIn(oldest_key, cache)
+        self.assertIn(newest_key, cache)
+        for key in cache:
+            for digest in (key[1], key[2], key[5]):
+                self.assertTrue(digest is None or isinstance(digest, bytes))
+                if digest is not None:
+                    self.assertEqual(len(digest), 32)
 
 
 if __name__ == "__main__":

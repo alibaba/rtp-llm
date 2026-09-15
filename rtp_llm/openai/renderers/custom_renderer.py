@@ -16,7 +16,10 @@ from rtp_llm.config.generate_config import (
     thinking_mode_from_value,
 )
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
-from rtp_llm.config.response_format import normalize_think_tag
+from rtp_llm.config.response_format import (
+    normalize_think_tag,
+    prompt_ends_with_think_anchor,
+)
 from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -32,6 +35,7 @@ from rtp_llm.openai.api_datatype import (
     CompletionTokensDetails,
     DeltaMessage,
     FinisheReason,
+    GPTToolDefinition,
     PromptTokensDetails,
     RendererInfo,
     RoleEnum,
@@ -94,6 +98,31 @@ def _get_think_config(generate_env_config):
     think_start_tag = normalize_think_tag(generate_env_config.think_start_tag)
     think_end_tag = normalize_think_tag(generate_env_config.think_end_tag)
     return think_mode, think_start_tag, think_end_tag
+
+
+def _strip_boundary_special_ids(tokenizer, word: str, ids: List[int]) -> List[int]:
+    """去掉 legacy 回退编码包在词两端的特殊 token。
+
+    旧式 encode() 默认会追加 BOS/EOS，包着特殊 token 的序列在生成输出中
+    永不出现，注册成停止序列等于静默失效。裁剪时至少保留一个 id，避免把
+    <|endoftext|> 这类本身就是特殊 token 的停止词裁空。
+    """
+    if len(ids) <= 1:
+        return ids
+    special_tokens = getattr(tokenizer, "all_special_tokens", None)
+    if not isinstance(special_tokens, (list, tuple)) or not special_tokens:
+        return ids
+    special_token_ids = tokenizer.convert_tokens_to_ids(list(special_tokens))
+    special_ids = set(special_token_ids)
+    if word in special_tokens:
+        word_id = tokenizer.convert_tokens_to_ids(word)
+        if isinstance(word_id, int) and word_id in ids:
+            return [word_id]
+    while len(ids) > 1 and ids[0] in special_ids:
+        ids.pop(0)
+    while len(ids) > 1 and ids[-1] in special_ids:
+        ids.pop()
+    return ids
 
 
 class StreamStatus:
@@ -399,6 +428,30 @@ class CustomChatRenderer:
                 ids_list.append(token_id)
             else:
                 ids_list.append(self.tokenizer.encode(word, add_special_tokens=True))
+        return ids_list
+
+    def encode_extra_stop_words(self, words: List[str]) -> List[List[int]]:
+        # 停止词必须按当前 tokenizer 反查：写死 id 会在词表不同的 ckpt 上把
+        # 无关 token 变成停止序列。tokenize_words 走 convert_tokens_to_ids，
+        # 对多 token 串会退化成 unk，故此处用 encode。
+        ids_list = []
+        for word in words:
+            try:
+                ids = self.tokenizer.encode(word, add_special_tokens=False)
+            except TypeError:
+                if not getattr(self, "_legacy_tokenizer_warned", False):
+                    self._legacy_tokenizer_warned = True
+                    logging.warning(
+                        "tokenizer %s does not accept add_special_tokens; stop "
+                        "words fall back to plain encode with boundary special "
+                        "tokens trimmed",
+                        type(self.tokenizer).__name__,
+                    )
+                ids = _strip_boundary_special_ids(
+                    self.tokenizer, word, list(self.tokenizer.encode(word))
+                )
+            if ids:
+                ids_list.append(list(ids))
         return ids_list
 
     def get_all_extra_stop_word_ids_list(self) -> List[List[int]]:
@@ -1125,6 +1178,64 @@ class CustomChatRenderer:
     def should_process_think(self, request: ChatCompletionRequest):
         # 留出方法给子类重写, 避免重复的think处理
         return self.in_think_mode(request)
+
+    def _prompt_ends_with_think_anchor(self, rendered_prompt: str) -> bool:
+        return prompt_ends_with_think_anchor(rendered_prompt, self.think_start_tag)
+
+    def _record_prompt_think_anchor(
+        self, request: ChatCompletionRequest, rendered_prompt: str
+    ) -> None:
+        """Record whether the rendered prompt ends with the think anchor.
+
+        The endpoint records this too, but it appends prefill after rendering
+        and re-records afterwards. Here only requests that have never been
+        inspected are filled in, so render paths outside the endpoint
+        (raw/dash_sc style callers) still reach the same gate decision.
+        """
+        if request.prompt_has_think_anchor() is None:
+            request.set_prompt_has_think_anchor(
+                self._prompt_ends_with_think_anchor(rendered_prompt)
+            )
+
+    def _effective_tools(
+        self, request: ChatCompletionRequest
+    ) -> Optional[List[GPTToolDefinition]]:
+        # 工具列表按请求语义收敛：tool_choice=none 时模型不得调用任何工具。
+        if getattr(request, "tool_choice", None) == "none":
+            return None
+        return request.tools
+
+    def _normalize_tools_context(
+        self, request: ChatCompletionRequest, context: Dict[str, Any]
+    ) -> None:
+        """Make the rendered tools match the request's effective tool policy."""
+
+        tools = self._effective_tools(request)
+        if not tools:
+            context.pop("tools", None)
+            return
+        context["tools"] = [
+            tool.model_dump(exclude_none=True, mode="json") for tool in tools
+        ]
+
+    def needs_reasoning_tool_status(self, request: ChatCompletionRequest) -> bool:
+        """Whether the response path needs the tool/reasoning-aware status object.
+
+        The anchor term is what stops a template-injected think block from
+        leaking: with thinking_mode DISABLED and no tools the request config
+        alone says "nothing to parse", while the model is in fact going to
+        think. Only the flag recorded during rendering is consulted here, and
+        every render path fills it in (see _record_prompt_think_anchor), so the
+        gate never renders the prompt itself. A request that no code path has
+        rendered yet keeps the gate shut, which is also why
+        _resolve_think_anchor's fallback render is a safety net for other
+        callers rather than the gate's decision path.
+        """
+        return bool(
+            self._effective_tools(request)
+            or self.in_think_mode(request)
+            or request.prompt_has_think_anchor() is True
+        )
 
     async def render_response_stream(
         self,

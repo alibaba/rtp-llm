@@ -162,7 +162,8 @@ class DeepseekV32Renderer(ReasoningToolBaseRenderer):
 
         # Add tools from request level to the first system message
         # According to encoding_dsv32 format, tools must be attached to a system message
-        if request.tools:
+        active_tools = self._effective_tools(request)
+        if active_tools:
             tools_data = [
                 {
                     "type": "function",
@@ -172,7 +173,7 @@ class DeepseekV32Renderer(ReasoningToolBaseRenderer):
                         "parameters": tool.function.parameters,
                     },
                 }
-                for tool in request.tools
+                for tool in active_tools
             ]
 
             # Find the first system message and add tools to it
@@ -251,7 +252,7 @@ class DeepseekV32Renderer(ReasoningToolBaseRenderer):
         Returns:
             DeepSeekV32Detector if tools are present, None otherwise
         """
-        if request.tools:
+        if self._effective_tools(request):
             # Determine thinking_mode based on whether request is in thinking mode
             thinking_mode = "thinking" if self.in_think_mode(request) else "chat"
 
@@ -266,27 +267,13 @@ class DeepseekV32Renderer(ReasoningToolBaseRenderer):
     def _create_reasoning_parser(
         self, request: ChatCompletionRequest
     ) -> Optional[ReasoningParser]:
-        """
-        Create reasoning parser if in thinking mode.
-
-        Args:
-            request: Chat completion request
-
-        Returns:
-            ReasoningParser if thinking mode is enabled, None otherwise
-        """
-        if not self.in_think_mode(request):
+        # 模板注入了 think 锚点就意味着模型会输出思考内容，此时即便请求侧
+        # thinking_mode 为 DISABLED 也必须建解析器，否则思考块会泄漏进可见回复。
+        anchored = self._resolve_think_anchor(request)
+        if not anchored and not self.in_think_mode(request):
             return None
 
-        try:
-            # Check if the rendered prompt should use thinking mode
-            rendered_result = self.render_chat(request)
-            if "<think>" in rendered_result.rendered_prompt:
-                return ReasoningParser(model_type="deepseek-v3", force_reasoning=True)
-        except Exception:
-            return None
-
-        return None
+        return ReasoningParser(model_type="deepseek-v3", force_reasoning=anchored)
 
 
 register_renderer("deepseek_v32", DeepseekV32Renderer)
