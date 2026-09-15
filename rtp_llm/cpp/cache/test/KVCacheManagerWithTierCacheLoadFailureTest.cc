@@ -122,8 +122,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerHitPermanentCapacityRejectsBefo
     EXPECT_EQ(failed_result.status, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
     EXPECT_EQ(failed_result.async_context, nullptr);
     EXPECT_EQ(failed_result.reuse_len, 0);
-    EXPECT_EQ(failed_result.host_reuse_len, 0);
-    EXPECT_EQ(failed_result.disk_reuse_len, 0);
+
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
         for (int group_id = 0; group_id < cache_config_.groupNums(); ++group_id) {
             EXPECT_EQ(failed_resource->blocksNum(batch_id, group_id), 0u)

@@ -157,6 +157,29 @@ class CacheConfigArgumentsTest(TestCase):
                 with self.subTest(name=name, args=args):
                     self.assertEqual(getattr(config, name), getattr(defaults, name))
 
+    def test_removed_sm_copy_cli_is_rejected(self):
+        # This copy optimization was removed with the old connector. It is
+        # not an alias for the independent disk-cache tier switch.
+        with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with self.assertRaises(SystemExit) as raised:
+                self.parse_cache_config(["--enable_memory_cache_sm_copy", "1"], {})
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn(
+            "unrecognized arguments: --enable_memory_cache_sm_copy", stderr.getvalue()
+        )
+
+    def test_removed_sm_copy_env_does_not_enable_disk_cache(self):
+        defaults = self.parse_cache_config([], {})
+        for value in ("0", "1"):
+            for args in (None, []):
+                with self.subTest(value=value, args=args):
+                    config = self.parse_cache_config(
+                        args, {"ENABLE_MEMORY_CACHE_SM_COPY": value}
+                    )
+                    self.assertFalse(hasattr(config, "enable_memory_cache_sm_copy"))
+                    self.assertEqual(config.__getstate__(), defaults.__getstate__())
+                    self.assertFalse(config.enable_disk_cache)
+
     def test_memory_names_match_config_attributes_and_pickle(self):
         from rtp_llm.ops import KVCacheConfig
         from rtp_llm.server.server_args.kv_cache_group_args import (

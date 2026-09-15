@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
@@ -100,7 +101,7 @@ GroupSetPtr createGroupSet(const GroupBase&                group,
                 std::make_shared<LinearGroupSet>(std::move(device_pools), std::move(host_pool), std::move(disk_pool));
             break;
         case CacheGroupType::SWA: {
-            const auto seq_size = group.seq_size_per_block;
+            const auto seq_size = group.cacheKeyTokenStride();
             RTP_LLM_CHECK_WITH_INFO(seq_size > 0 && seq_size <= static_cast<size_t>(std::numeric_limits<int>::max()),
                                     "SWA group_id=%zu has invalid seq_size_per_block=%zu",
                                     group_id,
@@ -393,14 +394,18 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         group_pools[static_cast<size_t>(group_id)] = std::move(pool);
     }
 
-    const bool host_enabled = kv_cache_config.enable_memory_cache;
-    const bool disk_enabled = kv_cache_config.enable_disk_cache;
-    if (host_enabled && kv_cache_config.memory_cache_size_mb <= 0) {
-        RTP_LLM_LOG_ERROR("memory cache size must be positive");
+    const bool       host_enabled = kv_cache_config.enable_memory_cache;
+    const bool       disk_enabled = kv_cache_config.enable_disk_cache;
+    constexpr size_t bytes_per_mb = 1024UL * 1024UL;
+    const auto       valid_budget = [](int64_t mb) {
+        return mb > 0 && static_cast<uint64_t>(mb) <= std::numeric_limits<size_t>::max() / bytes_per_mb;
+    };
+    if (host_enabled && !valid_budget(kv_cache_config.memory_cache_size_mb)) {
+        RTP_LLM_LOG_ERROR("memory cache size must be positive and fit in bytes");
         return nullptr;
     }
-    if (disk_enabled && kv_cache_config.disk_cache_size_mb <= 0) {
-        RTP_LLM_LOG_ERROR("disk cache size must be positive");
+    if (disk_enabled && !valid_budget(kv_cache_config.disk_cache_size_mb)) {
+        RTP_LLM_LOG_ERROR("disk cache size must be positive and fit in bytes");
         return nullptr;
     }
 
@@ -483,6 +488,19 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         }
     }
 
+    // Canonical CP keys cover a virtual token block. Keep the physical layout
+    // unchanged and publish the key stride only to cache matching/remote storage.
+    auto cache_topology = cache_config.topologyPtr();
+    if (const auto mapper = allocator->cpSlotMapper(); mapper && mapper->isSharded()) {
+        auto         groups  = cache_topology->groups();
+        const size_t cp_size = static_cast<size_t>(mapper->cpSize());
+        RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block <= std::numeric_limits<size_t>::max() / cp_size,
+                                "canonical CP cache key stride overflow");
+        for (auto& group : groups) {
+            group.cache_key_token_stride = cache_config.seq_size_per_block * cp_size;
+        }
+        cache_topology = CacheTopology::create(std::move(groups), cache_topology->layers());
+    }
     group_sets.reserve(group_members.size());
     for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
         const std::vector<int>&         members = group_members[group_set_id];
@@ -494,13 +512,13 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             device_pools.push_back(group_pools[static_cast<size_t>(group_id)]);
             group_ids.push_back(static_cast<size_t>(group_id));
         }
-        const auto& first     = cache_config.topology().groupById(group_ids.front());
+        const auto& first     = cache_topology->groupById(group_ids.front());
         auto        group_set = createGroupSet(first,
                                         group_ids.front(),
                                         std::move(device_pools),
                                         std::move(host_pools[group_set_id]),
                                         std::move(disk_pools[group_set_id]));
-        group_set->initialize(group_set_id, cache_config.topologyPtr(), std::move(group_ids));
+        group_set->initialize(group_set_id, cache_topology, std::move(group_ids));
         RTP_LLM_LOG_INFO(
             "group_set[%zu] membership sealed: payload_bytes=%zu", group_set_id, group_set->payloadBytes());
         group_sets.push_back(std::move(group_set));
@@ -619,7 +637,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                                    std::move(task_pool),
                                                    std::move(cache_metrics_reporter));
     if (result->isRemoteCacheEnabled()) {
-        const std::shared_ptr<const CacheTopology> storage_topology = cache_config.topologyPtr();
+        const std::shared_ptr<const CacheTopology> storage_topology = cache_topology;
         const std::vector<DeviceBlockPoolPtr>      resolver_pools   = group_pools;
         RTP_LLM_CHECK_WITH_INFO(result->storageBackend()->init(
                                     storage_topology,

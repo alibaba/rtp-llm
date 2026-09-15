@@ -31,8 +31,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DevicePrefixHitKeepsLowerTiersUntouc
     const auto result               = manager_->malloc(malloc_info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, 2 * static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(result.host_reuse_len, 0);
-    EXPECT_EQ(result.disk_reuse_len, 0);
+
     EXPECT_EQ(result.async_context, nullptr);
 
     for (int group_id = 0; group_id < cache_config_.groupNums(); ++group_id) {
@@ -219,8 +218,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
     const auto   first_result             = manager_->malloc(first_info);
     ASSERT_TRUE(first_result.success);
     EXPECT_EQ(first_result.reuse_len, 0);
-    EXPECT_EQ(first_result.host_reuse_len, 0);
-    EXPECT_EQ(first_result.disk_reuse_len, 0);
+
     ASSERT_NE(first_result.async_context, nullptr);
     const bool first_load_entered = pausable_engine->waitUntilEnteredFor(
         std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
@@ -259,8 +257,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
     EXPECT_FALSE(second_result.success);
     EXPECT_EQ(second_result.async_context, nullptr);
     EXPECT_EQ(second_result.reuse_len, 0);
-    EXPECT_EQ(second_result.host_reuse_len, 0);
-    EXPECT_EQ(second_result.disk_reuse_len, 0);
+
     for (int group_id = 0; group_id < cache_config_.groupNums(); ++group_id) {
         EXPECT_EQ(second_resource->blocksNum(0, group_id), 0u) << "group=" << group_id;
     }
@@ -331,8 +328,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalseStillMatchesResidentP
     // blocks. Device-tree lookup is independently gated by
     // enable_device_cache, so a resident prefix remains reusable here.
     EXPECT_EQ(result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(result.host_reuse_len, 0);
-    EXPECT_EQ(result.disk_reuse_len, 0);
+
     EXPECT_EQ(result.async_context, nullptr);
     ASSERT_TRUE(
         requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, resource, /*logical_reuse_blocks=*/1));
@@ -428,8 +424,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerTierMatchPublishesAsyncContext)
     auto result              = manager_->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, 0);
-    EXPECT_EQ(result.host_reuse_len, 0);
-    EXPECT_EQ(result.disk_reuse_len, 0);
+
     ASSERT_NE(result.async_context, nullptr);
     result.async_context->waitDone();
     ASSERT_TRUE(result.async_context->success()) << result.async_context->errorInfo().ToString();
@@ -501,8 +496,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
     const auto result        = manager_->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, 0);
-    EXPECT_EQ(result.host_reuse_len, 0);
-    EXPECT_EQ(result.disk_reuse_len, 0);
+
     ASSERT_NE(result.async_context, nullptr);
 
     const bool entered =

@@ -36,10 +36,10 @@ struct StorageTaskState {
         BlockIdxType       block;
     };
 
-    StorageRequest          request;
-    std::vector<Pin>        pins;
-    std::once_flag          finish_once;
-    void finish() {
+    StorageRequest   request;
+    std::vector<Pin> pins;
+    std::once_flag   finish_once;
+    void             finish() {
         std::call_once(finish_once, [this] {
             for (const Pin& pin : pins) {
                 pin.pool->decRef(pin.block);
@@ -88,11 +88,15 @@ StorageBackend::~StorageBackend() {
 bool StorageBackend::init(std::shared_ptr<const CacheTopology> topology,
                           std::vector<DeviceBlockPoolPtr>      device_pools,
                           BufferResolver                       buffer_resolver) {
-    RTP_LLM_CHECK_WITH_INFO(!topology_, "StorageBackend is already initialized");
+    if (init_attempted_) {
+        RTP_LLM_LOG_ERROR("StorageBackend initialization has already been attempted");
+        return false;
+    }
     RTP_LLM_CHECK(topology && device_pools.size() == topology->groups().size() && buffer_resolver);
     for (const auto& pool : device_pools) {
         RTP_LLM_CHECK(pool != nullptr);
     }
+    init_attempted_ = true;
     if (executor_ == nullptr) {
         executor_ = makeDefaultStorageBackendExecutor();
     }
@@ -100,11 +104,24 @@ bool StorageBackend::init(std::shared_ptr<const CacheTopology> topology,
         RTP_LLM_LOG_ERROR("StorageBackend executor cannot be shared between backends");
         return false;
     }
-    topology_        = std::move(topology);
-    device_pools_    = std::move(device_pools);
-    buffer_resolver_ = std::move(buffer_resolver);
-    if (!initImpl()) {
+    topology_            = std::move(topology);
+    device_pools_        = std::move(device_pools);
+    buffer_resolver_     = std::move(buffer_resolver);
+    const auto fail_init = [this] {
+        shutdownImpl();
+        buffer_resolver_ = {};
+        device_pools_.clear();
+        topology_.reset();
         return false;
+    };
+    bool impl_initialized = false;
+    try {
+        impl_initialized = initImpl();
+    } catch (...) {}
+    if (!impl_initialized) {
+        // The executor has never started and may still be used by another backend.
+        executor_->bound_to_backend_.store(false);
+        return fail_init();
     }
     bool started = false;
     try {
@@ -112,7 +129,8 @@ bool StorageBackend::init(std::shared_ptr<const CacheTopology> topology,
     } catch (...) {}
     if (!started) {
         executor_->shutdown();
-        return false;
+        // Keep the binding: shutdown executors are terminal and must not be reused.
+        return fail_init();
     }
     initialized_ = true;
     {

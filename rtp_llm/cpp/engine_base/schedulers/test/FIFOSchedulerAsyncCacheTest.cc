@@ -2,6 +2,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <stdexcept>
 #include <thread>
 #include <unordered_map>
 
@@ -41,7 +42,9 @@ std::shared_ptr<LoadAsyncContext> makeControlledAllocatorContext() {
                                                                    Tier::DEVICE,
                                                                    BlockIndicesType{1}}};
     auto context = coordinator->create(std::move(descriptors), {false}, /*matched_blocks=*/1);
-    EXPECT_TRUE(coordinator->registerContext(context));
+    if (!coordinator->registerContext(context)) {
+        throw std::runtime_error("failed to register controlled allocator context");
+    }
     return context;
 }
 

@@ -585,6 +585,11 @@ TEST(StorageBackendTest, ExecutorStartFailurePropagatesFromInit) {
     auto        executor = std::make_shared<HoldingExecutor>(/*start_result=*/false);
     TestBackend backend(/*init_result=*/true, executor);
     EXPECT_FALSE(initBackend(backend, pool));
+    EXPECT_FALSE(initBackend(backend, pool));
+    EXPECT_EQ(backend.initCalls(), 1u);
+    TestBackend other(true, executor);
+    EXPECT_FALSE(initBackend(other, pool));
+    EXPECT_EQ(other.initCalls(), 0u);
 }
 
 TEST(StorageBackendTest, SubmissionFailureCompletesOnceAndReleasesPins) {
@@ -656,12 +661,12 @@ TEST(StorageBackendTest, IoExceptionsPropagateFailureAndReleasePins) {
 
 TEST(StorageBackendTest, AsyncWritesReturnBeforeCompletionAndReleaseOnlyTheirOwnPins) {
     for (bool complete_first : {true, false}) {
-        auto pool = std::make_shared<TestBlockPool>();
-        auto first_block = pool->malloc().value();
+        auto pool         = std::make_shared<TestBlockPool>();
+        auto first_block  = pool->malloc().value();
         auto second_block = pool->malloc().value();
         pool->incRef(first_block);
         pool->incRef(second_block);
-        auto executor = std::make_shared<HoldingExecutor>();
+        auto        executor = std::make_shared<HoldingExecutor>();
         TestBackend backend(true, executor);
         ASSERT_TRUE(initBackend(backend, pool));
         EXPECT_TRUE(backend.write(backend.prepareWrite(makeRequest(first_block))));
@@ -681,12 +686,11 @@ TEST(StorageBackendTest, AsyncWritesReturnBeforeCompletionAndReleaseOnlyTheirOwn
     }
 }
 
-
 TEST(StorageBackendTest, AsyncWriteFailuresAndRejectionReleasePins) {
-    auto pool = std::make_shared<TestBlockPool>();
+    auto pool  = std::make_shared<TestBlockPool>();
     auto block = pool->malloc().value();
     pool->incRef(block);
-    auto executor = std::make_shared<HoldingExecutor>();
+    auto        executor = std::make_shared<HoldingExecutor>();
     TestBackend backend(true, executor);
     ASSERT_TRUE(initBackend(backend, pool));
     backend.failNextWrite();
@@ -707,7 +711,6 @@ TEST(StorageBackendTest, AsyncWriteFailuresAndRejectionReleasePins) {
     EXPECT_EQ(pool->refCount(block), 1u);
     pool->decRef(block);
 }
-
 
 TEST(StorageBackendTest, AsyncWriteDuringStoppingIsRejectedAndReleasesPins) {
     auto pool  = std::make_shared<TestBlockPool>();
@@ -753,15 +756,15 @@ TEST(StorageBackendTest, AsyncWriteDuringStoppingIsRejectedAndReleasesPins) {
 }
 
 TEST(StorageBackendTest, AsyncWriteFromOwnCallbacksQueuesWithoutBlocking) {
-    auto pool = std::make_shared<TestBlockPool>();
+    auto pool  = std::make_shared<TestBlockPool>();
     auto block = pool->malloc().value();
     pool->incRef(block);
-    auto executor = std::make_shared<HoldingExecutor>();
+    auto        executor = std::make_shared<HoldingExecutor>();
     TestBackend backend(true, executor);
     ASSERT_TRUE(initBackend(backend, pool));
     for (bool read : {false, true}) {
         bool called = false;
-        auto done = [&](bool success) {
+        auto done   = [&](bool success) {
             EXPECT_TRUE(success);
             EXPECT_TRUE(backend.write(backend.prepareWrite(makeRequest(block))));
             called = true;
@@ -781,7 +784,6 @@ TEST(StorageBackendTest, AsyncWriteFromOwnCallbacksQueuesWithoutBlocking) {
     backend.shutdown();
     pool->decRef(block);
 }
-
 
 TEST(StorageBackendTest, DuplicateExecutorInvocationCompletesExactlyOnce) {
     auto pool  = std::make_shared<TestBlockPool>();
@@ -934,6 +936,30 @@ TEST(StorageBackendTest, InitPropagatesDerivedFailure) {
 
     EXPECT_FALSE(initBackend(backend, pool));
     EXPECT_EQ(backend.initCalls(), 1u);
+    EXPECT_FALSE(initBackend(backend, pool));
+    EXPECT_EQ(backend.initCalls(), 1u);
+}
+
+TEST(StorageBackendTest, InvalidArgumentsDoNotConsumeInitializationAttempt) {
+    auto        pool = std::make_shared<TestBlockPool>();
+    TestBackend backend;
+    const auto  resolver = [](int, int, int) { return std::vector<BlockInfo>{}; };
+    EXPECT_ANY_THROW(backend.init(nullptr, {}, resolver));
+    EXPECT_ANY_THROW(backend.init(makeTopology(), {}, resolver));
+    EXPECT_ANY_THROW(backend.init(makeTopology(), {nullptr}, resolver));
+    EXPECT_EQ(backend.initCalls(), 0u);
+    ASSERT_TRUE(initBackend(backend, pool));
+    backend.shutdown();
+}
+
+TEST(StorageBackendTest, FailedDerivedInitReleasesUnusedExecutorBinding) {
+    auto        pool     = std::make_shared<TestBlockPool>();
+    auto        executor = std::make_shared<HoldingExecutor>();
+    TestBackend failed(false, executor);
+    EXPECT_FALSE(initBackend(failed, pool));
+    TestBackend other(true, executor);
+    ASSERT_TRUE(initBackend(other, pool));
+    other.shutdown();
 }
 
 TEST(StorageBackendTest, WritePinsEachPhysicalBlockOnceUntilCompletion) {

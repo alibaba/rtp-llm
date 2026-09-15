@@ -19,7 +19,7 @@ size_t GroupBase::reuseBlockCount(size_t matched_block_count) const {
             }
             const size_t window = static_cast<size_t>(policy.sliding_window_size);
             return std::min(matched_block_count,
-                            window / seq_size_per_block + (window % seq_size_per_block != 0));
+                            window / cacheKeyTokenStride() + (window % cacheKeyTokenStride() != 0));
     }
     return 0;
 }

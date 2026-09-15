@@ -101,19 +101,12 @@ struct MallocResult {
                status == MallocStatus::NONE ? MallocStatus::INTERNAL_ERROR :
                                               status) {}
 
-    MallocResult(bool                          success,
-                 int                           reuse_len,
-                 int64_t                       match_cost_time_us,
-                 std::shared_ptr<AsyncContext> async_context,
-                 int                           host_reuse_len = 0,
-                 int                           disk_reuse_len = 0):
+    MallocResult(bool success, int reuse_len, int64_t match_cost_time_us, std::shared_ptr<AsyncContext> async_context):
         success(success),
         reuse_len(reuse_len),
         match_cost_time_us(match_cost_time_us),
         status(success ? MallocStatus::NONE : MallocStatus::INTERNAL_ERROR),
-        async_context(std::move(async_context)),
-        host_reuse_len(host_reuse_len),
-        disk_reuse_len(disk_reuse_len) {}
+        async_context(std::move(async_context)) {}
 
     bool         success            = false;
     int          reuse_len          = 0;
@@ -122,8 +115,7 @@ struct MallocResult {
 
     std::shared_ptr<AsyncContext> async_context = nullptr;
 
-    int host_reuse_len = 0;
-    int disk_reuse_len = 0;
+    // Lower-tier reuse is published only after async_context completes.
 
     int64_t match_end_time_us          = 0;
     int64_t malloc_begin_time_us       = 0;

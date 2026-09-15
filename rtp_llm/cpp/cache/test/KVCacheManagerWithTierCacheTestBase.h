@@ -1742,8 +1742,7 @@ protected:
         const auto failed_result        = manager_->malloc(failed_info);
         ASSERT_TRUE(failed_result.success);
         EXPECT_EQ(failed_result.reuse_len, 0);
-        EXPECT_EQ(failed_result.host_reuse_len, 0);
-        EXPECT_EQ(failed_result.disk_reuse_len, 0);
+
         ASSERT_NE(failed_result.async_context, nullptr);
         const bool failure_entered = pausable_engine->waitUntilEnteredFor(
             std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
@@ -1848,8 +1847,7 @@ protected:
         const auto retry_result        = manager_->malloc(retry_info);
         ASSERT_TRUE(retry_result.success);
         EXPECT_EQ(retry_result.reuse_len, 0);
-        EXPECT_EQ(retry_result.host_reuse_len, 0);
-        EXPECT_EQ(retry_result.disk_reuse_len, 0);
+
         ASSERT_NE(retry_result.async_context, nullptr);
         const bool retry_entered = pausable_engine->waitUntilEnteredFor(
             std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
@@ -1973,8 +1971,7 @@ protected:
         const auto   first_result        = manager_->malloc(first_info);
         ASSERT_TRUE(first_result.success);
         EXPECT_EQ(first_result.reuse_len, 0);
-        EXPECT_EQ(first_result.host_reuse_len, 0);
-        EXPECT_EQ(first_result.disk_reuse_len, 0);
+
         ASSERT_NE(first_result.async_context, nullptr);
         const bool entered = engine->waitUntilEnteredCountFor(
             cache->groupSets().size(), std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
@@ -2030,8 +2027,7 @@ protected:
         const auto second_result        = manager_->malloc(second_info);
         ASSERT_TRUE(second_result.success);
         EXPECT_EQ(second_result.reuse_len, 0);
-        EXPECT_EQ(second_result.host_reuse_len, 0);
-        EXPECT_EQ(second_result.disk_reuse_len, 0);
+
         ASSERT_NE(second_result.async_context, nullptr);
         EXPECT_FALSE(second_result.async_context->done());
         EXPECT_EQ(engine->submittedDescriptorCount(), submits_before_join);
@@ -2173,8 +2169,7 @@ protected:
             const auto retry_result        = manager_->malloc(retry_info);
             ASSERT_TRUE(retry_result.success);
             EXPECT_EQ(retry_result.reuse_len, 0);
-            EXPECT_EQ(retry_result.host_reuse_len, 0);
-            EXPECT_EQ(retry_result.disk_reuse_len, 0);
+
             ASSERT_NE(retry_result.async_context, nullptr);
             ASSERT_TRUE(
                 waitForAsyncContextDoneFor(retry_result.async_context,
