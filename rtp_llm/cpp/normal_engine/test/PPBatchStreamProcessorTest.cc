@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPSerialization.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace rtp_llm {
 
@@ -88,22 +89,27 @@ public:
     std::vector<torch::Tensor> committed_tokens;
 };
 
-class CompletedPPTicket: public PPCommTicket {
+class InMemoryP2PWork final: public P2PWork {
 public:
-    using PPCommTicket::PPCommTicket;
+    explicit InMemoryP2PWork(torch::Tensor tensor): tensor_(std::move(tensor)) {}
+
+    /** The test transport copies CPU tensors before returning the ticket. */
     void wait() override {}
+
+private:
+    torch::Tensor tensor_;
 };
 
 class InMemoryPPTransport: public PPTransport {
 public:
     std::unique_ptr<PPCommTicket> asyncSend(const torch::Tensor& tensor) override {
         sent_tensors.push_back(tensor.clone());
-        return std::make_unique<CompletedPPTicket>(tensor);
+        return std::make_unique<PPCommTicket>(std::make_unique<InMemoryP2PWork>(tensor));
     }
 
     std::unique_ptr<PPCommTicket> asyncReceive(torch::Tensor& tensor) override {
         tensor.copy_(received_tensors.at(receive_index++));
-        return std::make_unique<CompletedPPTicket>(tensor);
+        return std::make_unique<PPCommTicket>(std::make_unique<InMemoryP2PWork>(tensor));
     }
 
     std::vector<torch::Tensor> received_tensors;

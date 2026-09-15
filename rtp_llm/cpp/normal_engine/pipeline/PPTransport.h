@@ -7,36 +7,41 @@
 
 namespace rtp_llm {
 
+class P2PWork;
+
 class PPCommTicket {
 public:
-    explicit PPCommTicket(const torch::Tensor& tensor): tensor_(tensor) {}
+    explicit PPCommTicket(std::unique_ptr<P2PWork> work);
 
-    virtual ~PPCommTicket() = default;
+    ~PPCommTicket();
 
-    // CUDA tensors: make the caller's current stream wait for completion.
-    // CPU tensors: block the calling thread until the bytes arrive.
-    virtual void wait() = 0;
+    /**
+     * Different behaviors for CPU or CUDA：
+     * 1. CPU waits for local completion
+     * 2. CUDA enqueues a wait on the tensor device's current stream and will not block the CPU.
+     * P2PWork is released after wait() returns; subsequent calls are no-ops.
+     */
+    void wait();
 
-protected:
-    torch::Tensor tensor_;
+private:
+    std::unique_ptr<P2PWork> work_;
 };
 
 class PPTransport {
 public:
     virtual ~PPTransport() = default;
 
-    // CUDA tensors observe the caller's current stream: a send depends on prior work on it.
     virtual std::unique_ptr<PPCommTicket> asyncSend(const torch::Tensor& tensor) = 0;
     virtual std::unique_ptr<PPCommTicket> asyncReceive(torch::Tensor& tensor)    = 0;
 };
 
-// Routes by tensor device: CUDA to the NCCL lane group, CPU to its gloo twin.
-class NcclPPTransport final: public PPTransport {
+/** Routes by tensor device: CUDA to the NCCL lane group, CPU to its gloo twin. */
+class TorchDistributedPPTransport final: public PPTransport {
 public:
-    NcclPPTransport(int64_t previous_rank, int64_t next_rank);
+    TorchDistributedPPTransport(int64_t previous_rank, int64_t next_rank);
 
-    NcclPPTransport(const NcclPPTransport&)            = delete;
-    NcclPPTransport& operator=(const NcclPPTransport&) = delete;
+    TorchDistributedPPTransport(const TorchDistributedPPTransport&)            = delete;
+    TorchDistributedPPTransport& operator=(const TorchDistributedPPTransport&) = delete;
 
     std::unique_ptr<PPCommTicket> asyncSend(const torch::Tensor& tensor) override;
     std::unique_ptr<PPCommTicket> asyncReceive(torch::Tensor& tensor) override;

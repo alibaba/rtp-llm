@@ -125,7 +125,7 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
                             propose_step_);
 
     if (!warm_up_) {
-        transport_ = std::make_unique<NcclPPTransport>(pp_layout_.prevRank(), pp_layout_.nextRank());
+        transport_ = std::make_unique<TorchDistributedPPTransport>(pp_layout_.prevRank(), pp_layout_.nextRank());
     }
 
     enable_detail_log_ = params.profiling_debug_logging_config.enable_detail_log;
@@ -687,7 +687,8 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     /** 2. do the sync across the all ranks in the same stage. */
     tpSyncModelInputs(plan.model_input, parallelism_config_);
 
-    /** 3. make sure the current slot is ready. */
+    /** 3. Wait on this slot's previous sends before resetting it. CUDA waits order subsequent operations on the current
+     * stream after communication. */
     auto& inflight = slots_[current_slot_];
     waitAll(inflight.plan_sends);
     waitAll(inflight.activation_sends);
