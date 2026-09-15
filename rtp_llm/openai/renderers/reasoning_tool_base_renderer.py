@@ -100,10 +100,26 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         """创建Resoning解析器，子类可选实现"""
         return None
 
-    def _effective_tools(
-        self, request: ChatCompletionRequest
-    ) -> Optional[List[GPTToolDefinition]]:
-        return request.tools
+    def _resolve_think_anchor(self, request: ChatCompletionRequest) -> bool:
+        """Whether the template injected a think anchor at the end of the prompt.
+
+        Both the endpoint and render_chat record this while rendering, so the
+        common path costs nothing. Requests that reach this point unrecorded
+        (constructed by a caller that renders elsewhere) fall back to rendering
+        here, which is why this stays tolerant of render failures; the probed
+        value is cached on the request so sibling renderers reuse it.
+        """
+        recorded = request.prompt_has_think_anchor()
+        if recorded is not None:
+            return recorded
+        try:
+            rendered_result = self.render_chat(request)
+        except Exception as e:
+            logging.error(f"Failed to render chat while resolving think anchor: {e}")
+            return False
+        anchor = self._prompt_ends_with_think_anchor(rendered_result.rendered_prompt)
+        request.set_prompt_has_think_anchor(anchor)
+        return anchor
 
     @override
     def should_process_think(self, request: ChatCompletionRequest):
@@ -115,7 +131,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         self, n: int, request: ChatCompletionRequest
     ) -> List[StreamStatus]:
         """创建状态列表"""
-        if (request.tools or self.in_think_mode(request)) and not request.logprobs:
+        if self.needs_reasoning_tool_status(request):
             return [
                 ReasoningToolStreamStatus(
                     request,
@@ -124,15 +140,15 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                 )
                 for _ in range(n)
             ]
-        else:
-            # logprobs模式下使用普通StreamStatus
-            return [StreamStatus(request) for _ in range(n)]
+        return [StreamStatus(request) for _ in range(n)]
 
     @override
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         """渲染聊天请求"""
         prompt: str = self._build_prompt(request)
         input_ids: List[int] = self.tokenizer.encode(prompt)
+        # 渲染即记录锚点：响应侧的门控只认这个标记，非 endpoint 链路也必须填。
+        self._record_prompt_think_anchor(request, prompt)
         return RenderedInputs(input_ids=input_ids, rendered_prompt=prompt)
 
     def _build_prompt(self, request: ChatCompletionRequest) -> str:
@@ -161,6 +177,10 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             and isinstance(request.extra_configs.chat_template_kwargs, dict)
         ):
             context.update(request.extra_configs.chat_template_kwargs)
+
+        # Apply after all user-controlled template kwargs so tool_choice=none
+        # cannot reintroduce tools into the model prompt.
+        self._normalize_tools_context(request, context)
 
         # 创建Jinja2环境
         env = Environment(

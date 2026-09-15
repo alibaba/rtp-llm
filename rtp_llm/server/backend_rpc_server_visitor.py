@@ -7,13 +7,27 @@ from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
 
 import torch
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.exceptions import (
+    ExceptionCategory,
+    ExceptionType,
+    FtRuntimeException,
+)
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
+from rtp_llm.config.response_format_compiler import (
+    recompile_reasoning_envelope,
+    update_reasoning_envelope_budget,
+    uses_reasoning_envelope,
+)
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
-from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
+from rtp_llm.ops import (
+    SpeculativeExecutionConfig,
+    SpeculativeType,
+    VitSeparation,
+    get_block_cache_keys,
+)
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
@@ -31,6 +45,7 @@ from rtp_llm.utils.base_model_datatypes import (
     RequestInfo,
 )
 from rtp_llm.utils.time_util import Timer
+from rtp_llm.utils.util import str_to_bool
 
 if TYPE_CHECKING:
     from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -41,6 +56,39 @@ route_logger = logging.getLogger("route_logger")
 def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
     """Return the set of human-readable role names from a list of RoleAddr."""
     return {role_addr.role.name for role_addr in role_addrs}
+
+
+def _speculative_reserve_tokens(
+    sp_config: Optional[SpeculativeExecutionConfig],
+) -> int:
+    """Mirror the speculative reserve used by ``GenerateStream::maxTokenNum``.
+
+    Source mapping: ``NormalEngine.cc`` sets ``reserve_step`` to ``3 * gamma``
+    for DSpARK and ``gamma + 1`` otherwise; ``GenerateStream.cc`` takes its max
+    with the async output-buffer reserve ``2 * gamma + 1``. Keep the branch
+    tests below in sync with those two C++ symbols; SpeculativeReserveSyncTest
+    pins these branches against the C++ literals, so a C++ change must update
+    that table consciously.
+    """
+
+    sp_type = (
+        getattr(sp_config, "type", SpeculativeType.NONE)
+        if sp_config is not None
+        else SpeculativeType.NONE
+    )
+    if (
+        sp_config is None
+        or not getattr(sp_config, "model_type", "")
+        or sp_type in (None, "", SpeculativeType.NONE)
+    ):
+        return 0
+
+    gamma = max(0, int(getattr(sp_config, "gen_num_per_cycle", 0) or 0))
+    if sp_type == SpeculativeType.DSPARK:
+        return 3 * gamma
+    if str_to_bool(os.environ.get("RTP_LLM_STREAM_ASYNC", "0") or "0"):
+        return 2 * gamma + 1
+    return gamma + 1
 
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
@@ -55,6 +103,26 @@ _TERMINAL_ROUTE_EXCEPTION_TYPES = frozenset(
         # Retrying it with a new request id silently starts a second admission
         # attempt with a fresh identity and can hide the original timeout.
         ExceptionType.BATCH_SLO_EXPIRED,
+    }
+)
+# 8xxx 里的取消与永久性请求错误不是瞬态路由故障：换个 request id 重试会违背取消
+# 语义，或把注定失败的请求再提交一遍（BAD_REQUEST 等类别）。
+# 取消语义按错误码逐一钉住，而不是拉黑整个 CANCELLED 类别：
+# P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED(8317) 与
+# P2P_CONNECTOR_WORKER_READ_CANCELLED(8323) 同为 CANCELLED 类别，但它们是 worker
+# 抢占/重启/连接拆除引起的瞬态读取消，换 request id 重试正是恢复手段。
+_NON_RETRYABLE_ROUTE_EXCEPTION_TYPES = frozenset(
+    {
+        int(ExceptionType.CANCELLED),
+        int(ExceptionType.ROUTER_REQUEST_CANCELLED),
+    }
+)
+_NON_RETRYABLE_ROUTE_CATEGORIES = frozenset(
+    {
+        ExceptionCategory.BAD_REQUEST,
+        ExceptionCategory.UNSUPPORTED,
+        ExceptionCategory.TOO_LONG,
+        ExceptionCategory.INVALID_OUTPUT,
     }
 )
 
@@ -177,6 +245,17 @@ class BackendRPCServerVisitor:
                     exception_type == int(terminal_type)
                     for terminal_type in _TERMINAL_ROUTE_EXCEPTION_TYPES
                 ):
+                    return False
+                # Cancellation and permanent request errors carry 8xxx codes too,
+                # but they are not transient: a retry under a new request id
+                # would defeat the cancel or re-submit a doomed request.
+                if exception_type in _NON_RETRYABLE_ROUTE_EXCEPTION_TYPES:
+                    return False
+                try:
+                    category = ExceptionType(exception_type).category
+                except ValueError:
+                    category = None
+                if category in _NON_RETRYABLE_ROUTE_CATEGORIES:
                     return False
                 return exception_type >= 8000
             except (TypeError, ValueError):
@@ -585,6 +664,73 @@ class BackendRPCServerVisitor:
                 f"model max tokens is {self.max_seq_len}, "
                 f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
             )
+
+        config = input.generate_config
+        if not uses_reasoning_envelope(config):
+            return
+
+        # GenerateStream::maxTokenNum() reserves the current speculative draft
+        # window. Mirror that boundary here before rebuilding the grammar.
+        speculative_reserve = _speculative_reserve_tokens(self.sp_config)
+
+        max_new_tokens = min(
+            self.max_seq_len - input.prompt_length - speculative_reserve,
+            config.max_new_tokens,
+        )
+        if max_new_tokens <= 0:
+            raise FtRuntimeException(
+                ExceptionType.LONG_PROMPT_ERROR,
+                f"model max tokens is {self.max_seq_len}, request length is "
+                f"{input.prompt_length}, speculative reserve is "
+                f"{speculative_reserve}, max_new_tokens is {max_new_tokens}",
+            )
+
+        # 空 end 标记只让引擎侧的强制收尾（ThinkModeLogitsProcessor 的
+        # has_think_budget 需要非空 DFA）退化为 no-op，reasoning 语法仍按
+        # max_thinking_tokens 约束思考段，请求照常可服务：与 validate() 以及
+        # ADAPTIVE 空 begin 标记「告警不拒绝」的口径一致，不按输入非法拒绝，
+        # 结束标记长度按 0 计入收敛。
+        end_think_token_ids = getattr(config, "end_think_token_ids", None) or []
+
+        max_thinking_tokens = getattr(config, "max_thinking_tokens", None)
+        end_tag_len = len(end_think_token_ids)
+        # Reserve the complete end tag and one following token so the grammar
+        # can enter its final-answer branch and EOS remains reachable.
+        think_budget_cap = max_new_tokens - end_tag_len - 1
+        if think_budget_cap < 1:
+            raise FtRuntimeException(
+                ExceptionType.LONG_PROMPT_ERROR,
+                "remaining generation space cannot fit a positive thinking "
+                f"budget, the {end_tag_len}-token think end tag, and a final "
+                f"token (generatable_tokens={max_new_tokens})",
+            )
+        if max_thinking_tokens is not None and max_thinking_tokens > think_budget_cap:
+            # 显式性标记由 endpoint 写在同一个 config 实例上：endpoint 与
+            # visitor 同在 Python 前端进程，trans_input 序列化发生在
+            # _validate_input 之后，标记在这里仍然可读。
+            budget_was_explicit = "max_thinking_tokens" in getattr(
+                config, "model_fields_set", set()
+            ) or getattr(config, "_max_thinking_tokens_was_explicit", False)
+            if budget_was_explicit:
+                logging.warning(
+                    "max_thinking_tokens %d exceeds the safe thinking budget "
+                    "%d (generatable_tokens=%d, think_end_tag_tokens=%d, "
+                    "speculative_reserve=%d, max_seq_len=%d, prompt_length=%d); "
+                    "clamping and rebuilding the reasoning grammar",
+                    max_thinking_tokens,
+                    think_budget_cap,
+                    max_new_tokens,
+                    end_tag_len,
+                    speculative_reserve,
+                    self.max_seq_len,
+                    input.prompt_length,
+                )
+            config.max_thinking_tokens = think_budget_cap
+            # 预算收敛只改 reasoning 段的 max_tokens 一个标量：默认预算下每个
+            # thinking 请求都会走进来，原地更新避免整包重编译；形状不是编译器
+            # 产物时回退到全量重编译。
+            if not update_reasoning_envelope_budget(config, think_budget_cap):
+                recompile_reasoning_envelope(config)
 
     @torch.inference_mode()
     async def enqueue(

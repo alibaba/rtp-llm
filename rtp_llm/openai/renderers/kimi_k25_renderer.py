@@ -91,6 +91,7 @@ class KimiK25Renderer(KimiK2Renderer):
 
         prompt = self._build_prompt(new_request)
         input_ids = self.tokenizer.encode(prompt)
+        self._record_prompt_think_anchor(request, prompt)
         return RenderedInputs(
             input_ids=input_ids,
             input_urls=mm_input.urls,

@@ -147,6 +147,8 @@ class DeepseekV31Renderer(ReasoningToolBaseRenderer):
         ):
             context.update(request.extra_configs.chat_template_kwargs)
 
+        self._normalize_tools_context(request, context)
+
         # 兼容一下enable_thinking的行为, 让用户指定enable_thinking时, thinking也能生效
         if context.get("enable_thinking") == True:
             context["thinking"] = context["enable_thinking"]
@@ -155,7 +157,7 @@ class DeepseekV31Renderer(ReasoningToolBaseRenderer):
             context["bos_token"] = self.tokenizer.bos_token
 
         # 带有tools的情况默认不开启thinking
-        if request.tools:
+        if context.get("tools"):
             context["thinking"] = False
 
         # 创建Jinja2环境
@@ -176,7 +178,7 @@ class DeepseekV31Renderer(ReasoningToolBaseRenderer):
     def _create_detector(
         self, request: ChatCompletionRequest
     ) -> Optional[BaseFormatDetector]:
-        if request.tools:
+        if self._effective_tools(request):
             return DeepSeekV31Detector()
         else:
             return None
@@ -185,18 +187,13 @@ class DeepseekV31Renderer(ReasoningToolBaseRenderer):
     def _create_reasoning_parser(
         self, request: ChatCompletionRequest
     ) -> Optional[ReasoningParser]:
-        if not self.in_think_mode(request):
+        # 模板注入了 think 锚点就意味着模型会输出思考内容，此时即便请求侧
+        # thinking_mode 为 DISABLED 也必须建解析器，否则思考块会泄漏进可见回复。
+        anchored = self._resolve_think_anchor(request)
+        if not anchored and not self.in_think_mode(request):
             return None
 
-        try:
-            rendered_result = self.render_chat(request)
-            if rendered_result.rendered_prompt.endswith("<think>"):
-                return ReasoningParser(model_type="deepseek-v3", force_reasoning=True)
-        except Exception as e:
-            logging.error(f"Failed to render chat in _create_reasoning_parser: {e}")
-            return None
-
-        return None
+        return ReasoningParser(model_type="deepseek-v3", force_reasoning=anchored)
 
 
 register_renderer("deepseek_v31", DeepseekV31Renderer)
