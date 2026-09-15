@@ -113,3 +113,25 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+# Two exec processes with real GPU caches and P2P transport; only model execution is stubbed.
+# RDMA is opt-in through P2P_SMOKE_TRANSPORT=rdma and P2P_SMOKE_HOST=<interface IP>.
+cc_test(
+    name = "p2p_generate_stream_smoke_test",
+    srcs = ["P2PGenerateStreamSmokeTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/engine_base/schedulers",
+        "//rtp_llm/cpp/engine_base/stream:stream",
+        "//rtp_llm/cpp/normal_engine",
+        "@havenask//aios/autil:net",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "H20"},
+    tags = ["manual"],
+    timeout = "moderate",
+)
