@@ -54,6 +54,17 @@ class _Model:
         return PyModelOutputs(token_sum.expand_as(inputs.input_hiddens))
 
 
+class _WideInputModel(_Model):
+    def __init__(self, hidden_size):
+        self.hidden_size = hidden_size
+
+    def forward(self, inputs, _attention):
+        return PyModelOutputs(
+            inputs.input_hiddens[:, : self.hidden_size]
+            + inputs.input_hiddens[:, self.hidden_size :]
+        )
+
+
 class _FailingModel(_Model):
     def __init__(self):
         self.forward_calls = 0
@@ -84,7 +95,7 @@ class TestCudaGraphLazyCapture(unittest.TestCase):
     tokens_per_block = 16
     buckets = [1, 4, 8]
 
-    def _runner(self, model=None):
+    def _runner(self, model=None, input_hidden_size=None):
         runner = CudaGraphRunner()
         runner.init_decode(
             model or _Model(),
@@ -94,6 +105,7 @@ class TestCudaGraphLazyCapture(unittest.TestCase):
             self.tokens_per_block,
             self.buckets,
             lazy_capture=True,
+            input_hidden_size=input_hidden_size or self.hidden_size,
         )
         self.addCleanup(self._close_runner, runner)
         return runner
@@ -118,13 +130,13 @@ class TestCudaGraphLazyCapture(unittest.TestCase):
         runner.close()
         torch.cuda.empty_cache()
 
-    def _inputs(self, batch_size, value=1.0):
+    def _inputs(self, batch_size, value=1.0, input_hidden_size=None):
         inputs = PyModelInputs()
         attention = PyAttentionInputs()
 
         inputs.input_ids = torch.arange(batch_size, dtype=torch.int32, device="cuda")
         inputs.input_hiddens = torch.full(
-            (batch_size, self.hidden_size),
+            (batch_size, input_hidden_size or self.hidden_size),
             value,
             dtype=torch.float16,
             device="cuda",
@@ -247,6 +259,28 @@ class TestCudaGraphLazyCapture(unittest.TestCase):
         torch.testing.assert_close(
             outputs.hidden_states,
             torch.full_like(outputs.hidden_states, 6.0),
+        )
+
+    def test_lazy_storage_uses_input_hidden_size(self):
+        input_hidden_size = self.hidden_size * 2
+        runner = self._runner(
+            _WideInputModel(self.hidden_size),
+            input_hidden_size=input_hidden_size,
+        )
+        inputs = self._inputs(3, input_hidden_size=input_hidden_size)
+        inputs.input_hiddens[:, : self.hidden_size].fill_(2.0)
+        inputs.input_hiddens[:, self.hidden_size :].fill_(5.0)
+
+        self.assertEqual(runner.plan(inputs), "CaptureAfterEager")
+        self.assertTrue(runner.captureCurrentBucket())
+        self.assertEqual(runner.plan(inputs), "Replay")
+
+        outputs = runner.forward(inputs)
+        torch.cuda.synchronize()
+        self.assertEqual(outputs.hidden_states.shape, (3, self.hidden_size))
+        torch.testing.assert_close(
+            outputs.hidden_states,
+            torch.full_like(outputs.hidden_states, 7.0),
         )
 
     def test_failed_capture_falls_back_without_retry(self):

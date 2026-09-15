@@ -350,8 +350,23 @@ class FusedMoe(torch.nn.Module):
             if torch.cuda.is_current_stream_capturing():
                 raise RuntimeError("FusedMoe graph input exceeds router capacity")
             outputs = []
-            for start in range(0, hidden_states.shape[0], max_inp_tokens):
-                end = min(start + max_inp_tokens, hidden_states.shape[0])
+            token_count = hidden_states.shape[0]
+            for start in range(0, token_count, max_inp_tokens):
+                end = min(start + max_inp_tokens, token_count)
+                chunk_extra_expert_args = (
+                    {
+                        key: (
+                            value[start:end]
+                            if isinstance(value, torch.Tensor)
+                            and value.ndim > 0
+                            and value.shape[0] == token_count
+                            else value
+                        )
+                        for key, value in extra_expert_args.items()
+                    }
+                    if extra_expert_args is not None
+                    else None
+                )
                 outputs.append(
                     self._forward_single(
                         hidden_states[start:end],
@@ -362,7 +377,7 @@ class FusedMoe(torch.nn.Module):
                         a1_scale=a1_scale,
                         a2_scale=a2_scale,
                         apply_router_weight_on_input=apply_router_weight_on_input,
-                        extra_expert_args=extra_expert_args,
+                        extra_expert_args=chunk_extra_expert_args,
                         extra_finalize_args=(
                             dict(extra_finalize_args)
                             if extra_finalize_args is not None

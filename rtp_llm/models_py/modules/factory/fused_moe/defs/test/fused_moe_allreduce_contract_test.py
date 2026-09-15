@@ -200,6 +200,63 @@ class FusedMoeSkipAllreduceTest(TestCase):
         for finalize_call in router.finalize.call_args_list:
             self.assertTrue(finalize_call.args[4][SKIP_TP_ALLREDUCE_ARG])
 
+    def test_chunked_forward_slices_token_aligned_expert_args(self):
+        fused_moe, router, experts, hidden_states, topk_weights, topk_ids = (
+            self._make_fused_moe(False)
+        )
+        router.max_inp_tokens = 2
+        router.prepare.side_effect = lambda a1, _, __, weights, ids: (
+            ExpertForwardPayload(
+                expert_x=a1,
+                expert_topk_ids=ids,
+                expert_topk_weights=weights,
+            )
+        )
+        experts.execute.side_effect = lambda payload, **_: CombineForwardPayload(
+            fused_expert_output=payload.expert_x.clone()
+        )
+        router.finalize.side_effect = lambda payload, *_: payload.fused_expert_output
+
+        token_values = torch.arange(8).reshape(4, 2)
+        scalar_tensor = torch.tensor(3)
+        global_tensor = torch.arange(3)
+        metadata = object()
+        extra_expert_args = {
+            "router_logits": token_values,
+            "layer_idx": 7,
+            "scalar_tensor": scalar_tensor,
+            "global_tensor": global_tensor,
+            "metadata": metadata,
+        }
+
+        with patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=False
+        ):
+            output = fused_moe(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                extra_expert_args=extra_expert_args,
+            )
+
+        torch.testing.assert_close(output, hidden_states)
+        self.assertEqual(experts.execute.call_count, 2)
+        chunk_args = [
+            call.kwargs["extra_expert_args"] for call in experts.execute.call_args_list
+        ]
+        torch.testing.assert_close(chunk_args[0]["router_logits"], token_values[:2])
+        torch.testing.assert_close(chunk_args[1]["router_logits"], token_values[2:])
+        self.assertIsNot(chunk_args[0], extra_expert_args)
+        self.assertIsNot(chunk_args[1], extra_expert_args)
+        self.assertIsNot(chunk_args[0], chunk_args[1])
+        for args in chunk_args:
+            self.assertEqual(args["layer_idx"], 7)
+            self.assertIs(args["scalar_tensor"], scalar_tensor)
+            self.assertIs(args["global_tensor"], global_tensor)
+            self.assertIs(args["metadata"], metadata)
+        self.assertIs(extra_expert_args["router_logits"], token_values)
+        self.assertEqual(extra_expert_args["router_logits"].shape, (4, 2))
+
     def test_gate_pack_rejects_skip_before_dispatch(self):
         fused_moe, router, experts, hidden_states, _, _ = self._make_fused_moe(False)
         router.supports_gate_pack = True
