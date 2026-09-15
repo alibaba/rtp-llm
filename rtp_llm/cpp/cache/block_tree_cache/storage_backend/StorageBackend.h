@@ -83,6 +83,8 @@ public:
     explicit StorageBackend(std::shared_ptr<StorageBackendExecutor> executor = nullptr);
     virtual ~StorageBackend();
 
+    // Initialization is single-attempt. A failed start may permanently stop
+    // an injected executor; create a fresh backend/executor to retry.
     bool             init(std::shared_ptr<const CacheTopology> topology,
                           std::vector<DeviceBlockPoolPtr>      device_pools,
                           BufferResolver                       buffer_resolver);
@@ -128,6 +130,7 @@ private:
     std::vector<DeviceBlockPoolPtr>                           device_pools_;
     BufferResolver                                            buffer_resolver_;
     std::shared_ptr<StorageBackendExecutor>                   executor_;
+    bool                                                      init_attempted_{false};
     bool                                                      initialized_{false};
 
     std::mutex              lifecycle_mutex_;

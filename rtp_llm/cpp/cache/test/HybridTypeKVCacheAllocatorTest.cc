@@ -961,8 +961,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, TieredJoinedLoadMapsTargetsAcrossFullAndL
     const auto first_context = std::dynamic_pointer_cast<LoadAsyncContext>(first_result.async_context);
     ASSERT_NE(first_context, nullptr);
     EXPECT_EQ(first_result.reuse_len, 0);
-    EXPECT_EQ(first_result.host_reuse_len, 0);
-    EXPECT_EQ(first_result.disk_reuse_len, 0);
+
     EXPECT_EQ(first_resource->cacheResource(0).deviceReuseBlockNum(), 0u);
     EXPECT_EQ(first_context->matchedBlocks(), cached_keys.size());
     EXPECT_EQ(first_context->matchedBlocks(Tier::HOST), cached_keys.size());
@@ -980,8 +979,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, TieredJoinedLoadMapsTargetsAcrossFullAndL
     const auto second_context = std::dynamic_pointer_cast<LoadAsyncContext>(second_result.async_context);
     ASSERT_NE(second_context, nullptr);
     EXPECT_EQ(second_result.reuse_len, 0);
-    EXPECT_EQ(second_result.host_reuse_len, 0);
-    EXPECT_EQ(second_result.disk_reuse_len, 0);
+
     EXPECT_EQ(second_resource->cacheResource(0).deviceReuseBlockNum(), 0u);
     ASSERT_EQ(second_context->loadDescs().size(), first_context->loadDescs().size());
     ASSERT_TRUE(std::all_of(second_context->joinedLoads().begin(),

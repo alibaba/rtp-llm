@@ -33,6 +33,7 @@
 #include <condition_variable>
 #include <functional>
 #include <memory>
+#include <limits>
 #include <thread>
 
 using namespace std;
@@ -733,6 +734,33 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_NoContext_ReturnsTrue) {
     ASSERT_TRUE(resource.loadCacheDone());
 }
 
+TEST_F(StreamCacheResourceTest, CacheReuseMetricsAllowMissingWarmupCacheManager) {
+    prepareResource(/*reuse_cache=*/true);
+    auto&                 resource = stream_->streamCacheResource();
+    kmonitor::MetricsTags tags;
+    stream_->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
+    resource.resource_context_.cache_manager.reset();
+
+    resource.reportCacheReuseMetrics();
+
+    EXPECT_FALSE(resource.cache_reuse_metrics_.report_reuse_metrics);
+}
+
+TEST_F(StreamCacheResourceTest, AllocatorReuseRejectsInvalidCountsBeforePublishing) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+    for (const size_t total : {size_t{0}, static_cast<size_t>(std::numeric_limits<int>::max())}) {
+        auto context = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::DEVICE});
+        ASSERT_TRUE(context->success());
+        context->matched_blocks_         = total;
+        resource.allocator_load_context_ = context;
+
+        EXPECT_ANY_THROW((void)resource.finalizeAllocatorLoad());
+        EXPECT_EQ(stream_->reuseLength(), 0);
+        resource.allocator_load_context_.reset();
+    }
+}
+
 TEST_F(StreamCacheResourceTest, testCacheReuseMetricsKeepBlockAlignedInputLength) {
     prepareResource(/*reuse_cache=*/true);
     StreamCacheResource& resource = stream_->streamCacheResource();
@@ -961,8 +989,6 @@ TEST_F(StreamCacheResourceTest, DeferredResultPublishesOnlyDeviceReadyReuseLengt
     backend->waitForMatches(1);
     ASSERT_NE(result.async_context, nullptr);
     EXPECT_EQ(result.reuse_len, 0);
-    EXPECT_EQ(result.host_reuse_len, 0);
-    EXPECT_EQ(result.disk_reuse_len, 0);
 
     backend->releaseMatches();
     result.async_context->waitDone();
@@ -1005,7 +1031,7 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
     auto allocator             = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
     cache_manager_->allocator_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
-        .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/2, 0, load_context, /*host=*/2, /*disk=*/2}));
+        .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/2, 0, load_context}));
     EXPECT_CALL(*allocator, incrMalloc(testing::_)).WillOnce(testing::Return(MallocResult{true, 0}));
 
     ASSERT_TRUE(resource.initKVBlock().ok());
@@ -1082,7 +1108,7 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadPendingPublishesZeroDeviceReady
     auto allocator             = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
     cache_manager_->allocator_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
-        .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/0, 0, load_context, /*host=*/2, /*disk=*/2}));
+        .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/0, 0, load_context}));
     EXPECT_CALL(*allocator, incrMalloc(testing::_)).WillOnce(testing::Return(MallocResult{true, 0}));
 
     ASSERT_TRUE(resource.initKVBlock().ok());

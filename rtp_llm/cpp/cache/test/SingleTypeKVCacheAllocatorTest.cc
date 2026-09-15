@@ -1089,8 +1089,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadExact
     ASSERT_TRUE(result.success);
     ASSERT_NE(result.async_context, nullptr);
     EXPECT_EQ(result.reuse_len, 0);
-    EXPECT_EQ(result.host_reuse_len, 0);
-    EXPECT_EQ(result.disk_reuse_len, 0);
+
     EXPECT_EQ(resource->cacheResource(0).deviceReuseBlockNum(), 0u);
     const auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
     ASSERT_NE(load_context, nullptr);

@@ -84,11 +84,10 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
             if (load_context == nullptr || !load_context->commit()) {
                 load_context.reset();
                 pending_async_context.reset();
-                init_result.success        = false;
-                init_result.reuse_len      = 0;
-                init_result.host_reuse_len = 0;
-                init_result.disk_reuse_len = 0;
-                init_result.async_context  = nullptr;
+                init_result.success   = false;
+                init_result.reuse_len = 0;
+
+                init_result.async_context = nullptr;
                 return finalize_init_failure(std::move(init_result));
             }
             init_result.async_context = std::move(pending_async_context);

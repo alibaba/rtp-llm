@@ -13,6 +13,7 @@
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
@@ -51,19 +52,19 @@ CacheConfig makeSingleConfig() {
                                           /*size_per_head=*/8);
 }
 
-CacheConfig makeSwaConfig() {
+CacheConfig makeSwaConfig(int block_size = 4) {
     CacheConfig config;
     config.dtype                       = DataType::TYPE_FP16;
     config.layer_num                   = 2;
     config.layer_all_num               = 2;
     config.block_num                   = 8;
-    config.seq_size_per_block          = 4;
-    config.kernel_seq_size_per_block   = 4;
+    config.seq_size_per_block          = block_size;
+    config.kernel_seq_size_per_block   = block_size;
     config.group_layer_num             = 2;
     config.use_independent_block_pools = true;
 
     auto spec = test::makeResolvedMhaSpec(
-        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4);
+        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/block_size);
     auto policy                  = defaultCacheGroupPolicy(CacheGroupType::SWA);
     policy.enable_prefix_reuse   = true;
     policy.sliding_window_size   = 128;
@@ -781,6 +782,32 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteBackendIsDroppedWhenRemoteCacheDisabled)
     const BlockTreeMatchResult result = cache->match({1, 2});
     EXPECT_EQ(result.async_context, nullptr);
     EXPECT_EQ(backend->matchCalls(), 0u);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, CpSwaWindowUsesCanonicalKeysWithoutChangingPhysicalLayout) {
+    auto config                     = makeSwaConfig(16);
+    auto policies                   = config.groupPoliciesSnapshot();
+    policies[0].sliding_window_size = 128;
+    config.setGroupPolicies(policies);
+    auto allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 16));
+    auto cache = createBlockTreeCache(config, KVCacheConfig{}, allocator);
+    ASSERT_NE(cache, nullptr);
+    auto swa = std::dynamic_pointer_cast<SWAGroupSet>(cache->groupSets().front());
+    ASSERT_NE(swa, nullptr);
+    EXPECT_EQ(config.topology().groupById(0).seq_size_per_block, 16u);
+    EXPECT_EQ(config.topology().groupById(0).cacheKeyTokenStride(), 16u);
+    EXPECT_EQ(swa->seqSizePerBlock(), 32u);
+    EXPECT_EQ(swa->computeReuseBlockCount(8), 4u);
+    auto             validator = swa->createMatchValidator();
+    GroupSetResource hole;
+    GroupSetResource present;
+    present.device_blocks = {1};
+    EXPECT_FALSE(validator->validate(hole));
+    EXPECT_FALSE(validator->validate(present));
+    EXPECT_FALSE(validator->validate(present));
+    EXPECT_FALSE(validator->validate(present));
+    EXPECT_TRUE(validator->validate(present));
 }
 
 TEST_F(BlockTreeCacheFactoryTest, SwaGroupSetUsesDeclaredPolicyWindow) {
@@ -1873,6 +1900,23 @@ TEST_F(BlockTreeCacheFactoryTest, DerivesEachLocalTierFromItsOwnSwitch) {
                 }
             }
         }
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, RejectsOverflowingTierBudgetsBeforeAllocating) {
+    const auto config = makeSingleConfig();
+    // This previously wrapped to exactly 1 MiB and could create a tiny pool.
+    const int64_t overflowing_mb = static_cast<int64_t>(std::numeric_limits<size_t>::max() / (1024UL * 1024UL)) + 2;
+    for (bool memory : {true, false}) {
+        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.enable_memory_cache  = memory;
+        kv_cache_config.enable_disk_cache    = !memory;
+        kv_cache_config.memory_cache_size_mb = overflowing_mb;
+        kv_cache_config.disk_cache_size_mb   = overflowing_mb;
+        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_budget_overflow");
+        kv_cache_config.disk_cache_paths = disk_dir.path;
+        expectFactoryRejects(config, allocator, kv_cache_config);
     }
 }
 

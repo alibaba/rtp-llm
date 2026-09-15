@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -18,7 +19,7 @@ size_t groupSeqSize(const CacheConfig& config, size_t gid, size_t fallback) {
 CPSlotMapper::CPSlotMapper(): cp_rank_(0), cp_size_(1), block_size_(1), virtual_block_size_(1) {}
 
 CPSlotMapper::CPSlotMapper(int cp_rank, int cp_size, int block_size):
-    cp_rank_(cp_rank), cp_size_(cp_size), block_size_(block_size), virtual_block_size_(block_size * cp_size) {
+    cp_rank_(cp_rank), cp_size_(cp_size), block_size_(block_size), virtual_block_size_(0) {
     if (cp_size <= 0) {
         throw std::invalid_argument("CPSlotMapper cp_size must be positive");
     }
@@ -28,6 +29,10 @@ CPSlotMapper::CPSlotMapper(int cp_rank, int cp_size, int block_size):
     if (cp_rank < 0 || cp_rank >= cp_size) {
         throw std::invalid_argument("CPSlotMapper cp_rank out of range");
     }
+    if (block_size > std::numeric_limits<int>::max() / cp_size) {
+        throw std::invalid_argument("CPSlotMapper virtual block size exceeds int range");
+    }
+    virtual_block_size_ = block_size * cp_size;
 }
 
 CpGroupLayout CPSlotMapper::layoutForGroup(const CacheConfig& config, size_t gid) const {
@@ -87,14 +92,20 @@ size_t CPSlotMapper::logicalSeqSizePerBlock(const CacheConfig& config, size_t gi
 }
 
 int CPSlotMapper::reuseBlockTokens(const CacheConfig& config) const {
+    const auto checked_tokens = [](size_t tokens) {
+        if (tokens == 0 || tokens > static_cast<size_t>(std::numeric_limits<int>::max())) {
+            throw std::invalid_argument("CPSlotMapper reuse block tokens must fit a positive int");
+        }
+        return static_cast<int>(tokens);
+    };
     if (isSharded()) {
         for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
             if (config.typeForGroup(gid) == CacheGroupType::FULL) {
-                return static_cast<int>(logicalSeqSizePerBlock(config, gid));
+                return checked_tokens(logicalSeqSizePerBlock(config, gid));
             }
         }
     }
-    return static_cast<int>(config.seq_size_per_block);
+    return checked_tokens(config.seq_size_per_block);
 }
 
 CacheKeysType CPSlotMapper::canonicalCacheKeys(const CacheKeysType& full_keys) const {

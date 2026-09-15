@@ -30,6 +30,11 @@ struct GroupBase {
     size_t   kv_block_stride_bytes     = 0;
     size_t   kv_scale_stride_bytes     = 0;
 
+    // Optional cache-key token coverage; physical allocation strides stay unchanged.
+    size_t cache_key_token_stride = 0;
+    size_t cacheKeyTokenStride() const {
+        return cache_key_token_stride == 0 ? seq_size_per_block : cache_key_token_stride;
+    }
     size_t reuseBlockCount(size_t matched_block_count) const;
 };
 

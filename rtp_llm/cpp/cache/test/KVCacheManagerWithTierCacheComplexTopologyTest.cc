@@ -182,8 +182,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
     EXPECT_EQ(load_result.reuse_len, 0);
-    EXPECT_EQ(load_result.host_reuse_len, 0);
-    EXPECT_EQ(load_result.disk_reuse_len, 0);
+
     ASSERT_NE(load_result.async_context, nullptr);
     const bool load_entered = pausable_engine->waitUntilEnteredFor(
         std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
@@ -271,8 +270,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     const auto hit_result        = manager_->malloc(hit_info);
     ASSERT_TRUE(hit_result.success);
     EXPECT_EQ(hit_result.reuse_len, 2 * seq_size_per_block);
-    EXPECT_EQ(hit_result.host_reuse_len, 0);
-    EXPECT_EQ(hit_result.disk_reuse_len, 0);
+
     EXPECT_EQ(hit_result.async_context, nullptr);
     EXPECT_EQ(pausable_engine->submittedDescriptorCount(), submits_before_second_hit);
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
@@ -356,8 +354,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     const auto touch_result        = manager_->malloc(touch_info);
     ASSERT_TRUE(touch_result.success);
     EXPECT_EQ(touch_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(touch_result.host_reuse_len, 0);
-    EXPECT_EQ(touch_result.disk_reuse_len, 0);
+
     ASSERT_NE(touch_result.async_context, nullptr);
     touch_result.async_context->waitDone();
     ASSERT_TRUE(touch_result.async_context->success()) << touch_result.async_context->errorInfo().ToString();
@@ -381,8 +378,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     const auto heat_result        = manager_->malloc(heat_info);
     ASSERT_TRUE(heat_result.success);
     EXPECT_EQ(heat_result.reuse_len, 2 * static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(heat_result.host_reuse_len, 0);
-    EXPECT_EQ(heat_result.disk_reuse_len, 0);
+
     EXPECT_EQ(heat_result.async_context, nullptr);
     ASSERT_TRUE(
         requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, heat_resource, /*logical_reuse_blocks=*/2));
@@ -575,8 +571,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
     EXPECT_EQ(load_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(load_result.host_reuse_len, 0);
-    EXPECT_EQ(load_result.disk_reuse_len, 0);
+
     ASSERT_NE(load_result.async_context, nullptr);
     const bool entered =
         engine->waitUntilEnteredFor(std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
@@ -785,8 +780,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
     const auto result        = manager_->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, 0);
-    EXPECT_EQ(result.host_reuse_len, 0);
-    EXPECT_EQ(result.disk_reuse_len, 0);
+
     ASSERT_NE(result.async_context, nullptr);
 
     const bool entered =

@@ -18,6 +18,13 @@ class KVCacheConfigPickleTest(TestCase):
         state = config.__getstate__()
         self.assertEqual(state[:2], ("KVCacheConfig", 7))
         self.assertEqual(state[-5:], tuple(KV_CACHE_EVENT_FIELD_VALUES.values()))
+        # setstate must normalize its private slice, not mutate the supplied
+        # version-7 tuple retained by another Python reference.
+        original_state = tuple(list(state))
+        direct = KVCacheConfig.__new__(KVCacheConfig)
+        direct.__setstate__(state)
+        self.assertEqual(state, original_state)
+        self.assertEqual(direct.__getstate__(), original_state)
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.block_tree_transfer_worker_count, 7)
         self.assertTrue(restored.enable_disk_cache)

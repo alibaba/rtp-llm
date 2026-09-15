@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <algorithm>
+#include <limits>
 #include <thread>
 
 using namespace std;
@@ -221,9 +222,8 @@ absl::Status StreamCacheResource::initKVBlock() {
         return absl::InternalError("malloc failed with unknown status");
     }
 
-    const bool load_pending = result.async_context != nullptr;
-    publishReuseLengths(
-        result.reuse_len, load_pending ? 0 : result.host_reuse_len, load_pending ? 0 : result.disk_reuse_len, 0);
+    // HOST/DISK reuse is published after the asynchronous load completes.
+    publishReuseLengths(result.reuse_len, 0, 0, 0);
     allocator_load_context_ = std::move(result.async_context);
     return absl::OkStatus();
 }
@@ -279,17 +279,27 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     const auto malloc_status = load_context == nullptr ? MallocStatus::NONE : load_context->mallocStatus();
     if (load_success) {
         RTP_LLM_CHECK(load_context != nullptr);
-        const size_t total    = load_context->matchedBlocks();
-        const size_t local    = load_context->localMatchedBlocks();
-        const size_t host     = load_context->matchedBlocks(Tier::HOST);
-        const size_t disk     = load_context->matchedBlocks(Tier::DISK);
+        const size_t total = load_context->matchedBlocks();
+        const size_t local = load_context->localMatchedBlocks();
+        const size_t host  = load_context->matchedBlocks(Tier::HOST);
+        const size_t disk  = load_context->matchedBlocks(Tier::DISK);
+        RTP_LLM_CHECK_WITH_INFO(total >= local && host <= local && disk <= local - host,
+                                "invalid allocator reuse counts: total=%zu local=%zu host=%zu disk=%zu",
+                                total,
+                                local,
+                                host,
+                                disk);
+        const int tokens = reuseBlockTokens();
+        RTP_LLM_CHECK_WITH_INFO(tokens > 0 && total <= static_cast<size_t>(std::numeric_limits<int>::max()) / tokens,
+                                "allocator reuse token count exceeds int range: blocks=%zu tokens=%d",
+                                total,
+                                tokens);
         const size_t backend  = total - local;
         auto&        resource = batch_kv_cache_resource_->cacheResource(0);
         resource.setDeviceReuseBlockNum(local - host - disk);
         resource.setMemoryReuseBlockNum(host);
         resource.setDiskReuseBlockNum(disk);
         resource.setStorageBackendReuseBlockNum(backend);
-        const int tokens = reuseBlockTokens();
         publishReuseLengths(total * tokens, host * tokens, disk * tokens, backend * tokens);
     } else if (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
         stream_->setHostReuseLength(0);
@@ -328,7 +338,7 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
 }
 
 void StreamCacheResource::reportCacheReuseMetrics() {
-    if (stream_->metrics_reporter_ == nullptr || !reuseCache()) {
+    if (resource_context_.cache_manager == nullptr || stream_->metrics_reporter_ == nullptr || !reuseCache()) {
         return;
     }
     const int64_t input_length                 = stream_->inputLength();
@@ -390,7 +400,7 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     }
 
     if (result.reuse_len > 0) {
-        publishReuseLengths(result.reuse_len, result.host_reuse_len, result.disk_reuse_len, 0);
+        publishReuseLengths(result.reuse_len, 0, 0, 0);
     }
     if (result.async_context) {
         const bool aborted = resource_context_.cache_manager->abortPendingLoad(result.async_context);
