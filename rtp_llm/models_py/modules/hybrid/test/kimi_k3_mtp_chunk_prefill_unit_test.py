@@ -3,8 +3,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-from torch import nn
-
 from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model
 from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
     KimiK3ChunkRound,
@@ -14,6 +12,7 @@ from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
 )
 from rtp_llm.models_py.modules.kimi_k3.kda.prefill import KimiKDACurrentStateRegistry
 from rtp_llm.ops.compute_ops import CacheGroupType, PyAttentionInputs
+from torch import nn
 
 
 class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
@@ -42,8 +41,19 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
             "parallelism_config",
             SimpleNamespace(
                 get_attn_tp_size=lambda: tp_size,
+                get_attn_tp_rank=lambda: 0,
+                tp_size=tp_size, tp_rank=0,
+                prefill_cp_config=SimpleNamespace(prefill_cp_size=1),
                 kv_page_rr_enabled=lambda: False,
                 ep_size=ep_size,
+            ),
+        )
+        object.__setattr__(
+            model,
+            "execution_spec",
+            SimpleNamespace(
+                chunk_tokens=0, tp_size=tp_size, tp_rank=0, sp_type="",
+                kda_layers=(0,), aux_layers=(), aux_layer_set=frozenset(),
             ),
         )
         object.__setattr__(model, "layers", [])
@@ -290,11 +300,7 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
         inputs.attention_inputs.kv_cache_kernel_block_id_device = torch.arange(
             8, dtype=torch.int32, device="cuda"
         ).reshape(2, 4)
-        plan = KimiK3ChunkRound(
-            (
-                KimiK3ChunkSlice(1, 2, 4, 0, 0, 2, 0, 2, True),
-            )
-        )
+        plan = KimiK3ChunkRound((KimiK3ChunkSlice(1, 2, 4, 0, 0, 2, 0, 2, True),))
 
         chunk = build_chunk_model_inputs(
             inputs.input_ids,
@@ -343,38 +349,24 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
 
     def test_forward_dispatches_oversized_prefill_to_whole_chunk_path(self) -> None:
         model = self._model()
-        whole_chunk = MagicMock(return_value=object())
         impl_one = MagicMock(return_value=object())
-        object.__setattr__(model, "_forward_whole_chunk_prefill", whole_chunk)
         object.__setattr__(model, "_forward_impl_one", impl_one)
         chunk_inputs = self._inputs(8, [8], [0])
         small_inputs = self._inputs(4, [4], [0])
-
+        model.execution_spec.chunk_tokens = 4
         with patch(
-            "rtp_llm.models_py.model_desc.kimi_k3.prefill_chunk_tokens",
-            return_value=4,
-        ):
-            result = model.forward(chunk_inputs)
-            self.assertIsNotNone(result)
-            whole_chunk.assert_called_once_with(chunk_inputs, None, 4, None)
+            "rtp_llm.models_py.modules.kimi_k3.chunk_prefill.KimiK3ChunkSession._run_rounds"
+        ) as rounds:
+            model.forward(chunk_inputs)
+            rounds.assert_called_once_with(chunk_inputs, None, 4, None)
             impl_one.assert_not_called()
-
-            whole_chunk.reset_mock()
+            self.assertFalse(model._whole_chunk_prefill_active)
             model.forward(small_inputs)
             impl_one.assert_called_once_with(small_inputs, None)
-            whole_chunk.assert_not_called()
-            self.assertFalse(model._whole_chunk_prefill_active)
-            self.assertIsNone(model._prefill_mtp_hidden_workspace)
-            self.assertIsNone(model._prefill_mtp_draft_workspace)
-
         impl_one.reset_mock()
-        with patch(
-            "rtp_llm.models_py.model_desc.kimi_k3.prefill_chunk_tokens",
-            return_value=0,
-        ):
-            model.forward(chunk_inputs)
+        model.execution_spec.chunk_tokens = 0
+        model.forward(chunk_inputs)
         impl_one.assert_called_once_with(chunk_inputs, None)
-        whole_chunk.assert_not_called()
 
     def test_whole_chunk_prefill_plans_rounds_hooks_and_collects_terminal_row(
         self,
@@ -425,7 +417,7 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
         inputs.embedding_inputs.text_tokens_mask[62:66] = False
         fmha = MagicMock()
         ordered.attach_mock(fmha.release_forward_workspace, "attention_workspace")
-        with patch("rtp_llm.models_py.model_desc.kimi_k3.barrier") as barrier:
+        with patch("rtp_llm.models_py.modules.kimi_k3.chunk_prefill.barrier") as barrier:
             result = model._forward_whole_chunk_prefill(inputs, fmha, 64, record_hook)
 
         barrier.assert_called_once()
@@ -471,6 +463,83 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
         self.assertTrue(torch.equal(result.hidden_states, torch.tensor([[127.0]])))
         self.assertTrue(torch.equal(model._mtp_hidden_buffer, torch.tensor([[1127.0]])))
 
+    def test_chunk_checkpoint_alignment_keeps_physical_publication_frontiers(self) -> None:
+        from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
+            KimiK3ChunkCachePublisher,
+            KimiK3ChunkRdmaPublisher,
+        )
+
+        for checkpoint_interval in (64, 512):
+            with self.subTest(checkpoint_interval=checkpoint_interval):
+                model = self._model()
+                model._kda_checkpoint_tokens = checkpoint_interval
+                model.kv_cache.get_layer_cache = lambda _: SimpleNamespace(
+                    seq_size_per_block=checkpoint_interval, group_id=0
+                )
+                model.kv_cache.group_seq_size_per_block = [checkpoint_interval]
+                model.parallelism_config.get_attn_tp_rank = lambda: 0
+                from rtp_llm.models_py.modules.kimi_k3.parallel_mode import KimiK3ParallelMode
+                model.parallel_mode = KimiK3ParallelMode.TP_SP
+                model.num_attn_res_blocks = 1
+                model._kda_local_heads = 1
+                model._kda_head_dim = 16
+                object.__setattr__(model, "_embed_prepared", lambda ids, _mm: ids.float().reshape(-1, 1))
+                object.__setattr__(model, "norm", lambda hidden, _residual: hidden)
+                rounds = []
+                writes = []
+                metadata_seen = []
+
+                def layer_forward(hidden, residual, **kwargs):
+                    metadata = kwargs["attn_meta"].kda_prefill_metadata
+                    metadata_seen.append(metadata)
+                    self.assertEqual(metadata.checkpoint_tokens, checkpoint_interval)
+                    self.assertEqual(metadata.checkpoint_tokens, kwargs["kv_cache"].seq_size_per_block)
+                    return SimpleNamespace(hidden_states=hidden, block_residual=residual)
+
+                layer = MagicMock(side_effect=layer_forward)
+                layer.is_kda = True
+                layer.self_attn = MagicMock()
+                object.__setattr__(model, "layers", [layer])
+                publisher = KimiK3ChunkRdmaPublisher(
+                    [1153], [512], transfer_page_tokens=64, kda_layer_indices=[0]
+                )
+                cache_publisher = KimiK3ChunkCachePublisher(
+                    writer=lambda _cache, plan: writes.append(
+                        (plan.begin_block_host.tolist(), plan.end_block_host.tolist())
+                    ),
+                    publisher=publisher,
+                    layers=model.layers,
+                    kv_cache=model.kv_cache,
+                )
+
+                def forward_one(round_inputs, _fmha, **kwargs):
+                    rounds.append(kwargs["round_plan"])
+                    return KimiK3Model._forward_impl_one(model, round_inputs, _fmha, **kwargs)
+
+                object.__setattr__(model, "_forward_impl_one", forward_one)
+                with patch.dict("os.environ", {"SP_TYPE": ""}), patch("rtp_llm.models_py.modules.kimi_k3.chunk_prefill.barrier"), patch(
+                    "rtp_llm.models_py.modules.kimi_k3.chunk_prefill.KimiK3ChunkCachePublisher.create",
+                    return_value=cache_publisher,
+                ) as create_publisher:
+                    result = model._forward_whole_chunk_prefill(
+                        self._inputs(1153, [1153], [512]),
+                        SimpleNamespace(prepare=lambda _inputs: None, fmha_params=None),
+                        768,
+                    )
+
+                expected_first = 768 if checkpoint_interval == 64 else 512
+                self.assertEqual([r.token_count for r in rounds], [expected_first, 1153 - expected_first])
+                self.assertEqual(rounds[0].slices[0].absolute_end % checkpoint_interval, 0)
+                self.assertEqual(
+                    [meta.required_slots for meta in metadata_seen],
+                    [(item.slices[0].absolute_end + checkpoint_interval - 1) // checkpoint_interval for item in rounds],
+                )
+                self.assertEqual([meta.continuation_mask_host for meta in metadata_seen], [(False,), (True,)])
+                self.assertEqual(create_publisher.call_args.kwargs["transfer_page_tokens"], 64)
+                self.assertEqual(publisher.frontier, (27,))
+                self.assertEqual(writes, [([(512 + expected_first) // 64], [27])])
+                self.assertEqual(result.hidden_states.tolist(), [[1152.0]])
+
     def test_whole_chunk_prefill_collects_one_terminal_row_per_request(self) -> None:
         model = self._model()
         hidden_outputs = [
@@ -499,7 +568,7 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
         )
         object.__setattr__(model, "_publish_whole_chunk_cache", MagicMock())
         inputs = self._inputs(128, [64, 64], [0, 0])
-        with patch("rtp_llm.models_py.model_desc.kimi_k3.barrier"):
+        with patch("rtp_llm.models_py.modules.kimi_k3.chunk_prefill.barrier"):
             result = model._forward_whole_chunk_prefill(
                 inputs, MagicMock(), 64, record_hook
             )
@@ -534,7 +603,7 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
         inputs = self._inputs(128, [128], [0])
         inputs.force_disable_sp_run = True
 
-        with patch("rtp_llm.models_py.model_desc.kimi_k3.barrier"):
+        with patch("rtp_llm.models_py.modules.kimi_k3.chunk_prefill.barrier"):
             result = model._forward_whole_chunk_prefill(inputs, MagicMock(), 64, hook)
 
         self.assertEqual(hook.call_count, 2)
@@ -558,7 +627,7 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
             model, "_forward_impl_one", MagicMock(side_effect=forward_one)
         )
         object.__setattr__(model, "_publish_whole_chunk_cache", MagicMock())
-        with patch("rtp_llm.models_py.model_desc.kimi_k3.barrier"):
+        with patch("rtp_llm.models_py.modules.kimi_k3.chunk_prefill.barrier"):
             model._forward_whole_chunk_prefill(
                 self._inputs(128, [128], [0]), MagicMock(), 64
             )
@@ -718,7 +787,7 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
 
         fmha = MagicMock()
         with (
-            patch("rtp_llm.models_py.model_desc.kimi_k3.barrier"),
+            patch("rtp_llm.models_py.modules.kimi_k3.chunk_prefill.barrier"),
             self.assertRaisesRegex(RuntimeError, "injected target failure"),
         ):
             model._forward_whole_chunk_prefill(self._inputs(128, [128], [0]), fmha, 64)
@@ -749,7 +818,7 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
         attention_inputs.prefix_lengths_host = torch.tensor([0], dtype=torch.int32)
         inputs.attention_inputs = attention_inputs
 
-        with patch("rtp_llm.models_py.model_desc.kimi_k3.barrier") as barrier:
+        with patch("rtp_llm.models_py.modules.kimi_k3.chunk_prefill.barrier") as barrier:
             with self.assertRaisesRegex(
                 RuntimeError, "requires a host layer/group map"
             ):

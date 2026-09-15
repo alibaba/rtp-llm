@@ -11,11 +11,12 @@ from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 
 class KimiK3MegaBarrierUnitTest(unittest.TestCase):
     @staticmethod
-    def _module() -> KimiK3LatentMoE:
+    def _module(*, barrier_enabled=False) -> KimiK3LatentMoE:
         module = KimiK3LatentMoE.__new__(KimiK3LatentMoE)
         nn.Module.__init__(module)
         module._mega_group = object()
         module.layer_idx = 11
+        module._pre_kernel_barrier = barrier_enabled
         return module
 
     def test_barrier_is_noop_by_default(self) -> None:
@@ -27,14 +28,10 @@ class KimiK3MegaBarrierUnitTest(unittest.TestCase):
         barrier.assert_not_called()
 
     def test_barrier_synchronizes_cuda_stream_and_ranks(self) -> None:
-        module = self._module()
+        module = self._module(barrier_enabled=True)
         stream = MagicMock()
 
         with (
-            patch.dict(
-                "os.environ",
-                {"DSV4_MEGA_MOE_PRE_KERNEL_BARRIER": "1"},
-            ),
             patch("torch.cuda.is_current_stream_capturing", return_value=False),
             patch("torch.cuda.device"),
             patch("torch.cuda.current_stream", return_value=stream),
@@ -50,13 +47,9 @@ class KimiK3MegaBarrierUnitTest(unittest.TestCase):
         barrier.assert_called_once_with(group=module._mega_group, device_ids=[3])
 
     def test_barrier_rejects_cuda_graph_capture(self) -> None:
-        module = self._module()
+        module = self._module(barrier_enabled=True)
 
         with (
-            patch.dict(
-                "os.environ",
-                {"DSV4_MEGA_MOE_PRE_KERNEL_BARRIER": "1"},
-            ),
             patch("torch.cuda.is_current_stream_capturing", return_value=True),
             self.assertRaisesRegex(RuntimeError, "CUDA graph capture"),
         ):

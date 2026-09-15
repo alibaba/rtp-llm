@@ -4,8 +4,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-from torch import nn
-
 from rtp_llm.models_py.model_desc.kimi_k3 import resolve_kimi_k3_moe_strategy
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.modules.kimi_k3.input_packer_se import (
@@ -15,6 +13,7 @@ from rtp_llm.models_py.modules.kimi_k3.input_packer_se import (
 )
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.models_py.modules.kimi_k3.moe_se import KimiK3LatentMoESE
+from torch import nn
 
 
 class KimiK3MegaMoeSeUnitTest(unittest.TestCase):
@@ -22,6 +21,7 @@ class KimiK3MegaMoeSeUnitTest(unittest.TestCase):
     def _regular_module() -> KimiK3LatentMoE:
         module = KimiK3LatentMoE.__new__(KimiK3LatentMoE)
         nn.Module.__init__(module)
+        module._pre_kernel_barrier = False
         module._mega_buf = SimpleNamespace(num_max_tokens_per_rank=8)
         module._mega_input_packer = SimpleNamespace(pack=MagicMock())
         module._mega_y = torch.empty((8, 4), dtype=torch.bfloat16)
@@ -37,6 +37,7 @@ class KimiK3MegaMoeSeUnitTest(unittest.TestCase):
     def _se_module() -> KimiK3LatentMoESE:
         module = KimiK3LatentMoESE.__new__(KimiK3LatentMoESE)
         nn.Module.__init__(module)
+        module._pre_kernel_barrier = False
         module._mega_buf = SimpleNamespace(num_max_tokens_per_rank=8)
         module._mega_input_packer = SimpleNamespace(pack=MagicMock())
         module._mega_y = torch.empty((8, 4), dtype=torch.bfloat16)
@@ -70,6 +71,7 @@ class KimiK3MegaMoeSeUnitTest(unittest.TestCase):
         module = KimiK3LatentMoE.__new__(KimiK3LatentMoE)
         nn.Module.__init__(module)
         module.attn_tp_size = 1
+        module.attn_tp_rank = 0
         module.routed_norm = None
         module.weights = {
             K3W.MOE_ROUTED_DOWN: torch.eye(2),
@@ -80,7 +82,7 @@ class KimiK3MegaMoeSeUnitTest(unittest.TestCase):
         routing_weights = torch.ones((2, 1), dtype=torch.float32)
         captured = {}
 
-        def fake_expert_sum(routed_input, ids, weights, *, sequence_parallel):
+        def fake_expert_sum(routed_input, ids, weights):
             captured["ids"] = ids.clone()
             captured["weights"] = weights.clone()
             return torch.zeros_like(routed_input)

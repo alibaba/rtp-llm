@@ -6,8 +6,6 @@ from dataclasses import dataclass
 from typing import Dict
 
 import torch
-from torch import nn
-
 from rtp_llm.models_py.modules.kimi_k3.kda.cache import KimiK3KDACache
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
     fused_recurrent_kda,
@@ -17,6 +15,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
 from rtp_llm.models_py.triton_kernels.linear_replay import linear_serial_replay
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 
 @dataclass(frozen=True)
@@ -53,15 +52,16 @@ class KimiK3KDADecode(nn.Module):
         self.gate_lower_bound = gate_lower_bound
         self.fused_conv = fused_conv
 
-    def _cache_context(
+    def prepare_context(
         self,
-        hidden_states: torch.Tensor,
+        token_count: int,
+        device: torch.device,
         kv_cache: LayerKVCache,
         attention_inputs: PyAttentionInputs,
     ) -> _PagedDecodeCache:
         """Validate and return device-resident paged Decode state."""
 
-        if not hidden_states.is_cuda:
+        if device.type != "cuda":
             raise RuntimeError("Kimi K3 Decode requires CUDA inputs")
         sequence_lengths_plus_one = getattr(
             attention_inputs, "sequence_lengths_plus_1_d", None
@@ -78,7 +78,7 @@ class KimiK3KDADecode(nn.Module):
             or sequence_lengths_plus_one.ndim != 1
             or block_map.ndim != 2
             or sequence_lengths_plus_one.numel() != block_map.shape[0]
-            or hidden_states.shape[0] % block_map.shape[0] != 0
+            or token_count % block_map.shape[0] != 0
             or block_map.shape[1] == 0
         ):
             raise RuntimeError(
@@ -97,8 +97,8 @@ class KimiK3KDADecode(nn.Module):
             or conv_cache.ndim != 3
             or tuple(conv_cache.shape[1:])
             != (self.history_size, 3 * self.projection_size)
-            or ssm_cache.device != hidden_states.device
-            or conv_cache.device != hidden_states.device
+            or ssm_cache.device != device
+            or conv_cache.device != device
         ):
             raise RuntimeError(
                 "KDA paged decode cache layout does not match the model "
@@ -242,8 +242,13 @@ class KimiK3KDADecode(nn.Module):
         kv_cache: LayerKVCache,
         attention_inputs: PyAttentionInputs,
         is_target_verify: bool,
+        prepared_context=None,
     ) -> torch.Tensor:
-        cache = self._cache_context(q_projected, kv_cache, attention_inputs)
+        cache = prepared_context
+        if cache is None:
+            cache = self.prepare_context(
+                q_projected.shape[0], q_projected.device, kv_cache, attention_inputs
+            )
         if is_target_verify:
             return self._target_verify(
                 q_projected,

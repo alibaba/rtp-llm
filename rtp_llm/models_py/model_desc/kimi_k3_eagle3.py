@@ -1,11 +1,9 @@
+from dataclasses import replace
 from typing import Any, Dict, Optional
 
 import torch
-from torch import nn
-
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     DenseMLP,
@@ -14,16 +12,11 @@ from rtp_llm.models_py.modules import (
     MlaAttention,
     RMSNorm,
 )
-from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
-    MultimodalEmbeddingInjector,
-)
-from rtp_llm.models_py.modules.kimi_k3.utils import (
-    mask_multimodal_token_ids,
-    sequence_offsets,
-)
+from rtp_llm.models_py.modules.kimi_k3.input_preparation import prepare_draft_round
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 
 class _GatedEagle3MLA(MlaAttention):
@@ -120,7 +113,18 @@ class KimiK3Eagle3Model(GptModelBase):
         self.aux_projection = LinearFactory.create_linear_from_weights(
             weights.weights[0], W.eagle3_fc_proj
         )
-        self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
+        self.embedding_dtype = weights.get_global_weight(W.embedding).dtype
+        self._draft_layer_cache = None
+        self._draft_cache_group = None
+        self.weight._k3_kv_b_projections = {
+            0: LinearFactory.create_linear_from_weights(
+                weights.weights[0],
+                W.mla_kv_b_w,
+                W.mla_kv_b_s,
+                None,
+                model_config.quant_config,
+            )
+        }
         self.hidden_size = model_config.hidden_size
         self.layer = _KimiK3Eagle3Layer(
             model_config, parallelism_config, weights.weights[0]
@@ -129,53 +133,49 @@ class KimiK3Eagle3Model(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
-    def _embed_shifted_multimodal(self, inputs: PyModelInputs) -> torch.Tensor:
-        input_ids = inputs.input_ids
-        multimodal_inputs = inputs.multimodal_inputs
-        multimodal_features = multimodal_inputs.multimodal_features
-        if not multimodal_features:
-            return self.embedding(input_ids)
+    def initialize(self, init_resource):
+        result = super().initialize(init_resource)
+        self._draft_layer_cache = (
+            self.kv_cache.get_layer_cache(0) if self.kv_cache else None
+        )
+        group = int(self._draft_layer_cache.group_id) if self._draft_layer_cache else -1
+        self._draft_cache_group = group if group >= 0 else None
+        return result
 
-        mm_features_locs = multimodal_inputs.mm_features_locs_host
-        if mm_features_locs is None or mm_features_locs.numel() != len(
-            multimodal_features
-        ):
-            raise ValueError(
-                "Kimi K3 EAGLE-3 multimodal feature locations must match the "
-                "feature count"
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        prepared = prepare_draft_round(self, inputs, None)
+        impl = super().prepare_fmha_impl(inputs, is_cuda_graph)
+        if is_cuda_graph:
+            impl._k3_draft_prepared = replace(
+                prepared, fmha_impl=None
             )
+        return impl
 
-        # MTP prefill shifts each packed request one token left and appends the target
-        # sample, so image features must move with it (draft reaches here on prefill).
-        ranges = sequence_offsets(
-            inputs.attention_inputs.cu_seqlens,
-            input_ids.numel(),
-            cu_seqlens_host=inputs.attention_inputs.cu_seqlens_host,
-        )
-        shifted_features, shifted_locs = [], []
-        for feature, loc in zip(multimodal_features, mm_features_locs.tolist()):
-            # loc - 1 must stay in its own request; the last row anchors the lookup
-            # since loc may precede the request start across a reused prefix.
-            start = max(s for s, _ in ranges if s <= loc + feature.size(0) - 1)
-            dropped = max(0, start - loc + 1)  # rows with no draft slot
-            shifted_features.append(feature[dropped:])
-            shifted_locs.append(max(loc - 1, start))
-        shifted_locs = torch.tensor(shifted_locs, dtype=torch.int32)
-        input_ids = mask_multimodal_token_ids(input_ids, shifted_features, shifted_locs)
-        embedding = self.embedding(input_ids)
-        return self.multimodal_embedding_injector(
-            embedding, shifted_features, shifted_locs
-        )
+    def _embed_prepared(self, prepared):
+        embedding = self.embedding(prepared.embedding_ids)
+        for location, feature in prepared.embedding_injections:
+            embedding[location : location + feature.shape[0]].copy_(feature)
+        return embedding
 
-    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
-        # Planner metadata is materialized before forward, including capture.
-        select_block_map_for_layer(inputs.attention_inputs, 0)
-        return super().prepare_fmha_impl(inputs, is_cuda_graph)
+    def _embed_shifted_multimodal(self, inputs):
+        return self._embed_prepared(prepare_draft_round(self, inputs, None))
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Optional[Any] = None):
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(inputs)
+        prepared = getattr(fmha_impl, "_k3_draft_prepared", None)
+        if prepared is None:
+            prepared = prepare_draft_round(self, inputs, fmha_impl)
+        else:
+            prepared = replace(prepared, fmha_impl=fmha_impl)
+        return self.forward_prepared(prepared)
+
+    def forward_prepared(self, prepared):
+        self._recurrent = None
+        inputs, fmha_impl = prepared.inputs, prepared.fmha_impl
         if inputs.input_hiddens is None:
             raise ValueError("Kimi K3 EAGLE-3 requires merged auxiliary hidden states")
-        embedding = self._embed_shifted_multimodal(inputs)
+        embedding = self._embed_prepared(prepared)
         hidden_width = inputs.input_hiddens.shape[-1]
         if hidden_width == self.hidden_size * 3:
             # The teacher/target pass supplies the three selected target-layer
@@ -192,14 +192,11 @@ class KimiK3Eagle3Model(GptModelBase):
                 f"hidden states ({self.hidden_size * 3}) or one recurrent draft "
                 f"hidden state ({self.hidden_size}), got {hidden_width}"
             )
-        if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)
-        select_block_map_for_layer(inputs.attention_inputs, 0)
         hidden_states = self.layer(
             embedding,
             hidden_states,
             fmha_impl,
-            self.kv_cache.get_layer_cache(0) if self.kv_cache else None,
+            prepared.layer_cache,
         )
         return PyModelOutputs(self.final_norm(hidden_states), fmha_impl.fmha_params)
 

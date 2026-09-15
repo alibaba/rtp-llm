@@ -60,7 +60,8 @@ def get_mla_impl(
     )
     for impl in mla_impls:
         if attn_configs.mla_fp8_compute and impl.__name__ not in (
-            "TokenSpeedMlaDecodeImpl", "MlaFlashMLAPrefillImpl"
+            "TokenSpeedMlaDecodeImpl",
+            "MlaFlashMLAPrefillImpl",
         ):
             continue
         # Check support before creating instance
@@ -111,6 +112,11 @@ def get_mla_impl(
             logging.debug(f"skip mla impl [{impl}] because sparse mla is not supported")
             continue
 
+        projection_kwargs = {}
+        if getattr(impl, "supports_prepared_kv_b", False):
+            projection_kwargs["prepared_kv_b_projections"] = getattr(
+                weight, "_k3_kv_b_projections", None
+            )
         instance = impl(
             attn_configs,
             attn_inputs,
@@ -121,6 +127,7 @@ def get_mla_impl(
             max_seq_len=max_seq_len,
             is_cuda_graph=is_cuda_graph,
             parallelism_config=parallelism_config,
+            **projection_kwargs,
         )
         if not is_cuda_graph or instance.support_cuda_graph():
             return instance

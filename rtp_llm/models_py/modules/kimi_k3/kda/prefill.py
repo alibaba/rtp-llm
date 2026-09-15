@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Dict, Optional, Sequence
 
 import torch
-from torch import nn
-
 from rtp_llm.models_py.modules.kimi_k3.kda.cache import KimiK3KDACache
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
     KimiKDARecurrentCheckpointMetadata,
@@ -19,9 +16,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
 )
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
-
-
-_CULA_LOGGED_DEVICES: set[int] = set()
+from torch import nn
 
 
 @dataclass(frozen=True)
@@ -94,21 +89,33 @@ class KimiKDACurrentStateRegistry:
         return state
 
 
-def prepare_kimi_kda_prefill_metadata(
-    cu_seqlens_host: torch.Tensor,
-    input_lengths_host: torch.Tensor,
-    prefix_lengths_host: torch.Tensor,
-    *,
-    checkpoint_tokens: int,
-    local_heads: int,
-    head_dim: int,
-    device: torch.device,
-    active_original_batch_indices: Optional[Sequence[int]] = None,
-    continuation_mask: Optional[Sequence[bool]] = None,
-    materialized_block_maps_host: Optional[Sequence[torch.Tensor]] = None,
-) -> KimiKDAPrefillMetadata:
-    """Validate host request metadata once and allocate one round workspace."""
+@dataclass(frozen=True)
+class KimiKDAPrefillPlan:
+    cu_seqlens_cpu: torch.Tensor
+    input_lengths_cpu: torch.Tensor
+    prefix_lengths_cpu: torch.Tensor
+    sequence_count: int
+    checkpoint_tokens: int
+    required_slots: int
+    local_heads: int
+    head_dim: int
+    active_indices: tuple[int, ...]
+    continuing: tuple[bool, ...]
+    materialized_block_maps_host: Optional[Sequence[torch.Tensor]]
 
+
+def plan_kimi_kda_prefill_metadata(
+    cu_seqlens_host,
+    input_lengths_host,
+    prefix_lengths_host,
+    *,
+    checkpoint_tokens,
+    local_heads,
+    head_dim,
+    active_original_batch_indices=None,
+    continuation_mask=None,
+    materialized_block_maps_host=None,
+):
     host_tensors = {
         "cu_seqlens_host": cu_seqlens_host,
         "input_lengths_host": input_lengths_host,
@@ -172,6 +179,53 @@ def prepare_kimi_kda_prefill_metadata(
             )
         )
     )
+    active_indices = list(
+        range(sequence_count)
+        if active_original_batch_indices is None
+        else active_original_batch_indices
+    )
+    continuing = list(
+        [False] * sequence_count if continuation_mask is None else continuation_mask
+    )
+    if len(active_indices) != sequence_count or len(continuing) != sequence_count:
+        raise ValueError(
+            "KDA active request metadata must contain one value per sequence"
+        )
+    if len(set(active_indices)) != sequence_count or any(
+        index < 0 for index in active_indices
+    ):
+        raise ValueError(
+            "KDA active original request indices must be unique and non-negative"
+        )
+    return KimiKDAPrefillPlan(
+        cu_seqlens_cpu,
+        input_lengths_cpu,
+        prefix_lengths_cpu,
+        sequence_count,
+        checkpoint_tokens,
+        required_slots,
+        local_heads,
+        head_dim,
+        tuple(active_indices),
+        tuple(continuing),
+        materialized_block_maps_host,
+    )
+
+
+def bind_kimi_kda_prefill_workspace(plan, device):
+    cu_seqlens_cpu = plan.cu_seqlens_cpu
+    input_lengths_cpu, prefix_lengths_cpu = (
+        plan.input_lengths_cpu,
+        plan.prefix_lengths_cpu,
+    )
+    sequence_count, checkpoint_tokens, required_slots = (
+        plan.sequence_count,
+        plan.checkpoint_tokens,
+        plan.required_slots,
+    )
+    local_heads, head_dim = plan.local_heads, plan.head_dim
+    active_indices, continuing = plan.active_indices, plan.continuing
+    materialized_block_maps_host = plan.materialized_block_maps_host
     conv = prepare_kimi_kda_short_conv_metadata(cu_seqlens_cpu, device)
     recurrent = prepare_kimi_kda_recurrent_checkpoint_metadata(
         input_lengths_cpu,
@@ -185,26 +239,6 @@ def prepare_kimi_kda_prefill_metadata(
         dtype=torch.float32,
         device=device,
     )
-    active_indices = list(
-        range(sequence_count)
-        if active_original_batch_indices is None
-        else active_original_batch_indices
-    )
-    continuing = list(
-        [False] * sequence_count
-        if continuation_mask is None
-        else continuation_mask
-    )
-    if len(active_indices) != sequence_count or len(continuing) != sequence_count:
-        raise ValueError(
-            "KDA active request metadata must contain one value per sequence"
-        )
-    if len(set(active_indices)) != sequence_count or any(
-        index < 0 for index in active_indices
-    ):
-        raise ValueError(
-            "KDA active original request indices must be unique and non-negative"
-        )
     return KimiKDAPrefillMetadata(
         cu_seqlens_cpu=cu_seqlens_cpu,
         sequence_count=sequence_count,
@@ -216,12 +250,20 @@ def prepare_kimi_kda_prefill_metadata(
         active_original_batch_indices=torch.tensor(
             active_indices, dtype=torch.int64, device=device
         ),
-        continuation_mask=torch.tensor(
-            continuing, dtype=torch.bool, device=device
-        ),
+        continuation_mask=torch.tensor(continuing, dtype=torch.bool, device=device),
         active_original_batch_indices_host=tuple(active_indices),
         continuation_mask_host=tuple(continuing),
     )
+
+
+def prepare_kimi_kda_prefill_metadata(
+    cu_seqlens_host, input_lengths_host, prefix_lengths_host, *, device, **kwargs
+):
+    """Compatibility entry; planning never allocates GPU scratch."""
+    plan = plan_kimi_kda_prefill_metadata(
+        cu_seqlens_host, input_lengths_host, prefix_lengths_host, **kwargs
+    )
+    return bind_kimi_kda_prefill_workspace(plan, device)
 
 
 class KimiK3KDAPrefill(nn.Module):
@@ -244,8 +286,19 @@ class KimiK3KDAPrefill(nn.Module):
         self.local_heads = local_heads
         self.head_dim = head_dim
         self.projection_size = projection_size
-        self.gate_lower_bound = gate_lower_bound
+        if gate_lower_bound is None:
+            raise ValueError("cuLA requires K3 finite gate lower bound")
+        self.gate_lower_bound = float(gate_lower_bound)
         self.fused_conv = fused_conv
+
+        # These parameters are immutable after model loading. Keep their final
+        # cuLA representation rather than casting at every layer invocation.
+        self._a_log_fp32 = weights[W.linear_attn_alog].float().contiguous()
+        self._dt_bias_fp32 = weights[W.linear_attn_dt_b_kda].float().contiguous()
+        self._attention_scale = head_dim**-0.5
+        from cula.kda import chunk_kda
+
+        self._cula_chunk_kda = chunk_kda
 
     def _cula_checkpoint_prefill(
         self,
@@ -277,51 +330,29 @@ class KimiK3KDAPrefill(nn.Module):
             or not checkpoint_states.is_contiguous()
         ):
             raise ValueError("K3 cuLA checkpoints must be contiguous FP32")
-        try:
-            import cula
-            from cula.kda import chunk_kda as cula_chunk_kda
-        except Exception as error:
-            raise RuntimeError(
-                "Prefill requires cuLA but the cuda-linear-attention package "
-                f"could not be imported: {type(error).__name__}: {error}"
-            ) from error
-        if self.gate_lower_bound is None:
-            raise RuntimeError("cuLA requires K3's finite gate lower bound")
-
-        device_index = q.device.index if q.device.index is not None else 0
-        if device_index not in _CULA_LOGGED_DEVICES:
-            logging.info(
-                "[KimiK3 cuLA] enabled device=%s package=%s version=%s",
-                q.device,
-                getattr(cula, "__file__", "<unknown>"),
-                getattr(cula, "__version__", "<unknown>"),
-            )
-            _CULA_LOGGED_DEVICES.add(device_index)
         single_sequence = int(cu_seqlens.numel()) == 2
         cula_cu_seqlens = None if single_sequence else cu_seqlens.contiguous()
         with torch.inference_mode():
-            output, final_state, published_checkpoints = cula_chunk_kda(
+            output, final_state, published_checkpoints = self._cula_chunk_kda(
                 q.contiguous(),
                 k.contiguous(),
                 v.contiguous(),
                 raw_gate.to(dtype=q.dtype).contiguous(),
                 raw_beta.to(dtype=q.dtype).contiguous(),
-                scale=self.head_dim**-0.5,
+                scale=self._attention_scale,
                 initial_state=recurrent_state,
                 output_final_state=False,
                 use_qk_l2norm_in_kernel=True,
                 use_gate_in_kernel=True,
                 use_beta_sigmoid_in_kernel=True,
                 cu_seqlens=cula_cu_seqlens,
-                cu_seqlens_cpu=(
-                    None if cula_cu_seqlens is None else cu_seqlens_cpu
-                ),
+                cu_seqlens_cpu=(None if cula_cu_seqlens is None else cu_seqlens_cpu),
                 safe_gate=True,
                 lower_bound=float(self.gate_lower_bound),
                 disable_recompute=False,
                 use_intracard_cp=False,
-                A_log=self.weights[W.linear_attn_alog].float().contiguous(),
-                dt_bias=self.weights[W.linear_attn_dt_b_kda].float().contiguous(),
+                A_log=self._a_log_fp32,
+                dt_bias=self._dt_bias_fp32,
                 checkpoint_interval=checkpoint_interval,
                 checkpoint_states=checkpoint_states,
             )
@@ -363,9 +394,7 @@ class KimiK3KDAPrefill(nn.Module):
             )
         _, conv_cache = self.cache.get_views(kv_cache)
         current_conv = (
-            current_state.conv.index_select(
-                0, metadata.active_original_batch_indices
-            )
+            current_state.conv.index_select(0, metadata.active_original_batch_indices)
             if current_state is not None
             else None
         )

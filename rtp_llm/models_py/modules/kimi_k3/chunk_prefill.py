@@ -9,18 +9,23 @@ draft-model input.
 from __future__ import annotations
 
 import copy
+import json
+import logging
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import torch
-
 from rtp_llm.ops.compute_ops import (
     PyAttentionInputs,
     PyEmbeddingInputs,
     PyModelInputs,
+    PyModelOutputs,
     PyMultimodalInputs,
 )
+
+from rtp_llm.models_py.distributed.collective_torch import Group, barrier
+from rtp_llm.models_py.modules.kimi_k3.kda.prefill import KimiKDACurrentStateRegistry
 
 if TYPE_CHECKING:
     from rtp_llm.ops.compute_ops import PyCacheStorePublishPlan
@@ -46,6 +51,72 @@ class KimiK3ChunkRound:
     @property
     def token_count(self) -> int:
         return sum(item.new_length for item in self.slices)
+
+
+@dataclass(frozen=True)
+class KimiK3RowSelection:
+    """CPU-only row description, retained in the complete batch plan."""
+
+    ranges: tuple[tuple[int, int], ...]
+    token_count: int
+
+    def prepare(self, device):
+        index = None
+        if len(self.ranges) > 1:
+            index = torch.cat(
+                [
+                    torch.arange(start, start + length, device=device)
+                    for start, length in self.ranges
+                ]
+            )
+        return KimiK3PreparedRowSelection(self.ranges, self.token_count, index)
+
+
+@dataclass(frozen=True)
+class KimiK3PreparedRowSelection:
+    """Current-round device index; never retained by the CPU batch plan."""
+
+    ranges: tuple[tuple[int, int], ...]
+    token_count: int
+    index: Optional[torch.Tensor]
+
+    def select(self, hidden):
+        if not self.ranges:
+            return hidden.narrow(0, 0, 0)
+        if len(self.ranges) == 1:
+            return hidden.narrow(0, *self.ranges[0])
+        if self.index is None:
+            raise RuntimeError("draft row selection was not prepared")
+        return hidden.index_select(0, self.index)
+
+
+@dataclass(frozen=True)
+class KimiK3BatchPlan:
+    rounds: tuple[KimiK3ChunkRound, ...]
+    draft_rows: tuple[KimiK3RowSelection, ...]
+    terminal_rows: tuple[tuple[tuple[int, int], ...], ...]
+
+    @classmethod
+    def from_rounds(cls, rounds):
+        selections, terminals = [], []
+        for round_plan in rounds:
+            ranges, terminal, offset = [], [], 0
+            for item in round_plan.slices:
+                length = item.new_length - int(item.terminal)
+                if length:
+                    if ranges and sum(ranges[-1]) == offset:
+                        ranges[-1] = (ranges[-1][0], ranges[-1][1] + length)
+                    else:
+                        ranges.append((offset, length))
+                offset += item.new_length
+                if item.terminal:
+                    terminal.append((item.original_batch_idx, offset - 1))
+            selections.append(
+                KimiK3RowSelection(tuple(ranges), sum(n for _, n in ranges))
+            )
+            terminals.append(tuple(terminal))
+        return cls(tuple(rounds), tuple(selections), tuple(terminals))
+
 
 
 def logical_chunk_round(
@@ -80,9 +151,7 @@ class KimiK3ChunkRdmaPublishStep:
 
     @property
     def terminal_indices(self) -> tuple[int, ...]:
-        return tuple(
-            index for index, terminal in enumerate(self.terminal) if terminal
-        )
+        return tuple(index for index, terminal in enumerate(self.terminal) if terminal)
 
     def to_op_plan(self) -> PyCacheStorePublishPlan:
         from rtp_llm.ops.compute_ops import PyCacheStorePublishPlan
@@ -166,9 +235,7 @@ class KimiK3ChunkRdmaPublisher:
             [False] * len(self.input_lengths),
         )
 
-    def round_step(
-        self, round_plan: KimiK3ChunkRound
-    ) -> KimiK3ChunkRdmaPublishStep:
+    def round_step(self, round_plan: KimiK3ChunkRound) -> KimiK3ChunkRdmaPublishStep:
         ends = list(self._frontier)
         terminals = [False] * len(self.input_lengths)
         for item in round_plan.slices:
@@ -228,9 +295,7 @@ class KimiK3ChunkRdmaPublisher:
 
     def validate_complete(self) -> None:
         if not all(self._terminal):
-            missing = [
-                index for index, value in enumerate(self._terminal) if not value
-            ]
+            missing = [index for index, value in enumerate(self._terminal) if not value]
             raise RuntimeError(
                 f"K3 chunk RDMA requests did not reach terminal publication: {missing}"
             )
@@ -321,9 +386,7 @@ class KimiK3ChunkCachePublisher:
                 prefix_lengths,
                 transfer_page_tokens=transfer_page_tokens,
                 kda_layer_indices=(
-                    layer_idx
-                    for layer_idx, layer in enumerate(layers)
-                    if layer.is_kda
+                    layer_idx for layer_idx, layer in enumerate(layers) if layer.is_kda
                 ),
             ),
             layers=layers,
@@ -334,9 +397,7 @@ class KimiK3ChunkCachePublisher:
     def enabled(self) -> bool:
         return self._publisher is not None
 
-    def _context(
-        self, step: KimiK3ChunkRdmaPublishStep
-    ) -> KimiK3ChunkPublishContext:
+    def _context(self, step: KimiK3ChunkRdmaPublishStep) -> KimiK3ChunkPublishContext:
         return KimiK3ChunkPublishContext(
             writer=self._writer,
             publisher=self._publisher,
@@ -365,9 +426,7 @@ class KimiK3ChunkCachePublisher:
             return None
         return self._context(self._publisher.round_step(round_plan))
 
-    def commit_round(
-        self, context: Optional[KimiK3ChunkPublishContext]
-    ) -> None:
+    def commit_round(self, context: Optional[KimiK3ChunkPublishContext]) -> None:
         if context is not None:
             context.publisher.commit(context.step)
 
@@ -753,8 +812,8 @@ def _build_chunk_multimodal_inputs(
 
     if chunk_features:
         chunk.multimodal_features = chunk_features
-        chunk.mm_features_locs_host, chunk.mm_features_locs = (
-            _host_and_device_tensor(chunk_locs, torch.int32, device)
+        chunk.mm_features_locs_host, chunk.mm_features_locs = _host_and_device_tensor(
+            chunk_locs, torch.int32, device
         )
     return chunk
 
@@ -798,9 +857,7 @@ def build_chunk_attention_inputs(
     chunk.cu_seqlens_host, chunk.cu_seqlens = _host_and_device_tensor(
         cu_seqlens, torch.int32, device
     )
-    _, chunk.cu_kv_seqlens = _host_and_device_tensor(
-        cu_kv_seqlens, torch.int32, device
-    )
+    _, chunk.cu_kv_seqlens = _host_and_device_tensor(cu_kv_seqlens, torch.int32, device)
     chunk.input_lengths_host, chunk.input_lengths = _host_and_device_tensor(
         lengths, torch.int32, device
     )
@@ -812,13 +869,12 @@ def build_chunk_attention_inputs(
     )
     chunk.sequence_lengths_plus_1_d = chunk.sequence_lengths + 1
     max_length = max(lengths)
-    padding_offset: list[int] = []
-    cumulative_padding = 0
-    for length in lengths:
-        padding_offset.extend([cumulative_padding] * length)
-        cumulative_padding += max_length - length
-    _, chunk.padding_offset = _host_and_device_tensor(
-        padding_offset, torch.int32, device
+    # Only O(batch) Python metadata; output_size avoids a CUDA size readback.
+    offsets = [i * max_length - cu_seqlens[i] for i in range(len(lengths))]
+    chunk.padding_offset = torch.repeat_interleave(
+        torch.tensor(offsets, dtype=torch.int32, device=device),
+        chunk.input_lengths,
+        output_size=total_tokens,
     )
     chunk.total_tokens = int(total_tokens)
     chunk.context_total_kv_length = int(sum(sequence_lengths))
@@ -970,7 +1026,9 @@ def kda_materialized_block_maps(
     try:
         group_ids = sorted({int(layer_group_ids[index]) for index in kda_layer_indices})
     except IndexError as error:
-        raise RuntimeError("KDA layer/group map does not cover every KDA layer") from error
+        raise RuntimeError(
+            "KDA layer/group map does not cover every KDA layer"
+        ) from error
     if any(group_id < 0 or group_id >= len(maps_by_group) for group_id in group_ids):
         raise RuntimeError("KDA cache group is outside host kernel block maps")
     return tuple(maps_by_group[group_id] for group_id in group_ids)
@@ -1008,3 +1066,261 @@ __all__ = [
     "prepare_round_fmha",
     "validate_whole_chunk_prefill",
 ]
+
+
+class KimiK3ChunkSession:
+    def __init__(self, model):
+        self.model = model
+        self.plan = None
+        self.publisher = None
+        self.current_state_registry = None
+
+    def run(self, inputs, fmha_impl=None, chunk_prefill_round_hook=None):
+        model = self.model
+        budget = model.execution_spec.chunk_tokens
+        if (
+            budget > 0
+            and inputs.attention_inputs is not None
+            and inputs.attention_inputs.is_prefill
+            and inputs.input_ids.numel() > budget
+        ):
+            model._begin_whole_chunk_prefill(budget)
+            try:
+                return self._run_rounds(
+                    inputs, fmha_impl, budget, chunk_prefill_round_hook
+                )
+            finally:
+                model._end_whole_chunk_prefill()
+                self.current_state_registry = None
+        return model._forward_impl_one(inputs, fmha_impl)
+
+    def _run_rounds(
+        self,
+        inputs: PyModelInputs,
+        fmha_impl: Any,
+        chunk_tokens: int,
+        chunk_prefill_round_hook: Any = None,
+    ) -> PyModelOutputs:
+        model = self.model
+        if model._kda_checkpoint_tokens is None:
+            raise RuntimeError("Kimi K3 cache geometry is not initialized")
+        validate_whole_chunk_prefill(
+            inputs,
+            chunk_tokens,
+            tp_size=int(model.parallelism_config.get_attn_tp_size()),
+            ep_size=int(model.parallelism_config.ep_size),
+            alignment_tokens=model._kda_checkpoint_tokens,
+        )
+        input_ids = inputs.input_ids.reshape(-1)
+        attention_inputs = inputs.attention_inputs
+        total_tokens = int(input_ids.numel())
+        input_lengths = host_lengths(
+            attention_inputs.input_lengths_host, "input_lengths_host"
+        )
+        prefix_lengths = host_lengths(
+            attention_inputs.prefix_lengths_host, "prefix_lengths_host"
+        )
+        logical_request_count = int(
+            getattr(attention_inputs, "logical_request_count", 0)
+            or len(input_lengths)
+        )
+        logical_input_lengths = input_lengths[:logical_request_count]
+        logical_prefix_lengths = prefix_lengths[:logical_request_count]
+        if sum(input_lengths) != total_tokens:
+            raise RuntimeError(
+                "whole-model K3 packed lengths do not cover input tokens: "
+                f"lengths={sum(input_lengths)} tokens={total_tokens}"
+            )
+        if model._layer_group_ids is None:
+            layer_map_host = getattr(
+                attention_inputs, "kv_cache_layer_to_group_host", None
+            )
+            if layer_map_host is None or not layer_map_host.numel():
+                raise RuntimeError(
+                    "whole-model K3 Prefill requires a host layer/group map"
+                )
+            model._layer_group_ids = tuple(
+                int(value) for value in layer_map_host.tolist()
+            )
+        # The outer C++ boundary may have appended a dummy request to align
+        # the complete packed Prefill. Internal rounds have independent token
+        # remainders, so plan real requests only and rebuild one round-local
+        # dummy immediately before each model forward.
+        rounds = plan_kimi_k3_chunk_rounds(
+            logical_input_lengths,
+            logical_prefix_lengths,
+            chunk_budget=chunk_tokens,
+            alignment_tokens=model._kda_checkpoint_tokens,
+        )
+        logical_rounds = tuple(logical_chunk_round(r, logical_request_count) for r in rounds)
+        batch_plan = KimiK3BatchPlan.from_rounds(logical_rounds)
+        self.plan = batch_plan
+        chunk_cache_publisher = KimiK3ChunkCachePublisher.create(
+            attention_inputs,
+            model.kv_cache,
+            model.layers,
+            input_lengths=logical_input_lengths,
+            prefix_lengths=logical_prefix_lengths,
+            transfer_page_tokens=model._k3_page_tokens,
+        )
+        self.publisher = chunk_cache_publisher
+        barrier(Group.TP)
+        logging.info(
+            "[K3_WHOLE_CHUNK_PREFILL] enabled total_tokens=%d "
+            "requests=%d rounds=%d chunk_tokens=%d mla_page_tokens=%d "
+            "checkpoint_tokens=%d shard_size=%d shard_rank=%d TP=%d EP=%d "
+            "chunkwise_rdma=%s",
+            total_tokens,
+            len(input_lengths),
+            len(rounds),
+            chunk_tokens,
+            model._k3_page_tokens,
+            model._kda_checkpoint_tokens,
+            model.kv_cache.local_shard_count,
+            (
+                int(model.parallelism_config.tp_rank)
+                if model.parallelism_config.kv_page_rr_enabled()
+                else 0
+            ),
+            int(model.parallelism_config.get_attn_tp_size()),
+            int(model.parallelism_config.ep_size),
+            chunk_cache_publisher.enabled,
+        )
+        terminal_hidden: Optional[torch.Tensor] = None
+        terminal_mtp_hidden: Optional[torch.Tensor] = None
+        force_disable_sp_run = inputs.force_disable_sp_run
+        mtp_hidden_enabled = (
+            chunk_prefill_round_hook is not None and not force_disable_sp_run
+        )
+        terminal_written = [False] * logical_request_count
+        final_params: Any = None
+        tp_size = int(model.parallelism_config.get_attn_tp_size())
+        current_state_registry = KimiKDACurrentStateRegistry(
+            logical_request_count + int(tp_size > 1)
+        )
+        self.current_state_registry = current_state_registry
+        chunk_cache_publisher.publish_prefix()
+        for round_idx, round_plan in enumerate(rounds):
+            logical_round = logical_chunk_round(round_plan, logical_request_count)
+            terminal_count = sum(int(item.terminal) for item in logical_round.slices)
+            round_label = (
+                f"round={round_idx},tokens={round_plan.token_count},"
+                f"logical_tokens={logical_round.token_count},"
+                f"requests={len(round_plan.slices)},"
+                f"logical_requests={len(logical_round.slices)},"
+                f"terminal={terminal_count}"
+            )
+            chunk_inputs = build_chunk_model_inputs(
+                input_ids,
+                attention_inputs,
+                round_plan=round_plan,
+                multimodal_inputs=inputs.multimodal_inputs,
+                embedding_inputs=inputs.embedding_inputs,
+                force_disable_sp_run=force_disable_sp_run,
+                tp_size=tp_size,
+            )
+            selection = (
+                batch_plan.draft_rows[round_idx].prepare(input_ids.device)
+                if mtp_hidden_enabled else None
+            )
+            chunk_attention = chunk_inputs.attention_inputs
+            round_label += (
+                f",physical_tokens={chunk_attention.physical_token_count},"
+                f"physical_requests={chunk_attention.physical_request_count}"
+            )
+            prepare_round_fmha(fmha_impl, chunk_attention)
+            # The preceding round's draft forward has consumed the previous
+            # target round. Drop that owner before this target forward builds
+            # and all-gathers the next 3-layer Eagle hidden tensor.
+            model._release_prefill_mtp_hidden_buffer()
+            chunk_publish_context = chunk_cache_publisher.begin_round(logical_round)
+            with torch.profiler.record_function(
+                f"RTP::kimi_k3.chunk_prefill.target_forward({round_label})"
+            ):
+                round_output = model._forward_impl_one(
+                    chunk_inputs,
+                    fmha_impl,
+                    kda_current_state_registry=current_state_registry,
+                    round_plan=round_plan,
+                    chunk_publish_context=chunk_publish_context,
+                )
+            chunk_cache_publisher.commit_round(chunk_publish_context)
+            if os.environ.get("KIMI_K3_SMOKE_EVIDENCE") == "1":
+                logging.info(
+                    "[K3_SMOKE_EVENT] %s",
+                    json.dumps(
+                        {
+                            "kind": "chunk",
+                            "rank": int(model.parallelism_config.get_attn_tp_rank()),
+                            "round": round_idx,
+                            "tp": tp_size,
+                            "logical_tokens": logical_round.token_count,
+                            "physical_tokens": chunk_attention.physical_token_count,
+                            "logical_requests": len(logical_round.slices),
+                            "physical_requests": chunk_attention.physical_request_count,
+                        },
+                        sort_keys=True,
+                    ),
+                )
+            if chunk_prefill_round_hook is not None:
+                # Target projections have consumed MLA's aliased output. Its
+                # historical KV scratch must not overlap the draft's expansion.
+                fmha_impl.release_forward_workspace()
+                if mtp_hidden_enabled:
+                    round_mtp_hidden = model.get_mtp_target_hidden_states(-1)
+                    if round_mtp_hidden is None:
+                        raise RuntimeError(
+                            "whole-model K3 Prefill did not publish MTP target hidden rows"
+                        )
+                    if terminal_mtp_hidden is None:
+                        terminal_mtp_hidden = torch.empty(
+                            (logical_request_count, *round_mtp_hidden.shape[1:]),
+                            dtype=round_mtp_hidden.dtype,
+                            device=round_mtp_hidden.device,
+                        )
+                    assert selection is not None
+                    for request_idx, row in batch_plan.terminal_rows[round_idx]:
+                        terminal_mtp_hidden[request_idx].copy_(round_mtp_hidden[row])
+                    model._mtp_hidden_buffer = selection.select(round_mtp_hidden)
+                    model._mtp_hidden_valid_tokens = selection.token_count
+                chunk_prefill_round_hook(logical_round, round_plan is rounds[-1])
+            if terminal_hidden is None:
+                terminal_hidden = torch.empty(
+                    (logical_request_count, round_output.hidden_states.shape[-1]),
+                    dtype=round_output.hidden_states.dtype,
+                    device=round_output.hidden_states.device,
+                )
+            final_params = getattr(round_output, "params_ptr", None)
+            packed_end = 0
+            for item in logical_round.slices:
+                packed_end += item.new_length
+                if item.terminal:
+                    terminal_hidden[item.original_batch_idx].copy_(
+                        round_output.hidden_states[packed_end - 1]
+                    )
+                    terminal_written[item.original_batch_idx] = True
+            del selection
+            del chunk_inputs
+            del chunk_attention
+            del round_output
+        chunk_cache_publisher.validate_complete()
+        if not chunk_cache_publisher.enabled:
+            model._publish_whole_chunk_cache(attention_inputs)
+        if terminal_hidden is None or not all(terminal_written):
+            missing = [
+                idx for idx, written in enumerate(terminal_written) if not written
+            ]
+            raise RuntimeError(f"whole-model K3 missing terminal rows for {missing}")
+        if mtp_hidden_enabled:
+            if terminal_mtp_hidden is None:
+                raise RuntimeError("whole-model K3 missing terminal MTP hidden rows")
+            model._mtp_hidden_buffer = terminal_mtp_hidden
+            model._mtp_hidden_valid_tokens = logical_request_count
+        hidden = terminal_hidden
+        result = (
+            PyModelOutputs(hidden, final_params)
+            if final_params is not None
+            else PyModelOutputs(hidden)
+        )
+        result.lm_output_already_selected = True
+        return result

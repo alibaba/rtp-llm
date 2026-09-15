@@ -6,8 +6,6 @@ import logging
 from typing import TYPE_CHECKING, Dict, Literal, Optional
 
 import torch
-from torch import nn
-
 from rtp_llm.model_loader.linear_attn_weight import split_kda_qkvg_fa_beta_sections
 from rtp_llm.models_py.distributed.sequence_parallel import SequenceParallelLayout
 from rtp_llm.models_py.modules.factory import LinearFactory
@@ -34,6 +32,7 @@ from rtp_llm.ops import ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import to_torch_dtype
+from torch import nn
 
 if TYPE_CHECKING:
     from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
@@ -54,6 +53,7 @@ class KimiK3KDA(nn.Module):
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
+        self.projection_ktp_workspace = None
         self.parallelism_config = parallelism_config
         self.weights = weights
         runtime = config.k3_runtime_config
@@ -184,9 +184,7 @@ class KimiK3KDA(nn.Module):
                 layer_idx,
             )
         expected_fused_width = (
-            4 * self.projection_local_size
-            + self.forget_latent_size
-            + self.total_heads
+            4 * self.projection_local_size + self.forget_latent_size + self.total_heads
         )
         actual_fused_width = (
             self._fp8_projections[W.linear_attn_qkvg_fa_beta_w].N
@@ -270,10 +268,9 @@ class KimiK3KDA(nn.Module):
                 forget_latent_size=self.forget_latent_size,
                 ktp_size=self.ktp_size,
                 ktp_rank=self.ktp_rank,
+                workspace=self.projection_ktp_workspace,
             )
-            mixed_qkv_projected = torch.cat(
-                (result.q, result.k, result.v), dim=-1
-            )
+            mixed_qkv_projected = torch.cat((result.q, result.k, result.v), dim=-1)
             return (
                 mixed_qkv_projected,
                 result.q,
@@ -439,6 +436,7 @@ class KimiK3KDA(nn.Module):
         prefill_metadata: Optional[KimiKDAPrefillMetadata] = None,
         current_state_registry: Optional[KimiKDACurrentStateRegistry] = None,
         projected_fused: Optional[torch.Tensor] = None,
+        prepared_context=None,
     ) -> torch.Tensor:
         is_target_verify = self._validate_request(
             hidden_states,
@@ -491,6 +489,7 @@ class KimiK3KDA(nn.Module):
                 kv_cache=kv_cache,
                 attention_inputs=attention_inputs,
                 is_target_verify=is_target_verify,
+                prepared_context=prepared_context,
             )
         output = self._prepare_output_projection(
             output,

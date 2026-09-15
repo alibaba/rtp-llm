@@ -29,6 +29,81 @@ from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
 )
 
 
+class KtpProjectionWorkspaceTest(unittest.TestCase):
+    def make_workspace(self):
+        return projection_ktp.KtpProjectionWorkspace(
+            (1, 2), ktp_size=8, total_heads=16, head_dim=4, device="cpu"
+        )
+
+    def test_bucket_addresses_are_stable_and_missing_capture_bucket_fails(self):
+        workspace = self.make_workspace()
+        with mock.patch.object(workspace, "_is_capturing", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "not prepared"):
+                workspace.get(1)
+        first = workspace.get(1)
+        self.assertIs(workspace.get(1), first)
+        self.assertNotEqual(first[0].data_ptr(), first[1].data_ptr())
+        self.assertNotEqual(first[0].data_ptr(), workspace.get(2)[0].data_ptr())
+        with mock.patch.object(workspace, "_is_capturing", return_value=False):
+            self.assertIsNone(workspace.get(3))
+        self.assertEqual(set(workspace.buffers), {1, 2})
+        with mock.patch.object(workspace, "_is_capturing", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "not prepared"):
+                workspace.get(3)
+
+    def test_workspace_transport_matches_temporary_transport(self):
+        workspace = self.make_workspace()
+        torch.manual_seed(91)
+        hidden = torch.randn(2, 8, dtype=torch.bfloat16)
+        fused = torch.randn(8, 4 * 8 + 4 + 16, dtype=torch.bfloat16)
+        forget = torch.randn(4, 8, dtype=torch.bfloat16)
+        kwargs = dict(
+            total_heads=16, head_dim=4, forget_latent_size=4, ktp_size=8, ktp_rank=3
+        )
+        seen = []
+
+        def exchange(send, group, output=None):
+            if output is None:
+                return send.clone()
+            seen.append((send.data_ptr(), output.data_ptr()))
+            output.copy_(send)
+            return output
+
+        with mock.patch.object(
+            projection_ktp, "_all_gather_projection_input",
+            side_effect=lambda x, **kw: x.repeat(8, 1),
+        ), mock.patch.object(projection_ktp, "all_to_all_single", side_effect=exchange):
+            expected = projection_ktp.project_kda_inputs_ktp(hidden, fused, forget, **kwargs)
+            for _ in range(2):
+                actual = projection_ktp.project_kda_inputs_ktp(
+                    hidden, fused, forget, workspace=workspace, **kwargs
+                )
+                for name, value in vars(expected).items():
+                    torch.testing.assert_close(
+                        getattr(actual, name), value, rtol=0, atol=0
+                    )
+        send, receive = workspace.get(2)
+        self.assertEqual(seen, [(send.data_ptr(), receive.data_ptr())] * 2)
+
+    def test_reassembled_heads_survive_receive_buffer_reuse(self):
+        workspace = self.make_workspace()
+        for batch in (1, 2):
+            received = workspace.get(batch)[1]
+            received.copy_(torch.arange(received.numel()).reshape(received.shape))
+            result = reassemble_ktp_projection_payload(
+                received, ktp_size=8, physical_batch=batch,
+                local_projection_size=8, local_heads=2,
+            )
+            before = {name: value.clone() for name, value in vars(result).items()}
+            received.zero_()
+            for name, value in vars(result).items():
+                self.assertNotEqual(
+                    value.untyped_storage().data_ptr(),
+                    received.untyped_storage().data_ptr(),
+                )
+                torch.testing.assert_close(value, before[name], rtol=0, atol=0)
+
+
 class KtpStepPlanTest(unittest.TestCase):
     def test_mega_moe_accepts_projection_ktp_and_ktp1_draft_layouts(self):
         for ktp_size in (8, 1):

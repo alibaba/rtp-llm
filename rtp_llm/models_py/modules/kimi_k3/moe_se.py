@@ -14,7 +14,6 @@ import os
 from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
-
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.modules.kimi_k3.input_packer_se import (
     get_kimi_k3_mega_moe_se_input_packer,
@@ -105,7 +104,6 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
 
         import deep_gemm
         import torch.distributed as dist
-
         from rtp_llm.models_py.modules.dsv4.quant_layouts import (
             FP4_BLOCK,
             prepare_fp4_weight_scale_for_deepgemm,
@@ -357,7 +355,12 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         *,
         valid_token_count: Optional[int] = None,
         valid_token_mask: Optional[torch.Tensor] = None,
+        prepared_context=None,
     ) -> torch.Tensor:
+        if prepared_context is not None:
+            if hidden_states.shape[0] != prepared_context.token_count:
+                raise ValueError("prepared MoE token count does not match input")
+            valid_token_count = prepared_context.valid_tokens
         expert_ids, routing_weights = self._route(hidden_states)
         expert_ids, routing_weights = self._mask_padding_routes(
             expert_ids,

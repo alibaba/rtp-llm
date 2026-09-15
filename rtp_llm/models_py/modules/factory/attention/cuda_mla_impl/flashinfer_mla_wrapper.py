@@ -484,6 +484,8 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
 class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
     """Dense FlashMLA variant of RTP's shared MLA Prefill pipeline."""
 
+    supports_prepared_kv_b = True
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -496,6 +498,7 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
         max_seq_len: int = 0,
         is_cuda_graph: bool = False,
         parallelism_config: Optional[ParallelismConfig] = None,
+        prepared_kv_b_projections=None,
     ) -> None:
         from .flashmla_dense_prefill import MlaFlashMLAPrefillOp
 
@@ -537,6 +540,7 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
                 q_scale=attn_configs.mla_fp8_q_scale,
                 kv_scale=attn_configs.mla_fp8_kv_scale,
                 external_prefix_cache=self.page_rr_cache_adapter is not None,
+                prepared_kv_b_projections=prepared_kv_b_projections,
             ),
             NewMlaRotaryEmbeddingOp(
                 cos_sin_cache=cos_sin_cache,

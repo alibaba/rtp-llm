@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence
 
 import torch
@@ -33,6 +34,12 @@ def _select_mla_attention_inputs(
     if explicit_inputs is not None:
         return explicit_inputs
     return getattr(fmha_impl, "attn_inputs", None)
+
+
+@dataclass(frozen=True)
+class KimiK3MLAContext:
+    sp_layout: SequenceParallelLayout
+    projected_qkv_a: Optional[Sequence[torch.Tensor]] = None
 
 
 class KimiK3MLA(MlaAttention):
@@ -103,6 +110,10 @@ class KimiK3MLA(MlaAttention):
             if self._fp8_enabled
             else None
         )
+        self.kv_b_proj = LinearFactory.create_linear_from_weights(
+            weights, W.mla_kv_b_w, W.mla_kv_b_s, None,
+            quant_config=quant_config or config.quant_config,
+        )
         self._o_w = self.o_proj if self._fp8_enabled else weights[W.attn_o_w]
         self._packed_qkv_gate_w = weights[W.mla_fusedqkrope_w]
         # These are only the two small MLA latent norms; decoder-wide norms keep
@@ -122,8 +133,6 @@ class KimiK3MLA(MlaAttention):
                     self._kv_a_norm, latent_norm_eps, retain_bf16=True
                 )
         self.output_gate_op = Fp8SigmoidGate() if self._fp8_enabled else SigmoidGate()
-        self._sp_layout_for_forward: Optional[SequenceParallelLayout] = None
-        self._projected_qkv_a_for_forward: Optional[Sequence[torch.Tensor]] = None
 
     def tp_input_projection_weights(self) -> list:
         """Return local packed MLA projection shards for outer TP orchestration."""
@@ -140,12 +149,12 @@ class KimiK3MLA(MlaAttention):
         return self._o_w
 
     def _project_qkv_a_input(
-        self, hidden_states: torch.Tensor
+        self, hidden_states: torch.Tensor, context: KimiK3MLAContext
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        sp_layout = self._sp_layout_for_forward
+        sp_layout = context.sp_layout
         if self.parallel_mode is KimiK3ParallelMode.TP_SP:
             assert sp_layout is not None
-            projected = self._projected_qkv_a_for_forward
+            projected = context.projected_qkv_a
             if projected is None:
                 raise RuntimeError(
                     "K3 TP-SP MLA requires its input projection from the decoder "
@@ -209,7 +218,7 @@ class KimiK3MLA(MlaAttention):
         assert output_gate is not None
         return self.output_gate_op(attn_output, output_gate)
 
-    def _project_output(self, attn_output: torch.Tensor) -> torch.Tensor:
+    def _project_output(self, attn_output: torch.Tensor, context: KimiK3MLAContext) -> torch.Tensor:
         # The decoder layer owns the output projection and collective.  The
         # base MLA forward still calls this hook at the correct semantic point.
         return attn_output
@@ -223,9 +232,9 @@ class KimiK3MLA(MlaAttention):
         *,
         sp_layout: SequenceParallelLayout,
         projected_qkv_a: Optional[Sequence[torch.Tensor]] = None,
+        prepared_context=None,
     ) -> torch.Tensor:
         attn_inputs = _select_mla_attention_inputs(attention_inputs, fmha_impl)
-        self._sp_layout_for_forward = sp_layout
         if attn_inputs is None:
             raise ValueError("K3 MLA requires physical attention metadata")
         if int(hidden_states.shape[0]) != sp_layout.tokens.local_tokens:
@@ -239,14 +248,8 @@ class KimiK3MLA(MlaAttention):
             and projected_qkv_a is not None
         ):
             raise ValueError("Projection KTP does not accept a TP MLA projection")
-        self._projected_qkv_a_for_forward = projected_qkv_a
-        try:
-            return super().forward(hidden_states, fmha_impl, kv_cache)
-        finally:
-            self._sp_layout_for_forward = None
-            self._projected_qkv_a_for_forward = None
-
-
-__all__ = [
-    "KimiK3MLA",
-]
+        context = prepared_context or KimiK3MLAContext(sp_layout)
+        context = replace(context, projected_qkv_a=projected_qkv_a)
+        return super().forward(
+            hidden_states, fmha_impl, kv_cache, projection_context=context
+        )

@@ -48,6 +48,9 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         model._k3_page_tokens = None
         model._kda_checkpoint_tokens = None
         model._ktp_capture_buckets = ()
+        model.execution_spec = SimpleNamespace(chunk_tokens=0, sp_type="", tp_size=8, tp_rank=0)
+        model.layers = nn.ModuleList([])
+        model.layer_num = 0
 
     def test_parallel_mode_is_fixed_by_topology(self) -> None:
         def config(*, tp_size: int, ktp_size: int, role_type: RoleType):
@@ -267,6 +270,8 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             K3W.MOE_GATE: router_weight,
             K3W.MOE_CORRECTION_BIAS: correction_bias,
         }
+        module._router_correction_fp32 = correction_bias.float()
+        module._router_weight_fp32 = router_weight.float()
 
         logits = torch.mm(hidden, router_weight, out_dtype=torch.float32)
         reference_logits = torch.mm(hidden.float(), router_weight.float())
@@ -296,6 +301,8 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             K3W.MOE_GATE: router_weight,
             K3W.MOE_CORRECTION_BIAS: correction_bias,
         }
+        module._router_correction_fp32 = correction_bias.float()
+        module._router_weight_fp32 = router_weight.float()
 
         with patch.object(torch, "mm", side_effect=AssertionError("unexpected mm")):
             actual_ids, actual_weights = module._route(hidden)
@@ -348,7 +355,10 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         projected = torch.randn(4, 14)
         module._projected_qkv_a_for_forward = [projected]
 
-        actual_qkv_a, actual_gate = module._project_qkv_a_input(local_input)
+        from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLAContext
+        actual_qkv_a, actual_gate = module._project_qkv_a_input(
+            local_input, KimiK3MLAContext(module._sp_layout_for_forward, [projected])
+        )
         torch.testing.assert_close(actual_qkv_a, projected[:, :6], rtol=0, atol=0)
         torch.testing.assert_close(actual_gate, projected[:, 6:], rtol=0, atol=0)
 
@@ -393,7 +403,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         module.parallelism_config = SimpleNamespace(get_attn_tp_size=lambda: 8)
         module._o_w = torch.empty((8, 16))
         attn_output = torch.empty((32768, 8))
-        actual = module._project_output(attn_output)
+        actual = module._project_output(attn_output, None)
 
         self.assertIs(actual, attn_output)
         self.assertIs(module.output_projection_weight(), module._o_w)
@@ -774,6 +784,8 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         nn.Module.__init__(layer)
         layer.parallel_mode = KimiK3ParallelMode.TP_SP
         layer.layer_idx = 1
+        layer._previous_blocks = 1
+        layer._writes_block = False
         layer.eps = 1e-5
         layer.attn_res_block_size = 2
         layer.layer_type = kimi_k3.HybridAttentionType.LINEAR
@@ -836,6 +848,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
                 *,
                 valid_token_count,
                 valid_token_mask=None,
+                prepared_context=None,
             ):
                 self.valid_token_count = valid_token_count
                 return torch.zeros_like(hidden_states)
@@ -848,6 +861,8 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         nn.Module.__init__(layer)
         layer.parallel_mode = KimiK3ParallelMode.TP_SP
         layer.layer_idx = 1
+        layer._previous_blocks = 1
+        layer._writes_block = False
         layer.eps = 1e-6
         layer.attn_res_block_size = 2
         layer.layer_type = kimi_k3.HybridAttentionType.LINEAR
@@ -1007,7 +1022,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         group = object()
 
         with (
-            patch.object(kimi_k3, "prefill_chunk_tokens", return_value=1 << 16),
+            patch.object(model.execution_spec, "chunk_tokens", 1 << 16),
             patch.object(kimi_k3, "get_process_group", return_value=group),
             patch.object(
                 kimi_k3,
@@ -1063,7 +1078,8 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             max_decode_graph_batch_size=8,
         )
 
-        with patch.dict(kimi_k3.os.environ, {"SP_TYPE": "eagle3"}):
+        model.execution_spec.sp_type = "eagle3"
+        with patch.dict("os.environ", {"SP_TYPE": "eagle3"}):
             self.assertTrue(model.initialize(init_resource))
 
         self.assertEqual(tuple(model._mtp_hidden_buffer.shape), (32, 48))

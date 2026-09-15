@@ -73,6 +73,52 @@ class KtpProjectionResult:
     output_gate: torch.Tensor
 
 
+class KtpProjectionWorkspace:
+    """Model-owned KDA communication buffers for the finite Graph buckets.
+
+    The serial target runner shares these across KDA layers. Reassembly copies
+    every head section before the next layer reuses the receive buffer. Keep
+    the same addresses in eager warmup, capture, and replay: transient A2A
+    allocations can hang KTP/MegaMoE replay with the supported NCCL build.
+    This workspace must not be shared by concurrently executing models.
+    """
+
+    def __init__(self, physical_batches, *, ktp_size, total_heads, head_dim, device):
+        if ktp_size <= 1 or total_heads % ktp_size or head_dim <= 0:
+            raise ValueError("invalid KTP communication workspace geometry")
+        local_heads = total_heads // ktp_size
+        self.payload_width = local_heads * (5 * head_dim + 1)
+        self.ktp_size = ktp_size
+        self.device = torch.device(device)
+        self.physical_batches = frozenset(batch for batch in physical_batches if batch > 0)
+        self.buffers = {}
+
+    def _is_capturing(self):
+        return self.device.type == "cuda" and torch.cuda.is_current_stream_capturing()
+
+    def get(self, physical_batch):
+        buffers = self.buffers.get(physical_batch)
+        if buffers is not None:
+            return buffers
+        if self._is_capturing():
+            raise RuntimeError("KTP communication bucket was not prepared before capture")
+        if physical_batch not in self.physical_batches:
+            # Ordinary eager request sizes do not grow the Graph resource pool.
+            return None
+        shape = (self.ktp_size * physical_batch, self.payload_width)
+        buffers = (
+            torch.empty(shape, dtype=torch.bfloat16, device=self.device),
+            torch.empty(shape, dtype=torch.bfloat16, device=self.device),
+        )
+        self.buffers[physical_batch] = buffers
+        logger.info(
+            "[K3_KTP_WORKSPACE] warmup_physical_batch=%d bytes=%d shared_across_kda_layers=True",
+            physical_batch,
+            sum(t.numel() * t.element_size() for t in buffers),
+        )
+        return buffers
+
+
 def _apply_projection(
     inputs: torch.Tensor | QuantizedActivation, projection: Any
 ) -> torch.Tensor:
@@ -222,6 +268,7 @@ def project_kda_inputs_ktp(
     forget_latent_size: int,
     ktp_size: int,
     ktp_rank: int,
+    workspace: KtpProjectionWorkspace | None = None,
 ) -> KtpProjectionResult:
     """Run KDA's projection-only KTP AllGather/GEMM/AllToAll pipeline."""
 
@@ -254,7 +301,15 @@ def project_kda_inputs_ktp(
         ktp_size=ktp_size,
         ktp_rank=ktp_rank,
     )
-    received = all_to_all_single(send, group=Group.KTP)
+    buffers = workspace.get(physical_batch) if workspace is not None else None
+    if buffers is not None:
+        buffers[0].copy_(send)
+        send = buffers[0]
+    received = (
+        all_to_all_single(send, group=Group.KTP, output=buffers[1])
+        if buffers is not None
+        else all_to_all_single(send, group=Group.KTP)
+    )
     return reassemble_ktp_projection_payload(
         received,
         ktp_size=ktp_size,
@@ -266,6 +321,7 @@ def project_kda_inputs_ktp(
 
 __all__ = [
     "KtpProjectionResult",
+    "KtpProjectionWorkspace",
     "pack_ktp_projection_payload",
     "project_kda_inputs_ktp",
     "reassemble_ktp_projection_payload",

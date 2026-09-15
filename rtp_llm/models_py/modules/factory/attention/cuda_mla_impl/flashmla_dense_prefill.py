@@ -323,6 +323,7 @@ class MlaFlashMLAPrefillOp:
         q_scale: float = 1.0,
         kv_scale: float = 1.0,
         external_prefix_cache: bool = False,
+        prepared_kv_b_projections=None,
     ) -> None:
         if weights is None:
             raise ValueError("FlashMLA Prefill requires MLA projection weights")
@@ -382,6 +383,9 @@ class MlaFlashMLAPrefillOp:
         ) * softmax_extra_scale
         self.weights = weights
         self.quant_config = quant_config
+        # K3 supplies model-owned projections. Other MLA models retain their
+        # existing lazy construction instead of preparing every layer here.
+        self._kv_b_projections = prepared_kv_b_projections
         self._prefix_producer = None
         if quant_config is not None and quant_config.get_method() == "FP8_PER_BLOCK":
             from .mla_prefix_fp8_producer import Fp8MlaPrefixGather
@@ -724,6 +728,8 @@ class MlaFlashMLAPrefillOp:
         return k, value_states
 
     def _create_kv_b_proj(self, layer_id: int) -> LinearBase:
+        if self._kv_b_projections is not None:
+            return self._kv_b_projections[layer_id]
         return LinearFactory.create_linear_from_weights(
             self.weights[layer_id],
             W.mla_kv_b_w,

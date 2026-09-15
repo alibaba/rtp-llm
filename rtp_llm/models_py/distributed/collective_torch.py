@@ -899,7 +899,9 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     # return torch.cat(tensor_list, dim=0)
 
 
-def all_to_all_single(tensor: torch.Tensor, group: Group) -> torch.Tensor:
+def all_to_all_single(
+    tensor: torch.Tensor, group: Group, *, output: Optional[torch.Tensor] = None
+) -> torch.Tensor:
     """Exchange equal contiguous dim-0 chunks across ``group``.
 
     Projection KTP lays its input out as ``[destination, rows, payload]``.
@@ -917,7 +919,16 @@ def all_to_all_single(tensor: torch.Tensor, group: Group) -> torch.Tensor:
             f"shape={tuple(tensor.shape)}, world_size={world_size}"
         )
     send = tensor.contiguous()
-    output = torch.empty_like(send)
+    if output is None:
+        output = torch.empty_like(send)
+    elif (
+        output.shape != send.shape
+        or output.dtype != send.dtype
+        or output.device != send.device
+        or not output.is_contiguous()
+        or output.untyped_storage().data_ptr() == send.untyped_storage().data_ptr()
+    ):
+        raise ValueError("AllToAll output must match input and use separate contiguous storage")
     torch.distributed.all_to_all_single(output, send, group=process_group)
     return output
 

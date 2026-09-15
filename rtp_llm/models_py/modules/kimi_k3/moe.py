@@ -5,18 +5,18 @@ from __future__ import annotations
 import inspect
 import logging
 import os
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
 import torch.nn.functional as F
-from torch import nn
-
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models.kimi_k3.kimi_k3_weight import shared_expert_weight_shard_enabled
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.base import GroupTopK, RMSNorm
 from rtp_llm.models_py.triton_kernels.common.activation import situ_and_mul
 from rtp_llm.ops import ParallelismConfig
+from torch import nn
 
 if TYPE_CHECKING:
     from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
@@ -80,6 +80,12 @@ def _transient_full_row_weight(
     return all_gather(local_weight.contiguous(), group=Group.TP)
 
 
+@dataclass(frozen=True)
+class KimiK3MoEContext:
+    token_count: int
+    valid_tokens: Optional[int]
+
+
 class KimiK3LatentMoE(nn.Module):
     """K3 latent MoE backed exclusively by DeepGEMM MegaMoE.
 
@@ -138,8 +144,20 @@ class KimiK3LatentMoE(nn.Module):
             and router_weight.dtype == torch.bfloat16
             and torch.cuda.get_device_capability(router_weight.device)[0] >= 8
         )
+        self._router_correction_fp32 = weights[K3W.MOE_CORRECTION_BIAS].float()
+        self._router_weight_fp32 = (
+            None if self._bf16_fp32_router_enabled else router_weight.float()
+        )
+        self._pre_kernel_barrier = (
+            os.environ.get(_K3_MEGA_PRE_KERNEL_BARRIER_ENV, "0") == "1"
+        )
         self._group_topk = GroupTopK()
         self._setup_deep_gemm_mega()
+
+    def prepare_context(self, token_count, valid_token_count):
+        if valid_token_count is not None and not 0 <= valid_token_count <= token_count:
+            raise ValueError("valid_token_count is outside the local token shard")
+        return KimiK3MoEContext(token_count, valid_token_count)
 
     def _validate_mega_preconditions(self, label: str) -> None:
         """Check what both mega strategies require of the device and the world.
@@ -271,7 +289,6 @@ class KimiK3LatentMoE(nn.Module):
 
         import deep_gemm
         import torch.distributed as dist
-
         from rtp_llm.models_py.modules.dsv4.moe.input_packer import (
             get_mega_moe_input_packer,
         )
@@ -491,7 +508,7 @@ class KimiK3LatentMoE(nn.Module):
     ) -> None:
         """Rendezvous K3 ranks before entering the peer-symmetric MegaMoE kernel."""
 
-        if os.environ.get(_K3_MEGA_PRE_KERNEL_BARRIER_ENV, "0") != "1":
+        if not self._pre_kernel_barrier:
             return
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
@@ -521,7 +538,7 @@ class KimiK3LatentMoE(nn.Module):
             dist.barrier(group=group)
 
     def _route(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        correction_bias = self.weights[K3W.MOE_CORRECTION_BIAS].float()
+        correction_bias = self._router_correction_fp32
         router_weight = self.weights[K3W.MOE_GATE]
         if (
             self._bf16_fp32_router_enabled
@@ -534,7 +551,12 @@ class KimiK3LatentMoE(nn.Module):
             )
         else:
             router_logits = torch.matmul(
-                hidden_states.float(), router_weight.float()
+                hidden_states.float(),
+                (
+                    self._router_weight_fp32
+                    if self._router_weight_fp32 is not None
+                    else router_weight.float()
+                ),
             )
         if self._group_topk.fused_sigmoid_supported(
             router_logits,
@@ -649,7 +671,12 @@ class KimiK3LatentMoE(nn.Module):
         *,
         valid_token_count: Optional[int] = None,
         valid_token_mask: Optional[torch.Tensor] = None,
+        prepared_context=None,
     ) -> torch.Tensor:
+        if prepared_context is not None:
+            if hidden_states.shape[0] != prepared_context.token_count:
+                raise ValueError("prepared MoE token count does not match input")
+            valid_token_count = prepared_context.valid_tokens
         expert_ids, routing_weights = self._route(hidden_states)
         expert_ids, routing_weights = self._mask_padding_routes(
             expert_ids,

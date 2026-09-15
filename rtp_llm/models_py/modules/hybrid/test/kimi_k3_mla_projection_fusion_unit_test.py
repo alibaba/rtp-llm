@@ -76,7 +76,10 @@ class KimiK3MLAProjectionFusionUnitTest(unittest.TestCase):
 
         expected = torch.mm(hidden_states, projection.weight)
         module._projected_qkv_a_for_forward = [expected]
-        qkv_a, output_gate = module._project_qkv_a_input(hidden_states)
+        from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLAContext
+        qkv_a, output_gate = module._project_qkv_a_input(
+            hidden_states, KimiK3MLAContext(module._sp_layout_for_forward, [expected])
+        )
 
         self.assertEqual(projection.calls, 0)
         torch.testing.assert_close(qkv_a, expected[:, :6], rtol=0, atol=0)

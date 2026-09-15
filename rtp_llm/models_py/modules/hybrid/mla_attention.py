@@ -2,8 +2,6 @@ from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
 import torch
-from torch import nn
-
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
@@ -12,6 +10,7 @@ from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 
 class MlaAttention(nn.Module):
@@ -171,12 +170,18 @@ class MlaAttention(nn.Module):
         hidden_states: torch.Tensor,
         fmha_impl: MlaImplBase,
         kv_cache: Optional[LayerKVCache] = None,
+        *,
+        projection_context=None,
     ) -> torch.Tensor:
         output_gate = None
         q_c = None
         if self.q_lora_rank > 0:
             with self._profile_stage("q_kv_down_projection", hidden_states):
-                fused_qkv, output_gate = self._project_qkv_a_input(hidden_states)
+                fused_qkv, output_gate = (
+                    self._project_qkv_a_input(hidden_states)
+                    if projection_context is None
+                    else self._project_qkv_a_input(hidden_states, projection_context)
+                )
             kv_offset = self.q_lora_rank
             q, compressed_kv = torch.split(
                 fused_qkv,
@@ -240,4 +245,8 @@ class MlaAttention(nn.Module):
         with self._profile_stage("sigmoid_output_gate", attn_output):
             attn_output = self._apply_output_gate(attn_output, output_gate)
         with self._profile_stage("o_projection_then_token_reduce_scatter", attn_output):
-            return self._project_output(attn_output)
+            return (
+                self._project_output(attn_output)
+                if projection_context is None
+                else self._project_output(attn_output, projection_context)
+            )

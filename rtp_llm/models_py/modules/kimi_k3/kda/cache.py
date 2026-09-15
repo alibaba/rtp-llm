@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import torch
-
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
     KimiKDARecurrentCheckpointMetadata,
     kimi_kda_load_recurrent_state,
@@ -43,11 +42,17 @@ class KimiK3KDACache:
                 f"block={converter.block_size_bytes}"
             )
 
-    def get_views(
-        self, kv_cache: LayerKVCache
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def bind(self, kv_cache: LayerKVCache) -> None:
+        """Bind stable cache storage when the model receives new resources."""
+        self._bound_cache = None
+        self._bound_views = self.get_views(kv_cache)
+        self._bound_cache = kv_cache
+
+    def get_views(self, kv_cache: LayerKVCache) -> tuple[torch.Tensor, torch.Tensor]:
         """Interpret RTP's linear-cache block storage as SSM and conv states."""
 
+        if getattr(self, "_bound_cache", None) is kv_cache:
+            return self._bound_views
         base = kv_cache.kv_cache_base
         if base is None or base.numel() == 0:
             raise ValueError("KDA LayerKVCache has no backing tensor")
@@ -68,9 +73,7 @@ class KimiK3KDACache:
         KDA conv and recurrent cache tensors.
         """
 
-        block_map = getattr(
-            attention_inputs, "kv_cache_kernel_block_id_device", None
-        )
+        block_map = getattr(attention_inputs, "kv_cache_kernel_block_id_device", None)
         if (
             block_map is None
             or not block_map.numel()
@@ -127,5 +130,6 @@ class KimiK3KDACache:
             linear_block_map,
             ssm_cache,
         )
+
 
 __all__ = ["KimiK3KDACache"]

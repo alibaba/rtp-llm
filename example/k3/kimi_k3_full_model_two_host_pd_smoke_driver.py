@@ -201,7 +201,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def forwarded_optional_environment(role: str) -> dict[str, str]:
-    result: dict[str, str] = {}
+    # Pass the default explicitly so remote shell environments cannot select a
+    # different speculative model for the two roles.
+    result: dict[str, str] = {"SP_TYPE": "mtp"}
     names = (
         "SP_TYPE",
         "SP_MODEL_TYPE",
