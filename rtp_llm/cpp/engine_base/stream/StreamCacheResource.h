@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -36,13 +37,15 @@ public:
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
     absl::Status         initKVBlock();
     absl::Status         waitForAllocatorLoad();
-    absl::Status         incrKVBlock(int seq_len_override = -1);
-    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
-    int                  tryReleaseKVBlock(size_t nums);
-    void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
-    void                 releaseResource();
-    bool                 asyncLoadCache();
-    bool                 loadCacheDone();
+    // Empty while pending; a terminal status preserves retryable materialization failures.
+    std::optional<absl::Status> pollAllocatorLoad();
+    absl::Status                incrKVBlock(int seq_len_override = -1);
+    void                        fakeInitKVBlock(size_t reserved_blocks = 0);
+    int                         tryReleaseKVBlock(size_t nums);
+    void                        freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
+    void                        releaseResource();
+    bool                        asyncLoadCache();
+    bool                        loadCacheDone();
 
     // swap all linear groups rhs and lhs
     void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);

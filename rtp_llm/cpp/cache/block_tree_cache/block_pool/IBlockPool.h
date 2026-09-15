@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -45,6 +46,8 @@ struct BlockPoolConfigBase {
 class IBlockPool {
 public:
     virtual ~IBlockPool() = default;
+
+    void setCapacityChangeCallback(std::function<void()> callback);
 
     const std::string&  poolName() const;
     virtual std::string debugString() const;
@@ -89,18 +92,29 @@ protected:
 
     template<typename Validator, typename Mutator>
     void mutateAllocatedBlocks(const BlockIdList& blocks, Validator&& validate, Mutator&& mutate) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        checkInitializedNoLock();
-        if (blocks.empty()) {
-            return;
+        std::function<void()> notify;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            checkInitializedNoLock();
+            if (blocks.empty()) {
+                return;
+            }
+            checkUniqueBlocksNoLock(blocks);
+            for (const auto block : blocks) {
+                checkAllocatedNoLock(block);
+                validate(block);
+            }
+            const auto free_before      = availableFreeBlocksNoLock();
+            const auto available_before = available_blocks_num_;
+            for (const auto block : blocks) {
+                mutate(block);
+            }
+            if (availableFreeBlocksNoLock() > free_before || available_blocks_num_ > available_before) {
+                notify = capacity_change_callback_;
+            }
         }
-        checkUniqueBlocksNoLock(blocks);
-        for (const auto block : blocks) {
-            checkAllocatedNoLock(block);
-            validate(block);
-        }
-        for (const auto block : blocks) {
-            mutate(block);
+        if (notify) {
+            notify();
         }
     }
 
@@ -136,6 +150,7 @@ private:
 private:
     std::shared_ptr<const BlockPoolConfigBase>                config_;
     bool                                                      initialized_{false};
+    std::function<void()>                                     capacity_change_callback_;
     std::vector<uint8_t>                                      allocated_;
     std::vector<uint32_t>                                     tree_refcounts_;
     std::array<std::vector<uint32_t>, kBlockTreeRefTypeCount> tree_refcounts_by_type_;

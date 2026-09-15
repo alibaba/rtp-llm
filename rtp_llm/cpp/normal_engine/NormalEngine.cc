@@ -53,8 +53,7 @@ void releaseHostMemoryCache() {
 #endif
 }
 
-bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig& pd_sep_config,
-                                         const CacheStoreConfig& cache_store_config) {
+bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const CacheStoreConfig& cache_store_config) {
     // Only PD cache-store RDMA registers KV cache as user MR.  Keep the
     // raw device allocation backing out of direct KVCacheManager users and non-RDMA
     // paths so PyTorch allocator behavior is unchanged elsewhere.
@@ -487,7 +486,7 @@ void NormalEngine::normalizeSystemPromptCacheConfig() {
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     normalizeSystemPromptCacheConfig();
-    const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
+    const bool use_device_malloc_block_pool = shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config);
     if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,
                                                          propose_params_->getEngineInitParams().model_config_,
@@ -508,7 +507,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       sp_config,
                                                                       pd_sep_config,
                                                                       cache_store_config,
-                                                                      use_cuda_malloc_block_pool);
+                                                                      use_device_malloc_block_pool);
         resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
@@ -533,7 +532,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       SpeculativeExecutionConfig{},
                                                                       pd_sep_config,
                                                                       cache_store_config,
-                                                                      use_cuda_malloc_block_pool);
+                                                                      use_device_malloc_block_pool);
         resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");

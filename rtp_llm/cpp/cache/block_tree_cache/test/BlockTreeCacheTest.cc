@@ -100,13 +100,13 @@ std::vector<DeviceBlockPoolPtr> makeStructuralDevicePools(size_t count, const st
         layout.seq_size_per_block         = 1;
         layout.kernel_blocks_per_kv_block = 1;
 
-        auto config                     = std::make_shared<DeviceBlockPoolConfig>();
-        config->pool_type               = BlockPoolType::DEVICE;
-        config->pool_name               = pool_name_prefix + "_" + std::to_string(next_pool_id.fetch_add(1));
-        config->physical_block_count    = physical_block_count;
-        config->total_size_bytes        = layout.total_size_bytes;
-        config->memory_layouts          = {layout};
-        config->use_cuda_malloc_backing = true;
+        auto config                       = std::make_shared<DeviceBlockPoolConfig>();
+        config->pool_type                 = BlockPoolType::DEVICE;
+        config->pool_name                 = pool_name_prefix + "_" + std::to_string(next_pool_id.fetch_add(1));
+        config->physical_block_count      = physical_block_count;
+        config->total_size_bytes          = layout.total_size_bytes;
+        config->memory_layouts            = {layout};
+        config->use_device_malloc_backing = true;
 
         auto device_pool = std::make_shared<DeviceBlockPool>(config);
         RTP_LLM_CHECK(device_pool->init());
@@ -2165,8 +2165,8 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     ASSERT_NE(first_source, NULL_BLOCK_IDX);
     ASSERT_NE(second_source, NULL_BLOCK_IDX);
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
-    resources[0][0].host_block                = first_source;
-    resources[0][1].host_block                = second_source;
+    resources[0][0].host_block = first_source;
+    resources[0][1].host_block = second_source;
     const BlockTreeInsertResult insert_result =
         cache->tree()->insertNode({100}, resources, /*collect_path=*/false, /*is_resident=*/false);
     ASSERT_EQ(insert_result.inserted_nodes.size(), 1u);
@@ -2276,7 +2276,7 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackCoreHoldersAndRetainsReque
     const BlockIdxType source_block = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_NE(source_block, NULL_BLOCK_IDX);
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
-    resources[0][0].host_block                = source_block;
+    resources[0][0].host_block = source_block;
     const BlockTreeInsertResult insert_result =
         cache->tree()->insertNode({100}, resources, /*collect_path=*/false, /*is_resident=*/false);
     ASSERT_EQ(insert_result.inserted_nodes.size(), 1u);
@@ -2360,8 +2360,8 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostDescript
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
-    resources[0][0].device_blocks             = {cache_block};
-    resources[0][1].host_block                = host_block;
+    resources[0][0].device_blocks = {cache_block};
+    resources[0][1].host_block    = host_block;
     const BlockTreeInsertResult insert_result =
         cache->tree()->insertNode({100}, resources, /*collect_path=*/false, /*is_resident=*/false);
     ASSERT_EQ(insert_result.inserted_nodes.size(), 1u);
@@ -2869,7 +2869,7 @@ TEST_F(BlockTreeCacheTest, EventSnapshotRemainsAuthoritativeWhenTransportQueueIs
     EXPECT_TRUE(cache_->logicalCacheSnapshot().block_keys.empty());
     EXPECT_GT(cache_->logicalCacheSnapshot().version, version);
     cache_->setEventPublisher(nullptr, {});
-    const auto count = publisher->events.size();
+    const auto count              = publisher->events.size();
     resources[0][0].device_blocks = {43};  // Block 42 was released by the eviction.
     cache_->insert({200}, resources, Tier::DEVICE);
     EXPECT_EQ(publisher->events.size(), count);

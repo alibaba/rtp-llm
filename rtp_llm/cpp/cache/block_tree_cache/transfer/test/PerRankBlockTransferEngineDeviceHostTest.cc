@@ -55,11 +55,11 @@ static DeviceBlockPoolPtr
 makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs, size_t usable_count, const std::string& pool_name) {
     const auto physical_block_count = usable_count + 1;
 
-    auto config                     = std::make_shared<DeviceBlockPoolConfig>();
-    config->pool_type               = BlockPoolType::DEVICE;
-    config->pool_name               = pool_name;
-    config->physical_block_count    = physical_block_count;
-    config->use_cuda_malloc_backing = true;
+    auto config                       = std::make_shared<DeviceBlockPoolConfig>();
+    config->pool_type                 = BlockPoolType::DEVICE;
+    config->pool_name                 = pool_name;
+    config->physical_block_count      = physical_block_count;
+    config->use_device_malloc_backing = true;
 
     size_t offset = 0;
     for (const auto& spec : specs) {
@@ -1051,18 +1051,18 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DefaultStagingCanReserve64FullBl
     ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
     for (const size_t swa_bytes : {4096u, 16384u}) {
         auto full_device = makeDevicePool({{8192, 0}}, 1, "default_staging_full");
-        auto swa_device = makeDevicePool({{swa_bytes, 0}}, 1, "default_staging_swa");
-        auto full_group = makeDeviceHostGroup(
-            0, {full_device}, nullptr, {makeGroupBase(CacheGroupType::FULL, {0}, 8192)});
-        auto swa_group = makeDeviceHostGroup(
-            1, {swa_device}, nullptr, {makeGroupBase(CacheGroupType::SWA, {0}, swa_bytes)});
-        auto engine = std::make_shared<PerRankBlockTransferEngine>(
-            std::vector<GroupSetPtr>{full_group, swa_group}, true);
+        auto swa_device  = makeDevicePool({{swa_bytes, 0}}, 1, "default_staging_swa");
+        auto full_group =
+            makeDeviceHostGroup(0, {full_device}, nullptr, {makeGroupBase(CacheGroupType::FULL, {0}, 8192)});
+        auto swa_group =
+            makeDeviceHostGroup(1, {swa_device}, nullptr, {makeGroupBase(CacheGroupType::SWA, {0}, swa_bytes)});
+        auto engine =
+            std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{full_group, swa_group}, true);
         auto full = engine->device_disk_executor_->full_staging_pool_->tryMallocBatch(64);
         ASSERT_TRUE(full.has_value());
         EXPECT_EQ(full->size(), 64u);
         const size_t expected_swa_capacity = swa_bytes == 4096 ? 128 : 64;
-        auto swa = engine->device_disk_executor_->swa_staging_pool_->tryMallocBatch(expected_swa_capacity);
+        auto         swa = engine->device_disk_executor_->swa_staging_pool_->tryMallocBatch(expected_swa_capacity);
         ASSERT_TRUE(swa.has_value());
         EXPECT_EQ(swa->size(), expected_swa_capacity);
         EXPECT_FALSE(engine->device_disk_executor_->swa_staging_pool_->tryMallocBatch(1).has_value());

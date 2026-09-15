@@ -21,6 +21,11 @@ IBlockPool::IBlockPool(std::shared_ptr<const BlockPoolConfigBase> config): confi
     available_blocks_num_ = free_blocks_.size();
 }
 
+void IBlockPool::setCapacityChangeCallback(std::function<void()> callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    capacity_change_callback_ = std::move(callback);
+}
+
 const std::string& IBlockPool::poolName() const {
     return config_->pool_name;
 }

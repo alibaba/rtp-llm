@@ -639,11 +639,18 @@ TEST_F(KVCacheManagerTest, AllocationWaitObservesReleaseGeneration) {
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
 
+    const auto release_capacity = [&] {
+        auto       pool  = cache_manager->allocator_->getDeviceBlockPool();
+        const auto block = pool->malloc();
+        ASSERT_TRUE(block.has_value());
+        pool->incRef(*block);
+        pool->decRef(*block);
+    };
     const auto generation_before_release = cache_manager->allocationGeneration();
-    cache_manager->notifyAllocationChange();
+    release_capacity();
     EXPECT_TRUE(cache_manager->waitForAllocationChange(generation_before_release, /*timeout_ms=*/1));
 
-    const auto generation_before_wait = cache_manager->allocationGeneration();
+    const auto         generation_before_wait = cache_manager->allocationGeneration();
     std::promise<void> waiter_started;
     auto               waiter_ready = waiter_started.get_future();
     auto waiter = std::async(std::launch::async, [cache_manager, generation_before_wait, &waiter_started] {
@@ -652,7 +659,7 @@ TEST_F(KVCacheManagerTest, AllocationWaitObservesReleaseGeneration) {
     });
     waiter_ready.get();
     EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
-    cache_manager->notifyAllocationChange();
+    release_capacity();
     EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(100)), std::future_status::ready);
     EXPECT_TRUE(waiter.get());
 }
@@ -670,15 +677,15 @@ TEST_F(KVCacheManagerTest, ConnectorReferenceReleaseWakesAllocationWaiter) {
 
     MallocInfo malloc_info{resource, tokens};
     malloc_info.reuse_cache         = false;
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     ASSERT_TRUE(cache_manager->malloc(malloc_info).success);
 
-    auto connector_ref = cache_manager->incrKVCacheRef(
-        resource->cacheResource(0), resource->cacheKeys(0), /*is_connector=*/true);
+    auto connector_ref =
+        cache_manager->incrKVCacheRef(resource->cacheResource(0), resource->cacheKeys(0), /*is_connector=*/true);
     ASSERT_NE(connector_ref, nullptr);
     cache_manager->free(FreeInfo{resource, tokens});
 
-    const auto generation_before_release = cache_manager->allocationGeneration();
+    const auto         generation_before_release = cache_manager->allocationGeneration();
     std::promise<void> waiter_started;
     auto               waiter_ready = waiter_started.get_future();
     auto waiter = std::async(std::launch::async, [cache_manager, generation_before_release, &waiter_started] {
@@ -707,10 +714,28 @@ TEST_F(KVCacheManagerTest, UpdateKVBlockReleaseWakesAllocationWaiter) {
 
     MallocInfo malloc_info{resource, tokens};
     malloc_info.reuse_cache         = false;
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     ASSERT_TRUE(cache_manager->malloc(malloc_info).success);
 
-    const auto generation_before_release = cache_manager->allocationGeneration();
+    // The initial batch shares a complete prefix block. Dropping one reference
+    // does not release capacity and must not wake allocation waiters.
+    ASSERT_EQ(resource->blocks(0, 0).size(), 1u);
+    ASSERT_EQ(resource->blocks(1, 0).size(), 1u);
+    ASSERT_EQ(resource->blocks(0, 0).back(), resource->blocks(1, 0).back());
+    const auto                     shared_free       = cache_manager->freeBlocksNum();
+    const auto                     shared_generation = cache_manager->allocationGeneration();
+    std::vector<TaggedBlockIdPair> block_update_mapping;
+    ASSERT_TRUE(cache_manager->updateKVBlock(
+        resource, /*block_src_batch=*/{0}, /*copy_last_block=*/false, block_update_mapping));
+    EXPECT_EQ(cache_manager->freeBlocksNum(), shared_free);
+    EXPECT_EQ(cache_manager->allocationGeneration(), shared_generation);
+
+    // Fork an independent tail so reducing the batch now releases a physical block.
+    ASSERT_TRUE(cache_manager->updateKVBlock(
+        resource, /*block_src_batch=*/{0, 0}, /*copy_last_block=*/true, block_update_mapping));
+    ASSERT_NE(resource->blocks(0, 0).back(), resource->blocks(1, 0).back());
+    const auto         free_before_release       = cache_manager->freeBlocksNum();
+    const auto         generation_before_release = cache_manager->allocationGeneration();
     std::promise<void> waiter_started;
     auto               waiter_ready = waiter_started.get_future();
     auto waiter = std::async(std::launch::async, [cache_manager, generation_before_release, &waiter_started] {
@@ -720,9 +745,9 @@ TEST_F(KVCacheManagerTest, UpdateKVBlockReleaseWakesAllocationWaiter) {
     waiter_ready.get();
     EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
 
-    std::vector<TaggedBlockIdPair> block_update_mapping;
     ASSERT_TRUE(cache_manager->updateKVBlock(
         resource, /*block_src_batch=*/{0}, /*copy_last_block=*/false, block_update_mapping));
+    EXPECT_EQ(cache_manager->freeBlocksNum(), free_before_release + 1);
     EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(100)), std::future_status::ready);
     EXPECT_TRUE(waiter.get());
 }
@@ -1756,8 +1781,8 @@ TEST_F(KVCacheManagerTest, MultiRankZeroRejectsMismatchedBroadcastAddressCount) 
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfoReturnsAllKeysBeyondTenThousand) {
     ScopedEnvVar  snapshot_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", "0");
-    constexpr int kKeyCount = 10001;
-    constexpr int kSeqLen   = kKeyCount * 2;
+    constexpr int kKeyCount    = 10001;
+    constexpr int kSeqLen      = kKeyCount * 2;
     CacheConfig   cache_config = makeSimpleMhaCacheConfig(1, kKeyCount + 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     kv_cache_config.reuse_cache         = true;
@@ -1776,7 +1801,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoReturnsAllKeysBeyondTenThousand) {
 
     BatchKVCacheResourcePtr resource = makeDSV4BatchResource(cache_config);
     CompleteTokenIdsPtr     tokens   = makeDSV4CompleteTokenIds(kSeqLen, kSeqLen, /*seq_size_per_block=*/2);
-    MallocInfo             malloc_info{resource, tokens};
+    MallocInfo              malloc_info{resource, tokens};
     malloc_info.reuse_cache         = true;
     malloc_info.enable_cache_lookup = false;
     ASSERT_TRUE(kv_cache_manager->malloc(malloc_info).success);
@@ -1851,8 +1876,7 @@ TEST_F(KVCacheManagerTest, StorePublishesFullBlocksOnlyAndLookupLeavesOneToken) 
     }
     manager->free(FreeInfo{seed_resource, seed_tokens});
 
-    EXPECT_EQ(manager->blockTreeCache()->getKeySnapshot().keys,
-              (CacheKeysType{seed_keys[0], seed_keys[1]}));
+    EXPECT_EQ(manager->blockTreeCache()->getKeySnapshot().keys, (CacheKeysType{seed_keys[0], seed_keys[1]}));
     auto partial_match = manager->blockTreeCache()->match(seed_keys);
     EXPECT_EQ(partial_match.matched_device_blocks, 2u);
     block_tree_cache_test::releaseRequestRefsForTest(*manager->blockTreeCache(),
@@ -2634,5 +2658,28 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 
+TEST_F(KVCacheManagerTest, AllocationWaitBackoffBoundsRepeatedPrefixRollback) {
+    auto config  = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    auto manager = std::make_shared<KVCacheManager>(config, false);
+    ASSERT_TRUE(manager->init());
+    auto pool  = manager->allocator_->getDeviceBlockPool();
+    auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    pool->incTreeRef(*block, BlockTreeRefType::CACHE);
+    const auto available = pool->availableBlocksNum();
+    const auto started   = std::chrono::steady_clock::now();
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const auto generation = manager->allocationGeneration();
+        // An unsuccessful admission borrows and rolls back the same prefix.
+        pool->incRef(*block);
+        pool->decRef(*block);
+        ASSERT_EQ(pool->availableBlocksNum(), available);
+        EXPECT_TRUE(manager->waitForAllocationChange(generation, 20, 20));
+    }
+    EXPECT_GE(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(60));
+    pool->decTreeRef(*block, BlockTreeRefType::CACHE);
+}
+
 }  // namespace test
+
 }  // namespace rtp_llm
