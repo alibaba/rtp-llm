@@ -3506,8 +3506,8 @@ rpds-py==0.30.0 \
     # via
     #   jsonschema
     #   referencing
-rtp-kernel @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0608/arm_pkg/rtp_kernel-0.1.0%2Bcu13.fb4b4ab-cp310-cp310-linux_aarch64.whl \
-    --hash=sha256:2df85dae2bba17de32f38546454344e590142fef18272425e0e050a86d658b73
+rtp-kernel @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260722/rtp_kernel-0.1.0-49c379b-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:f58054a222003721f6793d66dc84e5ca26186ed36cd7977ede384810b168fbb4
     # via -r internal_source/deps/requirements_cuda13_arm.txt
 safetensors==0.7.0 \
     --hash=sha256:0071bffba4150c2f46cae1432d31995d77acfd9f8db598b5d1a2ce67e8440ad2 \
