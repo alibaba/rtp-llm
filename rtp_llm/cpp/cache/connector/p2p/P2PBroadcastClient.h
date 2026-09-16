@@ -139,7 +139,7 @@ private:
 
     void genBroadcastRequest(FunctionRequestPB&                  request,
                              const BroadcastParams&              params,
-                             const std::vector<TransferRoutePB>* routes_of_worker);
+                             std::vector<TransferRoutePB>*       routes_of_worker);
 
 private:
     std::vector<std::string>          worker_addrs_;

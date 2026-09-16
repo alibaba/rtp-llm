@@ -8,6 +8,7 @@
 #include <thread>
 #include <vector>
 #include <type_traits>
+#include <utility>
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
@@ -184,7 +185,7 @@ public:
 
     template<typename RequestPB, typename ResponsePB, typename RpcCall>
     std::shared_ptr<BroadcastResult<RequestPB, ResponsePB>>
-    broadcast(const std::vector<RequestPB>& requests, int timeout_ms, const RpcCall& rpc_call) const {
+    broadcast(std::vector<RequestPB> requests, int timeout_ms, const RpcCall& rpc_call) const {
         const auto worker_size = worker_addrs_.size();
         if (requests.size() != worker_size) {
             RTP_LLM_LOG_WARNING(
@@ -214,7 +215,7 @@ public:
                                                       "ExecuteFunction getConnection rank=" + std::to_string(rank)
                                                           + " peer=" + addr + ": " + conn_status.status().ToString()));
             }
-            ctx->request        = requests.at(rank);
+            ctx->request        = std::move(requests.at(rank));
             ctx->server_addr    = addr;
             ctx->timeout_ms     = timeout_ms;
             ctx->client_context = std::make_shared<grpc::ClientContext>();

@@ -84,7 +84,7 @@ P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
     };
 
     auto result = tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        requests, static_cast<int>(std::min<int64_t>(timeout_ms, std::numeric_limits<int>::max())), rpc_call);
+        std::move(requests), static_cast<int>(std::min<int64_t>(timeout_ms, std::numeric_limits<int>::max())), rpc_call);
     if (!result) {
         RTP_LLM_LOG_WARNING("broadcast failed, cannot create broadcast result");
         return nullptr;
@@ -95,7 +95,7 @@ P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
 
 void P2PBroadcastClient::genBroadcastRequest(FunctionRequestPB&                  request,
                                              const BroadcastParams&              params,
-                                             const std::vector<TransferRoutePB>* routes_of_worker) {
+                                             std::vector<TransferRoutePB>*       routes_of_worker) {
     auto p2p_request = request.mutable_p2p_request();
 
     // 传输端点索引表：route 里的 peer_index 在 worker 侧解析成具体端点。
@@ -116,8 +116,8 @@ void P2PBroadcastClient::genBroadcastRequest(FunctionRequestPB&                 
     if (routes_of_worker == nullptr) {
         return;
     }
-    for (const auto& route : *routes_of_worker) {
-        p2p_request->add_routes()->CopyFrom(route);
+    for (auto& route : *routes_of_worker) {
+        p2p_request->add_routes()->Swap(&route);
     }
     p2p_request->set_plan_digest(params.plan_digest);
 }
@@ -164,7 +164,7 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
     };
 
     auto result = tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        requests, static_cast<int>(timeout_ms), rpc_call);
+        std::move(requests), static_cast<int>(timeout_ms), rpc_call);
     if (!result) {
         RTP_LLM_LOG_WARNING("P2PBroadcastClient cancel: broadcast failed, unique_key: %s", unique_key.c_str());
         return nullptr;
@@ -212,7 +212,7 @@ P2PBroadcastClient::LeaseStatusResult P2PBroadcastClient::queryLeaseStatus(const
     };
 
     auto tp_result = tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        requests, static_cast<int>(poll_timeout_ms), rpc_call);
+        std::move(requests), static_cast<int>(poll_timeout_ms), rpc_call);
     if (!tp_result) {
         RTP_LLM_LOG_WARNING("queryLeaseStatus: broadcast failed to create result, unique_key=%s", unique_key.c_str());
         return result;
