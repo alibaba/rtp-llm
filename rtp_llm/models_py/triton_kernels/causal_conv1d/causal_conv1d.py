@@ -129,7 +129,7 @@ def prepare_causal_conv1d_metadata(
     )
 
 
-@triton.jit(do_not_specialize=["max_block_size"])
+@triton.jit(do_not_specialize=["max_block_size", "stride_o_seq"])
 def _causal_conv1d_fwd_kernel(  # continuous batching
     # Pointers to matrices
     x_ptr,  # (dim, cu_seqlen) holding `batch` of actual sequences + padded sequences
@@ -155,7 +155,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     stride_istate_seq: tl.constexpr,
     stride_istate_dim: tl.constexpr,
     stride_istate_token: tl.constexpr,
-    stride_o_seq: tl.constexpr,
+    stride_o_seq,
     stride_o_dim: tl.constexpr,
     stride_o_token: tl.constexpr,
     # others

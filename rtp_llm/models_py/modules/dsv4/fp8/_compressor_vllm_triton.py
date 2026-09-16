@@ -144,6 +144,7 @@ def _save_partial_states_kernel(
         "seq_start",
         "n_raw",
         "kv_cache_block_size",
+        "NUM_STATE_BLOCKS",
     ]
 )
 def _fused_kv_compress_norm_rope_insert_sparse_attn(
@@ -197,7 +198,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     TOKEN_STRIDE: tl.constexpr,
     SCALE_DIM: tl.constexpr,
     KV_BLOCK_STRIDE: tl.constexpr,
-    NUM_STATE_BLOCKS: tl.constexpr,
+    NUM_STATE_BLOCKS,
     NUM_KV_BLOCKS: tl.constexpr,
     BATCHED: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
@@ -436,6 +437,7 @@ def _glm_kpool_hadamard128(x):
         "seq_start",
         "n_raw",
         "kv_cache_block_size",
+        "NUM_STATE_BLOCKS",
     ]
 )
 def _fused_kv_compress_norm_rope_insert_indexer_attn(
@@ -489,7 +491,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     TOKEN_STRIDE: tl.constexpr,
     SCALE_DIM: tl.constexpr,
     KV_BLOCK_STRIDE: tl.constexpr,
-    NUM_STATE_BLOCKS: tl.constexpr,
+    NUM_STATE_BLOCKS,
     NUM_KV_BLOCKS: tl.constexpr,
     BATCHED: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,

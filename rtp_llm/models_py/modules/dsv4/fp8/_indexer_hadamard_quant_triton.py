@@ -3,6 +3,7 @@
 import torch
 import triton
 import triton.language as tl
+
 from rtp_llm.models_py.triton_kernels.sparse_mla.fused_prefill_rope_hadamard import (
     _had128_inline,
 )
@@ -10,9 +11,9 @@ from rtp_llm.models_py.triton_kernels.sparse_mla.fused_prefill_rope_hadamard imp
 ROWS = 16
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["R"])
 def indexer_hadamard_quant_fold_kernel(
-    q, w, o, wf, R: tl.constexpr, BR: tl.constexpr, ROTATE: tl.constexpr
+    q, w, o, wf, R, BR: tl.constexpr, ROTATE: tl.constexpr
 ):
     r = tl.program_id(0).to(tl.int64) * BR + tl.arange(0, BR)
     d = tl.arange(0, 128)
