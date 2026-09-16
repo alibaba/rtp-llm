@@ -642,6 +642,20 @@ ShardLayout ShardLayout::forPeer(const ShardLayout&       self,
         }
         g.kv_block_stride_bytes = global_kv / divisor;
 
+        // PAYLOAD_BYTES changes the spec's payload as well as its stride.
+        // EQUAL_BYTES only slices the stride; its spec still describes the full
+        // payload, so it must not use the stride's CP divisor here.
+        size_t global_payload = self.group(tag).k_block_payload_bytes
+                                * static_cast<size_t>(std::max(1, self.headShardCount(tag)));
+        if (self.group(tag).pre_sliced && self.effectiveSlice(tag) == CpBlockSliceMode::PAYLOAD_BYTES) {
+            global_payload *= static_cast<size_t>(self.cpSize());
+        }
+        size_t payload_divisor = static_cast<size_t>(std::max(1, peer.headShardCount(tag)));
+        if (g.pre_sliced && peer.effectiveSlice(tag) == CpBlockSliceMode::PAYLOAD_BYTES) {
+            payload_divisor *= static_cast<size_t>(peer.cpSize());
+        }
+        g.k_block_payload_bytes = global_payload / payload_divisor;
+
         if (self.group(tag).kv_scale_stride_bytes > 0) {
             const size_t self_divisor = static_cast<size_t>(std::max(1, self.headShardCount(tag)))
                                         * (self.group(tag).pre_sliced ?

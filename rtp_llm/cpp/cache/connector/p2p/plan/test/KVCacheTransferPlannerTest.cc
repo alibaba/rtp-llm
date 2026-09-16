@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 
 #include <gtest/gtest.h>
 #include <tuple>
@@ -876,6 +877,80 @@ TEST(PlannerGroupD, DigestDistinguishesTailKeySelection) {
     EXPECT_NE(last_one.digest(), last_two.digest());
     EXPECT_NE(result.plan.digest(), last_one.digest());
     EXPECT_NE(result.plan.digest(), last_two.digest());
+}
+
+// 从真实状态缓存 spec 构造两端，避免手工填写 payload 掩盖 factory 的推导错误。
+TEST(PlannerGroupD, FactoryMirrorsCpStatePayloadFromRealSpecs) {
+    for (int cp_size : {2, 4}) {
+        for (int decode_tp_size : {1, cp_size}) {
+            for (auto mode : {CpBlockSliceMode::PAYLOAD_BYTES, CpBlockSliceMode::EQUAL_BYTES}) {
+                SCOPED_TRACE(::testing::Message() << "cp_size=" << cp_size << " decode_tp=" << decode_tp_size
+                                                  << " mode=" << static_cast<int>(mode));
+                auto prefill_pc = makePc(cp_size, CPRotateMethod::ALL_GATHER, true);
+                prefill_pc.role_type = RoleType::PREFILL;
+                auto decode_pc = makePc(decode_tp_size, CPRotateMethod::PREFILL_CP, true);
+                decode_pc.role_type = RoleType::DECODE;
+                decode_pc.prefill_cp_config.prefill_cp_size = cp_size;
+
+                auto local_layout = [mode](const ParallelismConfig& pc) {
+                    KVCacheSpecDesc desc;
+                    desc.tag                  = kFixedTag;
+                    desc.cache_type           = KVCacheSpecType::OpaqueState;
+                    desc.dtype                = DataType::TYPE_UINT8;
+                    desc.entry_dtype          = DataType::TYPE_UINT8;
+                    desc.entry_elems           = 64;
+                    desc.entry_count_mode      = OpaqueBlockEntryCountMode::EXPLICIT;
+                    desc.explicit_entry_count = 8;
+                    desc.cp                   = CacheCpPolicyDesc{};
+                    desc.cp->slice            = mode;
+                    desc.cp->prefill_slice_layout = mode == CpBlockSliceMode::PAYLOAD_BYTES ?
+                                                       CpPrefillSliceLayout::PAYLOAD :
+                                                       CpPrefillSliceLayout::BLOCK_STRIDE;
+                    SpecBuildContext ctx;
+                    ctx.seq_size_per_block = kSeqSizePerBlock;
+                    ctx.parallelism_config = &pc;
+                    auto spec = FixedStateCacheSpec::build(desc, ctx);
+                    GroupBase group;
+                    group.tag                       = kFixedTag;
+                    group.spec                      = spec;
+                    group.policy                    = defaultCacheGroupPolicy(CacheGroupType::SWA);
+                    group.policy.cp_slice           = mode;
+                    group.layer_ids                 = {0};
+                    group.block_num                 = 8;
+                    group.seq_size_per_block        = spec->seq_size_per_block;
+                    group.kernel_seq_size_per_block = spec->seq_size_per_block;
+                    group.kv_block_stride_bytes     = spec->block_size_bytes();
+                    auto topology = CacheTopology::create({group}, {{0, {kFixedTag}}});
+                    return ShardLayoutFactory::fromTopology(*topology, pc, pc.role_type);
+                };
+                const auto prefill = local_layout(prefill_pc);
+                const auto decode = local_layout(decode_pc);
+                const auto inferred_prefill =
+                    ShardLayoutFactory::peerOf(decode, cp_size, true, RoleType::PREFILL);
+                const auto inferred_decode =
+                    ShardLayoutFactory::peerOf(prefill, decode_tp_size, true, RoleType::DECODE);
+                EXPECT_EQ(inferred_prefill.group(kFixedTag).k_block_payload_bytes,
+                          prefill.group(kFixedTag).k_block_payload_bytes);
+                EXPECT_EQ(inferred_decode.group(kFixedTag).k_block_payload_bytes,
+                          decode.group(kFixedTag).k_block_payload_bytes);
+                EXPECT_EQ(inferred_prefill.group(kFixedTag).kv_block_stride_bytes,
+                          prefill.group(kFixedTag).kv_block_stride_bytes);
+                EXPECT_EQ(inferred_decode.group(kFixedTag).kv_block_stride_bytes,
+                          decode.group(kFixedTag).kv_block_stride_bytes);
+
+                const auto on_decode = KVCacheTransferPlanner::plan(inferred_prefill, decode, {kFixedTag});
+                const auto on_prefill = KVCacheTransferPlanner::plan(prefill, inferred_decode, {kFixedTag});
+                ASSERT_TRUE(on_decode.ok()) << on_decode.error.ToString();
+                ASSERT_TRUE(on_prefill.ok()) << on_prefill.error.ToString();
+                EXPECT_FALSE(on_decode.plan.routes.empty());
+                EXPECT_EQ(on_decode.plan.digest(), on_prefill.plan.digest());
+                for (const auto& route : on_decode.plan.routes) {
+                    EXPECT_EQ(route.src_bytes, prefill.group(kFixedTag).kv_block_stride_bytes);
+                    EXPECT_EQ(route.dst_bytes, route.src_bytes);
+                }
+            }
+        }
+    }
 }
 
 // 用例 D4: 两端独立求值结果一致（「跨端协议零改动」的正确性根据）
