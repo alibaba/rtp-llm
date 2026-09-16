@@ -35,6 +35,9 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     // Token IDs and sequence length already include this step's samples.
     // The next step may have a different beam width.
     for (int i = 0; i < currentBatchSize(); i++) {
+        // Model tensors still use input rows; sampled beams may duplicate or reorder them.
+        const int src_idx =
+            update_info.src_batch_indices.defined() ? update_info.src_batch_indices.data_ptr<int32_t>()[i] : i;
         GenerateOutput generate_output;
         generate_output.aux_info.iter_count = iter_count_;
         generate_output.output_ids          = torch::empty({1, (int64_t)output_len}, torch::kInt32);
@@ -68,7 +71,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             if (logits_result.size(0) <= 1) {
                 generate_output.logits = logits_result.cpu().clone();
             } else {
-                generate_output.logits = logits_result.narrow(0, i, 1).cpu().clone();
+                generate_output.logits = logits_result.narrow(0, src_idx, 1).cpu().clone();
             }
         }
 
@@ -76,7 +79,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             if (update_info.hidden_states.size(0) == 1) {
                 generate_output.hidden_states = update_info.hidden_states.cpu();
             } else {
-                generate_output.hidden_states = update_info.hidden_states.narrow(0, i, 1).cpu();
+                generate_output.hidden_states = update_info.hidden_states.narrow(0, src_idx, 1).cpu();
             }
         }
         if (generate_input_->generate_config->return_all_hidden_states && update_info.all_hidden_states.defined()

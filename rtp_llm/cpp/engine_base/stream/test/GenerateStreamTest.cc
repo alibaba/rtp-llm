@@ -131,8 +131,8 @@ TEST_F(GenerateStreamTest, P2PRequestDeadlineDoesNotRestartWithStreamBeginTime) 
 
 TEST_F(GenerateStreamTest, PrefillFallbackVariableBeamOutputUsesCompletedStep) {
     autil::EnvGuard perf_scope("PERF_TEST", "0");
-    // Stop before the next width change, both after prefill and after a decode step.
-    for (const auto& widths : std::vector<std::vector<int>>{{4, 2, 4}, {2, 4, 2}}) {
+    // Cover shrinking, expanding and reordered fixed-width beams, after prefill and decode.
+    for (const auto& widths : std::vector<std::vector<int>>{{4, 2, 4}, {2, 4, 2}, {2, 2, 2}}) {
         for (const int max_new_tokens : {1, 2}) {
             SCOPED_TRACE(::testing::Message()
                          << "first_width=" << widths.front() << ", max_new_tokens=" << max_new_tokens);
@@ -147,6 +147,8 @@ TEST_F(GenerateStreamTest, PrefillFallbackVariableBeamOutputUsesCompletedStep) {
             config.ignore_eos            = true;
             config.reuse_cache           = false;
             config.return_cum_log_probs  = true;
+            config.return_logits        = true;
+            config.return_hidden_states = true;
 
             ModelConfig model_config;
             model_config.max_seq_len                  = 32;
@@ -163,7 +165,10 @@ TEST_F(GenerateStreamTest, PrefillFallbackVariableBeamOutputUsesCompletedStep) {
             ASSERT_FALSE(stream->queryPdSep());
             ASSERT_FALSE(stream->isStreaming());
 
-            torch::Tensor sampled_tokens;
+            torch::Tensor        sampled_tokens;
+            torch::Tensor        logits;
+            torch::Tensor        hidden_states;
+            std::vector<int32_t> source_rows;
             for (int step = 0; step < max_new_tokens; ++step) {
                 const int beam_count = widths[step];
                 sampled_tokens       = torch::empty({beam_count, input->inputLength() + step + 1}, torch::kInt32);
@@ -175,9 +180,25 @@ TEST_F(GenerateStreamTest, PrefillFallbackVariableBeamOutputUsesCompletedStep) {
                         row[input->inputLength() + token] = 10 * (beam + 1) + token;
                     }
                 }
-                StreamUpdateInfo update_info{.new_tokens     = sampled_tokens,
-                                             .num_new_tokens = 1,
-                                             .cum_log_probs  = torch::arange(beam_count, torch::kFloat32)};
+                torch::Tensor src_batch_indices;
+                if (step + 1 == max_new_tokens) {
+                    const int input_rows = step == 0 ? 1 : widths[step - 1];
+                    logits = torch::arange(input_rows * model_config.vocab_size, torch::kFloat32)
+                                 .reshape({input_rows, model_config.vocab_size});
+                    hidden_states = torch::arange(input_rows * 3, torch::kFloat32).reshape({input_rows, 3}) + 1000;
+                    source_rows.resize(beam_count);
+                    for (int beam = 0; beam < beam_count; ++beam) {
+                        source_rows[beam] = input_rows - 1 - beam % input_rows;
+                    }
+                    // The final update skips KV remapping, so this remains a stream-only test.
+                    src_batch_indices = torch::tensor(source_rows, torch::kInt32);
+                }
+                StreamUpdateInfo update_info{.new_tokens        = sampled_tokens,
+                                             .num_new_tokens    = 1,
+                                             .hidden_states     = hidden_states,
+                                             .logits            = logits,
+                                             .cum_log_probs     = torch::arange(beam_count, torch::kFloat32),
+                                             .src_batch_indices = src_batch_indices};
                 stream->update(update_info);
                 ASSERT_FALSE(stream->hasError());
                 if (step + 1 < max_new_tokens) {
@@ -201,6 +222,10 @@ TEST_F(GenerateStreamTest, PrefillFallbackVariableBeamOutputUsesCompletedStep) {
                                  sampled_tokens.narrow(0, beam, 1).narrow(1, input->inputLength(), max_new_tokens)));
                 ASSERT_TRUE(output.aux_info.cum_log_probs.has_value());
                 EXPECT_FLOAT_EQ(output.aux_info.cum_log_probs->item<float>(), static_cast<float>(beam));
+                ASSERT_TRUE(output.logits.has_value());
+                EXPECT_TRUE(torch::equal(*output.logits, logits.narrow(0, source_rows[beam], 1)));
+                ASSERT_TRUE(output.hidden_states.has_value());
+                EXPECT_TRUE(torch::equal(*output.hidden_states, hidden_states.narrow(0, source_rows[beam], 1)));
             }
             EXPECT_FALSE(stream->hasOutput());
         }
