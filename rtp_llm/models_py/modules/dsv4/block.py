@@ -231,6 +231,11 @@ class Block(nn.Module):
                     "DSV4 MoE front requires the mega_moe_se strategy, "
                     f"got {strategy_name or 'unknown'!r}"
                 )
+            logging.info(
+                "DSV4 MoE front disabled for unsupported strategy=%r; using "
+                "the ordinary MoE path",
+                strategy_name or "unknown",
+            )
             return
         score_func = getattr(getattr(self.ffn, "gate", None), "score_func", None)
         if score_func != "sqrtsoftplus":
@@ -483,11 +488,12 @@ class Block(nn.Module):
             and not use_moe_front
             and not self._moe_front_fallback_logged
         ):
+            reason = self._moe_front_adapter.unsupported_reason(x, input_ids)
             logging.warning(
                 "DSV4 MoE front layer %d is falling back to the ordinary MoE "
-                "prefix because the decode input is outside its tensor or "
-                "capacity contract",
+                "prefix: %s",
                 self.layer_id,
+                reason or "decode input is outside the front contract",
             )
             self._moe_front_fallback_logged = True
         if use_moe_front:
@@ -496,7 +502,7 @@ class Block(nn.Module):
                 ffn_input_observer = lambda value: _rt.record_if_level(
                     2, f"L{self.layer_id:02d}_decode_ffn_in", value
                 )
-            ffn_out, x_pre, post, comb = self._moe_front_adapter.forward(
+            ffn_out, _, post, comb = self._moe_front_adapter.forward(
                 x,
                 input_ids,
                 ffn_input_observer=ffn_input_observer,

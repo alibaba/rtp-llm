@@ -6,7 +6,7 @@ import logging
 import os
 import re
 from collections.abc import Callable, Mapping
-from functools import reduce
+from functools import lru_cache, reduce
 from operator import mul
 from typing import TYPE_CHECKING
 
@@ -56,6 +56,10 @@ def _parse_arches(value: object) -> set[str]:
 def _validate_extension_contract(
     ops, dim: int, experts: int, topk: int, device: torch.device
 ) -> Mapping:
+    if dim % 128 != 0:
+        raise RuntimeError(
+            f"DSV4 MoE-front hidden size must be a multiple of 128, got {dim}"
+        )
     geometry = ops.geometry_moe_front(dim)
     if not isinstance(geometry, Mapping):
         raise RuntimeError(
@@ -108,6 +112,8 @@ def _validate_extension_contract(
 
     source_commit = str(build_info.get("source_commit", ""))
     source_sha256 = str(build_info.get("source_sha256", ""))
+    # cuda-extension's normal wheel build embeds git rev-parse --short=8;
+    # source_sha256 below provides the full implementation identity.
     if not re.fullmatch(r"[0-9a-f]{8,40}", source_commit):
         raise RuntimeError(
             f"DSV4 MoE-front build has invalid source commit {source_commit!r}"
@@ -124,6 +130,20 @@ def _validate_extension_contract(
                 f"{field}={dependency_commit!r}"
             )
     return geometry
+
+
+@lru_cache(maxsize=None)
+def _load_and_validate_extension(
+    dim: int, experts: int, topk: int, device: torch.device
+) -> tuple[object, Mapping]:
+    """Load and validate one immutable wheel contract per device geometry."""
+
+    from rtp_kernel import dsv4_moe_front
+
+    geometry = _validate_extension_contract(
+        dsv4_moe_front, dim, experts, topk, device
+    )
+    return dsv4_moe_front, geometry
 
 
 class MegaMoeFrontAdapter:
@@ -143,8 +163,6 @@ class MegaMoeFrontAdapter:
         ffn_hc,
         ffn_norm,
     ) -> None:
-        from rtp_kernel import dsv4_moe_front
-
         if moe.strategy_name != "mega_moe_se":
             raise RuntimeError(
                 "DSV4 MoE front requires the MegaMoE-SE strategy; "
@@ -157,7 +175,6 @@ class MegaMoeFrontAdapter:
         self.gate = moe.gate
         self.ffn_hc = ffn_hc
         self.ffn_norm = ffn_norm
-        self._ops = dsv4_moe_front
 
         if int(self.gate.topk) != _TOPK:
             raise RuntimeError(
@@ -168,8 +185,7 @@ class MegaMoeFrontAdapter:
         if device.type != "cuda":
             raise RuntimeError(f"DSV4 MoE front requires CUDA weights, got {device}")
         try:
-            geometry = _validate_extension_contract(
-                dsv4_moe_front,
+            dsv4_moe_front, geometry = _load_and_validate_extension(
                 self.dim,
                 int(self.gate.weight.shape[0]),
                 int(self.gate.topk),
@@ -179,6 +195,7 @@ class MegaMoeFrontAdapter:
             raise RuntimeError(
                 f"DSV4 MoE-front validation failed for layer {self.layer_id}: {exc}"
             ) from exc
+        self._ops = dsv4_moe_front
         if tuple(ffn_hc.fn.shape) != (_HC_WIDTH, _HC_MULT * self.dim):
             raise RuntimeError(
                 f"DSV4 MoE-front hc_fn shape mismatch: {tuple(ffn_hc.fn.shape)}"
@@ -274,34 +291,56 @@ class MegaMoeFrontAdapter:
         for plan in plans.values():
             plan.close()
 
+    def unsupported_reason(
+        self, residual: torch.Tensor, input_ids: torch.Tensor | None = None
+    ) -> str | None:
+        """Explain why an input cannot use the front, or return ``None``."""
+
+        if residual.dim() not in (3, 4) or tuple(residual.shape[-2:]) != (
+            _HC_MULT,
+            self.dim,
+        ):
+            return f"residual shape {tuple(residual.shape)} is unsupported"
+        if not residual.is_cuda:
+            return "residual is not CUDA"
+        if residual.dtype != torch.bfloat16:
+            return f"residual dtype is {residual.dtype}, expected torch.bfloat16"
+        if not residual.is_contiguous():
+            return "residual is not contiguous"
+        tokens = reduce(mul, (int(value) for value in residual.shape[:-2]), 1)
+        if input_ids is None:
+            return "input_ids is required"
+        if int(input_ids.numel()) != tokens:
+            return f"input_ids has {input_ids.numel()} values for {tokens} tokens"
+        if self.gate.hash:
+            # RTP engine and CUDA Graph buffers publish int32 token IDs. Casting
+            # here would allocate once per layer and break graph capture.
+            if not input_ids.is_cuda:
+                return "HashMoE input_ids is not CUDA"
+            if input_ids.device != residual.device:
+                return (
+                    f"HashMoE input_ids is on {input_ids.device}, expected "
+                    f"{residual.device}"
+                )
+            if input_ids.dtype != torch.int32:
+                return (
+                    f"HashMoE input_ids dtype is {input_ids.dtype}, "
+                    "expected torch.int32"
+                )
+            if not input_ids.is_contiguous():
+                return "HashMoE input_ids is not contiguous"
+        mega_capacity = int(self.executor._mega_buf.num_max_tokens_per_rank)
+        capacity = min(MEGA_MOE_FRONT_CAPACITY, mega_capacity)
+        if not 0 <= tokens <= capacity:
+            return f"decode token count {tokens} exceeds capacity {capacity}"
+        return None
+
     def supports(
         self, residual: torch.Tensor, input_ids: torch.Tensor | None = None
     ) -> bool:
         """Return whether ``M*S`` fits both the front ABI and MoE buffer."""
 
-        if (
-            residual.dim() not in (3, 4)
-            or tuple(residual.shape[-2:]) != (_HC_MULT, self.dim)
-            or not residual.is_cuda
-            or residual.dtype != torch.bfloat16
-            or not residual.is_contiguous()
-        ):
-            return False
-        tokens = reduce(mul, (int(value) for value in residual.shape[:-2]), 1)
-        if input_ids is None:
-            return False
-        if int(input_ids.numel()) != tokens:
-            return False
-        if self.gate.hash:
-            if (
-                not input_ids.is_cuda
-                or input_ids.device != residual.device
-                or input_ids.dtype != torch.int32
-                or not input_ids.is_contiguous()
-            ):
-                return False
-        mega_capacity = int(self.executor._mega_buf.num_max_tokens_per_rank)
-        return 0 <= tokens <= min(MEGA_MOE_FRONT_CAPACITY, mega_capacity)
+        return self.unsupported_reason(residual, input_ids) is None
 
     def forward(
         self,
@@ -428,6 +467,9 @@ class MegaMoeFrontAdapter:
                     )
             finally:
                 if temporary_plan:
+                    # All device allocations are owned by the adapter workspace,
+                    # model weights, or caller. The temporary plan owns host-side
+                    # launch descriptors only; CUDA copies them during enqueue.
                     plan.close()
 
         normalized = self.normalized[:tokens].view(*leading, self.dim)
