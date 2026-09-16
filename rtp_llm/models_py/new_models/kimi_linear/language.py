@@ -1148,11 +1148,18 @@ class KimiLinearForCausalLM(GptModelBase):
         return ok
 
     def prepare_fmha_impl(
-        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: Optional[str] = None,
     ) -> Any:
         self._ensure_mla_kernel_layout()
         self.weight = self._mla_kernel_layout
-        return super().prepare_fmha_impl(inputs, is_cuda_graph)
+        return super().prepare_fmha_impl(
+            inputs,
+            is_cuda_graph,
+            cuda_graph_selection_mode=cuda_graph_selection_mode,
+        )
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
         if self.kv_cache is None:
