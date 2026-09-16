@@ -5,6 +5,7 @@ import os
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -13,6 +14,7 @@ from rtp_llm.models_py.modules.dsv41.compact_reader import CompactPages
 from rtp_llm.models_py.modules.dsv41.flashmla import (
     PlanarGlobalBinding,
     PlanarSwaBinding,
+    _finalize_native,
     _pack_selected_rows,
     flashmla_attention,
     flashmla_compact_attention,
@@ -263,12 +265,94 @@ class FlashMLACompactTest(unittest.TestCase):
                 ],
             )
 
+    def test_fused_finalize_masks_special_values_and_refreshes_graph(self):
+        for rows, heads in ((0, 64), (1, 64), (7, 128), (128, 64)):
+            with self.subTest(rows=rows, heads=heads):
+                native = torch.randn(rows, heads, 512, device="cuda", dtype=torch.bfloat16)
+                native_lse = torch.randn(rows, heads, device="cuda")
+                sinks = torch.randn(heads, device="cuda")
+                sinks[:4] = torch.tensor([float("inf"), -float("inf"), float("nan"), 0], device="cuda")
+                if rows:
+                    native_lse[:, :4] = sinks[:4]
+                metadata = SimpleNamespace(
+                    query_valid=torch.ones(rows, device="cuda", dtype=torch.bool),
+                    have_kv=torch.ones(rows, device="cuda", dtype=torch.bool),
+                    status=torch.zeros(rows, device="cuda", dtype=torch.int32),
+                )
+                actual = (torch.empty_like(native), torch.empty_like(native_lse),
+                          torch.empty(rows, heads, device="cuda", dtype=torch.int32))
+                expected = tuple(torch.empty_like(value) for value in actual)
+
+                def operation(outputs):
+                    _finalize_native(native, native_lse, sinks, metadata, *outputs)
+
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with patch.dict(os.environ, {"DSV41_FLASHMLA_FUSED_FINALIZE": "1"}):
+                    with torch.cuda.stream(stream):
+                        operation(actual)
+                    stream.synchronize()
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, stream=stream):
+                        operation(actual)
+                pointers = [value.data_ptr() for value in actual]
+                for iteration in range(4):
+                    native.neg_()
+                    if rows:
+                        metadata.query_valid[0] = iteration != 1
+                        metadata.have_kv[-1] = iteration not in (1, 2)
+                        metadata.status[0] = iteration
+                        if iteration == 1:
+                            native[0].fill_(float("nan"))
+                        else:
+                            native[0].fill_(iteration)
+                    with patch.dict(os.environ, {"DSV41_FLASHMLA_FUSED_FINALIZE": "0"}):
+                        operation(expected)
+                    graph.replay()
+                    torch.cuda.synchronize()
+                    torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0, equal_nan=True)
+                    torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=1e-6, equal_nan=True)
+                    torch.testing.assert_close(actual[2], expected[2], rtol=0, atol=0)
+                    self.assertEqual(pointers, [value.data_ptr() for value in actual])
+
+    def test_fused_finalize_actual_native_matches_legacy(self):
+        arguments, global_kv, selected = self._case()
+
+        def operation():
+            return flashmla_compact_attention(
+                *arguments, global_kv=global_kv, global_indices=selected
+            )
+
+        for staging in ("0", "1"):
+            with patch.dict(os.environ, {"DSV41_FLASHMLA_FAST_STAGING": staging,
+                                         "DSV41_FLASHMLA_FUSED_FINALIZE": "0"}):
+                expected = operation()
+            with patch.dict(os.environ, {"DSV41_FLASHMLA_FAST_STAGING": staging,
+                                         "DSV41_FLASHMLA_FUSED_FINALIZE": "1"}):
+                actual = operation()
+            torch.testing.assert_close(actual.output, expected.output, rtol=0, atol=0)
+            torch.testing.assert_close(actual.lse, expected.lse, rtol=0, atol=1e-6)
+            torch.testing.assert_close(actual.status, expected.status, rtol=0, atol=0)
+
     def test_precision_guard_mixed_rows_refresh_under_one_graph(self):
+        self._check_precision_guard_graph()
+
+    def test_precision_guard_paired_heads_refresh_under_one_graph(self):
+        self._check_precision_guard_graph(rows_repeat=2, optimized=True)
+
+    def _check_precision_guard_graph(self, rows_repeat=1, optimized=False):
         from rtp_llm.models_py.modules.dsv41.compact_reader import compact_attention
         from rtp_llm.models_py.modules.dsv41.flashmla import build_indices
 
         arguments, global_kv, selected = self._case()
-        query, requests, positions, floors, swa, _ = arguments
+        query, requests, positions, floors, swa, sinks = arguments
+        if rows_repeat != 1:
+            query = query.repeat(rows_repeat, 1, 1)
+            requests = requests.repeat(rows_repeat)
+            positions = positions.repeat(rows_repeat)
+            floors = floors.repeat(rows_repeat)
+            selected = selected.repeat(rows_repeat, 1)
+            arguments = query, requests, positions, floors, swa, sinks
         global_kv = replace(global_kv, page_table=global_kv.page_table.repeat(1, 3))
         positions.fill_(2048)
         floors.fill_(1921)
@@ -288,7 +372,11 @@ class FlashMLACompactTest(unittest.TestCase):
         stream.wait_stream(torch.cuda.current_stream())
         with patch.dict(
             os.environ,
-            {"DSV41_FLASHMLA_FAST_STAGING": "1", "DSV41_FLASHMLA_PRECISION_GUARD": "1"},
+            {
+                "DSV41_FLASHMLA_FAST_STAGING": "1",
+                "DSV41_FLASHMLA_PRECISION_GUARD": "1",
+                "DSV41_FLASHMLA_SKIP_EMPTY_TILES": str(int(optimized)),
+            },
         ):
             with torch.cuda.stream(stream):
                 operation()
@@ -342,6 +430,99 @@ class FlashMLACompactTest(unittest.TestCase):
     def test_precision_guard_preserves_output_alias_validation(self):
         with patch.dict(os.environ, {"DSV41_FLASHMLA_PRECISION_GUARD": "1"}):
             _probe_attention_output_buffers(self, flashmla_compact_attention)
+
+    def test_precision_guard_static_fallback_keeps_input_validation(self):
+        arguments, global_kv, selected = self._case()
+        query, requests, positions, floors, swa, sinks = arguments
+        with patch.dict(os.environ, {"DSV41_FLASHMLA_PRECISION_GUARD": "1"}):
+            for offset in (1, 2, 3):
+                for invalid in (
+                    arguments[offset].float(),
+                    arguments[offset][:-1],
+                    arguments[offset].cpu(),
+                    arguments[offset][:, None].repeat(1, 2)[:, 0],
+                ):
+                    changed = list(arguments)
+                    changed[offset] = invalid
+                    with self.subTest(offset=offset, dtype=invalid.dtype, shape=invalid.shape):
+                        with self.assertRaises(ValueError):
+                            flashmla_compact_attention(*changed)
+            with self.assertRaises(ValueError):
+                flashmla_compact_attention(*arguments, global_indices=selected)
+            for invalid in (
+                None, selected[0], selected[:1], selected.float(), selected[:, :511],
+                selected.cpu(), torch.cat((selected, selected[:, :1]), dim=1),
+            ):
+                with self.subTest(indices=None if invalid is None else (invalid.shape, invalid.dtype)):
+                    with self.assertRaises(ValueError):
+                        flashmla_compact_attention(
+                            *arguments, global_kv=global_kv, global_indices=invalid
+                        )
+            for invalid_swa in (
+                replace(swa, valid_ends=swa.valid_ends.float()),
+                replace(swa, pages=replace(swa.pages, entries_per_page=127)),
+            ):
+                with self.assertRaises(ValueError):
+                    flashmla_compact_attention(query, requests, positions, floors, invalid_swa, sinks)
+            with self.assertRaises(ValueError):
+                flashmla_compact_attention(*arguments, output=query)
+            with self.assertRaises(ValueError):
+                flashmla_compact_attention(
+                    *arguments,
+                    lse=torch.empty(query.shape[:2], device=query.device, dtype=torch.bfloat16),
+                )
+
+    def test_precision_guard_static_fallback_graph_keeps_status_and_skips_indices(self):
+        from rtp_llm.models_py.modules.dsv41.compact_reader import compact_attention
+
+        for capacity in (None, 0, 1, 511):
+            arguments, global_kv, selected = self._case()
+            query, requests, positions, floors, swa, _ = arguments
+            kwargs = {} if capacity is None else {
+                "global_kv": global_kv,
+                "global_indices": selected[:, :capacity].contiguous(),
+            }
+            saved = [tensor.clone() for tensor in (requests, positions, floors, swa.page_ids)]
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with patch.dict(os.environ, {"DSV41_FLASHMLA_PRECISION_GUARD": "1"}), patch(
+                "rtp_llm.models_py.modules.dsv41.flashmla.build_indices",
+                side_effect=AssertionError("static fallback must not build native indices"),
+            ):
+                with torch.cuda.stream(stream):
+                    flashmla_compact_attention(*arguments, **kwargs)
+                stream.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    actual = flashmla_compact_attention(*arguments, **kwargs)
+            pointers = [tensor.data_ptr() for tensor in (actual.output, actual.lse, actual.status)]
+            for fault, expected_status in (
+                ("request", 2), ("position", 2), ("negative_position", 2),
+                ("floor", 2), ("page", 1), ("padding", 0), ("recovered", 0),
+            ):
+                for tensor, value in zip((requests, positions, floors, swa.page_ids), saved):
+                    tensor.copy_(value)
+                if fault == "request":
+                    requests[0] = swa.page_ids.numel()
+                elif fault == "position":
+                    positions[0] = 1048576
+                elif fault == "negative_position":
+                    positions[0] = -2
+                elif fault == "floor":
+                    floors[0] = positions[0] + 1
+                elif fault == "page":
+                    swa.page_ids[requests[0]] = 0
+                elif fault == "padding":
+                    positions[0] = -1
+                expected = compact_attention(*arguments, **kwargs)
+                graph.replay()
+                torch.cuda.synchronize()
+                self._same(actual, expected)
+                self.assertTrue((actual.status[0] == expected_status).all().item())
+                self.assertEqual(
+                    pointers,
+                    [tensor.data_ptr() for tensor in (actual.output, actual.lse, actual.status)],
+                )
 
 
 if __name__ == "__main__":

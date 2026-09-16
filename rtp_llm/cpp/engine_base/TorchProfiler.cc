@@ -67,14 +67,18 @@ void TorchProfile::stop() {
 
 // ---- ProfilerSaveWorker ----
 
-ProfilerSaveWorker::ProfilerSaveWorker(): thread_([this] { run(); }) {}
+ProfilerSaveWorker::ProfilerSaveWorker(SaveFn save):
+    save_(save ? std::move(save) : [](tap::ProfilerResult& result, const std::string& file_name) {
+        result.save(file_name);
+    }),
+    thread_([this] { run(); }) {}
 
 ProfilerSaveWorker::~ProfilerSaveWorker() {
     {
         std::lock_guard<std::mutex> lock(mu_);
         stop_ = true;
     }
-    cv_.notify_one();
+    cv_.notify_all();
     thread_.join();
 }
 
@@ -83,7 +87,12 @@ void ProfilerSaveWorker::enqueue(std::unique_ptr<tap::ProfilerResult> result, st
         std::lock_guard<std::mutex> lock(mu_);
         tasks_.push({std::move(result), std::move(file_name)});
     }
-    cv_.notify_one();
+    cv_.notify_all();
+}
+
+void ProfilerSaveWorker::waitUntilIdle() {
+    std::unique_lock<std::mutex> lock(mu_);
+    cv_.wait(lock, [this] { return tasks_.empty() && !saving_; });
 }
 
 void ProfilerSaveWorker::run() {
@@ -97,14 +106,22 @@ void ProfilerSaveWorker::run() {
             }
             task = std::move(tasks_.front());
             tasks_.pop();
+            saving_ = true;
         }
         RTP_LLM_LOG_INFO("saving profiler trace to %s (async)", task.file_name.c_str());
         try {
-            task.result->save(task.file_name);
+            save_(*task.result, task.file_name);
             RTP_LLM_LOG_INFO("profiler trace saved: %s", task.file_name.c_str());
         } catch (const std::exception& e) {
             RTP_LLM_LOG_ERROR("failed to save profiler trace %s: %s", task.file_name.c_str(), e.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("failed to save profiler trace %s: unknown exception", task.file_name.c_str());
         }
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            saving_ = false;
+        }
+        cv_.notify_all();
     }
 }
 
@@ -180,6 +197,7 @@ void StepWindowProfiler::tick() {
             prefix += "_";
         }
         prefix += "wr" + std::to_string(world_rank_) + "_";
+        save_worker_.waitUntilIdle();
         profiler_ = std::make_shared<TorchProfile>(prefix, default_output_dir_);
         has_profiler_.store(true, std::memory_order_relaxed);
         profiler_->start();
@@ -251,6 +269,7 @@ void StepWindowProfiler::startStep() {
         prefix += "_";
     }
     prefix += "wr" + std::to_string(world_rank_) + "_";
+    save_worker_.waitUntilIdle();
     profiler_ = std::make_shared<TorchProfile>(prefix, default_output_dir_);
     has_profiler_.store(true, std::memory_order_relaxed);
     profiler_->start();

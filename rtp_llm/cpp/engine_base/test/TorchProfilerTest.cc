@@ -1,4 +1,6 @@
 #include <memory>
+#include <chrono>
+#include <future>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -128,6 +130,44 @@ TEST(TorchProfilerTest, DisableFailureIsNonFatal) {
 
 TEST(TorchProfilerTest, UnknownDisableFailureIsNonFatal) {
     EXPECT_EQ(detail::tryDisableProfiler(&throwUnknownProfilerError), nullptr);
+}
+
+TEST(TorchProfilerTest, NextCaptureWaitsForActiveAndQueuedSaves) {
+    std::promise<void> started;
+    std::promise<void> release;
+    auto              released = release.get_future().share();
+    std::atomic<int>   saved{0};
+    ProfilerSaveWorker worker([&](tap::ProfilerResult&, const std::string&) {
+        if (saved.load() == 0) {
+            started.set_value();
+            released.wait();
+        }
+        ++saved;
+    });
+    worker.enqueue(std::make_unique<tap::ProfilerResult>(), "first");
+    started.get_future().wait();
+    auto next_capture = std::async(std::launch::async, [&] { worker.waitUntilIdle(); });
+    // The first task has left the queue but still uses the old clock converter.
+    EXPECT_EQ(next_capture.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    worker.enqueue(std::make_unique<tap::ProfilerResult>(), "second");
+    release.set_value();
+    EXPECT_EQ(next_capture.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(saved.load(), 2);
+}
+
+TEST(TorchProfilerTest, SaveFailureDoesNotBlockNextCapture) {
+    std::atomic<int> saved{0};
+    ProfilerSaveWorker worker([&](tap::ProfilerResult&, const std::string&) {
+        if (++saved == 1) {
+            throw std::runtime_error("synthetic save failure");
+        }
+        throw 1;
+    });
+    worker.waitUntilIdle();
+    worker.enqueue(std::make_unique<tap::ProfilerResult>(), "standard_error");
+    worker.enqueue(std::make_unique<tap::ProfilerResult>(), "unknown_error");
+    worker.waitUntilIdle();
+    EXPECT_EQ(saved.load(), 2);
 }
 
 TEST(TorchProfilerTest, RealDuplicateFlowDoesNotEscapeWrapper) {

@@ -212,6 +212,27 @@ TEST_F(QueryConverterTest, testTransOutput) {
     }
 }
 
+TEST(QueryConverterTimingTest, LongRequestLatenciesSurviveRpcRoundTrip) {
+    GenerateOutput response;
+    response.output_ids = torch::zeros({1, 1}, torch::kInt32);
+    response.finished = true;
+    for (int64_t duration : {int64_t{1000}, int64_t{2147483648}, int64_t{4294967296}, int64_t{21600000000}}) {
+        response.aux_info.cost_time_us = duration;
+        response.aux_info.first_token_cost_time_us = duration - 1;
+        response.aux_info.wait_time_us = duration - 2;
+        GenerateOutputs outputs;
+        outputs.generate_outputs.push_back(response);
+        GenerateOutputsPB encoded;
+        QueryConverter::transResponse(&encoded, &outputs, true, "", 10000);
+        GenerateOutputsPB decoded;
+        ASSERT_TRUE(decoded.ParseFromString(encoded.SerializeAsString()));
+        const auto& aux = decoded.flatten_output().aux_info(0);
+        EXPECT_EQ(aux.cost_time_us(), duration);
+        EXPECT_EQ(aux.first_token_cost_time_us(), duration - 1);
+        EXPECT_EQ(aux.wait_time_us(), duration - 2);
+    }
+}
+
 TEST_F(QueryConverterTest, TransTensorPB_FP32) {
 
     torch::Tensor tensor = torch::rand({2, 3}, torch::kFloat32);

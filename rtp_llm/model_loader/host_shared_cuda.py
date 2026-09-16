@@ -440,8 +440,22 @@ class SharedEngramLookup:
             return binding
 
     def lookup(self, layer, indices, *, valid_mask=None, out=None):
+        return self._lookup(layer, indices, valid_mask=valid_mask, out=out)
+
+    def lookup_quantized(self, layer, indices, *, valid_mask=None, out=None):
+        """Return BF16 lookup output, group32 E4M3 values and exact FP32 scales.
+
+        The BF16 output keeps the ordinary lookup contract, including ``out``.
+        Captured quantization tensors belong to the same graph resource binding.
+        """
+        return self._lookup(
+            layer, indices, valid_mask=valid_mask, out=out, quantized=True
+        )
+
+    def _lookup(self, layer, indices, *, valid_mask=None, out=None, quantized=False):
         from rtp_llm.models_py.modules.dsv41._engram_lookup_triton import (
             engram_gather_kernel,
+            engram_gather_quantize_kernel,
         )
 
         with self._lock, torch.cuda.device(self.device):
@@ -500,24 +514,48 @@ class SharedEngramLookup:
             torch._assert_async(
                 in_bounds.all(), "Engram query ID is outside the host table"
             )
+            held = [indices, valid_mask, out]
+            if quantized:
+                encoded = torch.empty_like(out, dtype=torch.float8_e4m3fn)
+                scales = torch.empty(
+                    (*indices.shape, dim // 32), device=device, dtype=torch.float32
+                )
+                finite = torch.empty_like(scales, dtype=torch.bool)
+                held.extend((encoded, scales, finite))
             if indices.numel():
-                engram_gather_kernel[(indices.numel(),)](
+                arguments = (
                     self._buffers[prefix + "weight"],
                     self._buffers[prefix + "scale"],
                     indices,
                     indices if valid_mask is None else valid_mask,
                     out,
-                    ROWS=rows,
-                    DIM=dim,
-                    HAS_VALID=valid_mask is not None,
-                    BLOCK=256,
                 )
+                if quantized:
+                    engram_gather_quantize_kernel[(indices.numel(),)](
+                        *arguments,
+                        encoded,
+                        scales,
+                        finite,
+                        ROWS=rows,
+                        HAS_VALID=valid_mask is not None,
+                    )
+                    torch._assert_async(
+                        finite.all(), "nonfinite V4.1 block32 activation"
+                    )
+                else:
+                    engram_gather_kernel[(indices.numel(),)](
+                        *arguments,
+                        ROWS=rows,
+                        DIM=dim,
+                        HAS_VALID=valid_mask is not None,
+                        BLOCK=256,
+                    )
             if capturing:
-                for tensor in (indices, valid_mask, out):
+                for tensor in held:
                     self._capture._hold(tensor)
-            return out
+            return (out, encoded, scales) if quantized else out
 
-    def warmup(self, stream=None):
+    def warmup(self, stream=None, *, quantized=False):
         with self._lock, torch.cuda.device(self.device):
             self._check_open()
             if torch.cuda.is_current_stream_capturing():
@@ -531,6 +569,9 @@ class SharedEngramLookup:
                 for layer in self._tables:
                     self.lookup(layer, indices)
                     self.lookup(layer, indices, valid_mask=valid)
+                    if quantized:
+                        self.lookup_quantized(layer, indices)
+                        self.lookup_quantized(layer, indices, valid_mask=valid)
             stream.synchronize()
 
     def accounting(self):

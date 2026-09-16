@@ -1,8 +1,7 @@
 """Explicit CUDA13/SM100 FP8 block32 linears for V4.1 components.
 
-Activations cross the official BF16 -> group32 FP8/UE8M0 boundary. The
-checkpoint's two-dimensional 32x32 weight scales remain exact FP32 values
-when supplied to DeepGEMM with its raw-scale recipe.
+Activations cross the official BF16 -> group32 FP8/UE8M0 boundary. Checkpoint
+32x32 weight scales are losslessly expanded and packed once for DeepGEMM.
 """
 
 import logging
@@ -31,8 +30,10 @@ def _require_execution(values: torch.Tensor) -> None:
         raise RuntimeError("V4.1 block32 activation quantization requires autocast off")
 
 
-def quantize_block32(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return E4M3 values and exact power-of-two FP32 scales for [M,K]."""
+def quantize_block32(
+    values: torch.Tensor, *, packed: bool = False, swizzled: bool = False
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return E4M3 and raw, DeepGEMM-packed or F8_128x4 group32 scales."""
     _require_execution(values)
     if (
         values.ndim != 2
@@ -42,18 +43,56 @@ def quantize_block32(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         or values.shape[1] % 32
     ):
         raise ValueError("V4.1 activations must be contiguous BF16 [M,K] with K%32=0")
-    from rtp_llm.models_py.modules.dsv41._linear_triton import quantize_block32_kernel
+    if packed and swizzled:
+        raise ValueError("select only one V4.1 packed activation scale layout")
+    if (packed or swizzled) and values.shape[1] % 128:
+        raise ValueError("packed V4.1 activation scales require K%128=0")
+    from rtp_llm.models_py.modules.dsv41._linear_triton import (
+        quantize_block32_kernel,
+        quantize_block32_vector_kernel,
+    )
 
     rows, columns = values.shape
     encoded = torch.empty_like(values, dtype=torch.float8_e4m3fn)
-    scales = torch.empty(
-        (rows, columns // 32), dtype=torch.float32, device=values.device
-    )
-    if rows:
-        valid = torch.empty_like(scales, dtype=torch.bool)
-        quantize_block32_kernel[(rows, columns // 32)](
-            values, encoded, scales, valid, K=columns, num_warps=1
+    if swizzled:
+        scales = torch.empty(
+            ((rows + 127) // 128) * 128 * (columns // 32),
+            dtype=torch.uint8,
+            device=values.device,
         )
+    elif packed:
+        scales = torch.empty(
+            (columns // 128, ((rows + 3) // 4) * 4),
+            dtype=torch.int32,
+            device=values.device,
+        ).transpose(0, 1)[:rows]
+    else:
+        scales = torch.empty(
+            (rows, columns // 32), dtype=torch.float32, device=values.device
+        )
+    if rows:
+        if packed or swizzled or os.environ.get("DSV41_BLOCK32_FAST_QUANT", "1") == "1":
+            packs = 16 if values.numel() >= 1024 * 1024 else 4
+            stored_rows = ((rows + 127) // 128) * 128 if swizzled else rows
+            blocks = (stored_rows * columns + packs * 128 - 1) // (packs * 128)
+            valid = torch.empty(blocks, dtype=torch.bool, device=values.device)
+            quantize_block32_vector_kernel[(blocks,)](
+                values,
+                encoded,
+                scales,
+                valid,
+                rows,
+                K=columns,
+                PACKED=packed,
+                PACKS=packs,
+                SWIZZLED=swizzled,
+                num_warps=4,
+            )
+        else:
+            valid = torch.empty_like(scales, dtype=torch.bool)
+            quantize_block32_kernel[(rows, columns // 32)](
+                values, encoded, scales, valid, K=columns, num_warps=1
+            )
         torch._assert_async(valid.all(), "nonfinite V4.1 block32 activation")
     return encoded, scales
 
@@ -74,6 +113,10 @@ class V41Block32Linear(nn.Module):
                 "V4.1 dense weight must be contiguous E4M3 [N,K], N/K%32=0"
             )
         self.out_features, self.in_features = weight.shape
+        self._packed_activations = (
+            os.environ.get("DSV41_BLOCK32_FAST_QUANT", "1") == "1"
+            and self.in_features % 128 == 0
+        )
         if (
             scale.shape != (self.out_features // 32, self.in_features // 32)
             or scale.dtype != torch.float8_e8m0fnu
@@ -90,6 +133,157 @@ class V41Block32Linear(nn.Module):
         )
         self.register_buffer("weight", weight)
         self.register_buffer("weight_scale", scales)
+        self._prepack_weight_scale = os.environ.get("DSV41_BLOCK32_PREPACK", "1") == "1"
+        flashinfer_shape = (
+            (self.out_features, self.in_features) == (32768, 1280)
+            and torch.cuda.get_device_capability(weight.device) == (10, 3)
+            and self._prepack_weight_scale
+            and self._packed_activations
+        )
+        self._use_cudnn = (
+            flashinfer_shape and os.environ.get("DSV41_BLOCK32_CUDNN", "1") == "1"
+        )
+        self._use_cute = False
+        if flashinfer_shape and os.environ.get("DSV41_BLOCK32_CUTE", "1") == "1":
+            import cutlass
+            import flashinfer
+            from packaging.version import Version
+
+            self._use_cute = (
+                Version(flashinfer.__version__) == Version("0.6.18")
+                and Version(cutlass.__version__) == Version("4.6.2")
+            )
+        self.register_buffer("_weight_scale_packed", None, persistent=False)
+        self.register_buffer("_weight_scale_swizzled", None, persistent=False)
+        self._cudnn_plans = {}
+        self._cute_runner = None
+        self._flashinfer_gemm = None
+        if self._use_cudnn or self._use_cute:
+            from flashinfer.gemm import gemm_base
+
+            self._flashinfer_gemm = gemm_base
+        self._refresh_weight_scale_packed()
+        self.register_load_state_dict_post_hook(self._refresh_weight_scale_packed)
+
+    def _refresh_weight_scale_packed(self, _module=None, _incompatible_keys=None):
+        if self._prepack_weight_scale:
+            import deep_gemm
+
+            packed_scales = deep_gemm.get_mn_major_tma_aligned_packed_ue8m0_tensor(
+                self.weight_scale.repeat_interleave(32, dim=0)
+            )
+            previous = self._weight_scale_packed
+            if previous is not None and previous.device == packed_scales.device:
+                previous.copy_(packed_scales)
+            else:
+                self._weight_scale_packed = packed_scales
+        if self._use_cudnn or self._use_cute:
+            import flashinfer
+
+            swizzled = flashinfer.block_scale_interleave(
+                self.weight_scale.to(torch.float8_e8m0fnu)
+                .view(torch.uint8)
+                .repeat_interleave(32, dim=0)
+            )
+            previous = self._weight_scale_swizzled
+            if previous is not None and previous.device == swizzled.device:
+                previous.copy_(swizzled)
+            else:
+                self._weight_scale_swizzled = swizzled
+
+    def _use_swizzled_gemm(self, rows):
+        return (self._use_cute and 1 <= rows <= 8) or (
+            self._use_cudnn and rows == 2048
+        )
+
+    def _run_quantized_gemm(self, encoded, scales, output):
+        if scales.dtype == torch.uint8:
+            gemm_base = self._flashinfer_gemm
+
+            if self._use_cute and encoded.shape[0] <= 8:
+                if self._cute_runner is None:
+                    self._cute_runner = gemm_base._cute_dsl_gemm_mxfp8_runner(
+                        10, 3, True, torch.bfloat16
+                    )
+                self._cute_runner.forward(
+                    [
+                        encoded,
+                        self.weight.t(),
+                        scales,
+                        self._weight_scale_swizzled,
+                        torch.bfloat16,
+                        output,
+                        None,
+                    ]
+                )
+                return
+
+            stream = torch.cuda.current_stream(encoded.device)
+            key = (encoded.device, encoded.shape[0], stream.cuda_stream)
+            prepared = self._cudnn_plans.get(key)
+            if prepared is None:
+                import cudnn
+
+                a = encoded.unsqueeze(0)
+                b = self.weight.t().unsqueeze(0)
+                out = output.unsqueeze(0)
+                if hasattr(gemm_base, "build_cudnn_gemm_mxfp8_graph"):
+                    graph = gemm_base.build_cudnn_gemm_mxfp8_graph(
+                        a.shape,
+                        a.stride(),
+                        cudnn.data_type.FP8_E4M3,
+                        b.shape,
+                        b.stride(),
+                        cudnn.data_type.FP8_E4M3,
+                        32,
+                        cudnn.data_type.BFLOAT16,
+                        encoded.device,
+                    )
+                else:
+                    graph = gemm_base._get_cudnn_mxfp8_gemm_graph(
+                        a, b, torch.bfloat16, out
+                    )
+                workspace = torch.empty(
+                    graph.get_workspace_size(),
+                    dtype=torch.uint8,
+                    device=encoded.device,
+                )
+                uids = tuple(
+                    value.value
+                    for value in (
+                        gemm_base.UIDs.A_UID,
+                        gemm_base.UIDs.B_UID,
+                        gemm_base.UIDs.BLOCK_DESCALE_A_UID,
+                        gemm_base.UIDs.BLOCK_DESCALE_B_UID,
+                        gemm_base.UIDs.O_UID,
+                    )
+                )
+                prepared = self._cudnn_plans[key] = (graph._execute, workspace, uids)
+            # Plans depend on shape and dtype; bindings stay current after Graph
+            # capture or a state-dict update of the persistent weight buffers.
+            execute, workspace, (a_uid, b_uid, sa_uid, sb_uid, out_uid) = prepared
+            execute(
+                {
+                    a_uid: encoded.data_ptr(),
+                    b_uid: self.weight.data_ptr(),
+                    sa_uid: scales.data_ptr(),
+                    sb_uid: self._weight_scale_swizzled.data_ptr(),
+                    out_uid: output.data_ptr(),
+                },
+                workspace.data_ptr(),
+                gemm_base._get_cudnn_handle(encoded.device, stream),
+            )
+            return
+        import deep_gemm
+
+        packed = self._weight_scale_packed is not None
+        deep_gemm.fp8_gemm_nt(
+            (encoded, scales),
+            (self.weight, self._weight_scale_packed if packed else self.weight_scale),
+            output,
+            recipe=(1, 1 if packed else 32, 32),
+            disable_ue8m0_cast=False,
+        )
 
     @torch.inference_mode()
     def forward(self, values: torch.Tensor, *, out=None) -> torch.Tensor:
@@ -118,22 +312,19 @@ class V41Block32Linear(nn.Module):
             )
         rows = values.numel() // self.in_features
         if rows:
-            import deep_gemm
-
-            encoded, scales = quantize_block32(values.view(rows, self.in_features))
-            deep_gemm.fp8_gemm_nt(
-                (encoded, scales),
-                (self.weight, self.weight_scale),
-                out.view(rows, self.out_features),
-                recipe=(1, 32, 32),
-                disable_ue8m0_cast=False,
+            swizzled = self._use_swizzled_gemm(rows)
+            encoded, scales = quantize_block32(
+                values.view(rows, self.in_features),
+                packed=self._packed_activations and not swizzled,
+                swizzled=swizzled,
             )
+            self._run_quantized_gemm(encoded, scales, out.view(rows, self.out_features))
         return out
 
 
 @torch.inference_mode()
 def warmup_block32_linears(model: nn.Module, *, max_rows: int) -> None:
-    """Prepare each distinct V4.1 dense shape using its actual raw32 path."""
+    """Prepare each distinct V4.1 dense shape using its selected scale layout."""
     from rtp_llm.utils.warmup import model_warm_up_enabled
 
     if not model_warm_up_enabled():

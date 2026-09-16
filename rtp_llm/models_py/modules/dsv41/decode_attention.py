@@ -287,6 +287,20 @@ class V41DecodeAttentionContext:
     def check(self):
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("check decode completion only after graph replay")
+        statuses = [(~self.completed).to(torch.int32)]
+        for layer in self.layers.values():
+            statuses.extend((layer.writer_status.flatten(), layer.reader_status.flatten()))
+            if layer.compressor is not None:
+                statuses.extend(
+                    (
+                        layer.compressor.global_status.flatten(),
+                        layer.compressor.index_status.flatten(),
+                    )
+                )
+        statuses.extend(status.flatten() for status in self.index_status.values())
+        # Successful replay needs one host fence; retain ordered diagnostics on error.
+        if not bool(torch.cat(statuses).ne(0).any()):
+            return
         if not bool(self.completed.all()):
             raise RuntimeError("decode target did not complete all forty attention layers")
         for layer in self.layers.values():

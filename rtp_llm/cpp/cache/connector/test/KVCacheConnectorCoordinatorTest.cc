@@ -857,6 +857,83 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedAppendsDummyTailWhen
     coordinator.reset();
 }
 
+TEST(KVCacheConnectorCoordinatorCpuTest, AsyncRead_CP8RetainsCheckpointAtIncompleteVirtualTail) {
+    rtp_llm::initLogger();
+    constexpr int block_tokens = 128;
+    constexpr int cp_size = 8;
+    constexpr int reuse_unit = block_tokens * cp_size;
+    CacheConfig cp_cache_config;
+    cp_cache_config.layer_num = cp_cache_config.layer_all_num = 2;
+    cp_cache_config.seq_size_per_block = block_tokens;
+    cp_cache_config.kernel_seq_size_per_block = block_tokens;
+    cp_cache_config.layer_to_group_id = {0, 1};
+    cp_cache_config.group_types = {CacheGroupType::FULL, CacheGroupType::SWA};
+    cp_cache_config.group_seq_size_per_block = {block_tokens, reuse_unit};
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = cp_size;
+    parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+    auto allocator = std::make_shared<MockKVCacheAllocator>(cp_cache_config, AllocationType::HOST);
+    auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(cp_cache_config,
+                                                                     KVCacheConfig{},
+                                                                     RuntimeConfig{},
+                                                                     parallelism_config,
+                                                                     SpeculativeExecutionConfig{},
+                                                                     allocator);
+    coordinator->connectors_.clear();
+
+    // Derive the reusable boundary from canonical token positions, independently
+    // of the connector's physical-page alignment and dummy-tail decision.
+    for (int prompt_tokens : {1023, 1024, 1025, 1151, 1152, 1920, 2047, 2048, 3072,
+                             65535, 65536, 65537, 1047552, 1048320, 1048448, 1048575, 1048576}) {
+        SCOPED_TRACE("prompt_tokens=" + std::to_string(prompt_tokens));
+        const int physical_pages = (prompt_tokens + block_tokens - 1) / block_tokens;
+        const int canonical_keys = physical_pages / cp_size;
+        const int checkpoint_end = (prompt_tokens - 1) / reuse_unit * reuse_unit;
+        KVCacheResource resource;
+        resource.initGroups(2, 2, cp_cache_config.layer_to_group_id,
+                            cp_cache_config.kernelBlocksPerKvBlock(), cp_cache_config.group_types);
+        CacheKeysType source_keys;
+        for (int page = 0; page < physical_pages; ++page)
+            source_keys.push_back(10000 + page);
+        resource.setCacheKeys(source_keys);
+        resource.setLastBlockAligned(prompt_tokens % block_tokens == 0);
+        BlockIndicesType local_blocks;
+        for (int block = 0; block < (physical_pages + cp_size - 1) / cp_size; ++block)
+            local_blocks.push_back(100 + block);
+        resource.mutableBlockIds(0).assign(local_blocks);
+        resource.mutableBlockIds(1).assign(local_blocks);
+
+        EXPECT_CALL(*allocator, incrKVCacheRef(testing::_, testing::_, testing::Eq(true)))
+            .WillOnce(testing::Invoke([&](const KVCacheResource& selected, const CacheKeysType& keys, bool) {
+                EXPECT_EQ(keys.size() - 1, static_cast<size_t>(checkpoint_end / reuse_unit));
+                EXPECT_EQ(selected.blocks(0).size(), static_cast<size_t>(canonical_keys));
+                EXPECT_EQ(selected.blocks(1).size(), static_cast<size_t>(canonical_keys));
+                for (int group = 0; group < canonical_keys; ++group) {
+                    EXPECT_EQ(keys[group], source_keys[(group + 1) * cp_size - 1]);
+                    EXPECT_EQ(selected.blocks(0)[group], local_blocks[group]);
+                    EXPECT_EQ(selected.blocks(1)[group], local_blocks[group]);
+                }
+                if (checkpoint_end > 0) {
+                    EXPECT_EQ(keys[keys.size() - 2], source_keys[checkpoint_end / block_tokens - 1]);
+                }
+                EXPECT_EQ(selected.lastBlockAligned(), prompt_tokens % reuse_unit == 0);
+                return std::make_shared<KVCacheResource>();
+            }));
+        auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
+        ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
+        std::shared_ptr<Meta> meta = std::make_shared<TestMeta>(true, false, "");
+        ON_CALL(*rw_ctx, meta()).WillByDefault(testing::ReturnRef(meta));
+        auto async_ctx = coordinator->asyncRead(rw_ctx);
+        ASSERT_NE(async_ctx, nullptr);
+        {
+            std::lock_guard<std::mutex> lock(coordinator->update_mutex_);
+            coordinator->fused_async_read_context_list_.clear();
+        }
+        async_ctx.reset();
+    }
+    coordinator.reset();
+}
+
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenIncrKVCacheRefReturnsNull) {
     auto mock_connector       = std::make_shared<MockKVCacheConnector>();
     coordinator_->connectors_ = {mock_connector};

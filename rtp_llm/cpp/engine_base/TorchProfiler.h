@@ -53,11 +53,16 @@ private:
 // Background thread that serializes profiler results to disk without blocking the engine loop.
 class ProfilerSaveWorker {
 public:
-    ProfilerSaveWorker();
+    using SaveFn = std::function<void(torch::autograd::profiler::ProfilerResult&, const std::string&)>;
+
+    explicit ProfilerSaveWorker(SaveFn save = {});
     ~ProfilerSaveWorker();
 
     // Enqueue a save task. Non-blocking, returns immediately.
     void enqueue(std::unique_ptr<torch::autograd::profiler::ProfilerResult> result, std::string file_name);
+
+    // A new Kineto session replaces the clock converter used by unsaved CUDA activities.
+    void waitUntilIdle();
 
     ProfilerSaveWorker(const ProfilerSaveWorker&)            = delete;
     ProfilerSaveWorker& operator=(const ProfilerSaveWorker&) = delete;
@@ -74,6 +79,8 @@ private:
     std::condition_variable cv_;
     std::queue<SaveTask>    tasks_;
     bool                    stop_ = false;
+    bool                    saving_ = false;
+    SaveFn                  save_;
     std::thread             thread_;
 };
 

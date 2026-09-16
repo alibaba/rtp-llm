@@ -2,6 +2,7 @@
 
 import unittest
 from dataclasses import replace
+from types import SimpleNamespace
 
 import test_attention
 import torch
@@ -15,6 +16,75 @@ from rtp_llm.models_py.modules.dsv41.decode_compressor import (
     PAIR_SNAPSHOT_BYTES,
     V41DecodePairState,
 )
+
+
+class DecodeCompletionCheckGpuTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not torch.cuda.is_available():
+            raise unittest.SkipTest("CUDA required")
+
+    def setUp(self):
+        self.context = V41DecodeAttentionContext.__new__(V41DecodeAttentionContext)
+        self.context.completed = torch.ones(40, dtype=torch.bool, device="cuda")
+
+        def status():
+            return torch.zeros((2, 6), dtype=torch.int32, device="cuda")
+
+        self.context.layers = {
+            layer: SimpleNamespace(
+                writer_status=status(),
+                reader_status=status(),
+                compressor=(
+                    SimpleNamespace(global_status=status(), index_status=status())
+                    if layer == 2
+                    else None
+                ),
+            )
+            for layer in range(40)
+        }
+        self.context.index_status = {2: status(), 36: status()}
+
+    def test_rejects_each_status_and_preserves_failure_order(self):
+        context = self.context
+        failures = (
+            (context.layers[39].writer_status, "compact writer or reader"),
+            (context.layers[39].reader_status, "compact writer or reader"),
+            (context.layers[2].compressor.global_status, "both compact regions"),
+            (context.layers[2].compressor.index_status, "both compact regions"),
+            (context.index_status[36], "query or page metadata"),
+        )
+        context.check()
+        for status, message in failures:
+            with self.subTest(message=message, pointer=status.data_ptr()):
+                status[-1, -1] = -3
+                with self.assertRaisesRegex(RuntimeError, message):
+                    context.check()
+                status.zero_()
+                context.check()
+        context.layers[2].compressor.index_status[-1, -1] = 1
+        context.layers[39].writer_status[-1, -1] = 1
+        context.completed[-1] = False
+        with self.assertRaisesRegex(RuntimeError, "all forty attention layers"):
+            context.check()
+        context.completed.fill_(True)
+        with self.assertRaisesRegex(RuntimeError, "both compact regions"):
+            context.check()
+
+    def test_checks_current_replay_status_after_success_and_failure(self):
+        status = self.context.layers[39].reader_status
+        incoming = torch.zeros_like(status)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            status.copy_(incoming)
+        for error in (0, 7, 0):
+            incoming[-1, -1] = error
+            graph.replay()
+            if error:
+                with self.assertRaisesRegex(RuntimeError, "compact writer or reader"):
+                    self.context.check()
+            else:
+                self.context.check()
 
 
 class DecodeAttentionGpuTest(unittest.TestCase):

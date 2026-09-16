@@ -1,11 +1,13 @@
 import os
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 from torch import nn
 
 from rtp_llm.models_py.modules.dsv41.block import V41Block
+from rtp_llm.models_py.modules.dsv41.cp import V41CPAttentionContext
 from rtp_llm.models_py.modules.dsv41.engram import Engram
 from rtp_llm.models_py.modules.dsv41.inputs import V41ModelRows
 from rtp_llm.models_py.modules.dsv41.math import hc_pre, rms_norm
@@ -133,6 +135,95 @@ class TargetComposerTest(unittest.TestCase):
             torch.zeros(n, 3, dtype=torch.int32, device=self.device),
             torch.zeros(n, 3, dtype=torch.bool, device=self.device),
         )
+
+    def cp_model_context(self, valid, *, compact=True):
+        # Exercise the CP tensor boundary without collective/cache fixtures.
+        context = object.__new__(V41CPAttentionContext)
+        context.local_count = valid.numel()
+        context.valid = valid
+        context.cp = SimpleNamespace(
+            global_positions=torch.arange(valid.numel(), device=self.device)
+        )
+        context.model_row_indices = valid.nonzero().flatten() if compact else None
+        return context
+
+    def test_cp_block_omits_poisoned_padding_and_keeps_empty_expert_calls(self):
+        model, calls, _ = self.make_model()
+        block = model.blocks[0]
+        for flags in (
+            (True, True, True, True, True, True),
+            (False, True, False, True, True, False),
+            (False, False, False, False, False, False),
+        ):
+            with self.subTest(valid=flags):
+                valid = torch.tensor(flags, dtype=torch.bool, device=self.device)
+                context = self.cp_model_context(valid)
+                hidden = (
+                    torch.arange(6 * 4 * 32, device=self.device).reshape(6, 4, 32)
+                    / 512
+                ).bfloat16()
+                pre_mix = torch.full((6, 4), 0.25, device=self.device)
+                images = torch.arange(6, device=self.device) % 2 == 1
+                expected = block(hidden[valid], pre_mix[valid], object(), images[valid])
+                hidden[~valid] = torch.nan
+                pre_mix[~valid] = torch.nan
+                calls.clear()
+                with patch.object(block, "_mixes", wraps=block._mixes) as mixes:
+                    actual = block(hidden, pre_mix, context, images)
+                for produced, reference in zip(actual, expected):
+                    torch.testing.assert_close(
+                        produced[valid], reference, rtol=0, atol=0
+                    )
+                    self.assertTrue(bool((produced[~valid] == 0).all()))
+                self.assertEqual([entry[1] for entry in calls], ["attn", "moe"])
+                self.assertEqual(calls[0][3].shape[0], valid.numel())
+                self.assertEqual(calls[1][3].shape[0], int(valid.sum()))
+                torch.testing.assert_close(calls[1][2], images[valid])
+                self.assertTrue(bool(torch.isfinite(calls[0][3]).all()))
+                self.assertTrue(bool(torch.isfinite(calls[1][3]).all()))
+                self.assertEqual(mixes.call_count, 2 if any(flags) else 0)
+
+    def test_cp_prefill_compaction_preserves_images_l20_and_aux_row_mapping(self):
+        model, calls, _ = self.make_model()
+        rows = self.rows(image=True)
+        indices = rows.image_mask.nonzero().flatten()
+        features = V41ImageFeatures(
+            indices,
+            rows.token_types[indices].contiguous(),
+            torch.arange(1, 129, device=self.device).reshape(4, 32).bfloat16(),
+        )
+        baseline_context = self.cp_model_context(rows.valid, compact=False)
+        expected_l20 = model.prefill_encoder(
+            rows, baseline_context, image_features=features
+        )
+        expected = model.prefill_decoder(expected_l20, baseline_context)
+        calls.clear()
+        context = self.cp_model_context(rows.valid)
+        l20 = model.prefill_encoder(rows, context, image_features=features)
+        actual = model.prefill_decoder(l20, context)
+        self.assertIs(l20.rows, rows)
+        torch.testing.assert_close(
+            l20.hidden_states[rows.valid],
+            expected_l20.hidden_states[rows.valid],
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            l20.pre_mix[rows.valid], expected_l20.pre_mix[rows.valid], rtol=0, atol=0
+        )
+        for name in ("hidden_states", "aux_hidden_states", "aux_row_indices"):
+            torch.testing.assert_close(
+                getattr(actual, name), getattr(expected, name), rtol=0, atol=0
+            )
+        self.assertEqual(actual.aux_layer_ids, (37, 38, 39))
+        self.assertEqual(len(calls), 80)
+        for _, part, metadata, hidden in calls:
+            self.assertEqual(
+                hidden.shape[0],
+                rows.valid.numel() if part == "attn" else int(rows.valid.sum()),
+            )
+            if part == "moe":
+                torch.testing.assert_close(metadata, rows.image_mask[rows.valid])
 
     def test_complete_shifted_pre_chain_engram_order_and_selected_aux_inputs(self):
         model, calls, lookup = self.make_model()

@@ -81,12 +81,11 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
     const bool selected_aligned = selectedLastRankKeysAreAligned(source, cp_size);
     selected.setLastBlockAligned(selected_aligned);
 
-    // Memory connector intentionally drops the last key to avoid matching a
-    // partial tail.  After CP Page-RR remap, a source partial can belong to a
-    // non-last rank, making the selected last-rank key complete.  Append the
-    // original partial key as a connector-only dummy tail so the drop-last
-    // contract discards the dummy, not the usable selected key.
-    if (!source.lastBlockAligned() && selected_aligned && !source.cacheKeys().empty()) {
+    // The connector drops its last key to leave an unconsumed token. A partial
+    // CP virtual block can contain only complete physical pages, so physical
+    // last-block alignment does not identify every trailing group. Preserve
+    // the complete last-rank key with a connector-only tail in either case.
+    if (selected_aligned && source.cacheKeys().size() % static_cast<size_t>(cp_size) != 0) {
         selected.cacheKeys().push_back(source.cacheKeys().back());
         selected.rebuildLinearBlockDependencies();
         selected.setLastBlockAligned(false);

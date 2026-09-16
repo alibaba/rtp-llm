@@ -19,14 +19,35 @@ from rtp_llm.models.multimodal.deepseek_v41_processor import (
     load_image_bytes,
     preprocess_image,
 )
-from rtp_llm.models.multimodal.deepseek_vision import Aligner, RMSNorm, ViT
+from rtp_llm.models.multimodal.deepseek_vision import Aligner, Attention, RMSNorm, ViT
+
+
+class V41VisionAttention(Attention):
+    def _apply_rotary(self, q, k, cos, sin):
+        if q.is_cuda and not torch.is_grad_enabled():
+            from rtp_llm.models_py.modules.dsv41._vision_rope_triton import (
+                apply_vision_qk_rope,
+            )
+
+            result = apply_vision_qk_rope(q, k, cos, sin)
+            if result is not None:
+                return result
+        return super()._apply_rotary(q, k, cos, sin)
+
+    def _attention(self, q, k, v):
+        from rtp_llm.models_py.modules.dsv41._vision_fa4 import vision_attention_fa4
+
+        result = vision_attention_fa4(q, k, v)
+        return result if result is not None else super()._attention(q, k, v)
 
 
 class DeepSeekV41VisionEmbedding(nn.Module):
     def __init__(self, config, *, device=None):
         super().__init__()
         self.processor_config = V41ImageProcessorConfig.from_model_config(config)
-        self.vision = ViT(config.vision_parameters())
+        self.vision = ViT(
+            config.vision_parameters(), attention_cls=V41VisionAttention
+        )
         self.aligner = Aligner(config.vision_parameters())
         hidden_size = config.text["hidden_size"]
         self.image_start = nn.Parameter(torch.empty(hidden_size))

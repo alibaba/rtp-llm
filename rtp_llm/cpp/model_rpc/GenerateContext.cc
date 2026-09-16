@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
+#include "autil/EnvUtil.h"
 
 namespace rtp_llm {
 
@@ -59,6 +60,40 @@ void GenerateContext::collectBasicMetrics(RpcMetricsCollector& collector) {
 
 void GenerateContext::reportMetrics(RpcMetricsCollector& collector) {
     if (metrics_reporter) {
+        static const bool trace_phases = autil::EnvUtil::getEnv("DSV41_PD_PERF_TRACE", false);
+        if (trace_phases) {
+            // These are inclusive RPC phases; cache loading overlaps prefill.
+            RTP_LLM_LOG_INFO(
+                "PD phase timings: request_id=%ld request_key=%s error_code=%d total_rt_us=%ld "
+                "retry_times=%ld get_rpc_connection_rt_us=%ld remote_allocate_resource_rt_us=%ld "
+                "enqueue_request_rt_us=%ld remote_load_cache_wait_stream_rt_us=%ld "
+                "remote_load_cache_write_request_rt_us=%ld poll_local_output_rt_us=%ld "
+                "remote_load_cache_end_rt_us=%ld remote_generate_rt_us=%ld poll_remote_output_rt_us=%ld "
+                "prepare_generate_context_rt_us=%ld allocate_resource_rt_us=%ld "
+                "load_cache_from_prefill_rt_us=%ld local_generate_rt_us=%ld "
+                "load_cache_min_rt_us=%ld load_cache_max_rt_us=%ld load_cache_polling_cost_us=%ld",
+                request_id,
+                request_key.c_str(),
+                static_cast<int>(collector.error_code),
+                collector.total_rt_us,
+                collector.retry_times,
+                collector.get_rpc_connection_rt_us,
+                collector.remote_allocate_resource_rt_us,
+                collector.enqueue_request_rt_us,
+                collector.remote_load_cache_wait_stream_rt_us,
+                collector.remote_load_cache_write_request_rt_us,
+                collector.poll_local_output_rt_us,
+                collector.remote_load_cache_end_rt_us,
+                collector.remote_generate_rt_us,
+                collector.poll_remote_output_rt_us,
+                collector.prepare_generate_context_rt_us,
+                collector.allocate_resource_rt_us,
+                collector.load_cache_from_prefill_rt_us,
+                collector.local_generate_rt_us,
+                collector.load_cache_min_rt_us,
+                collector.load_cache_max_rt_us,
+                collector.load_cache_polling_cost_us);
+        }
         metrics_reporter->report<RpcMetrics, RpcMetricsCollector>(nullptr, &collector);
     }
 }

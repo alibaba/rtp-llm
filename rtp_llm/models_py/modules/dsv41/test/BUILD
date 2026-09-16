@@ -101,6 +101,13 @@ py_test(
 )
 
 py_test(
+    name = "test_cp_selected",
+    srcs = ["test_cp_selected.py"],
+    deps = ["//rtp_llm:rtp_llm_lib"],
+    data = ["//:rtp_compute_ops"],
+)
+
+py_test(
     name = "test_engine_adapter",
     srcs = ["test_engine_adapter.py", "fixture.py"],
     deps = [
@@ -309,6 +316,13 @@ py_test(
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     tags = ["requires-two-gpus"],
     env = {"GPU_COUNT": "2"},
+)
+
+py_test(
+    name = "test_engram_gather_quant",
+    srcs = ["test_engram_gather_quant.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"DSV41_BLOCK32_LINEAR": "1"},
 )
 
 py_test(

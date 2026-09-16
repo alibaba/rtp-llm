@@ -479,16 +479,26 @@ class V41DecodeFmhaImpl:
             torch._assert_async(
                 ~same.any(), "live requests share writable decode state"
             )
-        for layer, binding in self._swa.items():
+        # Transfer validated host ranges once, before the per-layer device work.
+        # Each pageable H2D tensor construction otherwise fences earlier copies.
+        range_layers = tuple(self._swa)
+        range_values = [
+            [ranges[index][layer] for layer in range_layers]
+            if not fake[index]
+            else [[0, 0, 0] for _ in range_layers]
+            for index in range(batch)
+        ]
+        range_values += [
+            [[0, 0, 0] for _ in range_layers]
+            for _ in range(self.batch_size - batch)
+        ]
+        device_ranges = torch.tensor(
+            range_values, dtype=torch.int32, device=self.device
+        ).unbind(1)
+        for (layer, binding), values in zip(self._swa.items(), device_ranges):
             group = self._groups[(layer, int(KVCacheRegionName.SWA_KV))]
             previous, current = self._previous_pages[group], self._current_pages[group]
             binding.page_ids.copy_(current)
-            values = [
-                ranges[index][layer] if not fake[index] else [0, 0, 0]
-                for index in range(batch)
-            ]
-            values += [[0, 0, 0]] * (self.batch_size - batch)
-            values = torch.tensor(values, dtype=torch.int32, device=self.device)
             binding.valid_starts.copy_(values[:, 0])
             binding.valid_ends.copy_(values[:, 1])
             self._floors[layer].copy_(values[:, 2])

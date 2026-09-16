@@ -478,6 +478,54 @@ def _pack_selected_rows(pages: CompactPages, indices: torch.Tensor):
     return packed, remapped
 
 
+def _finalize_native(native_output, native_lse, sinks, metadata, output, lse, status):
+    rows, heads, _ = output.shape
+    have_kv = metadata.have_kv
+    if (
+        os.environ.get("DSV41_FLASHMLA_FUSED_FINALIZE", "1") == "1"
+        and is_supported(output)
+        and native_output.is_contiguous()
+        and native_lse.is_contiguous()
+        and have_kv is not None
+    ):
+        from rtp_llm.models_py.modules.dsv41._flashmla_staging_triton import (
+            finalize_native_kernel,
+        )
+        import triton
+
+        if rows:
+            finalize_native_kernel[(triton.cdiv(rows * heads, 4),)](
+                native_output,
+                native_lse,
+                sinks,
+                metadata.query_valid,
+                have_kv,
+                metadata.status,
+                output,
+                lse,
+                status,
+                ROWS=rows,
+                HEADS=heads,
+                BLOCK_HEADS=4,
+                num_warps=4,
+                enable_fp_fusion=False,
+            )
+        return
+    active = metadata.query_valid[:, None]
+    output.copy_(torch.where(active[:, :, None], native_output.view_as(output), 0))
+    if have_kv is None:
+        have_kv = (metadata.main >= 0).any(dim=(1, 2))
+        if metadata.extra is not None:
+            have_kv |= (metadata.extra >= 0).any(dim=(1, 2))
+    # Upstream LSE excludes the sink and uses +inf for no-KV queries.
+    attention_lse = torch.where(
+        have_kv[:, None], native_lse.reshape(rows, heads), -torch.inf
+    )
+    combined_lse = torch.logaddexp(attention_lse, sinks[None, :])
+    lse.copy_(torch.where(active, combined_lse, -torch.inf))
+    status.copy_(metadata.status[:, None].expand(-1, heads))
+
+
 def _flashmla_attention(
     query,
     request_ids,
@@ -541,6 +589,35 @@ def _flashmla_attention(
                 )
     if request_ids.device != device or request_ids.shape != (rows,):
         raise ValueError("FlashMLA query and request rows must share shape/device")
+    precision_guard = (
+        compact
+        and heads == 64
+        and os.environ.get("DSV41_FLASHMLA_PRECISION_GUARD", "0") == "1"
+    )
+    if precision_guard and (
+        global_kv is None
+        or (
+            global_indices is not None
+            and global_indices.ndim == 2
+            and global_indices.shape[1] < 512
+        )
+    ):
+        from rtp_llm.models_py.modules.dsv41.compact_reader import compact_attention
+
+        # This reader validates metadata and output aliases without native indices.
+        return compact_attention(
+            query,
+            request_ids,
+            query_positions,
+            replay_floors,
+            swa,
+            sinks,
+            global_kv=global_kv,
+            global_indices=global_indices,
+            output=output,
+            lse=lse,
+            status=status,
+        )
     metadata = build_indices(
         request_ids,
         query_positions,
@@ -569,27 +646,6 @@ def _flashmla_attention(
             global_indices,
         ),
     )
-    precision_guard = (
-        compact
-        and heads == 64
-        and os.environ.get("DSV41_FLASHMLA_PRECISION_GUARD", "0") == "1"
-    )
-    if precision_guard and (global_kv is None or global_indices.shape[1] < 512):
-        from rtp_llm.models_py.modules.dsv41.compact_reader import compact_attention
-
-        return compact_attention(
-            query,
-            request_ids,
-            query_positions,
-            replay_floors,
-            swa,
-            sinks,
-            global_kv=global_kv,
-            global_indices=global_indices,
-            output=output,
-            lse=lse,
-            status=status,
-        )
     if rows:
         main_pages = swa.pages
         extra_pages = None if global_kv is None else global_kv.pages
@@ -623,20 +679,9 @@ def _flashmla_attention(
             topk_length=metadata.main_lengths,
             extra_topk_length=metadata.extra_lengths,
         )
-        active = metadata.query_valid[:, None]
-        output.copy_(torch.where(active[:, :, None], native_output.view_as(output), 0))
-        have_kv = metadata.have_kv
-        if have_kv is None:
-            have_kv = (metadata.main >= 0).any(dim=(1, 2))
-            if metadata.extra is not None:
-                have_kv |= (metadata.extra >= 0).any(dim=(1, 2))
-        # Upstream LSE excludes the sink and uses +inf for no-KV queries.
-        attention_lse = torch.where(
-            have_kv[:, None], native_lse.reshape(rows, heads), -torch.inf
+        _finalize_native(
+            native_output, native_lse, sinks, metadata, output, lse, status
         )
-        combined_lse = torch.logaddexp(attention_lse, sinks[None, :])
-        lse.copy_(torch.where(active, combined_lse, -torch.inf))
-        status.copy_(metadata.status[:, None].expand(-1, heads))
         if precision_guard:
             from rtp_llm.models_py.modules.dsv41._flashmla_precision_triton import (
                 partial_extra_attention_kernel,
@@ -674,6 +719,10 @@ def _flashmla_attention(
                 COMPRESS_RATIO=global_kv.compress_ratio,
                 SCALE=1.0 / math.sqrt(512),
                 BLOCK_N=16,
+                SKIP_EMPTY_TILES=os.environ.get("DSV41_FLASHMLA_SKIP_EMPTY_TILES", "0")
+                == "1",
+                HEAD_PAIR=rows >= 6
+                and torch.cuda.get_device_capability(device) in ((10, 0), (10, 3)),
                 num_warps=8,
             )
     return ReaderResult(output, status, lse)

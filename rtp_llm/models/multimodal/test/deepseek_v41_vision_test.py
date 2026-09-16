@@ -3,8 +3,10 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 from unittest import TestCase, main
+from unittest.mock import patch
 
 import torch
 from safetensors import safe_open
@@ -18,7 +20,11 @@ from rtp_llm.models.multimodal.deepseek_v41_processor import (
     image_token_types,
 )
 from rtp_llm.models.multimodal.deepseek_v41_vision import DeepSeekV41VisionEmbedding
-from rtp_llm.models.multimodal.deepseek_vision import RMSNorm
+from rtp_llm.models.multimodal.deepseek_vision import (
+    RMSNorm,
+    _vision_cos_sin,
+    apply_rotary,
+)
 
 VISION_SHA256 = "5d49edc196a4ef22384abe76d35a40098cbe1e74b586c8f66a2edff4f076b26c"
 
@@ -241,6 +247,135 @@ class V41VisionEmbeddingTest(TestCase):
             if isinstance(module, RMSNorm):
                 self.assertEqual(module.weight.dtype, torch.float32)
         self.assertEqual(self.adapter.image_start.dtype, torch.bfloat16)
+
+    @torch.inference_mode()
+    def test_fa4_shape_and_unavailable_fallback(self):
+        from rtp_llm.models_py.modules.dsv41 import _vision_fa4 as fa4
+
+        with patch.dict(os.environ, {"DSV41_VISION_FA4": "1"}):
+            for rows in (0, 1, 1521, 4070, 8648, 8650):
+                qk = torch.empty(rows, 32, 64, device="cuda", dtype=torch.bfloat16)
+                qkv = torch.empty(rows, 3, 16, 64, device="cuda", dtype=torch.bfloat16)
+                with patch.object(fa4, "_load_fa4", side_effect=AssertionError):
+                    self.assertIsNone(
+                        fa4.vision_attention_fa4(qk[:, :16], qk[:, 16:], qkv[:, 2])
+                    )
+
+            qk = torch.empty(8649, 32, 64, device="cuda", dtype=torch.bfloat16)
+            qkv = torch.empty(8649, 3, 16, 64, device="cuda", dtype=torch.bfloat16)
+            q, k, v = qk[:, :16], qk[:, 16:], qkv[:, 2]
+            self.assertTrue(fa4._enabled_or_supported(q, k, v))
+            self.assertFalse(fa4._enabled_or_supported(q.clone(), k, v))
+            self.assertFalse(fa4._enabled_or_supported(q.float(), k, v))
+            with torch.enable_grad():
+                self.assertIsNone(fa4.vision_attention_fa4(q, k, v))
+            with patch.dict(os.environ, {"DSV41_VISION_FA4": "0"}):
+                self.assertIsNone(fa4.vision_attention_fa4(q, k, v))
+
+            fa4._load_fa4.cache_clear()
+            try:
+                with patch.dict(sys.modules, {"flash_attn.cute.interface": None}):
+                    with self.assertLogs(fa4.__name__, level="WARNING") as records:
+                        self.assertIsNone(fa4.vision_attention_fa4(q, k, v))
+                        status = fa4.vision_fa4_status()
+                    self.assertFalse(status["available"])
+                    self.assertIn("ModuleNotFoundError", status["unavailable_reason"])
+                    self.assertEqual(len(records.output), 1)
+            finally:
+                fa4._load_fa4.cache_clear()
+
+    @torch.inference_mode()
+    def test_fa4_math_and_dynamic_graph(self):
+        from rtp_llm.models_py.modules.dsv41 import _vision_fa4 as fa4
+
+        with patch.dict(os.environ, {"DSV41_VISION_FA4": "1"}):
+            status = fa4.vision_fa4_status()
+            if not status["available"]:
+                self.skipTest(status["unavailable_reason"])
+            generator = torch.Generator(device="cuda").manual_seed(941)
+            qk = torch.randn(
+                8649, 32, 64, device="cuda", dtype=torch.bfloat16, generator=generator
+            )
+            qkv = torch.randn(
+                8649,
+                3,
+                16,
+                64,
+                device="cuda",
+                dtype=torch.bfloat16,
+                generator=generator,
+            )
+            q, k, v = qk[:, :16], qk[:, 16:], qkv[:, 2]
+            before = qkv.clone()
+            actual = fa4.vision_attention_fa4(q, k, v)
+            with sdpa_kernel(SDPBackend.MATH):
+                expected = (
+                    torch.nn.functional.scaled_dot_product_attention(
+                        q.float().transpose(0, 1).unsqueeze(0),
+                        k.float().transpose(0, 1).unsqueeze(0),
+                        v.float().transpose(0, 1).unsqueeze(0),
+                    )
+                    .squeeze(0)
+                    .transpose(0, 1)
+                )
+            torch.testing.assert_close(actual.float(), expected, rtol=1e-2, atol=2e-3)
+            torch.testing.assert_close(qkv, before, rtol=0, atol=0)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = fa4.vision_attention_fa4(q, k, v)
+            for _ in range(2):
+                qk.normal_(generator=generator)
+                qkv.normal_(generator=generator)
+                graph.replay()
+                torch.testing.assert_close(
+                    captured, fa4.vision_attention_fa4(q, k, v), rtol=0, atol=0
+                )
+
+    @torch.inference_mode()
+    def test_rotary_fused_exact_graph_and_fallback(self):
+        from rtp_llm.models_py.modules.dsv41._vision_rope_triton import (
+            apply_vision_qk_rope,
+        )
+
+        with patch.dict(os.environ, {"DSV41_VISION_ROPE": "1"}):
+            for rows in (1, 7, 19, 127, 1521):
+                with self.subTest(rows=rows):
+                    qkv = torch.randn(
+                        rows, 3, 16, 64, device="cuda", dtype=torch.bfloat16
+                    )
+                    q, k, v = qkv.unbind(1)
+                    before = qkv.clone()
+                    cos, sin = _vision_cos_sin(1, rows, 32, 10000.0, "cuda:0")
+                    actual = apply_vision_qk_rope(q, k, cos, sin)
+                    self.assertIsNotNone(actual)
+                    for value, source in zip(actual, (q, k)):
+                        torch.testing.assert_close(
+                            value, apply_rotary(source, cos, sin), rtol=0, atol=0
+                        )
+                        self.assertNotEqual(
+                            value.untyped_storage().data_ptr(),
+                            qkv.untyped_storage().data_ptr(),
+                        )
+                    torch.testing.assert_close(qkv, before, rtol=0, atol=0)
+                    self.assertIsNone(
+                        apply_vision_qk_rope(q.clone(), k.clone(), cos, sin)
+                    )
+                    self.assertIsNone(
+                        apply_vision_qk_rope(q.float(), k.float(), cos, sin)
+                    )
+
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = apply_vision_qk_rope(q, k, cos, sin)
+            for _ in range(3):
+                qkv.normal_()
+                graph.replay()
+                for value, source in zip(captured, (q, k)):
+                    torch.testing.assert_close(
+                        value, apply_rotary(source, cos, sin), rtol=0, atol=0
+                    )
+            with patch.dict(os.environ, {"DSV41_VISION_ROPE": "0"}):
+                self.assertIsNone(apply_vision_qk_rope(q, k, cos, sin))
 
 
 if __name__ == "__main__":

@@ -63,19 +63,28 @@ class Attention(nn.Module):
         self.wqkv = nn.Linear(dim, 3 * dim)
         self.wo = nn.Linear(dim, dim)
 
+    def _apply_rotary(self, q, k, cos, sin):
+        return apply_rotary(q, cos, sin), apply_rotary(k, cos, sin)
+
+    def _attention(self, q, k, v):
+        return (
+            F.scaled_dot_product_attention(
+                q.transpose(0, 1).unsqueeze(0),
+                k.transpose(0, 1).unsqueeze(0),
+                v.transpose(0, 1).unsqueeze(0),
+            )
+            .squeeze(0)
+            .transpose(0, 1)
+        )
+
     def forward(self, x, cos, sin):
         n = x.size(0)
         q, k, v = (
             t.view(n, self.n_heads, self.head_dim)
             for t in self.wqkv(x).chunk(3, dim=-1)
         )
-        q, k = apply_rotary(q, cos, sin), apply_rotary(k, cos, sin)
-        out = F.scaled_dot_product_attention(
-            q.transpose(0, 1).unsqueeze(0),
-            k.transpose(0, 1).unsqueeze(0),
-            v.transpose(0, 1).unsqueeze(0),
-        ).squeeze(0)
-        return self.wo(out.transpose(0, 1).reshape(n, -1))
+        q, k = self._apply_rotary(q, k, cos, sin)
+        return self.wo(self._attention(q, k, v).reshape(n, -1))
 
 
 class MLP(nn.Module):
@@ -91,10 +100,10 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, *, attention_cls=Attention):
         super().__init__()
         dim = config["vision_dim"]
-        self.norm1, self.attn = RMSNorm(dim), Attention(config)
+        self.norm1, self.attn = RMSNorm(dim), attention_cls(config)
         self.norm2, self.mlp = RMSNorm(dim), MLP(config)
 
     def forward(self, x, cos, sin):
@@ -103,13 +112,16 @@ class Block(nn.Module):
 
 
 class ViT(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, *, attention_cls=Attention):
         super().__init__()
         self.rope_dim = config["vision_dim"] // config["vision_n_heads"] // 2
         self.rope_theta = float(config.get("vision_rope_theta", 10000.0))
         self.patch_embed = PatchEmbed(config)
         self.blocks = nn.ModuleList(
-            [Block(config) for _ in range(config["vision_n_layers"])]
+            [
+                Block(config, attention_cls=attention_cls)
+                for _ in range(config["vision_n_layers"])
+            ]
         )
         self.norm = RMSNorm(config["vision_dim"])
 

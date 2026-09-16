@@ -1,5 +1,7 @@
 """Engram hashing from explicit canonical request history, without slot state."""
 
+import os
+
 import numpy as np
 import torch
 from sympy import isprime
@@ -216,6 +218,37 @@ class Engram(nn.Module):
         self.q_weight = nn.Parameter(q_weight, requires_grad=False)
         self.k_weight = nn.Parameter(k_weight, requires_grad=False)
 
+    def _fused_lookup_supported(self):
+        from rtp_llm.model_loader.host_shared_cuda import SharedEngramLookup
+        from rtp_llm.models_py.modules.dsv41.linear import V41Block32Linear
+
+        return (
+            os.environ.get("DSV41_ENGRAM_GATHER_QUANT", "1") == "1"
+            and type(self.projection) is V41Block32Linear
+            and isinstance(self.shared_lookup, SharedEngramLookup)
+            and self.projection.weight.device
+            == torch.device("cuda", self.shared_lookup.device)
+        )
+
+    def _project_quantized(self, encoded, scales):
+        from rtp_llm.models_py.modules.dsv41.linear import _require_execution
+
+        _require_execution(encoded)
+        projection = self.projection
+        rows = encoded.numel() // projection.in_features
+        output = torch.empty(
+            (*encoded.shape[:-2], projection.out_features),
+            dtype=torch.bfloat16,
+            device=encoded.device,
+        )
+        if rows:
+            projection._run_quantized_gemm(
+                encoded.view(rows, projection.in_features),
+                scales.view(rows, projection.in_features // 32),
+                output.view(rows, projection.out_features),
+            )
+        return output
+
     def forward(self, hidden, hash_ids, token_mask=None, *, lookup_output=None):
         from rtp_llm.models_py.modules.dsv41.math import engram_inject
 
@@ -231,10 +264,16 @@ class Engram(nn.Module):
             if token_mask.shape != hidden.shape[:-2] or token_mask.dtype != torch.bool:
                 raise ValueError("Engram token mask must cover complete image spans")
             valid = token_mask.unsqueeze(-1).expand_as(hash_ids).contiguous()
-        rows = self.shared_lookup.lookup(
-            self.layer_id, hash_ids, valid_mask=valid, out=lookup_output
-        )
-        projected = self.projection(rows.flatten(-2))
+        if self._fused_lookup_supported():
+            _, encoded, scales = self.shared_lookup.lookup_quantized(
+                self.layer_id, hash_ids, valid_mask=valid, out=lookup_output
+            )
+            projected = self._project_quantized(encoded, scales)
+        else:
+            rows = self.shared_lookup.lookup(
+                self.layer_id, hash_ids, valid_mask=valid, out=lookup_output
+            )
+            projected = self.projection(rows.flatten(-2))
         return engram_inject(
             hidden, projected, self.q_weight, self.k_weight, token_mask
         )

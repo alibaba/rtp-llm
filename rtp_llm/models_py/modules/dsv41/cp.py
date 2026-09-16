@@ -1,8 +1,9 @@
 """CP8 target prefill over framework-owned V4.1 cache shards.
 
-Queries and model rows remain in the framework's padded zigzag order. Only
-compressor inputs, SWA windows, and selected compact KV rows cross the TP/CP
-group. All receive storage is scoped to a source tile and its consumers.
+Queries retain the framework's padded zigzag order. Row-local model and attention
+operations pack only real rows without changing their CP owners. Only compressor
+inputs, SWA windows, and selected compact KV rows cross the TP/CP group. All
+receive storage is scoped to a source tile and its consumers.
 """
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ from dataclasses import dataclass, fields, replace
 
 import torch
 import torch.nn.functional as F
-
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -58,10 +58,13 @@ from rtp_llm.models_py.modules.dsv41.compressor import (
     prepare_owner_kv,
 )
 from rtp_llm.models_py.modules.dsv41.cprr_reader import (
-    CprrReadIdentity,
     CprrReaderLease,
+    CprrReadIdentity,
     bind_cprr_paged,
     restore_cprr_swa,
+)
+from rtp_llm.models_py.modules.dsv41.decode_compressor import (
+    normalize_empty_pair_checkpoint,
 )
 from rtp_llm.models_py.modules.dsv41.indexer import (
     CANDIDATE_BLOCKS,
@@ -72,7 +75,6 @@ from rtp_llm.models_py.modules.dsv41.indexer import (
     score_candidate_tile,
 )
 from rtp_llm.models_py.modules.dsv41.math import grouped_wo_a
-from rtp_llm.models_py.modules.dsv41.decode_compressor import normalize_empty_pair_checkpoint
 from rtp_llm.models_py.modules.dsv41.source_indexer import (
     SOURCE_QUERY_TILE,
     prepare_index_source,
@@ -95,6 +97,73 @@ def _check(condition, message):
 
 def _bytes(*tensors):
     return sum(value.numel() * value.element_size() for value in tensors)
+
+
+def _query_rows(tensor, indices):
+    return tensor if indices is None else tensor.index_select(0, indices)
+
+
+def _copy_query_rows(destination, indices, values):
+    if indices is None:
+        destination.copy_(values)
+    else:
+        destination.index_copy_(0, indices, values)
+
+
+def _selected_local_rows(pool, table, wanted, entries, entry_bytes, rank):
+    message = "CP selected KV row has no allocated owner page"
+    if (
+        pool.is_cuda
+        and pool.stride(1) == 1
+        and torch.cuda.get_device_capability(pool.device)[0] == 10
+        and os.environ.get("DSV41_CP_FUSED_SELECTED", "1") == "1"
+    ):
+        from rtp_llm.models_py.modules.dsv41._cp_gather_triton import (
+            gather_selected_kernel,
+        )
+
+        block_rows = 4
+        blocks = (wanted.numel() + block_rows - 1) // block_rows
+        local = torch.empty(
+            (wanted.numel(), entry_bytes), dtype=torch.uint8, device=pool.device
+        )
+        status = torch.empty((blocks,), dtype=torch.int32, device=pool.device)
+        if blocks:
+            gather_selected_kernel[(blocks,)](
+                pool,
+                table,
+                wanted,
+                local,
+                status,
+                ROWS=wanted.numel(),
+                ENTRIES=entries,
+                ENTRY_BYTES=entry_bytes,
+                POOL_PAGES=pool.shape[0],
+                PAGE_STRIDE=pool.stride(0),
+                TABLE_WIDTH=table.shape[1],
+                TABLE_STRIDE=table.stride(1),
+                WANTED_STRIDE=wanted.stride(0),
+                RANK=rank,
+                BLOCK_ROWS=block_rows,
+                BLOCK_BYTES=1 << (entry_bytes - 1).bit_length(),
+            )
+            _check(status == 0, message)
+        return local
+
+    logical = wanted.clamp_min(0).long() // entries
+    owners, virtual = logical % 8, logical // 8
+    owned = (wanted >= 0) & (owners == rank)
+    in_table = virtual < table.shape[1]
+    ids = table[0].index_select(0, virtual.clamp_max(table.shape[1] - 1)).long()
+    _check(~owned | (in_table & (ids > 0) & (ids < pool.shape[0])), message)
+    page_rows = pool[:, : entries * entry_bytes].view(
+        pool.shape[0], entries, entry_bytes
+    )
+    local = page_rows[
+        ids.clamp(0, pool.shape[0] - 1), wanted.clamp_min(0).long() % entries
+    ]
+    local.masked_fill_(~owned[:, None], 0)
+    return local
 
 
 @dataclass(frozen=True)
@@ -173,7 +242,32 @@ class V41CPAttentionContext(V41AttentionContext):
         if len(set(mapping)) != end - start:
             raise ValueError("CP restore map repeats canonical source rows")
         self._restore_host = tuple(mapping)
+        query_owners = {flat // self.local_count for flat in mapping}
+        self.single_query_owner = (
+            next(iter(query_owners))
+            if len(query_owners) == 1
+            and os.environ.get("DSV41_CP_SINGLE_OWNER_TRANSPORT", "1") != "0"
+            else None
+        )
         device = self.query_device
+        model_rows = sorted(
+            flat % self.local_count
+            for flat in mapping
+            if flat // self.local_count == cp.cp_rank
+        )
+        self._real_local_rows = tuple(model_rows)
+        self._query_row_plans = {}
+        self.attention_query_rows = (
+            len(model_rows)
+            if os.environ.get("DSV41_CP_COMPACT_QUERY_ROWS", "1") != "0"
+            else self.local_count
+        )
+        self.model_row_indices = (
+            torch.tensor(model_rows, dtype=torch.int64, device=device)
+            if len(model_rows) != self.local_count
+            and os.environ.get("DSV41_CP_COMPACT_MODEL_ROWS", "1") != "0"
+            else None
+        )
         self._restore = torch.tensor(mapping, dtype=torch.int64, device=device)
         rank_positions = torch.full(
             (8 * self.local_count,), -1, dtype=torch.int64, device=device
@@ -194,6 +288,56 @@ class V41CPAttentionContext(V41AttentionContext):
     @property
     def query_device(self):
         return self.cp.global_positions.device
+
+    @property
+    def model_query_rows(self):
+        return (
+            self.query_rows
+            if self.model_row_indices is None
+            else self.model_row_indices.numel()
+        )
+
+    def pack_model_rows(self, tensor):
+        """Select real local rows using the already validated host ownership map."""
+        if (
+            tensor.ndim < 1
+            or tensor.shape[0] != self.query_rows
+            or tensor.device != self.query_device
+        ):
+            raise ValueError("CP model packing requires the canonical local row shape")
+        if self.model_row_indices is None:
+            return tensor
+        return tensor.index_select(0, self.model_row_indices)
+
+    def unpack_model_rows(self, tensor):
+        """Restore attention/L20 row geometry without assigning work to padding."""
+        if (
+            tensor.ndim < 1
+            or tensor.shape[0] != self.model_query_rows
+            or tensor.device != self.query_device
+        ):
+            raise ValueError("CP model output differs from the packed local row shape")
+        if self.model_row_indices is None:
+            return tensor
+        output = tensor.new_zeros((self.query_rows, *tensor.shape[1:]))
+        output.index_copy_(0, self.model_row_indices, tensor)
+        return output
+
+    def query_row_indices(self, first, last):
+        """Select real rows within a padded collective tile without device sync."""
+        if not 0 <= first <= last <= self.query_rows:
+            raise ValueError("CP query tile exceeds its canonical local row range")
+        if self.attention_query_rows == self.query_rows:
+            return None
+        key = (first, last)
+        if key not in self._query_row_plans:
+            rows = [row - first for row in self._real_local_rows if first <= row < last]
+            self._query_row_plans[key] = (
+                None
+                if len(rows) == last - first
+                else torch.tensor(rows, dtype=torch.int64, device=self.query_device)
+            )
+        return self._query_row_plans[key]
 
     @property
     def query_identity(self):
@@ -714,7 +858,9 @@ class V41CPAttentionContext(V41AttentionContext):
             region[None, :],
             raw[None, :],
             torch.tensor([self.start], dtype=torch.int64, device=self.query_device),
-            torch.tensor([restored_state_ready], dtype=torch.bool, device=self.query_device),
+            torch.tensor(
+                [restored_state_ready], dtype=torch.bool, device=self.query_device
+            ),
             reuse_unit=self.cache.layout.reuse_unit,
         )
         position = int(raw[4096:4104].view(torch.int64).item())
@@ -803,55 +949,90 @@ class V41CPAttentionContext(V41AttentionContext):
             slot, (received, restored.page_table, restored.status), layer
         )
 
-    def gather_selected(self, slot, positions, layer, *, retained_bytes=0):
+    def _query_destination(self, query_owner):
+        if query_owner != self.single_query_owner or query_owner is None:
+            raise ValueError("CP compact transport requires one canonical query owner")
+        group = collective_torch._get_group(Group.TP)
+        return group, torch.distributed.get_global_rank(group, query_owner)
+
+    def gather_selected(
+        self, slot, positions, layer, *, retained_bytes=0, query_owner=None
+    ):
         """Receive compact rows selected by each rank, retaining original quantization."""
         spec, pool, table = self._page_specs[slot], self.pools[slot], self.tables[slot]
         requests, width = positions.shape
-        wanted = self._all_gather(positions, retained_bytes=retained_bytes).reshape(-1)
+        if query_owner is None:
+            wanted = self._all_gather(positions, retained_bytes=retained_bytes).reshape(
+                -1
+            )
+        else:
+            group, destination = self._query_destination(query_owner)
+            wanted = positions.clone().reshape(-1)
+            self._record_gather(
+                _bytes(wanted), retained_bytes + _bytes(positions, wanted)
+            )
+            torch.distributed.broadcast(wanted, src=destination, group=group)
         output_bytes = requests * width * spec.encoding.entry_bytes
         self._record_gather(
             output_bytes,
             retained_bytes
             + _bytes(positions, wanted)
-            + 9 * output_bytes
+            + (9 if query_owner is None else 1) * output_bytes
             + wanted.numel() * _SELECTED_METADATA_BYTES,
         )
-        logical = wanted.clamp_min(0).long() // spec.entries
-        owners, virtual = logical % 8, logical // 8
-        owned = (wanted >= 0) & (owners == self.cp.cp_rank)
-        in_table = virtual < table.shape[1]
-        ids = table[0].index_select(0, virtual.clamp_max(table.shape[1] - 1)).long()
-        _check(
-            ~owned | (in_table & (ids > 0) & (ids < pool.shape[0])),
-            "CP selected KV row has no allocated owner page",
-        )
-        page_rows = pool[:, : spec.entries * spec.encoding.entry_bytes].view(
-            pool.shape[0], spec.entries, spec.encoding.entry_bytes
-        )
-        local = page_rows[
-            ids.clamp(0, pool.shape[0] - 1), wanted.clamp_min(0).long() % spec.entries
-        ]
-        local.masked_fill_(~owned[:, None], 0)
-        del logical, owners, virtual, owned, in_table, ids
-        values = torch.empty(
-            (requests * width, spec.encoding.entry_bytes),
-            dtype=torch.uint8,
-            device=self.query_device,
+        local = _selected_local_rows(
+            pool,
+            table,
+            wanted,
+            spec.entries,
+            spec.encoding.entry_bytes,
+            self.cp.cp_rank,
         )
         # Each byte has exactly one page owner; SUM preserves its bit pattern.
-        # Rank-major requests make each scatter chunk the requesting rank's rows.
-        torch.distributed.reduce_scatter_tensor(
-            values, local, group=collective_torch._get_group(Group.TP)
-        )
+        if query_owner is None:
+            values = torch.empty(
+                (requests * width, spec.encoding.entry_bytes),
+                dtype=torch.uint8,
+                device=self.query_device,
+            )
+            torch.distributed.reduce_scatter_tensor(
+                values, local, group=collective_torch._get_group(Group.TP)
+            )
+        else:
+            torch.distributed.reduce(local, dst=destination, group=group)
+            values = local
         values = values.view(requests, width, -1)
         values.masked_fill_((positions < 0)[:, :, None], 0)
         return values, self.lease(slot, (values,), layer)
 
-    def swa_queries(self, layer, first, last, initial, encoded):
+    def swa_queries(
+        self, layer, first, last, initial, encoded, *, query_rows=None, query_owner=None
+    ):
         """Restore each local query's causal ring before any later row overwrites it."""
-        query_positions = self._rank_positions[:, first:last]
+        count = last - first
+        spec = self._page_specs[RegionSlot(CacheRegion.SWA, layer)]
+        if query_owner is None:
+            query_positions = self._rank_positions[:, first:last]
+        else:
+            group, destination = self._query_destination(query_owner)
+            query_positions = self._rank_positions[
+                query_owner : query_owner + 1, first:last
+            ]
         offsets = torch.arange(1 - SWA_WINDOW, 1, device=self.query_device)
         wanted = (query_positions[:, :, None] + offsets).reshape(-1)
+        output_bytes = count * SWA_WINDOW * 528
+        page_bytes = (count + 1) * spec.page_stride_bytes
+        # The fixed-shape past/current selection briefly owns three input tiles.
+        # Communication and ring packing have smaller, disjoint lifetimes.
+        self._record_gather(
+            output_bytes,
+            _bytes(initial.pages.data)
+            + wanted.numel() * _SELECTED_METADATA_BYTES
+            + max(
+                (24 if query_owner is None else 3) * output_bytes,
+                output_bytes + 2 * page_bytes,
+            ),
+        )
         active = (
             (query_positions[:, :, None] >= 0).expand(-1, -1, SWA_WINDOW).reshape(-1)
         )
@@ -862,53 +1043,49 @@ class V41CPAttentionContext(V41AttentionContext):
         )
         owners = torch.where(current, source // self.local_count, 0)
         local_indices = source % self.local_count
-        local = encoded.index_select(0, local_indices).clone()
+        local = encoded.index_select(0, local_indices)
         past = valid & ~current
-        _check(
-            ~past | (wanted >= initial.valid_starts[0]),
-            "CP query is missing restored SWA history",
-        )
-        old = initial.pages.data[1, : initial.pages.entries_per_page * 528].view(
-            -1, 528
-        )
-        local[past] = old.index_select(0, wanted[past] % initial.pages.entries_per_page)
+        if self.replay_floor < self.start:
+            _check(
+                ~past | (wanted >= initial.valid_starts[0]),
+                "CP query is missing restored SWA history",
+            )
+            if self.cp.cp_rank == 0:
+                old = initial.pages.data[
+                    1, : initial.pages.entries_per_page * 528
+                ].view(-1, 528)
+                local = torch.where(
+                    past[:, None],
+                    old.index_select(0, wanted % initial.pages.entries_per_page),
+                    local,
+                )
         local.masked_fill_((~valid | (owners != self.cp.cp_rank))[:, None], 0)
-        receive = self._all_gather(
-            local,
-            retained_bytes=_bytes(initial.pages.data),
-            restored_bytes=(last - first) * SWA_WINDOW * 528,
-        ).view(8, wanted.numel(), 528)
-        begin = self.cp.cp_rank * (last - first) * SWA_WINDOW
-        row = torch.arange(
-            begin, begin + (last - first) * SWA_WINDOW, device=self.query_device
-        )
-        values = receive[owners[begin : begin + row.numel()], row]
-        values.masked_fill_(~valid[begin : begin + row.numel(), None], 0)
-        spec = self._page_specs[RegionSlot(CacheRegion.SWA, layer)]
-        pages = CompactPages(
-            torch.zeros(
-                (last - first + 1, spec.page_stride_bytes),
-                dtype=torch.uint8,
-                device=self.query_device,
-            ),
-            CacheRegion.SWA,
-            spec.entries,
-        )
+        # Current rows have their canonical CP owner; restored rows use rank0.
+        if query_owner is None:
+            values = torch.empty(
+                (count * SWA_WINDOW, 528), dtype=torch.uint8, device=self.query_device
+            )
+            torch.distributed.reduce_scatter_tensor(
+                values, local, group=collective_torch._get_group(Group.TP)
+            )
+        else:
+            torch.distributed.reduce(local, dst=destination, group=group)
+            values = local
+            if self.cp.cp_rank != query_owner:
+                values.zero_()
+        del local, wanted, active, valid, current, source, owners, local_indices, past
+        positions = self._rank_positions[self.cp.cp_rank, first:last]
+        values = values.view(count, SWA_WINDOW, 528)
+        if query_rows is not None:
+            if query_rows.numel() == 0:
+                return None
+            values = values.index_select(0, query_rows)
+            positions = positions.index_select(0, query_rows)
+            count = query_rows.numel()
+        pages = _swa_query_pages(values, positions, spec, self.replay_floor)
         page_ids = torch.arange(
-            1, last - first + 1, dtype=torch.int32, device=self.query_device
+            1, count + 1, dtype=torch.int32, device=self.query_device
         )
-        tokens = wanted[begin : begin + row.numel()].view(last - first, SWA_WINDOW)
-        columns = torch.arange(528, device=self.query_device)
-        byte_slots = (tokens.clamp_min(0) % spec.entries)[:, :, None] * 528 + columns
-        # Invalid positions must not overwrite a real slot zero near sequence start.
-        for query in range(last - first):
-            keep = valid[begin : begin + row.numel()].view(last - first, SWA_WINDOW)[
-                query
-            ]
-            pages.data[query + 1, byte_slots[query, keep]] = values.view(
-                last - first, SWA_WINDOW, 528
-            )[query, keep]
-        positions = query_positions[self.cp.cp_rank]
         binding = SwaBinding(
             pages,
             page_ids,
@@ -919,7 +1096,7 @@ class V41CPAttentionContext(V41AttentionContext):
             ).to(torch.int32),
             (positions + 1).clamp_min(0).to(torch.int32),
         )
-        lease = self.lease(spec.slot, (receive, values, pages.data), layer)
+        lease = self.lease(spec.slot, (values, pages.data), layer)
         self.release(lease, layer)
         return binding
 
@@ -1238,7 +1415,9 @@ def begin_cp_request(
                     "CP pair state must match the layout's complete byte-sliced snapshots"
                 )
             context._physical(table, context.current, pool)
-            pair = context.restore_pair(owner, restored_state_ready=restored_state_ready)
+            pair = context.restore_pair(
+                owner, restored_state_ready=restored_state_ready
+            )
             context._pair_initials[owner] = pair
         cache.owners[owner] = AttentionOwnerCache(
             GlobalBinding(
@@ -1274,6 +1453,29 @@ def begin_cp_request(
     return context
 
 
+def _swa_query_pages(values, positions, spec, replay_floor):
+    count, _, row_bytes = values.shape
+    columns = torch.arange(spec.entries, device=values.device)
+    distance = (positions[:, None] - columns[None, :]) % spec.entries
+    source_rows = (SWA_WINDOW - 1 - distance).clamp_min(0)
+    packed = values.gather(1, source_rows[:, :, None].expand(-1, -1, row_bytes))
+    tokens = positions[:, None] - distance
+    valid = (
+        (positions[:, None] >= 0)
+        & (distance < SWA_WINDOW)
+        & (tokens >= replay_floor)
+        & (tokens >= 0)
+    )
+    packed.masked_fill_(~valid[:, :, None], 0)
+    storage = torch.zeros(
+        (count + 1, spec.page_stride_bytes), dtype=torch.uint8, device=values.device
+    )
+    storage[1:, : spec.entries * row_bytes].view(count, spec.entries, row_bytes).copy_(
+        packed
+    )
+    return CompactPages(storage, CacheRegion.SWA, spec.entries)
+
+
 def _packed_pages(values, spec):
     queries, rows, row_bytes = values.shape
     pages_per_query = (rows + spec.entries - 1) // spec.entries
@@ -1285,12 +1487,18 @@ def _packed_pages(values, spec):
     table = torch.arange(
         1, queries * pages_per_query + 1, dtype=torch.int32, device=values.device
     ).view(queries, pages_per_query)
-    row = torch.arange(rows, device=values.device)
-    ids = table.long()[:, row // spec.entries]
-    columns = (row % spec.entries)[:, None] * row_bytes + torch.arange(
-        row_bytes, device=values.device
-    )
-    storage[ids[:, :, None], columns[None, :, :]] = values
+    destination = storage[1:].view(queries, pages_per_query, spec.page_stride_bytes)
+    full_pages, tail = divmod(rows, spec.entries)
+    if full_pages:
+        destination[:, :full_pages, : spec.entries * row_bytes].copy_(
+            values[:, : full_pages * spec.entries].reshape(
+                queries, full_pages, spec.entries * row_bytes
+            )
+        )
+    if tail:
+        destination[:, full_pages, : tail * row_bytes].copy_(
+            values[:, full_pages * spec.entries :].reshape(queries, tail * row_bytes)
+        )
     return CompactPages(storage, spec.slot.region, spec.entries), table
 
 
@@ -1347,13 +1555,16 @@ def _score_queries(attention, hidden, qr, context):
     layer, source = attention.layer, attention.source
     if source.index_k_owner not in context.published_sources:
         raise ValueError("CP index queries require their published source owner")
-    query = attention_rope(
-        attention.index_wq_b(qr).reshape(-1, 32, 128),
-        context.positions,
-        global_branch=True,
+    query = context.unpack_model_rows(
+        attention_rope(
+            attention.index_wq_b(context.pack_model_rows(qr)).reshape(-1, 32, 128),
+            context.pack_model_rows(context.positions),
+            global_branch=True,
+        )
     )
-    weights = (
-        F.linear(hidden, attention.index_weights) * (128**-0.5 * 32**-0.5)
+    weights = context.unpack_model_rows(
+        F.linear(context.pack_model_rows(hidden), attention.index_weights)
+        * (128**-0.5 * 32**-0.5)
     ).contiguous()
     visible = torch.where(context.valid, (context.positions + 1) // source.ratio, 0).to(
         torch.int32
@@ -1377,21 +1588,29 @@ def _score_queries(attention, hidden, qr, context):
             restored, lease = context.gather_paged(
                 slot, source_first, source_last, layer
             )
-            prepared_source = prepare_index_source(
-                restored.pages,
-                restored.page_table,
-                capacity=source_last - source_first,
+            prepared_source = (
+                prepare_index_source(
+                    restored.pages,
+                    restored.page_table,
+                    capacity=source_last - source_first,
+                )
+                if context.attention_query_rows
+                else None
             )
         for first in range(0, hidden.shape[0], query_tile):
             last = min(first + query_tile, hidden.shape[0])
-            local_visible = visible[first:last]
+            query_rows = context.query_row_indices(first, last)
+            count = last - first if query_rows is None else query_rows.numel()
+            local_visible = _query_rows(visible[first:last], query_rows)
             if layer <= 20:
+                if not count:
+                    continue
                 tile_visible = (local_visible - source_first).clamp(
                     0, source_last - source_first
                 )
                 scores = score_index_source(
-                    query[first:last].contiguous(),
-                    weights[first:last].contiguous(),
+                    _query_rows(query[first:last], query_rows).contiguous(),
+                    _query_rows(weights[first:last], query_rows).contiguous(),
                     prepared_source,
                     tile_visible,
                     layer=layer,
@@ -1406,24 +1625,29 @@ def _score_queries(attention, hidden, qr, context):
                 actual = (chosen[:, :, None] * SPARSE_BLOCK + row).flatten(1)
                 actual = torch.where(
                     (chosen[:, :, None] >= 0).expand(-1, -1, SPARSE_BLOCK).flatten(1)
-                    & (actual < local_visible[:, None]),
+                    & (actual < visible[first:last, None]),
                     actual,
                     -1,
                 ).contiguous()
                 values = torch.empty(
-                    (last - first, actual.shape[1], 68),
+                    (count, actual.shape[1], 68),
                     dtype=torch.uint8,
                     device=hidden.device,
                 )
-                # Retain the complete candidates while bounding the rank-major
-                # answers, reduced output and gathered int32 request positions.
+                # Size the common transport schedule for the largest rank buffer.
+                padded_value_bytes = (last - first) * actual.shape[1] * 68
+                peers = 8 if context.single_query_owner is None else 1
                 transport_blocks = min(
                     _REINDEX_BLOCKS,
-                    (MAX_GATHER_BYTES - _bytes(values, actual))
+                    (MAX_GATHER_BYTES - padded_value_bytes - _bytes(actual))
                     // (
                         (last - first)
                         * SPARSE_BLOCK
-                        * (9 * 68 + 8 * (4 + _SELECTED_METADATA_BYTES) + 4)
+                        * (
+                            (9 if peers == 8 else 1) * 68
+                            + peers * (4 + _SELECTED_METADATA_BYTES)
+                            + 4
+                        )
                     ),
                 )
                 # Tile transport, then score the complete candidate set once.
@@ -1437,24 +1661,33 @@ def _score_queries(attention, hidden, qr, context):
                         actual[:, row_first:row_last].contiguous(),
                         layer,
                         retained_bytes=_bytes(values, actual),
+                        query_owner=context.single_query_owner,
                     )
-                    values[:, row_first:row_last].copy_(received)
+                    if count:
+                        values[:, row_first:row_last].copy_(
+                            _query_rows(received, query_rows)
+                        )
                     context.release(row_lease, layer)
                     del received, row_lease
+                if not count:
+                    del values, actual
+                    continue
+                chosen = _query_rows(chosen, query_rows)
+                actual = _query_rows(actual, query_rows)
                 pages, table = _packed_pages(values, context._page_specs[slot])
                 tile_visible = (chosen >= 0).sum(-1, dtype=torch.int32) * SPARSE_BLOCK
                 ids = torch.arange(
                     CANDIDATE_BLOCKS, dtype=torch.int32, device=hidden.device
-                )[None, :].expand(last - first, -1)
+                )[None, :].expand(count, -1)
                 ids = torch.where(
                     ids * SPARSE_BLOCK < tile_visible[:, None], ids, -1
                 ).contiguous()
                 request_ids = torch.arange(
-                    last - first, dtype=torch.int32, device=hidden.device
+                    count, dtype=torch.int32, device=hidden.device
                 )
                 scores = score_candidate_tile(
-                    query[first:last].contiguous(),
-                    weights[first:last].contiguous(),
+                    _query_rows(query[first:last], query_rows).contiguous(),
+                    _query_rows(weights[first:last], query_rows).contiguous(),
                     pages,
                     table,
                     request_ids,
@@ -1486,15 +1719,38 @@ def _score_queries(attention, hidden, qr, context):
         if lease is not None:
             context.release(lease, layer)
             del restored, lease, prepared_source
+    topk = torch.full(
+        (context.query_rows, INDEX_TOPK), -1, dtype=torch.int32, device=hidden.device
+    )
+    candidate_blocks = (
+        torch.full(
+            (context.query_rows, CANDIDATE_BLOCKS),
+            -1,
+            dtype=torch.int32,
+            device=hidden.device,
+        )
+        if layer == 20
+        else None
+    )
+    query_status = torch.zeros(
+        context.query_rows, dtype=torch.int32, device=hidden.device
+    )
+    for first, ranked in top.items():
+        last = min(first + query_tile, context.query_rows)
+        query_rows = context.query_row_indices(first, last)
+        _copy_query_rows(topk[first:last], query_rows, ranked.ordered_positions())
+        _copy_query_rows(query_status[first:last], query_rows, status[first])
+        if candidate_blocks is not None:
+            _copy_query_rows(
+                candidate_blocks[first:last],
+                query_rows,
+                blocks[first].ordered_positions(),
+            )
     context.publish_selection(
         IndexSelection(
-            torch.cat([value.ordered_positions() for value in top.values()]),
-            (
-                torch.cat([value.ordered_positions() for value in blocks.values()])
-                if layer == 20
-                else None
-            ),
-            torch.cat(list(status.values())),
+            topk,
+            candidate_blocks,
+            query_status,
             layer,
             source.index_k_owner,
             calls,
@@ -1529,23 +1785,52 @@ def forward_cp_attention(attention, hidden, context):
     backend = os.environ.get("DSV41_ATTENTION_BACKEND", "native")
     if backend not in ("native", "flashmla"):
         raise ValueError("unknown V4.1 attention backend; no silent fallback")
+    read_queries = int(os.environ.get("DSV41_CP_READ_QUERIES", _READ_QUERIES))
+    if not 1 <= read_queries <= 32:
+        raise ValueError("CP attention query batch must be between 1 and 32")
+    if context.single_query_owner is not None:
+        owner_batch = int(os.environ.get("DSV41_CP_SINGLE_OWNER_READ_QUERIES", "64"))
+        if owner_batch not in (32, 64, 128):
+            raise ValueError("CP single-owner query batch must be 32, 64 or 128")
+        # Reader staging is additional to the per-gather live-byte accounting.
+        read_queries = min(owner_batch, 8 * read_queries)
     try:
-        qr, query, kv = attention._project(hidden, context.positions)
+        model_positions = context.pack_model_rows(context.positions)
+        qr, query, kv = (
+            context.unpack_model_rows(value)
+            for value in attention._project(
+                context.pack_model_rows(hidden), model_positions
+            )
+        )
         if attention.source.writes_global:
             _publish_owner(attention, hidden, context)
         if attention.source.scores_queries:
             _score_queries(attention, hidden, qr, context)
-        encoded = encode_compact(kv, CacheRegion.SWA)
+        query_rows = context.query_row_indices(0, context.query_rows)
+        encoded = encode_compact(_query_rows(kv, query_rows), CacheRegion.SWA)
         encoded.check()
+        if query_rows is None:
+            encoded_rows = encoded.output
+        else:
+            encoded_rows = encoded.output.new_zeros((context.query_rows, 528))
+            encoded_rows.index_copy_(0, query_rows, encoded.output)
         initial = context.restore_swa(attention.layer)
-        output = torch.empty_like(query)
+        output = torch.zeros_like(query)
         indices = (
             context.indices_for(attention.layer) if attention.source.ratio else None
         )
-        for first in range(0, hidden.shape[0], _READ_QUERIES):
-            last = min(first + _READ_QUERIES, hidden.shape[0])
+        for first in range(0, hidden.shape[0], read_queries):
+            last = min(first + read_queries, hidden.shape[0])
+            query_rows = context.query_row_indices(first, last)
+            count = last - first if query_rows is None else query_rows.numel()
             swa = context.swa_queries(
-                attention.layer, first, last, initial, encoded.output
+                attention.layer,
+                first,
+                last,
+                initial,
+                encoded_rows,
+                query_rows=query_rows,
+                query_owner=context.single_query_owner,
             )
             global_kv = global_indices = lease = None
             if indices is not None:
@@ -1555,14 +1840,24 @@ def forward_cp_attention(attention, hidden, context):
                     slot,
                     selected,
                     attention.layer,
-                    retained_bytes=_bytes(swa.pages.data, initial.pages.data),
+                    retained_bytes=_bytes(initial.pages.data)
+                    + (0 if swa is None else _bytes(swa.pages.data)),
+                    query_owner=context.single_query_owner,
                 )
+                if not count:
+                    context.release(lease, attention.layer)
+                    del values, lease
+                    continue
+                selected = _query_rows(selected, query_rows)
+                values = _query_rows(values, query_rows)
                 pages, table = _packed_pages(values, context._page_specs[slot])
                 global_kv = GlobalBinding(pages, table, attention.source.ratio)
                 dense = torch.arange(
                     INDEX_TOPK, dtype=torch.int32, device=hidden.device
-                )[None, :].expand(last - first, -1)
+                )[None, :].expand(count, -1)
                 global_indices = torch.where(selected >= 0, dense, -1).contiguous()
+            elif not count:
+                continue
             reader = compact_attention
             if backend == "flashmla":
                 from rtp_llm.models_py.modules.dsv41.flashmla import (
@@ -1571,11 +1866,13 @@ def forward_cp_attention(attention, hidden, context):
 
                 reader = flashmla_compact_attention
             positions = torch.where(
-                context.valid[first:last], context.positions[first:last], -1
+                _query_rows(context.valid[first:last], query_rows),
+                _query_rows(context.positions[first:last], query_rows),
+                -1,
             ).to(torch.int32)
             result = reader(
-                query[first:last].contiguous(),
-                torch.arange(last - first, dtype=torch.int32, device=hidden.device),
+                _query_rows(query[first:last], query_rows).contiguous(),
+                torch.arange(count, dtype=torch.int32, device=hidden.device),
                 positions,
                 torch.full_like(positions, context.replay_floor),
                 swa,
@@ -1584,21 +1881,22 @@ def forward_cp_attention(attention, hidden, context):
                 global_indices=global_indices,
             )
             result.check()
-            output[first:last].copy_(result.output)
+            _copy_query_rows(output[first:last], query_rows, result.output)
             if lease is not None:
                 context.release(lease, attention.layer)
                 del values, pages, table, lease
             del result, swa, global_kv
-        context.publish_swa(attention.layer, initial, encoded.output)
+        context.publish_swa(attention.layer, initial, encoded_rows)
         output = attention_rope(
-            output,
-            context.positions,
+            context.pack_model_rows(output),
+            model_positions,
             global_branch=bool(attention.source.ratio),
             inverse=True,
         )
         output = attention.wo_b(
             grouped_wo_a(output.reshape(-1, 8, 4096), attention.wo_a).flatten(1)
         )
+        output = context.unpack_model_rows(output)
         output.masked_fill_(~context.valid[:, None], 0)
         if output.shape != hidden.shape or output.dtype != torch.bfloat16:
             raise ValueError(
@@ -1611,10 +1909,18 @@ def forward_cp_attention(attention, hidden, context):
                 "reader_backend": backend,
                 "query_identity": context.query_identity,
                 "query_rows": hidden.shape[0],
+                "model_rows": context.model_query_rows,
+                "reader_rows": context.attention_query_rows,
+                "read_queries": read_queries,
+                "query_transport_owner": context.single_query_owner,
                 "source_rows": (
                     context.end - context.start if attention.source.writes_global else 0
                 ),
-                "index_rows": hidden.shape[0] if attention.source.scores_queries else 0,
+                "index_rows": (
+                    context.attention_query_rows
+                    if attention.source.scores_queries
+                    else 0
+                ),
                 "cp_size": 8,
                 "gather_count": context.gather_count,
                 "max_receive_bytes": context.max_receive_bytes,
