@@ -486,12 +486,13 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
             request.add_peer_addrs(addr);
         }
     } else if (maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
-        // Prefill worker has full KV cache on each rank.
-        int part_cnt = resource_.workers.size();
-        int peer_cnt = peer_addrs.size();
-        request.set_partition_count(part_cnt);
-        request.set_partition_id(index % part_cnt);
-        request.add_peer_addrs(peer_addrs[index % peer_cnt]);
+        const int64_t tp_d     = std::max<int64_t>(1, maga_init_params_.parallelism_config.tp_size);
+        const int64_t lane     = static_cast<int64_t>(index) % tp_d;
+        const int     peer_cnt = static_cast<int>(peer_addrs.size());
+        RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
+        request.set_partition_count(static_cast<int>(tp_d));
+        request.set_partition_id(static_cast<int>(lane));
+        request.add_peer_addrs(peer_addrs[static_cast<size_t>(lane) % static_cast<size_t>(peer_cnt)]);
     } else {
         const int64_t tp_d = std::max<int64_t>(1, maga_init_params_.parallelism_config.tp_size);
         const int64_t lane = index % tp_d;
@@ -544,10 +545,6 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     auto&       cache_keys         = generate_stream->cacheKeys(0);
     const auto& block_ids_by_group = generate_stream->kvCachePtr()->groupBlocks(0);
 
-    if (!decode_context.remote_stage_peer_groups.empty() && decode_context.prefill_cp_size > 1) {
-        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
-                         "PP stage routing with CP-sharded prefill is not supported yet");
-    }
     if (decode_context.remote_stage_peer_groups.empty()
         && resource_.workers.size() % decode_context.peer_addrs.size() != 0
         && decode_context.peer_addrs.size() % resource_.workers.size() != 0) {
@@ -855,9 +852,13 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
         return debug_infos;
     };
+    // Flat path: the peer list is the CP group. Under PP the predicate is
+    // re-evaluated per stage group in the dispatch below; the lambdas read the
+    // active value.
     const bool is_page_level_rr = load_context.prefill_cp_size > 1
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
-    auto layerGroupIds = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
+    bool active_page_level_rr = is_page_level_rr;
+    auto layerGroupIds        = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
         std::vector<int> layer_gids;
         if (use_hybrid) {
             const auto layer_group_ids = cfg.layerGroupIdsSnapshot();
@@ -898,7 +899,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         return cpMapperForGroup(cfg, gid).layoutForGroup(cfg, gid).slice != CpBlockSliceMode::NONE;
     };
     auto shouldLoadGroupFromPeer = [&](const CacheConfig& cfg, CacheGroupType group_type, size_t gid, int peer_idx) {
-        if (!is_page_level_rr) {
+        if (!active_page_level_rr) {
             return true;
         }
         if (group_type == CacheGroupType::FULL) {
@@ -910,7 +911,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         return groupUsesCpSlice(cfg, gid) || peer_idx == 0;
     };
     auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t block_pos, int peer_idx) {
-        if (!is_page_level_rr || group_type != CacheGroupType::FULL) {
+        if (!active_page_level_rr || group_type != CacheGroupType::FULL) {
             return true;
         }
         return (static_cast<int>(block_pos) % load_context.prefill_cp_size) == peer_idx;
@@ -919,13 +920,13 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                          const CacheConfig&     cfg,
                                          size_t                 gid,
                                          int                    peer_idx) {
-        if (!is_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
+        if (!active_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
             return parts;
         }
         return cpMapperForGroup(cfg, gid).sliceBlockForPeer(cfg, gid, std::move(parts), static_cast<size_t>(peer_idx));
     };
     auto isCompactFixedBlockTable = [&](const CacheConfig& cfg, size_t gid) {
-        if (!is_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
+        if (!active_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
             return false;
         }
         const auto group_tokens = cfg.seqSizePerBlockForGroup(gid);
@@ -938,7 +939,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             const size_t tail_block_count =
                 policy.active_tail_blocks > 0 ? static_cast<size_t>(policy.active_tail_blocks) : 0;
             const bool transfer_tail_blocks = tail_block_count > 0;
-            if (!is_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
+            if (!active_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
                 return blockPositionsForCacheTransfer(block_num,
                                                       load_context.reuse_block_size,
                                                       cfg_use_hybrid,
@@ -1046,7 +1047,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                   tag);
 
                     const bool             use_kv_key_prefix  = use_mla || use_opaque_kv_store || use_hybrid;
-                    const bool             use_whole_kv_block = is_page_level_rr || use_kv_key_prefix;
+                    const bool             use_whole_kv_block = active_page_level_rr || use_kv_key_prefix;
                     std::vector<BlockInfo> parts;
                     if (use_whole_kv_block) {
                         parts = cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag);
@@ -1184,7 +1185,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 const bool mtp_use_mla = mtp_cache_cfg.use_mla;
                                 const bool mtp_use_kv_key_prefix =
                                     mtp_use_mla || mtp_use_opaque_kv_store || mtp_use_hybrid;
-                                const bool mtp_use_whole_kv_block = is_page_level_rr || mtp_use_kv_key_prefix;
+                                const bool mtp_use_whole_kv_block = active_page_level_rr || mtp_use_kv_key_prefix;
                                 std::vector<BlockInfo> parts;
                                 if (mtp_use_whole_kv_block) {
                                     parts =
@@ -1297,30 +1298,88 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             }
         }
     } else {
-        const bool replicated_kv = use_mla;
+        // PP stage routing: pick the CP mode per stage group.
+        const int64_t tp_d           = std::max<int64_t>(1, pc.tp_size);
+        const int64_t lane           = static_cast<int64_t>(pc.tp_rank);
+        size_t        group_peer_cnt = 0;
         for (const auto& spg : load_context.remote_stage_peer_groups) {
+            RTP_LLM_CHECK_WITH_INFO(
+                !spg.peer_addrs.empty(), "empty stage peer group [%u, %u)", spg.range.begin, spg.range.end());
+            if (group_peer_cnt == 0) {
+                group_peer_cnt = spg.peer_addrs.size();
+            } else if (spg.peer_addrs.size() != group_peer_cnt) {
+                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                                 "inconsistent stage peer group sizes: " + std::to_string(spg.peer_addrs.size())
+                                     + " != " + std::to_string(group_peer_cnt));
+            }
+            if (load_context.prefill_cp_size > 1
+                && static_cast<int>(spg.peer_addrs.size()) != load_context.prefill_cp_size) {
+                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                                 "CP-sharded prefill requires stage peer group size "
+                                     + std::to_string(spg.peer_addrs.size()) + " == prefill_cp_size "
+                                     + std::to_string(load_context.prefill_cp_size));
+            }
             const size_t g_begin = std::max(gb, static_cast<size_t>(spg.range.begin));
             const size_t g_end   = std::min(ge, static_cast<size_t>(spg.range.end()));
             if (g_begin >= g_end) {
                 continue;
             }
-            RTP_LLM_CHECK_WITH_INFO(
-                !spg.peer_addrs.empty(), "empty stage peer group [%u, %u)", spg.range.begin, spg.range.end());
-            const auto slices = planStagePeerSlices(static_cast<int>(spg.peer_addrs.size()),
-                                                    static_cast<int>(pc.tp_size),
-                                                    static_cast<int>(pc.tp_rank),
-                                                    replicated_kv);
-            for (const auto& slice : slices) {
-                auto error_info = loadFromPeer(spg.peer_addrs[slice.peer_index],
+            const bool group_page_level_rr = load_context.prefill_cp_size > 1
+                                             && static_cast<int>(spg.peer_addrs.size()) == load_context.prefill_cp_size;
+            active_page_level_rr = group_page_level_rr;
+            if (group_page_level_rr) {
+                // Mode A: CP sharded. Each prefill rank holds 1/cp of the data.
+                // No source partitioning needed; decode-side slicing handles reassembly.
+                // The whole-block load protocol is defined for MLA/opaque KV caches only.
+                if (!use_mla && !use_opaque_kv_store) {
+                    return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                                     "CP-sharded prefill is only supported for MLA or opaque KV caches");
+                }
+                for (size_t pi = 0; pi < spg.peer_addrs.size(); ++pi) {
+                    auto error_info = loadFromPeer(spg.peer_addrs[pi],
+                                                   g_begin,
+                                                   g_end,
+                                                   static_cast<int>(pi),
+                                                   static_cast<int>(spg.peer_addrs.size()),
+                                                   /*src_partition_count=*/1,  // No source partitioning
+                                                   /*src_partition_id=*/0,     // No source partitioning
+                                                   /*include_mtp=*/spg.is_last_stage);
+                    if (!error_info.ok()) {
+                        return error_info;
+                    }
+                }
+            } else if (maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
+                // Mode B: CP full replication. Each prefill rank holds the complete KV.
+                // Pick peer by lane % peer_cnt for load balancing across decode lanes.
+                const size_t peer_idx   = static_cast<size_t>(lane % static_cast<int64_t>(spg.peer_addrs.size()));
+                auto         error_info = loadFromPeer(spg.peer_addrs[peer_idx],
                                                g_begin,
                                                g_end,
-                                               slice.dst_partition_id,
-                                               slice.dst_partition_count,
-                                               slice.src_partition_count,
-                                               slice.src_partition_id,
+                                               /*i=*/0,         // Single peer, index starts at 0
+                                               /*peer_cnt=*/1,  // Single peer
+                                               static_cast<int>(tp_d),
+                                               static_cast<int>(lane),
                                                /*include_mtp=*/spg.is_last_stage);
                 if (!error_info.ok()) {
                     return error_info;
+                }
+            } else {
+                const auto slices = planStagePeerSlices(static_cast<int>(spg.peer_addrs.size()),
+                                                        static_cast<int>(pc.tp_size),
+                                                        static_cast<int>(pc.tp_rank),
+                                                        /*replicated_kv=*/use_mla);
+                for (const auto& slice : slices) {
+                    auto error_info = loadFromPeer(spg.peer_addrs[slice.peer_index],
+                                                   g_begin,
+                                                   g_end,
+                                                   slice.dst_partition_id,
+                                                   slice.dst_partition_count,
+                                                   slice.src_partition_count,
+                                                   slice.src_partition_id,
+                                                   /*include_mtp=*/spg.is_last_stage);
+                    if (!error_info.ok()) {
+                        return error_info;
+                    }
                 }
             }
         }

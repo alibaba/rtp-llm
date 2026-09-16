@@ -11,15 +11,46 @@ from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 MODEL_TYPE = "qwen_3"
 
 # Variant table: each side's (pp, tp) width. decode_gpus = decode_pp*decode_tp.
-#   sym:     prefill pp2tp1 / decode pp2tp1 - symmetric PP stage routing
-#   asym:    prefill pp2tp1 / decode pp2tp2 - decode TP finer, sub-slice read
-#   conv:    prefill pp2tp2 / decode pp2tp1 - prefill TP finer, peer assembly
-#   pp1_tp2: prefill pp1tp2 / decode pp1tp2 - pp=1 flat path with TP>1
+#   sym:              prefill pp2tp1 / decode pp2tp1 - symmetric PP stage routing
+#   asym:             prefill pp2tp1 / decode pp2tp2 - decode TP finer, sub-slice read
+#   conv:             prefill pp2tp2 / decode pp2tp1 - prefill TP finer, peer assembly
+#   pp1_tp2:          prefill pp1tp2 / decode pp1tp2 - pp=1 flat path with TP>1
+#   cp_sharded:       prefill pp2tp2(cp=2,sharded) / decode pp2tp1 - CP mode A
+#   cp_full:          prefill pp2tp2(cp=2,full) / decode pp2tp1 - CP mode B
+#   cp_full_decode_tp2: prefill pp2tp2(cp=2,full) / decode pp2tp2 - CP mode B + decode TP>1
+#
+# Note: CP mode A (sharded) requires an MLA/opaque model; plain MHA KV cache is
+# rejected by the decode-side whole-block load path. Needs a separate test with
+# an MLA model.
 VARIANTS = {
     "sym": {"prefill_pp": 2, "prefill_tp": 1, "decode_pp": 2, "decode_tp": 1},
     "asym": {"prefill_pp": 2, "prefill_tp": 1, "decode_pp": 2, "decode_tp": 2},
     "conv": {"prefill_pp": 2, "prefill_tp": 2, "decode_pp": 2, "decode_tp": 1},
     "pp1_tp2": {"prefill_pp": 1, "prefill_tp": 2, "decode_pp": 1, "decode_tp": 2},
+    "cp_sharded": {
+        "prefill_pp": 2,
+        "prefill_tp": 2,
+        "decode_pp": 2,
+        "decode_tp": 1,
+        "prefill_cp": 2,
+        "kv_cache_sharded": True,
+    },
+    "cp_full": {
+        "prefill_pp": 2,
+        "prefill_tp": 2,
+        "decode_pp": 2,
+        "decode_tp": 1,
+        "prefill_cp": 2,
+        "kv_cache_sharded": False,
+    },
+    "cp_full_decode_tp2": {
+        "prefill_pp": 2,
+        "prefill_tp": 2,
+        "decode_pp": 2,
+        "decode_tp": 2,
+        "prefill_cp": 2,
+        "kv_cache_sharded": False,
+    },
 }
 
 
@@ -116,6 +147,8 @@ class PdPPTest(unittest.TestCase):
         prefill_tp,
         decode_pp,
         decode_tp,
+        prefill_cp=1,
+        kv_cache_sharded=False,
     ):
         prefill_port = MagaServerManager.get_free_port()
         decode_port = MagaServerManager.get_free_port()
@@ -145,8 +178,25 @@ class PdPPTest(unittest.TestCase):
         )
         prefill_ws = prefill_pp * prefill_tp
         decode_ws = decode_pp * decode_tp
+        """
+        CP is asymmetric: prefill runs the rotation (ALL_GATHER); decode
+        declares the peer as CP (PREFILL_CP) and mirrors the CP shape config
+        (prefill_cp_size / kv_cache_sharded) from its own settings.
+        """
         prefill_args = f"--pp_size {prefill_pp} --tp_size {prefill_tp} --world_size {prefill_ws} {common_pd}"
+        if prefill_cp > 1:
+            prefill_args += (
+                f" --cp_rotate_method ALL_GATHER --prefill_cp_size {prefill_cp}"
+            )
+            if kv_cache_sharded:
+                prefill_args += " --prefill_cp_kv_cache_sharded 1"
         decode_args = f"--pp_size {decode_pp} --tp_size {decode_tp} --world_size {decode_ws} {common_pd}"
+        if prefill_cp > 1:
+            decode_args += " --cp_rotate_method PREFILL_CP"
+            if kv_cache_sharded:
+                decode_args += (
+                    f" --prefill_cp_size {prefill_cp} --prefill_cp_kv_cache_sharded 1"
+                )
         prefill = MagaServerManager(
             env_args={
                 "CUDA_VISIBLE_DEVICES": prefill_devices,
@@ -224,6 +274,8 @@ class PdPPTest(unittest.TestCase):
         prefill_tp = variant["prefill_tp"]
         prefill_pp = variant["prefill_pp"]
         decode_pp = variant["decode_pp"]
+        prefill_cp = variant.get("prefill_cp", 1)
+        kv_cache_sharded = variant.get("kv_cache_sharded", False)
         prefill_gpus = prefill_pp * prefill_tp
         decode_gpus = decode_pp * decode_tp
         # Baseline and prefill run strictly sequentially and share the first
@@ -242,6 +294,8 @@ class PdPPTest(unittest.TestCase):
             prefill_tp=prefill_tp,
             decode_pp=decode_pp,
             decode_tp=decode_tp,
+            prefill_cp=prefill_cp,
+            kv_cache_sharded=kv_cache_sharded,
         )
         for (prompt, _), base, got in zip(self.cases(), baseline, actual):
             if prefill_tp != 1 and prefill_tp != decode_tp:

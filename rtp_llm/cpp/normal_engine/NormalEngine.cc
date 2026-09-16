@@ -122,9 +122,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                                 "pipeline parallelism does not support data parallelism");
         RTP_LLM_CHECK_WITH_INFO(parallelism_config.ep_size == 1,
                                 "pipeline parallelism does not support expert parallelism");
-        RTP_LLM_CHECK_WITH_INFO(parallelism_config.prefill_cp_config.method == CPRotateMethod::DISABLED
-                                    && !parallelism_config.prefill_cp_config.kv_cache_sharded,
-                                "pipeline parallelism does not support context parallelism");
+
         RTP_LLM_CHECK_WITH_INFO(!parallelism_config.enable_sp && parallelism_config.ffn_sp_size == 1,
                                 "pipeline parallelism does not support sequence parallelism");
         RTP_LLM_CHECK_WITH_INFO(!parallelism_config.use_ub_comm,

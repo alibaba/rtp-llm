@@ -245,6 +245,68 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     EXPECT_EQ(request.peer_addrs(1), "prefill-1");
 }
 
+TEST(DecodeRpcServerTest, PpCPShardedLoadRequestCarriesStagePeerGroups) {
+    DecodeRpcServer server;
+    server.resource_.workers                            = {"decode-0", "decode-1", "decode-2", "decode-3"};
+    server.maga_init_params_.parallelism_config.tp_size = 2;
+
+    const std::string                 request_key = "request";
+    const std::vector<std::string>    peer_addrs  = {"prefill-0", "prefill-1", "prefill-2", "prefill-3"};
+    const std::vector<CacheKeyType>   cache_keys  = {101, 102};
+    const GroupBlockIds               block_ids_by_group;
+    const std::vector<StagePeerGroup> groups = {{{0, 2}, {"prefill-0", "prefill-1"}, false},
+                                                {{2, 2}, {"prefill-2", "prefill-3"}, true}};
+    const auto                        load_context =
+        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2, /*reuse=*/0, groups);
+
+    const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
+
+    // PP + CP sharded: stage groups carry the routing, flat fields unused.
+    EXPECT_EQ(request.prefill_cp_size(), 2);
+    EXPECT_EQ(request.partition_count(), 1);
+    EXPECT_EQ(request.partition_id(), 0);
+    EXPECT_EQ(request.peer_addrs_size(), 0);
+    ASSERT_EQ(request.stage_peer_groups_size(), 2);
+    EXPECT_EQ(request.stage_peer_groups(0).layer_begin(), 0);
+    EXPECT_EQ(request.stage_peer_groups(0).layer_count(), 2);
+    ASSERT_EQ(request.stage_peer_groups(0).peer_addrs_size(), 2);
+    EXPECT_EQ(request.stage_peer_groups(0).peer_addrs(0), "prefill-0");
+    EXPECT_EQ(request.stage_peer_groups(0).peer_addrs(1), "prefill-1");
+    EXPECT_FALSE(request.stage_peer_groups(0).is_last_stage());
+    EXPECT_EQ(request.stage_peer_groups(1).layer_begin(), 2);
+    EXPECT_TRUE(request.stage_peer_groups(1).is_last_stage());
+}
+
+TEST(DecodeRpcServerTest, PpCPFullReplicationLoadRequestCarriesStagePeerGroups) {
+    DecodeRpcServer server;
+    server.resource_.workers                            = {"decode-0", "decode-1", "decode-2", "decode-3"};
+    server.maga_init_params_.parallelism_config.tp_size = 2;
+    server.maga_init_params_.parallelism_config.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    server.maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded = false;
+
+    const std::string                 request_key = "request";
+    const std::vector<std::string>    peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType>   cache_keys  = {101};
+    const GroupBlockIds               block_ids_by_group;
+    const std::vector<StagePeerGroup> groups = {{{0, 2}, {"prefill-0", "prefill-1"}, false},
+                                                {{2, 2}, {"prefill-0", "prefill-1"}, true}};
+    const auto                        load_context =
+        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1, /*reuse=*/0, groups);
+
+    const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/3, peer_addrs);
+
+    // PP + CP full replication: stage groups carry the routing, flat fields unused.
+    EXPECT_EQ(request.prefill_cp_size(), 1);
+    EXPECT_EQ(request.partition_count(), 1);
+    EXPECT_EQ(request.partition_id(), 0);
+    EXPECT_EQ(request.peer_addrs_size(), 0);
+    ASSERT_EQ(request.stage_peer_groups_size(), 2);
+    EXPECT_EQ(request.stage_peer_groups(0).layer_begin(), 0);
+    ASSERT_EQ(request.stage_peer_groups(0).peer_addrs_size(), 2);
+    EXPECT_EQ(request.stage_peer_groups(1).layer_begin(), 2);
+    EXPECT_TRUE(request.stage_peer_groups(1).is_last_stage());
+}
+
 TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByLocalTagOrder) {
     auto                   topology = CacheTopology::create({makeRpcGroup("linear", {0}), makeRpcGroup("full", {1})},
                                                             {{0, {"linear"}}, {1, {"full"}}});
