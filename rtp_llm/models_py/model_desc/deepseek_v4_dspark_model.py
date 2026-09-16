@@ -111,6 +111,15 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             device_resource_config=device_resource_config,
         )
 
+        # Match DeepSeekV4DSparkWeight.prefill_commit_only: the dedicated
+        # PREFILL descriptor prunes proposal-only weights before loading them.
+        # Constructing a full transformer from that payload is invalid.  Keep
+        # DECODE/PDFUSION on the unchanged full proposal graph.
+        role_type = getattr(parallelism_config, "role_type", None)
+        self._v4_args.commit_only = (
+            str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
+        )
+
         noise_token_id = getattr(model_config, "dspark_noise_token_id", None)
         target_layer_ids = getattr(model_config, "dspark_target_layer_ids", None)
         markov_rank = getattr(model_config, "dspark_markov_rank", None)
@@ -219,6 +228,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         self.main_proj = _v4_fp8_linear(
             gw[W.v4_dspark_main_proj_w], gw[W.v4_dspark_main_proj_s]
         )
+        if self._v4_args.commit_only:
+            self.markov_head = None
+            return
         self.markov_head = DSparkMarkovHead(
             gw[W.v4_dspark_markov_w1],
             gw[W.v4_dspark_markov_w2],
@@ -826,12 +838,21 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         if self.v4 is None:
             raise RuntimeError("DeepSeekV4DSparkModel is not initialized")
-        device = self.v4.embed.weight.device
         gamma = self._gen_num_per_cycle
         phase = getattr(inputs, "dspark_call_phase", DSparkCallPhase.NONE)
         if phase == DSparkCallPhase.NONE:
             raise RuntimeError("DSpark forward requires an explicit proposal/commit phase")
         is_commit = phase == DSparkCallPhase.COMMIT
+        if bool(getattr(self._v4_args, "commit_only", False)):
+            if not is_commit:
+                raise RuntimeError("commit-only DSpARK PREFILL cannot propose")
+            # Commit-only transformers deliberately own no token embedding.
+            # Their target-feature projection remains device-resident.
+            if self.main_norm is None:
+                raise RuntimeError("DSpARK commit projection is not initialized")
+            device = self.main_norm.weight.device
+        else:
+            device = self.v4.embed.weight.device
 
         # PyWrappedModel warmup intentionally has no KVCache.  Produce stable
         # shapes without invoking any paged-cache or FlashMLA kernels.

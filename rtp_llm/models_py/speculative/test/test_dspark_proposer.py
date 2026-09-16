@@ -14,6 +14,7 @@ class _TinyProposer(DSparkProposerMixin):
     """Smallest possible DSparkProposerMixin subclass for the sampling tail."""
 
     def __init__(self, *, width: int, vocab: int, rank: int):
+        self.kv_cache = None
         self.init_dspark_proposer(
             width=width,
             noise_token_id=1,
@@ -182,6 +183,7 @@ class _CommitProposer(DSparkProposerMixin):
     """Captures the rows handed to the projection and commit hooks."""
 
     def __init__(self, *, aux_dim: int):
+        self.kv_cache = None
         self.init_dspark_proposer(
             width=2,
             noise_token_id=1,

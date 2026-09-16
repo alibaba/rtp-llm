@@ -12,6 +12,8 @@ from rtp_llm.ops.compute_ops import DSparkCallPhase, PyModelInputs
 
 def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
     model = DeepSeekV4DSparkModel.__new__(DeepSeekV4DSparkModel)
+    torch.nn.Module.__init__(model)
+    model.kv_cache = None
     model._gen_num_per_cycle = gamma
     model._dspark_commit_cp_enabled = False
     model._dspark_kv_cache_sharded = False
@@ -396,6 +398,95 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
                     self.assertTrue(
                         torch.equal(regular_writer.call_args.kwargs["kv"], gathered_kv)
                     )
+
+
+class DSparkCommitOnlyConstructionTest(unittest.TestCase):
+    @staticmethod
+    def _base_init(model, *args, **kwargs):
+        model._v4_args = SimpleNamespace(
+            n_layers=3, compress_ratios=[0, 0, 0], window_size=128,
+            dim=8, vocab_size=17, norm_eps=1e-6, commit_only=False,
+        )
+        model._gen_num_per_cycle = 3
+
+    def test_constructor_matches_prefill_descriptor_role(self):
+        from rtp_llm.ops import RoleType
+        config = SimpleNamespace(dspark_noise_token_id=1,
+                                 dspark_target_layer_ids=[40, 41, 42],
+                                 dspark_markov_rank=2)
+        for role, want in ((RoleType.PREFILL, True), ("PREFILL", True),
+                           (RoleType.DECODE, False), (RoleType.PDFUSION, False)):
+            with self.subTest(role=role), patch.object(
+                dspark_model_module.DeepSeekV4Model, "__init__", self._base_init
+            ):
+                model = DeepSeekV4DSparkModel(config, SimpleNamespace(role_type=role),
+                                            None, None, max_generate_batch_size=4)
+                self.assertIs(model._v4_args.commit_only, want)
+
+    def test_pruned_globals_require_no_markov_head(self):
+        from rtp_llm.utils.model_weight import W
+        model = _dspark_harness(3)
+        model._v4_args.commit_only = True
+        model._v4_args.norm_eps = 1e-6
+        weights = SimpleNamespace(global_weights={
+            W.v4_dspark_main_norm: torch.ones(8),
+            W.v4_dspark_main_proj_w: object(), W.v4_dspark_main_proj_s: object(),
+        })
+        with patch.object(dspark_model_module, "RMSNorm", return_value=object()), \
+             patch.object(dspark_model_module, "_v4_fp8_linear", return_value=object()), \
+             patch.object(dspark_model_module, "DSparkMarkovHead") as markov:
+            model._load_extra_weights(weights)
+        markov.assert_not_called()
+        self.assertIsNone(model.markov_head)
+        self.assertIsNotNone(model.main_proj)
+
+    def test_full_model_still_requires_markov_weights(self):
+        from rtp_llm.utils.model_weight import W
+        model = _dspark_harness(3)
+        model._v4_args.commit_only = False
+        model._v4_args.norm_eps = 1e-6
+        weights = SimpleNamespace(global_weights={
+            W.v4_dspark_main_norm: torch.ones(8),
+            W.v4_dspark_main_proj_w: object(), W.v4_dspark_main_proj_s: object(),
+        })
+        with patch.object(dspark_model_module, "RMSNorm", return_value=object()), \
+             patch.object(dspark_model_module, "_v4_fp8_linear", return_value=object()):
+            with self.assertRaises(KeyError):
+                model._load_extra_weights(weights)
+
+    def _commit_model(self):
+        model = _dspark_harness(3)
+        model._v4_args.commit_only = True
+        model.v4 = SimpleNamespace(embed=None)
+        model.main_norm = SimpleNamespace(weight=torch.ones(8))
+        model.kv_cache = None
+        return model
+
+    def test_commit_warmup_without_embedding(self):
+        model = self._commit_model()
+        inputs = PyModelInputs()
+        inputs.input_ids = torch.zeros(3, dtype=torch.int32)
+        inputs.dspark_call_phase = DSparkCallPhase.COMMIT
+        out = model.forward(inputs)
+        self.assertEqual(tuple(out.hidden_states.shape), (0, 8))
+
+    def test_commit_forwards_on_projection_device(self):
+        model = self._commit_model()
+        model.kv_cache = object()
+        model.fp8_kv_cache = True
+        inputs = PyModelInputs()
+        inputs.dspark_call_phase = DSparkCallPhase.COMMIT
+        sentinel = object()
+        with patch.object(model, "run_commit_step", return_value=sentinel) as run:
+            self.assertIs(model.forward(inputs), sentinel)
+        run.assert_called_once_with(inputs, torch.device("cpu"))
+
+    def test_commit_only_rejects_proposal_even_in_warmup(self):
+        model = self._commit_model()
+        inputs = PyModelInputs()
+        inputs.dspark_call_phase = DSparkCallPhase.PROPOSE
+        with self.assertRaisesRegex(RuntimeError, "commit-only.*cannot propose"):
+            model.forward(inputs)
 
 
 if __name__ == "__main__":
