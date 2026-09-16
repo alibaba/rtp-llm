@@ -29,6 +29,13 @@ final class RequestLifecycleTestSupport {
         return Boolean.TRUE.equals(ReflectionTestUtils.invokeMethod(slot, "recordCancellationLocked", reason, message));
     }
 
+    /** Inspect a private decision in state-only fixtures without widening the production API. */
+    static <T> T inspect(RequestSlot slot, String decision, Object... arguments) {
+        synchronized (slot) {
+            return ReflectionTestUtils.invokeMethod(slot, decision, arguments);
+        }
+    }
+
     private RequestLifecycleTestSupport() {
     }
 
@@ -101,20 +108,15 @@ final class RequestLifecycleTestSupport {
 
     // State-only fixtures deliberately seed a phase without executing publication or timers.
     static void startRouteDelivery(RequestSlot slot) {
-        var admission = org.mockito.Mockito.mock(PrefillAdmissionResources.CommittedAdmissionOwner.class);
-        org.mockito.Mockito.when(admission.transferToEndpoint(slot.activeItem())).thenReturn(true);
-        org.junit.jupiter.api.Assertions.assertNotNull(slot.claimRouteDelivery(slot.activeItem(), admission));
+        assertNotNull(slot.claimDelivery(slot.activeItem(), DeliveryClaimKind.ROUTE_DECISION, 0L, () -> true));
     }
 
     static void startBatchDelivery(RequestSlot slot, long batchId) {
-        var transaction = org.mockito.Mockito.mock(BatchDeliveryStrategy.BatchTransaction.class);
-        org.mockito.Mockito.when(transaction.batchId()).thenReturn(batchId);
-        org.mockito.Mockito.when(transaction.transferToEndpoint(slot.activeItem())).thenReturn(true);
-        org.junit.jupiter.api.Assertions.assertNotNull(slot.claimBatchDelivery(slot.activeItem(), transaction));
+        assertNotNull(slot.claimDelivery(slot.activeItem(), DeliveryClaimKind.BATCH_ENQUEUE, batchId, () -> true));
     }
 
     static void markAcknowledged(RequestSlot slot) {
-        ReflectionTestUtils.invokeMethod(slot, "transition", RequestState.Phase.ACKNOWLEDGED, "test acknowledgement");
+        ReflectionTestUtils.invokeMethod(slot, "transitionLocked", RequestState.Phase.ACKNOWLEDGED, "test acknowledgement");
     }
 
     static RequestSlot.RequestEffect acknowledge(RequestSlot slot, long batchId) {

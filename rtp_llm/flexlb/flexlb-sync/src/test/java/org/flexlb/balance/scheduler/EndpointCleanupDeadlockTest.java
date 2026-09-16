@@ -48,6 +48,16 @@ class EndpointCleanupDeadlockTest {
         verifyCompletion("prefill-individual");
     }
 
+    @Test
+    void decodeCleanupAndWorkerTerminalFinish() throws Exception {
+        verifyCompletion("decode-terminal");
+    }
+
+    @Test
+    void timerCloseDoesNotHoldRegistrationLockWhileWaitingForSlot() throws Exception {
+        verifyCompletion("timer-close");
+    }
+
     private void verifyCompletion(String endpoint) throws Exception {
         Path output = outputDirectory.resolve(endpoint + ".txt");
         String classpath = System.getProperty("surefire.test.class.path",
@@ -80,7 +90,55 @@ class EndpointCleanupDeadlockTest {
             }
         }
 
+        private static void verifyTimerClose() throws Exception {
+            var config = SchedulingTestConfig.batchConfig();
+            ConfigService service = mock(ConfigService.class);
+            when(service.loadBalanceConfig()).thenReturn(config);
+            RequestRegistry registry = mock(RequestRegistry.class);
+            ExpirationTimer timer = new ExpirationTimer(registry, service);
+            RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class), 992L,
+                    timer, new RequestTerminalCleanup(timer), () -> { });
+            CountDownLatch slotHeld = new CountDownLatch(1);
+            CountDownLatch closeReachesSlots = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            doAnswer(call -> {
+                closeReachesSlots.countDown();
+                return java.util.List.of(slot);
+            }).when(registry).snapshotSlots();
+            Thread holder = new Thread(() -> {
+                try {
+                    synchronized (slot) {
+                        slotHeld.countDown();
+                        assertTrue(closeReachesSlots.await(5, TimeUnit.SECONDS));
+                        // close() is about to acquire Slot. Registration must remain available
+                        // to reject this late request; holding it while waiting for Slot deadlocks.
+                        assertThrows(java.util.concurrent.RejectedExecutionException.class,
+                                () -> timer.attachRequestDeadline(slot, Long.MAX_VALUE));
+                    }
+                } catch (Throwable error) { failure.set(error); }
+            }, "slot-checks-timer-registration");
+            Thread closer = new Thread(() -> {
+                try {
+                    assertTrue(slotHeld.await(5, TimeUnit.SECONDS));
+                    timer.close();
+                } catch (Throwable error) { failure.set(error); }
+            }, "timer-close-waits-for-slot");
+            holder.setDaemon(true);
+            closer.setDaemon(true);
+            holder.start();
+            closer.start();
+            holder.join(8_000);
+            closer.join(8_000);
+            if (failure.get() != null) { throw new AssertionError(failure.get()); }
+            assertFalse(holder.isAlive() || closer.isAlive(), "Slot / timer registration lock cycle");
+        }
+
         private static void run(String kind) throws Exception {
+            if (kind.equals("timer-close")) {
+                verifyTimerClose();
+                System.out.println("COMPLETED " + kind);
+                return;
+            }
             var config = SchedulingTestConfig.batchConfig();
             ConfigService service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
@@ -128,12 +186,23 @@ class EndpointCleanupDeadlockTest {
                         return invocation.callRealMethod();
                     }).when(endpoint).release(reservation, DecodeEndpoint.ReleaseReason.NOT_SENT);
                 }
-                endpointOperation = kind.equals("decode-rejection")
-                        ? () -> claim.complete(org.flexlb.balance.delivery.DeliveryResult.notSent(
-                                new IllegalStateException("definite dispatch rejection")))
-                        : () -> registry.setDeliveryPrediction(
-                        claim, new org.flexlb.balance.projection.WorkSnapshot(
-                                System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
+                if (kind.equals("decode-terminal")) {
+                    doAnswer(invocation -> {
+                        assertFalse(Thread.holdsLock(slot), "Worker cleanup must not retain Slot");
+                        slotHeld.countDown();
+                        assertTrue(endpointHeld.await(5, TimeUnit.SECONDS));
+                        return invocation.callRealMethod();
+                    }).when(endpoint).release(reservation, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+                }
+                endpointOperation = switch (kind) {
+                    case "decode-rejection" -> () -> claim.complete(
+                            org.flexlb.balance.delivery.DeliveryResult.notSent(new IllegalStateException("not sent")));
+                    case "decode-terminal" -> () -> slot.processDecodeStatus(endpoint,
+                            DecodeEndpoint.WorkerStatusFact.terminal(reservation, 0L));
+                    default -> () -> registry.setDeliveryPrediction(claim,
+                            new org.flexlb.balance.projection.WorkSnapshot(
+                                    System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
+                };
             } else {
                 boolean batch = kind.equals("prefill");
                 var fixture = new PrefillCleanupDeadlockFixture(id, batch);
@@ -145,7 +214,7 @@ class EndpointCleanupDeadlockTest {
             // The slot monitor is held explicitly to isolate the inversion from admission setup.
             Thread holder = new Thread(() -> {
                 try {
-                    if (kind.equals("decode-rejection")) {
+                    if (kind.equals("decode-rejection") || kind.equals("decode-terminal")) {
                         // Reservation release and cleanup can contend for the endpoint without holding Slot.
                         endpointOperation.run();
                     } else {
