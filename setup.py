@@ -737,6 +737,23 @@ _CUDA129_TEST_BAZEL_STAGED_OUTPUTS = [
     ),
 ]
 
+_CUDA13_RUNTIME_BAZEL_STAGED_OUTPUTS = [
+    (_STAGED_OUTPUT_RUNTIME, f"@flashinfer_cpp_cu13//:{name}", (f"lib{name}.so",))
+    for name in (
+        "flashinfer_batch_paged_prefill",
+        "flashinfer_batch_paged_prefill_256",
+        "flashinfer_batch_paged_decode",
+        "flashinfer_batch_paged_decode_256",
+        "flashinfer_batch_ragged_prefill",
+        "flashinfer_batch_ragged_prefill_256",
+        "flashinfer_single_decode",
+        "flashinfer_single_decode_256",
+        "flashinfer_single_prefill",
+        "flashinfer_single_prefill_256",
+        "flashinfer_sm90",
+    )
+]
+
 _ROCM_TEST_BAZEL_STAGED_OUTPUTS = [
     (
         _STAGED_OUTPUT_TEST,
@@ -846,6 +863,8 @@ def _selected_bazel_staged_outputs(build_config: str, bazel_args: list = None) -
         # bindings below libs/test/ so remote-session archives them, while
         # wheel package-data (libs/*.so) does not publish test-only modules.
         staged_outputs.extend(_CUDA129_TEST_BAZEL_STAGED_OUTPUTS)
+    if {"cuda13", "cuda13_arm"} & _bazel_config_names(bazel_args):
+        staged_outputs.extend(_CUDA13_RUNTIME_BAZEL_STAGED_OUTPUTS)
     include_remote_kvcm = _include_remote_kvcm_runtime_outputs(bazel_args)
     if include_remote_kvcm:
         staged_outputs.extend(_REMOTE_KVCM_RUNTIME_BAZEL_STAGED_OUTPUTS)

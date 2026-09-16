@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Type, Union
 
 from rtp_llm.test.smoke_framework.manifest import _parse_world_size, get_gpu_count
@@ -102,6 +103,23 @@ def _configure_optional_internal_env(test_config: Mapping[str, Any]) -> None:
 
 
 def run_smoke_test(test_name: str, test_config: Mapping[str, Any]) -> None:
+    """Provide the legacy per-test temporary directory in native Python runs."""
+    if os.environ.get("TEST_TMPDIR"):
+        _run_smoke_test(test_name, test_config)
+        return
+    previous = os.environ.get("TEST_TMPDIR")
+    with tempfile.TemporaryDirectory(prefix="rtp_smoke_") as tmp_dir:
+        os.environ["TEST_TMPDIR"] = tmp_dir
+        try:
+            _run_smoke_test(test_name, test_config)
+        finally:
+            if previous is None:
+                os.environ.pop("TEST_TMPDIR", None)
+            else:
+                os.environ["TEST_TMPDIR"] = previous
+
+
+def _run_smoke_test(test_name: str, test_config: Mapping[str, Any]) -> None:
     """Drive a single smoke test case end-to-end.
 
     1. Build env_args (single-role list or multi-role dict).

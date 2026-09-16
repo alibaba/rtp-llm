@@ -644,6 +644,47 @@ class BuildPackagingContractTest(TestCase):
             )
             self.assertEqual(generated.read_text(), source.read_text())
 
+    def test_cuda13_stages_all_flashinfer_shared_dependencies(self):
+        setup_module = _load_setup_module()
+        build_tree = ast.parse(
+            (PROJECT_ROOT / "3rdparty/flashinfer/flashinfer_cu13.BUILD").read_text()
+        )
+        names = {
+            node.value.args[0].value
+            for node in build_tree.body
+            if isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "sub_lib"
+        }
+        self.assertEqual(len(names), 11)
+        for config in ("cuda13", "cuda13_arm"):
+            entries = setup_module._selected_bazel_staged_outputs(
+                config, [f"--config={config}"]
+            )
+            selected = [entry for entry in entries if "@flashinfer_cpp_cu13//:" in entry[1]]
+            self.assertEqual({entry[1].split(":")[-1] for entry in selected}, names)
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                outputs = root / "bazel-bin/external/flashinfer_cpp_cu13"
+                outputs.mkdir(parents=True)
+                for name in names:
+                    (outputs / f"lib{name}.so").write_bytes(name.encode())
+                setup_module.stage_bazel_outputs(root, selected)
+                for name in names:
+                    self.assertEqual(
+                        (root / "rtp_llm/libs" / f"lib{name}.so").read_bytes(),
+                        name.encode(),
+                    )
+                (outputs / "libflashinfer_single_decode.so").unlink()
+                with self.assertRaisesRegex(RuntimeError, "libflashinfer_single_decode.so"):
+                    setup_module.stage_bazel_outputs(root, selected)
+        for config in ("cuda12_9", "rocm", "cuda13_ppu"):
+            entries = setup_module._selected_bazel_staged_outputs(
+                config, [f"--config={config}"]
+            )
+            self.assertFalse(any("@flashinfer_cpp_cu13//:" in entry[1] for entry in entries))
+
     def test_dynamic_version_uses_release_version(self):
         setup_module = _load_setup_module()
         release_text = (PROJECT_ROOT / "rtp_llm" / "release_version.py").read_text(

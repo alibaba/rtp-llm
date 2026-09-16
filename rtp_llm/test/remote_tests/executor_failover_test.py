@@ -464,6 +464,52 @@ def test_reapi_smoke_uses_per_test_remote_profile_gpu_type_does_not_override_mar
     assert session_config.option.remote_gpu_type == "H20"
 
 
+def test_session_controller_does_not_import_explicit_profile_conftest(tmp_path):
+    gpu_dir = tmp_path / "gpu"
+    gpu_dir.mkdir()
+    (gpu_dir / "conftest.py").write_text(
+        "raise RuntimeError('GPU conftest imported on controller')\n"
+    )
+    test_file = gpu_dir / "test_gpu.py"
+    test_file.write_text("def test_gpu(): raise AssertionError('ran on controller')\n")
+    (tmp_path / "controller_plugin.py").write_text(
+        "from types import SimpleNamespace\n"
+        "from rtp_llm.test.remote_tests.plugin import RemoteREAPIPlugin, RemoteDispatchMode\n"
+        "class Controller:\n"
+        "    pytest_collection = RemoteREAPIPlugin.pytest_collection\n"
+        "    pytest_collection_modifyitems = RemoteREAPIPlugin.pytest_collection_modifyitems\n"
+        "    _session_collection_modifyitems = RemoteREAPIPlugin._session_collection_modifyitems\n"
+        "    def __init__(self, config):\n"
+        "        self.config = config\n"
+        "        self.mode = RemoteDispatchMode.SESSION\n"
+        "        self.gpu_type_override = 'H20'\n"
+        "        self.workers = 2\n"
+        "        self._gpu_request = None\n"
+        "    def pytest_sessionfinish(self, session):\n"
+        "        assert self._gpu_request.gpu_type == 'H20'\n"
+        "        assert self._gpu_request.gpu_count == 2\n"
+        "        assert session.testscollected == 0\n"
+        "def pytest_configure(config):\n"
+        f"    config.args[:] = [{str(test_file)!r}]\n"
+        "    config.pluginmanager.register(Controller(config))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-c", os.devnull,
+         "-p", "controller_plugin", str(tmp_path)],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONPATH=os.pathsep.join((str(tmp_path), str(Path(__file__).resolve().parents[3]))),
+            PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
+            PYTEST_ADDOPTS="",
+        ),
+        capture_output=True, text=True, timeout=60,
+    )
+    # This harness has no remote executor; it checks collection delegation only.
+    assert result.returncode == pytest.ExitCode.NO_TESTS_COLLECTED, result.stdout + result.stderr
+    assert "GPU conftest imported" not in result.stdout + result.stderr
+
+
 def test_remote_session_rejects_non_pyut_profile():
     class _PluginConfig(_FakeProfileConfig):
         def getoption(self, name, default=None):
