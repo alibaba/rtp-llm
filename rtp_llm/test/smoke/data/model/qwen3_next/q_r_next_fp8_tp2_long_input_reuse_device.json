@@ -1,4 +1,3 @@
-// Deployment-level device reuse; original expected results preserved.
 {
   "model_type": "qwen35_moe",
   "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
