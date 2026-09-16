@@ -80,6 +80,17 @@ def merge_embedding_results(results: list[MMEmbeddingRes]) -> MMEmbeddingRes:
 _merge_embedding_results = merge_embedding_results
 
 
+def trans_output(result: MMEmbeddingRes):
+    from rtp_llm.multimodal.multimodal_util import build_multimodal_output_pb
+
+    return build_multimodal_output_pb(
+        result.embeddings,
+        result.position_ids,
+        result.extra_input,
+        result.feature_hashes,
+    )
+
+
 def _mark_vit_error_reported(context, status_details=None) -> None:
     """Tell an optional proxy that the worker already counted this error."""
     metadata = [(VIT_ERROR_REPORTED_METADATA_KEY, "1")]

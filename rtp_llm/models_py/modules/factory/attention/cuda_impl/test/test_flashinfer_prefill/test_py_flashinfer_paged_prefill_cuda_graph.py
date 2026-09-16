@@ -99,6 +99,41 @@ class _PrefillPagedCudaGraphTestMixin:
 
         return inp
 
+    def _make_paged_kv_cache(
+        self, k, v, seq_lengths, head_num_kv, size_per_head, block_table=None
+    ):
+        if block_table is None:
+            max_blocks = max(math.ceil(s / PAGE_SIZE) for s in seq_lengths)
+            block_table = torch.zeros(
+                len(seq_lengths), max_blocks, dtype=torch.int32
+            )
+            offset = 0
+            for i, seq_len in enumerate(seq_lengths):
+                num_blocks = math.ceil(seq_len / PAGE_SIZE)
+                block_table[i, :num_blocks] = torch.arange(offset, offset + num_blocks)
+                offset += num_blocks
+        offsets = [0]
+        for seq_len in seq_lengths:
+            offsets.append(offsets[-1] + seq_len)
+        return fill_paged_kv_cache(
+            [k[offsets[i] : offsets[i + 1]] for i in range(len(seq_lengths))],
+            [v[offsets[i] : offsets[i + 1]] for i in range(len(seq_lengths))],
+            seq_lengths,
+            block_table,
+            PAGE_SIZE,
+            head_num_kv,
+            size_per_head,
+            self.cache_dtype(
+                self._create_config(
+                    head_num=8,
+                    head_num_kv=head_num_kv,
+                    size_per_head=size_per_head,
+                    seq_size_per_block=PAGE_SIZE,
+                ).attn_configs
+            ),
+            self.device,
+        )
+
     def _test_forward_match(
         self,
         input_lengths,
@@ -325,11 +360,15 @@ class TestPrefillPagedCudaGraph(_PrefillPagedCudaGraphTestMixin, BaseAttentionTe
             device=self.device,
         )
         v = torch.randn_like(k)
-        kv_cache = self._make_paged_kv_cache(
-            k, v, seq_lengths, head_num_kv, size_per_head
-        )
-
         normal_inputs = self._make_inputs(input_lengths, replay_prefix_lengths)
+        kv_cache = self._make_paged_kv_cache(
+            k,
+            v,
+            seq_lengths,
+            head_num_kv,
+            size_per_head,
+            block_table=normal_inputs.kv_cache_kernel_block_id,
+        )
         normal_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, normal_inputs)
         normal_op.prepare(normal_inputs)
         expected = normal_op.forward(q, kv_cache)

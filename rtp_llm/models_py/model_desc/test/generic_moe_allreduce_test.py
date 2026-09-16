@@ -13,6 +13,12 @@ from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 from rtp_llm.utils.model_weight import W
 
 
+def _empty_param_module():
+    module = Mock()
+    module.parameters.side_effect = lambda: iter([])
+    return module
+
+
 def _make_layer(
     *,
     supports_skip_tp_allreduce=True,
@@ -66,7 +72,7 @@ def _make_layer(
         ),
         patch(
             "rtp_llm.models_py.model_desc.generic_moe.DenseMLP",
-            return_value=Mock(),
+            return_value=_empty_param_module(),
         ),
         patch("rtp_llm.models_py.model_desc.generic_moe.MoEConfigAdapter"),
         patch(

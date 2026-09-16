@@ -895,7 +895,11 @@ class SparseDecodeMergeTest(unittest.TestCase):
                 .repeat(num_kv_heads, token_rows, 1)
             )
             topk_idx[:, :, 13:] = -1
-            for kv_dtype in (torch.bfloat16, torch.float8_e4m3fn):
+            major, minor = torch.cuda.get_device_capability()
+            kv_dtypes = (torch.bfloat16,)
+            if major >= 9:
+                kv_dtypes = (torch.bfloat16, torch.float8_e4m3fn)
+            for kv_dtype in kv_dtypes:
                 k_paged = k_bf16.to(kv_dtype)
                 v_paged = v_bf16.to(kv_dtype)
                 for sink in (

@@ -134,12 +134,15 @@ class CudaFp8GEMMLinear(LinearBase):
         return False
 
     def forward(
-        self, input: torch.Tensor, out: Optional[torch.Tensor] = None
+        self,
+        input: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+        input_scales: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # DeepGEMM supports caller-provided output buffers; the small-M
         # FlashInfer path currently does not.
-        if out is not None:
-            return self._deepgemm_linear(input, out=out)
+        if input_scales is not None or out is not None:
+            return self._deepgemm_linear(input, out=out, input_scales=input_scales)
         if not self._should_use_flashinfer(input):
             return self._deepgemm_linear(input)
         return self._flashinfer_linear(input)

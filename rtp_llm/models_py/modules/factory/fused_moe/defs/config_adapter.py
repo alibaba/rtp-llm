@@ -30,8 +30,8 @@ class MoEConfigAdapter:
         self.quant_config = quant_config
 
         # Provide shortcut access to commonly used attributes
-        self.ep_size = parallelism_config.ep_size
-        self.ep_rank = parallelism_config.ep_rank
+        self.ep_size = int(getattr(parallelism_config, "ep_size", 1) or 1)
+        self.ep_rank = int(getattr(parallelism_config, "ep_rank", 0) or 0)
         # tp_size/tp_rank reflect the attention/MoE-input view: when CP is
         # enabled, get_attn_tp_size() returns 1, so MoE input slicing
         # (deepep narrow/allgather) stays a no-op. Router selectors that

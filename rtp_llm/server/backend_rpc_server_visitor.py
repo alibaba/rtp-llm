@@ -318,7 +318,11 @@ class BackendRPCServerVisitor:
                         selected_vit, keys, input=input
                     )
                 elif not vit_result.connection_failed:
-                    return vit_result
+                    # Old masters do not expose a ViT-only route and answer 404.
+                    # Fall through to ordinary prefill scheduling instead of
+                    # treating that as a terminal routing failure.
+                    if vit_result.error_code != 404:
+                        return vit_result
             try:
                 token_ids, full_length = multimodal_routing_tokens(
                     token_ids,
@@ -395,7 +399,7 @@ class BackendRPCServerVisitor:
                 new_vits = [
                     a for a in route_result.role_addrs if a.role == RoleType.VIT
                 ]
-                statuses = (route_result.result or {}).get("server_status", [])
+                statuses = route_result.server_status or []
                 status = next(
                     (
                         s

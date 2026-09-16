@@ -850,7 +850,8 @@ TEST_F(MtpExecutorTest, testLegacyDraftSamplerPreservesSoftmaxProposal) {
     auto output = sampler.forward(logits);
 
     EXPECT_EQ(output.token_ids.item<int64_t>(), 3);
-    EXPECT_TRUE(torch::allclose(output.all_probs.cpu(), torch::softmax(logits.cpu(), /*dim=*/-1), 1e-5, 1e-6));
+    // Default top_k=1 uses the point-mass proposal, not a full softmax.
+    checkTensorEqual(output.all_probs, torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}}).to(torch::kCUDA));
 }
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {

@@ -305,7 +305,7 @@ std::shared_ptr<BlockBuffer> TcpCacheStoreServiceImplContextTest::storeHndBlock(
         }
     }
 
-    auto       store_cache = std::make_shared<RequestBlockBuffer>("test-request-id");
+    auto       store_cache = std::make_shared<RequestBlockBuffer>("hnd-request-id");
     store_cache->addBlock(block);
 
     std::mutex mutex;
@@ -319,7 +319,7 @@ std::shared_ptr<BlockBuffer> TcpCacheStoreServiceImplContextTest::storeHndBlock(
     mutex.lock();
     mutex.unlock();
 
-    return cache_store2_->request_block_buffer_store_->request_cache_map_["test-request-id"]->blocks_[key];
+    return cache_store2_->request_block_buffer_store_->request_cache_map_["hnd-request-id"]->blocks_[key];
 }
 
 bool TcpCacheStoreServiceImplContextTest::initContextWithBlock(const std::shared_ptr<BlockBuffer>& block,

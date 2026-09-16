@@ -626,6 +626,8 @@ class GenerateConfig(BaseModel):
         if requested_mode == ThinkingMode.ADAPTIVE:
             self.thinking_mode = ThinkingMode.ADAPTIVE
             self.in_think_mode = False
+            if self.enable_think_logits_processor is None:
+                self.enable_think_logits_processor = True
             if tokenizer and not self.begin_think_token_ids:
                 think_start_tag = normalize_think_tag(
                     generate_env_config.think_start_tag

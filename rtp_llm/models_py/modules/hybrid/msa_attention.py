@@ -2176,7 +2176,9 @@ class MSAAttention(nn.Module):
         # sequence_lengths is host-resident, so copying it here would break CUDA
         # graph capture. sequence_lengths_plus_1_device is exactly kv_lens for
         # decode and already lives on the device.
-        seq_lens = attn_inputs.sequence_lengths_plus_1_device
+        seq_lens = getattr(attn_inputs, "sequence_lengths_plus_1_device", None)
+        if seq_lens is None:
+            seq_lens = attn_inputs.sequence_lengths.to(device=device) + 1
         kv_lens = seq_lens.to(torch.int64)
         positions = seq_lens - 1
         addressing = (kv_lens, seq_lens, positions, phys_block_table)
@@ -3186,9 +3188,11 @@ class MSAAttention(nn.Module):
                 k_paged[dst_page] = main_pages[src_page, 0].to(k_paged.dtype)
                 v_paged[dst_page] = main_pages[src_page, 1].to(v_paged.dtype)
                 slot = int(dst_page) * page_size
-                self._scratch_idx_k[slot : slot + page_size] = idx_pages[
-                    src_page
-                ].reshape(page_size, -1).to(self._scratch_idx_k.dtype)
+                self._scratch_idx_k[slot : slot + page_size] = (
+                    idx_pages[src_page]
+                    .reshape(page_size, *self._scratch_idx_k.shape[1:])
+                    .to(self._scratch_idx_k.dtype)
+                )
             return
         _scatter_cp_prefix_pages(
             main_pages,

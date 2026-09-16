@@ -122,25 +122,34 @@ def pack_mxfp8_scale(
     import deep_gemm
 
     sf = scale_fp32.contiguous()
-    # DeepGEMM 2.1 binds recipe as a 3-int tuple in the kwargs overload.
-    # The positional 2-int form (mn, k, (1, 32)) is the one other MX/FP4
-    # packers already use and what H20's pybind accepts.
-    recipe = (1, MX_BLOCK)
+    # DeepGEMM 2.1 binds recipe as a 3-int tuple. Older wheels still accept
+    # the 2-int (1, 32) form, so try both.
+    recipes = ((1, 1, MX_BLOCK), (1, MX_BLOCK))
     # DeepGEMM's JIT kernel launches on the *current* CUDA device. During
     # weight loading each TP rank's tensors live on its own device (e.g.
     # cuda:5) while the current device may still be cuda:0, which makes the
     # launch fail with CUDA_ERROR_INVALID_VALUE. Pin the current device to the
     # tensor's device for the launch.
+    def _transform(recipe):
+        if num_groups is None:
+            return deep_gemm.transform_sf_into_required_layout(sf, mn, k, recipe)
+        return deep_gemm.transform_sf_into_required_layout(
+            sf, mn, k, recipe, num_groups
+        )
+
+    def _try_recipes():
+        last_error = None
+        for recipe in recipes:
+            try:
+                return _transform(recipe)
+            except TypeError as error:
+                last_error = error
+        raise last_error
+
     if sf.is_cuda:
         with torch.cuda.device(sf.device):
-            if num_groups is None:
-                return deep_gemm.transform_sf_into_required_layout(sf, mn, k, recipe)
-            return deep_gemm.transform_sf_into_required_layout(
-                sf, mn, k, recipe, num_groups
-            )
-    if num_groups is None:
-        return deep_gemm.transform_sf_into_required_layout(sf, mn, k, recipe)
-    return deep_gemm.transform_sf_into_required_layout(sf, mn, k, recipe, num_groups)
+            return _try_recipes()
+    return _try_recipes()
 
 
 def mxfp8_linear(

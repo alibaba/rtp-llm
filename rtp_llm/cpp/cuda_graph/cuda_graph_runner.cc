@@ -1401,6 +1401,20 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
         return false;
     }
     const auto& captured_inputs = graph_it->second.mem_hold_.py_model_inputs_;
+    if (inputs.input_hiddens.defined() && inputs.input_hiddens.numel() > 0 && captured_inputs.input_hiddens.defined()
+        && captured_inputs.input_hiddens.numel() > 0 && inputs.input_hiddens.dim() == 2
+        && captured_inputs.input_hiddens.dim() == 2
+        && inputs.input_hiddens.size(1) != captured_inputs.input_hiddens.size(1)) {
+        if (observe_fallback) {
+            RTP_LLM_LOG_WARNING(
+                "input_hiddens row width is incompatible with CUDA graph key %d: input=%ld capture=%ld, "
+                "fallback to normal run",
+                graph_key,
+                inputs.input_hiddens.size(1),
+                captured_inputs.input_hiddens.size(1));
+        }
+        return false;
+    }
     if (isGenerationPrefillCudaGraph()) {
         const auto table_fits = [](const PyAttentionInputs& source, const PyAttentionInputs& destination) {
             return source.kv_cache_kernel_block_id.defined() && destination.kv_cache_kernel_block_id.defined()

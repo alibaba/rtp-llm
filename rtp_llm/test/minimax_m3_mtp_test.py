@@ -86,6 +86,7 @@ def _weight_info():
     weight._mtp_eh_proj_is_quantized = False
     weight._sparse_layer_set = {0}
     weight.has_e_score_correction_bias = True
+    weight._native_mxfp4_routed = False
     return weight
 
 

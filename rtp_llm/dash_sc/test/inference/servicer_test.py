@@ -1304,15 +1304,15 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             def record_aux_info(self, aux_info, *, overwrite=True):
                 return None
 
-        exception_types = (
-            ExceptionType.MM_LONG_PROMPT_ERROR,
-            ExceptionType.MM_WRONG_FORMAT_ERROR,
-            ExceptionType.MM_PROCESS_ERROR,
-            ExceptionType.MM_EMPTY_ENGINE_ERROR,
-            ExceptionType.MM_NOT_SUPPORTED_ERROR,
-            ExceptionType.MM_DOWNLOAD_FAILED,
+        exception_cases = (
+            (ExceptionType.MM_LONG_PROMPT_ERROR, 8, 413),
+            (ExceptionType.MM_WRONG_FORMAT_ERROR, 8, 400),
+            (ExceptionType.MM_PROCESS_ERROR, 19, 500),
+            (ExceptionType.MM_EMPTY_ENGINE_ERROR, 19, 500),
+            (ExceptionType.MM_NOT_SUPPORTED_ERROR, 8, 422),
+            (ExceptionType.MM_DOWNLOAD_FAILED, 19, 500),
         )
-        for exception_type in exception_types:
+        for exception_type, expected_error_no, expected_status in exception_cases:
             with self.subTest(exception_type=exception_type):
                 access_agg = _AccessAgg()
                 chunks = await _drain(
@@ -1328,9 +1328,10 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 )
 
                 self.assertEqual(len(chunks), 1)
-                _assert_parameter_error_response(
-                    self, chunks[0], "multimodal input failed"
-                )
+                error_no, payload = _dash_error_payload(chunks[0])
+                self.assertEqual(error_no, expected_error_no)
+                self.assertEqual(payload["status_code"], expected_status)
+                self.assertIn("multimodal input failed", payload["status_message"])
                 self.assertEqual(
                     access_agg.backend_error_code,
                     f"{int(exception_type)}_{exception_type.name}",
