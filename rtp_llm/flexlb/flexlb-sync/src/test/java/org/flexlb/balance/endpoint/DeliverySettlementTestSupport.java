@@ -62,13 +62,12 @@ public final class DeliverySettlementTestSupport {
         response.setTotalKvCacheTokens(10_000L);
         EndpointTestSupport.applyStatus(endpoint, response).run();
         try (var pin = endpoint.tryPinGeneration()) {
-            assertTrue(endpoint.markQueuedExact(pin, reservation));
+            assertTrue(endpoint.markQueued(pin, reservation));
         }
-        var permit = endpoint.acquireEngineDispatchPermit(reservation,
-                new DecodeEndpoint.AdmissionCapacity(0, 100L)).permit();
+        var permit = endpoint.acquireDispatchPermit(reservation, new DecodeEndpoint.AdmissionCapacity(0, 100L)).permit();
         assertNotNull(permit);
         assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
-                permit.transferToEngineLifecycle());
+                permit.dispatch());
     }
 
     public static void decodeStatus(DecodeEndpoint endpoint, long requestId, boolean finished) {

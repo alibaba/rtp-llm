@@ -237,7 +237,7 @@ public class EvictionManager {
         }
         try (handle; admission) {
             boolean evictionCommitted =
-                    decodeEp.tryEvictLocalReservationsAndReserveIncoming(
+                    decodeEp.replaceQueuedRequests(
                             reservedVictims,
                             request.requestId(),
                             request.hardKvTokens(),

@@ -99,7 +99,7 @@ class EndpointRetirementLinearizationTest {
             assertFalse(attempt.queueOfferAccepted());
             assertFalse(attempt.directPinAvailable());
             assertFalse(attempt.decodePinAvailable());
-            assertTrue(capturedDecode.layeredAdmissionView()
+            assertTrue(capturedDecode.resourceSnapshot()
                     .reserved().isEmpty());
         } finally {
             resumeAdmission.countDown();

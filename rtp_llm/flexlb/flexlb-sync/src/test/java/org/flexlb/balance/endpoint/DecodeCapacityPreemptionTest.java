@@ -35,13 +35,12 @@ class DecodeCapacityPreemptionTest {
         long expectedKvTokens = 250L;
         DecodeEndpoint.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.reservePinned(pin, 1L, 100L, 200L, 30);
-            var reservation = endpoint.tryReservePlacementPinned(pin, 9L,
-                    hardKvTokens, expectedKvTokens, 70);
+            victim = endpoint.reserveUnqueued(pin, 1L, 100L, 200L, 30);
+            var reservation = endpoint.reserve(pin, 9L, hardKvTokens, expectedKvTokens, 70);
             assertNotNull(reservation);
             assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
-                    endpoint.acquireEngineDispatchPermit(reservation, policy).status());
-            endpoint.releaseReservationExact(reservation);
+                    endpoint.acquireDispatchPermit(reservation, policy).status());
+            endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         }
         var view = endpoint.routingView();
         assertTrue(view.realKvAvailable() >= hardKvTokens);
@@ -52,8 +51,7 @@ class DecodeCapacityPreemptionTest {
         if (usageChanged) { updateCapacity(endpoint, 250L); }
         assertEquals(usageChanged ? DecodeEndpoint.PreemptionBeginResult.INFEASIBLE
                         : DecodeEndpoint.PreemptionBeginResult.SUCCESS,
-                endpoint.beginPriorityPreemption(1L, List.of(victim), 9L,
-                        hardKvTokens, expectedKvTokens, 70, policy));
+                endpoint.beginPreemption(1L, List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
         assertNotNull(endpoint.reservationHandle(1L));
         if (usageChanged) { assertNull(endpoint.reservationHandle(9L)); }
     }
@@ -66,16 +64,14 @@ class DecodeCapacityPreemptionTest {
         long expectedKvTokens = 100L;
         DecodeEndpoint.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.tryReservePlacementPinned(pin, 1L, 100L, 200L, 30);
-            assertNull(endpoint.tryReservePlacementPinned(pin, 9L, hardKvTokens,
-                    expectedKvTokens, 70, policy));
+            victim = endpoint.reserve(pin, 1L, 100L, 200L, 30);
+            assertNull(endpoint.reserve(pin, 9L, hardKvTokens, expectedKvTokens, 70, policy));
         }
         // The same queued reservation remains soft for ordinary Engine dispatch.
         assertTrue(policy.evaluate(endpoint.routingView().dispatchUsage(), hardKvTokens, expectedKvTokens).fits());
         DecodeEvictionProposal proposal = plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_RESERVED);
         assertEquals(DecodeEvictionProposal.CASE_SLOT, proposal.evictionCase());
-        assertTrue(endpoint.tryEvictLocalReservationsAndReserveIncoming(List.of(victim), 9L,
-                hardKvTokens, expectedKvTokens, 70, policy));
+        assertTrue(endpoint.replaceQueuedRequests(List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
         assertNull(endpoint.reservationHandle(1L));
         assertNotNull(endpoint.reservationHandle(9L));
     }
@@ -88,12 +84,11 @@ class DecodeCapacityPreemptionTest {
         long expectedKvTokens = 200L;
         DecodeEndpoint.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.tryReservePlacementPinned(pin, 1L, 0L, 900L, 30);
+            victim = endpoint.reserve(pin, 1L, 0L, 900L, 30);
         }
         DecodeEvictionProposal proposal = plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_RESERVED);
         assertEquals(List.of(1L), proposal.victims().stream().map(DecodeEndpoint.DecodeRequestView::requestId).toList());
-        assertTrue(endpoint.tryEvictLocalReservationsAndReserveIncoming(List.of(victim), 9L,
-                hardKvTokens, expectedKvTokens, 70, policy));
+        assertTrue(endpoint.replaceQueuedRequests(List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
         assertEquals(200L, endpoint.routingView().inflightExpectedKv());
     }
 

@@ -135,8 +135,8 @@ class RouteDeliveryStrategyTest {
                 org.mockito.ArgumentMatchers.eq(List.of(
                         fixture.capabilities.routeReservation(first),
                         fixture.capabilities.routeReservation(second))));
-        verify(fixture.capabilities.permit(first)).transferToEngineLifecycle();
-        verify(fixture.capabilities.permit(second)).transferToEngineLifecycle();
+        verify(fixture.capabilities.permit(first)).dispatch();
+        verify(fixture.capabilities.permit(second)).dispatch();
         assertEquals(1, fixture.capabilities.handoffs().size());
         fixture.capabilities.handoffs().forEach(handoff -> verify(handoff).close());
     }
@@ -255,7 +255,7 @@ class RouteDeliveryStrategyTest {
         verify(fixture.capabilities.routeReservation(head), never()).close();
         verify(fixture.capabilities.permit(head)).release();
         verify(fixture.capabilities.permit(head), never())
-                .transferToEngineLifecycle();
+                .dispatch();
         assertTrue(fixture.telemetry.routes().isEmpty());
     }
 

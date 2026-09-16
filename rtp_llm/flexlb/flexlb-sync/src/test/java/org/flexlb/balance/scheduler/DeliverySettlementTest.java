@@ -27,6 +27,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+import static org.mockito.ArgumentMatchers.eq;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -83,7 +84,7 @@ class DeliverySettlementTest {
         assertFalse(member.item().future().get(5, TimeUnit.SECONDS).isSuccess());
         assertEquals(RequestState.Phase.FAILED, member.slot().snapshot().state());
         assertOccupancy(0, 0);
-        verify(member.item().decodeEp(), never()).releaseUnsentRequestReservation(any());
+        verify(member.item().decodeEp(), never()).release(any(), eq(DecodeEndpoint.ReleaseReason.NOT_SENT));
     }
 
     @ParameterizedTest
@@ -93,7 +94,7 @@ class DeliverySettlementTest {
                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), new EndpointEventProjector(registry)));
         DecodeEndpoint.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) {
-            reservation = decode.reservePinned(pin, 2L, 1L, 1L, 50);
+            reservation = decode.reserveUnqueued(pin, 2L, 1L, 1L, 50);
         }
         assertNotNull(reservation);
         Member member = member(2L, 12L, decode, reservation);
@@ -109,10 +110,10 @@ class DeliverySettlementTest {
         assertFalse(member.item().future().get(5, TimeUnit.SECONDS).isSuccess());
         assertOccupancy(0, 0);
         assertEquals(1, decode.routingView().engineCapacityUsed());
-        assertEquals(observed, decode.isReservationAccepted(reservation));
-        verify(decode, never()).releaseUnsentRequestReservation(any());
+        assertEquals(observed, decode.isAcceptedByEngine(reservation));
+        verify(decode, never()).release(any(), eq(DecodeEndpoint.ReleaseReason.NOT_SENT));
         DeliverySettlementTestSupport.decodeStatus(decode, 2L, true);
-        assertFalse(decode.isReservationAccepted(reservation));
+        assertFalse(decode.isAcceptedByEngine(reservation));
         assertEquals(0, decode.routingView().engineCapacityUsed());
     }
 
@@ -233,7 +234,7 @@ class DeliverySettlementTest {
         assertTrue(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
 
         verify(prefill, after(1200).times(1)).expireCommittedItem(member.item());
-        verify(member.item().decodeEp()).expireReservationExact(member.item().decodeReservation());
+        verify(member.item().decodeEp()).release(member.item().decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
         assertOccupancy(1, 1);
     }
 
@@ -291,7 +292,7 @@ class DeliverySettlementTest {
         member.claim().complete(new DeliveryResult(status, new IllegalStateException("lost response")));
         assertOccupancy(1, 1);
         assertFalse(member.item().future().isDone());
-        verify(member.item().decodeEp(), never()).releaseUnsentRequestReservation(any());
+        verify(member.item().decodeEp(), never()).release(any(), eq(DecodeEndpoint.ReleaseReason.NOT_SENT));
     }
 
     @Test
@@ -329,7 +330,7 @@ class DeliverySettlementTest {
         reject(member);
         assertOccupancy(0, 0);
         assertFalse(preemption.terminalObservation().toCompletableFuture().isDone());
-        verify(member.item().decodeEp(), never()).reconcilePriorityVictimFinished(anyLong(), any());
+        verify(member.item().decodeEp(), never()).updatePreemption(anyLong(), argThat(update -> update.kind() == DecodeEndpoint.PreemptionUpdate.Kind.FINISHED));
         decodeFinished(member);
         assertTrue(preemption.terminalObservation().toCompletableFuture().isDone());
     }
@@ -454,7 +455,7 @@ class DeliverySettlementTest {
 
         assertFalse(member.item().future().get(1, TimeUnit.SECONDS).isSuccess());
         assertEquals(RequestState.Phase.FAILED, member.slot().snapshot().state());
-        verify(member.item().decodeEp()).expireReservationExact(member.item().decodeReservation());
+        verify(member.item().decodeEp()).release(member.item().decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
         assertTrue(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
     }
 
@@ -549,7 +550,7 @@ class DeliverySettlementTest {
         RequestLifecycleTestSupport.awaitCondition(() -> registry.liveRequestCount() == 0);
         assertSame(response, member.item().future().join());
         assertEquals(RequestState.Phase.FAILED, member.slot().snapshot().state());
-        verify(member.item().decodeEp()).expireReservationExact(member.item().decodeReservation());
+        verify(member.item().decodeEp()).release(member.item().decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
     }
 
     @Test

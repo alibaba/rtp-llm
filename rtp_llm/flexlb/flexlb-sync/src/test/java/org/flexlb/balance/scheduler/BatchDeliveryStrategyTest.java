@@ -54,8 +54,8 @@ class BatchDeliveryStrategyTest {
         verify(fixture.capabilities.batchReservation()).commit(
                 org.mockito.ArgumentMatchers.eq(List.of(first, second)),
                 org.mockito.ArgumentMatchers.eq(83L));
-        verify(fixture.capabilities.permit(first)).transferToEngineLifecycle();
-        verify(fixture.capabilities.permit(second)).transferToEngineLifecycle();
+        verify(fixture.capabilities.permit(first)).dispatch();
+        verify(fixture.capabilities.permit(second)).dispatch();
         assertEquals(1, fixture.capabilities.handoffs().size());
         fixture.capabilities.handoffs().forEach(handoff -> verify(handoff).close());
         assertEquals(1, fixture.submission.totalCloseCount());

@@ -21,6 +21,7 @@ import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.List;
 import java.util.Map;
@@ -87,7 +88,7 @@ class RequestResourceAccountingTest {
         try (Fixture f = new Fixture()) {
             var member = PrefillAdmissionResources.prepareMember(f.item);
             assertTrue(member.accepted());
-            assertEquals(1, f.decode.layeredAdmissionView().activeDispatchPermits());
+            assertEquals(1, f.decode.resourceSnapshot().activeDispatchPermits());
             assertEquals(1, f.decode.routingView().engineCapacityUsed());
             f.requests.cancelRequest(ID, 0, CancelReason.CLIENT_CANCELLED);
             // The transaction's eventual rollback must remain harmless after request cleanup.
@@ -118,10 +119,10 @@ class RequestResourceAccountingTest {
     @Test
     void localRollbackCannotReleaseAnEngineOwnerWhoseProjectionHasNotArrived() throws Exception {
         try (Fixture f = new Fixture()) {
-            var acquisition = f.decode.acquireEngineDispatchPermit(f.reservation, f.capacity);
+            var acquisition = f.decode.acquireDispatchPermit(f.reservation, f.capacity);
             assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
             assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
-                    acquisition.permit().transferToEngineLifecycle());
+                    acquisition.permit().dispatch());
             // Endpoint ownership can advance before its notification reaches the slot.
             f.requests.cancelRequest(ID, 0, CancelReason.CLIENT_CANCELLED);
             assertEquals(0, f.requests.liveRequestCount());
@@ -152,16 +153,38 @@ class RequestResourceAccountingTest {
             DeliveryClaim claim = f.handoff();
             TaskInfo running = task(ID);
             f.decodeStatus(Map.of("101", running), Map.of(), TOTAL_KV - HARD_KV);
-            assertEquals(1, f.decode.layeredAdmissionView().runningCount());
+            assertEquals(1, f.decode.resourceSnapshot().runningCount());
             assertEquals(1, f.decode.routingView().engineCapacityUsed());
             assertEquals(0, f.decode.routingView().inflightHardKv(), "Engine status replaces the local KV prediction");
             claim.complete(DeliveryResult.uncertain(new IllegalStateException("late transport failure")));
             assertTrue(f.item.future().get(2, TimeUnit.SECONDS).isSuccess());
             assertEquals(1, f.requests.liveRequestCount());
-            assertEquals(1, f.decode.layeredAdmissionView().runningCount());
+            assertEquals(1, f.decode.resourceSnapshot().runningCount());
             assertEquals(1, f.prefill.getLocallyOwnedRequestCount());
             applyStatus(f.prefill, status(RoleType.PREFILL, 2L, Map.of(), Map.of("101", running), TOTAL_KV));
             f.decodeStatus(Map.of(), Map.of("101", running), TOTAL_KV);
+            f.assertEmpty();
+            f.assertCapacityReusable();
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"RUNNING, RECEIVED", "RUNNING, PENDING", "KV_ALLOCATED, RECEIVED", "KV_ALLOCATED, PENDING"})
+    void decodePhaseRegressionStillDeliversTerminalWithoutInactivity(TaskPhase confirmed, TaskPhase regressed)
+            throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.handoff().complete(DeliveryResult.delivered());
+            assertTrue(f.item.future().get(2, TimeUnit.SECONDS).isSuccess());
+            applyStatus(f.prefill, status(RoleType.PREFILL, 2L, Map.of(), Map.of("101", task(ID)), TOTAL_KV));
+            TaskInfo active = task(ID);
+            active.setPhase(confirmed);
+            f.decodeStatus(Map.of("101", active), Map.of(), TOTAL_KV - HARD_KV);
+            TaskInfo stillPresent = task(ID);
+            stillPresent.setPhase(regressed);
+            f.decodeStatus(Map.of("101", stillPresent), Map.of(), TOTAL_KV);
+            assertEquals(RequestState.Phase.ACKNOWLEDGED, f.requests.getRequestState(ID, 0).state());
+            // No inactivity expiry, sweep, sleep or shutdown is allowed to make this assertion pass.
+            f.decodeStatus(Map.of(), Map.of("101", task(ID)), TOTAL_KV);
             f.assertEmpty();
             f.assertCapacityReusable();
         }
@@ -172,7 +195,7 @@ class RequestResourceAccountingTest {
         try (Fixture f = new Fixture()) {
             f.handoff().complete(DeliveryResult.delivered());
             f.decodeStatus(Map.of("101", task(ID)), Map.of(), TOTAL_KV - HARD_KV);
-            assertEquals(1, f.decode.layeredAdmissionView().runningCount());
+            assertEquals(1, f.decode.resourceSnapshot().runningCount());
             f.expire();
             f.assertEmpty();
             assertEquals(TOTAL_KV - HARD_KV, f.decode.realKvAvailable(),
@@ -193,7 +216,7 @@ class RequestResourceAccountingTest {
                 if (replacementRef.get() != null) { return true; }
                 f.decode.evictExpiredRequests(0, ignored -> false);
                 try (var pin = f.decode.tryPinGeneration()) {
-                    replacementRef.set(f.decode.tryReservePlacementPinned(pin, ID, HARD_KV * 2, EXPECTED_KV * 2, 50));
+                    replacementRef.set(f.decode.reserve(pin, ID, HARD_KV * 2, EXPECTED_KV * 2, 50));
                 }
                 return replacementRef.get() != null;
             });
@@ -201,12 +224,12 @@ class RequestResourceAccountingTest {
             assertNotEquals(oldReservation.reservationToken(), replacement.reservationToken());
             oldClaim.complete(DeliveryResult.delivered());
             f.expire();
-            assertFalse(f.decode.expireReservationExact(oldReservation));
-            assertFalse(f.decode.releaseLocalShadowIfExact(oldReservation));
+            assertFalse(f.decode.release(oldReservation, DecodeEndpoint.ReleaseReason.EXPIRED).released());
+            assertFalse(f.decode.release(oldReservation, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED).released());
             assertEquals(HARD_KV * 2, f.decode.routingView().inflightHardKv());
             assertEquals(EXPECTED_KV * 2, f.decode.routingView().inflightExpectedKv());
             assertEquals(replacement, f.decode.reservationHandle(ID));
-            f.decode.releaseReservationExact(replacement);
+            f.decode.release(replacement, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             f.assertEmpty();
         }
     }
@@ -251,7 +274,7 @@ class RequestResourceAccountingTest {
             decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"), projector);
             decodeStatus(Map.of(), Map.of(), TOTAL_KV);
             try (var pin = decode.tryPinGeneration()) {
-                reservation = decode.tryReservePlacementPinned(pin, ID, HARD_KV, EXPECTED_KV, 50);
+                reservation = decode.reserve(pin, ID, HARD_KV, EXPECTED_KV, 50);
             }
             assertNotNull(reservation);
             var context = RequestLifecycleTestSupport.context(config, ID);
@@ -277,7 +300,7 @@ class RequestResourceAccountingTest {
         }
 
         DeliveryClaim handoff() {
-            var acquisition = decode.acquireEngineDispatchPermit(reservation, capacity);
+            var acquisition = decode.acquireDispatchPermit(reservation, capacity);
             assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
             var member = new PrefillAdmissionResources.Member(item, acquisition.permit());
             try (var owner = PrefillAdmissionResources.createCommittedOwner(List.of(member))) {
@@ -298,7 +321,7 @@ class RequestResourceAccountingTest {
 
         void assertHandedOff() {
             assertReserved();
-            assertEquals(0, decode.layeredAdmissionView().activeDispatchPermits());
+            assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
             assertEquals(1, decode.routingView().engineCapacityUsed());
             assertFalse(capacity.evaluate(decode.routingView().dispatchUsage(), HARD_KV, EXPECTED_KV).fits());
         }
@@ -309,7 +332,7 @@ class RequestResourceAccountingTest {
             assertEquals(0, prefill.getLocallyOwnedRequestCount(), "Prefill inflight");
             assertEquals(0, prefill.getIndividuallyTrackedRequestCount(), "Prefill individual lease");
             assertEquals(0, prefill.getInflightBatchCount(), "Prefill batch occupancy");
-            var view = decode.layeredAdmissionView();
+            var view = decode.resourceSnapshot();
             assertEquals(0, view.routing().inflightHardKv(), "Decode hard KV reservation");
             assertEquals(0, view.routing().inflightExpectedKv(), "Decode expected KV reservation");
             assertEquals(0, view.activeDispatchPermits(), "Decode dispatch permits");
@@ -323,12 +346,12 @@ class RequestResourceAccountingTest {
 
         void assertCapacityReusable() {
             try (var pin = decode.tryPinGeneration()) {
-                var next = decode.tryReservePlacementPinned(pin, 999L, HARD_KV, EXPECTED_KV, 50);
+                var next = decode.reserve(pin, 999L, HARD_KV, EXPECTED_KV, 50);
                 assertNotNull(next);
-                var permit = decode.acquireEngineDispatchPermit(next, capacity);
+                var permit = decode.acquireDispatchPermit(next, capacity);
                 assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, permit.status());
                 assertTrue(permit.permit().release());
-                decode.releaseReservationExact(next);
+                decode.release(next, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             }
             // A second exact request must be able to use the sole Prefill slot too.
             var nextContext = RequestLifecycleTestSupport.context(item.ctx().getConfig(), 999L);
