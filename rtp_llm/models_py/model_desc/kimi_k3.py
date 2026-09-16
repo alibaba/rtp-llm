@@ -645,6 +645,10 @@ class KimiK3Model(GptModelBase):
             getattr(self.config, "k3_attention_quant_config", None) is not None
         )
         fp8_kwargs = {"fp8": True} if fp8_attention else {}
+        # Decode uses separate NCCL collectives and GEMMs for both warmup and
+        # CUDA Graph execution. Prefill retains its fused overlap backend.
+        if init_resource.is_decode_role:
+            fp8_kwargs["use_fused"] = False
         if not getattr(self, "_all_gather_gemm_configured", False):
             all_gather_gemm_requested = (
                 tp_size > 1

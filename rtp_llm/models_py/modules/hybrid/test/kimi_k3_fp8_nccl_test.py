@@ -139,51 +139,52 @@ class KimiK3Fp8NcclTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "different shape"):
                     rs.configure_gemm_reduce_scatter(group, "cuda:0", max_m=64, n=128)
 
-    def test_bf16_tp16_gemm_precedes_nccl_with_padding(self):
-        group, k, n = object(), 8, 4
-        weight = (torch.arange(k * n).view(k, n) % 3 / 16).to(torch.bfloat16)
-        for m, pad_rows in ((0, True), (1, True), (16, False), (17, True), (177, True)):
-            with self.subTest(rows=m, pad_rows=pad_rows):
-                # Real CPU BF16 math; only CUDA eligibility and NCCL are mocked.
-                x = (torch.arange(m * k * 2).view(m, k * 2) % 7 - 3).to(torch.bfloat16)[
-                    :, ::2
-                ]
-                physical_m = (m + 15) // 16 * 16
-                expected = torch.nn.functional.pad(
-                    (x.float() @ weight.float()).to(torch.bfloat16),
-                    (0, 0, 0, physical_m - m),
-                )
-                state = rs._GemmReduceScatterState(
-                    group, x.device, 16, max(16, physical_m), n, fp8=True
-                )
+    def test_bf16_decode_gemm_precedes_nccl_with_padding(self):
+        for size in (2, 4, 8, 16):
+            group, k, n = Mock(size=Mock(return_value=size)), 8, 4
+            weight = (torch.arange(k * n).view(k, n) % 3 / 16).to(torch.bfloat16)
+            for m, pad_rows in ((0, True), (1, True), (16, False), (17, True), (177, True)):
+                with self.subTest(rows=m, pad_rows=pad_rows):
+                    # Real CPU BF16 math; only CUDA eligibility and NCCL are mocked.
+                    x = (torch.arange(m * k * 2).view(m, k * 2) % 7 - 3).to(torch.bfloat16)[
+                        :, ::2
+                    ]
+                    physical_m = (m + size - 1) // size * size
+                    expected = torch.nn.functional.pad(
+                        (x.float() @ weight.float()).to(torch.bfloat16),
+                        (0, 0, 0, physical_m - m),
+                    )
+                    state = rs._GemmReduceScatterState(
+                        group, x.device, size, max(size, physical_m), n, fp8=True, use_fused=False
+                    )
 
-                def scatter(output, partial, *, op, group):
-                    self.assertIs(group, state.group)
-                    self.assertIs(op, rs.dist.ReduceOp.SUM)
-                    self.assertTrue(partial.is_contiguous())
-                    torch.testing.assert_close(partial, expected, rtol=0, atol=0)
-                    output.fill_(7)
+                    def scatter(output, partial, *, op, group):
+                        self.assertIs(group, state.group)
+                        self.assertIs(op, rs.dist.ReduceOp.SUM)
+                        self.assertTrue(partial.is_contiguous())
+                        torch.testing.assert_close(partial, expected, rtol=0, atol=0)
+                        output.fill_(7)
 
-                with patch.object(
-                    torch.Tensor,
-                    "is_cuda",
-                    new_callable=PropertyMock,
-                    return_value=True,
-                ), patch.object(
-                    rs, "collective_gemm_state_key", return_value=(group, 0)
-                ), patch.dict(
-                    rs._STATES, {(group, 0): state}
-                ), patch.object(
-                    rs.dist, "reduce_scatter_tensor", side_effect=scatter
-                ) as nccl:
-                    result = rs.gemm_reduce_scatter(x, weight, group, pad_rows=pad_rows)
-                self.assertEqual(tuple(result.shape), (physical_m // 16, n))
-                self.assertEqual(result.dtype, torch.bfloat16)
-                if m:
-                    nccl.assert_called_once()
-                    torch.testing.assert_close(result, torch.full_like(result, 7))
-                else:
-                    nccl.assert_not_called()
+                    with patch.object(
+                        torch.Tensor,
+                        "is_cuda",
+                        new_callable=PropertyMock,
+                        return_value=True,
+                    ), patch.object(
+                        rs, "collective_gemm_state_key", return_value=(group, 0)
+                    ), patch.dict(
+                        rs._STATES, {(group, 0): state}
+                    ), patch.object(
+                        rs.dist, "reduce_scatter_tensor", side_effect=scatter
+                    ) as nccl:
+                        result = rs.gemm_reduce_scatter(x, weight, group, pad_rows=pad_rows)
+                    self.assertEqual(tuple(result.shape), (physical_m // size, n))
+                    self.assertEqual(result.dtype, torch.bfloat16)
+                    if m:
+                        nccl.assert_called_once()
+                        torch.testing.assert_close(result, torch.full_like(result, 7))
+                    else:
+                        nccl.assert_not_called()
 
     def test_fp8_dispatch_keeps_ag_fused_and_selects_rs_backend(self):
         device = torch.device("cuda:0")
@@ -193,7 +194,7 @@ class KimiK3Fp8NcclTest(unittest.TestCase):
             with self.subTest(ag_size=size):
                 group = Mock(size=Mock(return_value=size))
                 payload = Mock(shape=(1, 512), device=device)
-                state = SimpleNamespace(max_m=32, k=512, device=device)
+                state = SimpleNamespace(max_m=32, k=512, device=device, use_fused=True)
                 with patch.object(ag, "get_process_group", return_value=group), patch.dict(
                     ag._STATES, {(group, 0, True): state}
                 ), patch.object(
@@ -287,6 +288,61 @@ class KimiK3Fp8NcclTest(unittest.TestCase):
                         projection.assert_called_once()
                         projection.forward_quantized.assert_not_called()
                     torch.testing.assert_close(result, torch.full_like(result, 7))
+
+    def test_decode_initialization_avoids_all_fused_resources(self):
+        for size in (2, 4, 8, 16):
+            group = Mock(size=Mock(return_value=size))
+            with self.subTest(size=size), patch.dict(ag._STATES, {}, clear=True), patch.dict(
+                rs._STATES, {}, clear=True
+            ), patch.dict(sys.modules, {"deep_gemm": None}), patch.object(
+                symm, "_pipelined_multi_all_gather_and_consume", None
+            ), patch.object(ag, "reserve_fused_all_gather_matmul_workspace") as reserve:
+                for fp8 in (False, True):
+                    ag.configure_all_gather_gemm(
+                        group, "cuda:0", max_m=32, k=640, dtype=torch.bfloat16,
+                        fp8=fp8, use_fused=False,
+                    )
+                    rs.configure_gemm_reduce_scatter(
+                        group, "cuda:0", max_m=32, n=128, fp8=fp8, use_fused=False,
+                    )
+                reserve.assert_not_called()
+                self.assertIsNone(rs._STATES[(group, 0)].workspace)
+                self.assertFalse(rs._STATES[(group, 0)].use_fused)
+                if size != 16:
+                    with self.assertRaisesRegex(RuntimeError, "backend"):
+                        rs.configure_gemm_reduce_scatter(group, "cuda:0", max_m=32, n=128)
+
+    def test_decode_fp8_ag_preserves_rank_rows_and_packed_scales(self):
+        k = 640
+        for size in (2, 4, 8, 16):
+            for m in (1, 3, 4, 5):
+                with self.subTest(size=size, rows=m):
+                    group = Mock(size=Mock(return_value=size))
+                    payloads = [activation(m, k, rank) for rank in range(size)]
+                    projections = [ReferenceProjection(
+                        (torch.arange(k * n).view(k, n) % 3 - 1) / 16
+                    ) for n in (8, 16)]
+                    logical_m = m * size - 1
+                    expected = [torch.cat([
+                        p.forward_quantized(a.values, a.scales) for a in payloads
+                    ])[:logical_m] for p in projections]
+                    state = ag._AllGatherGemmState(
+                        True, group, torch.device("cpu"), size, m * size, k,
+                        torch.bfloat16, 0, use_fused=False,
+                    )
+                    def gather(output, source, *, group):
+                        sources = [a.values.view(torch.uint8) for a in payloads] if source.dtype == torch.uint8 else [a.scale_wire for a in payloads]
+                        output.copy_(torch.cat(sources))
+                    with patch.object(ag, "get_process_group", return_value=group), patch.object(
+                        ag, "collective_gemm_state_key", return_value=(group, 0)
+                    ), patch.dict(ag._STATES, {(group, 0, True): state}), patch.object(
+                        ag.dist, "all_gather_into_tensor", side_effect=gather
+                    ) as nccl, patch.object(ag, "fused_all_gather_fp8_linear") as fused:
+                        actual = ag.all_gather_gemm(payloads[0], projections, logical_m=logical_m)
+                    self.assertEqual(nccl.call_count, 2)
+                    fused.assert_not_called()
+                    for result, reference in zip(actual, expected):
+                        torch.testing.assert_close(result, reference, rtol=0, atol=0)
 
     def test_empty_input_does_not_communicate(self):
         x = activation(0, 128)

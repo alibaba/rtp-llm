@@ -1053,6 +1053,69 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         self.assertTrue(model._all_gather_gemm_configured)
         self.assertTrue(model._gemm_reduce_scatter_configured)
 
+    def test_decode_selects_nccl_for_both_projection_collectives(self):
+        for fp8 in (False, True):
+            with self.subTest(fp8=fp8):
+                model = KimiK3Model.__new__(KimiK3Model)
+                nn.Module.__init__(model)
+                self._prepare_model_init_stub(model)
+                model.config = SimpleNamespace(
+                    max_seq_len=32768, hidden_size=7168, gen_num_per_cycle=3,
+                    k3_attention_quant_config=object() if fp8 else None,
+                )
+                model.parallelism_config = SimpleNamespace(get_attn_tp_size=lambda: 8)
+                model.embedding_weight = SimpleNamespace(
+                    is_cuda=True, dtype=torch.bfloat16, device=torch.device("cuda:0")
+                )
+                model._max_generate_batch_size = 8
+                model._all_gather_gemm_configured = False
+                model._gemm_reduce_scatter_configured = False
+                resource = SimpleNamespace(
+                    kv_cache=None, is_decode_role=True, max_context_batch_size=1,
+                    max_decode_graph_batch_size=8,
+                )
+                with patch.object(kimi_k3, "get_process_group", return_value=object()), patch.object(
+                    kimi_k3, "configure_all_gather_gemm"
+                ) as ag, patch.object(kimi_k3, "configure_gemm_reduce_scatter") as rs:
+                    self.assertTrue(model.initialize(resource))
+                for configure in (ag, rs):
+                    self.assertFalse(configure.call_args.kwargs["use_fused"])
+                    self.assertEqual(configure.call_args.kwargs.get("fp8", False), fp8)
+                    self.assertEqual(configure.call_args.kwargs["max_m"], 32)
+
+    def test_mtp_selects_collective_backend_by_role(self):
+        import rtp_llm.models_py.model_desc.kimi_k3_mtp as mtp
+
+        for decode in (False, True):
+            with self.subTest(decode=decode):
+                model = mtp.KimiK3MtpModel.__new__(mtp.KimiK3MtpModel)
+                nn.Module.__init__(model)
+                model.config = SimpleNamespace(max_seq_len=32)
+                model.parallelism_config = SimpleNamespace(get_attn_tp_size=lambda: 8)
+                model.embedding = SimpleNamespace(weight=torch.empty(1, dtype=torch.bfloat16))
+                model.hidden_size = 16
+                model._max_batch = 8
+                model._proposal_steps = 3
+                model._all_gather_gemm_configured = False
+                model._gemm_reduce_scatter_configured = False
+                resource = SimpleNamespace(
+                    is_decode_role=decode, max_context_batch_size=1,
+                    max_decode_graph_batch_size=8,
+                )
+                with (
+                    patch.object(mtp.GptModelBase, "initialize", return_value=True),
+                    patch.object(mtp, "get_process_group", return_value=object()),
+                    patch.object(mtp, "prefill_chunk_tokens", return_value=0),
+                    patch.object(mtp, "configure_all_gather_gemm") as ag,
+                    patch.object(mtp, "configure_gemm_reduce_scatter") as rs,
+                ):
+                    self.assertTrue(model.initialize(resource))
+                for configure in (ag, rs):
+                    self.assertEqual(configure.call_args.kwargs["use_fused"], not decode)
+                    self.assertEqual(configure.call_args.kwargs["max_m"], 32)
+                if decode:
+                    self.assertEqual(tuple(model._recurrent.shape), (32, 16))
+
     def test_decode_eagle3_uses_fixed_hidden_buffer_across_graph_shapes(self) -> None:
         model = KimiK3Model.__new__(KimiK3Model)
         nn.Module.__init__(model)

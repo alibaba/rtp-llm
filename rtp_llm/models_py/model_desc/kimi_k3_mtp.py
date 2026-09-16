@@ -247,6 +247,7 @@ class KimiK3MtpModel(GptModelBase):
                 max_m=max_physical_tokens,
                 k=self.hidden_size,
                 dtype=self.embedding.weight.dtype,
+                use_fused=not self._decode_role,
             )
             self._all_gather_gemm_configured = True
         if tp_size > 1 and not self._gemm_reduce_scatter_configured:
@@ -255,6 +256,7 @@ class KimiK3MtpModel(GptModelBase):
                 self.embedding.weight.device,
                 max_m=max_physical_tokens,
                 n=self.hidden_size,
+                use_fused=not self._decode_role,
             )
             self._gemm_reduce_scatter_configured = True
         return True

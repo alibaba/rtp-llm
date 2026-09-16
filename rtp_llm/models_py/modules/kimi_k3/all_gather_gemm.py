@@ -1,4 +1,4 @@
-"""Fused symmetric-memory AllGather/GEMM for Kimi K3 Prefill."""
+"""Prefill fused AllGather/GEMM and Decode NCCL AllGather plus local GEMM."""
 
 from __future__ import annotations
 
@@ -31,14 +31,17 @@ class _AllGatherGemmState:
     k: int
     dtype: torch.dtype
     workspace_bytes: int
+    use_fused: bool = True
 
 
 _STATES: dict[tuple[dist.ProcessGroup, int, bool], _AllGatherGemmState] = {}
 
 
-def configure_all_gather_gemm(group, device, *, max_m, k, dtype, fp8=False) -> bool:
-    """Reserve the fused operator workspace, independently of request length."""
-    if fp8:
+def configure_all_gather_gemm(
+    group, device, *, max_m, k, dtype, fp8=False, use_fused=True
+) -> bool:
+    """Fix the backend before warmup/capture; only fused execution needs symmetric memory."""
+    if fp8 and use_fused:
         import torch.distributed._symmetric_memory as symm
 
         if not callable(getattr(symm, "_pipelined_multi_all_gather_and_consume", None)):
@@ -47,9 +50,14 @@ def configure_all_gather_gemm(group, device, *, max_m, k, dtype, fp8=False) -> b
     device = torch.device("cuda", key[1])
     existing = _STATES.get(key)
     if existing is not None:
-        if (max_m, k, dtype) != (existing.max_m, existing.k, existing.dtype):
+        if (max_m, k, dtype, use_fused) != (
+            existing.max_m,
+            existing.k,
+            existing.dtype,
+            existing.use_fused
+        ):
             raise RuntimeError(
-                "K3 AllGather/GEMM was already configured with a different shape"
+                "K3 AllGather/GEMM was already configured with a different shape or backend"
             )
         return True
     world_size = int(group.size())
@@ -67,13 +75,16 @@ def configure_all_gather_gemm(group, device, *, max_m, k, dtype, fp8=False) -> b
         workspace_bytes = (
             local_m * k + ((k + 511) // 512) * ((local_m + 3) // 4 * 4) * 4
         )
-    if world_size > 1:
+    if world_size > 1 and use_fused:
         reserve_fused_all_gather_matmul_workspace(group, workspace_bytes)
+    if not use_fused:
+        workspace_bytes = 0
     _STATES[key] = _AllGatherGemmState(
-        fp8, group, device, world_size, max_m, k, dtype, workspace_bytes
+        fp8, group, device, world_size, max_m, k, dtype, workspace_bytes, use_fused
     )
     logging.info(
-        "[K3_ALL_GATHER_GEMM] fused TP%d max_m=%d k=%d fp8=%s workspace=%.3f GiB",
+        "[K3_ALL_GATHER_GEMM] %s TP%d max_m=%d k=%d fp8=%s workspace=%.3f GiB",
+        "fused" if use_fused else "nccl",
         world_size,
         max_m,
         k,
@@ -86,7 +97,7 @@ def configure_all_gather_gemm(group, device, *, max_m, k, dtype, fp8=False) -> b
 def all_gather_gemm(
     local_input, weights: Sequence, *, logical_m: int, group: Group = Group.TP
 ) -> list[torch.Tensor]:
-    """Gather and project through the fused operator for every nonempty TP shard."""
+    """Gather and project with the backend selected during initialization."""
     if logical_m < 0:
         raise ValueError(f"logical_m must be non-negative, got {logical_m}")
     if not weights:
@@ -127,6 +138,11 @@ def all_gather_gemm(
         raise RuntimeError(f"AllGather/GEMM M={physical_m} exceeds max_m={state.max_m}")
     if local_input.dtype != state.dtype or not local_input.is_contiguous():
         raise TypeError("AllGather/GEMM input must be contiguous BF16")
+    if not state.use_fused:
+        with torch.profiler.record_function("RTP::kimi_k3.all_gather_gemm.bf16_nccl"):
+            gathered = local_input.new_empty((physical_m, state.k))
+            dist.all_gather_into_tensor(gathered, local_input, group=process_group)
+            return [torch.matmul(gathered, w)[:logical_m] for w in weights]
     with torch.profiler.record_function("RTP::kimi_k3.all_gather_gemm.fused"):
         _, outputs = fused_all_gather_matmul(
             local_input, weights, process_group, return_gathered=False
@@ -160,6 +176,29 @@ def _all_gather_quantized(local_input, projections, *, logical_m, group):
         raise RuntimeError("FP8 AG must be initialized before execution")
     if m * size > state.max_m or k != state.k or local_input.device != state.device:
         raise ValueError("FP8 AG exceeds configured workspace")
+    if not state.use_fused:
+        with torch.profiler.record_function("RTP::kimi_k3.all_gather_gemm.fp8_nccl"):
+            values = local_input.values.new_empty((size * m, k))
+            groups, aligned_m = local_input.scale_wire.shape
+            wire = local_input.scale_wire.new_empty((size * groups, aligned_m))
+            dist.all_gather_into_tensor(
+                values.view(torch.uint8),
+                local_input.values.view(torch.uint8),
+                group=process_group
+            )
+            dist.all_gather_into_tensor(wire, local_input.scale_wire, group=process_group)
+            # Each rank pads its scale rows independently. Remove that padding
+            # before joining rank-local rows, then restore the GEMM's global alignment.
+            scales = wire.new_zeros((groups, (size * m + 3) // 4 * 4))
+            scales[:, : size * m].copy_(
+                wire.view(size, groups, aligned_m)[:, :, :m]
+                .permute(1, 0, 2)
+                .reshape(groups, size * m)
+            )
+            return [
+                p.forward_quantized(values, scales.T[: size * m])[:logical_m]
+                for p in projections
+            ]
     with torch.profiler.record_function("RTP::kimi_k3.all_gather_gemm.fp8_fused"):
         outputs = fused_all_gather_fp8_linear(local_input, projections, process_group)
     return [out[:logical_m] for out in outputs]
