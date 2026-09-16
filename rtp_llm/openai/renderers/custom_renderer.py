@@ -1117,6 +1117,10 @@ class CustomChatRenderer:
     def resolve_thinking_mode(self, request: ChatCompletionRequest) -> ThinkingMode:
         return request.resolve_thinking_mode(self.default_thinking_mode)
 
+    def default_thinking_budget(self, max_new_tokens: int) -> Optional[int]:
+        """Optional model default, used only when the request omits a budget."""
+        return None
+
     def in_think_mode(self, request: ChatCompletionRequest):
         # Keep renderer-side parsing aligned with the three-state mode already
         # resolved for GenerateConfig. ADAPTIVE decides from the first token.

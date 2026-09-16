@@ -241,6 +241,11 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             return "max"
         return effort
 
+    def default_thinking_budget(self, max_new_tokens: int) -> Optional[int]:
+        # DSv4 thinking shares the output allowance unless the caller gives a
+        # separate budget. Do not force </think> at the generic 32K default.
+        return max(GenerateConfig.model_fields["max_thinking_tokens"].default, max_new_tokens)
+
     def _normalize_tool_arguments(self, arguments: Any) -> str:
         if arguments is None:
             return "{}"
@@ -415,11 +420,11 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         thinking_mode = "thinking" if self.in_think_mode(request) else "chat"
 
         # Configure encoding
-        # drop_thinking=True: Remove reasoning_content from historical assistant messages
+        # Preserve historical reasoning only when explicitly requested.
         # add_default_bos_token=True: Always add BOS token since we encode full messages
         encode_config = {
             "thinking_mode": thinking_mode,
-            "drop_thinking": True,
+            "drop_thinking": request.preserve_thinking is not True,
             "add_default_bos_token": True,
             "reasoning_effort": self._normalize_reasoning_effort(
                 request.reasoning_effort
