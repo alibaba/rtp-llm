@@ -49,7 +49,7 @@ import static org.mockito.Mockito.when;
  * <p>Construction note: {@code ZookeeperMasterElectService}'s constructor runs
  * {@code init()}. The mocked configuration uses the default no-consistency
  * mode, so {@code init()}
- * return before touching {@code HIPPO_ROLE} or ZooKeeper. The test then uses
+ * return before resolving the deployment identity or contacting ZooKeeper. The test then uses
  * the production {@code @Setter} hooks (including the package-private
  * {@code setClient}/{@code setLeaderSelector} reachable from this same
  * package) to bind a real Curator client and a real {@link LeaderSelector}

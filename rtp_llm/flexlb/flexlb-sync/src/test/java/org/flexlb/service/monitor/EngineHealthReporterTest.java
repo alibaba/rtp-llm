@@ -178,7 +178,7 @@ class EngineHealthReporterTest {
     }
 
     @Test
-    void shouldReportSelectedEngineWithCandidateChoiceAndSelectionReason() {
+    void shouldReportSelectedEngineWithConfiguredStrategy() {
         ServerStatus serverStatus = new ServerStatus();
         serverStatus.setRole(RoleType.PREFILL);
         serverStatus.setServerIp("10.0.0.1");
@@ -193,14 +193,12 @@ class EngineHealthReporterTest {
         BalanceContext context = new BalanceContext();
         context.setConfig(config);
         context.setResponse(response);
-        context.recordSelectionReason(RoleType.PREFILL, "GLOBAL_BATCH");
 
         reporter.reportBalancingService(context);
 
         verify(monitor).report("app.engine.balancing.master.select.detail", FlexMetricTags.of(
                 "role", "PREFILL",
                 "strategy", "LEAST_RECENTLY_USED_IN_POOL",
-                "reason", "GLOBAL_BATCH",
                 "engineIp", "10.0.0.1:8080",
                 "success", "true",
                 "code", "200"), 1.0);
