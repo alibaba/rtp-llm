@@ -330,7 +330,7 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
             seq_size_per_block=config.seq_size_per_block,
         )
         attn_inputs.is_cuda_graph = True
-        attn_inputs.sequence_lengths_plus_1_d = torch.tensor(
+        attn_inputs.sequence_lengths_plus_1_device = torch.tensor(
             sequence_lengths, dtype=torch.int32, device="cuda"
         )
 
@@ -386,7 +386,7 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
             dtype=torch.bfloat16,
         )
         attn_inputs.is_cuda_graph = True
-        attn_inputs.sequence_lengths_plus_1_d = torch.tensor(
+        attn_inputs.sequence_lengths_plus_1_device = torch.tensor(
             sequence_lengths, dtype=torch.int32, device=self.device
         )
 
@@ -416,7 +416,7 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
         # Reproduce the old contract: update only the aliased paged-KV tensors
         # while retaining the one-page capture plan.
         params.fill_decode_cuda_graph_params(
-            attn_inputs.sequence_lengths_plus_1_d,
+            attn_inputs.sequence_lengths_plus_1_device,
             attn_inputs.kv_cache_kernel_block_id_device,
             config.seq_size_per_block,
         )
