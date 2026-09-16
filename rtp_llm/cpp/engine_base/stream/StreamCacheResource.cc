@@ -88,7 +88,6 @@ public:
             routing.request_id      = stream->streamId();
             routing.unique_key      = stream->uniqueKey();
             routing.deadline_ms     = stream->deadlineMs();
-            routing.request_timeout_ms = stream->generateConfig()->timeout_ms;
             routing.prefill_addr    = stream->prefillAddr();
             routing.prefill_tp_size = stream->getPrefillTpSize();
             routing.prefill_cp_size = stream->getPrefillCpSize();

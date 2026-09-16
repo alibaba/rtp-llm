@@ -274,7 +274,6 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadUsesConfiguredLoadBudgetAndRequestDea
     waitAsyncContextDone(result.context);
     ASSERT_TRUE(result.context->success());
     auto request = prefill_server_->service()->getLastStartLoadRequest();
-    EXPECT_GT(request.request_timeout_ms(), 0);
     EXPECT_EQ(request.timeout_ms(), 1000);
 }
 
@@ -287,7 +286,6 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadLoadBudgetCannotExceedRemainingReques
     ASSERT_TRUE(result.context->success());
     auto request = prefill_server_->service()->getLastStartLoadRequest();
     EXPECT_EQ(request.timeout_ms(), 5000);
-    EXPECT_GT(request.request_timeout_ms(), 0);
 }
 
 TEST(P2PConnectorConfigTest, LoadTimeoutComesFromSharedPDSepConfig) {

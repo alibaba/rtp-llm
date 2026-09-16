@@ -87,7 +87,7 @@ TEST_F(DecodeLoadHelperTest, Load_ReturnNotNull_RequestSuccess) {
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
 
     // 执行 load
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000, 5000);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result->request_id, request_id);
     EXPECT_EQ(result->request.unique_key(), unique_key);
@@ -104,7 +104,7 @@ TEST_F(DecodeLoadHelperTest, Load_ReturnNotNull_RequestSuccess) {
     EXPECT_EQ(server_->service()->getStartLoadCallCount(), 1);
 }
 
-TEST_F(DecodeLoadHelperTest, LoadCarriesFullDurationsButKeepsLocalDeadline) {
+TEST_F(DecodeLoadHelperTest, LoadCarriesOnlyLoadTimeoutAndKeepsLocalDeadline) {
     const int64_t request_deadline_ms  = currentTimeMs() + 5000;
     const int64_t transfer_deadline_ms = currentTimeMs() + 500;
     constexpr uint64_t plan_digest     = 0xfedcba9876543210ULL;
@@ -115,14 +115,12 @@ TEST_F(DecodeLoadHelperTest, LoadCarriesFullDurationsButKeepsLocalDeadline) {
                                 "test_split_deadline",
                                 request_deadline_ms,
                                 transfer_deadline_ms,
-                                5000,
                                 1000,
                                 false,
                                 plan_digest);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result->request.timeout_ms(), 1000);
-    EXPECT_EQ(result->request.request_timeout_ms(), 5000);
     EXPECT_EQ(result->request.plan_digest(), plan_digest);
     EXPECT_GT(result->timeout_ms, 0);
     EXPECT_LE(result->timeout_ms, 500);
@@ -141,7 +139,8 @@ TEST_F(DecodeLoadHelperTest, LoadReturnsPlanDigestMismatchBeforeTransferDeadline
                                 static_cast<uint32_t>(server_->listenPort()),
                                 "test_plan_digest_mismatch",
                                 deadline_ms,
-                                deadline_ms, 5000, 5000,
+                                deadline_ms,
+                                5000,
                                 false,
                                 1);
     ASSERT_NE(result, nullptr);
@@ -162,7 +161,8 @@ TEST_F(DecodeLoadHelperTest, LoadRejectsSuccessfulResponseWithoutFirstToken) {
                                 static_cast<uint32_t>(server_->listenPort()),
                                 "test_missing_first_token",
                                 deadline_ms,
-                                deadline_ms, 5000, 5000);
+                                deadline_ms,
+                                5000);
 
     ASSERT_NE(result, nullptr);
     EXPECT_FALSE(waitDone(result));
@@ -182,7 +182,7 @@ TEST_F(DecodeLoadHelperTest, Load_ReturnNotNull_RequestFailed) {
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
 
     // 执行 load
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000, 5000);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000);
     ASSERT_NE(result, nullptr);
 
     // 等待完成
@@ -207,7 +207,7 @@ TEST_F(DecodeLoadHelperTest, Load_ReturnNotNull_Timeout) {
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
 
     // 执行 load
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000, 5000);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000);
     ASSERT_NE(result, nullptr);
 
     // 等待完成，应该会因为超时返回 false
@@ -272,7 +272,7 @@ TEST_F(DecodeLoadHelperTest, Load_ReturnNull_InvalidServerAddr) {
     uint32_t    prefill_port = 99999;  // 无效端口
 
     // 执行 load，应该返回 nullptr（因为无法连接）
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000, 5000);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000);
     // 注意：由于 RPCPool 的行为，可能返回非空但 waitDone 会失败
     // 这里主要测试接口调用不会崩溃
     if (result != nullptr) {
@@ -288,7 +288,7 @@ TEST_F(DecodeLoadHelperTest, Load_NormalizesRawIpv6ServerAddr) {
     std::string prefill_ip   = "::1";
     uint32_t    prefill_port = 65535;
 
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000, 5000);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result->server_addr, "[::1]:65535");
     result->cancel();
@@ -296,7 +296,7 @@ TEST_F(DecodeLoadHelperTest, Load_NormalizesRawIpv6ServerAddr) {
 
 TEST_F(DecodeLoadHelperTest, Load_ReturnNull_InvalidTargetPort) {
     const int64_t deadline_ms = currentTimeMs() + 100;
-    auto result = client_->load(1009, "::1", 0, "test_load_bad_port", deadline_ms, deadline_ms, 5000, 5000);
+    auto          result      = client_->load(1009, "::1", 0, "test_load_bad_port", deadline_ms, deadline_ms, 5000);
     ASSERT_NE(result, nullptr);
     EXPECT_TRUE(result->done());
     EXPECT_EQ(result->error_code, ErrorCode::INVALID_PARAMS);
@@ -313,7 +313,7 @@ TEST_F(DecodeLoadHelperTest, Load_ParsesLegacyStartLoadResponse) {
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
 
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000, 5000);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000);
     ASSERT_NE(result, nullptr);
 
     bool success = waitDone(result);
@@ -346,7 +346,7 @@ TEST_F(DecodeLoadHelperTest, Load_ReturnNotNull_RpcStatusFailed) {
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
 
     // 执行 load
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000, 5000);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000);
     ASSERT_NE(result, nullptr);
 
     // 等待完成
@@ -372,7 +372,7 @@ TEST_F(DecodeLoadHelperTest, CheckDone_NotDoneInitially) {
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
 
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000, 5000);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000);
     ASSERT_NE(result, nullptr);
 
     // 初始状态应该是 not done
@@ -395,7 +395,7 @@ TEST_F(DecodeLoadHelperTest, CheckDone_TotalCostTimeUs) {
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
 
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000, 5000);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000);
     ASSERT_NE(result, nullptr);
 
     waitDone(result);
@@ -424,7 +424,7 @@ TEST_F(DecodeLoadHelperTest, Cancel_BoundedByDrainDeadline_WhenServerSlow) {
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
 
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000, 5000);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000);
     ASSERT_NE(result, nullptr);
 
     // Give the request a moment to reach the (sleeping) server.
@@ -452,7 +452,7 @@ TEST_F(DecodeLoadHelperTest, Cancel_Idempotent) {
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
 
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000, 5000);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000);
     ASSERT_NE(result, nullptr);
 
     result->cancel();

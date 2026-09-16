@@ -68,7 +68,6 @@ public:
     }
     void setDeadlineMs(int64_t ms) {
         routing_ctx_.deadline_ms = ms;
-        routing_ctx_.request_timeout_ms = std::max<int64_t>(1, ms - currentTimeMs());
     }
     void setPrefillAddr(const std::string& ip, uint32_t port) {
         routing_ctx_.prefill_addr = {ip, port};

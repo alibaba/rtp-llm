@@ -138,38 +138,18 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         return;
     }
 
-    const std::string& unique_key           = request.unique_key();
-    const int64_t      now_ms = currentTimeMs();
-    const int64_t      request_deadline_ms =
-        stream_store_->requestDeadline(unique_key, request.request_timeout_ms());
-    int64_t transfer_deadline_ms = request.timeout_ms() > 0
-        && request.timeout_ms() <= std::numeric_limits<int32_t>::max()
-        ? std::min(request_deadline_ms, now_ms + request.timeout_ms()) : 0;
-    if (unique_key.empty()) {
+    const std::string& unique_key = request.unique_key();
+    const int64_t      now_ms     = currentTimeMs();
+    if (unique_key.empty() || request.timeout_ms() <= 0 || request.timeout_ms() > std::numeric_limits<int32_t>::max()) {
+        stream_store_->markTerminal(unique_key, 0);
+        stream_store_->clearPrefillPayload(unique_key);
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
-        response.set_error_message("invalid StartLoad unique_key");
+        response.set_error_message("invalid StartLoad unique_key or load timeout");
         return;
     }
-    if (request_deadline_ms <= 0 || request_deadline_ms == std::numeric_limits<int64_t>::max()
-        || transfer_deadline_ms <= 0 || transfer_deadline_ms > request_deadline_ms) {
-        if (!unique_key.empty() && request_deadline_ms > 0) {
-            stream_store_->markTerminal(unique_key, request_deadline_ms);
-            stream_store_->clearPrefillPayload(unique_key);
-        }
-        response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
-        response.set_error_message("invalid StartLoad deadlines");
-        return;
-    }
-    if (now_ms >= transfer_deadline_ms) {
-        if (!unique_key.empty()) {
-            stream_store_->markTerminal(unique_key, request_deadline_ms);
-            stream_store_->clearPrefillPayload(unique_key);
-        }
-        response.set_error_code(transErrorCodeToRPC(ErrorCode::GENERATE_TIMEOUT));
-        response.set_error_message("transfer deadline expired before handleRead");
-        return;
-    }
-    auto handle_read_start_us = currentTimeUs();
+    // Registration wait consumes this same load budget; never restart it after registration.
+    int64_t    transfer_deadline_ms = now_ms + request.timeout_ms();
+    const auto handle_read_start_us = currentTimeUs();
 
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     for (const auto& worker : request.workers()) {
@@ -182,12 +162,27 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
             RTP_LLM_LOG_WARNING("handleRead rejected StartLoad, unique_key=%s, error=%s",
                                 unique_key.c_str(),
                                 plan_error.ToString().c_str());
-            stream_store_->markTerminal(unique_key, request_deadline_ms);
+            stream_store_->markTerminal(unique_key, 0);
             stream_store_->clearPrefillPayload(unique_key);
             response.set_error_code(transErrorCodeToRPC(plan_error.code()));
             response.set_error_message(plan_error.ToString());
             return;
         }
+    }
+
+    const int64_t request_deadline_ms =
+        stream_store_->waitForRequestDeadline(unique_key, transfer_deadline_ms, is_cancelled);
+    const bool cancelled = is_cancelled && is_cancelled();
+    if (request_deadline_ms > 0) {
+        transfer_deadline_ms = std::min(transfer_deadline_ms, request_deadline_ms);
+    }
+    if (cancelled || request_deadline_ms <= 0 || currentTimeMs() >= transfer_deadline_ms) {
+        stream_store_->markTerminal(unique_key, 0);
+        stream_store_->clearPrefillPayload(unique_key);
+        response.set_error_code(transErrorCodeToRPC(cancelled ? ErrorCode::CANCELLED : ErrorCode::GENERATE_TIMEOUT));
+        response.set_error_message(cancelled ? "request registration wait cancelled" :
+                                               "request registration or load deadline expired");
+        return;
     }
 
     RTP_LLM_LOG_DEBUG("[PD-DIAG] handleRead start, unique_key=%s, deadline_ms=%ld, timestamp_us=%ld",

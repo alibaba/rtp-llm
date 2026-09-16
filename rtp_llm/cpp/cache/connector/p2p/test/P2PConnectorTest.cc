@@ -139,7 +139,6 @@ protected:
         P2PConnectorStartLoadRequestPB request;
         request.set_unique_key(unique_key);
         request.set_timeout_ms(deadline_ms - currentTimeMs());
-        request.set_request_timeout_ms(std::max<int64_t>(1, deadline_ms - currentTimeMs()));
 
         for (int i = 0; i < num_workers; ++i) {
             auto* worker = request.add_workers();
@@ -169,6 +168,8 @@ protected:
         input->generate_config = config;
         input->input_ids       = torch::zeros({1}, torch::kInt32);
         input->begin_time_us   = currentTimeUs();  // Set begin_time_us to current time
+        // Mirror Prefill GenerateStream registration before resources are published.
+        input->request_deadline_ms = connector_->streamStore()->requestDeadline(unique_key, timeout_ms);
 
         return std::make_shared<MockGenerateStream>(input);
     }
@@ -249,6 +250,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnGenerateTimeout_WhenWaitResourceEntryT
     // 3. 使用有效的相对预算，让资源等待实际超时。
     auto request = createValidStartLoadRequest("test_wait_timeout", currentTimeMs() + 5000);
     request.set_timeout_ms(20);
+    connector_->streamStore()->requestDeadline(request.unique_key(), 5000);
 
     P2PConnectorStartLoadResponsePB response;
     connector_->handleRead(request, response);
@@ -256,9 +258,130 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnGenerateTimeout_WhenWaitResourceEntryT
     EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::GENERATE_TIMEOUT));
 }
 
+TEST_F(P2PConnectorTest, StartLoadWaitsForGenerateStreamRegistration) {
+    const std::string key     = "start-load-before-generate";
+    auto              request = createValidStartLoadRequest(key, currentTimeMs() + 5000);
+    request.set_no_transfer(true);
+    std::promise<void> waiting;
+    auto               started = waiting.get_future();
+    std::atomic<bool>  signalled{false};
+    auto               result = std::async(std::launch::async, [&] {
+        P2PConnectorStartLoadResponsePB response;
+        connector_->handleRead(request, response, [&] {
+            if (!signalled.exchange(true)) {
+                waiting.set_value();
+            }
+            return false;
+        });
+        return response;
+    });
+    ASSERT_EQ(started.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_EQ(result.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    auto stream = createGenerateStream(key, 5020, 5000);
+    ASSERT_NE(connector_->asyncRead(createValidKVCacheResource(), createMockMeta(stream.get()), 0, 0), nullptr);
+    P2PConnectorResourceEntry::SideChannelData data;
+    data.has_first_token = true;
+    data.first_token_id  = 42;
+    connector_->streamStore()->publishPrefillPayload(key, stream->deadlineMs(), std::move(data));
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    const auto response = result.get();
+    EXPECT_EQ(response.error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_EQ(response.payload().first_generate_token_id(), 42);
+}
+
+TEST_F(P2PConnectorTest, StartLoadRegistrationWaitExpiresWithoutCreatingRequestDeadline) {
+    auto request = createValidStartLoadRequest("missing-registration", currentTimeMs() + 5000);
+    request.set_timeout_ms(20);
+    P2PConnectorStartLoadResponsePB response;
+    connector_->handleRead(request, response);
+    EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::GENERATE_TIMEOUT));
+    EXPECT_NE(response.error_message().find("registration"), std::string::npos);
+    EXPECT_EQ(connector_->streamStore()->waitForRequestDeadline(request.unique_key(), currentTimeMs()), 0);
+    for (const auto& server : tp_broadcast_servers_) {
+        EXPECT_EQ(server->service()->getBroadcastTpCallCount(), 0);
+    }
+}
+
+TEST_F(P2PConnectorTest, StartLoadRegistrationWaitObservesRpcCancellation) {
+    auto               request = createValidStartLoadRequest("cancel-registration", currentTimeMs() + 5000);
+    std::promise<void> waiting;
+    auto               started = waiting.get_future();
+    std::atomic<bool>  signalled{false};
+    std::atomic<bool>  cancelled{false};
+    auto               result = std::async(std::launch::async, [&] {
+        P2PConnectorStartLoadResponsePB response;
+        connector_->handleRead(request, response, [&] {
+            if (!signalled.exchange(true)) {
+                waiting.set_value();
+            }
+            return cancelled.load();
+        });
+        return response;
+    });
+    ASSERT_EQ(started.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    cancelled = true;
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_EQ(result.get().error_code(), transErrorCodeToRPC(ErrorCode::CANCELLED));
+    EXPECT_EQ(connector_->streamStore()->waitForRequestDeadline(request.unique_key(), currentTimeMs()), 0);
+}
+
+TEST_F(P2PConnectorTest, StartLoadDoesNotRestartLoadBudgetAfterRegistrationWait) {
+    const std::string key    = "registration-load-budget";
+    auto              stream = createGenerateStream(key, 5022, 5000);
+    ASSERT_NE(connector_->asyncRead(createValidKVCacheResource(), createMockMeta(stream.get()), 0, 0), nullptr);
+    P2PConnectorResourceEntry::SideChannelData data;
+    data.has_first_token = true;
+    data.first_token_id  = 42;
+    connector_->streamStore()->publishPrefillPayload(key, stream->deadlineMs(), std::move(data));
+    auto request = createValidStartLoadRequest(key, currentTimeMs() + 5000);
+    request.set_timeout_ms(20);
+    request.set_no_transfer(true);
+    std::promise<void> waiting;
+    auto               started = waiting.get_future();
+    std::promise<void> release;
+    auto               gate = release.get_future().share();
+    std::atomic<bool>  signalled{false};
+    auto               result = std::async(std::launch::async, [&] {
+        P2PConnectorStartLoadResponsePB response;
+        connector_->handleRead(request, response, [&] {
+            if (!signalled.exchange(true)) {
+                waiting.set_value();
+                gate.wait();
+            }
+            return false;
+        });
+        return response;
+    });
+    // Hold the registration wait across its load deadline, then allow it to observe registration.
+    // Always release before a fatal assertion so async teardown cannot block on the gate.
+    EXPECT_EQ(started.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_EQ(result.wait_for(std::chrono::milliseconds(40)), std::future_status::timeout);
+    release.set_value();
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    const auto response = result.get();
+    EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::GENERATE_TIMEOUT));
+    EXPECT_NE(response.error_message().find("registration or load deadline expired"), std::string::npos);
+    EXPECT_TRUE(connector_->streamStore()->isMarkedCancelled(key));
+    for (const auto& server : tp_broadcast_servers_) {
+        EXPECT_EQ(server->service()->getBroadcastTpCallCount(), 0);
+    }
+}
+
+TEST_F(P2PConnectorTest, StartLoadUsesRegisteredRequestDeadlineWithoutRenewingIt) {
+    auto       request  = createValidStartLoadRequest("short-request-deadline", currentTimeMs() + 5000);
+    const auto deadline = connector_->streamStore()->requestDeadline(request.unique_key(), 30);
+    auto       result   = std::async(std::launch::async, [&] {
+        P2PConnectorStartLoadResponsePB response;
+        connector_->handleRead(request, response);
+        return response;
+    });
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_EQ(result.get().error_code(), transErrorCodeToRPC(ErrorCode::GENERATE_TIMEOUT));
+    EXPECT_EQ(connector_->streamStore()->requestDeadline(request.unique_key(), 5000), deadline);
+}
+
 TEST_F(P2PConnectorTest, HandleReadRejectsNonPositiveTransferTimeout) {
     auto request = createValidStartLoadRequest("test_expired_transfer", currentTimeMs() - 100);
-    request.set_request_timeout_ms(5000);
 
     P2PConnectorStartLoadResponsePB response;
     connector_->handleRead(request, response);
@@ -280,6 +403,7 @@ TEST_F(P2PConnectorTest, HandleReadRejectsEmptyUniqueKeyWithoutWaiting) {
 
 TEST_F(P2PConnectorTest, HandleReadRejectsPlanDigestMismatchBeforeResourceWait) {
     auto request = createValidStartLoadRequest("plan-digest-mismatch", currentTimeMs() + 5000, 2);
+    connector_->streamStore()->requestDeadline(request.unique_key(), 5000);
     const auto prefill_digest = request.plan_digest();
     request.set_plan_digest(prefill_digest ^ (uint64_t{1} << 63));
 
@@ -332,7 +456,7 @@ TEST_F(P2PConnectorTest, HandleReadAcceptsMatchingPlanDigestBeforeResourceWait) 
 
     EXPECT_TRUE(resource_wait_reached);
     EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::CANCELLED));
-    EXPECT_NE(response.error_message().find("waitForResourceEntry"), std::string::npos);
+    EXPECT_NE(response.error_message().find("registration wait cancelled"), std::string::npos);
 }
 
 TEST_F(P2PConnectorTest, HandleReadRejectsTailKeyPlanMismatchBeforeResourceWait) {
@@ -684,7 +808,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithPublishedPrefillPayload) {
     data.propose_probs    = torch::tensor({0.25f, 0.75f});
     data.propose_hidden   = torch::tensor({1.0f, 2.0f});
 
-    connector_->streamStore()->publishPrefillPayload(unique_key, deadline_ms, std::move(data));
+    connector_->streamStore()->publishPrefillPayload(unique_key, stream->deadlineMs(), std::move(data));
 
     // 4. 创建 request 并调用 handleRead
     //    使用 num_workers = 1 简化测试
@@ -720,7 +844,7 @@ TEST_F(P2PConnectorTest, HandleRead_HoldsRank0RequestResourceUntilAllRanksReturn
     P2PConnectorResourceEntry::SideChannelData data;
     data.has_first_token = true;
     data.first_token_id  = 12345;
-    connector_->streamStore()->publishPrefillPayload(unique_key, deadline_ms, std::move(data));
+    connector_->streamStore()->publishPrefillPayload(unique_key, stream->deadlineMs(), std::move(data));
 
     tp_broadcast_servers_[0]->service()->setSleepMillis(0);
     tp_broadcast_servers_[1]->service()->setSleepMillis(300);
@@ -770,7 +894,6 @@ TEST_F(P2PConnectorTest, HandleRead_TimeoutReleasesPrefillResourceAfterCancelBro
     }
 
     auto request = createValidStartLoadRequest(unique_key, deadline_ms, 1);
-    request.set_request_timeout_ms(5000);
     auto handle_read_future = std::async(std::launch::async, [&]() {
         P2PConnectorStartLoadResponsePB response;
         connector_->handleRead(request, response);
@@ -815,7 +938,7 @@ TEST_F(P2PConnectorTest, HandleRead_NoTransferSkipsDataTransferAndReturnsSideCha
     P2PConnectorResourceEntry::SideChannelData data;
     data.has_first_token = true;
     data.first_token_id  = 34567;
-    connector_->streamStore()->publishPrefillPayload(unique_key, deadline_ms, std::move(data));
+    connector_->streamStore()->publishPrefillPayload(unique_key, stream->deadlineMs(), std::move(data));
 
     for (auto& server : tp_broadcast_servers_) {
         server->service()->resetCallCounts();
@@ -878,7 +1001,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WhenPrefillPayloadPublishedAfterSte
     data.total_reuse_len  = 12;
     data.local_reuse_len  = 4;
     data.remote_reuse_len = 8;
-    connector_->streamStore()->publishPrefillPayload(unique_key, deadline_ms, std::move(data));
+    connector_->streamStore()->publishPrefillPayload(unique_key, stream->deadlineMs(), std::move(data));
 
     auto status = handle_read_future.wait_for(std::chrono::seconds(2));
     ASSERT_EQ(status, std::future_status::ready);
@@ -908,7 +1031,7 @@ TEST_F(P2PConnectorTest, HandleRead_PreservesZeroFirstToken) {
     P2PConnectorResourceEntry::SideChannelData data;
     data.has_first_token = true;
     data.first_token_id  = 0;
-    connector_->streamStore()->publishPrefillPayload(unique_key, deadline_ms, std::move(data));
+    connector_->streamStore()->publishPrefillPayload(unique_key, stream->deadlineMs(), std::move(data));
 
     auto request = createValidStartLoadRequest(unique_key, deadline_ms, 1);
 

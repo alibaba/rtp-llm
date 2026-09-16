@@ -2,6 +2,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <future>
 #include <memory>
 #include <limits>
 #include <thread>
@@ -629,6 +630,58 @@ TEST(P2PRequestTimeoutTest, FirstArrivalWinsAndTerminalCannotRenew) {
     store.markTerminal("relative-timeout", deadline);
     EXPECT_EQ(store.requestDeadline("relative-timeout", 60000), deadline);
     EXPECT_TRUE(store.isMarkedCancelled("relative-timeout"));
+}
+
+TEST(P2PRequestTimeoutTest, RegistrationWaitReadsExistingDeadline) {
+    P2PConnectorResourceStore store(nullptr, 10);
+    const auto                deadline = store.requestDeadline("registered", 5000);
+    EXPECT_EQ(store.waitForRequestDeadline("registered", currentTimeMs() + 1000), deadline);
+    EXPECT_EQ(store.waitForRequestDeadline("registered", currentTimeMs() + 1000, [] { return true; }), 0);
+    store.markTerminal("registered", deadline);
+    EXPECT_EQ(store.waitForRequestDeadline("registered", currentTimeMs() + 1000), 0);
+}
+
+TEST(P2PRequestTimeoutTest, RegistrationWaitRequiresMatchingGenerateStream) {
+    P2PConnectorResourceStore store(nullptr, 10);
+    store.requestDeadline("other-key", 5000);
+    std::promise<void> waiting;
+    auto               started = waiting.get_future();
+    std::atomic<bool>  signalled{false};
+    auto               result = std::async(std::launch::async, [&] {
+        return store.waitForRequestDeadline("matching-key", currentTimeMs() + 5000, [&] {
+            if (!signalled.exchange(true)) {
+                waiting.set_value();
+            }
+            return false;
+        });
+    });
+    ASSERT_EQ(started.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_EQ(result.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    const auto deadline = store.requestDeadline("matching-key", 1000);
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_EQ(result.get(), deadline);
+}
+
+TEST(P2PRequestTimeoutTest, RegistrationWaitDoesNotCreateOrRenewDeadline) {
+    P2PConnectorResourceStore store(nullptr, 10);
+    const auto                load_deadline = currentTimeMs() + 20;
+    EXPECT_EQ(store.waitForRequestDeadline("not-registered", load_deadline), 0);
+    EXPECT_GE(currentTimeMs(), load_deadline);
+    EXPECT_EQ(store.waitForRequestDeadline("cancelled", currentTimeMs() + 5000, [] { return true; }), 0);
+    const auto before_registration = currentTimeMs();
+    const auto deadline            = store.requestDeadline("not-registered", 5000);
+    EXPECT_GE(deadline, before_registration + 5000);
+    EXPECT_EQ(store.waitForRequestDeadline("not-registered", currentTimeMs() + 1000), deadline);
+    EXPECT_EQ(store.requestDeadline("not-registered", 60000), deadline);
+}
+
+TEST_F(P2PConnectorResourceStoreTest, ResourcePublicationDoesNotReplaceGenerateStreamRegistration) {
+    const auto deadline = currentTimeMs() + 5000;
+    ASSERT_TRUE(
+        stream_store_->addResource(createMockMeta("resource-only", 5021, deadline), createMockKVCacheResource()));
+    EXPECT_EQ(stream_store_->waitForRequestDeadline("resource-only", currentTimeMs() + 20), 0);
+    const auto registered = stream_store_->requestDeadline("resource-only", 5000);
+    EXPECT_EQ(stream_store_->waitForRequestDeadline("resource-only", currentTimeMs() + 1000), registered);
 }
 
 TEST(P2PRequestTimeoutTest, InvalidDurationsDoNotCreateRequest) {

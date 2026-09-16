@@ -704,13 +704,15 @@ message LeaseStatusResponsePB {
 message P2PConnectorStartLoadRequestPB {
     string unique_key = 1;
     repeated TPWorkerInfoPB workers = 2;
+    // Load budget includes waiting for GenerateStream request registration on Prefill.
     int64 timeout_ms = 3;
     // Decode already has all matched KV blocks locally. Prefill should still
     // complete the StartLoad lifecycle and return side-channel data, but must
     // not dispatch a data transfer.
     bool no_transfer = 4;
-    // Configured durations, without subtracting time already spent on Decode.
-    int64 request_timeout_ms = 5;
+    // Request timeout is carried only by GenerateStream.
+    reserved 5;
+    reserved "request_timeout_ms";
     // Digest of the Decode-side transfer plan. Prefill computes its mirror
     // plan before resource wait and rejects a mismatch immediately.
     uint64 plan_digest = 6;

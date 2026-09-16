@@ -55,8 +55,14 @@ public:
 public:
     bool init();
 
-    // First arrival establishes the local deadline; later messages cannot renew it.
+    // GenerateStream registers the local request deadline; duplicates cannot renew it.
     int64_t requestDeadline(const std::string& unique_key, int64_t timeout_ms);
+
+    // Wait for GenerateStream registration without creating request state.
+    // Returns zero when the load wait expires, is cancelled, or the request is terminal.
+    int64_t waitForRequestDeadline(const std::string&    unique_key,
+                                   int64_t               load_deadline_ms,
+                                   std::function<bool()> is_cancelled = nullptr);
 
 public:
     // addResource from Meta (extracts routing from Meta::p2pRouting())
@@ -108,6 +114,7 @@ private:
         int64_t request_deadline_ms;
         int64_t load_deadline_ms = 0;
         int64_t retain_until_ms = 0;
+        bool request_registered = false;
         bool consumed = false;
         bool terminal = false;
         std::optional<P2PConnectorResourceEntry::SideChannelData> side_channel_data;

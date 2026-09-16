@@ -81,8 +81,35 @@ int64_t P2PConnectorResourceStore::requestDeadline(const std::string& unique_key
         // Match the existing default cancelled-key retention window.
         it->second.retain_until_ms = now + timeout_ms + 3600 * 1000;
     }
+    it->second.request_registered = true;
     scheduleDeadlineCheckLocked();
+    resource_cv_.notify_all();
     return it->second.request_deadline_ms;
+}
+
+int64_t P2PConnectorResourceStore::waitForRequestDeadline(const std::string&    unique_key,
+                                                          int64_t               load_deadline_ms,
+                                                          std::function<bool()> is_cancelled) {
+    if (unique_key.empty() || !validDeadline(load_deadline_ms)) {
+        return 0;
+    }
+    std::unique_lock<std::mutex> lock(resource_map_mutex_);
+    const bool                   ready = waitWithBackoff(
+        lock,
+        resource_cv_,
+        std::chrono::system_clock::time_point(std::chrono::milliseconds(load_deadline_ms)),
+        [&]() {
+            const auto it = request_states_.find(unique_key);
+            return stopping_ || (it != request_states_.end() && (it->second.request_registered || it->second.terminal));
+        },
+        is_cancelled);
+    if (!ready || stopping_ || (is_cancelled && is_cancelled()) || currentTimeMs() >= load_deadline_ms) {
+        return 0;
+    }
+    const auto it = request_states_.find(unique_key);
+    return it != request_states_.end() && it->second.request_registered && !it->second.terminal ?
+               it->second.request_deadline_ms :
+               0;
 }
 
 void P2PConnectorResourceStore::setOnRequestReleased(std::function<void(int64_t, int64_t)> callback) {
