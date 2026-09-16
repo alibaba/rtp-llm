@@ -348,6 +348,10 @@ public:
         return steal_task_count_.load(std::memory_order_relaxed);
     }
 
+    int recvCallCount() const {
+        return recv_call_count_.load(std::memory_order_relaxed);
+    }
+
     int taskCount() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return static_cast<int>(tasks_.size());
@@ -715,6 +719,51 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_ReadyEmptyLayersRejectsRequiredTransf
     EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
     EXPECT_NE(result.ToString().find("route requires an empty layer buffer"), std::string::npos);
     EXPECT_TRUE(mock_sender_->getTransferCalls().empty());
+    EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr);
+}
+
+TEST_F(P2PConnectorWorkerTest, SendKVCache_InvalidLayerPublicationWakesWaitAndPreservesError) {
+    const int64_t     request_id  = 2013;
+    const std::string unique_key  = "invalid-layer-during-send";
+    const int64_t     deadline_ms = currentTimeMs() + 10000;
+    auto invalid_resource = createKVCacheResource(1, 2);
+    invalid_resource->mutableBlockIdsForLayer(1, "group1").assign({0, -1});
+
+    mock_sender_->setAsyncCallback(false);
+    mock_sender_->setCallbackDelayMs(0);
+    mock_sender_->setBlockSend(true);
+    addComputedBuffer(request_id, 0, deadline_ms);
+    auto computed = computed_buffers_->getBuffer(request_id);
+    ASSERT_NE(computed, nullptr);
+
+    auto sending = std::async(std::launch::async, [&] {
+        return prefill_->sendKVCache(
+            request_id, unique_key, deadline_ms, makeRoutePlan({{"127.0.0.1", 12345}}), deadline_ms);
+    });
+    // Release the blocked sender and cancel the read before destroying the
+    // future, including when a fatal assertion ends the test early.
+    auto cleanup = std::shared_ptr<void>(nullptr, [this, request_id, unique_key, deadline_ms](void*) {
+        mock_sender_->setBlockSend(false);
+        prefill_->cancelRequest(request_id, unique_key, deadline_ms, deadline_ms);
+    });
+    ASSERT_TRUE(mock_sender_->waitForTransferCallCount(1, std::chrono::seconds(2)));
+    ASSERT_EQ(mock_sender_->getTransferCalls().front().layer_id, 0);
+    EXPECT_EQ(sending.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+
+    // Layer 0 has an unfinished send and layer 1 is still missing. A failed
+    // publication must end the request without waiting for either or the deadline.
+    EXPECT_FALSE(prefill_->writeByLayerTag(1, "group1", invalid_resource, request_id, nullptr, deadline_ms));
+    const auto publication_error = computed->error();
+    ASSERT_EQ(publication_error.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
+    EXPECT_NE(publication_error.ToString().find("layer=1 tag=group1"), std::string::npos);
+    EXPECT_NE(publication_error.ToString().find("cache_key=1001 block_id=-1"), std::string::npos);
+
+    ASSERT_EQ(sending.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    const auto result = sending.get();
+    EXPECT_EQ(result.code(), publication_error.code());
+    EXPECT_EQ(result.ToString(), publication_error.ToString());
+    EXPECT_LT(currentTimeMs(), deadline_ms);
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 1);
     EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr);
 }
 
@@ -1412,6 +1461,29 @@ TEST_F(P2PConnectorWorkerTest, CancelRead_ReturnTrue_DuringRecvRegistrationWindo
     EXPECT_TRUE(done);
     EXPECT_TRUE(result.hasError());
     EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED);
+}
+
+TEST_F(P2PConnectorWorkerTest, Read_InvalidLaterRouteRegistersNoReceiveTasks) {
+    auto valid   = createLayerCacheBuffer(0, 2);
+    auto invalid = std::make_shared<LayerCacheBuffer>(1, "group1");
+    invalid->addBlockId(1000, 0);
+    invalid->addBlockId(1001, -1);
+    const auto plan = makeReadPlan({valid, invalid});
+    ASSERT_EQ(plan.routes.size(), 2u);
+
+    const auto result = decode_->read(3009, "invalid-later-route", currentTimeMs() + 5000, plan);
+
+    EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+    EXPECT_NE(result.ToString().find("route=1 layer=1 tag=group1"), std::string::npos);
+    EXPECT_NE(result.ToString().find("cache_key=1001 block_id=-1"), std::string::npos);
+    // A zero final task count alone would also pass if an earlier task were
+    // registered and rolled back. Verify no receiver call happened at all.
+    EXPECT_EQ(mock_receiver_->recvCallCount(), 0);
+    EXPECT_EQ(mock_receiver_->stealTaskCount(), 0);
+    EXPECT_EQ(mock_receiver_->taskCount(), 0);
+    EXPECT_TRUE(decode_->lease_map_.empty());
+    EXPECT_TRUE(decode_->read_tasks_.empty());
+    EXPECT_TRUE(decode_->building_read_keys_.empty());
 }
 
 TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_BuildRecvTasksFailure_RollsBackRegisteredTasks) {
