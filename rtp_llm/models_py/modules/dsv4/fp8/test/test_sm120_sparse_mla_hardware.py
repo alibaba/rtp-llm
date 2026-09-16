@@ -234,6 +234,102 @@ class Sm120SparseMlaHardwareTest(unittest.TestCase):
     def test_hca_prefill_eager_and_cuda_graph(self) -> None:
         self._assert_prefill_variant("hca")
 
+    def test_decode_128_page_adapter_eager_and_graph(self) -> None:
+        # Production PD cache geometry is 256/128.  The pinned FlashInfer
+        # native small-token decode kernel requires 64-entry footer pages.
+        # Exercise the explicit byte-preserving adapter through the REAL op,
+        # including target-verify rows (8 requests x gamma+1 = 32 rows).
+        import os
+        from rtp_llm.models_py.modules.dsv4.fp8.test.test_pack_slots_to_paged import (
+            _pack_slots_to_paged_torch,
+        )
+        rows, heads, dim, width = 32, 64, 512, 128
+        scale = dim ** -0.5
+        source = torch.randn(256, dim, dtype=torch.bfloat16, device=self.device)
+        cache = self._packed_cache(source, block_size=128)
+        values, _ = self._gather_dequantized(cache, [list(range(256))])
+        values = values.squeeze(0).float()
+        # Independent torch footer reconstruction of the entire source pool.
+        # Slot IDs are unchanged; only the storage page grouping is different.
+        control_cache, _ = _pack_slots_to_paged_torch(
+            cache, torch.arange(256, device=self.device), 64
+        )
+        query = torch.randn(8, 4, heads, dim, dtype=torch.bfloat16, device=self.device)
+        sink = torch.linspace(-0.2, 0.3, heads, device=self.device)
+        slots = (torch.arange(rows * width, device=self.device).reshape(rows, width) * 7 % 256).int()
+        lens = (torch.arange(rows, device=self.device) * 11 % width).int()
+        slots[:, 3] = -1  # canonicalization must not discard valid later slots
+        op = SparseAttnV4DecodeFp8Op(heads, dim, scale)
+
+        for extra_page in (None, 32, 1):
+            with self.subTest(extra_page=extra_page):
+                extra_cache = extra_slots = extra_lens = extra_values = None
+                if extra_page is not None:
+                    source2 = torch.randn(256, dim, dtype=torch.bfloat16, device=self.device)
+                    extra_cache = self._packed_cache(source2, block_size=extra_page)
+                    extra_values, _ = self._gather_dequantized(extra_cache, [list(range(256))])
+                    extra_values = extra_values.squeeze(0).float()
+                    extra_slots = (slots + 13) % 256
+                    extra_lens = (lens // 3).contiguous()
+
+                control_extra = None
+                if extra_cache is not None:
+                    control_extra, _ = _pack_slots_to_paged_torch(
+                        extra_cache, torch.arange(256, device=self.device),
+                        2 if extra_page <= 2 else 64,
+                    )
+
+                def forward(control=False):
+                    return op.forward(
+                        query, control_cache if control else cache, sink, slots.reshape(8, 4, width),
+                        sched_meta=None, topk_length=lens,
+                        extra_k_cache=control_extra if control else extra_cache,
+                        extra_topk_idxs=None if extra_slots is None else extra_slots.reshape(8, 4, width),
+                        extra_topk_length=extra_lens,
+                    )
+
+                def reference():
+                    q = query.reshape(rows, heads, dim).float()
+                    selected = values[slots.clamp_min(0).long()]
+                    valid = (torch.arange(width, device=self.device)[None] < lens[:, None]) & (slots >= 0)
+                    if extra_values is not None:
+                        selected = torch.cat((selected, extra_values[extra_slots.long()]), dim=1)
+                        ev = torch.arange(width, device=self.device)[None] < extra_lens[:, None]
+                        valid = torch.cat((valid, ev), dim=1)
+                    logits = torch.einsum("rhd,rkd->rhk", q, selected) * scale
+                    logits.masked_fill_(~valid[:, None], -torch.inf)
+                    logits = torch.cat((logits, sink.view(1, heads, 1).expand(rows, -1, -1)), dim=-1)
+                    probs = torch.softmax(logits, dim=-1)[..., :-1]
+                    return torch.einsum("rhk,rkd->rhd", probs, selected).view_as(query).to(query.dtype)
+
+                with patch.dict(os.environ, {"DSV4_SM120_PACK_DECODE_SLOTS": "0"}):
+                    control = forward(control=True)
+                    control_graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(control_graph):
+                        captured_control = forward(control=True)
+                with patch.dict(os.environ, {"DSV4_SM120_PACK_DECODE_SLOTS": "1"}):
+                    actual = forward()
+                    # This is an adapter-equivalence gate, not a new native
+                    # kernel accuracy envelope. Both arms run the SAME native
+                    # kernel on byte-identical KV values in legal footer pages.
+                    self.assertTrue(torch.equal(actual, control))
+                    self.assertTrue(torch.isfinite(actual).all().item())
+                    error = (actual.float() - reference().float()).abs().max().item()
+                    print(f"native oracle diagnostic (not quality acceptance): page={extra_page} max_abs={error}")
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        captured = forward()
+                    query.copy_(torch.randn_like(query))
+                    lens.copy_((lens + 19) % width)
+                    if extra_lens is not None:
+                        extra_lens.copy_((extra_lens + 7) % width)
+                    control_graph.replay()
+                    graph.replay()
+                    torch.cuda.synchronize(self.device)
+                    self.assertTrue(torch.equal(captured, captured_control))
+                    self.assertTrue(torch.isfinite(captured).all().item())
+
+
     def test_large_decode_window_uses_graph_safe_generic_fallback(self) -> None:
         width, heads, dim = 1152, 8, 512
         scale = dim**-0.5
