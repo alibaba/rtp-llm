@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from functools import reduce
 from operator import mul
 from typing import TYPE_CHECKING
@@ -290,15 +290,24 @@ class MegaMoeFrontAdapter:
         tokens = reduce(mul, (int(value) for value in residual.shape[:-2]), 1)
         if input_ids is None:
             return False
-        if not input_ids.is_contiguous() or int(input_ids.numel()) != tokens:
+        if int(input_ids.numel()) != tokens:
             return False
-        if self.gate.hash and input_ids.dtype != torch.int32:
-            return False
+        if self.gate.hash:
+            if (
+                not input_ids.is_cuda
+                or input_ids.device != residual.device
+                or input_ids.dtype != torch.int32
+                or not input_ids.is_contiguous()
+            ):
+                return False
         mega_capacity = int(self.executor._mega_buf.num_max_tokens_per_rank)
         return 0 <= tokens <= min(MEGA_MOE_FRONT_CAPACITY, mega_capacity)
 
     def forward(
-        self, residual: torch.Tensor, input_ids: torch.Tensor
+        self,
+        residual: torch.Tensor,
+        input_ids: torch.Tensor,
+        ffn_input_observer: Callable[[torch.Tensor], None] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         leading = tuple(int(value) for value in residual.shape[:-2])
         tokens = reduce(mul, leading, 1)
@@ -313,25 +322,39 @@ class MegaMoeFrontAdapter:
                 "DSV4 MoE-front residual shape mismatch: "
                 f"got {tuple(residual.shape)}, expected [...,{_HC_MULT},{self.dim}]"
             )
-        if not residual.is_contiguous() or not input_ids.is_contiguous():
+        if not residual.is_contiguous():
             raise RuntimeError(
-                "DSV4 MoE front requires contiguous residual and input_ids for "
-                "allocation-free CUDA graph capture"
+                "DSV4 MoE front requires a contiguous residual for allocation-free "
+                "CUDA graph capture"
             )
-        input_ids_flat = input_ids.view(-1)
-        if int(input_ids_flat.numel()) != tokens:
+        if int(input_ids.numel()) != tokens:
             raise RuntimeError(
-                f"DSV4 MoE-front input id count {input_ids_flat.numel()} != {tokens}"
+                f"DSV4 MoE-front input id count {input_ids.numel()} != {tokens}"
             )
+        input_ids_flat = None
+        if self.gate.hash:
+            if (
+                input_ids.device != residual.device
+                or input_ids.dtype != torch.int32
+                or not input_ids.is_contiguous()
+            ):
+                raise RuntimeError(
+                    "DSV4 hash MoE front requires contiguous int32 input_ids on "
+                    "the residual CUDA device"
+                )
+            input_ids_flat = input_ids.view(-1)
 
         if tokens == 0:
             # Empty EP/DP ranks skip the extension but must enter the same
             # DeepGEMM collective as ranks that have local tokens.
+            normalized = self.normalized[:0].view(*leading, self.dim)
+            if ffn_input_observer is not None:
+                ffn_input_observer(normalized)
             with record_function_range("dsv4.moe.routed_experts"):
                 y = self.executor.forward_prepacked(0, residual.device)
             return (
                 y.view(*leading, self.dim),
-                self.normalized[:0].view(*leading, self.dim),
+                normalized,
                 self.post[:0].view(*leading, _HC_MULT, 1),
                 self.comb[:0].view(*leading, _HC_MULT, _HC_MULT),
             )
@@ -344,10 +367,7 @@ class MegaMoeFrontAdapter:
             try:
                 if self.gate.hash:
                     assert self.tid2eid is not None
-                    if input_ids_flat.dtype != torch.int32:
-                        raise RuntimeError(
-                            "DSV4 hash MoE front requires production int32 input_ids"
-                        )
+                    assert input_ids_flat is not None
                     plan.run_hash_out(
                         self.hc_base,
                         self.hc_scale,
@@ -410,11 +430,14 @@ class MegaMoeFrontAdapter:
                 if temporary_plan:
                     plan.close()
 
+        normalized = self.normalized[:tokens].view(*leading, self.dim)
+        if ffn_input_observer is not None:
+            ffn_input_observer(normalized)
         with record_function_range("dsv4.moe.routed_experts"):
             y = self.executor.forward_prepacked(tokens, residual.device)
         return (
             y.view(*leading, self.dim),
-            self.normalized[:tokens].view(*leading, self.dim),
+            normalized,
             self.post[:tokens].view(*leading, _HC_MULT, 1),
             self.comb[:tokens].view(*leading, _HC_MULT, _HC_MULT),
         )

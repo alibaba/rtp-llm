@@ -214,14 +214,16 @@ class Block(nn.Module):
         )
         self._prefill_fast_hc_impls_cached = self._resolve_prefill_fast_hc_impls()
         self._moe_front_adapter = None
-        self._moe_front_required = False
         self._moe_front_fallback_logged = False
 
     def enable_moe_front(self, *, required: bool = False) -> None:
-        """Attach the standalone CUDA-extension front to MegaMoE-SE."""
+        """Attach the standalone CUDA-extension front to MegaMoE-SE.
 
-        self._moe_front_required = bool(required)
-        self._moe_front_fallback_logged = False
+        ``required`` makes attachment fail fast. Runtime inputs outside the
+        extension contract still use the ordinary MoE path.
+        """
+
+        Block.disable_moe_front(self)
         strategy_name = getattr(self.ffn, "strategy_name", "")
         if strategy_name != "mega_moe_se":
             if required:
@@ -274,7 +276,6 @@ class Block(nn.Module):
 
         adapter = self._moe_front_adapter
         self._moe_front_adapter = None
-        self._moe_front_required = False
         self._moe_front_fallback_logged = False
         if adapter is not None:
             adapter.close()
@@ -477,11 +478,6 @@ class Block(nn.Module):
             self._moe_front_adapter is not None
             and self._moe_front_adapter.supports(x, input_ids)
         )
-        if self._moe_front_required and not use_moe_front:
-            raise RuntimeError(
-                "DSV4_MEGA_MOE_FRONT is required, but the current decode input "
-                "does not satisfy the MoE-front tensor or capacity contract"
-            )
         if (
             self._moe_front_adapter is not None
             and not use_moe_front
@@ -495,7 +491,16 @@ class Block(nn.Module):
             )
             self._moe_front_fallback_logged = True
         if use_moe_front:
-            ffn_out, x_pre, post, comb = self._moe_front_adapter.forward(x, input_ids)
+            ffn_input_observer = None
+            if _dbg_layer:
+                ffn_input_observer = lambda value: _rt.record_if_level(
+                    2, f"L{self.layer_id:02d}_decode_ffn_in", value
+                )
+            ffn_out, x_pre, post, comb = self._moe_front_adapter.forward(
+                x,
+                input_ids,
+                ffn_input_observer=ffn_input_observer,
+            )
         else:
             x_pre, post, comb = self.ffn_hc.pre(
                 x,
@@ -510,8 +515,6 @@ class Block(nn.Module):
             if _dbg_layer:
                 _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
             ffn_out = self.ffn(x_pre, input_ids, is_decode_forward=True)
-        if _dbg_layer and use_moe_front:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
