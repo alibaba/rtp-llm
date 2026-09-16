@@ -221,9 +221,13 @@ class V4Transformer(nn.Module):
 
             mode = moe_front_mode()
             if mode != "off":
+                failed_layer_id = None
                 try:
                     for layer in self.layers:
                         layer.enable_moe_front(required=mode == "required")
+                        if mode == "auto" and layer._moe_front_adapter is None:
+                            failed_layer_id = int(layer.layer_id)
+                            break
                 except Exception:
                     for layer in self.layers:
                         try:
@@ -233,9 +237,12 @@ class V4Transformer(nn.Module):
                                 "Failed to clean up DSV4 MoE front after attach error"
                             )
                     raise
-                if not all(
-                    layer._moe_front_adapter is not None for layer in self.layers
-                ):
+                if failed_layer_id is not None:
+                    logging.warning(
+                        "DSV4 MoE front auto mode is all-or-none; disabling it "
+                        "for every layer because layer %d could not attach",
+                        failed_layer_id,
+                    )
                     for layer in self.layers:
                         layer.disable_moe_front()
 
