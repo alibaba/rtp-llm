@@ -3,14 +3,17 @@ from types import SimpleNamespace
 from unittest import mock
 
 import torch
+import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv4.block import Block
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
+    MegaMoeSEExecutor,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.mega_front import (
     MEGA_MOE_FRONT_CAPACITY,
     MegaMoeFrontAdapter,
     _validate_extension_contract,
     moe_front_mode,
-    moe_front_requested,
 )
 
 
@@ -89,6 +92,80 @@ class _TensorContract:
         return True
 
 
+def _reference_prefix(adapter, residual, input_ids):
+    tokens = residual.shape[0]
+    flat = residual.view(tokens, -1).float()
+    inv_rms = torch.rsqrt(flat.square().mean(-1, keepdim=True) + 1.0e-6)
+    mix = F.linear(flat, adapter.hc_fn.float()) * inv_rms
+    pre = (
+        torch.sigmoid(mix[:, :4] * adapter.hc_scale[0] + adapter.hc_base[:4])
+        + adapter.ffn_hc.hc_eps
+    )
+    collapsed = torch.sum(pre.unsqueeze(-1) * residual.float(), dim=1).to(
+        torch.bfloat16
+    )
+    ssq = collapsed.float().square().sum(-1)
+    normalized = (
+        collapsed.float()
+        * torch.rsqrt(ssq[:, None] / adapter.dim + adapter.ffn_norm.variance_epsilon)
+        * adapter.ffn_norm_weight.float()
+    ).to(torch.bfloat16)
+
+    post = 2.0 * torch.sigmoid(mix[:, 4:8] * adapter.hc_scale[1] + adapter.hc_base[4:8])
+    comb = mix[:, 8:].view(tokens, 4, 4)
+    comb = torch.softmax(
+        comb * adapter.hc_scale[2] + adapter.hc_base[8:].view(4, 4), dim=-1
+    )
+    comb = comb + adapter.ffn_hc.hc_eps
+    comb = comb / (comb.sum(dim=-2, keepdim=True) + adapter.ffn_hc.hc_eps)
+    for _ in range(19):
+        comb = comb / (comb.sum(dim=-1, keepdim=True) + adapter.ffn_hc.hc_eps)
+        comb = comb / (comb.sum(dim=-2, keepdim=True) + adapter.ffn_hc.hc_eps)
+
+    logits = F.linear(normalized.float(), adapter.router_weight.float())
+    scores = F.softplus(logits).sqrt()
+    if adapter.gate.hash:
+        topk_ids = adapter.tid2eid[input_ids.view(-1)].to(torch.int64)
+    else:
+        topk_ids = (scores + adapter.correction_bias).topk(6, dim=-1).indices
+    selected = scores.gather(1, topk_ids)
+    topk_weights = selected / selected.sum(-1, keepdim=True) * adapter.gate.route_scale
+    return normalized, post, comb, topk_ids, topk_weights
+
+
+class _ReferencePlan(_FakePlan):
+    def __init__(self, adapter, residual, tokens: int) -> None:
+        super().__init__()
+        self.adapter = adapter
+        self.residual = residual
+        self.tokens = tokens
+
+    def _write_reference(self, input_ids, args, *, hash_mode: bool) -> None:
+        normalized, post, comb, topk_ids, topk_weights = _reference_prefix(
+            self.adapter, self.residual[: self.tokens], input_ids
+        )
+        if hash_mode:
+            normalized_out, topk_ids_out, topk_weights_out = args[9], args[14], args[15]
+            post_out, comb_out = args[16], args[17]
+        else:
+            normalized_out, topk_ids_out, topk_weights_out = args[8], args[12], args[13]
+            post_out, comb_out = args[14], args[15]
+        normalized_out[: self.tokens].copy_(normalized)
+        topk_ids_out[: self.tokens].copy_(topk_ids)
+        topk_weights_out[: self.tokens].copy_(topk_weights)
+        post_out[: self.tokens].copy_(post)
+        comb_out[: self.tokens].copy_(comb)
+
+    def run_learned_out(self, *args, **kwargs) -> None:
+        self.calls.append((args, kwargs))
+        input_ids = torch.zeros(self.tokens, dtype=torch.int64)
+        self._write_reference(input_ids, args, hash_mode=False)
+
+    def run_hash_out(self, *args, **kwargs) -> None:
+        self.calls.append((args, kwargs))
+        self._write_reference(args[4], args, hash_mode=True)
+
+
 def _fake_adapter(dim: int = 128) -> tuple[MegaMoeFrontAdapter, _FakePlan]:
     adapter = MegaMoeFrontAdapter.__new__(MegaMoeFrontAdapter)
     adapter.layer_id = 3
@@ -143,9 +220,7 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             Block.enable_moe_front(block)
 
         self.assertIs(block._moe_front_adapter, adapter)
-        adapter_cls.assert_called_once_with(
-            block.ffn, "hc", "norm"
-        )
+        adapter_cls.assert_called_once_with(block.ffn, "hc", "norm")
 
     def test_front_is_not_attached_to_non_mega_strategy(self) -> None:
         block = SimpleNamespace(
@@ -191,6 +266,24 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         self.assertIsNone(block._moe_front_adapter)
         adapter_cls.assert_not_called()
 
+    def test_auto_mode_falls_back_for_expected_adapter_validation_errors(self) -> None:
+        for error in (ImportError, AttributeError, TypeError, ValueError, RuntimeError):
+            block = SimpleNamespace(
+                ffn=SimpleNamespace(
+                    strategy_name="mega_moe_se",
+                    gate=SimpleNamespace(score_func="sqrtsoftplus"),
+                ),
+                ffn_hc="hc",
+                ffn_norm="norm",
+                _moe_front_adapter=None,
+            )
+            with self.subTest(error=error.__name__), mock.patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.mega_front.MegaMoeFrontAdapter",
+                side_effect=error("not available"),
+            ):
+                Block.enable_moe_front(block)
+            self.assertIsNone(block._moe_front_adapter)
+
     def test_required_front_rejects_unsupported_score_func(self) -> None:
         block = SimpleNamespace(
             ffn=SimpleNamespace(
@@ -206,30 +299,26 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
 
     def test_front_requires_explicit_valid_environment_value(self) -> None:
         with mock.patch.dict("os.environ", {}, clear=True):
-            self.assertFalse(moe_front_requested())
+            self.assertEqual(moe_front_mode(), "off")
         for value in ("1", "TRUE", "yes", "On", "auto"):
             with self.subTest(value=value), mock.patch.dict(
                 "os.environ", {"DSV4_MEGA_MOE_FRONT": value}, clear=True
             ):
-                self.assertTrue(moe_front_requested())
+                self.assertNotEqual(moe_front_mode(), "off")
         for value in ("0", "false", "NO", "off", ""):
             with self.subTest(value=value), mock.patch.dict(
                 "os.environ", {"DSV4_MEGA_MOE_FRONT": value}, clear=True
             ):
-                self.assertFalse(moe_front_requested())
-        with mock.patch.dict(
-            "os.environ", {"DSV4_MEGA_MOE_FRONT": "auto"}, clear=True
-        ):
+                self.assertEqual(moe_front_mode(), "off")
+        with mock.patch.dict("os.environ", {"DSV4_MEGA_MOE_FRONT": "auto"}, clear=True):
             self.assertEqual(moe_front_mode(), "auto")
-        with mock.patch.dict(
-            "os.environ", {"DSV4_MEGA_MOE_FRONT": "1"}, clear=True
-        ):
+        with mock.patch.dict("os.environ", {"DSV4_MEGA_MOE_FRONT": "1"}, clear=True):
             self.assertEqual(moe_front_mode(), "required")
         with mock.patch.dict(
             "os.environ", {"DSV4_MEGA_MOE_FRONT": "maybe"}, clear=True
         ):
             with self.assertRaisesRegex(RuntimeError, "DSV4_MEGA_MOE_FRONT"):
-                moe_front_requested()
+                moe_front_mode()
 
     def test_front_switch_is_independent_from_attention_switches(self) -> None:
         with mock.patch.dict(
@@ -241,7 +330,7 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             },
             clear=True,
         ):
-            self.assertTrue(moe_front_requested())
+            self.assertEqual(moe_front_mode(), "required")
 
         with mock.patch.dict(
             "os.environ",
@@ -252,7 +341,7 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             },
             clear=True,
         ):
-            self.assertFalse(moe_front_requested())
+            self.assertEqual(moe_front_mode(), "off")
 
     def test_plans_share_one_layer_workspace(self) -> None:
         adapter, _ = _fake_adapter()
@@ -290,21 +379,69 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         self.assertFalse(second_temporary)
         self.assertEqual(len(created), 2)
 
+        adapter.close()
+        self.assertEqual(adapter._graph_plans, {})
+        self.assertTrue(first.closed)
+        self.assertTrue(second.closed)
+
+    def test_disable_front_closes_plans(self) -> None:
+        adapter, plan = _fake_adapter()
+        adapter._graph_plans[(16, 1234)] = plan
+        block = SimpleNamespace(
+            _moe_front_adapter=adapter,
+            _moe_front_required=True,
+        )
+
+        Block.disable_moe_front(block)
+
+        self.assertIsNone(block._moe_front_adapter)
+        self.assertFalse(block._moe_front_required)
+        self.assertTrue(plan.closed)
+
     def test_front_support_is_bounded_by_extension_and_mega_buffer(self) -> None:
         adapter, _ = _fake_adapter()
 
         for tokens in (1, 128, 129, 256):
             with self.subTest(tokens=tokens):
                 self.assertTrue(
-                    adapter.supports(_TensorContract(tokens, 1, 4, adapter.dim))
+                    adapter.supports(
+                        _TensorContract(tokens, 1, 4, adapter.dim),
+                        torch.empty(tokens, dtype=torch.int64),
+                    )
                 )
-        self.assertFalse(adapter.supports(_TensorContract(257, 1, 4, adapter.dim)))
-        self.assertTrue(adapter.supports(_TensorContract(43, 3, 4, adapter.dim)))
-        self.assertFalse(adapter.supports(_TensorContract(43, 6, 4, adapter.dim)))
+        self.assertFalse(
+            adapter.supports(
+                _TensorContract(257, 1, 4, adapter.dim),
+                torch.empty(257, dtype=torch.int64),
+            )
+        )
+        self.assertTrue(
+            adapter.supports(
+                _TensorContract(43, 3, 4, adapter.dim),
+                torch.empty(129, dtype=torch.int64),
+            )
+        )
+        self.assertFalse(
+            adapter.supports(
+                _TensorContract(43, 6, 4, adapter.dim),
+                torch.empty(258, dtype=torch.int64),
+            )
+        )
+        self.assertFalse(adapter.supports(_TensorContract(16, 2, 4, adapter.dim)))
 
         adapter.executor._mega_buf.num_max_tokens_per_rank = 32
-        self.assertTrue(adapter.supports(_TensorContract(16, 2, 4, adapter.dim)))
-        self.assertFalse(adapter.supports(_TensorContract(17, 2, 4, adapter.dim)))
+        self.assertTrue(
+            adapter.supports(
+                _TensorContract(16, 2, 4, adapter.dim),
+                torch.empty(32, dtype=torch.int64),
+            )
+        )
+        self.assertFalse(
+            adapter.supports(
+                _TensorContract(17, 2, 4, adapter.dim),
+                torch.empty(34, dtype=torch.int64),
+            )
+        )
 
         adapter.gate.hash = True
         hash_residual = _TensorContract(16, 2, 4, adapter.dim)
@@ -344,9 +481,7 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         )
         with mock.patch("torch.cuda.get_device_capability", return_value=(10, 3)):
             self.assertEqual(
-                _validate_extension_contract(
-                    ops, 4096, 256, 6, torch.device("cuda:0")
-                ),
+                _validate_extension_contract(ops, 4096, 256, 6, torch.device("cuda:0")),
                 geometry,
             )
 
@@ -355,9 +490,7 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         )
         with mock.patch("torch.cuda.get_device_capability", return_value=(10, 3)):
             with self.assertRaisesRegex(RuntimeError, "geometry mismatch"):
-                _validate_extension_contract(
-                    ops, 4096, 256, 6, torch.device("cuda:0")
-                )
+                _validate_extension_contract(ops, 4096, 256, 6, torch.device("cuda:0"))
 
         for missing_field in ("scale_cols", "collapse_ssq_bits"):
             with self.subTest(missing_field=missing_field):
@@ -374,18 +507,14 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
 
         ops.geometry_moe_front = lambda _hidden: None
         with self.assertRaisesRegex(RuntimeError, "must be a mapping"):
-            _validate_extension_contract(
-                ops, 4096, 256, 6, torch.device("cuda:0")
-            )
+            _validate_extension_contract(ops, 4096, 256, 6, torch.device("cuda:0"))
 
         ops.geometry_moe_front = lambda _hidden: geometry
         for field in ("deepgemm_commit", "cutlass_commit"):
             with self.subTest(field=field):
                 invalid_build_info = dict(valid_build_info)
                 invalid_build_info.pop(field)
-                ops.build_info_moe_front = (
-                    lambda value=invalid_build_info: value
-                )
+                ops.build_info_moe_front = lambda value=invalid_build_info: value
                 with mock.patch(
                     "torch.cuda.get_device_capability", return_value=(10, 3)
                 ):
@@ -425,6 +554,90 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         self.assertEqual(tuple(args[13].shape), (2, 6))
         self.assertIs(kwargs["router_logits"], adapter.router_logits)
         self.assertTrue(plan.closed)
+
+    def test_learned_front_avoids_logits_buffer_above_low_m_specialization(
+        self,
+    ) -> None:
+        adapter, plan = _fake_adapter()
+        residual = torch.zeros((10, 1, 4, adapter.dim), dtype=torch.bfloat16)
+        input_ids = torch.arange(10, dtype=torch.int64).view(10, 1)
+
+        adapter.forward(residual, input_ids)
+
+        self.assertEqual(len(plan.calls), 1)
+        _, kwargs = plan.calls[0]
+        self.assertIsNone(kwargs["router_logits"])
+
+    def test_front_prefix_matches_unfused_reference_for_learned_and_hash(self) -> None:
+        torch.manual_seed(20260916)
+        tokens = 4
+        dim = 128
+        residual = torch.randn(tokens, 1, 4, dim).to(torch.bfloat16)
+
+        for hash_mode in (False, True):
+            with self.subTest(hash_mode=hash_mode):
+                adapter, _ = _fake_adapter(dim)
+                adapter.gate.hash = hash_mode
+                adapter.hc_fn.normal_(mean=0.0, std=0.02)
+                adapter.hc_base.normal_(mean=0.0, std=0.05)
+                adapter.hc_scale.copy_(torch.tensor([0.25, 0.5, 0.75]))
+                adapter.ffn_norm_weight.normal_(mean=1.0, std=0.02)
+                adapter.router_weight.normal_(mean=0.0, std=0.03)
+                adapter.correction_bias = torch.randn(256) * 0.01
+                input_ids = torch.tensor([[2], [7], [11], [19]], dtype=torch.int64)
+                if hash_mode:
+                    adapter.tid2eid = torch.randint(0, 256, (32, 6), dtype=torch.int32)
+                    adapter.correction_bias = None
+                    input_ids = input_ids.to(torch.int32)
+
+                created = []
+
+                def create_plan(hidden, hc_fn, plan_tokens, workspace):
+                    plan = _ReferencePlan(adapter, hidden, plan_tokens)
+                    created.append(plan)
+                    return plan
+
+                adapter._ops = SimpleNamespace(Dsv4MoeFrontPlan=create_plan)
+                expected = _reference_prefix(
+                    adapter, residual.view(tokens, 4, dim), input_ids
+                )
+
+                y, normalized, post, comb = adapter.forward(residual, input_ids)
+
+                torch.testing.assert_close(
+                    normalized.view(tokens, dim), expected[0], rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    post.view(tokens, 4), expected[1], rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    comb.view(tokens, 4, 4), expected[2], rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    adapter.executor._mega_buf.topk_idx[:tokens],
+                    expected[3],
+                    rtol=0,
+                    atol=0,
+                )
+                torch.testing.assert_close(
+                    adapter.executor._mega_buf.topk_weights[:tokens],
+                    expected[4],
+                    rtol=1.0e-6,
+                    atol=1.0e-6,
+                )
+
+                front_final = post.to(y.dtype) * y.unsqueeze(-2) + torch.matmul(
+                    comb.to(residual.dtype).transpose(-1, -2), residual
+                )
+                expected_post = expected[1].view(tokens, 1, 4, 1)
+                expected_comb = expected[2].view(tokens, 1, 4, 4)
+                ordinary_final = expected_post.to(y.dtype) * y.unsqueeze(
+                    -2
+                ) + torch.matmul(
+                    expected_comb.to(residual.dtype).transpose(-1, -2), residual
+                )
+                torch.testing.assert_close(front_final, ordinary_final)
+                self.assertTrue(created[0].closed)
 
     def test_hash_front_passes_int32_ids_to_four_kernel_plan(self) -> None:
         adapter, plan = _fake_adapter()
@@ -477,6 +690,8 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             ffn_norm=mock.Mock(side_effect=lambda value: value),
             ffn=ffn,
             _moe_front_adapter=adapter,
+            _moe_front_required=False,
+            _moe_front_fallback_logged=False,
         )
 
         with mock.patch(
@@ -519,6 +734,87 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         ffn_hc.pre.assert_called_once()
         ffn.assert_called_once()
 
+    def test_required_front_rejects_runtime_fallback(self) -> None:
+        dim = 8
+        residual = torch.ones((257, 1, 4, dim), dtype=torch.bfloat16)
+        input_ids = torch.arange(257, dtype=torch.int64).view(257, 1)
+        collapsed = residual.mean(dim=-2)
+        block = SimpleNamespace(
+            layer_id=3,
+            attn_hc=SimpleNamespace(
+                pre=mock.Mock(return_value=(collapsed, object(), object())),
+                post=mock.Mock(return_value=residual),
+            ),
+            attn_norm=mock.Mock(side_effect=lambda value: value),
+            attn=None,
+            ffn_hc=mock.Mock(),
+            ffn_norm=mock.Mock(),
+            ffn=mock.Mock(),
+            _moe_front_adapter=SimpleNamespace(supports=mock.Mock(return_value=False)),
+            _moe_front_required=True,
+        )
+
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4._record_tensor.should_record_layer",
+            return_value=False,
+        ), self.assertRaisesRegex(RuntimeError, "MoE-front tensor or capacity"):
+            Block.forward_decode(
+                block,
+                residual,
+                SimpleNamespace(),
+                input_ids,
+                attn_fn=lambda value: value,
+            )
+
+    def test_fallback_records_ffn_input_before_launch(self) -> None:
+        dim = 8
+        residual = torch.ones((2, 1, 4, dim), dtype=torch.bfloat16)
+        collapsed = residual.mean(dim=-2)
+        events = []
+
+        def run_ffn(value, input_ids, *, is_decode_forward):
+            events.append("ffn_launch")
+            return value
+
+        block = SimpleNamespace(
+            layer_id=3,
+            attn_hc=SimpleNamespace(
+                pre=mock.Mock(return_value=(collapsed, object(), object())),
+                post=mock.Mock(return_value=residual),
+            ),
+            attn_norm=mock.Mock(side_effect=lambda value: value),
+            attn=None,
+            ffn_hc=SimpleNamespace(
+                pre=mock.Mock(return_value=(collapsed, object(), object())),
+                post=mock.Mock(return_value=residual),
+            ),
+            ffn_norm=mock.Mock(side_effect=lambda value: value),
+            ffn=mock.Mock(side_effect=run_ffn),
+            _moe_front_adapter=None,
+            _moe_front_required=False,
+            _moe_front_fallback_logged=False,
+        )
+
+        def record(_level, name, _tensor):
+            events.append(name)
+
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4._record_tensor.should_record_layer",
+            return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4._record_tensor.record_if_level",
+            side_effect=record,
+        ):
+            Block.forward_decode(
+                block,
+                residual,
+                SimpleNamespace(),
+                torch.ones((2, 1), dtype=torch.int64),
+                attn_fn=lambda value: value,
+            )
+
+        self.assertLess(events.index("L03_decode_ffn_in"), events.index("ffn_launch"))
+
     def test_empty_rank_skips_front_and_enters_mega_collective(self) -> None:
         adapter, plan = _fake_adapter()
         residual = torch.empty((0, 1, 4, adapter.dim), dtype=torch.bfloat16)
@@ -532,6 +828,25 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         self.assertEqual(tuple(comb.shape), (0, 1, 4, 4))
         self.assertEqual(adapter.executor.launches[0][:2], ("launch", 0))
         self.assertEqual(plan.calls, [])
+
+    def test_real_prepacked_executor_entry_handles_nonempty_and_empty_ranks(
+        self,
+    ) -> None:
+        executor = MegaMoeSEExecutor.__new__(MegaMoeSEExecutor)
+        executor._mega_buf = SimpleNamespace(num_max_tokens_per_rank=8)
+        executor._mega_y = torch.arange(8 * 4, dtype=torch.bfloat16).view(8, 4)
+        executor._launch = mock.Mock()
+        device = torch.device("cpu")
+
+        nonempty = executor.forward_prepacked(3, device)
+        empty = executor.forward_prepacked(0, device)
+
+        self.assertEqual(tuple(nonempty.shape), (3, 4))
+        self.assertEqual(tuple(empty.shape), (0, 4))
+        self.assertEqual(
+            executor._launch.call_args_list,
+            [mock.call(nonempty, 3, device), mock.call(empty, 0, device)],
+        )
 
 
 if __name__ == "__main__":
