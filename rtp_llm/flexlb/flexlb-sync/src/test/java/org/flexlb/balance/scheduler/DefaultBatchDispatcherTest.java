@@ -98,6 +98,23 @@ class DefaultBatchDispatcherTest {
     }
 
     @Test
+    void dispatchReleasesBatchWhenTransportProvesRequestWasNotSent() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenReturn(CompletableFuture.failedFuture(new EngineGrpcClient.BatchNotSentException(
+                        io.grpc.Status.UNAVAILABLE.asRuntimeException())));
+
+        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test_reason", callback);
+
+        assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(1, callback.failureCount.get());
+        assertEquals(0, callback.uncertainCount.get());
+        assertEquals(0, callback.successCount.get());
+        verify(prefillEp, times(1)).releaseBatch(1L);
+    }
+
+    @Test
     void dispatchHandlesNullGrpcResponse() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
