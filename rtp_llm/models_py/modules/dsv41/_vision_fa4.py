@@ -33,7 +33,8 @@ def vision_fa4_status():
 
 
 def _enabled_or_supported(q, k, v):
-    # Smaller images favor cuDNN once the FA4 Python launch cost is included.
+    # Smaller images favor cuDNN once the FA4 Python launch cost is included;
+    # on SM100 FA4 also measured slower than cuDNN at every grid, so it stays (10, 3).
     return (
         os.environ.get("DSV41_VISION_FA4", "1") == "1"
         and not torch.is_grad_enabled()
@@ -43,7 +44,7 @@ def _enabled_or_supported(q, k, v):
         and q.stride() == k.stride() == (2048, 64, 1)
         and v.stride() == (3072, 64, 1)
         and q.device == k.device == v.device
-        and torch.cuda.get_device_capability(q.device)[0] == 10
+        and torch.cuda.get_device_capability(q.device) == (10, 3)
     )
 
 
