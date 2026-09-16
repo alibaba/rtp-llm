@@ -914,9 +914,19 @@ StreamState GenerateStream::moveToNext() {
         // Chunked context rounds must not take the decode-time KV growth path.
         if (old_status == StreamState::RUNNING && chunkedPrefillEnabled() && isContextStream()
             && !generate_status_->checkFinished()) {
-            return old_status;
+            state = old_status;
+        } else {
+            state = generate_status_->moveToNext();
         }
-        state                 = generate_status_->moveToNext();
+        if (state == StreamState::RUNNING && useChunkWindow() && !isFakeStream()) {
+            const auto prepared = stream_cache_resource_->incrKVBlock(
+                reuse_length_ + currentChunkLen(), reuse_length_);
+            if (!prepared.ok()) {
+                reportEventWithoutLock(StreamEvents::Error, ErrorCode::EXECUTION_EXCEPTION,
+                                       "chunk prefill state allocation failed: " + prepared.ToString());
+                state = getStatus();
+            }
+        }
         const auto new_status = getStatus();
 
         if ((old_status == StreamState::WAITING && new_status != StreamState::WAITING)

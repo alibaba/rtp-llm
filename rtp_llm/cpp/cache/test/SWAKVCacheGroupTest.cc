@@ -94,6 +94,51 @@ TEST_F(SWAKVCacheGroupTest, DefaultPolicyDrivesBehaviorInterfaces) {
     EXPECT_FALSE(group.memoryPlacement() == CacheMemoryPlacement::HOST_PINNED);
 }
 
+TEST_F(SWAKVCacheGroupTest, PrefillChunkBackfillsTailAndPreservesHistory) {
+    auto group = makeGroup(256);
+    BlockIds ids;
+    ASSERT_TRUE(group.malloc(ids, 32768, false));
+    ASSERT_EQ(ids.blocksNum(), 128);
+    EXPECT_EQ(validBlockCount(ids.blocks()), 2);
+    std::vector<size_t> filled;
+    ASSERT_TRUE(group.preparePrefillChunk(ids, 8192, &filled));
+    EXPECT_EQ(filled, (std::vector<size_t>{30, 31}));
+    const auto previous_tail = ids.blocks()[31];
+    group.releaseBeforePrefillChunk(ids, 0, false);
+    ASSERT_TRUE(group.preparePrefillChunk(ids, 16384, &filled));
+    EXPECT_EQ(filled, (std::vector<size_t>{62, 63}));
+    group.releaseBeforePrefillChunk(ids, 8192, false);
+    EXPECT_EQ(ids.blocks()[31], previous_tail);
+    ASSERT_TRUE(group.preparePrefillChunk(ids, 16384, &filled));
+    EXPECT_TRUE(filled.empty());
+    ASSERT_TRUE(group.preparePrefillChunk(ids, 24576, &filled));
+    group.releaseBeforePrefillChunk(ids, 16384, false);
+    EXPECT_TRUE(isNullBlockIdx(ids.blocks()[31]));
+    EXPECT_FALSE(isNullBlockIdx(ids.blocks()[63]));
+    EXPECT_FALSE(isNullBlockIdx(ids.blocks()[95]));
+    EXPECT_FALSE(isNullBlockIdx(ids.blocks()[127]));
+    EXPECT_EQ(validBlockCount(ids.blocks()), 6);
+    group.free(ids.blocks());
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
+}
+
+TEST_F(SWAKVCacheGroupTest, PrefillPartialTailAndRollbackPositions) {
+    auto group = makeGroup(256);
+    BlockIds ids;
+    ASSERT_TRUE(group.malloc(ids, 20000, false));
+    std::vector<size_t> filled;
+    ASSERT_TRUE(group.preparePrefillChunk(ids, 8192, &filled));
+    BlockIndicesType allocated;
+    for (const auto i : filled) allocated.push_back(ids.blocks()[i]);
+    group.free(allocated);
+    ids.remove(filled);
+    EXPECT_EQ(validBlockCount(ids.blocks()), 2);
+    ASSERT_TRUE(group.preparePrefillChunk(ids, 20000, &filled));
+    EXPECT_TRUE(filled.empty());
+    group.free(ids.blocks());
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
+}
+
 // ==================== needBlocksNum ====================
 
 TEST_F(SWAKVCacheGroupTest, NeedBlocksNum_Basic) {

@@ -88,6 +88,7 @@
     "include/sgl_kernel/utils.cuh": "6dcb47c69906cb32e1d014db21b459ff27e11408ad81449f6fdc5b86eac14582",
     "include/sgl_kernel/utils.h": "d0e4bf235e004b2cc61924b377f57e876ae6988bfadc61c6f0422306f4f17aac",
     "include/sgl_kernel/vec.cuh": "eba7c4cc8ca2e778fcaf37edb309682b46be3f99a3a4933abf848fad9ad1c880",
-    "include/sgl_kernel/warp.cuh": "3254a491733811043f923423ea7eefec2d2697311bb520a0553ef3cdb177db57"
+    "include/sgl_kernel/warp.cuh": "3254a491733811043f923423ea7eefec2d2697311bb520a0553ef3cdb177db57",
+    "compat/topk_prefill_bf16_checked.cuh": "679187d5776c5d0314514f0bd6f33870389d00e41446d0664c2fb5d4cb8adacf"
   }
 }

@@ -58,6 +58,10 @@ public:
                                bool                 enable_reuse_cache   = false,
                                int                  reserve_step         = 0,
                                std::vector<size_t>* backfilled_positions = nullptr) = 0;
+    // FULL/LINEAR resources retain their admission-time allocation. Sparse tail
+    // groups override these to backfill a chunk tail without changing table width.
+    virtual bool preparePrefillChunk(BlockIds&, int, std::vector<size_t>*) { return true; }
+    virtual void releaseBeforePrefillChunk(BlockIds&, int, bool) {}
     virtual MatchResult match(const CacheKeysType& cache_keys);
     virtual MatchResult matchPrefix(const CacheKeysType& cache_keys) const;
     virtual MatchResult matchSingleKey(CacheKeyType cache_key) const;

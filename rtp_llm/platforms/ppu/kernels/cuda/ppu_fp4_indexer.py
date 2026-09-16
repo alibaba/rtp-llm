@@ -27,16 +27,17 @@ def _module(kind, arch, parameter=0):
             f"FusedNormRopeKernel<fp32_t,128,64,{parameter},{pdl}>::forward_fp4",
         ),
         "topk": ("topk_prefill_bf16.cuh", "TopKPrefillBF16Kernel::transform"),
+        "topk_checked": ("topk_prefill_bf16_checked.cuh", "TopKPrefillBF16CheckedKernel::transform"),
         "topk_decode": ("topk_decode_v1.cuh", f"TopKKernel<{pdl}>::transform"),
     }
     filename, symbol = choices[kind]
     source = f"csrc/deepseek_v4/{filename}"
-    if kind in ("store", "topk", "compress_decode", "topk_decode"):
+    if kind in ("store", "topk", "topk_checked", "compress_decode", "topk_decode"):
         source = f"compat/{filename}"
     flags = []
     if kind in ("compress", "compress_decode"):
         flags += ["-use_fast_math"]
-    if kind in ("topk", "topk_decode"):
+    if kind in ("topk", "topk_checked", "topk_decode"):
         flags += [f"-DSGL_TOPK={parameter}"]
     return load_sglang_kernel(
         f"fp4_{kind}_{parameter}", source, symbol, arch, tuple(flags)
@@ -155,11 +156,10 @@ def topk_decode(scores, lengths, out):
 def topk_bf16(scores, starts, ends, out):
     if scores.dtype != torch.bfloat16 or scores.shape[1] >= 2**31:
         raise ValueError("BF16 TopK requires BF16 scores with fewer than 2**31 columns")
-    # Both frozen SG and this port fail in the PPU >16K two-pass kernel.
+    # A 1M prompt has 250K compressed candidates. The vendor two-pass
+    # implementation is not safe for these widths; use checked selection.
     if scores.shape[1] > 16384:
-        raise ValueError(
-            "PPU SG BF16 TopK above 16384 candidate columns is not qualified"
-        )
+        return _checked_bf16_topk(scores, starts, ends, out)
     if not scores.shape[0]:
         return out
     pages = _identity_page(scores.device).expand(scores.shape[0], 1)
@@ -167,3 +167,19 @@ def topk_bf16(scores, starts, ends, out):
         "topk", torch.cuda.get_device_capability(scores.device), out.shape[1]
     ).forward(scores, starts, ends, pages, out, 2**31, None)
     return out
+
+
+def _checked_bf16_topk(scores, starts, ends, out):
+    """Native stream selection with exact per-row radix retries."""
+    from rtp_llm.platforms.ppu.kernels.ppu_bf16_radix_topk import bf16_radix_topk
+
+    if scores.shape[1] > 262144 or out.shape[1] not in (512, 1024):
+        raise ValueError("Wide BF16 TopK supports at most 262144 columns and K=512/1024")
+    if out.stride(0) != out.shape[1] or not scores.shape[0]:
+        return bf16_radix_topk(scores, starts, ends, out)
+    fallback = torch.empty(scores.shape[0], dtype=torch.int32, device=scores.device)
+    pages = _identity_page(scores.device).expand(scores.shape[0], 1)
+    _module("topk_checked", torch.cuda.get_device_capability(scores.device), out.shape[1]).forward(
+        scores, starts, ends, pages, out, fallback
+    )
+    return bf16_radix_topk(scores, starts, ends, out, rows_to_compute=fallback)

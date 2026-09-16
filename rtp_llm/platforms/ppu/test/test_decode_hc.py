@@ -13,6 +13,36 @@ from rtp_llm.platforms.ppu.models.dsv4.manifest import DECODE_EXECUTION_OPTIONS
     "requires a PPU M890P",
 )
 class DecodeHCTest(unittest.TestCase):
+    def test_prenorm_against_fp32_reference(self):
+        from rtp_llm.platforms.ppu.models.dsv4.ppu_hc_prenorm import (
+            tf32_hc_prenorm_gemm,
+        )
+
+        torch.manual_seed(921)
+        old_tf32 = torch.backends.cuda.matmul.allow_tf32
+        torch.backends.cuda.matmul.allow_tf32 = False
+        try:
+            # Cover decode, partial tiles, and the two prefill launch regimes.
+            for rows in (1, 65, 257, 4096, 8192):
+                with self.subTest(rows=rows):
+                    x = torch.randn(rows, 16384, device="cuda", dtype=torch.bfloat16)
+                    weight = torch.randn(24, 16384, device="cuda") * 0.01
+                    out = torch.empty(1, rows, 24, device="cuda")
+                    squares = torch.empty(1, rows, device="cuda")
+                    tf32_hc_prenorm_gemm(x, weight, out, squares)
+                    reference = x.float() @ weight.t()
+                    square_reference = x.float().square().sum(dim=1)
+                    self.assertTrue(bool(out.isfinite().all()))
+                    self.assertLess(
+                        float((out[0] - reference).norm() / reference.norm()), 0.002
+                    )
+                    self.assertLess(
+                        float((squares[0] - square_reference).norm()
+                              / square_reference.norm()), 1e-5
+                    )
+        finally:
+            torch.backends.cuda.matmul.allow_tf32 = old_tf32
+
     def unit(self, *, zero=False, reduction="torch"):
         torch.manual_seed(890409)
         fn = torch.randn((24, 16384), device="cuda", dtype=torch.float32) / 128

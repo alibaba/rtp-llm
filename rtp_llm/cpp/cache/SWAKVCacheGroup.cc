@@ -138,6 +138,58 @@ MatchResult SWAKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     return result;
 }
 
+bool SWAKVCacheGroup::preparePrefillChunk(BlockIds& block_ids, int chunk_end,
+                                          std::vector<size_t>* backfilled_positions) {
+    backfilled_positions->clear();
+    const int slots = needBlocksNum(chunk_end, 0);
+    RTP_LLM_CHECK_WITH_INFO(slots > 0 && slots <= static_cast<int>(block_ids.blocksNum()),
+                            "chunk end exceeds admitted state table: end=%d slots=%d size=%zu",
+                            chunk_end, slots, block_ids.blocksNum());
+    std::vector<size_t> missing;
+    for (int i = std::max(0, slots - activeTailBlockCount()); i < slots; ++i) {
+        if (isNullBlockIdx(block_ids.blocks()[i])) {
+            missing.push_back(static_cast<size_t>(i));
+        }
+    }
+    if (missing.empty()) {
+        return true;
+    }
+    if (freeBlocksNum() < missing.size() && !ensureFreeBlocks(missing.size())) {
+        return false;
+    }
+    auto allocated = block_pool_->malloc(missing.size());
+    if (allocated.size() != missing.size()) {
+        if (!allocated.empty()) block_pool_->requestFree(allocated);
+        return false;
+    }
+    for (size_t i = 0; i < missing.size(); ++i) {
+        block_ids.setAt(missing[i], allocated[i]);
+    }
+    *backfilled_positions = std::move(missing);
+    return true;
+}
+
+void SWAKVCacheGroup::releaseBeforePrefillChunk(BlockIds& block_ids, int chunk_start,
+                                                bool enable_reuse_cache) {
+    // Retain the prior chunk's tail until this chunk has consumed it. Admission
+    // also owns the final prompt tail; do not prune future slots here.
+    const int first_needed = std::max(0, needBlocksNum(chunk_start, 0) - activeTailBlockCount());
+    const bool reuse = effectiveReuseCacheForAllocation(enable_reuse_cache);
+    const int step = std::max(1, linear_step_);
+    BlockIndicesType released;
+    std::vector<size_t> positions;
+    for (int i = 0; i < first_needed; ++i) {
+        const auto block = block_ids.blocks()[i];
+        if (isNullBlockIdx(block) || (reuse && (i + 1) % step == 0)) continue;
+        released.push_back(block);
+        positions.push_back(static_cast<size_t>(i));
+    }
+    if (!released.empty()) {
+        block_pool_->requestFree(released);
+        block_ids.remove(positions);
+    }
+}
+
 bool SWAKVCacheGroup::malloc(BlockIds&            block_ids,
                              int                  seq_len,
                              bool                 enable_reuse_cache,

@@ -105,6 +105,32 @@ py_test(
 )
 
 py_test(
+    name = "fp4_indexer_chunk_state_test",
+    srcs = ["ppu/test/test_fp4_indexer_chunk_state.py"],
+    main = "ppu/test/test_fp4_indexer_chunk_state.py",
+    data = [":platform_sources", ":ppu_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    tags = ["gpu", "manual", "ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "bf16_radix_topk_test",
+    srcs = ["ppu/test/test_bf16_radix_topk.py"],
+    main = "ppu/test/test_bf16_radix_topk.py",
+    data = [":platform_sources", ":ppu_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    tags = ["gpu", "manual", "ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
     name = "mtp_queries_test",
     srcs = ["ppu/models/dsv4/test/test_ppu_mtp_queries.py"],
     main = "ppu/models/dsv4/test/test_ppu_mtp_queries.py",

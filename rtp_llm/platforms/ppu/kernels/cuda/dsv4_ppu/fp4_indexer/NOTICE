@@ -28,3 +28,6 @@ the FP32 Decode TopK. Selection and tie handling remain unchanged.
 compat/c4_decode_v2.cuh skips negative state-write slots used by RTP graph
 padding. compat/fused_norm_rope_v2.cuh also skips negative output slots.
 Valid rows retain the original arithmetic and cache layout.
+
+compat/topk_prefill_bf16_checked.cuh adds synchronization and validates wide
+selection counters, with RTP radix fallback for unsupported rows or tie overflow.

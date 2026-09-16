@@ -20,17 +20,20 @@ gemm_t::run(d, sqr_sum, m, a, b, stream, num_sms, smem_size);
 
 
 def launch_geometry(m: int, k: int, n: int) -> dict:
-    """Match the frozen PPU DeepGEMM TF32 HC launch policy, not its atomics."""
+    """Match the M890P device kernel's fixed 64-row, 64-column load tile."""
     if m <= 0 or k != 16384 or n != 24:
         raise ValueError(
             "deterministic PPU HC requires M>0, K=16384, N=24 (DSV4 Flash)"
         )
-    block_k = 128 if m <= 256 else 64
+    # The fused_890p implementation uses a 64x64 AIU load and two
+    # 4096-element BF16 stages. The generic template accepts larger tiles,
+    # but BLOCK_M=128 reads beyond a stage and BLOCK_K=128 skips half of K.
+    block_k = 64
     splits = 64 if m <= 256 else (32 if m <= 512 or m >= 8192 else 16)
     return {
         "N": n,
         "K": k,
-        "BLOCK_M": 64 if m <= 256 or (m <= 4096 and k <= 8192) else 128,
+        "BLOCK_M": 64,
         "BLOCK_N": min(((n + 7) // 8) * 8, 32),
         "BLOCK_K": block_k,
         "NUM_SPLITS": max(1, min(splits, k // block_k)),
