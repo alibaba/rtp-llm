@@ -38,6 +38,7 @@ from rtp_llm.model_loader.weight_memory_saver import (
     feature_weights_region,
     suppress_weights_region,
 )
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
@@ -63,6 +64,10 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_padded_local_kv_lens,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_merge import merge_lse_output
+from rtp_llm.models_py.modules.dsv4.fp8._wo_a_sm90 import (
+    prepare_wo_a_grouped,
+    wo_a_grouped_gemm,
+)
 from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_shard import (
     build_swa_cp_local_indices,
     prefer_raw_q_merge_attention_conservative,
@@ -431,10 +436,17 @@ def _prepare_wo_a_stacked(
 def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
     """Backwards-compat bridge over ``_v4_fp8_linear`` for callers that
     still pass a flat dict + keys.  Mutates ``weights[scale_key]`` to the
-    packed form so subsequent callers don't repack."""
+    packed form so subsequent callers don't repack.
+
+    The write-back is deliberately confined to the SM100 packed layout.
+    The SM90 form is a *per-weight* relabel (its shape is derived from that
+    weight's N and K), and callers such as ``_fp8_w_s`` branch their TP
+    slicing on the scale dtype (``//512`` when packed, ``//128`` when raw),
+    so caching a relabelled fp32 scale under the raw key would silently
+    mis-slice. Recomputing the fp32 cast is a few microseconds at init."""
     w = weights[weight_key]
     s = weights[scale_key]
-    if s.dtype == torch.float8_e8m0fnu:
+    if s.dtype == torch.float8_e8m0fnu and is_deep_gemm_e8m0_used():
         s = _repack_v4_fp8_scale_to_int32(s)
         weights[scale_key] = s
     return _v4_fp8_linear(w, s)
@@ -990,7 +1002,8 @@ class AttentionFP8(nn.Module):
         # wo_a grouped projection: row-split along (n_groups*o_lora_rank).
         # Stored as plain ``[N, K]`` fp8 weight + UE8M0 scale tensors;
         # the ``fp8_einsum`` production path uses the pre-stacked
-        # ``_wo_a_stk_w`` / ``_wo_a_stk_s`` buffers below, the BF16
+        # ``_wo_a_stk_w`` / ``_wo_a_stk_s`` buffers below (SM100), the SM90
+        # per-group GEMM path the ``_wo_a_grp_*`` pair, and the BF16
         # fallback path inline-dequants from these via
         # ``_fp8_dequant_to_fp32``.
         wo_a_w = layer_weights[W.v4_attn_wo_a_w]
@@ -1014,11 +1027,26 @@ class AttentionFP8(nn.Module):
         self._sleep_wo_a_s_src = wo_a_raw_s
         self._sleep_wo_a_row_slice = wo_a_row_slice if tp_size > 1 else None
         K_local = n_heads_local * head_dim // n_groups_local
-        _stk_w, _stk_s = _prepare_wo_a_stacked(
-            wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
-        )
-        self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
-        self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
+        if is_deep_gemm_e8m0_used():
+            _stk_w, _stk_s = _prepare_wo_a_stacked(
+                wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
+            )
+            self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
+            self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
+        else:
+            # SM90: no ``fp8_einsum`` kernel exists, so wo_a runs as one
+            # ``fp8_gemm_nt`` per group over the native 128x128 block scale
+            # (see ``_wo_a_sm90``).  Registering different buffer names is
+            # deliberate: ``_collect_dsv4_batched_fp8_einsum_shapes`` keys
+            # its JIT prewarm off ``_wo_a_stk_w``/``_wo_a_stk_s``, so their
+            # absence makes the einsum prewarm a no-op instead of
+            # compiling a kernel this path never launches.
+            with feature_weights_region():
+                _grp_w, _grp_s = prepare_wo_a_grouped(
+                    wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
+                )
+            self.register_buffer("_wo_a_grp_w", _grp_w, persistent=False)
+            self.register_buffer("_wo_a_grp_s", _grp_s, persistent=False)
 
         # wo_b row-split along K (cols), all_reduce after forward
         self.wo_b = _fp8_w_s(
@@ -1233,11 +1261,13 @@ class AttentionFP8(nn.Module):
             if row_slice is not None or col_slice is not None:
                 w = w.contiguous()
                 s = s.contiguous()
-            rebuilt = (
-                _repack_v4_fp8_scale_to_int32(s)
-                if s.dtype == torch.float8_e8m0fnu
-                else s
-            )
+            rebuilt = s
+            if s.dtype == torch.float8_e8m0fnu:
+                rebuilt = (
+                    _repack_v4_fp8_scale_to_int32(s)
+                    if is_deep_gemm_e8m0_used()
+                    else s.float()
+                )
             if resident_w is not None:
                 if w.shape != resident_w.shape:
                     raise RuntimeError(
@@ -1274,6 +1304,11 @@ class AttentionFP8(nn.Module):
         row_slice = getattr(self, "_sleep_wo_a_row_slice", None)
         stk_w = getattr(self, "_wo_a_stk_w", None)
         stk_s = getattr(self, "_wo_a_stk_s", None)
+        prepare_wo_a = _prepare_wo_a_stacked
+        if stk_w is None:
+            stk_w = getattr(self, "_wo_a_grp_w", None)
+            stk_s = getattr(self, "_wo_a_grp_s", None)
+            prepare_wo_a = prepare_wo_a_grouped
         if src_w is not None and src_s is not None and stk_w is not None:
             with suppress_weights_region():
                 if row_slice is not None:
@@ -1285,7 +1320,7 @@ class AttentionFP8(nn.Module):
                     )
                     src_w = src_w.contiguous()
                     src_s = src_s.contiguous()
-                rebuilt_w, rebuilt_s = _prepare_wo_a_stacked(
+                rebuilt_w, rebuilt_s = prepare_wo_a(
                     src_w,
                     src_s,
                     self.n_groups,
@@ -2161,9 +2196,19 @@ class AttentionFP8(nn.Module):
         [M, G, K/512])`` in the exact layout ``deep_gemm.fp8_einsum``
         consumes, so the wo_a projection is a single einsum launch.
         Matches vLLM ``deepseek_v4_attention.py:325`` (same
-        ``"bhr,hdr->bhd"`` + recipe ``(1, 1, 128)`` for SM100 UE8M0)."""
+        ``"bhr,hdr->bhd"`` + recipe ``(1, 1, 128)`` for SM100 UE8M0).
+
+        ``fp8_einsum`` is Blackwell-only, so on SM90 this dispatches to the
+        per-group GEMM form in ``_wo_a_sm90`` instead — same math, same
+        ``[M, G, R]`` output, validated to 0.17% rel_l2 against an fp32
+        reference (``dsv4_fp8/probe_wo_a_sm90.py``)."""
         M, G, _K = o_fp8.shape
         R = self.o_lora_rank
+        if not is_deep_gemm_e8m0_used():
+            out = wo_a_grouped_gemm(
+                o_fp8, o_scale, self._wo_a_grp_w, self._wo_a_grp_s
+            )
+            return out.view(B, S, G, R)
         out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o_fp8.device)
         deep_gemm.fp8_einsum(
             "bhr,hdr->bhd",

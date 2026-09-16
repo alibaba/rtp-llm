@@ -13,31 +13,34 @@ softmax merging across both pools (mirrors vLLM
 pools -> BF16 cat -> TileLang sparse_attn" path which was
 bandwidth-bound on the dequant kernels.
 
-FlashMLA wheel is required (CUDA >= 12.9). The op asserts wheel
-availability at forward — there is no slow Python reference fallback
-because all dev/CI/prod boxes carry flash_mla.
+FlashMLA wheel is required. The op asserts wheel availability at forward —
+there is no slow Python reference fallback because all dev/CI/prod boxes
+carry flash_mla.
+
+Availability is decided by whether the import succeeds, not by
+``torch.version.cuda``. The wheel is built against CUDA >= 12.9, but that
+is a property of the *wheel*, not of the torch the wheel is loaded into:
+the H20 DSV4 env runs torch 2.8.0+cu128 against a vendored flash_mla on
+PYTHONPATH, which exports both entry points and loads its sm_90a cubin
+fine. Gating on the runtime CUDA minor version turned that
+into "flash_mla wheel is required for FP8 sparse decode" at the first
+decode step, after prefill had already succeeded. If a genuinely
+incompatible wheel is ever present the import itself raises, which is
+what the except clause below is for.
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Optional
 
 import torch
 
-_FLASH_MLA_AVAILABLE = False
-try:
-    if torch.version.cuda:
-        major, minor = map(int, torch.version.cuda.split(".")[:2])
-        if (major, minor) >= (12, 9):
-            from flash_mla import (
-                flash_mla_with_kvcache,  # type: ignore[import-not-found]
-            )
-            from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
+from rtp_llm.models_py.modules.dsv4._flash_mla_probe import flash_mla_available
 
-            _FLASH_MLA_AVAILABLE = True
-except (ImportError, AttributeError, ValueError) as e:
-    logging.warning("[dsv4-fp8] flash_mla wheel unavailable (%s)", e)
+# Availability comes from the shared probe: this file and its sibling each carried a
+# copy of the same two imports, the same except tuple and the same reasoning, so
+# widening that tuple had to be done twice.
+_FLASH_MLA_AVAILABLE = flash_mla_available()
 
 
 class SparseAttnV4DecodeFp8Op:

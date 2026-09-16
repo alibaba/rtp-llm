@@ -14,6 +14,12 @@ filegroup(
 )
 
 py_test(
+    name = "torch_patch_test",
+    srcs = ["torch_patch_test.py"],
+    deps = ["//rtp_llm:package_init"],
+)
+
+py_test(
     name = "jit_cache_manager_test",
     srcs = [
         "jit_cache_manager_test.py",

@@ -124,7 +124,12 @@ class SleepComputedWeightsTest(unittest.TestCase):
 
         raw_w = torch.zeros((128, 512), device="cuda", dtype=torch.float8_e4m3fn)
         raw_s = torch.full((1, 4), 2.0, device="cuda").to(torch.float8_e8m0fnu)
-        with mock.patch.object(LinearFactory, "create_linear_from_weights", create):
+        with mock.patch.object(
+            LinearFactory, "create_linear_from_weights", create
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.utils.is_deep_gemm_e8m0_used",
+            return_value=True,
+        ):
             with model_build_scope("draft"):
                 linear = model_fp8_linear(raw_w, raw_s)
         self.assertEqual(linear.weight_scales.dtype, torch.int32)
@@ -132,9 +137,71 @@ class SleepComputedWeightsTest(unittest.TestCase):
         ptr = linear.weight_scales.data_ptr()
         for _ in range(2):
             linear.weight_scales.zero_()
-            AttentionFP8._reload_linear_scale(linear)
+            with mock.patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.attention.is_deep_gemm_e8m0_used",
+                return_value=True,
+            ):
+                AttentionFP8._reload_linear_scale(linear)
             torch.testing.assert_close(linear.weight_scales, expected, rtol=0, atol=0)
             self.assertEqual(ptr, linear.weight_scales.data_ptr())
+
+    def test_sm90_mtp_linear_retains_raw_sources_before_relabelling(self):
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda import (
+            fp8_deepgemm_linear,
+        )
+
+        def create(weights, weight_key, scale_key, **kwargs):
+            # Exercise the constructor's real shape contract while keeping
+            # resident storage separate from the checkpoint source on CPU.
+            return fp8_deepgemm_linear.CudaFp8DeepGEMMLinear(
+                weights[weight_key].clone(), weights[scale_key].clone(), **kwargs
+            )
+
+        raw_w = (torch.arange(256 * 512).reshape(256, 512) % 16).to(
+            torch.float8_e4m3fn
+        )
+        raw_s = torch.exp2(torch.arange(8).reshape(2, 4).float() - 4).to(
+            torch.float8_e8m0fnu
+        )
+        with mock.patch.object(
+            LinearFactory, "create_linear_from_weights", create
+        ), mock.patch.object(
+            fp8_deepgemm_linear, "has_deep_gemm", return_value=True
+        ), mock.patch.object(
+            fp8_deepgemm_linear, "is_deep_gemm_e8m0_used", return_value=False
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.utils.is_deep_gemm_e8m0_used",
+            return_value=False,
+        ):
+            with model_build_scope("draft"):
+                linear = model_fp8_linear(raw_w, raw_s)
+
+        self.assertIs(linear._sleep_raw_weight_source, raw_w)
+        self.assertIs(linear._sleep_raw_scale_source, raw_s)
+        self.assertEqual(linear.weight.shape, raw_w.shape)
+        self.assertEqual(linear.weight_scales.shape, raw_s.shape)
+        self.assertEqual(linear.weight_scales.dtype, torch.float32)
+        self.assertFalse(linear.scale_ue8m0)
+        self.assertEqual(linear._sleep_model_scope, "draft")
+        self.assertIn(linear, iter_fp8_linears())
+        ptrs = linear.weight.data_ptr(), linear.weight_scales.data_ptr()
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.attention.is_deep_gemm_e8m0_used",
+            return_value=False,
+        ):
+            for _ in range(2):
+                linear.weight.view(torch.uint8).zero_()
+                linear.weight_scales.zero_()
+                AttentionFP8._reload_linear_scale(linear)
+                torch.testing.assert_close(
+                    linear.weight.float(), raw_w.float(), rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    linear.weight_scales, raw_s.float(), rtol=0, atol=0
+                )
+                self.assertEqual(
+                    ptrs, (linear.weight.data_ptr(), linear.weight_scales.data_ptr())
+                )
 
     def test_model_level_mtp_linears_are_scoped_and_restore_in_place(self):
         # e_proj/h_proj are constructed by the same factory, but do not belong
@@ -237,6 +304,104 @@ class SleepComputedWeightsTest(unittest.TestCase):
             self.assertEqual(
                 ptrs, (linear.weight.data_ptr(), linear.weight_scales.data_ptr())
             )
+
+    def test_sm90_tp_linear_rebuilds_fp32_scale_with_block_slices(self):
+        raw_w = (torch.arange(512 * 1024).reshape(512, 1024) % 16).to(
+            torch.float8_e4m3fn
+        )
+        raw_s = torch.exp2(torch.arange(32).reshape(4, 8).float() % 8 - 4).to(
+            torch.float8_e8m0fnu
+        )
+        for rows, cols in (
+            (slice(128, 384), None),
+            (None, slice(512, 1024)),
+            (slice(128, 384), slice(512, 1024)),
+        ):
+            with self.subTest(rows=rows, cols=cols):
+                row_blocks = (
+                    slice(rows.start // 128, rows.stop // 128)
+                    if rows is not None
+                    else slice(None)
+                )
+                col_blocks = (
+                    slice(cols.start // 128, cols.stop // 128)
+                    if cols is not None
+                    else slice(None)
+                )
+                expected_w = raw_w[
+                    rows if rows is not None else slice(None),
+                    cols if cols is not None else slice(None),
+                ].contiguous()
+                expected_s = raw_s[row_blocks, col_blocks].float().contiguous()
+                linear = SimpleNamespace(
+                    weight=torch.empty_like(expected_w),
+                    weight_scales=torch.empty_like(expected_s),
+                    _sleep_raw_weight_source=raw_w,
+                    _sleep_raw_scale_source=raw_s,
+                    _sleep_row_slice=rows,
+                    _sleep_col_slice=cols,
+                )
+                ptrs = linear.weight.data_ptr(), linear.weight_scales.data_ptr()
+                with mock.patch(
+                    "rtp_llm.models_py.modules.dsv4.fp8.attention.is_deep_gemm_e8m0_used",
+                    return_value=False,
+                ):
+                    for _ in range(2):
+                        linear.weight.view(torch.uint8).zero_()
+                        linear.weight_scales.zero_()
+                        AttentionFP8._reload_linear_scale(linear)
+                        torch.testing.assert_close(
+                            linear.weight.float(), expected_w.float(), rtol=0, atol=0
+                        )
+                        torch.testing.assert_close(
+                            linear.weight_scales, expected_s, rtol=0, atol=0
+                        )
+                        self.assertEqual(
+                            ptrs,
+                            (linear.weight.data_ptr(), linear.weight_scales.data_ptr()),
+                        )
+
+    def test_sm90_grouped_wo_a_rebuild_preserves_storage(self):
+        raw_w = (torch.arange(512 * 256).reshape(512, 256) % 16).to(
+            torch.float8_e4m3fn
+        )
+        raw_s = torch.exp2(torch.arange(8).reshape(4, 2).float() - 4).to(
+            torch.float8_e8m0fnu
+        )
+        for rows in (None, slice(256, 512)):
+            with self.subTest(rows=rows):
+                n_groups = 4 if rows is None else 2
+                expected_w = raw_w[rows if rows is not None else slice(None)].reshape(
+                    n_groups, 128, 256
+                )
+                expected_s = (
+                    raw_s[2:] if rows is not None else raw_s
+                ).float().reshape(n_groups, 1, 2)
+                obj = SimpleNamespace(
+                    _sleep_wo_a_w_src=raw_w,
+                    _sleep_wo_a_s_src=raw_s,
+                    _sleep_wo_a_row_slice=rows,
+                    _wo_a_grp_w=torch.empty_like(expected_w),
+                    _wo_a_grp_s=torch.empty_like(expected_s),
+                    n_groups=n_groups,
+                    o_lora_rank=128,
+                    n_heads=n_groups,
+                    head_dim=256,
+                )
+                ptrs = obj._wo_a_grp_w.data_ptr(), obj._wo_a_grp_s.data_ptr()
+                for _ in range(2):
+                    obj._wo_a_grp_w.view(torch.uint8).zero_()
+                    obj._wo_a_grp_s.zero_()
+                    AttentionFP8.reload_sleep_computed_weights(obj)
+                    torch.testing.assert_close(
+                        obj._wo_a_grp_w.float(), expected_w.float(), rtol=0, atol=0
+                    )
+                    torch.testing.assert_close(
+                        obj._wo_a_grp_s, expected_s, rtol=0, atol=0
+                    )
+                    self.assertEqual(
+                        ptrs, (obj._wo_a_grp_w.data_ptr(), obj._wo_a_grp_s.data_ptr())
+                    )
 
     def test_indexer_refolds_projection_without_replacing_storage(self):
         source = torch.arange(16, dtype=torch.bfloat16).reshape(4, 4)

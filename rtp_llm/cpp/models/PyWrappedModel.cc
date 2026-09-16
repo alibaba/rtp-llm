@@ -254,10 +254,6 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     if (context_batch_size > 0) {
         RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs(context_metadata)");
         py_attn_inputs.total_tokens = inputs.combo_tokens.defined() ? static_cast<int>(inputs.combo_tokens.size(0)) : 0;
-        // TODO(async): context_total_kv_length is still a legacy CPU scalar.
-        // The exact value for non-zero prefix lengths is available as
-        // cu_kv_seqlens[-1] on device; do not D2H here just to fill this field.
-        py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens;
         py_attn_inputs.cu_seqlens              = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.cu_kv_seqlens           = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.padding_offset          = torch::empty({py_attn_inputs.total_tokens}, cuda_i32);
@@ -268,6 +264,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
                                           py_attn_inputs.cu_kv_seqlens,
                                           py_attn_inputs.padding_offset,
                                           c10::cuda::getCurrentCUDAStream().stream());
+        py_attn_inputs.context_total_kv_length = py_attn_inputs.cu_kv_seqlens[context_batch_size].item<int>();
 #else
         RTP_LLM_FAIL("device attention input metadata requires CUDA");
 #endif

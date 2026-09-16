@@ -1,6 +1,8 @@
 import importlib
 from typing import Any
 
+from rtp_llm.utils import torch_patch as _torch_patch  # noqa: F401
+
 
 def __getattr__(name: str) -> Any:
     """Preserve old top-level access without importing C++ ops eagerly."""

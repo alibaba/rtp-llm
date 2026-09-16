@@ -8,13 +8,14 @@ sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + [
     '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
 ]
 
-# The DeepSeek V4 TopK uses CTA clusters and requires SM90+. CUDA Runtime reports
-# this host as SM103, so emit an exact SM103 cubin alongside production SM100.
+# The DeepSeek V4 TopK uses CTA clusters and requires SM90+. Emit Hopper code
+# alongside the SM100/SM103 cubins because this target overrides global arch flags.
 dsv4_indexer_topk_cuda_copts = copts() + cuda_default_copts_without_arch() + [
     '-O3',
     # TopK is defined by exact FP32 ordering. The global CUDA defaults enable
     # ftz=true, which collapses distinct subnormal scores to zero in compares.
     '-nvcc_options=ftz=false',
+    '--cuda-include-ptx=sm_90', '--cuda-gpu-arch=sm_90',
     '--cuda-include-ptx=sm_100', '--cuda-gpu-arch=sm_100',
     '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
     '--cuda-include-ptx=sm_103', '--cuda-gpu-arch=sm_103',

@@ -24,6 +24,8 @@ from rtp_llm.model_loader.ffn_weight import (
 )
 from rtp_llm.model_loader.per_block_fp8_quant_weight import V4PerBlockFp8Weight
 from rtp_llm.model_loader.tensor_source import StackSplitTensorSource, TensorSource
+from rtp_llm.model_loader.weight_module import CompositeWeight
+from rtp_llm.models.deepseek_v4 import DeepSeekV4MtpWeight
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, identity
 
 
@@ -77,6 +79,28 @@ class TestV4SharedExpertW13Weight(unittest.TestCase):
         )
         self.assertIs(wrapped.kernel.process_fun, concat_0)
         self.assertIs(wrapped.scale.process_fun, concat_0)
+
+
+class TestV4MtpProjectionWeights(unittest.TestCase):
+    def test_fp8_projection_scales_are_derived_once_with_e8m0_dtype(self):
+        loader = types.SimpleNamespace(_num_layers=0, _hidden_size=128)
+        weight_info = DeepSeekV4MtpWeight._get_weight_info(loader)
+        quant_config = Fp8BlockWiseQuantConfig(is_quanted=True)
+        quantized_weights = [
+            weight.create(weight, quant_config) for weight in weight_info.weights
+        ]
+
+        def walk(weight):
+            yield weight
+            if isinstance(weight, CompositeWeight):
+                for child in weight.sub_weights.values():
+                    yield from walk(child)
+
+        all_weights = [child for weight in quantized_weights for child in walk(weight)]
+        for scale_name in (W.v4_mtp_e_proj_s, W.v4_mtp_h_proj_s):
+            scales = [weight for weight in all_weights if weight.name == scale_name]
+            self.assertEqual(len(scales), 1, scale_name)
+            self.assertIs(scales[0].data_type, torch.float8_e8m0fnu)
 
 
 class TestStackSplitTensorSource(unittest.TestCase):

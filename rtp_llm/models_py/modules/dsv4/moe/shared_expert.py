@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.model_loader.weight_memory_saver import pausable_empty
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
 from .warmup_sync import cuda_graph_warmup_forward_enabled
@@ -195,6 +196,34 @@ class FusedSharedExpertFastPath:
         self._prepared_shared_experts: nn.Module | None = None
         self._w13_parts: tuple[torch.Tensor, torch.Tensor] | None = None
         self._w2_parts: tuple[torch.Tensor, torch.Tensor] | None = None
+
+    @staticmethod
+    def _gemm_activation_scale(packed: torch.Tensor, k: int) -> torch.Tensor:
+        """Activation scale in the form this device's ``fp8_gemm_nt`` accepts.
+
+        The two quant kernels feeding this path
+        (``quant_bf16_fp8_packed_ue8m0`` / ``silu_mul_fp8_quant_packed``)
+        emit the int32-packed UE8M0 scale, which is a Blackwell recipe.
+        SM90's kernel asserts ``sfa_dtype == sfb_dtype == kFloat``
+        (``utils/layout.hpp:49``) and takes the per-token 1x128 / per-block
+        128x128 pair instead — which is what ``weight_scales`` already is
+        here, since ``_v4_fp8_linear`` relabels it to fp32 on Hopper. So
+        only the activation side needs converting, and unpacking is
+        preferable to giving the Triton kernels a second output contract:
+        the FP8 activation values stay bit-identical across architectures,
+        and the unpacked tensor is 1/128th the activation's size.
+        """
+        if is_deep_gemm_e8m0_used():
+            return packed
+        from deep_gemm.utils.layout import get_mn_major_tma_aligned_tensor
+
+        from rtp_llm.models_py.modules.dsv4.fp8._wo_a_sm90 import (
+            unpack_ue8m0_int32_scale,
+        )
+
+        return get_mn_major_tma_aligned_tensor(
+            unpack_ue8m0_int32_scale(packed, k // 128).contiguous()
+        )
 
     @staticmethod
     def _linear_parts(linear: nn.Module) -> tuple[torch.Tensor, torch.Tensor]:
@@ -435,10 +464,10 @@ class FusedSharedExpertFastPath:
 
         quant_bf16_fp8_packed_ue8m0(x, x_fp8, x_scale, group_size=128, eps=1.0e-4)
         fp8_gemm_nt(
-            (x_fp8, x_scale),
+            (x_fp8, self._gemm_activation_scale(x_scale, x_fp8.size(1))),
             w13_parts,
             gate_up,
-            disable_ue8m0_cast=False,
+            disable_ue8m0_cast=None,
         )
         silu_mul_fp8_quant_packed(
             gate_up,
@@ -448,10 +477,10 @@ class FusedSharedExpertFastPath:
             output_scale=hidden_scale,
         )
         fp8_gemm_nt(
-            (hidden_fp8, hidden_scale),
+            (hidden_fp8, self._gemm_activation_scale(hidden_scale, hidden_fp8.size(1))),
             w2_parts,
             out,
-            disable_ue8m0_cast=False,
+            disable_ue8m0_cast=None,
         )
         return out
 
