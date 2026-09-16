@@ -66,5 +66,4 @@ cc_test(
         "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
         "//conditions:default": {"gpu": "A10"},
     }),
-    exec_properties = {'gpu':'A10'},
 )
