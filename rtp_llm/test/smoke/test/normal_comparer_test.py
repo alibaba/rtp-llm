@@ -181,6 +181,35 @@ class NormalComparerDiskReuseTest(unittest.TestCase):
                             reuse_enabled and value == 0,
                         )
 
+    def test_mixed_tier_expectations_are_cold_only_when_all_fields_are_zero(self):
+        for disk_field in self.DISK_FIELDS:
+            prefix = disk_field.removesuffix("disk_reuse_len")
+            for tier in ("local", "memory", "remote"):
+                other_field = f"{prefix}{tier}_reuse_len"
+                for disk_value, other_value in ((0, 0), (0, 512), (512, 0), (512, 512)):
+                    for reuse_enabled in (False, True):
+                        with self.subTest(
+                            disk_field=disk_field,
+                            other_field=other_field,
+                            disk_value=disk_value,
+                            other_value=other_value,
+                            reuse_enabled=reuse_enabled,
+                        ):
+                            self.assertEqual(
+                                _asserts_cold_cache(
+                                    {
+                                        "_reuse_cache_enabled": reuse_enabled,
+                                        "result": {
+                                            "aux_info": {
+                                                disk_field: disk_value,
+                                                other_field: other_value,
+                                            }
+                                        },
+                                    }
+                                ),
+                                reuse_enabled and disk_value == 0 and other_value == 0,
+                            )
+
     def test_warm_disk_expectation_is_not_misclassified_by_other_zero_fields(self):
         for field in self.DISK_FIELDS:
             with self.subTest(field=field):
