@@ -12,6 +12,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.mega_front import (
     MEGA_MOE_FRONT_CAPACITY,
     MegaMoeFrontAdapter,
+    _load_and_validate_extension,
     _validate_extension_contract,
     moe_front_mode,
 )
@@ -273,13 +274,15 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             ffn_norm="norm",
             _moe_front_adapter=None,
         )
-        with mock.patch(
-            "rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.mega_front.MegaMoeFrontAdapter"
-        ) as adapter_cls:
-            Block.enable_moe_front(block)
+        with self.assertLogs(level="INFO") as logs:
+            with mock.patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.mega_front.MegaMoeFrontAdapter"
+            ) as adapter_cls:
+                Block.enable_moe_front(block)
 
         self.assertIsNone(block._moe_front_adapter)
         adapter_cls.assert_not_called()
+        self.assertIn("unsupported strategy='local_loop'", "\n".join(logs.output))
 
     def test_required_front_rejects_non_mega_se_strategy(self) -> None:
         block = SimpleNamespace(
@@ -495,6 +498,12 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
                 hash_residual, _InputIdsContract(32, dtype=torch.int64)
             )
         )
+        self.assertEqual(
+            adapter.unsupported_reason(
+                hash_residual, _InputIdsContract(32, dtype=torch.int64)
+            ),
+            "HashMoE input_ids dtype is torch.int64, expected torch.int32",
+        )
         self.assertFalse(
             adapter.supports(
                 hash_residual, _InputIdsContract(32, device="cuda:1")
@@ -541,6 +550,15 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
                 geometry,
             )
 
+        short_commit_build_info = dict(valid_build_info, source_commit="37c78f10")
+        ops.build_info_moe_front = lambda: short_commit_build_info
+        with mock.patch("torch.cuda.get_device_capability", return_value=(10, 3)):
+            self.assertEqual(
+                _validate_extension_contract(ops, 4096, 256, 6, torch.device("cuda:0")),
+                geometry,
+            )
+        ops.build_info_moe_front = lambda: valid_build_info
+
         ops.geometry_moe_front = lambda _hidden: dict(
             geometry, kernel_contract_version=2
         )
@@ -580,6 +598,40 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
                         _validate_extension_contract(
                             ops, 4096, 256, 6, torch.device("cuda:0")
                         )
+
+    def test_rejects_hidden_size_without_fp8_scale_alignment(self) -> None:
+        ops = SimpleNamespace(geometry_moe_front=mock.Mock())
+
+        with self.assertRaisesRegex(RuntimeError, "multiple of 128"):
+            _validate_extension_contract(ops, 4100, 256, 6, torch.device("cuda:0"))
+
+        ops.geometry_moe_front.assert_not_called()
+
+    def test_extension_contract_is_validated_once_per_device_geometry(self) -> None:
+        ops = object()
+        geometry = {"max_m": MEGA_MOE_FRONT_CAPACITY}
+        extension_package = SimpleNamespace(dsv4_moe_front=ops)
+        validation_target = (
+            "rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe."
+            "mega_front._validate_extension_contract"
+        )
+        _load_and_validate_extension.cache_clear()
+        try:
+            with mock.patch.dict("sys.modules", {"rtp_kernel": extension_package}):
+                with mock.patch(validation_target, return_value=geometry) as validate:
+                    first = _load_and_validate_extension(
+                        4096, 256, 6, torch.device("cuda:0")
+                    )
+                    second = _load_and_validate_extension(
+                        4096, 256, 6, torch.device("cuda:0")
+                    )
+        finally:
+            _load_and_validate_extension.cache_clear()
+
+        self.assertIs(first, second)
+        validate.assert_called_once_with(
+            ops, 4096, 256, 6, torch.device("cuda:0")
+        )
 
     def test_learned_front_stages_and_launches_prepacked_mega(self) -> None:
         adapter, plan = _fake_adapter()
@@ -734,6 +786,9 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         )
         adapter = SimpleNamespace(
             supports=mock.Mock(return_value=False),
+            unsupported_reason=mock.Mock(
+                return_value="decode token count 257 exceeds capacity 256"
+            ),
             forward=mock.Mock(side_effect=AssertionError("front must not run")),
         )
         ffn = mock.Mock(return_value=collapsed)
@@ -749,21 +804,26 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             _moe_front_fallback_logged=False,
         )
 
-        with mock.patch(
-            "rtp_llm.models_py.modules.dsv4._record_tensor.should_record_layer",
-            return_value=False,
-        ):
-            output = Block.forward_decode(
-                block,
-                residual,
-                SimpleNamespace(),
-                input_ids,
-                attn_fn=lambda value: value,
-            )
+        with self.assertLogs(level="WARNING") as logs:
+            with mock.patch(
+                "rtp_llm.models_py.modules.dsv4._record_tensor.should_record_layer",
+                return_value=False,
+            ):
+                output = Block.forward_decode(
+                    block,
+                    residual,
+                    SimpleNamespace(),
+                    input_ids,
+                    attn_fn=lambda value: value,
+                )
 
         self.assertIs(output, residual)
         adapter.supports.assert_called_once_with(residual, input_ids)
+        adapter.unsupported_reason.assert_called_once_with(residual, input_ids)
         adapter.forward.assert_not_called()
+        self.assertIn(
+            "decode token count 257 exceeds capacity 256", "\n".join(logs.output)
+        )
         ffn_hc.pre.assert_called_once()
         ffn.assert_called_once()
         ffn_input, ffn_input_ids = ffn.call_args.args
@@ -808,7 +868,10 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             ),
             ffn_norm=mock.Mock(side_effect=lambda value: value),
             ffn=mock.Mock(return_value=collapsed),
-            _moe_front_adapter=SimpleNamespace(supports=mock.Mock(return_value=False)),
+            _moe_front_adapter=SimpleNamespace(
+                supports=mock.Mock(return_value=False),
+                unsupported_reason=mock.Mock(return_value="capacity mismatch"),
+            ),
             _moe_front_fallback_logged=False,
         )
 
