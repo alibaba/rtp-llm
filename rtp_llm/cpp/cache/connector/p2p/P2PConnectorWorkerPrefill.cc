@@ -445,9 +445,7 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
     int       count    = 0;
     const int layer_id = layer_cache_buffer->getLayerId();
 
-    // Reusable result callback for both success / error paths. We need the same
-    // callback shape whether the send dispatch happens inline (when async pool
-    // push fails) or async on the worker pool.
+    // Account for both transport completion and a task rejected before enqueue.
     auto make_send_done_cb = [transfer_result](const std::string& partition_layer_key) {
         return [transfer_result, partition_layer_key](transfer::TransferErrorCode transfer_ec,
                                                       const std::string&          cb_error_msg) {
@@ -537,8 +535,7 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
         // pool worker thread. The completion callback is unchanged (still
         // invoked by arpc IO threads when the response arrives).
         //
-        // send_req is wrapped in shared_ptr so both the async task and the
-        // inline fallback path can reference it without a stale move.
+        // Task state owns the request until execution or cancellation releases it.
         auto done_cb =
             make_send_done_cb(partition_layer_key + " peer=" + route.dst_ip + ":" + std::to_string(route.dst_port));
         auto                              send_req_shared = std::make_shared<transfer::SendRequest>(std::move(send_req));
@@ -623,16 +620,26 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
             // tasks that never start release this ref via AsyncSendTaskState.
             (void)buffer_keepalive_local;
         };
-        auto async_task = task;
-
-        if (!async_sender_pool_
-            || async_sender_pool_->pushTask(std::move(async_task)) != autil::ThreadPoolBase::ERROR_NONE) {
-            // Pool full or not initialized: fall back to inline send so we
-            // never lose a callback. WARN so we can see this in production.
-            RTP_LLM_LOG_WARNING("async_sender_pool pushTask failed, fallback to inline send, "
-                                "partition_layer_key=%s",
-                                partition_layer_key.c_str());
-            task();
+        // Blocking enqueue cannot observe this request's cancellation/deadline.
+        // Never fall back to inline send: its synchronous GPU copy can also block
+        // the dispatcher. Reject overload and use the normal request cleanup path.
+        const auto enqueue_error = async_sender_pool_ ?
+                                       async_sender_pool_->pushTask(
+                                           std::move(task), /*isBlocked=*/false, /*executeWhenFail=*/false) :
+                                       autil::ThreadPoolBase::ERROR_POOL_HAS_STOP;
+        if (enqueue_error != autil::ThreadPoolBase::ERROR_NONE) {
+            const std::string reason = enqueue_error == autil::ThreadPoolBase::ERROR_POOL_QUEUE_FULL ?
+                                           "sender queue full" : "sender pool unavailable";
+            const std::string message = "sendKVCache: " + reason + " enqueue_error="
+                                        + std::to_string(static_cast<int>(enqueue_error))
+                                        + " key=" + partition_layer_key;
+            RTP_LLM_LOG_WARNING("%s", message.c_str());
+            task_state->releaseIfNotStarted();
+            mark_dispatch_failure(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, message);
+            // count already includes this rejected task. No pool task will run,
+            // so complete it exactly once here; preserve the dispatch error above.
+            done_cb(transfer::TransferErrorCode::UNKNOWN, message);
+            return count;
         }
     }
     return count;

@@ -838,6 +838,109 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_SenderThrowsFailsWithoutCallbackTimeo
     EXPECT_EQ(mock_sender_->getTransferCallCount(), 2);
 }
 
+TEST_F(P2PConnectorWorkerTest, SendKVCache_FullQueueFailsBeforeBlockedSenderFinishes) {
+    worker_config_.p2p_prefill_sender_thread_count = 1;
+    worker_config_.p2p_prefill_sender_queue_size   = 1;
+    worker_config_.layer_all_num                  = 5;
+    worker_config_.topology = makeOneGroupPerLayerTopology(worker_config_.layer_all_num);
+    prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(
+        worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+    ASSERT_TRUE(prefill_->init());
+    computed_buffers_ = prefill_->getComputedBuffersStore();
+
+    const int64_t     request_id  = 2014;
+    const std::string unique_key  = "sender-queue-full";
+    const int64_t     deadline_ms = currentTimeMs() + 10000;
+    mock_sender_->setAsyncCallback(false);
+    mock_sender_->setCallbackDelayMs(0);
+    mock_sender_->setBlockSend(true);
+
+    std::vector<std::future<void>> released;
+    auto [first_resource, first_released] = createTrackedKVCacheResource(0);
+    ASSERT_TRUE(prefill_->writeByLayerTag(0, "group0", first_resource, request_id, nullptr, deadline_ms));
+    first_resource.reset();
+    released.push_back(std::move(first_released));
+
+    auto sending = std::async(std::launch::async, [&] {
+        return prefill_->sendKVCache(
+            request_id, unique_key, deadline_ms, makeRoutePlan({{"127.0.0.1", 12345}}), deadline_ms);
+    });
+    // Also unblock the pool before the future is destroyed on an assertion failure.
+    auto cleanup = std::shared_ptr<void>(nullptr, [this, request_id, unique_key, deadline_ms](void*) {
+        mock_sender_->setBlockSend(false);
+        prefill_->cancelRequest(request_id, unique_key, deadline_ms, deadline_ms);
+    });
+    ASSERT_TRUE(mock_sender_->waitForTransferCallCount(1, std::chrono::seconds(2)));
+    std::shared_ptr<P2PConnectorWorkerPrefill::SendTransferResult> transfer_result;
+    {
+        std::lock_guard<std::mutex> lock(prefill_->handle_cancel_mutex_);
+        const auto it = prefill_->handle_cancel_flags_.find(unique_key);
+        ASSERT_NE(it, prefill_->handle_cancel_flags_.end());
+        transfer_result = it->second.transfer_result.lock();
+    }
+    ASSERT_NE(transfer_result, nullptr);
+
+    // Publish only after the sole sender is blocked. Four more tasks exceed
+    // the queue even if the pool admits one entry beyond its configured size.
+    for (int layer_id = 1; layer_id < 5; ++layer_id) {
+        auto [resource, signal] = createTrackedKVCacheResource(layer_id);
+        ASSERT_TRUE(prefill_->writeByLayerTag(
+            layer_id, "group" + std::to_string(layer_id), resource, request_id, nullptr, deadline_ms));
+        resource.reset();
+        released.push_back(std::move(signal));
+    }
+    ASSERT_EQ(sending.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    const auto result = sending.get();
+    EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+    EXPECT_NE(result.ToString().find("sender queue full"), std::string::npos);
+    EXPECT_NE(result.ToString().find(unique_key), std::string::npos);
+    EXPECT_LT(currentTimeMs(), deadline_ms);
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 1);
+    EXPECT_EQ(transfer_result->done_count.load(), 1);  // Only the rejected task completed.
+    EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr);
+    EXPECT_EQ(released[0].wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    for (size_t i = 1; i < released.size(); ++i) {
+        EXPECT_EQ(released[i].wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    }
+
+    const auto queued = prefill_->async_sender_pool_->getItemCount();
+    EXPECT_GT(queued, 0u);
+    mock_sender_->setBlockSend(false);
+    {
+        std::unique_lock<std::mutex> lock(transfer_result->result_mutex);
+        EXPECT_TRUE(transfer_result->result_cv.wait_for(lock, std::chrono::seconds(2), [&] {
+            // One started task, one rejected task, and each skipped queued task.
+            return transfer_result->done_count.load() == static_cast<int64_t>(queued) + 2;
+        }));
+        EXPECT_EQ(transfer_result->error_code, result.code());
+        EXPECT_EQ(transfer_result->error_msg, result.ToString());
+    }
+    EXPECT_EQ(released[0].wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 1);  // Queued tasks never reached the transport.
+}
+
+TEST_F(P2PConnectorWorkerTest, SendLayer_UnavailablePoolCompletesRejectedTaskWithoutInlineSend) {
+    prefill_->async_sender_pool_->stop();
+    const auto plan = makeRoutePlan({{"127.0.0.1", 12345}});
+    // Cover both a stopped pool and an absent pool using the same failure path.
+    for (bool absent : {false, true}) {
+        if (absent) {
+            prefill_->async_sender_pool_.reset();
+        }
+        auto result    = std::make_shared<P2PConnectorWorkerPrefill::SendTransferResult>();
+        auto cancelled = std::make_shared<std::atomic<bool>>(false);
+        const auto count = prefill_->sendLayerToPartitions(
+            createLayerCacheBuffer(0), plan, "unavailable-pool", currentTimeMs() + 5000, cancelled, result);
+        EXPECT_EQ(count, 1);
+        EXPECT_EQ(result->done_count.load(), 1);
+        EXPECT_TRUE(result->dispatch_failed.load());
+        EXPECT_FALSE(result->all_success.load());
+        EXPECT_EQ(result->error_code, ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+        EXPECT_NE(result->error_msg.find("sender pool unavailable"), std::string::npos);
+        EXPECT_EQ(mock_sender_->getTransferCallCount(), 0);
+    }
+}
+
 TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_PartialLayersTransferFailed) {
     int64_t     request_id  = 2002;
     std::string unique_key  = "test_partial_fail";
