@@ -31,3 +31,16 @@ py_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+py_test(
+    name = "qwen3_dspark_convert_test",
+    srcs = [
+        "qwen3_dspark_convert.py",
+        "qwen3_dspark_convert_test.py",
+    ],
+    deps = [
+        "//rtp_llm:numpy",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:torch",
+    ],
+)

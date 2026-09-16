@@ -49,9 +49,7 @@ class Qwen3DSparkWeight(QWenV3Weight):
         )
         if self._d2t_path is not None:
             transform = (
-                dspark_offset_d2t_to_absolute
-                if self._d2t_path == "d2t"
-                else identity
+                dspark_offset_d2t_to_absolute if self._d2t_path == "d2t" else identity
             )
             info.weights.append(
                 AtomicWeight(
@@ -88,19 +86,49 @@ class Qwen3DSpark(QwenV3):
         config.dspark_markov_rank = int(dspark.get("markov_rank", 0) or 0)
         if config.dspark_markov_rank <= 0:
             raise ValueError("Qwen3 DSpark requires markov_rank > 0")
-        config.dspark_sample_from_anchor = bool(
-            dspark.get("sample_from_anchor", False)
-        )
+        config.dspark_sample_from_anchor = bool(dspark.get("sample_from_anchor", False))
+        lm_head_source = dspark.get("lm_head_source", "checkpoint")
+        if lm_head_source not in ("checkpoint", "target"):
+            raise ValueError("DSpark lm_head_source must be 'checkpoint' or 'target'")
+        config.dspark_share_target_lm_head = lm_head_source == "target"
         return config
 
     @staticmethod
     def get_weight_cls():
         return Qwen3DSparkWeight
 
-    def _create_python_model(self):
-        from rtp_llm.models_py.model_desc.qwen3_dspark_model import (
-            Qwen3DSparkModel,
+    @classmethod
+    def speculative_weight_alias_names(cls, target_model, draft_model_config):
+        # TorchSpec trains against the external target head. Other DSpark
+        # formats keep their checkpoint head, including reduced-vocab drafts.
+        if not draft_model_config.dspark_share_target_lm_head:
+            return ()
+        target_config = target_model.model_config
+        compatible = (
+            "hidden_size",
+            "vocab_size",
+            "data_type",
+            "enable_fp32_lm_head",
+            "normalize_lm_head_weight",
         )
+        mismatches = [
+            name
+            for name in compatible
+            if getattr(target_config, name) != getattr(draft_model_config, name)
+        ]
+        if mismatches:
+            details = ", ".join(
+                f"{name}={getattr(target_config, name)!r}/{getattr(draft_model_config, name)!r}"
+                for name in mismatches
+            )
+            raise ValueError(
+                "DSpark cannot share incompatible target lm-head: " + details
+            )
+        # The draft's embedding and final norm are trained checkpoint tensors.
+        return (W.lm_head,)
+
+    def _create_python_model(self):
+        from rtp_llm.models_py.model_desc.qwen3_dspark_model import Qwen3DSparkModel
 
         self.py_model = Qwen3DSparkModel(
             self.model_config,
