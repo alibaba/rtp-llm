@@ -30,7 +30,7 @@ public final class RequestScheduler {
 
     private final DefaultRouter router;
     private final EndpointRegistry endpointRegistry;
-    private final RequestRegistry lifecycle;
+    private final RequestRegistry requestRegistry;
     private final GlobalQueueCoordinator globalQueue;
 
     @Autowired
@@ -40,13 +40,13 @@ public final class RequestScheduler {
             EndpointRegistry endpointRegistry,
             BatchSchedulerReporter reporter,
             EvictionManager evictionManager,
-            RequestRegistry lifecycle,
+            RequestRegistry requestRegistry,
             PlacementAvailability placementAvailability) {
         Objects.requireNonNull(configService, "configService");
         this.router = Objects.requireNonNull(router, "router");
         this.endpointRegistry = Objects.requireNonNull(
                 endpointRegistry, "endpointRegistry");
-        this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
+        this.requestRegistry = Objects.requireNonNull(requestRegistry, "lifecycle");
         FlexlbConfig startupConfig = configService.loadBalanceConfig();
         this.globalQueue = startupConfig != null && startupConfig.isQueue()
                 ? new GlobalQueueCoordinator(
@@ -54,7 +54,7 @@ public final class RequestScheduler {
                         Objects.requireNonNull(router, "router"),
                         Objects.requireNonNull(reporter, "reporter"),
                         Objects.requireNonNull(evictionManager, "evictionManager"),
-                        this.lifecycle,
+                        this.requestRegistry,
                         Objects.requireNonNull(
                                 placementAvailability, "placementAvailability"))
                 : null;
@@ -71,7 +71,7 @@ public final class RequestScheduler {
             return CompletableFuture.completedFuture(error(StrategyErrorType.DISPATCH_FAILED,
                     "QUEUE configuration was enabled after scheduler startup"));
         }
-        CompletableFuture<Response> future = lifecycle.register(context);
+        CompletableFuture<Response> future = requestRegistry.register(context);
         context.setFuture(future);
         if (future.isDone()) {
             return future;
@@ -99,11 +99,11 @@ public final class RequestScheduler {
             switch (selection.status()) {
                 case SUCCESS -> {
                     try (RouteAdmission admission = selection.value()) {
-                        var committed = admission.tryCommitDirectRoute(context, lifecycle);
+                        var committed = admission.tryCommitDirectRoute(context, requestRegistry);
                         failure = switch (committed.status()) {
                             case SUCCESS -> {
                                 var delivery = committed.value();
-                                lifecycle.publishRoute(delivery.claim(), delivery.precedingWork(), delivery.unstartedWorkMs());
+                                requestRegistry.publishRoute(delivery.claim(), delivery.precedingWork(), delivery.unstartedWorkMs());
                                 yield null;
                             }
                             case REJECTED -> committed.rejection();
@@ -120,7 +120,7 @@ public final class RequestScheduler {
             Logger.warn("DIRECT admission failed: request_id={}", context.getRequestId(), selectionFailure);
         } finally {
             if (failure != null) {
-                lifecycle.publishDecisionResponseAsync(context.getRequestId(), context.getFuture(), failure);
+                requestRegistry.publishDecisionResponseAsync(context.getRequestId(), context.getFuture(), failure);
             }
         }
     }
@@ -129,11 +129,11 @@ public final class RequestScheduler {
             long requestId,
             long expectedBatchId,
             CancelReason reason) {
-        return lifecycle.cancelRequest(requestId, expectedBatchId, reason);
+        return requestRegistry.cancelRequest(requestId, expectedBatchId, reason);
     }
 
     public int getInflightSize() {
-        return lifecycle.liveRequestCount();
+        return requestRegistry.liveRequestCount();
     }
 
     public int getQueuedRequestCount() {
@@ -149,11 +149,11 @@ public final class RequestScheduler {
     }
 
     public List<RequestState> snapshotActiveRequests() {
-        return lifecycle.snapshotActiveRequests();
+        return requestRegistry.snapshotActiveRequests();
     }
 
     public RequestState getRequestState(long requestId, long expectedBatchId) {
-        return lifecycle.getRequestState(requestId, expectedBatchId);
+        return requestRegistry.getRequestState(requestId, expectedBatchId);
     }
 
     public void closePlacement() {

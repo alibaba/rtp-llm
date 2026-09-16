@@ -9,6 +9,7 @@ import lombok.Setter;
 public final class DispatcherConfig {
 
     public static final int DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER = 2;
+    public static final int DEFAULT_FETCH_ATTACH_TIMEOUT_MS = 3_000;
 
     public enum Type {
         BATCH,
@@ -17,6 +18,8 @@ public final class DispatcherConfig {
 
     private Type type = Type.BATCH;
     private int maxInflightPerPrefillWorker = DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER;
+    /** BATCH only: engine wait for FetchResponse attachment, not generation duration. */
+    private int fetchAttachTimeoutMs = DEFAULT_FETCH_ATTACH_TIMEOUT_MS;
 
     public static DispatcherConfig nonBatch() {
         DispatcherConfig config = new DispatcherConfig();
@@ -41,6 +44,10 @@ public final class DispatcherConfig {
         }
         if (maxInflightPerPrefillWorker <= 0) {
             throw new ConfigValidationException("dispatcher.maxInflightPerPrefillWorker",
+                    "must be greater than zero");
+        }
+        if (fetchAttachTimeoutMs <= 0) {
+            throw new ConfigValidationException("dispatcher.fetchAttachTimeoutMs",
                     "must be greater than zero");
         }
     }

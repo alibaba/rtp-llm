@@ -74,8 +74,8 @@ class RequestSlotTerminalSettlementTest {
             RequestLifecycleTestSupport.recordCancellation(slot, CancelReason.CLIENT_CANCELLED, "original client cancellation");
             assertTrue(slot.installInactivityDeadline(inactivity));
 
-            TerminalAction action = slot.beginTerminalizing(
-                    TerminalOutcome.cancel("original client cancellation; request inactive"), null);
+            TerminalAction action = slot.finishRequest(null,
+                    TerminalOutcome.cancel("original client cancellation; request inactive"), null, false);
             assertNotNull(action);
             assertSame(claim, action.preemption());
             assertTrue(claim.isFinished());
@@ -85,7 +85,7 @@ class RequestSlotTerminalSettlementTest {
             assertEquals(RequestSlot.RequestEffect.Status.STALE,
                     slot.applyPreemptionCompleted(claim, "late Cancel ACK").status());
             assertEquals(RequestSlot.RequestEffect.Status.STALE,
-                    slot.reduceWorkerTerminal(fixture.item(), DeferredTerminal.worker(
+                    slot.processRequestEnd(fixture.item(), DeferredTerminal.worker(
                             WorkerTerminalSource.DECODE_ENDPOINT, true, 0L)).status());
             assertFalse(slot.consumeInactivityDeadline(inactivity));
             action.terminalResources().release(timer);
@@ -98,8 +98,7 @@ class RequestSlotTerminalSettlementTest {
             assertTrue(slot.isTerminalRecord());
             assertNull(slot.activeItem());
             assertFalse(slot.hasCancellationFirstCause());
-            assertNull(slot.beginTerminalizing(
-                    TerminalOutcome.timeout("duplicate expiry"), null));
+            assertNull(slot.finishRequest(null, TerminalOutcome.timeout("duplicate expiry"), null, false));
         }
     }
 
@@ -114,8 +113,8 @@ class RequestSlotTerminalSettlementTest {
             delivered.setSuccess(true);
             assertTrue(slot.future().completeOwned(delivered));
 
-            TerminalAction action = slot.beginTerminalizing(
-                    TerminalOutcome.timeout("request inactive"), new Response());
+            TerminalAction action = slot.finishRequest(null,
+                    TerminalOutcome.timeout("request inactive"), new Response(), true);
             assertNotNull(action);
             assertNull(action.publication());
             assertNull(action.response());
@@ -136,7 +135,7 @@ class RequestSlotTerminalSettlementTest {
             assertTrue(RequestLifecycleTestSupport.recordCancellation(slot,
                     CancelReason.CLIENT_CANCELLED, "first client cancellation"));
             assertEquals(RequestSlot.RequestEffect.Status.NONE,
-                    slot.reduceWorkerTerminal(fixture.item(), workerTerminal).status());
+                    slot.processRequestEnd(fixture.item(), workerTerminal).status());
 
             RequestSlot.AdmissionHandleCompletion completion =
                     slot.completeAdmissionHandle(fixture.admission());
@@ -146,8 +145,8 @@ class RequestSlotTerminalSettlementTest {
             assertEquals(CancelReason.CLIENT_CANCELLED, slot.requireCancellationFirstCause());
             assertEquals(RequestState.Phase.CANCEL_REQUESTED, slot.snapshot().state());
 
-            TerminalAction action = slot.beginTerminalizing(
-                    TerminalOutcome.cancel("first client cancellation; worker completed"), null);
+            TerminalAction action = slot.finishRequest(null,
+                    TerminalOutcome.cancel("first client cancellation; worker completed"), null, false);
             assertNotNull(action);
             assertEquals(RequestState.Phase.CANCELLED,
                     slot.finishTermination(action).terminal().state());
@@ -173,7 +172,7 @@ class RequestSlotTerminalSettlementTest {
                 slot.applyPreemptionPhase(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT);
             }
 
-            RequestSlot.RequestEffect effect = slot.reduceWorkerTerminal(fixture.item(),
+            RequestSlot.RequestEffect effect = slot.processRequestEnd(fixture.item(),
                     DeferredTerminal.worker(WorkerTerminalSource.DECODE_ENDPOINT, false, 42L));
             assertEquals(RequestSlot.RequestEffect.Status.READY, effect.status());
             assertNotNull(effect.terminal());

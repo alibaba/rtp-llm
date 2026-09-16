@@ -55,9 +55,7 @@ public final class DeliveryStrategyTestSupport {
                     .transferToEndpoint(invocation.getArgument(0))) { return null; }
             DeliveryClaim claim = Mockito.mock(DeliveryClaim.class);
             ReflectionTestUtils.setField(claim, "item", invocation.getArgument(0));
-            Mockito.doAnswer(inv -> { completed.accept(claim, inv.getArgument(0)); return null; })
-                    .when(claim).complete(Mockito.any());
-            Mockito.doAnswer(inv -> { claim.complete(DeliveryResult.delivered()); return null; })
+            Mockito.doAnswer(inv -> { completed.accept(claim, DeliveryResult.delivered()); return null; })
                     .when(requests).publishRoute(Mockito.eq(claim), Mockito.any(), Mockito.anyLong());
             return claim;
         }).when(requests).claimRouteDelivery(Mockito.any(), Mockito.any());

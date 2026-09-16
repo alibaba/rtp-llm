@@ -105,11 +105,14 @@ class RequestConfirmationTimeoutTest {
             DeliveryClaim claim;
             try (var routeCommit = prefill.tryBeginRouteCommitAdmission()) {
                 assertNotNull(routeCommit);
-                claim = RequestLifecycleTestSupport.claimRouteWithoutPrediction(requests, item, () -> {
+                java.util.function.BooleanSupplier commitPrefill = () -> {
                     try (var handoff = routeCommit.commit(List.of(item), List.of(routeReservation.get()))) {
                         return true;
                     }
-                });
+                };
+                claim = waiting == ConfirmationWait.UNCERTAIN_REPLY
+                        ? RequestLifecycleTestSupport.claimBatchWithoutPrediction(requests, item, 1L, commitPrefill)
+                        : RequestLifecycleTestSupport.claimRouteWithoutPrediction(requests, item, commitPrefill);
                 assertNotNull(claim);
                 requests.setDeliveryPrediction(claim, new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L);
             }
