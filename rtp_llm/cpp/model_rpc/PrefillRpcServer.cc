@@ -162,6 +162,12 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
     return grpc::Status::OK;
 }
 
+bool PrefillRpcServer::canUsePDSep(const GenerateInputPB& request) const {
+    // RemoteGenerate does not transfer prompt loss to Decode. Keep loss requests
+    // local so Decode never tries to compute prompt loss from a single decode token.
+    return request.generate_config().calculate_loss() == 0 && checkPDSupport(request).supported;
+}
+
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
     static int max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * 1000;
     auto       begin_time_us       = currentTimeUs();
@@ -483,7 +489,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start generate stream call", request->request_id());
     c10::InferenceMode inference_guard(true);
-    if (!checkPDSupport(*request).supported) {
+    if (!canUsePDSep(*request)) {
         return LocalRpcServer::GenerateStreamCall(server_context, request, writer);
     }
 
@@ -552,7 +558,7 @@ grpc::Status PrefillRpcServer::BatchGenerateCall(grpc::ServerContext*        ser
     bool has_pd_request     = false;
     bool has_non_pd_request = false;
     for (int i = 0; i < batch_size; ++i) {
-        if (checkPDSupport(request->inputs(i)).supported) {
+        if (canUsePDSep(request->inputs(i))) {
             has_pd_request = true;
         } else {
             has_non_pd_request = true;

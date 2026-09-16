@@ -26,6 +26,7 @@ public:
     grpc::Status RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response);
 
 private:
+    bool         canUsePDSep(const GenerateInputPB& request) const;
     ErrorInfo    waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream);
     grpc::Status prepareAllocateResource(PrefillGenerateContext& prefill_context);
     void         getRpcConnection(PrefillGenerateContext& prefill_context);

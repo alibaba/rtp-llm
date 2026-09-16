@@ -201,6 +201,42 @@ TEST(PrefillRpcServerTest, PDSepEligibilityRejectsUnsupportedGenerationModes) {
     EXPECT_TRUE(checkPDSupport(target_logprob_without_prompt_logits).supported);
 }
 
+TEST(PrefillRpcServerTest, LossRequestsStayLocalWithoutDisablingDecodeEntrancePD) {
+    PrefillRpcServer server;
+    GenerateInputPB request;
+    request.add_token_ids(10);
+    request.add_token_ids(20);
+    auto* config = request.mutable_generate_config();
+    config->set_max_new_tokens(2);
+    config->set_can_use_pd_separation(true);
+    config->set_return_logits(true);
+    config->set_return_hidden_states(true);
+
+    EXPECT_TRUE(server.canUsePDSep(request));
+    for (int loss_mode : {1, 2}) {
+        config->set_calculate_loss(loss_mode);
+        EXPECT_FALSE(server.canUsePDSep(request));
+        EXPECT_TRUE(checkPDSupport(request).supported);
+
+        // Batch admission must use the same rule as GenerateStreamCall. A loss
+        // request mixed with a PD request is rejected before any engine/RPC work.
+        for (bool loss_first : {false, true}) {
+            BatchGenerateInputPB batch;
+            *batch.add_inputs() = request;
+            *batch.add_inputs() = request;
+            batch.mutable_inputs(loss_first ? 1 : 0)->mutable_generate_config()->set_calculate_loss(0);
+            grpc::ServerContext context;
+            BatchGenerateOutputsPB response;
+            const auto status = server.BatchGenerateCall(&context, &batch, &response);
+            EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+            EXPECT_NE(status.error_message().find("mixing PD and non-PD"), std::string::npos);
+        }
+    }
+    config->set_calculate_loss(0);
+    config->set_can_use_pd_separation(false);
+    EXPECT_FALSE(server.canUsePDSep(request));
+}
+
 TEST(DecodeRpcServerTest, MtpCacheKeyUsesSharedBaseModelIdForEverySlot) {
     constexpr size_t mtp_base_model_id = 17;
 
