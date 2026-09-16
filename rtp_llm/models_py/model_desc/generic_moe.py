@@ -81,17 +81,15 @@ class GenericMoeLayer(nn.Module):
             quant_config=quant_config,
             enable_cuda_graph=enable_cuda_graph,
         )
+        config_adapter.has_shared_expert_gate = W.shared_expert_gate in weights
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
         router = self.fused_moe.router
         router_tp_size = router.tp_collective_size
 
-        self.w1 = weights.get(W.moe_w1, None)
-        self.w2 = weights.get(W.moe_w2, None)
-        assert (
-            self.w1 is not None and self.w2 is not None
-        ), "Weights w1 and w2 must be provided"
-        self.num_local_experts = self.w1.shape[0]
-        self.add_shared_expert = config.moe_style == 2
+        self.num_local_experts = self.num_experts // max(self.ep_size, 1)
+        self.add_shared_expert = (
+            config.moe_style == 2 and not self.fused_moe.includes_shared_expert
+        )
         if self.add_shared_expert:
             self.shared_expert = DenseMLP(
                 config.activation_type,
@@ -177,7 +175,6 @@ class GenericMoeLayer(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
-        router_logits_fp32 = router_logits.float()
 
         topk_weights = torch.empty(
             (num_tokens, self.top_k),
@@ -196,7 +193,7 @@ class GenericMoeLayer(nn.Module):
             self.group_topk(
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                scores=router_logits_fp32,
+                scores=router_logits,
                 correction_bias=self.correction_bias,
                 n_group=self.num_expert_group,
                 topk_group=self.topk_group,
@@ -205,8 +202,7 @@ class GenericMoeLayer(nn.Module):
                 routed_scaling_factor=self.routed_scaling_factor,
             )
         else:
-            # Top-K selection using C++ SelectTopkOp
-            self.select_topk(router_logits_fp32, topk_ids, topk_weights)
+            self.select_topk(router_logits, topk_ids, topk_weights)
 
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)

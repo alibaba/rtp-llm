@@ -3,9 +3,9 @@ load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
-cc_import(
+alias(
     name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+    actual = "@torch//:torch",
 )
 
 cuda13_torch_link_deps = select({
@@ -36,6 +36,16 @@ test_deps = [
     ":cuda_test_util",
 ] + torch_deps()
 
+cc_test(
+    name = "batch_copy_test",
+    srcs = [
+        "CudaBatchCopyTest.cc",
+    ],
+    data = [],
+    copts = copts(),
+    deps = test_deps,
+    exec_properties = {'gpu':'H20'},
+)
 
 cc_test(
     name = "cuda_mask_logits_op_test",
@@ -47,7 +57,7 @@ cc_test(
     deps = test_deps + [
         "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
     ],
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -61,7 +71,7 @@ cc_test(
         "//3rdparty/flashinfer:flashinfer",
         "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
     ],
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -74,7 +84,7 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/testing:rejection_sampling_test_utils",
     ] + torch_deps(),
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -88,7 +98,7 @@ cc_test(
         "//3rdparty/flashinfer:flashinfer",
         "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
     ] + cuda13_torch_link_deps,
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 # Aliases: compiled CudaGraph test binding at //rtp_llm/cpp/cuda_graph/tests/.

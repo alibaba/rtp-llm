@@ -18,7 +18,6 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-#include <unistd.h>
 
 using namespace std;
 namespace rtp_llm {
@@ -136,12 +135,8 @@ void addBatchError(EnqueueBatchResponsePB* response, int64_t request_id, int64_t
 }
 
 int64_t batchErrorCode(const grpc::Status& status) {
-    // AutoTPM 8429 is carried in gRPC details because RESOURCE_EXHAUSTED is
-    // only its transport projection. Preserve the domain code when adapting
-    // the status into EnqueueBatchErrorPB.
     ErrorDetailsPB details;
-    if (!status.error_details().empty() && details.ParseFromString(status.error_details())
-        && details.error_code() == static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED)) {
+    if (!status.error_details().empty() && details.ParseFromString(status.error_details()) && details.error_code() != 0) {
         return details.error_code();
     }
     return status.error_code();
@@ -896,8 +891,8 @@ void PrefillBatchRpcServer::buildSlotContexts(std::vector<BatchSlot>& slots) {
             metrics_reporter_,
             meta_,
             maga_init_params_.pd_sep_config.prefill_stop_stream_wait_timeout_ms);
-        pfx_ctx->onflight_requests      = onflight_requests_;
-        pfx_ctx->loading_cache_requests = loading_cache_requests_;
+        pfx_ctx->onflight_requests      = &onflight_requests_;
+        pfx_ctx->loading_cache_requests = &loading_cache_requests_;
         auto guard                      = std::make_shared<AtomicGuard>(onflight_requests_);
         auto deferred                   = std::make_shared<DeferredPrefillContext>();
         deferred->context               = std::move(pfx_ctx);
@@ -906,6 +901,73 @@ void PrefillBatchRpcServer::buildSlotContexts(std::vector<BatchSlot>& slots) {
         slot.deferred                   = std::move(deferred);
         slot.registration_status        = deferred_contexts_->registerActive(slot.input->request_id(), slot.deferred);
     }
+}
+
+PrefillBatchRpcServer::PrepareResult
+PrefillBatchRpcServer::prepareSlotWithRetry(PrefillGenerateContext& prefill_context,
+                                            int64_t                 max_retry_times,
+                                            int64_t                 max_retry_timeout_ms,
+                                            int64_t                 retry_interval_ms) {
+    PrepareResult result;
+    const auto    begin_time_us  = currentTimeUs();
+    const int64_t retry_attempts = std::max<int64_t>(max_retry_times, 0);
+    prefill_context.setRetryTimeoutMs(max_retry_timeout_ms);
+    const auto stage = prefill_context.stat_info.saveStage();
+    for (int64_t attempt = 0; attempt <= retry_attempts; ++attempt) {
+        if (prefill_context.isPriorityPreempted()) {
+            result.stage_status = preferPriorityPreemption(prefill_context, grpc::Status::OK);
+            break;
+        }
+        if (prefill_context.isRequestCancelled()) {
+            if (prefill_context.error_status.ok()) {
+                setContextError(prefill_context, ErrorInfo(ErrorCode::CANCELLED, "request is cancelled"));
+            }
+            break;
+        }
+        if (prefill_context.requestDeadlineExceeded()) {
+            setContextError(prefill_context, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline exhausted"));
+            break;
+        }
+        if (attempt > 0 && prefill_context.retryDeadlineExceeded()) {
+            break;
+        }
+        prefill_context.reset();
+        prefill_context.stat_info.restoreStage(stage);
+        prefill_context.retry_times++;
+        prepareAllocateResource(prefill_context);
+        if (prefill_context.isPriorityPreempted()) {
+            result.stage_status = preferPriorityPreemption(prefill_context, prefill_context.error_status);
+            break;
+        }
+        if (prefill_context.ok()) {
+            result.prepared = true;
+            break;
+        }
+        if (prefill_context.isRequestCancelled()) {
+            break;
+        }
+        if (prefill_context.requestDeadlineExceeded()) {
+            setContextError(prefill_context, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline exhausted"));
+            break;
+        }
+        auto cost_time_us                  = currentTimeUs() - begin_time_us;
+        prefill_context.retry_cost_time_ms = cost_time_us / 1000;
+        if (!prefill_context.shouldRetry() || prefill_context.retryDeadlineExceeded() || attempt == retry_attempts) {
+            break;
+        }
+        const int64_t retry_sleep_us = prefill_context.cappedRetrySleepUs(retry_interval_ms);
+        if (retry_sleep_us > 0) {
+            std::this_thread::sleep_for(std::chrono::microseconds(retry_sleep_us));
+        }
+    }
+    if (!result.prepared && result.stage_status.ok()) {
+        result.stage_status = prefill_context.error_status.ok() ? statusFromErrorInfo(prefill_context.error_info) :
+                                                                  prefill_context.error_status;
+        if (result.stage_status.ok()) {
+            result.stage_status = grpc::Status(grpc::StatusCode::INTERNAL, "prepareAllocateResource failed");
+        }
+    }
+    return result;
 }
 
 std::vector<PrefillBatchRpcServer::PrepareResult> PrefillBatchRpcServer::prepareGroup(std::vector<BatchSlot>& slots) {
@@ -929,42 +991,7 @@ std::vector<PrefillBatchRpcServer::PrepareResult> PrefillBatchRpcServer::prepare
                 prepare_resource_worker_pool_->async([this, slot, result, max_retry_times, max_retry_timeout_ms] {
                     auto& prefill_context = *slot->deferred->context;
                     try {
-                        int64_t begin_time_us = currentTimeUs();
-                        auto    stage           = prefill_context.stat_info.saveStage();
-                        for (int attempt = 0; attempt <= max_retry_times; ++attempt) {
-                            if (prefill_context.isPriorityPreempted()) {
-                                result->stage_status = preferPriorityPreemption(prefill_context, grpc::Status::OK);
-                                break;
-                            }
-                            prefill_context.reset();
-                            prefill_context.stat_info.restoreStage(stage);
-                            prefill_context.retry_times++;
-                            prepareAllocateResource(prefill_context);
-                            if (prefill_context.isPriorityPreempted()) {
-                                result->stage_status =
-                                    preferPriorityPreemption(prefill_context, prefill_context.error_status);
-                                break;
-                            }
-                            if (prefill_context.ok()) {
-                                result->prepared = true;
-                                break;
-                            }
-                            auto cost_time_us                  = currentTimeUs() - begin_time_us;
-                            prefill_context.retry_cost_time_ms = cost_time_us / 1000;
-                            if (max_retry_timeout_ms > 0 && cost_time_us >= max_retry_timeout_ms * 1000) {
-                                break;
-                            }
-                            usleep(1000);
-                        }
-                        if (!result->prepared && result->stage_status.ok()) {
-                            result->stage_status = prefill_context.error_status.ok() ?
-                                                       statusFromErrorInfo(prefill_context.error_info) :
-                                                       prefill_context.error_status;
-                            if (result->stage_status.ok()) {
-                                result->stage_status =
-                                    grpc::Status(grpc::StatusCode::INTERNAL, "prepareAllocateResource failed");
-                            }
-                        }
+                        *result = prepareSlotWithRetry(prefill_context, max_retry_times, max_retry_timeout_ms);
                     } catch (const std::exception& e) {
                         result->stage_status = grpc::Status(
                             grpc::StatusCode::INTERNAL, "prepareAllocateResource exception: " + std::string(e.what()));

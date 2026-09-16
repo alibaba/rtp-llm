@@ -310,6 +310,13 @@ def _torch_repo_impl(ctx):
 
     ctx.file("BUILD", ctx.read(ctx.attr.build_file))
     ctx.symlink(torch_path, "torch")
+    # CUDA 13 wheels install NVSHMEM beside torch in the same environment.
+    nvidia_path = ctx.path(str(ctx.path(torch_path).dirname) + "/nvidia")
+    if nvidia_path.exists:
+        ctx.symlink(nvidia_path, "nvidia")
+    torch_libs_path = ctx.path(str(ctx.path(torch_path).dirname) + "/torch.libs")
+    if torch_libs_path.exists:
+        ctx.symlink(torch_libs_path, "torch.libs")
 
 torch_local_repository = repository_rule(
     implementation = _torch_repo_impl,

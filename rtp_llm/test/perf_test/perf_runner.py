@@ -181,6 +181,9 @@ def _build_argv(test_name: str, test_config: dict, data_dir: Path) -> List[str]:
     """
     argv = ["perf_test"]
 
+    if "argv" in test_config:
+        return argv + list(test_config["argv"])
+
     argv.extend(["--model_type", test_config["model_type"]])
     argv.extend(["--checkpoint_path", test_config["checkpoint_path"]])
     tokenizer_path = test_config.get("tokenizer_path", test_config["checkpoint_path"])

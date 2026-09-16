@@ -129,7 +129,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("prefill_shuffle_indices", &PyContextParallelParams::prefill_shuffle_indices)
         .def_readwrite("prefill_qkv_restore_indice", &PyContextParallelParams::prefill_qkv_restore_indice)
         .def_readwrite("prefill_qkv_padding_mask", &PyContextParallelParams::prefill_qkv_padding_mask)
-        .def_readwrite("prefill_actual_input_lengths_cpu", &PyContextParallelParams::prefill_actual_input_lengths_cpu);
+        .def_readwrite("prefill_actual_input_lengths_cpu", &PyContextParallelParams::prefill_actual_input_lengths_cpu)
+        .def_readwrite("prefill_prefix_lengths_cpu", &PyContextParallelParams::prefill_prefix_lengths_cpu);
 
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
@@ -269,7 +270,14 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
         .def(pybind11::init<torch::Tensor>(), pybind11::arg("hidden_states"), "Initialize with hidden states tensor")
-        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor");
+        .def(pybind11::init<torch::Tensor, torch::Tensor>(),
+             pybind11::arg("hidden_states"),
+             pybind11::arg("mtp_target_hidden_states"),
+             "Initialize with hidden states and speculative target features")
+        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
+        .def_readwrite("mtp_target_hidden_states",
+                       &PyModelOutputs::mtp_target_hidden_states,
+                       "Optional target features consumed by speculative decoding");
 }
 
 }  // namespace torch_ext

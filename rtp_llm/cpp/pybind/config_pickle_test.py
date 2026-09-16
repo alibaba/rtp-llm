@@ -3,11 +3,15 @@ import unittest
 
 import pytest
 
-from rtp_llm.ops import GrammarConfig
+from rtp_llm.ops import GrammarConfig, HWKernelConfig
 
 
 def _new_grammar_config():
     return GrammarConfig.__new__(GrammarConfig)
+
+
+def _new_hw_kernel_config():
+    return HWKernelConfig.__new__(HWKernelConfig)
 
 
 class _LegacyGrammarConfig:
@@ -28,6 +32,27 @@ class _PreviousSixTupleGrammarConfig:
         return _new_grammar_config, (), previous_state
 
 
+class _LegacyHWKernelConfig:
+    def __reduce__(self):
+        legacy_state = (
+            11,
+            True,
+            False,
+            False,
+            "legacy.csv",
+            True,
+            True,
+            True,
+            True,
+            37,
+            [64, 128],
+            [1, 8],
+            True,
+            True,
+        )
+        return _new_hw_kernel_config, (), legacy_state
+
+
 @pytest.mark.H20
 class GrammarConfigPickleTest(unittest.TestCase):
     def test_current_format_round_trip(self):
@@ -37,6 +62,9 @@ class GrammarConfigPickleTest(unittest.TestCase):
         config.tokenizer_info_json = "current-tokenizer-info"
         config.compiler_cache_bytes = 1024
         config.terminate_without_stop_token = True
+        config.compile_timeout_ms = 1234
+        config.compile_concurrency = 3
+        config.compile_queue_size = 5
 
         restored = pickle.loads(pickle.dumps(config))
 
@@ -45,6 +73,9 @@ class GrammarConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.tokenizer_info_json, "current-tokenizer-info")
         self.assertEqual(restored.compiler_cache_bytes, 1024)
         self.assertTrue(restored.terminate_without_stop_token)
+        self.assertEqual(restored.compile_timeout_ms, 1234)
+        self.assertEqual(restored.compile_concurrency, 3)
+        self.assertEqual(restored.compile_queue_size, 5)
         self.assertFalse(hasattr(restored, "override_stop_tokens"))
 
     def test_legacy_five_tuple_is_loaded(self):
@@ -53,8 +84,11 @@ class GrammarConfigPickleTest(unittest.TestCase):
         self.assertTrue(restored.constrained_json_disable_any_whitespace)
         self.assertEqual(restored.num_workers, 3)
         self.assertEqual(restored.tokenizer_info_json, "tokenizer-info")
-        self.assertEqual(restored.compiler_cache_bytes, 512 * 1024 * 1024)
+        self.assertEqual(restored.compiler_cache_bytes, 2 * 1024 * 1024 * 1024)
         self.assertFalse(restored.terminate_without_stop_token)
+        self.assertEqual(restored.compile_timeout_ms, 2000)
+        self.assertEqual(restored.compile_concurrency, 1)
+        self.assertEqual(restored.compile_queue_size, 2)
         self.assertFalse(hasattr(restored, "override_stop_tokens"))
 
     def test_previous_five_tuple_is_loaded(self):
@@ -65,6 +99,9 @@ class GrammarConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.tokenizer_info_json, "previous-tokenizer-info")
         self.assertEqual(restored.compiler_cache_bytes, 2048)
         self.assertFalse(restored.terminate_without_stop_token)
+        self.assertEqual(restored.compile_timeout_ms, 2000)
+        self.assertEqual(restored.compile_concurrency, 1)
+        self.assertEqual(restored.compile_queue_size, 2)
         self.assertFalse(hasattr(restored, "override_stop_tokens"))
 
     def test_previous_six_tuple_is_loaded(self):
@@ -75,6 +112,9 @@ class GrammarConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.tokenizer_info_json, "six-tokenizer-info")
         self.assertEqual(restored.compiler_cache_bytes, 4096)
         self.assertTrue(restored.terminate_without_stop_token)
+        self.assertEqual(restored.compile_timeout_ms, 2000)
+        self.assertEqual(restored.compile_concurrency, 1)
+        self.assertEqual(restored.compile_queue_size, 2)
         self.assertFalse(hasattr(restored, "override_stop_tokens"))
 
     def test_fabricated_short_layouts_are_rejected(self):
@@ -85,6 +125,110 @@ class GrammarConfigPickleTest(unittest.TestCase):
             ):
                 config = _new_grammar_config()
                 config.__setstate__(state)
+
+
+@pytest.mark.H20
+class HWKernelConfigPickleTest(unittest.TestCase):
+    def test_current_format_round_trip(self):
+        config = HWKernelConfig()
+        config.deep_gemm_num_sm = 7
+        config.arm_gemm_use_kai = True
+        config.enable_multi_block_mode = False
+        config.ft_disable_custom_ar = False
+        config.rocm_hipblaslt_config = "current.csv"
+        config.use_swizzleA = True
+        config.enable_cuda_graph = True
+        config.enable_cuda_graph_debug_mode = True
+        config.generation_prefill_cuda_graph_max_requests = 5
+        config.generation_prefill_capture_token_buckets = [32, 64, 96]
+        config.enable_native_cuda_graph = True
+        config.num_native_cuda_graph = 41
+        config.prefill_capture_seq_lens = [17, 23]
+        config.decode_capture_batch_sizes = [2, 7]
+        config.disable_dpc_random = True
+        config.rocm_disable_custom_ag = True
+        config.force_legacy_fp8_ptpc = True
+
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertEqual(restored.deep_gemm_num_sm, 7)
+        self.assertTrue(restored.arm_gemm_use_kai)
+        self.assertFalse(restored.enable_multi_block_mode)
+        self.assertFalse(restored.ft_disable_custom_ar)
+        self.assertEqual(restored.rocm_hipblaslt_config, "current.csv")
+        self.assertTrue(restored.use_swizzleA)
+        self.assertTrue(restored.enable_cuda_graph)
+        self.assertTrue(restored.enable_cuda_graph_debug_mode)
+        self.assertEqual(restored.generation_prefill_cuda_graph_max_requests, 5)
+        self.assertEqual(
+            restored.generation_prefill_capture_token_buckets, [32, 64, 96]
+        )
+        self.assertTrue(restored.enable_native_cuda_graph)
+        self.assertEqual(restored.num_native_cuda_graph, 41)
+        self.assertEqual(restored.prefill_capture_seq_lens, [17, 23])
+        self.assertEqual(restored.decode_capture_batch_sizes, [2, 7])
+        self.assertTrue(restored.disable_dpc_random)
+        self.assertTrue(restored.rocm_disable_custom_ag)
+        self.assertTrue(restored.force_legacy_fp8_ptpc)
+
+    def test_legacy_14_tuple_uses_generation_prefill_cuda_graph_defaults(self):
+        restored = pickle.loads(pickle.dumps(_LegacyHWKernelConfig()))
+
+        self.assertEqual(restored.generation_prefill_cuda_graph_max_requests, 1)
+        self.assertEqual(restored.prefill_capture_seq_lens, [64, 128])
+        self.assertEqual(restored.decode_capture_batch_sizes, [1, 8])
+        self.assertEqual(restored.num_native_cuda_graph, 37)
+        self.assertEqual(
+            restored.generation_prefill_capture_token_buckets,
+            HWKernelConfig().generation_prefill_capture_token_buckets,
+        )
+
+    def test_native_15_tuple_retains_legacy_fp8_flag(self):
+        legacy_state = _LegacyHWKernelConfig().__reduce__()[2]
+        config = _new_hw_kernel_config()
+        config.__setstate__(legacy_state + (True,))
+        self.assertTrue(config.force_legacy_fp8_ptpc)
+        self.assertEqual(config.generation_prefill_cuda_graph_max_requests, 1)
+        self.assertEqual(config.generation_prefill_capture_token_buckets, [])
+
+    def test_main_16_tuple_retains_generation_prefill_fields(self):
+        legacy_state = _LegacyHWKernelConfig().__reduce__()[2]
+        config = _new_hw_kernel_config()
+        config.__setstate__(legacy_state + (5, [32, 64, 96]))
+        self.assertFalse(config.force_legacy_fp8_ptpc)
+        self.assertEqual(config.generation_prefill_cuda_graph_max_requests, 5)
+        self.assertEqual(config.generation_prefill_capture_token_buckets, [32, 64, 96])
+
+    def test_unsupported_tuple_sizes_are_rejected(self):
+        for size in (13, 18, 19):
+            with self.subTest(size=size), self.assertRaisesRegex(
+                RuntimeError, "Invalid state"
+            ):
+                config = _new_hw_kernel_config()
+                config.__setstate__(tuple(range(size)))
+
+    def test_current_layout_rejects_wrong_field_type(self):
+        malformed_state = (
+            11,
+            True,
+            False,
+            False,
+            "legacy.csv",
+            True,
+            True,
+            True,
+            True,
+            37,
+            [64, 128],
+            [1, 8],
+            True,
+            True,
+            "not-an-integer",
+            [32, 64],
+        )
+        with self.assertRaisesRegex(RuntimeError, "HWKernelConfig unpickle error"):
+            config = _new_hw_kernel_config()
+            config.__setstate__(malformed_state)
 
 
 if __name__ == "__main__":

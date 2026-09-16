@@ -1,62 +1,39 @@
 # -*- coding: utf-8 -*-
-"""
-Async Log Handler
-
-Core Features:
-1. Uses queue to buffer log messages, avoiding main thread blocking
-2. Dedicated background thread handles actual writing
-3. Drop strategy when queue is full to protect main flow
-4. Graceful shutdown mechanism ensures important logs are not lost
-
-Working Mechanism:
-    主线程调用日志
-           ↓
-    AsyncRotatingFileHandler.emit()  ← 接收日志，放入队列（非阻塞）
-           ↓
-       内存队列
-           ↓
-    后台线程取出日志记录
-           ↓
-    _write_record()
-           ↓
-    self._file_handler.emit()  ← 实际写入文件（可能阻塞）
-
-Two emit() Methods:
-- AsyncRotatingFileHandler.emit(): Fast reception, puts record into queue
-- RotatingFileHandler.emit(): Actual file writing with rotation logic
-"""
+"""Non-blocking rotating file handler with a bounded, drainable worker queue."""
 
 import logging
 import queue
+import sys
 import threading
+import time
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 
 class AsyncRotatingFileHandler(logging.Handler):
-    """Async file log handler - runs forever"""
+    """Write records on one background worker without blocking producers."""
 
-    def __init__(self, filename: str, mode: str = 'a', max_bytes: int = 0,
-                 backup_count: int = 0, encoding: Optional[str] = None,
-                 delay: bool = False, max_queue_size: int = 10000,
-                 flush_interval: float = 1.0, **kwargs):
-        """
-        Initialize async log handler
-
-        Args:
-            filename: Log file name
-            mode: File open mode
-            max_bytes: Maximum file size in bytes
-            backup_count: Number of backup files
-            encoding: File encoding
-            delay: Whether to delay file creation
-            max_queue_size: Maximum memory queue size
-            flush_interval: Flush interval in seconds
-            **kwargs: Other parameters
-        """
+    def __init__(
+        self,
+        filename: str,
+        mode: str = "a",
+        max_bytes: int = 0,
+        backup_count: int = 0,
+        encoding: Optional[str] = None,
+        delay: bool = False,
+        max_queue_size: int = 10000,
+        flush_interval: float = 1.0,
+        drain_timeout: Optional[float] = None,
+        **kwargs,
+    ):
         super().__init__()
+        if max_queue_size <= 0:
+            raise ValueError("max_queue_size must be greater than 0")
+        if flush_interval <= 0:
+            raise ValueError("flush_interval must be greater than 0")
+        if drain_timeout is not None and drain_timeout <= 0:
+            raise ValueError("drain_timeout must be greater than 0")
 
-        # Create underlying file handler
         self._file_handler = RotatingFileHandler(
             filename=filename,
             mode=mode,
@@ -64,134 +41,291 @@ class AsyncRotatingFileHandler(logging.Handler):
             backupCount=backup_count,
             encoding=encoding,
             delay=delay,
-            **kwargs
+            **kwargs,
         )
-
-        # Queue configuration
-        self._max_queue_size = max_queue_size
         self._flush_interval = flush_interval
+        self._drain_timeout = (
+            drain_timeout
+            if drain_timeout is not None
+            else max(1.0, flush_interval * 2)
+        )
+        self._queue: queue.Queue[logging.LogRecord] = queue.Queue(
+            maxsize=max_queue_size
+        )
+        self._worker_thread: Optional[threading.Thread] = None
+        self._worker_started_once = False
+        self._stop_event = threading.Event()
+        self._state_lock = threading.RLock()
+        self._target_lock = threading.Lock()
+        self._pending_condition = threading.Condition()
+        self._closing = False
+        self._handler_closed = False
+        self._target_closed = False
+        self._pending = 0
 
-        # Create queue and thread
-        self._queue = queue.Queue(maxsize=max_queue_size)
-        self._worker_thread = None
-
-        # Statistics
+        self._stats_lock = threading.Lock()
         self._stats = {
-            'dropped': 0,
+            "dropped": 0,
+            "rejected_closing": 0,
+            "enqueued": 0,
+            "written": 0,
+            "write_errors": 0,
+            "worker_restarts": 0,
+            "worker_start_errors": 0,
+            "max_queue_depth": 0,
         }
-
-        # Start background thread
         self._start_worker()
-        logging.info(f"AsyncRotatingFileHandler init complete, worker thread alive: {self._worker_thread.is_alive() if self._worker_thread else 'None'}")
 
+    @staticmethod
+    def _diagnose(message: str) -> None:
+        """Write internal failures directly so this handler cannot recurse."""
+        try:
+            sys.stderr.write(f"AsyncRotatingFileHandler: {message}\n")
+        except Exception:
+            pass
 
-    def _start_worker(self) -> None:
-        """Start background worker thread"""
-        if self._worker_thread is None or not self._worker_thread.is_alive():
-            self._worker_thread = threading.Thread(
+    def _start_worker(self) -> bool:
+        with self._state_lock:
+            return self._start_worker_locked()
+
+    def _start_worker_locked(self) -> bool:
+        if self._handler_closed or self._target_closed:
+            return False
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            return True
+
+        restarting = self._worker_started_once
+        worker: Optional[threading.Thread] = None
+        try:
+            worker = threading.Thread(
                 target=self._worker_loop,
                 name=f"AsyncLogWorker-{id(self)}",
-                daemon=True
+                daemon=True,
             )
-            self._worker_thread.start()
+            self._worker_thread = worker
+            worker.start()
+        except Exception as error:
+            worker_alive = False
+            if worker is not None:
+                try:
+                    worker_alive = worker.is_alive()
+                except Exception:
+                    pass
+            if not worker_alive and self._worker_thread is worker:
+                self._worker_thread = None
+            with self._stats_lock:
+                self._stats["worker_start_errors"] += 1
+            self._diagnose(f"failed to start worker: {error!r}")
+            return worker_alive
+
+        self._worker_started_once = True
+        if restarting:
+            with self._stats_lock:
+                self._stats["worker_restarts"] += 1
+        return True
 
     def _worker_loop(self) -> None:
-        """Background thread work loop"""
         try:
-            while True:
-                try:
-                    self._process_batch()
-                except Exception as e:
-                    logging.error(f"AsyncLogWorker error: {e}")
-
-        except Exception as e:
-            logging.error(f"AsyncLogWorker fatal error: {e}")
-            self._drain_queue()
+            while not self._stop_event.is_set() or not self._queue.empty():
+                self._process_batch()
+            self._close_target()
+        except BaseException as error:
+            self._diagnose(f"worker stopped unexpectedly: {error!r}")
+        finally:
+            with self._state_lock:
+                if self._worker_thread is threading.current_thread():
+                    self._worker_thread = None
+            with self._pending_condition:
+                self._pending_condition.notify_all()
 
     def _process_batch(self) -> None:
-        """Process a batch of log records from the queue"""
-        records_batch = []
-
-        # Get first record (blocking wait)
         try:
-            record = self._queue.get(timeout=self._flush_interval)
-            if record is not None:
-                records_batch.append(record)
+            records = [self._queue.get(timeout=self._flush_interval)]
         except queue.Empty:
             return
 
-        # Collect up to 100 records for batch processing
-        while len(records_batch) < 100:
+        while len(records) < 100:
             try:
-                record = self._queue.get_nowait()
-                if record is not None:
-                    records_batch.append(record)
+                records.append(self._queue.get_nowait())
             except queue.Empty:
                 break
 
-        # Batch write logs
-        for record in records_batch:
-            self._write_record(record)
+        try:
+            for record in records:
+                self._write_record(record)
+            self._flush_target()
+        finally:
+            for _ in records:
+                self._finish_record()
 
-        # Force flush file buffer
-        self._file_handler.flush()
+    def _finish_record(self) -> None:
+        self._queue.task_done()
+        with self._pending_condition:
+            self._pending -= 1
+            self._pending_condition.notify_all()
 
     def _write_record(self, record: logging.LogRecord) -> None:
-        """Write single log record"""
         try:
-            # Synchronous operation - will block until write is completed
-            self._file_handler.emit(record)
-        except Exception as e:
-            # Log error but don't raise exception
-            logging.error(f"Failed to write log record: {e}")
+            with self._target_lock:
+                self._file_handler.emit(record)
+            with self._stats_lock:
+                self._stats["written"] += 1
+        except Exception as error:
+            with self._stats_lock:
+                self._stats["write_errors"] += 1
+            self._diagnose(f"failed to write log record: {error!r}")
 
-    def _drain_queue(self) -> None:
-        """When the program exits, processes the remaining log records in the queue/"""
+    def _flush_target(self) -> None:
         try:
-            while True:
-                try:
-                    record = self._queue.get_nowait()
-                    if record is not None:
-                        self._write_record(record)
-                except queue.Empty:
-                    break
-        except Exception as e:
-            logging.error(f"Error draining queue: {e}")
+            with self._target_lock:
+                self._file_handler.flush()
+        except Exception as error:
+            self._diagnose(f"failed to flush target handler: {error!r}")
+
+    def _close_target(self) -> None:
+        with self._target_lock:
+            if self._target_closed:
+                return
+            try:
+                self._file_handler.close()
+            except Exception as error:
+                self._diagnose(f"failed to close target handler: {error!r}")
+        with self._state_lock:
+            self._target_closed = True
+        with self._pending_condition:
+            self._pending_condition.notify_all()
+
+    def _ensure_worker(self) -> bool:
+        with self._state_lock:
+            return self._start_worker_locked()
+
+    def _wait_for_drain(self, deadline: float) -> bool:
+        while True:
+            with self._pending_condition:
+                if self._pending == 0:
+                    return True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+
+            worker_started = self._ensure_worker()
+            with self._pending_condition:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._pending_condition.wait(
+                    timeout=min(remaining, 0.05 if worker_started else 0.01)
+                )
+
+    def _wait_for_target_close(self, deadline: float) -> bool:
+        while True:
+            with self._state_lock:
+                if self._target_closed:
+                    return True
+            if time.monotonic() >= deadline:
+                return False
+
+            worker_started = self._ensure_worker()
+            with self._pending_condition:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._pending_condition.wait(
+                    timeout=min(remaining, 0.05 if worker_started else 0.01)
+                )
 
     def emit(self, record: logging.LogRecord) -> None:
-        """Send log record to async queue - non-blocking"""
-        # Auto-restart dead worker thread
-        if not self._worker_thread or not self._worker_thread.is_alive():
-            logging.warning("AsyncLogHandler worker thread died, restarting...")
-            self._start_worker()
+        """Enqueue one record without blocking; reject producers once close starts."""
+        with self._state_lock:
+            if self._closing or self._handler_closed:
+                with self._stats_lock:
+                    self._stats["rejected_closing"] += 1
+                return
+            self._start_worker_locked()
+            with self._pending_condition:
+                self._pending += 1
+            try:
+                self._queue.put_nowait(record)
+            except queue.Full:
+                with self._pending_condition:
+                    self._pending -= 1
+                    self._pending_condition.notify_all()
+                with self._stats_lock:
+                    self._stats["dropped"] += 1
+                    dropped = self._stats["dropped"]
+                if dropped % 10 == 1:
+                    self._diagnose(
+                        f"dropped {dropped} log records because the queue is full"
+                    )
+                return
 
-        try:
-            self._queue.put_nowait(record)
-        except queue.Full:
-            # Drop logs when queue is full to protect main flow from blocking
-            self._stats['dropped'] += 1
-            if self._stats['dropped'] % 10 == 1:  # Reduce logging frequency
-                logging.warning(f"AsyncLogHandler: dropped {self._stats['dropped']} log records (queue full)")
+            queue_depth = self._queue.qsize()
+            with self._stats_lock:
+                self._stats["enqueued"] += 1
+                self._stats["max_queue_depth"] = max(
+                    self._stats["max_queue_depth"], queue_depth
+                )
 
     def flush(self) -> None:
-        """Flush log buffer - NOOP"""
-        pass
+        """Wait at most one drain deadline for all accepted records."""
+        if not hasattr(self, "_state_lock") or self._handler_closed:
+            return
+        deadline = time.monotonic() + self._drain_timeout
+        if not self._wait_for_drain(deadline):
+            self._diagnose(
+                f"flush timed out with {self.get_stats()['pending']} records pending"
+            )
 
     def close(self) -> None:
-        pass
+        if not hasattr(self, "_state_lock"):
+            return
+        with self._state_lock:
+            if self._handler_closed or self._closing:
+                return
+            self._closing = True
+            self._stop_event.set()
+            self._start_worker_locked()
+
+        deadline = time.monotonic() + self._drain_timeout
+        drained = self._wait_for_drain(deadline)
+        target_closed = self._wait_for_target_close(deadline) if drained else False
+        if not drained:
+            self._diagnose(
+                f"close timed out with {self.get_stats()['pending']} records pending"
+            )
+        elif not target_closed:
+            self._diagnose("close timed out waiting for target handler")
+        with self._state_lock:
+            self._handler_closed = True
+        super().close()
+
+    def get_stats(self) -> dict:
+        with self._stats_lock:
+            stats = dict(self._stats)
+        with self._pending_condition:
+            stats["pending"] = self._pending
+        with self._state_lock:
+            stats["queue_depth"] = self._queue.qsize()
+            stats["worker_alive"] = bool(
+                self._worker_thread and self._worker_thread.is_alive()
+            )
+            stats["closing"] = self._closing
+        return stats
 
     def setFormatter(self, formatter: logging.Formatter) -> None:
-        """Set formatter"""
         super().setFormatter(formatter)
-        if self._file_handler:
-            self._file_handler.setFormatter(formatter)
+        if hasattr(self, "_target_lock"):
+            with self._target_lock:
+                self._file_handler.setFormatter(formatter)
 
     def setLevel(self, level) -> None:
-        """Set log level"""
         super().setLevel(level)
-        if self._file_handler:
-            self._file_handler.setLevel(level)
+        if hasattr(self, "_target_lock"):
+            with self._target_lock:
+                self._file_handler.setLevel(level)
 
     def __del__(self):
-        """Destructor"""
-        pass
+        try:
+            self.close()
+        except Exception:
+            pass

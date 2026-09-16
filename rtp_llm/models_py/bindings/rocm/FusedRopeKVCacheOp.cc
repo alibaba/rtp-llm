@@ -101,9 +101,11 @@ static void copyTensorExactInPlace(torch::Tensor& dst, const torch::Tensor& src,
     dst_flat.copy_(src_match, true);
 }
 
-void rebuildPaddingOffsetForCaptureStride(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inputs) {
+void rebuildHostPaddingOffsetForCaptureStride(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inputs) {
     TORCH_CHECK(attn_inputs.input_lengths.defined(), "prepare_in_place expects input_lengths");
     TORCH_CHECK(params.padding_offset.defined(), "prepare_in_place expects a captured padding_offset tensor");
+    TORCH_CHECK(!params.padding_offset.is_cuda(),
+                "host padding_offset rebuild must not overwrite runner-owned device metadata");
     TORCH_CHECK(params.padding_offset.scalar_type() == at::kInt,
                 "captured padding_offset must be int32, got ",
                 params.padding_offset.scalar_type());
@@ -138,20 +140,13 @@ void rebuildPaddingOffsetForCaptureStride(CKAttn& params, const torch_ext::PyAtt
                 padding_offset_flat.numel(),
                 ", replay tokens=",
                 total_tokens);
-    auto host_padding_offset =
-        params.padding_offset.is_cuda() ?
-            torch::empty({total_tokens}, torch::TensorOptions().dtype(at::kInt).device(at::kCPU)) :
-            padding_offset_flat;
-    auto*   host_padding_offset_ptr = host_padding_offset.data_ptr<int32_t>();
-    int64_t token_cursor            = 0;
+    auto*   padding_offset_ptr = padding_offset_flat.data_ptr<int32_t>();
+    int64_t token_cursor       = 0;
     for (int64_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
         const int32_t input_length = input_lengths_ptr[batch_idx];
         const int32_t offset = static_cast<int32_t>(batch_idx * params.prefill_capture_max_seq_len - token_cursor);
-        std::fill_n(host_padding_offset_ptr + token_cursor, input_length, offset);
+        std::fill_n(padding_offset_ptr + token_cursor, input_length, offset);
         token_cursor += input_length;
-    }
-    if (params.padding_offset.is_cuda() && total_tokens > 0) {
-        padding_offset_flat.slice(0, 0, total_tokens).copy_(host_padding_offset, false);
     }
 }
 
@@ -166,6 +161,16 @@ void updateKvCacheOffset(CKAttn& params, const torch::Tensor& kv_cache_block_id_
     const int   batch_size        = kv_cache_block_id_device.size(0);
     const int   max_blocks_per_bs = kv_cache_block_id_device.size(1);
     hipStream_t stream            = GET_CURRENT_STREAM();
+    TORCH_CHECK(batch_size <= params.kv_block_array.mMaxSeqs,
+                "runtime batch_size ",
+                batch_size,
+                " exceeds captured mMaxSeqs ",
+                params.kv_block_array.mMaxSeqs);
+    TORCH_CHECK(max_blocks_per_bs == params.kv_block_array.mMaxBlocksPerSeq,
+                "runtime max_blocks_per_bs ",
+                max_blocks_per_bs,
+                " must equal captured mMaxBlocksPerSeq ",
+                params.kv_block_array.mMaxBlocksPerSeq);
     invokeConvertOffsetToBlockArrayData(params.kv_cache_offset.data_ptr<int>(),
                                         kv_cache_block_id_device.data_ptr<int>(),
                                         batch_size,
@@ -187,13 +192,14 @@ void prepareInPlace(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inp
         max_prefix_len = attn_inputs.prefix_lengths.max().item<int32_t>();
     }
 
-    if (params.prefill_capture_max_seq_len > 0) {
-        rebuildPaddingOffsetForCaptureStride(params, attn_inputs);
+    // Generation-prefill uses a device tensor populated by CudaGraphRunner,
+    // which is its single metadata owner. Legacy padded-query/MTP capture keeps
+    // a host tensor and still needs this op to rebuild offsets for the frozen
+    // capture row stride.
+    if (params.prefill_capture_max_seq_len > 0 && !params.padding_offset.is_cuda()) {
+        rebuildHostPaddingOffsetForCaptureStride(params, attn_inputs);
     }
 
-    // Only padded-Q graph replay freezes the fused RoPE row stride. All other
-    // callers retain the existing live-length metadata path without rebuilding
-    // padding_offset.
     params.prefill_runtime_max_seq_len =
         params.prefill_capture_max_seq_len > 0 ? params.prefill_capture_max_seq_len : params.max_seq_len;
     params.prefill_runtime_max_prefix_len      = max_prefix_len;
@@ -237,7 +243,11 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
     attn_params->cu_kv_seqlens = attn_inputs.cu_kv_seqlens_device;
     attn_params->input_lengths = attn_inputs.input_lengths;
     attn_params->max_seq_len   = attn_inputs.input_lengths.max().item<int32_t>();
-    if (pad_query) {
+    // The fused RoPE/KV writer captures seq_len as a host scalar. Preserve the
+    // capture stride for both padded-query graphs and generation-prefill graphs; the
+    // former rebuild host offsets here, while CudaGraphRunner owns the latter's
+    // device offsets.
+    if (pad_query || attn_inputs.is_cuda_graph) {
         attn_params->prefill_capture_max_seq_len = attn_params->max_seq_len;
     }
     attn_params->padding_offset = attn_inputs.padding_offset;
@@ -575,6 +585,13 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
     bool   store_q     = true;
     bool   store_kv    = false;
     bool   store_cache = kv_cache.has_value();
+
+    // The decode kernel indexes one sequence length per token.
+    RTP_LLM_CHECK_WITH_INFO(token_num <= batch_size,
+                            "FusedRopeKVCacheDecodeOp: token_num=%d exceeds batch_size=%d, "
+                            "the kernel would index sequence_lengths out of range",
+                            token_num,
+                            batch_size);
 
     // Always use aiter_pa for ROCm
     hipStream_t stream_ = GET_CURRENT_STREAM();

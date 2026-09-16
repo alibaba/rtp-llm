@@ -10,23 +10,13 @@ namespace speculative {
 
 FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
     FastTopKSamplerOutput output;
-    auto                  draft_probs = torch::softmax(logits, -1);
 
-    std::tuple<torch::Tensor, torch::Tensor> sample_res;
     if (top_k == 1) {
-        sample_res = torch::max(draft_probs, -1, true);
+        output.token_ids = torch::argmax(logits, -1, true);
+        output.all_probs = torch::zeros_like(logits).scatter_(-1, output.token_ids, 1.0);
     } else {
-        sample_res = torch::topk(draft_probs, top_k, -1);
-    }
-
-    output.token_ids = std::get<1>(sample_res);
-    if (top_k == 1) {
-        // A deterministic top-1 proposal must be represented by its point-mass
-        // distribution when rejection sampling computes its acceptance ratio.
-        output.all_probs = torch::zeros_like(draft_probs).scatter_(-1, output.token_ids, 1.0);
-    } else {
-        // Preserve the existing multi-candidate behavior. This path does not
-        // describe the deterministic top-1 proposal fixed above.
+        auto draft_probs = torch::softmax(logits, -1);
+        output.token_ids = std::get<1>(torch::topk(draft_probs, top_k, -1));
         output.all_probs = std::move(draft_probs);
     }
 
@@ -80,10 +70,14 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
         // the same q to rejection sampling. Request top-k/top-p stay target-side.
         logits.div_(temperature_column);
         auto sampling_probabilities = torch::softmax(logits, -1);
-        auto sampled_tokens         = execSampleFromProbs(sampling_probabilities).to(torch::kInt32);
+        auto sampled_draft_tokens   = execSampleFromProbs(sampling_probabilities).to(torch::kInt32);
+        auto sampled_target_tokens  = sampled_draft_tokens;
+        if (d2t_map_.defined()) {
+            sampled_target_tokens = d2t_map_.index_select(0, sampled_draft_tokens.to(torch::kLong)).to(torch::kInt32);
+        }
         all_probabilities.select(1, step).copy_(sampling_probabilities);
-        token_columns.push_back(sampled_tokens);
-        previous_tokens = sampled_tokens.to(torch::kLong);
+        token_columns.push_back(sampled_target_tokens);
+        previous_tokens = sampled_target_tokens.to(torch::kLong);
     }
 
     SamplerOutput output;

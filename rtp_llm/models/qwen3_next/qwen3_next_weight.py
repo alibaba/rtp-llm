@@ -330,9 +330,10 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
         moe_sub_weights = [moe_gate] + self._create_moe_expert_weights(moe_config)
 
         result: List[WeightModule] = []
-        result.append(FfnWeight(sub_weights=ffn_sub_weights, config=ffn_config))
+        if self.model_config.n_shared_experts > 0:
+            result.append(FfnWeight(sub_weights=ffn_sub_weights, config=ffn_config))
         result.append(MoeWeight(sub_weights=moe_sub_weights, config=moe_config))
-        if shared_expert_gate is not None:
+        if self.model_config.n_shared_experts > 0 and shared_expert_gate is not None:
             result.append(shared_expert_gate)
         return result
 

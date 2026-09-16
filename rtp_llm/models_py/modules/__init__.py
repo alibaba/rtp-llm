@@ -1,39 +1,4 @@
-# Import from base module
-from rtp_llm.models_py.modules.base import (
-    AddBiasResLayerNorm,
-    AddBiasResLayerNormTorch,
-    Embedding,
-    EmbeddingBert,
-    FakeBalanceExpert,
-    FusedQKRMSNorm,
-    FusedSiluAndMul,
-    GroupTopK,
-    IndexerOp,
-    LayerNorm,
-    LayerNormTorch,
-    MultimodalDeepstackInjector,
-    MultimodalEmbeddingInjector,
-    QKRMSNorm,
-    RMSNorm,
-    RMSNormTorch,
-    RMSResNorm,
-    RMSResNormTorch,
-    SelectTopk,
-    SigmoidGateScaleAdd,
-    WriteCacheStoreOp,
-    reshape_extra_input_to_deepstack,
-)
-
-# Import from factory module
-from rtp_llm.models_py.modules.factory import (
-    AttnImplFactory,
-    FMHAImplBase,
-    FusedMoeFactory,
-    LinearFactory,
-)
-
-# Import from hybrid module
-from rtp_llm.models_py.modules.hybrid import CausalAttention, DenseMLP, MlaAttention
+from importlib import import_module
 
 __all__ = [
     # Base modules
@@ -71,3 +36,30 @@ __all__ = [
     "MultimodalEmbeddingInjector",
     "reshape_extra_input_to_deepstack",
 ]
+
+_FACTORY_EXPORTS = {
+    "FusedMoeFactory",
+    "LinearFactory",
+    "AttnImplFactory",
+    "FMHAImplBase",
+}
+_HYBRID_EXPORTS = {"CausalAttention", "MlaAttention", "DenseMLP"}
+
+
+def __getattr__(name: str):
+    """Load runtime modules only when their public symbols are requested.
+
+    Importing a leaf module such as fused_moe.defs.config_adapter must not load
+    CUDA operators merely because Python first executes this package file.
+    """
+    if name not in __all__:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    if name in _FACTORY_EXPORTS:
+        module_name = "rtp_llm.models_py.modules.factory"
+    elif name in _HYBRID_EXPORTS:
+        module_name = "rtp_llm.models_py.modules.hybrid"
+    else:
+        module_name = "rtp_llm.models_py.modules.base"
+    value = getattr(import_module(module_name), name)
+    globals()[name] = value
+    return value

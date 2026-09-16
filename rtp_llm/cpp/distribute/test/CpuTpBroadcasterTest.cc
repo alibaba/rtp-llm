@@ -100,7 +100,7 @@ int connectWithRetry(const std::string& path) {
             return -1;
         }
 
-        struct sockaddr_un addr{};
+        struct sockaddr_un addr {};
         addr.sun_family = AF_UNIX;
         std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
         if (::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0) {
@@ -133,7 +133,7 @@ int fakeServerWrongProbe(const std::string& base) {
         return 1;
     }
 
-    struct sockaddr_un addr{};
+    struct sockaddr_un addr {};
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
     if (::bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
@@ -259,6 +259,24 @@ int happyPathChild(int rank, int tp_size, const std::string& base) {
     return 0;
 }
 
+int mismatchedPayloadSizeChild(int rank, const std::string& base) {
+    auto& bcast = CpuTpBroadcaster::instance();
+    bcast.reset();
+    bcast.initialize(rank, 2, base);
+
+    if (rank == 0) {
+        uint32_t value = 7;
+        bcast.broadcast(&value, sizeof(value), 0);
+        bcast.reset();
+        return 0;
+    }
+
+    uint64_t  value = 0;
+    const int rc    = expectThrowContains([&] { bcast.broadcast(&value, sizeof(value), 0); }, "payload size mismatch");
+    bcast.reset();
+    return rc;
+}
+
 void runHappyPath(int tp_size) {
     const std::string  base = makeTempBase();
     std::vector<pid_t> pids;
@@ -277,6 +295,16 @@ TEST(CpuTpBroadcasterTest, BroadcastHappyPathTp2) {
 
 TEST(CpuTpBroadcasterTest, BroadcastHappyPathTp4) {
     runHappyPath(4);
+}
+
+TEST(CpuTpBroadcasterTest, RejectsPayloadSizeMismatchBeforeReadingPayload) {
+    const std::string  base = makeTempBase();
+    std::vector<pid_t> pids;
+    pids.push_back(spawnChild([=] { return mismatchedPayloadSizeChild(0, base); }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    pids.push_back(spawnChild([=] { return mismatchedPayloadSizeChild(1, base); }));
+    expectChildrenOk(pids);
+    cleanupTempBase(base, 2);
 }
 
 TEST(CpuTpBroadcasterTest, Rank0RejectsBadPeerRank) {

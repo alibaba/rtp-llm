@@ -18,6 +18,14 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+# Include the patched source in the RTP wheel, not just Bazel's external tree.
+genrule(
+    name = "aiter_gdr_decode_padding_source",
+    srcs = ["@aiter//:gdr_decode_source"],
+    outs = ["fla/_aiter_gdr_decode_padding.py"],
+    cmd = "cp $(location @aiter//:gdr_decode_source) $@",
+)
+
 py_library(
     name = "kimi_kda",
     srcs = glob(["kimi_kda/*.py"]),

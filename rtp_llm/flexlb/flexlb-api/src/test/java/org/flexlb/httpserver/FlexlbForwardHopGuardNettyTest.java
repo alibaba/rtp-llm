@@ -10,17 +10,19 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.balance.scheduler.CancelReason;
+import org.flexlb.balance.scheduler.DeliveryClaimKind;
+import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
+import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.service.monitor.PrioritySchedulerReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -33,6 +35,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -40,12 +43,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Real Netty boundaries for self-target and one-hop forwarding guards. */
+/** Real Netty boundaries for forwarding guards and exact-owner cancellation. */
 class FlexlbForwardHopGuardNettyTest {
 
     @Test
@@ -109,11 +113,112 @@ class FlexlbForwardHopGuardNettyTest {
         }
     }
 
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void normalClientCancelReachesLocalOwnerAfterItStepsDown() throws Exception {
+        long requestId = 73_001L;
+        try (Node originalMaster = Node.start("10.0.0.1");
+             Client client = Client.connect(originalMaster.grpcPort())) {
+            when(originalMaster.routeService.getRequestState(requestId, 0L))
+                    .thenReturn(requestState(
+                            requestId, RequestState.Phase.ACKNOWLEDGED));
+            when(originalMaster.routeService.cancelRequest(
+                    requestId, 0L, CancelReason.CLIENT_CANCELLED))
+                    .thenReturn(requestState(
+                            requestId, RequestState.Phase.CANCELLED));
+
+            originalMaster.isMaster.set(true);
+            FlexlbScheduleProtocol.GetRequestStateResponsePB state =
+                    client.stub.getRequestState(
+                            FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                                    .setRequestId(requestId)
+                                    .build());
+            assertTrue(state.getFound());
+            assertEquals(
+                    FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_ACKNOWLEDGED,
+                    state.getLifecycle().getState());
+
+            originalMaster.isMaster.set(false);
+            originalMaster.masterAddress.set("127.0.0.2:7001");
+            FlexlbScheduleProtocol.FlexlbCancelResponsePB response =
+                    client.stub.cancel(
+                            FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                                    .setRequestId(requestId)
+                                    .setReason(FlexlbScheduleProtocol.CancelReasonPB
+                                            .CANCEL_REASON_CLIENT_CANCELLED)
+                                    .build());
+
+            assertTrue(response.getFound());
+            assertEquals(
+                    FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_CANCELLED,
+                    response.getLifecycle().getState());
+            verify(originalMaster.routeService).cancelRequest(
+                    requestId, 0L, CancelReason.CLIENT_CANCELLED);
+            assertEquals(2, originalMaster.inboundCalls.get());
+            originalMaster.awaitExecutorIdle();
+        }
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void forgedHopOneMissDoesNotForwardOrCancelUnrelatedState() throws Exception {
+        long requestedId = 74_001L;
+        long unrelatedLocalId = 74_002L;
+        try (Node follower = Node.start("10.0.0.1");
+             Node currentMaster = Node.start("10.0.0.2");
+             Client client = Client.connect(follower.grpcPort())) {
+            follower.masterAddress.set(currentMaster.httpAddress());
+            currentMaster.isMaster.set(true);
+            when(follower.routeService.cancelRequest(
+                    unrelatedLocalId, 0L, CancelReason.CLIENT_CANCELLED))
+                    .thenReturn(requestState(
+                            unrelatedLocalId, RequestState.Phase.CANCELLED));
+            when(currentMaster.routeService.cancelRequest(
+                    requestedId, 0L, CancelReason.CLIENT_CANCELLED))
+                    .thenReturn(requestState(
+                            requestedId, RequestState.Phase.CANCELLED));
+
+            FlexlbScheduleProtocol.FlexlbCancelResponsePB response =
+                    client.stub.cancel(
+                            FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                                    .setRequestId(requestedId)
+                                    .setReason(FlexlbScheduleProtocol.CancelReasonPB
+                                            .CANCEL_REASON_CLIENT_CANCELLED)
+                                    .setForwardHop(1)
+                                    .build());
+
+            assertFalse(response.getFound());
+            assertFalse(response.hasLifecycle());
+            verify(follower.routeService).cancelRequest(
+                    requestedId, 0L, CancelReason.CLIENT_CANCELLED);
+            verify(follower.routeService, never()).cancelRequest(
+                    unrelatedLocalId, 0L, CancelReason.CLIENT_CANCELLED);
+            verify(currentMaster.routeService, never()).cancelRequest(
+                    anyLong(), anyLong(), any(CancelReason.class));
+            assertEquals(1, follower.inboundCalls.get());
+            assertEquals(0, currentMaster.inboundCalls.get());
+            follower.awaitExecutorIdle();
+            currentMaster.awaitExecutorIdle();
+        }
+    }
+
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(requestId)
                 .setSeqLen(1024)
                 .build();
+    }
+
+    private static RequestState requestState(
+            long requestId, RequestState.Phase phase) {
+        return new RequestState(
+                requestId,
+                phase,
+                DeliveryClaimKind.NONE,
+                0L,
+                1L,
+                2L,
+                phase.name());
     }
 
     private static final class Client implements AutoCloseable {
@@ -142,6 +247,7 @@ class FlexlbForwardHopGuardNettyTest {
 
     private static final class Node implements AutoCloseable {
         private final AtomicReference<String> masterAddress = new AtomicReference<>();
+        private final AtomicBoolean isMaster = new AtomicBoolean(false);
         private final AtomicInteger inboundCalls = new AtomicInteger();
         private final AtomicInteger rejections = new AtomicInteger();
         private final LBStatusConsistencyService consistency;
@@ -155,7 +261,7 @@ class FlexlbForwardHopGuardNettyTest {
         private Node(String localIdentity) throws Exception {
             consistency = mock(LBStatusConsistencyService.class);
             when(consistency.isNeedConsistency()).thenReturn(true);
-            when(consistency.isMaster()).thenReturn(false);
+            when(consistency.isMaster()).thenAnswer(invocation -> isMaster.get());
             when(consistency.getLocalHostIp()).thenReturn(localIdentity);
             when(consistency.getMasterHostIpPort()).thenAnswer(
                     invocation -> masterAddress.get());
@@ -182,10 +288,7 @@ class FlexlbForwardHopGuardNettyTest {
                     configService,
                     mock(BatchSchedulerReporter.class),
                     mock(ServerScheduleLatencyRecorder.class),
-                    new PrioritySloPolicy(
-                            PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
-                            PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
-                    mock(PrioritySchedulerReporter.class));
+                    mock(RequestSchedulerReporter.class));
 
             serverExecutor = new ThreadPoolExecutor(
                     4, 4, 0L, TimeUnit.MILLISECONDS,

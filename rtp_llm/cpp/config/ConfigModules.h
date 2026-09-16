@@ -4,7 +4,9 @@
 #include <sstream>
 #include <map>
 #include <vector>
+#include "rtp_llm/cpp/config/MMTransportMode.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/config/RdmaConfig.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 
 namespace rtp_llm {
@@ -35,7 +37,7 @@ struct PrefillCPConfig {
     bool kv_cache_sharded = false;
     // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
     int64_t prefill_cp_size = 0;
-    bool           is_enabled() const {
+    bool    is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;
     }
@@ -108,24 +110,24 @@ struct ConcurrencyConfig {
 };
 
 struct FMHAConfig {
-    // String-based attention backend selection (new API)
-    std::string attn_backend          = "auto";  // "auto", "none", or a specific backend NAME
-    std::string prefill_attn_backend  = "";      // override for prefill stage (empty = use attn_backend)
-    std::string decode_attn_backend   = "";      // override for decode stage (empty = use attn_backend)
-    std::string disable_attn_backends = "";      // comma-separated list of backend NAMEs to disable
+    // Native explicit backend selection remains the first dispatch decision.
+    std::string attn_backend = "auto";
+    std::string prefill_attn_backend = "";
+    std::string decode_attn_backend = "";
+    std::string disable_attn_backends = "";
 
-    // Legacy boolean flags (kept for backward compatibility, derived from above)
-    bool        enable_fmha             = true;
-    bool        enable_trt_fmha         = true;
-    bool        enable_paged_trt_fmha   = true;
-    bool        enable_open_source_fmha = true;
-    bool        disable_flash_infer     = false;
-    bool        disable_flashinfer_hybrid_prefill = true;
-    bool        enable_xqa              = true;
-    bool        use_aiter_pa            = true;
-    bool        use_asm_pa              = true;
-    bool        use_triton_pa           = false;
-    int64_t     absorb_opt_len          = 1024;
+    bool enable_fmha = true;
+    bool enable_trt_fmha = true;
+    bool enable_paged_trt_fmha = true;
+    bool enable_open_source_fmha = true;
+    bool disable_flash_infer = false;
+    bool disable_flashinfer_hybrid_prefill = true;
+    bool enable_xqa = true;
+    bool use_aiter_pa = true;
+    bool use_asm_pa = true;
+    // Triton PA covers decode and graph-capable no-prefix generation prefill.
+    bool use_triton_pa = false;
+    int64_t absorb_opt_len = 1024;
     std::string to_string() const;
 };
 
@@ -146,7 +148,11 @@ struct KVCacheConfig {
     int                                     linear_step                       = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
     int         fp8_kv_cache              = 0;
-    std::string ssm_state_dtype           = "bf16";
+    // "auto" preserves a model-declared recurrent-state dtype. Models
+    // without such a declaration keep LinearAttentionConfig's BF16 default;
+    // the legacy remote connector falls back to BF16 because it requires one
+    // contiguous shared cache pool.
+    std::string ssm_state_dtype           = "auto";
     int64_t     kv_cache_mem_mb           = -1;
     int         seq_size_per_block        = 64;
     int         kernel_seq_size_per_block = 0;
@@ -167,7 +173,6 @@ struct KVCacheConfig {
     int64_t device_cache_min_free_blocks            = 0;
     int     load_cache_retry_times                  = 1;  // Maximum retry attempts for load cache transfer failures
 
-
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
     // linear-step-derived block count.
@@ -180,6 +185,13 @@ struct KVCacheConfig {
     // DSV4 fixed-pool residency switch. false = GPU BlockPool; true = pinned
     // CPU BlockPool for INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV.
     bool dsv4_fixed_pool_use_memory = false;
+
+    // HBM cache event publishing. Only tp_rank=0 with pp_size=1 creates an active publisher for each DP replica.
+    std::string kv_cache_event_publisher_type   = "none";  // none | kvcm
+    std::string kv_cache_event_manager_endpoint = "";      // KVCM Meta HTTP endpoint
+    std::string kv_cache_event_instance_group   = "";
+    std::string kv_cache_event_instance_id      = "";
+    std::string kv_cache_event_host_ip_port     = "";
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
@@ -228,6 +240,17 @@ struct ProfilingDebugLoggingConfig {
 };
 
 struct HWKernelConfig {
+    static constexpr int kGenerationPrefillCudaGraphMaxCaptureTokens = 1 << 20;
+    // Every bucket retains a whole-model device graph and its graph-owned
+    // allocations. Keep malformed list/range/file input from turning startup
+    // into an unbounded capture loop; production presets use only seven.
+    static constexpr int kGenerationPrefillCudaGraphMaxCaptureBuckets = 64;
+    // The generation-prefill attention backend receives one additional
+    // positive-length padding-sentinel row. CUDA's graph-safe paged-attention
+    // plan is a single-CTA kernel with at most 1024 rows, so real requests must
+    // stay at or below 1023.
+    static constexpr int kGenerationPrefillCudaGraphMaxRequests = 1023;
+
     int         deep_gemm_num_sm             = -1;
     bool        arm_gemm_use_kai             = false;
     bool        enable_multi_block_mode      = true;
@@ -237,8 +260,12 @@ struct HWKernelConfig {
     bool        force_legacy_fp8_ptpc        = false;
     bool        enable_cuda_graph            = false;
     bool        enable_cuda_graph_debug_mode = false;
-    bool        enable_native_cuda_graph     = false;
-    int         num_native_cuda_graph        = 200;
+    // Generation-prefill graph is enabled only when the CUDA graph master
+    // switch is on and this capture bucket list is explicitly configured.
+    int              generation_prefill_cuda_graph_max_requests = 1;
+    std::vector<int> generation_prefill_capture_token_buckets;
+    bool             enable_native_cuda_graph = false;
+    int              num_native_cuda_graph    = 200;
     // Prefill CUDA Graph capture configuration
     // Can be set via: prefill_capture_file_path, prefill_capture_seq_lens, or prefill_capture_max_seq_len + step
     std::vector<int> prefill_capture_seq_lens;
@@ -304,6 +331,9 @@ struct SpeculativeExecutionConfig {
     // DSpARK noise/mask token used to build each fixed-width draft block.
     // Filled from the draft checkpoint by ModelFactory.
     int64_t     sp_dspark_mask_token_id = -1;
+    // True: gamma query rows, including the anchor prediction. False:
+    // one conditioning anchor followed by gamma prediction rows.
+    bool        sp_dspark_sample_from_anchor = true;
     std::string to_string() const;
 
     // Helper functions for enum conversion
@@ -311,9 +341,26 @@ struct SpeculativeExecutionConfig {
     static std::string     to_string(SpeculativeType type);
 };
 
+struct MMControlConfig {
+    // Best-effort release RPC deadline.
+    int64_t release_timeout_ms = 1000;
+};
+
+struct MMTransportConfig {
+    std::string     mode = kMMTransportModeGrpc;
+    MMControlConfig control;
+    RdmaConfig      rdma;
+    // LLM-to-ViT RPC budget when no request input sets mm_timeout_ms.
+    int64_t default_rpc_timeout_ms = 125 * 1000;
+    // Let the ViT worker return its structured timeout before the client deadline.
+    int64_t rpc_timeout_margin_ms = 5 * 1000;
+};
+
 struct VitConfig {
-    VitSeparation vit_separation = VitSeparation::VIT_SEPARATION_LOCAL;
-    std::string   to_string() const;
+    VitSeparation     vit_separation = VitSeparation::VIT_SEPARATION_LOCAL;
+    MMTransportConfig output_transport;
+
+    std::string to_string() const;
 };
 
 struct CacheStoreConfig {
@@ -372,7 +419,7 @@ struct FIFOSchedulerConfig {
     //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
-    std::string decode_prefill_ratio = "1";
+    std::string decode_prefill_ratio           = "1";
     bool        cp_force_single_prefill        = true;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;
@@ -382,11 +429,18 @@ struct FIFOSchedulerConfig {
 struct GrammarConfig {
     bool constrained_json_disable_any_whitespace = false;
     // Service-level xgrammar matcher policy. Requests cannot override it.
-    bool                 terminate_without_stop_token = false;
-    int                  num_workers                  = 8;
-    std::string          tokenizer_info_json;
-    // Byte cap on xgrammar's internal compiled-grammar cache; <=0 = unlimited.
-    int64_t     compiler_cache_bytes = 512 * 1024 * 1024;
+    bool terminate_without_stop_token = false;
+    // Threads used by one grammar compile. <=0 is resolved by Python from this rank's CPU share.
+    int num_workers = 0;
+    // Positive wall-clock budget a caller waits for a compile. Non-positive values are rejected.
+    int compile_timeout_ms = 2000;
+    // Positive number of grammar compiles that may run concurrently in this engine process.
+    int compile_concurrency = 1;
+    // Positive number of distinct compiles that may wait behind running work.
+    int         compile_queue_size = 2;
+    std::string tokenizer_info_json;
+    // Total byte cap split between xgrammar's cache and the engine verdict LRU; <=0 = unlimited.
+    int64_t     compiler_cache_bytes = 2L * 1024L * 1024L * 1024L;
     std::string to_string() const;
 };
 

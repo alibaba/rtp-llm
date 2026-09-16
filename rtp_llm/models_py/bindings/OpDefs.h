@@ -262,6 +262,8 @@ struct PyCacheStoreInputs {
 struct PyPrefillCudaGaphCopyParams {
     // for embedding model cuda graph capture, the attenton batch size is padded to max_batch_size,
     // so we can't get the real batch size for `copy kernel` using `input_lengths.size(0)`(which is max_batch_size).
+    // Keep this scalar in fixed-address device memory: captured kernels read it
+    // directly and replay preparation updates it with stream ordering.
     torch::Tensor cuda_graph_prefill_batch_size = torch::empty(0);
     int           max_seq_len                   = 0;
     int           max_batch_size                = 0;
@@ -274,6 +276,7 @@ struct PyContextParallelParams {
     torch::Tensor prefill_qkv_restore_indice;
     torch::Tensor prefill_qkv_padding_mask;
     torch::Tensor prefill_actual_input_lengths_cpu;
+    torch::Tensor prefill_prefix_lengths_cpu;
 };
 
 // Naming convention: the host (pinned CPU) tensor uses the bare name; its device (CUDA)
@@ -366,10 +369,17 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor hidden_states;
+    // Optional model-side features consumed by speculative decoders.  This is
+    // a first-class forward output because CUDA graph replay does not execute
+    // Python and therefore cannot safely recover it from mutable model state.
+    torch::Tensor mtp_target_hidden_states;
 
     PyModelOutputs() = default;
 
     PyModelOutputs(torch::Tensor hidden_states): hidden_states(std::move(hidden_states)) {}
+
+    PyModelOutputs(torch::Tensor hidden_states, torch::Tensor mtp_target_hidden_states):
+        hidden_states(std::move(hidden_states)), mtp_target_hidden_states(std::move(mtp_target_hidden_states)) {}
 };
 
 void registerPyOpDefs(pybind11::module& m);

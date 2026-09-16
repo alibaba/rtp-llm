@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import torch
 from pydantic import BaseModel, ValidationError
 
+
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.test.smoke.base_comparer import BaseComparer
 from rtp_llm.test.smoke.common_def import (
@@ -74,6 +75,7 @@ class AuxInfo(BaseModel):
     output_len: Optional[int] = None
     step_output_len: Optional[int] = None
     iter_count: Optional[int] = None
+    iter_count_tolerance: Optional[int] = None
     cum_log_probs: Optional[Union[List[float], List[None]]] = None
     beam_responses: Optional[List[str]] = None
     # Allow multiple acceptable beam_responses orderings for cuBLAS/NCCL non-
@@ -83,6 +85,7 @@ class AuxInfo(BaseModel):
     beam_responses_alternatives: Optional[List[List[str]]] = None
     pd_sep: Optional[bool] = None
     softmax_probs: Optional[List[float]] = None
+    generation_prefill_cuda_graph_status: Optional[str] = None
 
 
 class SmokeResponse(BaseModel):
@@ -387,12 +390,12 @@ class NormalComparer(BaseComparer):
 
         # 普通字段直接比较
         for field in [
+            "iter_count",
             "input_len",
             "prefix_len",
             "reuse_len",
             "output_len",
             "step_output_len",
-            "iter_count",
             "pd_sep",
             "local_reuse_len",
             "remote_reuse_len",
@@ -405,6 +408,7 @@ class NormalComparer(BaseComparer):
             "decode_local_reuse_len",
             "decode_remote_reuse_len",
             "decode_memory_reuse_len",
+            "generation_prefill_cuda_graph_status",
         ]:
             expect_val = getattr(expect_aux, field)
             actual_val = getattr(actual_aux, field)

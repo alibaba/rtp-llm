@@ -1,3 +1,5 @@
+#include <mutex>
+
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
@@ -259,8 +261,11 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     auto total_input_tokens =
         model_input.combo_tokens.is_cuda() ? model_input.combo_tokens.cpu().pin_memory() : model_input.combo_tokens;
     auto& total_hidden_states = model_input.last_hidden_states;
-    auto  input_lengths =
-        model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().pin_memory() : model_input.input_lengths;
+    // The rank-local rewrite below writes through this mirror, so it must not alias the
+    // caller's host tensor: MtpExecutor snapshots the pre-split global lengths from that
+    // same buffer to rebuild the draft batch.
+    auto  input_lengths    = model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().pin_memory() :
+                                                                   model_input.input_lengths.clone().pin_memory();
     auto& sequence_lengths = model_input.sequence_lengths;
     // Preserve global lengths before updating input_lengths in place for this CP rank.
     auto input_lengths_cpu_tensor = input_lengths.clone().pin_memory();
@@ -269,12 +274,22 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     size_t num_prefill_stream = input_lengths.size(0) - num_decode_stream;
 
     const bool has_prefix_lengths = model_input.prefix_lengths.defined() && model_input.prefix_lengths.numel() > 0;
-    RTP_LLM_CHECK_WITH_INFO(!has_prefix_lengths || !model_input.prefix_lengths.is_cuda(),
-                            "CP prefix_lengths must be a host tensor");
-    RTP_LLM_CHECK_WITH_INFO(!has_prefix_lengths
-                                || model_input.prefix_lengths.numel() == static_cast<int64_t>(num_prefill_stream),
+    // Under RTP_LLM_DEVICE_INPUT the scheduler publishes prefix_lengths on CUDA;
+    // mirror it back since the loop below dereferences it on the host.
+    const bool prefix_lengths_on_device = has_prefix_lengths && model_input.prefix_lengths.is_cuda();
+    if (prefix_lengths_on_device) {
+        static std::once_flag prefix_lengths_d2h_once;
+        std::call_once(prefix_lengths_d2h_once, []() {
+            RTP_LLM_LOG_INFO("CP prefix_lengths arrived on device; mirroring to host for boundary math");
+        });
+    }
+    auto prefix_lengths = prefix_lengths_on_device ? model_input.prefix_lengths.cpu() : model_input.prefix_lengths;
+    RTP_LLM_CHECK_WITH_INFO(!has_prefix_lengths || prefix_lengths.numel() == static_cast<int64_t>(num_prefill_stream),
                             "CP prefix_lengths must match the prefill stream count");
-    const int32_t* prefix_lengths_ptr = has_prefix_lengths ? model_input.prefix_lengths.data_ptr<int32_t>() : nullptr;
+    // prefix_lengths_ptr is indexed linearly below, and .cpu() keeps the source stride.
+    RTP_LLM_CHECK_WITH_INFO(!has_prefix_lengths || prefix_lengths.is_contiguous(),
+                            "CP prefix_lengths must be contiguous");
+    const int32_t* prefix_lengths_ptr = has_prefix_lengths ? prefix_lengths.data_ptr<int32_t>() : nullptr;
     bool           has_prefix_reuse   = false;
     for (size_t p = 0; p < num_prefill_stream && has_prefix_lengths; ++p) {
         RTP_LLM_CHECK_WITH_INFO(prefix_lengths_ptr[p] >= 0, "CP prefix_lengths must be non-negative");
@@ -316,8 +331,9 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     const bool           need_source_map = need_token_remap || has_prefix_reuse;
     std::vector<int64_t> cp_select_indices;
     std::vector<uint8_t> cp_valid_mask;
-    RTP_LLM_CHECK_WITH_INFO(!need_source_map || num_decode_stream == 0,
-                            "Context parallel supports pure-prefill batches only when multimodal or prefix-reuse remap is required");
+    RTP_LLM_CHECK_WITH_INFO(
+        !need_source_map || num_decode_stream == 0,
+        "Context parallel supports pure-prefill batches only when multimodal or prefix-reuse remap is required");
     if (need_source_map) {
         cp_select_indices.reserve(cp_split_input_tokens.numel());
         cp_valid_mask.reserve(cp_split_input_tokens.numel());
@@ -330,10 +346,13 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
             total_hidden_states.dim() == 2, "CP MTP hidden states must be 2-D, got dim=%ld", total_hidden_states.dim());
         const int64_t expected_token_num = split_hidden_states_ ? global_token_num : local_token_num;
         RTP_LLM_CHECK_WITH_INFO(total_hidden_states.size(0) == expected_token_num,
-                                "CP MTP hidden states row count mismatch: rows=%ld, expected=%ld, layout=%s",
+                                "CP MTP hidden states row count mismatch: rows=%ld, expected=%ld, layout=%s, "
+                                "global_tokens=%ld, local_tokens=%ld",
                                 total_hidden_states.size(0),
                                 expected_token_num,
-                                split_hidden_states_ ? "global" : "local");
+                                split_hidden_states_ ? "global" : "local",
+                                global_token_num,
+                                local_token_num);
     }
     std::vector<int64_t> hidden_select_indices;
     std::vector<uint8_t> hidden_valid_mask;
@@ -477,6 +496,7 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     cp_params.prefill_qkv_restore_indice       = qkv_restore_indice.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_qkv_padding_mask         = qkv_padding_mask.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_actual_input_lengths_cpu = input_lengths_cpu_tensor;
+    cp_params.prefill_prefix_lengths_cpu       = prefix_lengths;
 #endif
 }
 

@@ -21,10 +21,10 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.quant_layouts import dequantize_fp8_weight
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
-from rtp_llm.models_py.modules.dsv4.qlinear import _fp8_dequant_to_fp32
 from rtp_llm.models_py.modules.dsv4.rope import (
     apply_rotary_emb,
     apply_rotary_emb_batched,
@@ -75,12 +75,14 @@ def decode_output_proj(
                 inverse=True,
             )
         o = o.reshape(bsz, q_len, attn.n_groups, -1)
-        wo_a_bf16 = _fp8_dequant_to_fp32(attn.wo_a_w, attn.wo_a_s).to(o.dtype)
+        wo_a_bf16 = dequantize_fp8_weight(attn.wo_a_w, attn.wo_a_s).to(o.dtype)
         wo_a = wo_a_bf16.view(attn.n_groups, attn.o_lora_rank, -1)
         o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
     out = attn._lin(attn.wo_b, o.flatten(2))
     if attn.tp_size > 1:
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
-        all_reduce(out, Group.TP)
+        reduced = all_reduce(out, Group.TP, inplace=True)
+        if reduced is not out:
+            out.copy_(reduced)
     return out

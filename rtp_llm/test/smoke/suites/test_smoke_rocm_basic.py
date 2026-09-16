@@ -10,6 +10,19 @@ from rtp_llm.test.smoke_framework.manifest import build_smoke_params
 from rtp_llm.test.smoke_framework.runner import run_smoke_test
 
 SMOKE_CASES = {
+    "rocm_basic_qwen25_generation_prefill_cuda_graph": {
+        "task_info": "data/model/qwen25/q_r_generation_prefill_cuda_graph_mi308x.json",
+        "smoke_args": "--warm_up 0 --act_type BF16 --seq_size_per_block 16 --test_block_num 1000 "
+        "--concurrency_limit 5 --max_context_batch_size 5 --reuse_cache 0 --use_aiter_pa 1 "
+        "--use_asm_pa 1 --use_triton_pa 1 --disable_flash_infer 1 --enable_cuda_graph 1 "
+        "--enable_cuda_graph_debug_mode 1 --decode_capture_config '1' "
+        "--generation_prefill_cuda_graph_max_requests 5 "
+        "--generation_prefill_capture_config '64,128,256,384,512,768,1024'",
+        "gpu_type": "MI308X-ROCM7",
+        "platform": "rocm",
+        "markers": ["smoke", "rocm", "MI308X_ROCM7"],
+        "timeout": 600,
+    },
     "rocm_basic_cache_reuse": {
         "task_info": "data/model/qwen2/q_r_reuse.json",
         "smoke_args": "--reuse_cache 1 --seq_size_per_block 16 --use_aiter_pa 1 --use_asm_pa "

@@ -151,7 +151,12 @@ std::string KVCacheConfig::to_string() const {
         << "load_cache_retry_times: " << load_cache_retry_times << "\n"
         << "dsv4_fixed_pool_blocks: " << dsv4_fixed_pool_blocks << "\n"
         << "dsv4_hca_state_pool_blocks: " << dsv4_hca_state_pool_blocks << "\n"
-        << "dsv4_fixed_pool_use_memory: " << dsv4_fixed_pool_use_memory << "\n";
+        << "dsv4_fixed_pool_use_memory: " << dsv4_fixed_pool_use_memory << "\n"
+        << "kv_cache_event_publisher_type: " << kv_cache_event_publisher_type << "\n"
+        << "kv_cache_event_manager_endpoint: " << kv_cache_event_manager_endpoint << "\n"
+        << "kv_cache_event_instance_group: " << kv_cache_event_instance_group << "\n"
+        << "kv_cache_event_instance_id: " << kv_cache_event_instance_id << "\n"
+        << "kv_cache_event_host_ip_port: " << kv_cache_event_host_ip_port << "\n";
     return oss.str();
 }
 
@@ -209,6 +214,8 @@ std::string HWKernelConfig::to_string() const {
         << "force_legacy_fp8_ptpc: " << force_legacy_fp8_ptpc << "\n"
         << "enable_cuda_graph: " << enable_cuda_graph << "\n"
         << "enable_cuda_graph_debug_mode: " << enable_cuda_graph_debug_mode << "\n"
+        << "generation_prefill_cuda_graph_max_requests: " << generation_prefill_cuda_graph_max_requests << "\n"
+        << "generation_prefill_capture_token_buckets size: " << generation_prefill_capture_token_buckets.size() << "\n"
         << "enable_native_cuda_graph: " << enable_native_cuda_graph << "\n"
         << "num_native_cuda_graph: " << num_native_cuda_graph << "\n"
         << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n"
@@ -309,7 +316,8 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "force_score_context_attention: " << force_score_context_attention << "\n"
         << "quantization: " << quantization << "\n"
         << "checkpoint_path: " << checkpoint_path << "\n"
-        << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id;
+        << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id << ", "
+        << "sp_dspark_sample_from_anchor: " << sp_dspark_sample_from_anchor;
     return oss.str();
 }
 
@@ -406,6 +414,9 @@ std::string GrammarConfig::to_string() const {
     oss << "constrained_json_disable_any_whitespace: " << constrained_json_disable_any_whitespace << "\n"
         << "terminate_without_stop_token: " << terminate_without_stop_token << "\n"
         << "num_workers: " << num_workers << "\n"
+        << "compile_timeout_ms: " << compile_timeout_ms << "\n"
+        << "compile_concurrency: " << compile_concurrency << "\n"
+        << "compile_queue_size: " << compile_queue_size << "\n"
         << "compiler_cache_bytes: " << compiler_cache_bytes << "\n"
         << "tokenizer_info_json_size: " << tokenizer_info_json.size();
     return oss.str();

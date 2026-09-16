@@ -9,6 +9,19 @@ class BuildPlatformDetectionTest(TestCase):
     def tearDown(self):
         build_platform._cached_build_config = None
 
+    def test_cuda13_detection_keeps_architecture_and_wheel_abi(self):
+        for machine, config in (("x86_64", "cuda13"), ("aarch64", "cuda13_arm")):
+            with self.subTest(machine=machine), patch.dict(os.environ, {}, clear=True):
+                build_platform._cached_build_config = None
+                with patch.object(build_platform, "_detect_overlay_build_config", return_value=""), patch.object(
+                    build_platform, "_detect_cuda", return_value=True
+                ), patch.object(build_platform, "_get_cuda_version_from_json", return_value="13.2.0"), patch.object(
+                    build_platform.platform, "machine", return_value=machine
+                ):
+                    self.assertEqual(build_platform.detect_build_config(verbose=False), config)
+                    self.assertEqual(build_platform.get_pip_extras(), config)
+                    self.assertEqual(build_platform.get_platform_config_versions()[config], "cu130")
+
     def test_cuda_version_comparison_uses_numeric_minor(self):
         self.assertEqual(
             build_platform._get_cuda_config_from_version("12.10.0"), "cuda12_9"

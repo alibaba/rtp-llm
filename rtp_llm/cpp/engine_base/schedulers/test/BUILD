@@ -3,9 +3,9 @@ load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
-cc_import(
+alias(
     name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+    actual = "@torch//:torch",
 )
 
 cuda13_torch_link_deps = select({

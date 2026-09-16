@@ -10,6 +10,27 @@ from rtp_llm.test.smoke_framework.manifest import build_smoke_params
 from rtp_llm.test.smoke_framework.runner import run_smoke_test
 
 SMOKE_CASES = {
+    "dense_generation_prefill_cuda_graph": {
+        "task_info": "data/model/qwen25/q_r_generation_prefill_cuda_graph.json",
+        "smoke_args": "--act_type BF16 --warm_up 0 --seq_size_per_block 64 --test_block_num 1000 "
+        "--concurrency_limit 5 --max_context_batch_size 5 --enable_cuda_graph 1 --decode_capture_config '1' "
+        "--generation_prefill_cuda_graph_max_requests 5 --generation_prefill_capture_config '64,256'",
+        "gpu_type": "H20",
+        "platform": "cuda",
+        "markers": ["smoke", "cuda", "H20"],
+        "timeout": 600,
+    },
+    "dense_generation_prefill_cuda_graph_fallback": {
+        "task_info": "data/model/qwen25/q_r_generation_prefill_cuda_graph_fallback.json",
+        "smoke_args": "--act_type BF16 --warm_up 0 --seq_size_per_block 64 --test_block_num 1000 "
+        "--concurrency_limit 1 --max_context_batch_size 1 --reuse_cache 0 --enable_cuda_graph 1 "
+        "--decode_capture_config '1' --generation_prefill_cuda_graph_max_requests 1 "
+        "--generation_prefill_capture_config '64'",
+        "gpu_type": "H20",
+        "platform": "cuda",
+        "markers": ["smoke", "cuda", "H20"],
+        "timeout": 600,
+    },
     "dense_fp8kv_cudagraph": {
         "task_info": "data/model/qwen25/q_r_new_model_py_fp8_kv_cache_cudagraph.json",
         "smoke_args": "--warm_up 0 --seq_size_per_block 64 --act_type BF16 --test_block_num "

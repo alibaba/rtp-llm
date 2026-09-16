@@ -14,6 +14,7 @@ import sys
 import types
 from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 
@@ -264,13 +265,14 @@ def test_assemble_indexer_k_cp1_passthrough():
     local_s = torch.arange(10 * 2, dtype=torch.uint8).reshape(10, 2) + 100
     out_q = torch.zeros((10, 4), dtype=torch.uint8)
     out_s = torch.zeros((10, 2), dtype=torch.uint8)
-    A.assemble_indexer_k(
-        plan=plan,
-        local_k_quant=local_q,
-        local_k_scale=local_s,
-        out_k_quant=out_q,
-        out_k_scale=out_s,
-    )
+    with patch.object(A, "all_gather", side_effect=lambda local, group: local):
+        A.assemble_indexer_k(
+            plan=plan,
+            local_k_quant=local_q,
+            local_k_scale=local_s,
+            out_k_quant=out_q,
+            out_k_scale=out_s,
+        )
     assert torch.equal(out_q, local_q)
     assert torch.equal(out_s, local_s)
 
@@ -324,6 +326,9 @@ def test_async_indexer_k_waits_each_work_once_before_restore_enqueue():
     )
     work_q = _CountingWork()
     work_s = _CountingWork()
+    local_k_quant = torch.empty((0, 1), dtype=torch.uint8)
+    local_k_scale = torch.empty((0, 1), dtype=torch.uint8)
+    producer_stream = object()
     handle = A.IndexerKCPGatherHandle(
         plan=plan,
         gathered_q=torch.empty((0, 1), dtype=torch.uint8),
@@ -332,6 +337,9 @@ def test_async_indexer_k_waits_each_work_once_before_restore_enqueue():
         work_s=work_s,
         completion_event=None,
         stream=None,
+        producer_stream=producer_stream,
+        local_k_quant=local_k_quant,
+        local_k_scale=local_k_scale,
         out_k_quant=torch.empty((0, 1), dtype=torch.uint8),
         out_k_scale=torch.empty((0, 1), dtype=torch.uint8),
     )
@@ -342,6 +350,9 @@ def test_async_indexer_k_waits_each_work_once_before_restore_enqueue():
     assert work_q.wait_calls == 1
     assert work_s.wait_calls == 1
     assert handle.work_waited is True
+    assert handle.local_k_quant is local_k_quant
+    assert handle.local_k_scale is local_k_scale
+    assert handle.producer_stream is producer_stream
 
 
 def test_build_plan_rejects_bad_cp_size():

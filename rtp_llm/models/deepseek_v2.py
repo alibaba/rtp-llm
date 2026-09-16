@@ -393,6 +393,11 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                     config=moe_config,
                 ),
             ]
+            if self.model_config.n_shared_experts == 0:
+                # Routed-only checkpoints do not contain shared_experts.* keys.
+                # Keep the routed descriptor while preventing the loader from
+                # attempting to resolve absent shared-expert tensors.
+                layer_weights.pop(0)
             if self.has_e_score_correction_bias:
                 layer_weights.append(
                     AtomicWeight(
@@ -591,6 +596,7 @@ class DeepSeekV2(BaseModel):
             content = reader.read()
             config_json = json.loads(content)
             config.inter_size = config_json["intermediate_size"]
+            config.dense_inter_size = config.inter_size
             config.attn_config.head_num = config_json["num_attention_heads"]
             config.attn_config.kv_head_num = config_json.get(
                 "num_key_value_heads", config.attn_config.head_num
@@ -687,15 +693,17 @@ class DeepSeekV2(BaseModel):
             config.moe_k = config_json["num_experts_per_tok"]
             config.expert_num = config_json["n_routed_experts"]
             moe_intermediate_size = config_json["moe_intermediate_size"]
+            config.moe_inter_size = moe_intermediate_size
             config.moe_n_group = config_json.get("n_group", 1)
             config.moe_topk_group = config_json.get("topk_group", 1)
 
             n_shared_experts = config_json["n_shared_experts"]
+            config.n_shared_experts = n_shared_experts
             config.inter_size = n_shared_experts * moe_intermediate_size
 
             config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
             config.has_moe_norm = config_json.get("norm_topk_prob", False)
-            config.moe_style = 2  # shared + expert
+            config.moe_style = 2 if n_shared_experts > 0 else 1
 
             moe_step = config_json.get("moe_layer_freq", 1)
             first_k_dense_replace = config_json["first_k_dense_replace"]
@@ -808,7 +816,10 @@ class DeepSeekV3Mtp(DeepSeekV2):
     @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
         desc = KVCacheSpecDesc()
-        if model_config.attn_config.use_mla and model_config.mla_ops_type != MlaOpsType.MHA:
+        if (
+            model_config.attn_config.use_mla
+            and model_config.mla_ops_type != MlaOpsType.MHA
+        ):
             desc.cache_type = KVCacheSpecType.MLA
         else:
             desc.cache_type = KVCacheSpecType.MHA

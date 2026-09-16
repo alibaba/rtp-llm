@@ -13,6 +13,11 @@
 #include <string>
 #include <utility>
 #include <memory>
+#include <vector>
+
+namespace kmonitor {
+class MetricsReporter;
+}
 
 namespace rtp_llm {
 
@@ -33,6 +38,10 @@ struct GptModelDescription {
     double                    input_embedding_scalar   = 1;
     double                    residual_scalar          = 1;
     bool                      reverse_e_h_norm         = false;
+    // Runtime MoE strategy selected by server configuration. Keep it with the
+    // description produced by Executor::genModelDescription so every model
+    // construction path receives the same fail-closed eligibility inputs.
+    MoeConfig moe_runtime_config;
 };
 
 struct GptModelInitParams {
@@ -60,7 +69,8 @@ struct GptModelInitParams {
     // is the contract between target and draft for MTP — see
     // makeFakeSPOutputBuffer (MtpExecutor.cc) and CudaGraphRunner
     // input_hiddens.
-    int64_t hc_mult = 1;
+    int64_t                                    hc_mult = 1;
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
 };
 
 enum GptModelInputIndex : size_t {
@@ -94,9 +104,23 @@ enum GptModelInputIndex : size_t {
     // last_hidden_states can have a different row count from combo_tokens for
     // DSpARK prefill seeding, so transmit its leading dimension explicitly.
     mtpHiddenStatesRows,
-    // Per-tensor device hint bitmap from root so non-root ranks allocate
-    // matching GPU buffers and keep tpSync broadcast lanes consistent.
+    // Root-owned scalar execution contract. Tensor shapes alone are not
+    // enough to choose the same model path on every TP rank (for example,
+    // target-verify selects a different CUDA graph/linear-attention mode).
+    modelControlFlags,
+    kvBlockStrideBytes,
+    kvScaleStrideBytes,
+    seqSizePerBlock,
+    kernelSeqSizePerBlock,
+    // Exact per-tensor placement bitmap from root.  Every tensor collected by
+    // tpSyncModelInputs has a bit so non-root ranks choose the same CPU/UDS or
+    // CUDA/NCCL lane as rank 0.
     tensorDeviceMap,
+    // Preserve the root-side KV block-table layout across TP sync. Legacy
+    // models use [batch, blocks], while grouped-cache models use
+    // [group, batch, blocks].
+    kvCacheKernelBlockIdRank,
+    kvCacheBlockIdRank,
     gptModelInputLength,
 };
 
@@ -105,20 +129,44 @@ enum GptModelInputIndex : size_t {
 // 12288 = 3.2G elements).
 using GptModelInputShapeHints = std::array<int64_t, GptModelInputIndex::gptModelInputLength>;
 
-// Bit positions for `tensorDeviceMap`. Only fields that participate in the
-// MTP/Eagle decode-prepare GPU path need a bit; other fields stay CPU.
+// Bit positions for `tensorDeviceMap`.  Keep this exhaustive with respect to
+// tpSyncModelInputs' broadcast set: a missing bit can make rank 0 and non-root
+// ranks classify one payload into different transports and deadlock TP.
 enum GptModelInputDeviceBit : uint32_t {
-    kDeviceBitComboTokens     = 1u << 0,
-    kDeviceBitInputLengths    = 1u << 1,
-    kDeviceBitSequenceLengths = 1u << 2,
-    kDeviceBitPrefixLengths   = 1u << 3,
-    kDeviceBitLmOutputIndexes = 1u << 4,
-    kDeviceBitKernelBlockId   = 1u << 5,
+    kDeviceBitComboTokens         = 1u << 0,
+    kDeviceBitInputLengths        = 1u << 1,
+    kDeviceBitSequenceLengths     = 1u << 2,
+    kDeviceBitPrefixLengths       = 1u << 3,
+    kDeviceBitKernelBlockId       = 1u << 4,
+    kDeviceBitBlockId             = 1u << 5,
+    kDeviceBitCacheGroupTypes     = 1u << 6,
+    kDeviceBitCacheKeys           = 1u << 7,
+    kDeviceBitCacheUpdateMapping  = 1u << 8,
+    kDeviceBitRequestId           = 1u << 9,
+    kDeviceBitRequestPdSeparation = 1u << 10,
+    kDeviceBitLmOutputIndexes     = 1u << 11,
+    kDeviceBitComboPositionIds    = 1u << 12,
+    kDeviceBitTextTokensMask      = 1u << 13,
+    kDeviceBitMmFeaturesLocs      = 1u << 14,
+};
+
+enum GptModelInputControlFlag : uint32_t {
+    kControlNeedAllLogits       = 1u << 0,
+    kControlNeedAllHiddenStates = 1u << 1,
+    kControlNeedMoeGating       = 1u << 2,
+    kControlWarmup              = 1u << 3,
+    kControlSkipRun             = 1u << 4,
+    kControlFakeStream          = 1u << 5,
+    kControlTargetVerify        = 1u << 6,
+    kControlPdSeparation        = 1u << 7,
+    kControlDecodeEntrance      = 1u << 8,
+    kControlOpaqueKvCacheStore  = 1u << 9,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);
 torch::Tensor           makeModelInputShapeHintsTensor(const GptModelInputs& inputs);
 std::array<int64_t, 2>  decodeMtpHiddenStatesShape(int64_t total_numel, int64_t rows);
+std::vector<int64_t> decodeKvBlockTableShape(int64_t rank, int64_t group_num, int64_t batch_size, int64_t max_blocks);
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
 
@@ -148,6 +196,13 @@ public:
     // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).
     // No-op when no attention inputs have been prepared yet.
     virtual void updateKVCacheKernelBlockId(const GptModelInputs& inputs) {}
+
+    // Optional DSpark PD-prefill barrier. Implementations return an error string
+    // after draining actual CacheStore publication; models without deferred
+    // publication have nothing to wait for.
+    virtual std::string waitCacheStorePublication() {
+        return {};
+    }
 
     // Optional spec-decode hand-off: target model exposes the pre-output-projection
     // residual buffer (DSv4: pre-``hc_head`` ``[T, hc*D]``) so MtpExecutor can

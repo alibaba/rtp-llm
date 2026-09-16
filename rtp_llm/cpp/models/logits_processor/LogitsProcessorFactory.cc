@@ -73,10 +73,12 @@ std::shared_ptr<XGrammarBackend>& LogitsProcessorFactory::grammarBackend() {
     return backend;
 }
 
-void LogitsProcessorFactory::init(const ModelConfig&   model_config,
-                                  const GrammarConfig& grammar_config,
-                                  const std::string&   tree_decode_config) {
-    grammarBackend() = XGrammarBackend::create(grammar_config.tokenizer_info_json, grammar_config);
+void LogitsProcessorFactory::init(const ModelConfig&           model_config,
+                                  const GrammarConfig&         grammar_config,
+                                  const std::string&           tree_decode_config,
+                                  kmonitor::MetricsReporterPtr metrics_reporter) {
+    grammarBackend() =
+        XGrammarBackend::create(grammar_config.tokenizer_info_json, grammar_config, std::move(metrics_reporter));
     PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(model_config.ckpt_path, tree_decode_config);
 }
 
@@ -117,7 +119,13 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
 
         auto matcher_or = backend->createMatcherFromKey(grammar_key);
         if (!matcher_or.ok()) {
-            return ErrorInfo(ErrorCode::INVALID_PARAMS, std::string(matcher_or.status().message()));
+            ErrorCode error_code = ErrorCode::UNKNOWN_ERROR;
+            if (matcher_or.status().code() == absl::StatusCode::kInvalidArgument) {
+                error_code = ErrorCode::INVALID_PARAMS;
+            } else if (matcher_or.status().code() == absl::StatusCode::kResourceExhausted) {
+                error_code = ErrorCode::GRAMMAR_COMPILE_OVERLOADED;
+            }
+            return ErrorInfo(error_code, std::string(matcher_or.status().message()));
         }
         auto grammar_processor = std::make_shared<GrammarLogitsProcessor>(std::move(matcher_or.value()), eos_token_id);
         result.push_back(std::move(grammar_processor));

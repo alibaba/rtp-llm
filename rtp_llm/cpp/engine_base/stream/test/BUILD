@@ -1,5 +1,6 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
 load("@rtp_llm//bazel:defs.bzl", "torch_deps")
+load("//bazel:device_defs.bzl", "device_impl_target")
 
 cc_test = cc_test_wrapper
 
@@ -7,9 +8,9 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
-cc_import(
+alias(
     name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+    actual = "@torch//:torch",
 )
 
 cuda13_torch_link_deps = select({
@@ -24,14 +25,13 @@ test_deps = [
     "//rtp_llm/cpp/engine_base:engine_base",
     "//rtp_llm/cpp/engine_base/stream:stream",
     "//rtp_llm/cpp/testing:device_test_utils",
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
     "//rtp_llm/cpp/cache/connector/p2p:connector",
     "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
     "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
-] + torch_deps() + cuda13_torch_link_deps
+] + torch_deps() + device_impl_target() + cuda13_torch_link_deps
 
 cc_test(
     name = "stream_cache_resource_test",
@@ -94,5 +94,5 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )

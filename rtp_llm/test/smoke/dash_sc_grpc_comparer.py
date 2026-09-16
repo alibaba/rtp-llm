@@ -294,12 +294,7 @@ def _generate_config_to_sampling(
     if "max_new_think_tokens" in sampling_params:
         kwargs["max_new_think_tokens"] = max_new_think_tokens
     if "response_format" in sampling_params:
-        response_format = gc.response_format
-        if response_format is not None and not isinstance(response_format, str):
-            response_format = json.dumps(
-                response_format, ensure_ascii=False, separators=(",", ":")
-            )
-        kwargs["response_format"] = response_format
+        kwargs["response_format"] = _jsonable_to_string(gc.response_format)
     if "json_format" in sampling_params:
         kwargs["json_format"] = bool(gc.json_format)
     if "structural_tag" in inspect.signature(SamplingParams).parameters:
@@ -312,6 +307,8 @@ def _generate_config_to_sampling(
 def _jsonable_to_string(value: Any) -> Optional[str]:
     if value is None:
         return None
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(by_alias=True, exclude_none=True)
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     text = str(value).strip()
@@ -389,6 +386,17 @@ def _dashllm_message_header(parameters: dict[str, Any]) -> Optional[dict[str, An
         return None
     header = payload.get("header")
     return header if isinstance(header, dict) else None
+
+
+def _response_status_code(parameters: dict[str, Any]) -> Optional[int]:
+    value = parameters.get("status_code")
+    if value is None:
+        header = _dashllm_message_header(parameters)
+        value = header.get("status_code") if header is not None else None
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _find_subsequence(values: List[int], pattern: List[int]) -> int:
@@ -499,6 +507,11 @@ class DashScGrpcComparer(NormalComparer):
             generated_ids[split_at:], stop_token_ids
         )
         content = self._decode(content_ids)
+        stripped_content = content.lstrip()
+        if stripped_content.startswith("</think>"):
+            while stripped_content.startswith("</think>"):
+                stripped_content = stripped_content[len("</think>") :].lstrip()
+            content = stripped_content
         if reasoning.startswith("<think>"):
             reasoning = reasoning[len("<think>") :]
             if reasoning.startswith("\n"):
@@ -700,22 +713,13 @@ class DashScGrpcComparer(NormalComparer):
                 f"content length {len(actual.content)} < min_content_chars {expect.min_content_chars}"
             )
         if expect.expected_status_code is not None:
-            header = _dashllm_message_header(actual.parameters)
-            if header is None:
+            actual_status_code = _response_status_code(actual.parameters)
+            if actual_status_code != expect.expected_status_code:
                 diffs.append(
-                    "DashLLM __messages__ header missing or invalid; "
-                    f"actual parameters: {actual.parameters}"
+                    "status_code: "
+                    f"expect {expect.expected_status_code}, "
+                    f"actual {actual_status_code}; parameters: {actual.parameters}"
                 )
-            else:
-                if (
-                    expect.expected_status_code is not None
-                    and header.get("status_code") != expect.expected_status_code
-                ):
-                    diffs.append(
-                        "status_code: "
-                        f"expect {expect.expected_status_code}, "
-                        f"actual {header.get('status_code')}"
-                    )
         if (
             expect.json_content
             or expect.json_object
@@ -850,10 +854,8 @@ class DashScGrpcComparer(NormalComparer):
                 )
                 response_parameters.update(_parse_infer_parameters(resp.infer_response))
                 status_message = response_parameters.get("status_message")
-                status_code = response_parameters.get("status_code")
-                if status_message or (
-                    status_code is not None and int(status_code) >= 400
-                ):
+                status_code = _response_status_code(response_parameters)
+                if status_message or (status_code is not None and status_code >= 400):
                     error_message = str(status_message or status_code)
                     break
                 if chunk_ids:
@@ -874,13 +876,22 @@ class DashScGrpcComparer(NormalComparer):
 
         if error_message:
             if expected.expected_error_message_contains is not None:
-                if expected.expected_error_message_contains in error_message:
+                diffs = []
+                if expected.expected_error_message_contains not in error_message:
+                    diffs.append(
+                        f"error_message: expect contains {expected.expected_error_message_contains!r}, "
+                        f"actual {error_message!r}"
+                    )
+                if expected.expected_status_code is not None:
+                    actual_status_code = _response_status_code(response_parameters)
+                    if actual_status_code != expected.expected_status_code:
+                        diffs.append(
+                            f"status_code: expect {expected.expected_status_code}, "
+                            f"actual {actual_status_code}; parameters: {response_parameters}"
+                        )
+                if not diffs:
                     return
-                raise SmokeException(
-                    QueryStatus.COMPARE_FAILED,
-                    f"error_message mismatch: expect contains {expected.expected_error_message_contains!r}, "
-                    f"actual: {error_message!r}",
-                )
+                raise SmokeException(QueryStatus.COMPARE_FAILED, "\n".join(diffs))
             raise SmokeException(
                 QueryStatus.VISIT_FAILED,
                 f"dash_sc_grpc error: {error_message}",

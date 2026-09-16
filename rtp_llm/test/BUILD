@@ -1,0 +1,432 @@
+py_test(
+    name = "kv_cache_specs_test",
+    srcs = [
+        "kv_cache_specs_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "generate_config_test",
+    srcs = [
+        "generate_config_test.py",
+    ],
+    data = [
+        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+        "//rtp_llm:sdk"
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "slice_stop_word_list_test",
+    srcs = [
+        "slice_stop_word_list_test.py",
+    ],
+    data = [
+        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+        "//rtp_llm:sdk"
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util",
+    ],
+    imports = ["aios/kmonitor/python_client"],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "stop_words_test",
+    srcs = [
+        "stop_words_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util",
+    ],
+    imports = [],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "renderer_stop_words_test",
+    srcs = [
+        "renderer_stop_words_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    imports = [],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "reasoning_tool_parsing_test",
+    srcs = [
+        "reasoning_tool_parsing_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    imports = [],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "deepseekv4_renderer_test",
+    srcs = [
+        "deepseekv4_renderer_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "stop_words_pipeline_test",
+    srcs = [
+        "stop_words_pipeline_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util",
+    ],
+    imports = [],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "openai_response_test",
+    srcs = [
+        "openai_response_test.py",
+    ],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+    ],
+    data = [
+        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+        "//rtp_llm/test/tokenizer_test:testdata",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "server_test",
+    srcs = [
+        "server_test.py",
+    ],
+    data = [
+        "//rtp_llm:sdk",
+    ],
+    deps = [
+        "//rtp_llm:uvicorn",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:psutil",
+        "//rtp_llm:tiktoken",
+        "//rtp_llm:testlib",
+    ],
+    imports = ["aios/kmonitor/python_client"],
+    tags = ["manual"],
+    timeout = 'eternal',
+)
+
+py_test(
+    name = "start_server_failure_test",
+    srcs = [
+        "start_server_failure_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "prompt_scoring_test",
+    srcs = [
+        "prompt_scoring_test.py",
+    ],
+    data = [
+        "//rtp_llm:sdk",
+        "//rtp_llm/test/prompt_scoring_data:testdata",
+    ],
+    deps = [
+        "//rtp_llm/test/utils:maga_server_manager",
+        "//rtp_llm:uvicorn",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:psutil",
+        "//rtp_llm:tiktoken",
+        "//rtp_llm:testlib",
+    ],
+    imports = ["aios/kmonitor/python_client"],
+    tags = ["manual"],
+    timeout = 'eternal',
+)
+
+py_test(
+    name = "concurrency_limit_test",
+    srcs = [
+        "concurrency_limit_test.py"
+    ],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util",
+    ],
+    timeout = 'short',
+    shard_count = 1,
+    # manual: both cases carry @unittest.skip("Temporarily disabled test case")
+    # (concurrency_limit_test.py:166, :204), so this reports OK (skipped=2) and
+    # passes having tested nothing -- while reserving a GPU. Drop the two skips
+    # to bring it back; until then it should not look like a passing gate.
+    tags = ["manual"],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "template_test",
+    srcs = [
+        "template_test.py",
+    ],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+        # qwen agent
+        "//rtp_llm:pydantic",
+        "//rtp_llm:json5",
+        "//rtp_llm:dashscope",
+        "//rtp_llm:jieba",
+        "//rtp_llm:openai",
+        "//rtp_llm:Pillow",
+    ],
+    data = [
+        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+        "//rtp_llm/test/tokenizer_test:testdata",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "pipeline_test",
+    srcs = [
+        "pipeline_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm:sdk",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "prefill_capture_seq_lens_test",
+    srcs = [
+        "prefill_capture_seq_lens_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "start_server_warmup_test",
+    srcs = [
+        "start_server_warmup_test.py",
+    ],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "auto_configure_deepep_test",
+    srcs = [
+        "auto_configure_deepep_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm:sdk",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "glm4_moe_detector_test",
+    srcs = [
+        "glm4_moe_detector_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib"
+    ],
+    imports = [],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name="glm47_moe_detector_test",
+    srcs=[
+        "glm47_moe_detector_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name="qwen3_coder_detector_test",
+    srcs=[
+        "qwen3_coder_detector_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "mtp_streaming_tool_parsing_test",
+    srcs = [
+        "mtp_streaming_tool_parsing_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib"
+    ],
+    imports = [],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name="token_normalizer_test",
+    srcs=[
+        "token_normalizer_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name="mtp_tool_call_segmentation_test",
+    srcs=[
+        "mtp_tool_call_segmentation_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+)
+
+py_test(
+    name="frontend_streaming_utf8_replay_test",
+    srcs=[
+        "frontend_streaming_utf8_replay_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name="format_convert_helper_test",
+    srcs=[
+        "format_convert_helper_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name="incremental_streaming_test",
+    srcs=[
+        "incremental_streaming_test.py",
+    ],
+    data=[
+        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+    ],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name="unknown_tool_name_test",
+    srcs=[
+        "unknown_tool_name_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name="empty_args_tool_call_test",
+    srcs=[
+        "empty_args_tool_call_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name="kimi_k25_mm_test",
+    srcs=[
+        "kimi_k25_mm_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name="test_transformers_imports",
+    srcs=[
+        "test_transformers_imports.py",
+    ],
+    data=[
+        "//rtp_llm:sdk",
+        "//rtp_llm/test/smoke:smoke_model_configs",
+    ],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties = {'gpu':'A10'},
+)
+
+# NOTE: 纯配置校验测试，但 generate_config.py 导入链拉起 rtp_llm.ops (CUDA .so)，import 阶段需 CUDA worker 在场。
+# 不需要 H20：默认 remote_default_exec_properties(gpu=gpu_cuda12) 的通用 CUDA 机器即可，故不再固定 exec_properties。
+# TODO(panyang): 拆分 rtp_llm.ops lazy-import 后移除 GPU 约束。
+py_test(
+    name = "test_generate_config_validators",
+    srcs = [
+        "test_generate_config_validators.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'A10'},
+)

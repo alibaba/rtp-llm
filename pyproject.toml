@@ -227,6 +227,8 @@ minversion = "7.0"
 
 # 测试搜索路径
 testpaths = [
+    "rtp_llm/access_logger/test",
+    "rtp_llm/cpp/config",
     "rtp_llm/test",
     "rtp_llm/utils/test",
     "rtp_llm/config/test",
@@ -329,8 +331,190 @@ filterwarnings = [
 # Consumed by: pytest --rtp-ci-profile=<name> or RTP_PYTEST_CI_PROFILE=<name>
 # =============================================================================
 [tool.rtp_llm.pytest_ci]
+cuda13_only_paths = [
+    "rtp_llm/test/dsv4",
+    "rtp_llm/models_py/modules/dsv4",
+    "rtp_llm/models_py/modules/factory/fused_moe/tests/test_strategy_select.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_chunked_moe.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_shared_expert_executor.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_mega_moe_input_packer.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/test_grouped_fp4_strategy_perf.py",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_mega_moe_se_input_pack.py",
+    "rtp_llm/models_py/speculative/test/test_dspark_proposer.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_moe_weight_adapter.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_mega_moe_jit_warmup.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/utils/test/mega_moe_static_buf_test.py",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_gate_fused.py",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_silu_mul_split.py",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_silu_mul_fp8_quant.py",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_mega_moe_input_packer_perf.py",
+]
 version = 1
 default_pytest_cli = "-v --tb=short --timeout=300"
+
+[tool.rtp_llm.pytest_ci.profiles.perf_cuda13]
+description = "Mainline DSV4 model and kernel performance workloads"
+gpu_type = "L20D_TEST"
+paths = ["rtp_llm/test/perf_test/test_perf_dsv4.py", "rtp_llm/test/perf_test/test_perf_dsv4_kernels.py"]
+markexpr = "manual and perf and cuda"
+expected_count = 16
+forbid_skips = true
+
+[tool.rtp_llm.pytest_ci.profiles.py_ut_cuda13_arm]
+description = "CUDA 13 arm mainline Python targets in isolated pytest processes"
+gpu_type = "SM100_ARM_CU13"
+minimum_count = 88
+forbid_skips = true
+isolate_all_paths = true
+require_isolated_tests = true
+markexpr = "not manual and not smoke"
+paths = [
+    "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_moe_weight_adapter.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_mega_moe_jit_warmup.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/utils/test/mega_moe_static_buf_test.py",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_gate_fused.py",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_silu_mul_split.py",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_silu_mul_fp8_quant.py",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_mega_moe_input_packer_perf.py",
+    "rtp_llm/models_py/kernels/cuda/test/fused_silu_mul_token_quant_batched_test.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_cp_context_build.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_cp_topk_idxs_align.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_cp_pool_block_gather.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_pool_reader.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_cp_kv_allgather_restore.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_cp_slot_mapping.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_indexer_cp_assembler.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_cp_workspace_combine_topk.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_cp_attention_merge.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_cp_attention_shard.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_cp_async.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_prefill_workspace.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_mtp_hidden_buffer.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_dspark_cuda_graph_contract.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_dspark_runtime_config.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_aux_hidden_capture.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_prefill_fast_path.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_hc_impl.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_dsv4_kernel_jit_warmup.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_layer_profiler_ranges.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_cp_metadata_triton.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_indexer_topk_backend.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_fused_inv_rope_fp8_quant.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_fused_rmsnorm_rope.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_fused_rmsnorm_fp8_quant.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_rope_only.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/tests/test_strategy_select.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_chunked_moe.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_prefill_fast_path_cuda.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_shared_expert_executor.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_mega_moe_input_packer.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/test_grouped_fp4_strategy_perf.py::GroupedFP4StrategyPerfTest::test_cuda_graph_capture_bs1_matches_eager",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_mega_moe_se_input_pack.py",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_mega_moe_gate_pack.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_bf16_gemm_fp32.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_compressor_disable_raw_path.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_compressor_forward_flat_input.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_compressor_fp8_per_token.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_compressor_prepare_metadata_varlen.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_compressor_raw_dispatch.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_compressor_state_pool_cpu.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_compressor_varlen_raw_path.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_decode_swa_write.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_dsv4_persistent_topk.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_topk_v3.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_topk_v3_routing.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_dsv4_top_k_per_row_prefill.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_fused_compressor_meta_triton.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_ring_write_mask.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_fp8_mqa_prefill_indexer_score.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_fp8_paged_indexer_score.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_compute_q_flat_input.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_fp8_prefill_chain.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_fp8_prefill_meta.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_fp8_quant_triton.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_fp8_score.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_q_fp8_quant.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_swa_combine_topk.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_swa_cp_packed_gather_triton.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_swa_dequant_large_stride.py::SwaDequantLargeStrideTest",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_swa_fp8_kv_roundtrip.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_swa_prefill_gather_lens.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_swa_prefill_varlen.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_swa_slot_mapping.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_swa_topk_meta_triton.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_workspace_prefill_varlen.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_no_recompile.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_decode_attn_metadata_start_pos.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_flash_mla_decode_kernel_layout.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_fused_decode_meta_comprehensive.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_compressor_start_finish_prefill.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_pool_slot_mapping_split.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_cp_padded_gather_triton.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_prefill_common_metadata_cuda.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_cp_pool_reader_owned_lens.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_attention_cp_prefill_paths.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_attention_csa_overlap.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_attention_hca_overlap.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_cache_lifecycle.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_output_projection_all_reduce.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_decode_topk_length.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_forward_with_pending_nested.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_prefill_mixed_layer_cache_store.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_fp8_sparse_attn_decode_op.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_compressor_cp_merged_gather.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_cp_padded_gather_distributed.py",
+    "rtp_llm/models_py/speculative/test/test_dspark_proposer.py",
+    "rtp_llm/test/pytest/pytest_main_test.py",
+]
+[tool.rtp_llm.pytest_ci.profiles.py_ut_cuda13_arm.isolated_gpu_counts]
+"rtp_llm/models_py/modules/dsv4/fp8/test/test_topk_v3.py" = 2
+"rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_cp_padded_gather_distributed.py" = 2
+
+[tool.rtp_llm.pytest_ci.profiles.py_ut_cuda13_x86]
+description = "CUDA 13 x86 mainline Python targets in isolated pytest processes"
+gpu_type = "L20D_TEST"
+minimum_count = 25
+forbid_skips = true
+isolate_all_paths = true
+require_isolated_tests = true
+markexpr = "not manual and not smoke"
+paths = [
+    "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_moe_weight_adapter.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_mega_moe_jit_warmup.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/utils/test/mega_moe_static_buf_test.py",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_gate_fused.py",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_silu_mul_split.py",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_silu_mul_fp8_quant.py",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_mega_moe_input_packer_perf.py",
+    "rtp_llm/models_py/kernels/cuda/test/fused_silu_mul_token_quant_batched_test.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_cp_metadata_triton.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_indexer_topk_backend.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_fused_inv_rope_fp8_quant.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_fused_rmsnorm_rope.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_fused_rmsnorm_fp8_quant.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_rope_only.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_dsv4_kernel_jit_warmup.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_layer_profiler_ranges.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_hc_impl.py",
+    "rtp_llm/models_py/modules/dsv4/test/test_prefill_fast_path_cuda.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_shared_expert_executor.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_mega_moe_input_packer.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/test_grouped_fp4_strategy_perf.py::GroupedFP4StrategyPerfTest::test_cuda_graph_capture_bs1_matches_eager",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_mega_moe_se_input_pack.py",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_mega_moe_gate_pack.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_cp_padded_gather_distributed.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_cp_padded_gather_triton.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_prefill_common_metadata_cuda.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_fused_compressor_meta_triton.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_swa_cp_packed_gather_triton.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_swa_fp8_kv_roundtrip.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_fp8_score.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_flash_mla_decode_kernel_layout.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_no_recompile.py",
+    "rtp_llm/models_py/modules/dsv4/fp8/test/test_fused_decode_meta_comprehensive.py",
+]
+[tool.rtp_llm.pytest_ci.profiles.py_ut_cuda13_x86.isolated_gpu_counts]
+"rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_cp_padded_gather_distributed.py" = 2
 
 [tool.rtp_llm.pytest_ci.profiles.py_ut_sm8x]
 description = "Python UT on SM8x class GPUs (py-ut-sm8x)"
@@ -404,6 +588,10 @@ expected_count = 286
 forbid_skips = true
 remote_env = { RTP_LLM_REQUIRE_ACCELERATOR = "1" }
 paths = [
+    "rtp_llm/models_py/triton_kernels/fla/test/test_aiter_flydsl_gdn_decode.py",
+    "rtp_llm/models_py/triton_kernels/fla/test/test_aiter_flydsl_gdn_prefill.py",
+    "rtp_llm/cpp/cuda_graph/tests/cuda_graph_copy_kernel_test.py",
+    "rtp_llm/cpp/models/test/pywrapped_model_cache_store_integration_test.py",
     "rtp_llm/model_loader/test/test_inline_fp8_quant.py",
     "rtp_llm/models_py/modules/factory/fused_moe/defs/test/fused_moe_allreduce_contract_test.py",
     "rtp_llm/models_py/triton_kernels/fla/test/test_gdn_decode.py",
@@ -444,14 +632,14 @@ markexpr = "not manual and not rocm and not cpu"
 description = "OSS smoke H20 light gate"
 paths = ["rtp_llm/test/smoke/suites/"]
 markexpr = "manual and smoke and H20 and light"
-expected_count = 14
+expected_count = 16
 forbid_skips = true
 
 [tool.rtp_llm.pytest_ci.profiles.smoke_h20_full_oss]
 description = "OSS smoke H20 full gate (excludes light cases)"
 paths = ["rtp_llm/test/smoke/suites/"]
 markexpr = "manual and smoke and H20 and not light"
-expected_count = 57
+expected_count = 58
 forbid_skips = true
 remote_env = { REMOTE_JIT_DIR = "/tmp/rtp-llm/.remote_jit_cache" }
 
@@ -492,7 +680,7 @@ description = "OSS smoke RTX 5000 Pro / SM120"
 paths = ["rtp_llm/test/smoke/suites/"]
 gpu_type = "RTX_5000_PRO"
 markexpr = "manual and smoke and RTX_5000_PRO"
-expected_count = 6
+expected_count = 8
 forbid_skips = true
 
 [tool.rtp_llm.pytest_ci.profiles.smoke_rocm_oss]
@@ -500,7 +688,7 @@ description = "OSS smoke ROCm (smoke-rocm-oss)"
 paths = ["rtp_llm/test/smoke/suites/"]
 # Must match smoke_defs_oss.py gpu markers (MI308X_ROCM7), not the hyphenated gpu_type string.
 markexpr = "manual and smoke and MI308X_ROCM7 and not dedicated"
-expected_count = 25
+expected_count = 26
 forbid_skips = true
 remote_env = { REMOTE_JIT_DIR = "/tmp/rtp-llm/.remote_jit_cache" }
 
@@ -524,7 +712,7 @@ forbid_skips = true
 description = "Internal smoke H20 (smoke-h20-internal)"
 paths = ["../internal_source/rtp_llm/test/smoke/suites/"]
 markexpr = "manual and smoke and H20"
-expected_count = 1
+expected_count = 2
 forbid_skips = true
 
 [tool.rtp_llm.pytest_ci.profiles.smoke_amd_internal]

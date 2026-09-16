@@ -41,7 +41,7 @@ class QWenV2MoeWeight(QWenV2Weight):
             is_gated_activation=self._is_gated_activation,
             align_size=self._align_size,
         )
-        return [
+        weights = [
             FfnWeight(
                 sub_weights=[
                     FfnAtomicWeight(
@@ -130,6 +130,9 @@ class QWenV2MoeWeight(QWenV2Weight):
                 transpose,
             ),
         ]
+        if self.model_config.n_shared_experts == 0:
+            return [weight for weight in weights if isinstance(weight, MoeWeight)]
+        return weights
 
 
 class Qwen2Moe(QWenV2):
@@ -156,10 +159,13 @@ class Qwen2Moe(QWenV2):
         # Set inter_size and moe_inter_size for hybrid MoE
         config.moe_inter_size = config_json["moe_intermediate_size"]
         config.inter_size = config_json.get("shared_expert_intermediate_size", 0)
+        # Qwen2-MoE has one independently-sized shared expert when the shared
+        # width is present; it does not use DeepSeek's width-multiple encoding.
+        config.n_shared_experts = int(config.inter_size > 0)
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
         config.has_moe_norm = config_json.get("norm_topk_prob", False)
         # step for moe layer
-        config.moe_style = 2
+        config.moe_style = 2 if config.n_shared_experts > 0 else 1
         moe_step = config_json["decoder_sparse_step"]
 
         # todo

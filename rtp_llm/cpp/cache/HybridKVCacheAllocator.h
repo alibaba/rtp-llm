@@ -34,6 +34,7 @@ public:
                                            int                            seq_len,
                                            int                            reserve_step) const override;
     std::vector<int> independentEvictionGroupIds() const override;
+    std::vector<int> reuseParticipatingGroupIds() const override;
 
 protected:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;

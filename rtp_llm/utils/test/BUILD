@@ -2,6 +2,7 @@ load("@arch_config//:arch_select.bzl", "requirement")
 
 requirement([
     "grpcio",
+    "protobuf",
 ])
 
 
@@ -126,7 +127,7 @@ py_test(
         "//:th_transformer_config",
         "//:rtp_compute_ops",
     ],
-    exec_properties = {'gpu':'H20'}
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -143,7 +144,19 @@ py_test(
         "//:th_transformer_config",
         "//:rtp_compute_ops",
     ],
-    exec_properties = {'gpu':'H20'}
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "grpc_client_wrapper_test",
+    srcs = ["grpc_client_wrapper_test.py"],
+    deps = [
+        ":grpcio",
+        ":protobuf",
+        "//rtp_llm:utils",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+        "//rtp_llm/metrics",
+    ],
 )
 
 py_test(

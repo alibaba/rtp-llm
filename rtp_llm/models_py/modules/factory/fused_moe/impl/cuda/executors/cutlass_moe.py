@@ -2,9 +2,7 @@ from math import prod
 from typing import Any, Callable, Dict, Optional
 
 import torch
-from rtp_kernel.fp8_group_gemm import (
-    get_cutlass_batched_moe_mm_data,
-)
+from rtp_kernel.fp8_group_gemm import get_cutlass_batched_moe_mm_data
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     cutlass_moe_mm_fp8_scaled,
@@ -22,18 +20,20 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
+from rtp_llm.models_py.modules.factory.fused_moe.utils.common import (
+    moe_kernel_quantize_input,
+    resize_cache,
+)
 from rtp_llm.models_py.triton_kernels.common.activation import (
     silu_and_mul,
     silu_mul_fp8_per_token_quant_batched,
 )
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     cutlass_moe_pre_reorder,
-    post_reorder_triton_kernel,
     get_cutlass_moe_mm_without_permute_info,
+    post_reorder_triton_kernel,
 )
 from rtp_llm.utils.model_weight import W
-
-from .util import moe_kernel_quantize_input, resize_cache
 
 
 class CutlassExpertsFp8(FusedMoeExpertExecutor):

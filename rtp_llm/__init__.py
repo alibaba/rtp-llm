@@ -151,6 +151,11 @@ except Exception as exc:
 
 def __getattr__(name: str) -> Any:
     """Preserve old top-level access without importing C++ ops eagerly."""
+    # Test discovery probes package hooks even when collecting pure Python tests.
+    if name in {
+        "pytest_plugins", "setUpModule", "tearDownModule", "setup_module", "teardown_module"
+    } or (name.startswith("__") and name.endswith("__")):
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     if name == "_ft_pickler":
         module = importlib.import_module("rtp_llm._ft_pickler")
         globals()[name] = module

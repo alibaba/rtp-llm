@@ -10,11 +10,25 @@ cc_library(
     copts = copts(),
 )
 
+py_test(
+    name = "model_config_test",
+    tags = ["manual"],  # The automatic Python gate is pytest's py_ut profile.
+    srcs = ["model_config_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = ["//rtp_llm:ops"],
+)
+
 cc_library(
     name = "role_types",
     hdrs = ["RoleTypes.h"],
     visibility = ["//visibility:public"],
     copts = copts(),
+)
+
+cc_library(
+    name = "rdma_config",
+    hdrs = ["RdmaConfig.h"],
+    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -25,6 +39,8 @@ cc_library(
         "@havenask//aios/autil:env_util",
         ":role_types",
         ":eplb_config",
+        ":mm_transport_mode",
+        ":rdma_config",
         "//rtp_llm/models_py/bindings/core:types",
     ],
     copts = copts(),
@@ -34,6 +50,13 @@ cc_library(
     name = "eplb_config",
     hdrs = ["EplbConfig.h"],
     srcs = ["EplbConfig.cc"],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)
+
+cc_library(
+    name = "mm_transport_mode",
+    hdrs = ["MMTransportMode.h"],
     visibility = ["//visibility:public"],
     copts = copts(),
 )

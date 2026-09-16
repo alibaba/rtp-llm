@@ -38,6 +38,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.modules import RMSNorm
+from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4.cp import build_cp_context_for_forward
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
@@ -67,6 +68,7 @@ from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
     DSparkProposerMixin,
     optional_tensor,
 )
+from rtp_llm.ops import RoleType
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
@@ -110,6 +112,17 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
         )
+
+        role_type = getattr(parallelism_config, "role_type", None)
+        self._commit_only_prefill = (
+            role_type == RoleType.PREFILL
+            or str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
+        )
+        self._v4_args.commit_only = self._commit_only_prefill
+        if self._commit_only_prefill:
+            logging.info(
+                "[DeepSeekV4DSparkModel] PREFILL role: enabling commit-only model"
+            )
 
         noise_token_id = getattr(model_config, "dspark_noise_token_id", None)
         target_layer_ids = getattr(model_config, "dspark_target_layer_ids", None)
@@ -548,6 +561,8 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             prefix_lengths=optional_tensor(
                 getattr(attention_inputs, "prefix_lengths", None)
             ),
+            prefix_lengths_host=getattr(cp_info, "prefill_prefix_lengths_cpu", None),
+            chunk_lengths_device=getattr(attention_inputs, "input_lengths", None),
             kv_cache_sharded=self._dspark_kv_cache_sharded,
         )
         positions = cp_ctx.global_positions
@@ -584,8 +599,11 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         attention_inputs = inputs.attention_inputs
         block_table = self._swa_block_table(attention_inputs, batch_size)
         tokens_per_block = int(require_pool_tokens_per_block(self.kv_cache, tag=SWA_KV))
+        swa_attention_inputs = as_attention_inputs_by_tag(
+            attention_inputs, self.kv_cache
+        ).get(SWA_KV)
         write_cache_store_impl = create_write_cache_store_impl(
-            primary_attention_inputs(attention_inputs, self.kv_cache), self.kv_cache
+            swa_attention_inputs, self.kv_cache
         )
         gathered_req_ids: Optional[torch.Tensor] = None
         gathered_positions: Optional[torch.Tensor] = None
@@ -598,26 +616,30 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             gathered_positions = all_gather(
                 context_positions.contiguous(), group=Group.TP
             )
+        layer_forward_range = _profiler.make_layer_forward_range()
         for layer_idx in range(len(self.v4.layers)):
-            self._commit_layer_features(
-                layer_idx,
-                main_x,
-                context_req_ids,
-                context_positions,
-                committed_ends,
-                block_table,
-                tokens_per_block,
-                batch_size,
-                gathered_req_ids=gathered_req_ids,
-                gathered_positions=gathered_positions,
-                cp_ctx=commit_ctx,
-            )
-            # PD-separated prefill publishes each committed draft-layer
-            # cache from the commit call: the published range is exactly
-            # the committed rows, so proposal rows never enter the store's
-            # block plan.
-            if write_cache_store_impl is not None:
-                write_cache_store_impl(self.kv_cache.get_layer_cache_groups(layer_idx))
+            with layer_forward_range(layer_idx):
+                self._commit_layer_features(
+                    layer_idx,
+                    main_x,
+                    context_req_ids,
+                    context_positions,
+                    committed_ends,
+                    block_table,
+                    tokens_per_block,
+                    batch_size,
+                    gathered_req_ids=gathered_req_ids,
+                    gathered_positions=gathered_positions,
+                    cp_ctx=commit_ctx,
+                )
+                # PD-separated prefill publishes each committed draft-layer
+                # cache from the commit call: the published range is exactly
+                # the committed rows, so proposal rows never enter the store's
+                # block plan.
+                if write_cache_store_impl is not None:
+                    write_cache_store_impl(
+                        self.kv_cache.get_layer_cache(layer_idx, SWA_KV)
+                    )
 
     def _forward_dspark_attention(
         self,
@@ -707,22 +729,24 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         # The hyper-connection choreography lives in Block.forward_decode;
         # only the attention call is substituted with the non-causal
         # fixed-block variant.
+        layer_forward_range = _profiler.make_layer_forward_range()
         for layer_idx, layer in enumerate(self.v4.layers):
-            hidden = layer.forward_decode(
-                hidden,
-                attn_metadata=None,
-                input_ids=query_ids,
-                attn_fn=lambda x_pre, layer_idx=layer_idx: self._forward_dspark_attention(
-                    layer_idx,
-                    x_pre,
-                    query_positions,
-                    prefix_lengths,
-                    active_requests,
-                    block_table,
-                    tokens_per_block,
-                    graph_metadata,
-                ),
-            )
+            with layer_forward_range(layer_idx):
+                hidden = layer.forward_decode(
+                    hidden,
+                    attn_metadata=None,
+                    input_ids=query_ids,
+                    attn_fn=lambda x_pre, layer_idx=layer_idx: self._forward_dspark_attention(
+                        layer_idx,
+                        x_pre,
+                        query_positions,
+                        prefix_lengths,
+                        active_requests,
+                        block_table,
+                        tokens_per_block,
+                        graph_metadata,
+                    ),
+                )
 
         return hidden
 
@@ -775,8 +799,17 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     def _forward_device(self) -> torch.device:
         if self.v4 is None:
             raise RuntimeError("DeepSeekV4DSparkModel is not initialized")
-        device = self.v4.embed.weight.device
-        if self.kv_cache is not None and not bool(self.fp8_kv_cache):
+        if getattr(self, "_commit_only_prefill", False):
+            if self.main_proj is None:
+                raise RuntimeError(
+                    "DSpARK commit-only model has no initialized main projection"
+                )
+            device = self.main_proj.weight.device
+        else:
+            device = self.v4.embed.weight.device
+        if getattr(self, "kv_cache", None) is not None and not bool(
+            getattr(self, "fp8_kv_cache", True)
+        ):
             raise RuntimeError("DeepSeekV4DSparkModel currently requires FP8 KV cache")
         return device
 
@@ -787,7 +820,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         device = self._forward_device()
         # PyWrappedModel warmup intentionally has no KVCache.  Produce stable
         # shapes without invoking any paged-cache or FlashMLA kernels.
-        if self.kv_cache is None:
+        if getattr(self, "kv_cache", None) is None:
             gamma = self._gen_num_per_cycle
             input_tokens = int(inputs.input_ids.numel())
             batch_size = max((input_tokens + gamma - 1) // gamma, 1)
@@ -797,6 +830,11 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 batch_size,
             )
             return self.dspark_empty_outputs(batch_size, device)
+        if getattr(self, "_commit_only_prefill", False):
+            raise RuntimeError(
+                "DSpARK PREFILL commit-only model cannot execute forward_propose; "
+                "use the DECODE/PDFUSION role for proposal inference"
+            )
         return self.run_propose_step(inputs, fmha_impl, device)
 
     @torch.inference_mode()
@@ -804,7 +842,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         self, inputs: PyModelInputs, fmha_impl: Any = None
     ) -> PyModelOutputs:
         device = self._forward_device()
-        if self.kv_cache is None:
+        if getattr(self, "kv_cache", None) is None:
             return PyModelOutputs(
                 torch.zeros(
                     (0, int(self._v4_args.dim)),

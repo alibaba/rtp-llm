@@ -45,14 +45,30 @@ except Exception:  # pragma: no cover
 
 if _TRITON_AVAILABLE:
 
-    @triton.jit
+    @triton.jit(
+        do_not_specialize=[
+            "N",
+            "POOL_ROWS",
+            "STATE_EB",
+            "STATE_TOKENS_PER_BLOCK",
+            "STATE_MAX_BLOCKS",
+            "KV_EB",
+            "KV_MAX_BLOCKS",
+            "RATIO",
+            "TOKENS_PER_BLOCK",
+            "CP_SIZE",
+            "CP_RANK",
+            "KV_OWNER_TOKENS_PER_BLOCK",
+        ]
+    )
     def _compressor_slot_mapping_kernel(
         # inputs
         positions_ptr,  # [N] i64
         b_idx_ptr,  # [N] i64
         state_bt_ptr,  # [B, STATE_MAX_BLOCKS] i32
         kv_bt_ptr,  # [B, KV_MAX_BLOCKS] i32 (ignored when HAS_KV=False)
-        seq_end_ptr,  # [B] i64 (ignored when HAS_SEQ_END=False)
+        seq_start_ptr,  # [B] i32/i64
+        cu_seq_ptr,  # [B+1] i32/i64
         # outputs
         state_slots_ptr,  # [N] i64
         kv_slots_ptr,  # [N] i64 (written with -1 when HAS_KV=False)
@@ -60,16 +76,18 @@ if _TRITON_AVAILABLE:
         # runtime
         N,
         POOL_ROWS,  # <= 0 means skip overflow check
-        # constexpr
-        STATE_EB: tl.constexpr,
-        STATE_TOKENS_PER_BLOCK: tl.constexpr,
-        STATE_MAX_BLOCKS: tl.constexpr,
+        STATE_EB,
+        STATE_TOKENS_PER_BLOCK,
+        STATE_MAX_BLOCKS,
         HAS_KV: tl.constexpr,
-        KV_EB: tl.constexpr,
-        KV_MAX_BLOCKS: tl.constexpr,
-        RATIO: tl.constexpr,
-        TOKENS_PER_BLOCK: tl.constexpr,  # = KV_EB * RATIO (noop when HAS_KV=False)
-        HAS_SEQ_END: tl.constexpr,
+        KV_EB,
+        KV_MAX_BLOCKS,
+        RATIO,
+        TOKENS_PER_BLOCK,
+        CP_SHARDED: tl.constexpr,
+        CP_SIZE,
+        CP_RANK,
+        KV_OWNER_TOKENS_PER_BLOCK,
         BLOCK_SIZE: tl.constexpr,
     ):
         pid = tl.program_id(0)
@@ -80,28 +98,51 @@ if _TRITON_AVAILABLE:
         b = tl.load(b_idx_ptr + offs, mask=mask, other=0).to(tl.int64)
 
         # ---------- State slot ----------
-        # State pools are SWA-type (cyclic block table). Block-table indexing
-        # uses kernel block size with modulo wrapping.
+        # State pools are SWA-type (cyclic block table). Under CP sharding the
+        # full logical ring is split into one contiguous slice per rank.
         state_bis_raw = pos // STATE_TOKENS_PER_BLOCK
         state_bis = state_bis_raw % STATE_MAX_BLOCKS
-        # ring offset uses STATE_EB (the ring entries per block)
-        in_blk_s = pos % STATE_EB
+        if CP_SHARDED:
+            full_state_eb = STATE_EB * CP_SIZE
+            logical_offset = pos % full_state_eb
+            state_owner = logical_offset // STATE_EB
+            in_blk_s = logical_offset - state_owner * STATE_EB
+        else:
+            full_state_eb = STATE_EB
+            state_owner = tl.full((BLOCK_SIZE,), 0, tl.int64)
+            in_blk_s = pos % STATE_EB
         state_bid = tl.load(
             state_bt_ptr + b * STATE_MAX_BLOCKS + state_bis, mask=mask, other=0
         ).to(tl.int64)
         state_valid = state_bid > 0
-        if HAS_SEQ_END:
-            seq_end = tl.load(seq_end_ptr + b, mask=mask, other=0).to(tl.int64)
-            block_end = (state_bis_raw + 1) * STATE_TOKENS_PER_BLOCK
-            effective_end = tl.minimum(block_end, seq_end)
-            state_valid = state_valid & ((pos + STATE_EB) >= effective_end)
+        if CP_SHARDED:
+            state_valid = state_valid & (state_owner == CP_RANK)
+        seq_start = tl.load(seq_start_ptr + b, mask=mask, other=0).to(tl.int64)
+        seq_begin = tl.load(cu_seq_ptr + b, mask=mask, other=0).to(tl.int64)
+        seq_finish = tl.load(cu_seq_ptr + b + 1, mask=mask, other=0).to(tl.int64)
+        seq_end = seq_start + seq_finish - seq_begin
+        block_end = (state_bis_raw + 1) * STATE_TOKENS_PER_BLOCK
+        effective_end = tl.minimum(block_end, seq_end)
+        state_valid = state_valid & ((pos + full_state_eb) >= effective_end)
         state_slot = tl.where(state_valid, state_bid * STATE_EB + in_blk_s, -1)
         tl.store(state_slots_ptr + offs, state_slot, mask=mask)
 
         # ---------- KV slot ----------
         if HAS_KV:
             boundary = ((pos + 1) % RATIO) == 0
-            kv_bis_raw = pos // TOKENS_PER_BLOCK
+            if CP_SHARDED:
+                owner_block = pos // KV_OWNER_TOKENS_PER_BLOCK
+                kv_owner = owner_block % CP_SIZE
+                local_owner_block = owner_block // CP_SIZE
+                kernel_blocks_per_owner = KV_OWNER_TOKENS_PER_BLOCK // TOKENS_PER_BLOCK
+                kernel_in_owner = (pos % KV_OWNER_TOKENS_PER_BLOCK) // TOKENS_PER_BLOCK
+                kv_bis_raw = (
+                    local_owner_block * kernel_blocks_per_owner + kernel_in_owner
+                )
+                owned_by_rank = kv_owner == CP_RANK
+            else:
+                kv_bis_raw = pos // TOKENS_PER_BLOCK
+                owned_by_rank = tl.full((BLOCK_SIZE,), 1, tl.int1)
             in_blk_k = (pos % TOKENS_PER_BLOCK) // RATIO
             in_capacity = kv_bis_raw < KV_MAX_BLOCKS
             # Clamp for safe gather; correctness relies on the `valid` mask.
@@ -110,7 +151,10 @@ if _TRITON_AVAILABLE:
                 kv_bt_ptr + b * KV_MAX_BLOCKS + safe_kv_bis, mask=mask, other=0
             ).to(tl.int64)
             kv_slot = kv_bid * KV_EB + in_blk_k
-            kv_valid = boundary & in_capacity & (kv_bid >= 0)
+            if CP_SHARDED:
+                kv_valid = boundary & owned_by_rank & in_capacity & (kv_bid > 0)
+            else:
+                kv_valid = boundary & in_capacity & (kv_bid >= 0)
             if POOL_ROWS > 0:
                 kv_valid = kv_valid & (kv_slot < POOL_ROWS)
             kv_slot = tl.where(kv_valid, kv_slot, -1)
@@ -134,9 +178,15 @@ def fused_compressor_slot_mapping(
     kv_bt: Optional[torch.Tensor],  # [B, kv_max_blocks] int32 or None
     kv_eb: int,
     ratio: int,
-    seq_end_per_req: torch.Tensor,  # [B] int64, ring write mask
+    seq_start_per_req: torch.Tensor,  # [B] int32/int64
+    cu_seq_per_req: torch.Tensor,  # [B+1] int32/int64
     state_tokens_per_block: int,
     pool_rows: int = 0,  # > 0 to enable overflow guard
+    *,
+    kv_tokens_per_block: int = 0,
+    cp_size: int = 1,
+    cp_rank: int = 0,
+    kv_owner_tokens_per_block: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Single-kernel equivalent of
     :meth:`CompressorFP8._compute_state_slot_mapping` +
@@ -151,9 +201,10 @@ def fused_compressor_slot_mapping(
     ``state_tokens_per_block``: block_table indexing stride (DSV4 = 256).
     The ring offset uses ``state_eb`` (= R) for ``pos % R``.
 
-    ``seq_end_per_req``: per-request sequence end (prefix_len + input_len).
-    Applies ring write mask: only the last R (=state_eb) positions before
-    each block boundary or sequence end produce valid state slots.
+    ``seq_start_per_req`` and ``cu_seq_per_req`` let the kernel derive each
+    request's sequence end without launching a separate sub/cast/add chain.
+    Under CP sharding, fixed STATE rings are byte-sliced across ranks and FULL
+    KV blocks use page-RR ownership; the same kernel applies both mappings.
     """
     if not _TRITON_AVAILABLE:
         raise RuntimeError("triton unavailable")
@@ -184,7 +235,7 @@ def fused_compressor_slot_mapping(
                 f"kv_bt={tuple(kv_bt.shape)}"
             )
         kv_max_blocks = int(kv_bt.shape[1])
-        tokens_per_block = kv_eb * ratio
+        tokens_per_block = int(kv_tokens_per_block or (kv_eb * ratio))
         kv_bt_arg = kv_bt
     else:
         # Passing state_bt as placeholder; kernel won't read it when HAS_KV=False.
@@ -196,10 +247,15 @@ def fused_compressor_slot_mapping(
         f"state_tokens_per_block={state_tokens_per_block} must be > 0; "
         "caller must propagate kernel_seq_size_per_block from CacheConfig"
     )
-    assert seq_end_per_req is not None, (
-        "seq_end_per_req is required for ring write mask; pass per-request "
-        "(prefix_len + input_len) tensor"
-    )
+    assert seq_start_per_req is not None and cu_seq_per_req is not None
+    assert seq_start_per_req.dim() == 1 and cu_seq_per_req.dim() == 1
+    assert cu_seq_per_req.numel() == seq_start_per_req.numel() + 1
+    assert 1 <= int(cp_size) and 0 <= int(cp_rank) < int(cp_size)
+    cp_sharded = int(cp_size) > 1
+    owner_tokens_per_block = int(kv_owner_tokens_per_block or tokens_per_block)
+    if cp_sharded and has_kv:
+        assert owner_tokens_per_block > 0
+        assert owner_tokens_per_block % tokens_per_block == 0
 
     BLOCK = 128
     grid = ((N + BLOCK - 1) // BLOCK,)
@@ -208,21 +264,25 @@ def fused_compressor_slot_mapping(
         b_idx,
         state_bt,
         kv_bt_arg,
-        seq_end_per_req,
+        seq_start_per_req,
+        cu_seq_per_req,
         state_slots,
         kv_slots,
         token_to_req,
         N,
         pool_rows,
-        STATE_EB=state_eb,
-        STATE_TOKENS_PER_BLOCK=state_tokens_per_block,
-        STATE_MAX_BLOCKS=state_max_blocks,
+        state_eb,
+        state_tokens_per_block,
+        state_max_blocks,
         HAS_KV=has_kv,
         KV_EB=max(1, kv_eb),
         KV_MAX_BLOCKS=kv_max_blocks,
         RATIO=max(1, ratio),
         TOKENS_PER_BLOCK=tokens_per_block,
-        HAS_SEQ_END=True,
+        CP_SHARDED=cp_sharded,
+        CP_SIZE=int(cp_size),
+        CP_RANK=int(cp_rank),
+        KV_OWNER_TOKENS_PER_BLOCK=owner_tokens_per_block,
         BLOCK_SIZE=BLOCK,
     )
     return state_slots, kv_slots, token_to_req

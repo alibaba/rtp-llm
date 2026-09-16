@@ -2,7 +2,6 @@ import logging
 import multiprocessing
 import os
 import signal
-import subprocess
 import sys
 import time
 import traceback
@@ -19,6 +18,8 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
+    configure_kv_cache_event_host_ip_port,
+    load_gpu_nic_affinity,
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
 )
@@ -87,6 +88,7 @@ def local_rank_start(
         local_rank = py_env_configs.parallelism_config.local_rank
         py_env_configs.server_config.set_local_rank(local_rank)
         py_env_configs.distribute_config.set_local_rank(local_rank)
+        configure_kv_cache_event_host_ip_port(py_env_configs)
         setup_cuda_device_and_accl_env(local_rank)
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
@@ -361,53 +363,6 @@ def multi_rank_start(
     return processes
 
 
-def load_gpu_nic_affinity():
-    if os.environ.get("ACCL_NIC_GPU_AFFINITY") != None:
-        return True
-    # 检查 /usr/local/bin/run_affinity 是否存在
-    run_affinity_path = "/usr/local/bin/run_affinity"
-    if not os.path.exists(run_affinity_path):
-        logging.info(f"get gpu nic affinity failed, {run_affinity_path} not exist")
-        return False
-
-    try:
-        # 执行 run_affinity 文件
-        result = subprocess.run(
-            [run_affinity_path],
-            check=True,  # 如果返回非零退出码则抛出异常
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except Exception as e:
-        # 执行失败
-        logging.info(
-            f"get gpu nic affinity failed, run {run_affinity_path} failed, exception is {e}"
-        )
-        return False
-
-    # 检查当前目录是否存在 npu_nic_affinity.json
-    json_path = "npu_nic_affinity.json"
-    if not os.path.exists(json_path):
-        logging.info(f"get gpu nic affinity failed, {json_path} 不存在")
-        return False
-
-    try:
-        # 读取 JSON 文件内容
-        with open(json_path, "r") as f:
-            content = f.read().strip()  # 读取并去除首尾空白
-        # 将内容存入环境变量
-        os.environ["ACCL_NIC_GPU_AFFINITY"] = content
-        logging.info(
-            f"get gpu nic affinity success, set env ACCL_NIC_GPU_AFFINITY to {content}"
-        )
-        return True
-    except Exception as e:
-        logging.info(
-            f"get gpu nic affinity failed, load {json_path} failed, exception is {e}"
-        )
-        return False
-
-
 def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
@@ -430,10 +385,12 @@ def start_backend_server(
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
 
-    if not torch.cuda.is_available():
-        return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
-
     pc = py_env_configs.parallelism_config
+    if not torch.cuda.is_available():
+        return local_rank_start(
+            global_controller, py_env_configs, pc.world_rank, pipe_writer
+        )
+
     if (
         pc.world_size % torch.cuda.device_count() != 0
         and pc.world_size > torch.cuda.device_count()
@@ -458,7 +415,9 @@ def start_backend_server(
                 pipe_writer,
                 cleanup=manager.stop if manager else None,
             )
-        return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
+        return local_rank_start(
+            global_controller, py_env_configs, pc.world_rank, pipe_writer
+        )
     finally:
         if manager:
             manager.stop()

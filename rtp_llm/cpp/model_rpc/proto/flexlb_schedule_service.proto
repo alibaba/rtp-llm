@@ -100,6 +100,9 @@ message FlexlbCancelRequestPB {
     int64 request_id = 1;
     int64 batch_id = 2;
     CancelReasonPB reason = 3;
+    // Single-hop guard only. Every receiver checks local lifecycle ownership;
+    // only a hop-zero miss on a follower may be forwarded to the current master.
+    int32 forward_hop = 4;
 }
 
 message FlexlbCancelResponsePB {

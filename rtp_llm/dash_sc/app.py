@@ -11,12 +11,14 @@ import asyncio
 import json
 import logging
 import os
+import queue
 import signal
 import threading
 import time
 import traceback
 from typing import TYPE_CHECKING, List, Optional
 
+from rtp_llm.config.engine_config import derive_grammar_compile_threads
 from rtp_llm.config.grammar_tokenizer_info import (
     build_model_grammar_tokenizer_info_json,
 )
@@ -30,6 +32,7 @@ from rtp_llm.dash_sc.inference.servicer import (
 )
 from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
 from rtp_llm.dash_sc.repetition_monitor import (
+    OutputRepetitionConfig,
     RequestRepetitionMonitorConfig,
     ToolCallLoopConfig,
     ToolCallMarkerConfig,
@@ -291,6 +294,15 @@ def _tokenize_marker_text(base_tok: BaseTokenizer, text: str) -> List[int]:
 def _build_repetition_monitor_config(
     config: RepetitionDetectionConfig, base_tok: BaseTokenizer | None = None
 ) -> RequestRepetitionMonitorConfig:
+    output_config = OutputRepetitionConfig(
+        enabled=config.output_repetition_monitor,
+        min_repeats=config.output_repetition_min_repeats,
+        min_duplicate_tokens=config.output_repetition_min_dup_tokens,
+        max_period=config.output_repetition_max_period,
+        non_contiguous_min_span=config.noncontig_repeat_min_span_tokens,
+        non_contiguous_min_occurrences=config.noncontig_repeat_min_occurrences,
+        non_contiguous_max_span=config.noncontig_repeat_max_span_tokens,
+    )
     tool_loop_config = ToolCallLoopConfig(
         enabled=config.tool_call_loop_monitor,
         repeat_threshold=config.tool_call_loop_threshold,
@@ -313,6 +325,7 @@ def _build_repetition_monitor_config(
         if begin_ids and end_ids:
             tool_markers = (ToolCallMarkerConfig(begin_ids=begin_ids, end_ids=end_ids),)
     return RequestRepetitionMonitorConfig(
+        output_config=output_config,
         tool_loop_config=tool_loop_config,
         tool_markers=tool_markers,
     )
@@ -483,18 +496,69 @@ class DashScApp:
         self._enqueue_loop = None
         self._enqueue_loop_thread = None
 
+    def _dispatch_signal_events(self) -> None:
+        while True:
+            kind, payload = self._signal_events.get()
+            try:
+                if kind == "barrier":
+                    payload.set()
+                    continue
+                signum = payload
+                if kind == "pre_stop":
+                    logging.info(
+                        "[DashScApp] received pre-stop drain signal %s", signum
+                    )
+                    self._start_pre_stop_watchdog(signum)
+                else:
+                    logging.info(
+                        "[DashScApp] received signal %s, shutting down", signum
+                    )
+                    keep_unavailable = (
+                        signum == signal.SIGTERM
+                        and self._effective_pre_stop_drain_seconds() > 0
+                    )
+                    self._begin_shutdown(signum, start_draining=not keep_unavailable)
+            except Exception:
+                # Never let the dispatcher die: a lost signal means a server that
+                # ignores SIGTERM.
+                logging.exception("[DashScApp] signal dispatch failed for %s", payload)
+
+    def wait_for_signal_dispatch(self, timeout: float = 5.0) -> bool:
+        """Block until every signal handed over before this call was dispatched.
+
+        The queue is FIFO with a single consumer, so a barrier that has been
+        processed proves everything enqueued ahead of it was processed too. That
+        is what makes it sound to assert a post-condition after signalling
+        instead of racing the dispatcher.
+        """
+        done = threading.Event()
+        self._signal_events.put(("barrier", done))
+        return done.wait(timeout)
+
     def _install_signal_handlers(self) -> None:
+        # Signal handlers run on the main thread and can be entered mid-update,
+        # so they must not log or take locks: _begin_shutdown's logging can
+        # re-enter the stderr writer and raise "reentrant call inside
+        # <_io.BufferedWriter ...>", which escapes the handler and takes the
+        # shutdown path with it. SimpleQueue.put is reentrant-safe and usable
+        # from a handler, so the handlers only hand the signal over and return;
+        # the worker below does the real work off the handler. Same approach as
+        # FrontendApp.
+        self._signal_events: "queue.SimpleQueue" = queue.SimpleQueue()
+        self._signal_worker = threading.Thread(
+            target=self._dispatch_signal_events,
+            name="dash-sc-signal-dispatch",
+            daemon=True,
+        )
+        self._signal_worker.start()
+
         def _drain_only_handler(signum, frame):
-            logging.info("[DashScApp] received pre-stop drain signal %s", signum)
-            self._start_pre_stop_watchdog(signum)
+            # Signal-handler context: hand off and return.
+            self._signal_events.put(("pre_stop", signum))
 
         def _handler(signum, frame):
-            logging.info("[DashScApp] received signal %s, shutting down", signum)
-            keep_unavailable = (
-                signum == signal.SIGTERM
-                and self._effective_pre_stop_drain_seconds() > 0
-            )
-            self._begin_shutdown(signum, start_draining=not keep_unavailable)
+            # Signal-handler context: hand off and return.
+            self._signal_events.put(("exit", signum))
 
         try:
             try:
@@ -634,6 +698,11 @@ class DashScApp:
                 # is gone).  Other task types leave the validator off and the engine
                 # keeps its old mid-stream rejection behaviour.
                 grammar_config = self.py_env_configs.grammar_config
+                # Engine setup normally resolves this first, but the sandbox consumes
+                # the same fanout and must not depend on that side effect.
+                derive_grammar_compile_threads(
+                    grammar_config, self.py_env_configs.parallelism_config
+                )
                 grammar_validator = None
                 if model_config.task_type == TaskType.LANGUAGE_MODEL:
                     try:

@@ -16,7 +16,10 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.config.server_config_setup import setup_and_configure_server
+from rtp_llm.config.server_config_setup import (
+    load_gpu_nic_affinity,
+    setup_and_configure_server,
+)
 from rtp_llm.ops import RoleType, SpeculativeType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
@@ -329,6 +332,7 @@ def start_vit_server_impl(
     start_port = server_config.start_port
     vit_server_count = server_config.vit_server_count
 
+    load_gpu_nic_affinity()
     vit_processes: list = []
     vit_server_port = 0
     try:
@@ -342,6 +346,7 @@ def start_vit_server_impl(
             worker_http_addresses = []
 
             base_grpc_port = py_env_configs.server_config.rpc_server_port
+            base_rdma_port = py_env_configs.vit_config.output_transport.rdma.port
 
             # Per-worker we consume two ports (grpc + http). Fail fast if the
             # range would walk past the 16-bit TCP port ceiling — otherwise
@@ -354,9 +359,16 @@ def start_vit_server_impl(
                     f"vit_server_count={vit_server_count}, max={max_port}"
                 )
 
+            if base_rdma_port > 0 and base_rdma_port + vit_server_count - 1 >= 65536:
+                raise ValueError(
+                    f"VIT worker RDMA port range exceeds 65535: "
+                    f"base={base_rdma_port}, vit_server_count={vit_server_count}"
+                )
+
             for i in range(vit_server_count):
                 internal_grpc_port = base_grpc_port + i * 2 + 1
                 internal_http_port = base_grpc_port + i * 2 + 2
+                worker_rdma_port = base_rdma_port + i if base_rdma_port > 0 else None
                 worker_addresses.append(f"127.0.0.1:{internal_grpc_port}")
                 worker_http_addresses.append(f"127.0.0.1:{internal_http_port}")
 
@@ -373,6 +385,7 @@ def start_vit_server_impl(
                         internal_grpc_port,  # grpc_port
                         internal_http_port,  # http_port
                         True,  # is_proxy_mode (proxy 模式下的 worker 进程)
+                        worker_rdma_port,
                     ),
                     name=f"vit_worker_{i}",
                 )
@@ -832,6 +845,10 @@ def _get_startup_real_warmup_speculative_reserve_step(
     if sp_type in (None, "", SpeculativeType.NONE):
         return 0
     gamma = int(getattr(sp_config, "gen_num_per_cycle", 0) or 0)
+    if sp_type == SpeculativeType.DSPARK:
+        # Keep startup request sizing identical to NormalEngine's fixed DSpARK
+        # reserve, including async rounds whose host bookkeeping can lag.
+        return 3 * gamma
     # Match GenerateStream::useStreamAsyncReserveTokens(): one verify window
     # in synchronous mode, or two in-flight proposal windows when async
     # bookkeeping is on.

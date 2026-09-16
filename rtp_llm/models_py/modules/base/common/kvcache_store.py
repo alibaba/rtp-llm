@@ -1,5 +1,4 @@
-from collections.abc import Sequence
-from typing import Optional, Type, Union
+from typing import Optional, Type
 
 import torch
 from torch import nn
@@ -20,11 +19,9 @@ class WriteCacheStoreOp(nn.Module):
     routing, CP canonical keys) lives in the C++ ``CacheStoreWriter``; python
     only pairs the writer with the per-forward inputs.
 
-    A DSv4 layer owns several KV regions (main MLA plus the compressed /
-    sliding-window / indexer groups), so ``forward`` also accepts the sequence of
-    per-group ``LayerKVCache`` returned by ``KVCache.get_layer_cache_groups``.
-    Each element carries its own ``layer_id``/``tag``, which is what the C++
-    writer uses to resolve the owning cache group.
+    The bound ``cache_store_inputs`` contains one cache group's physical block
+    table, so callers must pair this op with exactly one ``LayerKVCache`` from
+    the same group. Multi-group models route their per-tag ops explicitly.
 
     ``input_lengths`` / ``prefix_lengths`` / ``kv_cache_block_id_host`` are the
     read-only mirrors of the plan the C++ writer will execute for this forward:
@@ -51,22 +48,12 @@ class WriteCacheStoreOp(nn.Module):
         self.prefix_lengths = prefix_lengths
         self.kv_cache_block_id_host = kv_cache_block_id_host
 
-    def _write_one(self, kv_cache: Optional[LayerKVCache]) -> None:
+    def forward(self, kv_cache: Optional[LayerKVCache]) -> None:
+        if self.cache_store_writer is None or self.cache_store_inputs is None:
+            return
         if kv_cache is None:
             return
         self.cache_store_writer.write(self.cache_store_inputs, kv_cache)
-
-    def forward(
-        self,
-        kv_cache: Union[Optional[LayerKVCache], Sequence[Optional[LayerKVCache]]],
-    ) -> None:
-        if self.cache_store_writer is None or self.cache_store_inputs is None:
-            return
-        if isinstance(kv_cache, Sequence):
-            for layer_kv in kv_cache:
-                self._write_one(layer_kv)
-            return
-        self._write_one(kv_cache)
 
 
 # ``cache_store_writer`` is a C++-owned field of ``PyAttentionInputs`` and is

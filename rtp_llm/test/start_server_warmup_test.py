@@ -27,12 +27,16 @@ class StartupRealWarmupTest(unittest.TestCase):
             )
             self.assertEqual(
                 start_server._get_startup_real_warmup_speculative_reserve_step(dspark),
-                4,
+                9,
             )
         with patch.dict("os.environ", {"RTP_LLM_STREAM_ASYNC": "1"}):
             self.assertEqual(
-                start_server._get_startup_real_warmup_speculative_reserve_step(dspark),
+                start_server._get_startup_real_warmup_speculative_reserve_step(mtp),
                 7,
+            )
+            self.assertEqual(
+                start_server._get_startup_real_warmup_speculative_reserve_step(dspark),
+                9,
             )
         self.assertEqual(
             start_server._get_startup_real_warmup_request_token_len(

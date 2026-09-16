@@ -3,9 +3,9 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
-cc_import(
+alias(
     name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+    actual = "@torch//:torch",
 )
 
 cuda13_torch_link_deps = select({
@@ -28,5 +28,5 @@ cc_test(
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps() + cuda13_torch_link_deps,
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {'gpu':'A10'},
 )

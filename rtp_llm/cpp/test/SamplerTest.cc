@@ -269,4 +269,29 @@ TEST_F(SamplerTest, testGeneralSampling) {
             }
         }
     }
+
+    auto oracle_logits        = logits[1].repeat({(int64_t)batch_size, 1});
+    inputs.repetition_penalty = inputs.presence_penalty = inputs.frequency_penalty = torch::Tensor();
+    inputs.temperature = torch::ones({(int64_t)batch_size}, torch::kFloat32).pin_memory();
+    inputs.top_k.fill_(1);
+    inputs.top_p.fill_(1.0f);
+    inputs.logits        = oracle_logits.clone();
+    inputs.all_probs     = torch::empty_like(oracle_logits);
+    inputs.cum_log_probs = torch::Tensor();
+    outputs              = sampler_->forward(inputs);
+    auto point_mass      = torch::zeros_like(oracle_logits).scatter_(1, oracle_logits.argmax(-1, true), 1.0);
+    EXPECT_TRUE(torch::allclose(outputs.all_probs, point_mass));
+
+    // The original top token probability exceeds 0.5, so top-p keeps only token 7.
+    inputs.top_k.fill_(2);
+    inputs.top_p.fill_(0.5f);
+    inputs.token_ids     = output_token_ids.clone();
+    inputs.logits        = oracle_logits.clone();
+    inputs.all_probs     = torch::empty({(int64_t)batch_size, 4}, logits.options());
+    inputs.cum_log_probs = cum_log_probs.clone();
+    outputs              = sampler_->forward(inputs);
+    EXPECT_TRUE(
+        torch::equal(outputs.token_ids.select(1, step).cpu(), torch::full({(int64_t)batch_size}, 7, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(outputs.all_probs, point_mass.slice(1, 0, 4)));
+    EXPECT_TRUE(torch::allclose(outputs.cum_log_probs, cum_log_probs));
 }

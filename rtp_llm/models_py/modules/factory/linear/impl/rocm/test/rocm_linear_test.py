@@ -38,6 +38,7 @@ class LinearTorch(nn.Module):
 
 
 class FakeFusedMoe(nn.Module):
+    includes_shared_expert = False
     topk_ids_dtype = torch.int32
 
     router = SimpleNamespace(
@@ -393,6 +394,7 @@ class LinearTest(TestCase):
             num_layers=1,
             vocab_size=32,
             layernorm_eps=1e-6,
+            capture_aux_hidden_layer_ids=(),
         )
         parallelism_config = SimpleNamespace()
         hw_kernel_config = HWKernelConfig()

@@ -10,16 +10,17 @@ import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.sync.util.GrpcStatusUtils;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Optional;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.LongAdder;
+
+import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 
 public class GrpcCacheStatusCheckRunner implements Runnable {
 
@@ -30,9 +31,13 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private final String site;
     private final RoleType roleType;
     private final WorkerStatus workerStatus;
+    private final WorkerDirectory workerDirectory;
+    private final WorkerStatus.PollLease pollLease;
+    private final long generationId;
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService cacheAwareService;
+    private final DynamicCacheIntervalService cacheIntervalService;
     private final String ip;
     private final int grpcPort;
     private final long startTime = System.nanoTime() / 1000;
@@ -45,12 +50,16 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
 
     public GrpcCacheStatusCheckRunner(String modelName, String ipPort, String site, RoleType roleType,
                                       WorkerStatus workerStatus,
+                                      WorkerStatus.PollLease pollLease,
+                                      WorkerDirectory workerDirectory,
                                       EngineHealthReporter engineHealthReporter,
                                       EngineGrpcService engineGrpcService,
                                       CacheAwareService cacheAwareService,
+                                      DynamicCacheIntervalService cacheIntervalService,
                                       long requestTimeoutMs,
                                       LongAdder syncCount,
                                       Long syncEngineStatusInterval,
+                                      boolean fullSnapshotDebugMode,
                                       Executor callbackExecutor) {
 
         this.ipPort = ipPort;
@@ -60,13 +69,19 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         this.grpcPort = CommonUtils.toGrpcPort(Integer.parseInt(split[1]));
         this.modelName = modelName;
         this.workerStatus = workerStatus;
+        this.workerDirectory = java.util.Objects.requireNonNull(
+                workerDirectory, "workerDirectory");
+        this.pollLease = java.util.Objects.requireNonNull(
+                pollLease, "pollLease");
+        workerStatus.requireCachePollLease(pollLease);
+        this.generationId = workerStatus.getGenerationId();
         this.site = site;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.cacheAwareService = cacheAwareService;
-        this.debug = Optional.ofNullable(System.getenv("WHALE_CACHE_DEBUG_MODE"))
-                .map(Boolean::parseBoolean)
-                .orElse(false);
+        this.cacheIntervalService = java.util.Objects.requireNonNull(
+                cacheIntervalService, "cacheIntervalService");
+        this.debug = fullSnapshotDebugMode;
         this.requestTimeoutMs = requestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
@@ -77,18 +92,15 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     public void run() {
         boolean asyncInitiated = false;
         try {
-            // VIT workers do not own KV cache; querying cache status only adds
-            // an unnecessary RPC. EngineSyncRunner does not schedule this for
-            // VIT; retain the guard for direct callers.
-            if (roleType == RoleType.VIT) {
-                return;
-            }
             logger.debug("GrpcCacheStatusCheckRunner run for {}", ipPort);
-            long prefillCacheStatusCheckInterval = DynamicCacheIntervalService.getCurrentIntervalMs();
+            long prefillCacheStatusCheckInterval =
+                    cacheIntervalService.getCurrentIntervalMs();
             long roundInterval = prefillCacheStatusCheckInterval / syncEngineStatusInterval;
             roundInterval = Math.max(roundInterval, 1);
 
-            // Skip prefill cache status check if not in 100ms interval
+            // EngineSyncRunner is invoked on the status-poll cadence. Prefill
+            // cache polling uses an integer number of those ticks so a changing
+            // interval does not require a second scheduler or timer.
             if ((RoleType.PREFILL.equals(roleType) || RoleType.PDFUSION.equals(roleType))
                         && syncCount.longValue() % roundInterval != 0) {
                 logger.debug("Skip prefill cache status check for {} because not in {}ms interval", ipPort, prefillCacheStatusCheckInterval);
@@ -107,33 +119,51 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                                 cacheStatusPB.getAvailableKvCache(), cacheStatusPB.getTotalKvCache(), cacheStatusPB.getBlockSize());
                         return EngineStatusConverter.convertToCacheStatus(cacheStatusPB);
                     })
-                    .whenCompleteAsync((cacheStatus, ex) -> {
+                    .handleAsync((cacheStatus, failure) -> {
                         try {
-                            if (ex != null) {
-                                Throwable throwable = ex instanceof CompletionException ? ex.getCause() : ex;
-                                handleException(throwable);
+                            Throwable cause = unwrapCompletionFailure(failure);
+                            if (cause != null) {
+                                handleException(cause);
                                 // Return a default CacheStatus with error information
                                 CacheStatus errorStatus = CacheStatus.builder()
                                         .version(-1)
                                         .availableKvCache(0)
                                         .totalKvCache(0)
                                         .blockSize(0)
-                                        .message("Cache Status gRPC call failed: " + throwable.getMessage())
+                                        .message("Cache Status gRPC call failed: "
+                                                + cause.getMessage())
                                         .build();
                                 handleCacheStatusResponse(errorStatus, startTime);
                             } else {
                                 handleCacheStatusResponse(cacheStatus, startTime);
                             }
-                        } finally {
-                            workerStatus.getCacheCheckInProgress().set(false);
+                        } catch (Throwable callbackFailure) {
+                            logger.error("Cache status callback failed for {}",
+                                    ipPort, callbackFailure);
                         }
-                    }, callbackExecutor);
+                        return null;
+                    }, callbackExecutor)
+                    .whenComplete((ignored, callbackFailure) -> {
+                        pollLease.close();
+                        if (callbackFailure != null) {
+                            logger.error(
+                                    "Cache status callback was not scheduled for {}",
+                                    ipPort,
+                                    unwrapCompletionFailure(callbackFailure));
+                        }
+                    });
             asyncInitiated = true;
         } finally {
             if (!asyncInitiated) {
-                workerStatus.getCacheCheckInProgress().set(false);
+                pollLease.close();
             }
         }
+    }
+
+    private static Throwable unwrapCompletionFailure(Throwable failure) {
+        return failure instanceof CompletionException
+                && failure.getCause() != null
+                ? failure.getCause() : failure;
     }
 
     private void handleCacheStatusResponse(CacheStatus newCacheStatus, long startTime) {
@@ -146,19 +176,42 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 return;
             }
 
-            engineHealthReporter.reportCacheStatusCheckRemoteInfo(
-                    modelName, roleType.name(), startTime);
-
-            if (validateCacheStatusResponse(workerStatus, newCacheStatus)) {
-
-                workerStatus.setCacheStatus(newCacheStatus);
-                updateLocalKvCache(workerStatus);
-                logCacheStatusUpdate(newCacheStatus, startTime);
+            long successfulIntervalUs;
+            workerStatus.lock.lock();
+            try {
+                if (!workerDirectory.isCurrentStatus(
+                        roleType, ipPort, workerStatus)
+                        || !workerStatus.isActiveGeneration()) {
+                    logger.debug(
+                            "Ignore stale cache callback for {}#{}, role:{}",
+                            ipPort, generationId, roleType);
+                    return;
+                }
+                if (validateCacheStatusResponse(workerStatus, newCacheStatus)) {
+                    workerStatus.publishCacheStatus(newCacheStatus);
+                    if (isCacheProducingRole()) {
+                        // CacheAwareService is keyed by address, not generation.
+                        // Keep the generation lock through this in-memory index
+                        // update so retirement cannot publish a replacement or
+                        // clear the address between validation and publication.
+                        WorkerCacheUpdateResult updateResult = updateLocalKvCache();
+                        if (updateResult != null && updateResult.isSuccess()) {
+                            workerStatus.publishCacheIndexedVersion(
+                                    newCacheStatus.getVersion());
+                        }
+                    }
+                    logCacheStatusUpdate(newCacheStatus, startTime);
+                }
+                successfulIntervalUs =
+                        workerStatus.recordSuccessfulCachePoll();
+            } finally {
+                workerStatus.lock.unlock();
             }
 
-            engineHealthReporter.reportCacheStatusCheckerSuccess(modelName, workerStatus);
-            workerStatus.getCacheLastUpdateTime().set(System.nanoTime() / 1000);
-
+            engineHealthReporter.reportCacheStatusCheckRemoteInfo(
+                    modelName, roleType.name(), startTime);
+            engineHealthReporter.reportCacheStatusCheckerSuccess(
+                    modelName, workerStatus, successfulIntervalUs);
         } catch (Throwable e) {
             log("engine cache status check via gRPC exception, msg: " + e.getMessage(), e);
             engineHealthReporter.reportCacheStatusCheckerFail(
@@ -170,10 +223,20 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         if (debug) {
             return true;
         }
-        CacheStatus currentCacheStatus = workerStatus.getCacheStatus();
-        if (currentCacheStatus != null && newCacheStatus.getVersion() <= currentCacheStatus.getVersion()) {
+        WorkerStatus.CacheIndexSnapshot current =
+                workerStatus.cacheIndexSnapshot();
+        CacheStatus currentCacheStatus = current.cacheStatus();
+        if (currentCacheStatus == null) {
+            return true;
+        }
+        long currentVersion = currentCacheStatus.getVersion();
+        long responseVersion = newCacheStatus.getVersion();
+        boolean responseAlreadyIndexed = current.indexInitialized()
+                && current.indexedVersion() == responseVersion;
+        if (responseVersion < currentVersion
+                || responseVersion == currentVersion && responseAlreadyIndexed) {
             logger.debug("gRPC Cache Status - {}, role:{}, version not updated, current: {}, response: {}",
-                    ipPort, roleType.name(), currentCacheStatus.getVersion(), newCacheStatus.getVersion());
+                    ipPort, roleType.name(), currentVersion, responseVersion);
             return false;
         }
         return true;
@@ -191,25 +254,45 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 cacheStatus.getAvailableKvCache(),
                 cacheStatus.getTotalKvCache(),
                 (System.nanoTime() / 1000) - startTime,
-                DynamicCacheIntervalService.getCurrentIntervalMs());
+                cacheIntervalService.getCurrentIntervalMs());
     }
 
-    private void updateLocalKvCache(WorkerStatus workerStatus) {
+    private WorkerCacheUpdateResult updateLocalKvCache() {
         try {
-            if (!RoleType.PREFILL.equals(roleType) && !RoleType.PDFUSION.equals(roleType)) {
-                return;
-            }
-            WorkerCacheUpdateResult result = cacheAwareService.updateEngineBlockCache(workerStatus);
-            if (!result.isSuccess()) {
-                logger.debug("Failed to update worker cache for IP: {}, error: {}", workerStatus.getIp(), result.getErrorMessage());
+            WorkerCacheUpdateResult result =
+                    cacheAwareService.updateEngineBlockCache(workerStatus);
+            if (result == null) {
+                logger.debug(
+                        "Cache service returned no update result for {}#{}",
+                        ipPort, generationId);
                 engineHealthReporter.reportCacheStatusCheckerFail(
                         modelName, BalanceStatusEnum.CACHE_UPDATE_FAILED, roleType);
+                return null;
             }
+            if (!result.isSuccess()) {
+                logger.debug(
+                        "Cache update rejected for {}#{}, error:{}",
+                        ipPort,
+                        generationId,
+                        result.getErrorMessage());
+                engineHealthReporter.reportCacheStatusCheckerFail(
+                        modelName,
+                        BalanceStatusEnum.CACHE_UPDATE_FAILED,
+                        roleType);
+            }
+            return result;
         } catch (Exception e) {
-            logger.debug("Exception to update worker cache for IP: {}, error: {}", workerStatus.getIp(), e.getMessage());
+            logger.debug("Exception to update worker cache for {}#{}: {}",
+                    ipPort, generationId, e.getMessage());
             engineHealthReporter.reportCacheStatusCheckerFail(
                     modelName, BalanceStatusEnum.CACHE_UPDATE_FAILED, roleType);
+            return null;
         }
+    }
+
+    private boolean isCacheProducingRole() {
+        return RoleType.PREFILL.equals(roleType)
+                || RoleType.PDFUSION.equals(roleType);
     }
 
     private void log(String msg) {
@@ -236,7 +319,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private void handleException(Throwable ex) {
         log("gRPC cache status check failed:ipPort:" + ipPort + ", with exception: " + ex.getMessage());
         // Report specific error based on exception type
-        if (GrpcStatusUtils.isDeadlineExceeded(ex)) {
+        if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
             engineHealthReporter.reportCacheStatusCheckerFail(
                     modelName, BalanceStatusEnum.CACHE_GRPC_TIMEOUT, roleType);
         } else {
@@ -246,9 +329,11 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     }
 
     private long getCurrentCacheVersion() {
-        return debug ? -1L : Optional.ofNullable(workerStatus)
-                .map(WorkerStatus::getCacheStatus)
-                .map(CacheStatus::getVersion)
-                .orElse(-1L);
+        if (debug) {
+            return -1L;
+        }
+        WorkerStatus.CacheIndexSnapshot snapshot =
+                workerStatus.cacheIndexSnapshot();
+        return snapshot.indexInitialized() ? snapshot.indexedVersion() : -1L;
     }
 }

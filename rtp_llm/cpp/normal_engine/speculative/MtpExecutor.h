@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <list>
 #include <map>
 #include <memory>
@@ -88,6 +89,11 @@ public:
                                                        const ResourceContext& resource_context,
                                                        int                    vocab_size,
                                                        bool                   is_dspark = false);
+    static bool              mustWaitBeforeStreamPreparation(bool stream_async,
+                                                             bool drop_broad_sync,
+                                                             bool linear_attention,
+                                                             bool cache_snapshot_ready = false);
+    static int selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
 
 protected:
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
@@ -103,6 +109,9 @@ protected:
     };
 
     bool isTpRank0() const;
+    bool reduceDSparkCacheStoreStatus(bool local_ok);
+    bool finishDSparkPrefillCachePublication(const GptModelInputs&               model_input,
+                                             const std::list<GenerateStreamPtr>& streams);
 
     void maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
                                               ModelBase&      source,
@@ -112,9 +121,8 @@ protected:
     // last_hidden_states hand-off. hidden_rows == 0 means "use the tensor's own
     // row count"; target verify passes the explicit combo row count because a
     // graph replay does not advance the Python-side row counter.
-    void maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output,
-                                              ModelBase&       source,
-                                              int64_t          hidden_rows = 0);
+    void
+    maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source, int64_t hidden_rows = 0);
 
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
 
@@ -125,9 +133,9 @@ protected:
     absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
 
     // decodeStep helpers — extracted to keep decodeStep readable. Each helper
-    // owns a single phase (sync, prepare, forward, broadcast, dispatch) and
+    // owns a single phase (prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
-    void            waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStreamPtr>& streams);
+    void            waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
     void            prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& streams, TensorHolder& host_holder);
     void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
@@ -139,12 +147,11 @@ protected:
     SamplerOutput   sampleDSparkDraft(const StreamGroups&  stream_groups,
                                       const torch::Tensor& base_logits,
                                       const torch::Tensor& anchors);
-    void            dsparkModelDecode(GptModelInputs&                                 model_input,
-                                      const StreamGroups&                             stream_groups,
-                                      const MtpBatchStreamProcessor::DSparkRoundHead& round_head,
-                                      SamplerOutput&                                  draft_sampler_output,
-                                      torch::Tensor&                                  draft_token_ids_t,
-                                      int64_t&                                        model_forward_us);
+    void            runDSparkProposal(GptModelInputs&                                  proposal_input,
+                                      const StreamGroups&                              stream_groups,
+                                      const MtpBatchStreamProcessor::DSparkRoundState& round_state,
+                                      SamplerOutput&                                   draft_sampler_output,
+                                      int64_t&                                         model_forward_us);
     GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
                  buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
@@ -158,6 +165,9 @@ protected:
     absl::Status dispatchDecodeOutput(const StreamGroups&                          stream_groups,
                                       const std::list<GenerateStreamPtr>&          streams,
                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
+                                      const torch::Tensor&                         verify_position_ids,
+                                      const torch::Tensor&                         kv_cache_block_id,
+                                      const torch::Tensor&                         kv_cache_kernel_block_id,
                                       GptModelOutputs                              draft_prefill_model_output,
                                       SamplerOutput                                draft_prefill_sampler_output,
                                       std::shared_ptr<torch::Event>                rejection_event,
@@ -204,6 +214,9 @@ protected:
     // the main thread.
     absl::Status dispatchDecodeAsync(const StreamGroups&                          stream_groups,
                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                                     const torch::Tensor&                         verify_position_ids,
+                                     const torch::Tensor&                         kv_cache_block_id,
+                                     const torch::Tensor&                         kv_cache_kernel_block_id,
                                      MergedOutput                                 draft_prefill_output,
                                      std::shared_ptr<torch::Event>                rejection_event,
                                      std::shared_ptr<torch::Event>                draft_event);
@@ -212,27 +225,35 @@ protected:
     // the async path, using the host seqLength after specUpdate as truth.
     void publishSyncMtpDeviceState(const StreamGroups&                          stream_groups,
                                    const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                                   const torch::Tensor&                         verify_position_ids,
                                    const MergedOutput&                          draft_prefill_output);
 
+    static torch::Tensor advanceDSparkPositionIds(const torch::Tensor& verify_position_ids,
+                                                  const torch::Tensor& accept_len,
+                                                  int64_t              batch_size,
+                                                  int64_t              verify_width);
+
     void releaseAllModelBuffers();
+
 private:
+    static torch::Tensor snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder);
+
     GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
 
-    std::unique_ptr<ModelBase>               model_;
-    std::unique_ptr<Sampler>                 sampler_;
-    std::unique_ptr<MtpBatchStreamProcessor> batch_stream_processor_;
-    std::shared_ptr<KVCacheManager>          cache_manager_;
-    std::shared_ptr<ModelInputsLogger>       model_inputs_logger_;
-    bool                                     enable_ffn_disaggregate_ = false;
-    bool                                     enable_detail_log_       = false;
-    int                                      tp_rank_                 = 0;
-    ParallelismConfig                        parallelism_config_;
-    kmonitor::MetricsReporterPtr             metrics_reporter_ = nullptr;
+    std::unique_ptr<ModelBase>                                               model_;
+    std::unique_ptr<Sampler>                                                 sampler_;
+    std::unique_ptr<MtpBatchStreamProcessor>                                 batch_stream_processor_;
+    std::shared_ptr<KVCacheManager>                                          cache_manager_;
+    std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
+    bool                                                                     enable_ffn_disaggregate_ = false;
+    bool                                                                     enable_detail_log_       = false;
+    int                                                                      tp_rank_                 = 0;
+    ParallelismConfig                                                        parallelism_config_;
+    kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
-    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>
-        wall_tps_reporter_;
-    std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
-    size_t                                                                   vocab_size_;
+    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
+    std::shared_ptr<ExpertBalancer>                                                            expert_balancer_;
+    size_t                                                                                     vocab_size_;
 
     // for mtp
     DataType data_type_;
@@ -240,7 +261,10 @@ private:
     size_t   propose_step_;
     // Fixed-width block diffusion: one draft forward emits gamma proposals;
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
-    bool          is_dspark_ = false;
+    bool is_dspark_ = false;
+    // Dedicated PREFILL workers only seed DSpARK's draft feature KV and must
+    // not construct proposal wrappers or require proposal-only Markov weights.
+    bool          dspark_prefill_commit_only_ = false;
     size_t        draft_vocab_size_;
     torch::Tensor dspark_markov_w1_;
     torch::Tensor dspark_markov_w2_;
@@ -285,5 +309,9 @@ private:
     // Bookkeeping worker for stream-async decode dispatch. It owns a CUDA
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
     AsyncRunner spec_bookkeeping_runner_;
+
+    torch::Stream dspark_cache_store_sync_stream_;
+    torch::Tensor dspark_cache_store_status_;
+    std::function<bool(bool)> dspark_cache_store_status_reducer_for_test_;
 };
 }  // namespace rtp_llm

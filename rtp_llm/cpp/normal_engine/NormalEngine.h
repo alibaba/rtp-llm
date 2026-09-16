@@ -58,6 +58,9 @@ private:
     absl::Status                    initSystemPrompt();
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
     size_t                          getWarmUpInputLength() const;
+    static size_t                   warmUpReservedBlockCount(size_t seq_len,
+                                                            size_t reserve_tokens,
+                                                            size_t tokens_per_block);
     void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);

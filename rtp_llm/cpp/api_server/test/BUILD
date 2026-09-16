@@ -2,9 +2,9 @@ load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
-cc_import(
+alias(
     name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+    actual = "@torch//:torch",
 )
 
 cuda13_torch_link_deps = select({
@@ -55,7 +55,7 @@ py_test(
         "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM"},
         "//conditions:default": {"TEST_USING_DEVICE": "CUDA"},
     }),
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 py_library(

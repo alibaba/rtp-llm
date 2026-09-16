@@ -114,6 +114,38 @@ def init_server_group_args(parser, server_config, distribute_config):
         help="Parent wait window before backend shutdown after frontend drain. Negative derives from frontend/dash_sc drain config.",
     )
     server_group.add_argument(
+        "--enable_torch_allocator_dump",
+        env_name="RTP_LLM_ENABLE_TORCH_ALLOCATOR_DUMP",
+        bind_to=(server_config, "enable_torch_allocator_dump"),
+        type=str2bool,
+        default=False,
+        help="Enable the authenticated, rate-limited allocator dump endpoint.",
+    )
+    server_group.add_argument(
+        "--torch_allocator_dump_auth_token",
+        env_name="RTP_LLM_TORCH_ALLOCATOR_DUMP_AUTH_TOKEN",
+        bind_to=(server_config, "torch_allocator_dump_auth_token"),
+        type=str,
+        default="",
+        help="Secret required by the allocator dump HTTP and model RPC endpoints.",
+    )
+    server_group.add_argument(
+        "--torch_allocator_dump_auth_header",
+        env_name="RTP_LLM_TORCH_ALLOCATOR_DUMP_AUTH_HEADER",
+        bind_to=(server_config, "torch_allocator_dump_auth_header"),
+        type=str,
+        default="X-RTP-LLM-Allocator-Dump-Token",
+        help="HTTP request header carrying the allocator dump secret.",
+    )
+    server_group.add_argument(
+        "--torch_allocator_dump_cooldown_seconds",
+        env_name="RTP_LLM_TORCH_ALLOCATOR_DUMP_COOLDOWN_SECONDS",
+        bind_to=(server_config, "torch_allocator_dump_cooldown_seconds"),
+        type=float,
+        default=60.0,
+        help="Minimum delay after an allocator dump completes before another can start.",
+    )
+    server_group.add_argument(
         "--monitor_interval",
         env_name="MONITOR_INTERVAL",
         bind_to=(server_config, "monitor_interval"),

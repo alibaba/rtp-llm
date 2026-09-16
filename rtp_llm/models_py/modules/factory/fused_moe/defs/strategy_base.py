@@ -37,6 +37,11 @@ class MoeStrategy(ABC):
     to define which Router and Executor implementations they use.
     """
 
+    # Public MOE_STRATEGY value for strategies selected by exact-name filtering.
+    # Unnamed extension strategies remain eligible and decide in can_handle(),
+    # including for explicit requests that the in-tree registry does not know.
+    strategy_name: Optional[str] = None
+
     def can_handle(self, config: MoEConfigAdapter) -> bool:
         """Determine whether this strategy can handle the given configuration
 
@@ -58,10 +63,23 @@ class MoeStrategy(ABC):
         try:
             attrs = self.get_attributes()
         except ImportError as import_error:
-            logger.debug(
-                f"[{self.__class__.__name__}] Skipped due to missing dependency: {import_error}"
+            # Warn, not debug: this is the only trace that the strategy was
+            # dropped, and the no-quant strategies now refuse quantized configs,
+            # so no fallback candidate remains to mask an unimportable
+            # router/executor. Without this the caller only sees "no suitable MOE
+            # strategy found" and goes looking at quant_config and parallelism.
+            self.skip_reason = f"missing dependency: {import_error}"
+            logger.warning(
+                f"[{self.__class__.__name__}] Skipped due to {self.skip_reason}"
             )
             return False
+
+        # Imports resolved, so any reason recorded by an earlier call is stale.
+        # get_attributes() does not depend on config, so a strategy that raised
+        # once should keep raising and this should not be reachable -- clear it
+        # anyway rather than let a persistent instance carry a reason that is no
+        # longer true into an unrelated failure message.
+        self.skip_reason = None
 
         router_cls = attrs.get_router_class()
         executor_cls = attrs.get_executor_class()

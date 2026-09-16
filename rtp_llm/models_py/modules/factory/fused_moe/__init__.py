@@ -14,20 +14,24 @@ Usage example:
     from rtp_llm.models_py.modules.factory import FusedMoeFactory
 
     moe = FusedMoeFactory.create_fused_moe(config, weights)
+
+CUDA FP8/FP4 selection:
+    ``auto`` prefers ``mega_moe_se`` for EP models with shared experts. Set
+    ``MOE_STRATEGY=mega_moe`` to keep shared-expert computation independent.
 """
 
 import torch
 
-from rtp_llm.device.device_impl import is_gfx950
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.utils.arch import get_sm, is_cuda
-
 from rtp_llm.utils.backend_registry import run_backend_registrations
+
 from .defs.fused_moe import FusedMoe
 from .factory import FusedMoeFactory
 from .strategy_registry import StrategyRegistry
 
 __all__ = ["FusedMoeFactory", "StrategyRegistry", "FusedMoe"]
+
 
 # ============================================================================
 # Device-specific MoE strategy registration
@@ -43,14 +47,16 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.common.strategy.batched_tr
 if device_type == DeviceType.ROCm:
     # ========== ROCm Registry ==========
 
+    from rtp_llm.device.device_impl import is_gfx950
+
     # MoE strategies
     from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.strategy import (
         RocmBf16PureTPStrategy,
         RocmEpLowLatencyStrategy,
         RocmEpNormalStrategy,
-        RocmMXFp4PureTPStrategy,
         RocmFp8PerBlockPureTPStrategy,
         RocmFp8PerChannelPureTPStrategy,
+        RocmMXFp4PureTPStrategy,
     )
 
     registry = StrategyRegistry()
@@ -68,15 +74,19 @@ else:
 
     # MoE strategies
     from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
-        CudaFp8PerBlockPureCPStrategy,
-        CudaFp8PerBlockPureDPStrategy,
         CudaFp8PerBlockEpLowLatencyStrategy,
         CudaFp8PerBlockEpNormalStrategy,
         CudaFp8PerBlockNoDPMaskedStrategy,
         CudaFp8PerBlockNoDPStrategy,
+        CudaFp8PerBlockPureCPStrategy,
+        CudaFp8PerBlockPureDPStrategy,
         CudaFp8PerTensorEpLowLatencyStrategy,
         CudaFp8PerTensorEpNormalStrategy,
         CudaFp8PerTensorNoDPStrategy,
+        CudaGroupedFp4Strategy,
+        CudaLocalLoopStrategy,
+        CudaMegaMoeSEStrategy,
+        CudaMegaMoeStrategy,
         CudaNoQuantCppStrategy,
         CudaNoQuantDpNormalStrategy,
         CudaNoQuantEpLowLatencyStrategy,
@@ -86,6 +96,12 @@ else:
     )
 
     registry = StrategyRegistry()
+    # Registration order is the public ``auto`` preference for eligible
+    # FP8/FP4 EP models. ``mega_moe`` remains an explicit rollback path.
+    registry.register(CudaMegaMoeSEStrategy())
+    registry.register(CudaMegaMoeStrategy())
+    registry.register(CudaGroupedFp4Strategy())
+    registry.register(CudaLocalLoopStrategy())
     registry.register(CudaFp8PerTensorEpLowLatencyStrategy())
     registry.register(CudaFp8PerTensorEpNormalStrategy())
     registry.register(CudaFp8PerBlockEpLowLatencyStrategy())

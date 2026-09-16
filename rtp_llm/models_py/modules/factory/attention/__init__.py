@@ -36,12 +36,11 @@ if device_type == DeviceType.ROCm:
         AiterPrefillImplAsm,
         AiterPrefillImplNonAsm,
         AiterPrefillImplPaged,
-        validate_v_layout,
+        AiterPrefillImplTriton,
     )
 
-    attn_factory.VALIDATE_FMHA_CONFIG = validate_v_layout
     PREFILL_MHA_IMPS.extend(
-        [AiterPrefillImplPaged, AiterPrefillImplAsm, AiterPrefillImplNonAsm]
+        [AiterPrefillImplTriton, AiterPrefillImplPaged, AiterPrefillImplAsm, AiterPrefillImplNonAsm]
     )
     DECODE_MHA_IMPS.extend(
         [AiterDecodeImplTriton, AiterDecodeImplAsm, AiterDecodeImplNonAsm]
@@ -54,6 +53,9 @@ elif device_type == DeviceType.Cuda:
     )
     from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise_fp8 import (
         HeadWiseFP8PrefillImpl,
+    )
+    from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_attn_3 import (
+        FlashAttn3PagedShortGraphImpl,
     )
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
         PyFlashinferHybridPrefillImpl,
@@ -87,6 +89,7 @@ elif device_type == DeviceType.Cuda:
         [
             HeadWiseFP8PrefillImpl,
             HeadWisePrefillImpl,
+            FlashAttn3PagedShortGraphImpl,
             FlashInferTRTLLMSpecDecodeImpl,
             FlashInferTRTLLMPrefillImpl,
             FlashInferTRTLLMFMHAv2PrefillImpl,

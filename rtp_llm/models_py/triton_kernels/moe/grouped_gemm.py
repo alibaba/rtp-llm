@@ -138,6 +138,7 @@ def batched_triton_kernel(
 ):
     expert_id = tl.program_id(axis=0)
     e_num_tokens = tl.load(expert_num_tokens + expert_id)
+    e_num_tokens = tl.maximum(tl.minimum(e_num_tokens, max_num_tokens), 0)
     if e_num_tokens == 0:
         # Early exit
         return

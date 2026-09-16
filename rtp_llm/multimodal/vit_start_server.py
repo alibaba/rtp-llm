@@ -6,6 +6,7 @@ from setproctitle import setproctitle
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.server_config_setup import setup_cuda_device_and_accl_env
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.multimodal_mixin_factory import MultimodalMixinFactory
@@ -23,9 +24,12 @@ def vit_start_server(
     grpc_port: int,
     http_port: Optional[int] = None,
     is_proxy_mode: bool = False,
+    rdma_port: Optional[int] = None,
 ):
     # Set server_id on the passed config
     py_env_configs.server_config.vit_server_id = server_id
+    if rdma_port is not None:
+        py_env_configs.vit_config.output_transport.rdma.port = rdma_port
     setproctitle(f"rtp_llm_vit_server_{server_id}")
 
     logging.info(
@@ -34,6 +38,8 @@ def vit_start_server(
     )
 
     engine_config = EngineConfig.create(py_env_configs)
+    local_device_id = server_id % torch.cuda.device_count()
+    setup_cuda_device_and_accl_env(local_device_id)
 
     model_config = ModelFactory.create_model_config(
         model_args=py_env_configs.model_args,
@@ -52,12 +58,10 @@ def vit_start_server(
         logging.info(
             f"[VIT_SERVER_{server_id}] No multimodal model, skip start vit server"
         )
-        app = VitEndpointApp(py_env_configs, None)
+        app = VitEndpointApp(py_env_configs, None, local_device_id)
         app.start(grpc_port, http_port)
         return
 
-    local_device_id = server_id % torch.cuda.device_count()
-    torch.cuda.set_device(local_device_id)
     vit_process_engine = MultimodalMixinFactory.create_multimodal_process_engine(
         model_config=model_config,
         engine_config=engine_config,
@@ -71,7 +75,7 @@ def vit_start_server(
         f"[VIT_SERVER_{server_id}] Creating multimodal process engine finished"
     )
 
-    app = VitEndpointApp(py_env_configs, vit_process_engine)
+    app = VitEndpointApp(py_env_configs, vit_process_engine, local_device_id)
     app.start(
         grpc_port=grpc_port,
         http_port=http_port,

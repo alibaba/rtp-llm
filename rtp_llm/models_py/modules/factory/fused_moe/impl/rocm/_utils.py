@@ -2,8 +2,6 @@
 
 import torch
 
-from rtp_llm.device.device_impl import is_gfx950
-
 
 def get_rocm_fp8_dtype() -> torch.dtype:
     """Pick the FP8 dtype the current ROCm device supports.
@@ -14,4 +12,6 @@ def get_rocm_fp8_dtype() -> torch.dtype:
     drift — falls back to the ``ROCM_GFX_ARCH`` env var when CUDA/ROCm is not
     available (e.g. CPU-only build environments).
     """
+    from rtp_llm.device.device_impl import is_gfx950
+
     return torch.float8_e4m3fn if is_gfx950() else torch.float8_e4m3fnuz

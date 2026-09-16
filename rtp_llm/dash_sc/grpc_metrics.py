@@ -159,6 +159,42 @@ def _report_frontend_structured_metrics(
         kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, record.input_len, tags)
     kmonitor.report(GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC, record.output_len, tags)
     monitor = record.repetition_monitor
+    if monitor.output_repetition_check_ms > 0:
+        kmonitor.report(
+            GaugeMetrics.OUTPUT_REPETITION_CHECK_RT_METRIC,
+            monitor.output_repetition_check_ms,
+            tags,
+        )
+    output = monitor.output_repetition_result
+    if output is not None and output.hit:
+        kind = (
+            "non_contiguous_span_repeat"
+            if output.non_contiguous
+            else "same_token_run"
+            if output.repeat_unit_size == 1
+            else "exact_ngram_loop"
+            if output.repeat_unit_size <= 64
+            else "long_span_repeat"
+        )
+        output_tags = {**tags, "kind": kind, "action": "metric"}
+        kmonitor.report(AccMetrics.OUTPUT_REPETITION_QPS_METRIC, 1, output_tags)
+        if kind == "same_token_run":
+            kmonitor.report(AccMetrics.SAME_TOKEN_RUN_QPS_METRIC, 1, output_tags)
+        kmonitor.report(
+            GaugeMetrics.OUTPUT_REPETITION_PERIOD_METRIC,
+            output.repeat_unit_size,
+            output_tags,
+        )
+        kmonitor.report(
+            GaugeMetrics.OUTPUT_REPETITION_REPEAT_COUNT_METRIC,
+            output.repeat_count,
+            output_tags,
+        )
+        kmonitor.report(
+            GaugeMetrics.OUTPUT_REPETITION_DUPLICATE_TOKENS_METRIC,
+            output.duplicate_token_count,
+            output_tags,
+        )
     if monitor.tool_call_loop_check_ms is not None:
         kmonitor.report(
             GaugeMetrics.TOOL_CALL_LOOP_CHECK_RT_METRIC,

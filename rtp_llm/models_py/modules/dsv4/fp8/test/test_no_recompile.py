@@ -25,7 +25,9 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
     run_save_partial_states,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
+    _dequantize_and_gather_k_slots_kernel,
     _gather_k_cache_packed_kernel,
+    _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked,
     gather_k_cache_packed,
 )
 
@@ -211,6 +213,61 @@ class NoRecompileTest(unittest.TestCase):
             cache_after_first,
             cache_after_second,
             f"gather_k_cache_packed recompiled: cache grew {cache_after_first} -> {cache_after_second}",
+        )
+
+    def test_cp_rank_major_slot_dequant_no_recompile(self):
+        """Rank-major direct reads must not specialize on block count or stride."""
+        entries_per_block = 16
+        batch_size = 2
+        width = 5
+        _dequantize_and_gather_k_slots_kernel.device_caches.clear()
+        for num_unique_blocks, local_slice_bytes in ((2, 4672), (5, 4704)):
+            gathered = torch.zeros(
+                2 * num_unique_blocks,
+                local_slice_bytes,
+                dtype=torch.uint8,
+                device=DEVICE,
+            )
+            compact_slots = torch.tensor(
+                [[0, 15, -1, 16, 31], [1, 17, 2, -1, 3]],
+                dtype=torch.int64,
+                device=DEVICE,
+            ).remainder(num_unique_blocks * entries_per_block)
+            compact_slots[0, 2] = -1
+            compact_slots[1, 3] = -1
+            gather_lens = torch.tensor(
+                [width, width - 1], dtype=torch.int32, device=DEVICE
+            )
+            out = torch.empty(
+                batch_size,
+                width + 2,
+                512,
+                dtype=torch.bfloat16,
+                device=DEVICE,
+            )
+            _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
+                out,
+                gathered,
+                compact_slots,
+                gather_lens,
+                1,
+                full_entries_per_block=entries_per_block,
+                num_unique_blocks=num_unique_blocks,
+            )
+            torch.cuda.synchronize()
+            if num_unique_blocks == 2:
+                cache_after_first = _triton_cache_size(
+                    _dequantize_and_gather_k_slots_kernel
+                )
+
+        cache_after_second = _triton_cache_size(
+            _dequantize_and_gather_k_slots_kernel
+        )
+        self.assertEqual(
+            cache_after_first,
+            cache_after_second,
+            "rank-major slot dequant recompiled when block count/stride changed: "
+            f"cache grew {cache_after_first} -> {cache_after_second}",
         )
 
 

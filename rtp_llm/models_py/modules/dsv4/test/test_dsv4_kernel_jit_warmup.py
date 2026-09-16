@@ -1,14 +1,19 @@
 import inspect
+import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest import mock
 
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 import torch.nn as nn
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
@@ -34,15 +39,18 @@ _stub_package(
     os.path.join(_REPO, "rtp_llm", "models_py", "modules", "dsv4"),
 )
 
+import rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup as warmup_module
 from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
-    _collect_dsv4_branch_kernel_configs,
     _collect_dsv4_batched_fp8_einsum_shapes,
+    _collect_dsv4_branch_kernel_configs,
     _collect_dsv4_dense_gemm_shapes,
     _collect_dsv4_fp8_mqa_logits_shapes,
     _collect_dsv4_mhc_head_fused_shapes,
     _collect_dsv4_mhc_prenorm_shapes,
     _compute_mhc_prenorm_num_split,
+    _cp_direct_gather_batch_warmup_sizes,
     _cp_padded_tokens_per_rank_bound,
+    _cp_restore_batch_warmup_sizes,
     _dense_gemm_m_grid,
     _dist_rank,
     _generate_dense_gemm_warmup_m_grid,
@@ -52,7 +60,9 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _run_triton_warmup_launch_with_retry,
     _sm100_dense_layout_signature,
     _state_ring_entries_warmup_values,
+    _swa_slot_metadata_batch_warmup_sizes,
     _warmup_fused_kv_compress_norm_rope_insert,
+    resolve_dense_gemm_warmup_max_m,
     warmup_batched_fp8_einsum_jit,
     warmup_compressor_combine_branch_kernels,
     warmup_dense_gemm_jit,
@@ -60,12 +70,17 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     warmup_fp8_mqa_logits_jit,
     warmup_mhc_head_fused_jit,
     warmup_mhc_prenorm_gemm_jit,
-    resolve_dense_gemm_warmup_max_m,
 )
-import rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup as warmup_module
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.grouped_fp4 import (
+    GroupedFp4Executor,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+    ChunkedFp8Fp4MoeLayer,
+)
 
 
 def _module_type(name, attrs):
+
     def __init__(self):
         nn.Module.__init__(self)
         for key, value in attrs.items():
@@ -74,7 +89,171 @@ def _module_type(name, attrs):
     return type(name, (nn.Module,), {"__init__": __init__})
 
 
+def _cp_warmup_rank_worker(rank, directory):
+    dist.init_process_group(
+        "gloo",
+        init_method="file://" + os.path.join(directory, "rendezvous"),
+        rank=rank,
+        world_size=2,
+        timeout=timedelta(seconds=30),
+    )
+    try:
+        warmup_module._CP_METADATA_JIT_WARMED_KEYS.clear()
+        warmup_module._CP_METADATA_WARMUP_EPOCH = 0
+        local_calls = 0
+        original_error = ValueError("rank-local JIT compilation failed")
+
+        def local_warmup(**_kwargs):
+            nonlocal local_calls
+            local_calls += 1
+            if rank == 1 and local_calls == 1:
+                raise original_error
+            return True
+
+        outcomes = []
+        with (
+            mock.patch.object(
+                warmup_module, "model_warm_up_enabled", return_value=True
+            ),
+            mock.patch.object(warmup_module, "_is_cuda_device", return_value=True),
+            mock.patch.object(warmup_module, "_assert_not_capturing"),
+            mock.patch.object(
+                warmup_module,
+                "_warmup_prefill_cp_metadata_kernels",
+                side_effect=local_warmup,
+            ),
+            mock.patch.object(
+                dist, "barrier", side_effect=AssertionError("unexpected barrier")
+            ),
+            mock.patch.object(
+                dist, "all_reduce", side_effect=AssertionError("unexpected all_reduce")
+            ),
+        ):
+            for _ in range(3):
+                outcome = {}
+                try:
+                    warmup_module.warmup_prefill_cp_metadata_jit(
+                        is_decode_role=False,
+                        cp_enabled=True,
+                        cp_size=2,
+                        max_batch_size=2,
+                        fp8_kv_cache=True,
+                        kv_cache_sharded=True,
+                        device=torch.device("cpu"),
+                    )
+                except Exception as error:
+                    outcome = {
+                        "type": type(error).__name__,
+                        "error": str(error),
+                        "original_error": error is original_error,
+                    }
+                outcome["warm_keys"] = len(warmup_module._CP_METADATA_JIT_WARMED_KEYS)
+                outcomes.append(outcome)
+
+        # A rank that never reports must not inherit the production group's
+        # effectively unbounded collective timeout.
+        timeout_error = None
+        if rank == 0:
+            started = time.monotonic()
+            with mock.patch.object(
+                warmup_module, "_CP_METADATA_WARMUP_TIMEOUT_SECONDS", 1
+            ):
+                try:
+                    warmup_module._run_cp_metadata_warmup(lambda: True)
+                except RuntimeError as error:
+                    timeout_error = str(error)
+            timeout_elapsed = time.monotonic() - started
+        else:
+            time.sleep(3)
+            timeout_elapsed = None
+        with open(
+            os.path.join(directory, f"rank_{rank}.json"), "w", encoding="utf-8"
+        ) as result_file:
+            json.dump(
+                {
+                    "outcomes": outcomes,
+                    "local_calls": local_calls,
+                    "timeout_error": timeout_error,
+                    "timeout_elapsed": timeout_elapsed,
+                },
+                result_file,
+            )
+    finally:
+        dist.destroy_process_group()
+
+
 class Dsv4KernelJitWarmupTest(unittest.TestCase):
+    def test_cp_metadata_single_rank_preserves_result_and_exception_without_store(self):
+        for initialized in (False, True):
+            with self.subTest(initialized=initialized), mock.patch.object(
+                dist, "is_available", return_value=True
+            ), mock.patch.object(
+                dist, "is_initialized", return_value=initialized
+            ), mock.patch.object(
+                dist, "get_world_size", return_value=1
+            ), mock.patch.object(
+                dist.distributed_c10d,
+                "_get_default_store",
+                side_effect=AssertionError("single-rank warmup must not use a store"),
+            ):
+                self.assertTrue(warmup_module._run_cp_metadata_warmup(lambda: True))
+                self.assertFalse(warmup_module._run_cp_metadata_warmup(lambda: False))
+                original_error = ValueError("local JIT failure")
+                with self.assertRaises(ValueError) as caught:
+                    warmup_module._run_cp_metadata_warmup(
+                        mock.Mock(side_effect=original_error)
+                    )
+                self.assertIs(caught.exception, original_error)
+
+    def test_cp_metadata_rank_failure_propagates_and_retry_uses_fresh_status(self):
+        if not dist.is_available() or not dist.is_gloo_available():
+            self.fail("Gloo is required for the distributed warmup regression test")
+        with tempfile.TemporaryDirectory(prefix="dsv4_cp_warmup_") as directory:
+            context = mp.get_context("spawn")
+            processes = [
+                context.Process(target=_cp_warmup_rank_worker, args=(rank, directory))
+                for rank in range(2)
+            ]
+            try:
+                for process in processes:
+                    process.start()
+                deadline = time.monotonic() + 60
+                for process in processes:
+                    process.join(max(deadline - time.monotonic(), 0))
+                self.assertFalse(
+                    any(process.is_alive() for process in processes),
+                    "distributed warmup workers did not exit within 60s",
+                )
+                self.assertEqual([process.exitcode for process in processes], [0, 0])
+                results = []
+                for rank in range(2):
+                    with open(
+                        os.path.join(directory, f"rank_{rank}.json"), encoding="utf-8"
+                    ) as result_file:
+                        results.append(json.load(result_file))
+                for rank, result in enumerate(results):
+                    with self.subTest(rank=rank):
+                        first, retried, cached = result["outcomes"]
+                        self.assertIn(
+                            "rank-local JIT compilation failed", first["error"]
+                        )
+                        self.assertEqual(first["warm_keys"], 0)
+                        self.assertEqual(retried, {"warm_keys": 1})
+                        self.assertEqual(cached, {"warm_keys": 1})
+                        self.assertEqual(result["local_calls"], 2)
+                self.assertEqual(results[1]["outcomes"][0]["type"], "ValueError")
+                self.assertTrue(results[1]["outcomes"][0]["original_error"])
+                self.assertEqual(results[0]["outcomes"][0]["type"], "RuntimeError")
+                self.assertIn("rank 1", results[0]["outcomes"][0]["error"])
+                self.assertIn("within 1s", results[0]["timeout_error"])
+                self.assertLess(results[0]["timeout_elapsed"], 20)
+            finally:
+                for process in processes:
+                    if process.is_alive():
+                        process.terminate()
+                    if process.pid is not None:
+                        process.join(timeout=5)
+
     def test_public_jit_warmup_entrypoints_skip_when_model_warmup_disabled(self):
         with mock.patch.object(
             warmup_module, "model_warm_up_enabled", return_value=False
@@ -94,6 +273,20 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 cp_size=1,
                 device=device,
             )
+            with mock.patch.object(
+                warmup_module,
+                "_is_cuda_device",
+                side_effect=AssertionError("disabled warmup must not inspect CUDA"),
+            ):
+                warmup_module.warmup_prefill_cp_metadata_jit(
+                    is_decode_role=False,
+                    cp_enabled=True,
+                    cp_size=2,
+                    max_batch_size=3,
+                    fp8_kv_cache=True,
+                    kv_cache_sharded=True,
+                    device=torch.device("cuda"),
+                )
 
     def test_tilelang_prewarm_skips_when_model_warmup_disabled(self):
         from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
@@ -263,6 +456,21 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             (16,),
         )
 
+    def test_swa_metadata_warmup_reaches_1024_but_direct_gather_caps_at_64(self):
+        self.assertEqual(
+            _swa_slot_metadata_batch_warmup_sizes(1024),
+            (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024),
+        )
+        self.assertEqual(
+            _cp_direct_gather_batch_warmup_sizes(1024),
+            (1, 2, 4, 8, 16, 32, 64),
+        )
+        for configured_max_batch in (1, 16, 1024):
+            self.assertEqual(
+                _cp_restore_batch_warmup_sizes(configured_max_batch),
+                (1, 2, 4, 8, 16, 32, 64),
+            )
+
     def test_compressor_warmup_launches_local_and_full_cp_ring_keys(self):
         from rtp_llm.models_py.modules.dsv4.fp8 import _compressor_vllm_triton
 
@@ -332,16 +540,20 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         )
         root.add_module("fp4", Fp4Linear())
 
-        Grouped = _module_type(
-            "GroupedFP4Strategy",
-            {
-                "_w13": torch.empty((2, 10, 32), dtype=torch.int8),
-                "_s13_dense_t": torch.empty((2, 2, 10), dtype=torch.int32),
-                "_w2": torch.empty((2, 64, 5), dtype=torch.int8),
-                "_s2_dense_t": torch.empty((2, 1, 64), dtype=torch.int32),
-            },
-        )
-        root.add_module("grouped", Grouped())
+        grouped = GroupedFp4Executor.__new__(GroupedFp4Executor)
+        nn.Module.__init__(grouped)
+        grouped._w13 = torch.empty((2, 10, 32), dtype=torch.int8)
+        grouped._s13_dense_t = torch.empty((2, 2, 10), dtype=torch.int32)
+        grouped._w2 = torch.empty((2, 64, 5), dtype=torch.int8)
+        grouped._s2_dense_t = torch.empty((2, 1, 64), dtype=torch.int32)
+        fused_moe = nn.Module()
+        fused_moe.add_module("fused_experts", grouped)
+        common_moe = nn.Module()
+        common_moe.add_module("fused_moe", fused_moe)
+        dsv4_moe = ChunkedFp8Fp4MoeLayer.__new__(ChunkedFp8Fp4MoeLayer)
+        nn.Module.__init__(dsv4_moe)
+        dsv4_moe.add_module("_moe", common_moe)
+        root.add_module("moe", dsv4_moe)
 
         shapes = _collect_dsv4_dense_gemm_shapes(root)
         self.assertEqual(
@@ -797,9 +1009,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             old_enabled = mhc_tilelang.tk_mhc_head_fused_enabled
             mhc_tilelang.tk_mhc_head_fused_enabled = lambda: True
             self.addCleanup(
-                lambda: setattr(
-                    mhc_tilelang, "tk_mhc_head_fused_enabled", old_enabled
-                )
+                lambda: setattr(mhc_tilelang, "tk_mhc_head_fused_enabled", old_enabled)
             )
 
             warmup_module._MHC_HEAD_FUSED_JIT_WARMED_KEYS.clear()
@@ -860,9 +1070,14 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         self.assertEqual(_collect_dsv4_mhc_head_fused_shapes(root), {})
 
     def test_slot_dequant_warmup_uses_padded_cp_full_stride(self):
-        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _swa_dequant_triton,
+            _swa_ops_triton,
+        )
 
         calls = []
+        metadata_batches = []
+        restore_batches = []
         local_slice_bytes = 74880
         cp_size = 2
         expected_full_stride = local_slice_bytes * cp_size
@@ -881,6 +1096,25 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 dtype=torch.bfloat16,
                 device=pool_3d.device,
             )
+
+        def fake_slot_metadata(cu_seqlens, prefixes, **kwargs):
+            del cu_seqlens, kwargs
+            metadata_batches.append(int(prefixes.numel()))
+            return torch.empty(0, dtype=torch.int64, device=prefixes.device)
+
+        def fake_restore(
+            out,
+            gathered,
+            restore_indices,
+            seq_lens,
+            offset,
+            *,
+            seq_lens_total,
+        ):
+            del gathered, restore_indices, seq_lens, offset
+            self.assertEqual(int(out.shape[0]), seq_lens_total)
+            restore_batches.append(seq_lens_total)
+            return True
 
         def with_patch(obj, name, value):
             old = getattr(obj, name)
@@ -939,13 +1173,54 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                     ),
                 )
             )
+            old_values.append(
+                (
+                    _swa_ops_triton,
+                    "compute_swa_slot_in_flat_from_cu",
+                    with_patch(
+                        _swa_ops_triton,
+                        "compute_swa_slot_in_flat_from_cu",
+                        fake_slot_metadata,
+                    ),
+                )
+            )
+            old_values.append(
+                (
+                    _swa_dequant_triton,
+                    "direct_triton_fast_path_supported",
+                    with_patch(
+                        _swa_dequant_triton,
+                        "direct_triton_fast_path_supported",
+                        lambda device: True,
+                    ),
+                )
+            )
+            old_values.append(
+                (
+                    _swa_dequant_triton,
+                    "try_restore_dequantize_scatter_packed_k_cache_flat",
+                    with_patch(
+                        _swa_dequant_triton,
+                        "try_restore_dequantize_scatter_packed_k_cache_flat",
+                        fake_restore,
+                    ),
+                )
+            )
             warmup_module._SWA_SLOT_DEQUANT_JIT_WARMED_KEYS.clear()
 
-            warmup_module.warmup_dsv4_fp8_swa_slot_dequant_jit(
-                kv_cache=object(),
-                cp_size=cp_size,
-                device=torch.device("cpu"),
-            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "DSV4_CP_DIRECT_FLAT_PACK": "0",
+                    "DSV4_CP_SWA_DIRECT_DEQUANT_SCATTER": "0",
+                },
+            ):
+                warmup_module.warmup_dsv4_fp8_swa_slot_dequant_jit(
+                    kv_cache=object(),
+                    cp_size=cp_size,
+                    device=torch.device("cpu"),
+                    max_batch_size=1024,
+                )
         finally:
             for obj, name, value in old_values:
                 setattr(obj, name, value)
@@ -965,6 +1240,11 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 )
             ],
         )
+        self.assertEqual(
+            metadata_batches,
+            [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
+        )
+        self.assertEqual(restore_batches, [1, 2, 4, 8, 16, 32, 64])
 
     def test_mhc_pre_big_fuse_warmup_initializes_tilelang_env_first(self):
         source = inspect.getsource(warmup_module._launch_dummy_mhc_pre_big_fuse)
@@ -976,9 +1256,12 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         )
 
     def test_jit_kernel_specialization_contracts(self):
-        from rtp_llm.models_py.modules.dsv4.fp8 import _compressor_vllm_triton
-        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
-        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_kv_insert_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _compressor_vllm_triton,
+            _swa_dequant_triton,
+            _swa_kv_insert_triton,
+            _swa_ops_triton,
+        )
 
         compress_src = inspect.getsource(
             _compressor_vllm_triton._fused_kv_compress_norm_rope_insert_sparse_attn.fn
@@ -1028,6 +1311,13 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         self.assertNotIn("max_blocks_per_seq: tl.constexpr", gather_src)
         self.assertNotIn("block_stride: tl.constexpr", gather_src)
 
+        slot_src = inspect.getsource(
+            _swa_ops_triton._compute_swa_slot_in_flat_from_cu_kernel.fn
+        )
+        for runtime_scalar in ("window_size", "num_reqs"):
+            self.assertIn(f'"{runtime_scalar}"', slot_src)
+            self.assertNotIn(f"{runtime_scalar}: tl.constexpr", slot_src)
+
     def test_deepgemm_warmup_retry_handles_nvcc_compile_failure(self):
         calls = []
 
@@ -1064,7 +1354,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             calls.append(None)
             if len(calls) == 1:
                 raise RuntimeError(
-                    'Catastrophic error: cannot open source file '
+                    "Catastrophic error: cannot open source file "
                     '"/tmp/tmpxft_000011ba_00000000-7_tvm_kernels.cpp1.ii"'
                 )
 
@@ -1084,7 +1374,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             calls.append(None)
             if len(calls) == 1:
                 cause = RuntimeError(
-                    'Catastrophic error: cannot open source file '
+                    "Catastrophic error: cannot open source file "
                     '"/tmp/tmpxft_000011ba_00000000-7_tvm_kernels.cpp1.ii"'
                 )
                 raise RuntimeError("TileLang mhc_pre failed: shape=(1, 2)") from cause

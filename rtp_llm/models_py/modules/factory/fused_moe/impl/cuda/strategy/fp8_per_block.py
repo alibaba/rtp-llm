@@ -22,6 +22,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 class CudaFp8PerBlockNoDPStrategy(MoeStrategy):
     """CUDA FP8 PerBlock single GPU strategy"""
 
+    strategy_name = "fp8_per_block_no_dp"
+
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         resolver = MoeConfigResolver()
@@ -53,6 +55,8 @@ class CudaFp8PerBlockNoDPStrategy(MoeStrategy):
 
 class CudaFp8PerBlockNoDPMaskedStrategy(MoeStrategy):
     """CUDA FP8 PerBlock No DP Masked strategy"""
+
+    strategy_name = "fp8_per_block_no_dp_masked"
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -86,6 +90,8 @@ class CudaFp8PerBlockPureDPStrategy(MoeStrategy):
     Pure DP attention + EP MoE only: tp_size == 1, dp_size > 1, ep_size == dp_size.
     Mixed tp>1+dp>1 deliberately falls through to DeepEP strategies.
     """
+
+    strategy_name = "fp8_per_block_pure_dp"
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -127,6 +133,8 @@ class CudaFp8PerBlockPureCPStrategy(MoeStrategy):
     splits context evenly across ranks.
     """
 
+    strategy_name = "fp8_per_block_pure_cp"
+
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         resolver = MoeConfigResolver()
@@ -163,6 +171,8 @@ class CudaFp8PerBlockPureCPStrategy(MoeStrategy):
 class CudaFp8PerBlockEpLowLatencyStrategy(MoeStrategy):
     """CUDA FP8 PerBlock EP low latency strategy"""
 
+    strategy_name = "fp8_per_block_ep_low_latency"
+
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         resolver = MoeConfigResolver()
@@ -194,6 +204,8 @@ class CudaFp8PerBlockEpLowLatencyStrategy(MoeStrategy):
 
 class CudaFp8PerBlockEpNormalStrategy(MoeStrategy):
     """CUDA FP8 PerBlock EP normal mode strategy"""
+
+    strategy_name = "fp8_per_block_ep_normal"
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:

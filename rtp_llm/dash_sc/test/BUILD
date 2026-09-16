@@ -18,6 +18,13 @@ py_test(
 )
 
 py_test(
+    name = "core_dump_control_test",
+    srcs = ["inference/core_dump_control_test.py"],
+    main = "inference/core_dump_control_test.py",
+    deps = ["//rtp_llm/dash_sc:xgrammar_core_dump_control"],
+)
+
+py_test(
     name = "think_test",
     srcs = ["think_test.py"],
     main = "think_test.py",

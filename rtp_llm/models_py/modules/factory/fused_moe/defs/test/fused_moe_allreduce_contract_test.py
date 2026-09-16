@@ -118,6 +118,21 @@ class FusedMoeSkipAllreduceTest(TestCase):
             _extract_extra_finalize_args(router.finalize)[SKIP_TP_ALLREDUCE_ARG]
         )
 
+    def test_forward_passes_router_context_to_finalize(self):
+        fused_moe, router, _, hidden_states, topk_weights, topk_ids = (
+            self._make_fused_moe(False)
+        )
+        router_context = object()
+        router.prepare.return_value.router_context = router_context
+
+        fused_moe(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+        )
+
+        self.assertIs(router.finalize.call_args.args[0].router_context, router_context)
+
     def test_forward_rejects_skip_tp_allreduce_for_unsupported_router(self):
         fused_moe, router, experts, hidden_states, topk_weights, topk_ids = (
             self._make_fused_moe(False)
@@ -132,6 +147,31 @@ class FusedMoeSkipAllreduceTest(TestCase):
 
         router.prepare.assert_not_called()
         experts.execute.assert_not_called()
+        router.finalize.assert_not_called()
+
+    def test_gate_pack_rejects_skip_before_dispatch(self):
+        fused_moe, router, experts, hidden_states, _, _ = self._make_fused_moe(False)
+        router.supports_gate_pack = True
+        experts.supports_gate_pack = True
+        with self.assertRaisesRegex(ValueError, "supports_skip_tp_allreduce"):
+            fused_moe.forward_gate_pack(hidden_states, Mock(), skip_tp_allreduce=True)
+
+        router.prepare_gate_pack.assert_not_called()
+        experts.execute.assert_not_called()
+        router.finalize.assert_not_called()
+
+    def test_gate_pack_passes_skip_to_supported_router(self):
+        fused_moe, router, experts, hidden_states, _, _ = self._make_fused_moe(True)
+        router.supports_gate_pack = True
+        experts.supports_gate_pack = True
+        router.prepare_gate_pack.return_value = router.prepare.return_value
+        fused_moe.forward_gate_pack(hidden_states, Mock(), skip_tp_allreduce=True)
+
+        router.prepare_gate_pack.assert_called_once()
+        experts.execute.assert_called_once()
+        self.assertTrue(
+            _extract_extra_finalize_args(router.finalize)[SKIP_TP_ALLREDUCE_ARG]
+        )
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ filegroup(
     srcs = glob(["*.py"]),
 )
 
+
 exports_files([
     "entry.py",
     "data/prompt_candidates.json",

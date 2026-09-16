@@ -68,6 +68,7 @@ def _make_indexer_stub(*, bind_pool: bool, device: torch.device) -> IndexerFP8:
     ind.index_topk = 4
     ind.n_heads = 32
     ind.head_dim = INDEXER_HEAD_DIM
+    ind.rope_head_dim = 64
     ind.compress_ratio = 4
     ind.freqs_cis = torch.zeros(1, dtype=torch.float32, device=device)
     ind._cp_ctx = None
@@ -280,7 +281,12 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         ind = _make_indexer_stub(bind_pool=True, device=self.device)
         cp_ctx = SimpleNamespace(cp_size=2, kv_cache_sharded=True)
         ind._cp_ctx = cp_ctx
-        plan = SimpleNamespace(total_local_T=4, total_actual_local_T=3)
+        plan = SimpleNamespace(
+            total_local_T=4,
+            total_actual_local_T=3,
+            per_req_local_kv_lens=torch.tensor([2, 2], dtype=torch.int64),
+            per_req_actual_local_kv_lens=torch.tensor([1, 2], dtype=torch.int64),
+        )
         actual_cu = torch.tensor([0, 1, 3], dtype=torch.int32)
         meta = _make_meta(self.device, T=5)._replace(
             block_table_i32=torch.ones(2, 3, dtype=torch.int32, device=self.device),
@@ -362,6 +368,175 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         self.assertIs(assemble_kwargs["out_k_quant"], k_quant_flat)
         self.assertIs(assemble_kwargs["out_k_scale"], k_scale_buf)
 
+    def test_async_prepare_failure_preserves_primary_exception(self) -> None:
+        ind = _make_indexer_stub(bind_pool=True, device=self.device)
+        ind._cp_ctx = SimpleNamespace(cp_size=2, kv_cache_sharded=True)
+        plan = SimpleNamespace(
+            total_local_T=4,
+            total_actual_local_T=0,
+            per_req_local_kv_lens=torch.tensor([4], dtype=torch.int64),
+            per_req_actual_local_kv_lens=torch.tensor([0], dtype=torch.int64),
+        )
+        meta = _make_meta(self.device, T=5)._replace(
+            indexer_cp_plan=plan,
+            indexer_cp_local_cu=torch.tensor([0, 0], dtype=torch.int32),
+        )
+        k_quant_flat = torch.empty(5, INDEXER_HEAD_DIM, dtype=torch.uint8)
+        k_scale_buf = torch.empty(5, 4, dtype=torch.uint8)
+        pending = object()
+
+        with (
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler.start_assemble_indexer_k_async",
+                return_value=pending,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler.prepare_assemble_indexer_k_async",
+                side_effect=RuntimeError("prepare failed"),
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler.discard_assemble_indexer_k_async",
+                side_effect=RuntimeError("cleanup failed"),
+            ) as discard,
+            self.assertLogs(level="ERROR") as cleanup_logs,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "prepare failed"):
+                ind._gather_prefill_k_cache(
+                    meta,
+                    k_quant_flat,
+                    k_scale_buf,
+                    cp_gather_stream=object(),
+                    post_gather_stream=object(),
+                )
+
+        discard.assert_called_once_with(pending)
+        self.assertIn("cleanup failed", "\n".join(cleanup_logs.output))
+        self.assertIn("communication state", "\n".join(cleanup_logs.output))
+
+    def test_async_discard_logs_cleanup_failure(self) -> None:
+        pending = object()
+        with (
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler.discard_assemble_indexer_k_async",
+                side_effect=RuntimeError("cleanup failed"),
+            ) as discard,
+            self.assertLogs(level="ERROR") as cleanup_logs,
+        ):
+            IndexerFP8._discard_prefill_k_cache_gather(pending)
+
+        discard.assert_called_once_with(pending)
+        self.assertIn("cleanup failed", "\n".join(cleanup_logs.output))
+
+    def test_async_wait_failure_preserves_primary_exception(self) -> None:
+        ind = _make_indexer_stub(bind_pool=True, device=self.device)
+        x = torch.zeros(2, 8, dtype=torch.bfloat16, device=self.device)
+        qr = torch.zeros(2, 16, dtype=torch.bfloat16, device=self.device)
+        meta = _make_meta(self.device, T=1)
+        pending = object()
+        ind._compute_indexer_q = MagicMock(
+            return_value=torch.zeros(
+                2,
+                ind.n_heads,
+                ind.head_dim,
+                dtype=torch.bfloat16,
+                device=self.device,
+            )
+        )
+        ind.weights_proj = torch.zeros(
+            ind.n_heads, x.size(-1), dtype=torch.bfloat16, device=self.device
+        )
+        ind._gather_prefill_k_cache = MagicMock(return_value=pending)
+
+        import rtp_llm.models_py.modules.dsv4.fp8.indexer as indexer_mod
+
+        with (
+            patch.object(indexer_mod, "has_fp8_mqa_logits", return_value=True),
+            patch.object(
+                indexer_mod,
+                "indexer_q_rope_fp8_quant_fold",
+                return_value=(
+                    torch.empty(0, dtype=torch.float8_e4m3fn),
+                    torch.empty(0, dtype=torch.float32),
+                ),
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler.wait_assemble_indexer_k_async",
+                side_effect=RuntimeError("wait failed"),
+            ) as wait,
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler.discard_assemble_indexer_k_async",
+                side_effect=RuntimeError("cleanup failed"),
+            ) as discard,
+            self.assertLogs(level="ERROR") as cleanup_logs,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "wait failed"):
+                ind.forward_with_pending_nested(
+                    x,
+                    qr,
+                    meta,
+                    nested_pending=None,
+                )
+
+        wait.assert_called_once_with(pending)
+        discard.assert_called_once_with(pending)
+        self.assertIn("cleanup failed", "\n".join(cleanup_logs.output))
+        ind.compressor.clear_pool_context.assert_called_once()
+
+    # ------------------------------------------------------------------
+    def test_gather_prefill_k_cache_fused_path_bypasses_compact_scatter(self) -> None:
+        ind = _make_indexer_stub(bind_pool=True, device=self.device)
+        ind._cp_ctx = SimpleNamespace(cp_size=2, kv_cache_sharded=True)
+        plan = SimpleNamespace(
+            total_local_T=4,
+            total_actual_local_T=3,
+            per_req_local_kv_lens=torch.tensor([2, 2], dtype=torch.int64),
+            per_req_actual_local_kv_lens=torch.tensor([1, 2], dtype=torch.int64),
+        )
+        meta = _make_meta(self.device, T=5)._replace(
+            block_table_i32=torch.ones(2, 3, dtype=torch.int32),
+            indexer_cp_plan=plan,
+            indexer_cp_local_cu=torch.tensor([0, 1, 3], dtype=torch.int32),
+        )
+        out_q = torch.empty(5, INDEXER_HEAD_DIM, dtype=torch.uint8)
+        out_s = torch.empty(5, 4, dtype=torch.uint8)
+        assemble_calls = []
+
+        import rtp_llm.models_py.modules.dsv4.fp8.indexer as indexer_mod
+
+        with (
+            patch.object(
+                indexer_mod,
+                "try_gather_indexer_k_to_padded",
+                return_value=True,
+            ) as fused_gather,
+            patch.object(
+                indexer_mod.rtp_llm_ops,
+                "cp_gather_indexer_k_quant_cache",
+                side_effect=AssertionError("compact gather must be bypassed"),
+                create=True,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler.copy_actual_indexer_k_to_padded",
+                side_effect=AssertionError("scatter must be bypassed"),
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler.assemble_indexer_k",
+                side_effect=lambda **kwargs: assemble_calls.append(kwargs),
+            ),
+        ):
+            ind._gather_prefill_k_cache(meta, out_q, out_s)
+
+        fused_gather.assert_called_once()
+        args = fused_gather.call_args.args
+        self.assertIs(args[0], ind._kv_pool_view)
+        self.assertIs(args[1], meta.block_table_i32)
+        self.assertIs(args[2], plan.per_req_local_kv_lens)
+        self.assertIs(args[3], plan.per_req_actual_local_kv_lens)
+        self.assertEqual(fused_gather.call_args.kwargs["total_actual_tokens"], 3)
+        self.assertEqual(len(assemble_calls), 1)
+        self.assertEqual(tuple(assemble_calls[0]["local_k_quant"].shape), (4, 128))
+        self.assertEqual(tuple(assemble_calls[0]["local_k_scale"].shape), (4, 4))
+
     # ------------------------------------------------------------------
     # forward_with_pending_nested
     # ------------------------------------------------------------------
@@ -392,8 +567,9 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
 
         compute_q_calls = []
 
-        def fake_compute_q(qr_in, freqs):
+        def fake_compute_q(qr_in, freqs, *, apply_rope):
             compute_q_calls.append((qr_in, freqs))
+            self.assertFalse(apply_rope)
             return torch.zeros(
                 2, ind.n_heads, ind.head_dim, dtype=torch.bfloat16, device=self.device
             )
@@ -408,14 +584,18 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         # module-level binding (the production assert path needs DeepGEMM).
         import rtp_llm.models_py.modules.dsv4.fp8.indexer as indexer_mod
 
-        saved_has = indexer_mod.has_fp8_mqa_logits
-        # Also patch _kv_pool_view dim assertion: the 3D pool above (1,1,132)
-        # already satisfies it, but be explicit.
-        try:
-            indexer_mod.has_fp8_mqa_logits = lambda: True  # type: ignore[assignment]
+        with (
+            patch.object(indexer_mod, "has_fp8_mqa_logits", return_value=True),
+            patch.object(
+                indexer_mod,
+                "indexer_q_rope_fp8_quant_fold",
+                return_value=(
+                    torch.empty(0, dtype=torch.float8_e4m3fn),
+                    torch.empty(0, dtype=torch.float32),
+                ),
+            ),
+        ):
             out = ind.forward_with_pending_nested(x, qr, meta, nested_pending=pending)
-        finally:
-            indexer_mod.has_fp8_mqa_logits = saved_has  # type: ignore[assignment]
 
         # T==0 branch returns the empty-topk shape.
         self.assertEqual(tuple(out.shape), (2, 0))

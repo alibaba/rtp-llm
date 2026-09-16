@@ -13,6 +13,8 @@ class CPByteSlicedSlotCompaction(NamedTuple):
     unique_blocks: torch.Tensor
     compact_slots: torch.Tensor
     gather_lens_cpu: Tuple[int, ...] = ()
+    contiguous_block_start: int = -1
+    gather_lens: Optional[torch.Tensor] = None
 
 
 def build_cp_byte_sliced_slot_compaction(
@@ -38,13 +40,18 @@ def build_cp_byte_sliced_slot_compaction(
         negative_mode=negative_mode,
     )
 
+    gather_lens_saved: Optional[torch.Tensor] = None
     gather_lens_cpu: Tuple[int, ...] = ()
     if gather_lens is not None:
-        gather_lens_cpu = tuple(
-            int(v)
-            for v in gather_lens.to(device="cpu", dtype=torch.int32)
+        gather_lens_saved = (
+            gather_lens.detach()
             .reshape(-1)
-            .tolist()
+            .to(device=slots.device, dtype=torch.int32)
+            .contiguous()
+            .clone()
+        )
+        gather_lens_cpu = tuple(
+            int(v) for v in gather_lens_saved.to(device="cpu").tolist()
         )
 
     valid = slots >= 0
@@ -54,6 +61,8 @@ def build_cp_byte_sliced_slot_compaction(
             unique_blocks=torch.empty((0,), dtype=torch.long, device=slots.device),
             compact_slots=torch.full_like(slot_mapping, -1, dtype=torch.long),
             gather_lens_cpu=gather_lens_cpu,
+            contiguous_block_start=-1,
+            gather_lens=gather_lens_saved,
         )
 
     block_ids = valid_slots // full_entries_per_block
@@ -63,8 +72,20 @@ def build_cp_byte_sliced_slot_compaction(
     compact_flat[valid] = (
         inverse.to(torch.long) * full_entries_per_block + block_offsets
     )
+    contiguous_block_start = -1
+    if gather_lens is not None:
+        # Only prefix reads consume the contiguous-block fast path. Writers do
+        # not need a host copy of GPU metadata and must remain launch-ahead.
+        unique_blocks_cpu = unique_blocks.detach().cpu().tolist()
+        contiguous_block_start = int(unique_blocks_cpu[0])
+        if int(unique_blocks_cpu[-1]) - contiguous_block_start + 1 != len(
+            unique_blocks_cpu
+        ):
+            contiguous_block_start = -1
     return CPByteSlicedSlotCompaction(
         unique_blocks=unique_blocks,
         compact_slots=compact_flat.view_as(slot_mapping).contiguous(),
         gather_lens_cpu=gather_lens_cpu,
+        contiguous_block_start=contiguous_block_start,
+        gather_lens=gather_lens_saved,
     )

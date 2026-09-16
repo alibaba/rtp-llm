@@ -2,40 +2,27 @@
 
 from __future__ import annotations
 
-import contextvars
 import os
 from contextlib import contextmanager
-from typing import Optional, Type
+from typing import Any, Callable, ContextManager
 
 import torch
 
-
-_RANGES_ENABLED = os.environ.get("DSV4_RECORD_FUNCTION_RANGES", "1") != "0"
-_DISABLED_DEPTH: contextvars.ContextVar[int] = contextvars.ContextVar(
-    "dsv4_record_function_ranges_disabled", default=0
+from rtp_llm.models_py.modules.factory.fused_moe.utils.profiler import (
+    _NOOP_RECORD_FUNCTION_RANGE,
+    disable_record_function_ranges,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.profiler import (
+    record_function_ranges_enabled as _generic_ranges_enabled,
 )
 
+_RANGES_ENABLED = os.environ.get("DSV4_RECORD_FUNCTION_RANGES", "1") != "0"
 
-class _NoopRecordFunctionRange:
-    __slots__ = ()
-
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(
-        self,
-        exc_type: Optional[Type[BaseException]],
-        exc: Optional[BaseException],
-        tb,
-    ) -> bool:
-        return False
-
-
-_NOOP_RECORD_FUNCTION_RANGE = _NoopRecordFunctionRange()
+LayerForwardRange = Callable[[int], ContextManager[Any]]
 
 
 def record_function_ranges_enabled() -> bool:
-    return _RANGES_ENABLED and _DISABLED_DEPTH.get() <= 0
+    return _RANGES_ENABLED and _generic_ranges_enabled()
 
 
 def record_function_range(name: str):
@@ -44,11 +31,31 @@ def record_function_range(name: str):
     return torch.profiler.record_function(name)
 
 
+def _noop_layer_forward_range(_layer_idx: int) -> ContextManager[Any]:
+    return _NOOP_RECORD_FUNCTION_RANGE
+
+
+def _active_layer_forward_range(layer_idx: int) -> ContextManager[Any]:
+    # FUNCTION scope retains CPU layer attribution without projecting a user
+    # annotation onto every GPU stream covered by the range.
+    return torch._C._profiler._RecordFunctionFast(f"forward(layer={layer_idx})")
+
+
+def make_layer_forward_range() -> LayerForwardRange:
+    """Capture profiler state before the fast path suppresses nested ranges."""
+    if not record_function_ranges_enabled():
+        return _noop_layer_forward_range
+    profiler_enabled = getattr(torch.autograd, "_profiler_enabled", None)
+    if profiler_enabled is not None and not profiler_enabled():
+        return _noop_layer_forward_range
+    return _active_layer_forward_range
+
+
 @contextmanager
-def disable_record_function_ranges():
-    depth = _DISABLED_DEPTH.get()
-    token = _DISABLED_DEPTH.set(depth + 1)
-    try:
+def moe_record_function_scope():
+    """Propagate the DSV4 profiler switch into the generic MoE call."""
+    if _RANGES_ENABLED:
         yield
-    finally:
-        _DISABLED_DEPTH.reset(token)
+        return
+    with disable_record_function_ranges():
+        yield

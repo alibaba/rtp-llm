@@ -812,6 +812,7 @@ def _collect_smoke_files(rootdir: Path) -> List[str]:
         "internal_source/rtp_llm/test/smoke/data/**/*.jpg",
         "internal_source/rtp_llm/test/smoke/data/**/*.jpeg",
         "internal_source/rtp_llm/test/smoke/data/**/*.mp4",
+        "internal_source/rtp_llm/test/smoke/flexlb_runtime/**/*",
     ):
         files.extend(
             str(p.relative_to(rootdir)) for p in rootdir.glob(pattern) if p.is_file()

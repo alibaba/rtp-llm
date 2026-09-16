@@ -9,6 +9,19 @@ DSV4_CHUNK_TOKENS_ENV = "DSV4_CHUNK_TOKENS"
 DEFAULT_DSV4_CHUNK_TOKENS = 16384
 
 
+def chunked_moe_enabled() -> bool:
+    if dsv4_global_chunk_tokens_configured():
+        return moe_chunk_tokens_from_env() > 0
+    return os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
+
+
+def moe_chunk_tokens_from_env(default: int = DEFAULT_DSV4_CHUNK_TOKENS) -> int:
+    min_value = 0 if dsv4_global_chunk_tokens_configured() else 1
+    return dsv4_chunk_tokens_from_env(
+        "DSV4_MOE_CHUNK_TOKENS", default, min_value=min_value
+    )
+
+
 def dsv4_global_chunk_tokens_configured() -> bool:
     return DSV4_CHUNK_TOKENS_ENV in os.environ
 

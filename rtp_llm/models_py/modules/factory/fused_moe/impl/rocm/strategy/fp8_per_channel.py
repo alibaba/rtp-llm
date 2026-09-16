@@ -15,6 +15,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm._utils import (
 class RocmFp8PerChannelPureTPStrategy(MoeStrategy):
     """Rocm FP8 PerChannel(PTPC) pure TP strategy"""
 
+    strategy_name = "rocm_fp8_per_channel_no_dp"
+
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.rocm_moe import (
             RocmExpertsFp8PerChannel,

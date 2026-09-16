@@ -1,4 +1,4 @@
-"""Map main's 36 ROCm Python targets and two GTests to native pytest cases.
+"""Map the ROCm Python target baseline and mainline additions to pytest cases.
 
 Baseline: main-internal CI run 67542102 (AMD UT report, 38/38).
 Shared tests are routed to AMD only for the py_ut_amd profile.
@@ -26,6 +26,9 @@ _FLA = "rtp_llm/models_py/triton_kernels/fla/test/"
 _DESC = "rtp_llm/models_py/model_desc/test/"
 
 AMD_TARGETS = (
+    AmdTarget("test_aiter_flydsl_gdn_decode_rocm", _FLA + "test_aiter_flydsl_gdn_decode.py"),
+    AmdTarget("test_aiter_flydsl_gdn_prefill", _FLA + "test_aiter_flydsl_gdn_prefill.py"),
+    AmdTarget("cuda_graph_copy_kernel_test_rocm", "rtp_llm/cpp/cuda_graph/tests/cuda_graph_copy_kernel_test.py"),
     AmdTarget(
         "test_inline_fp8_quant", "rtp_llm/model_loader/test/test_inline_fp8_quant.py"
     ),
@@ -106,6 +109,22 @@ AMD_TARGETS = (
     AmdTarget(
         "generic_moe_allreduce_test_rocm", _DESC + "generic_moe_allreduce_test.py"
     ),
+) + tuple(
+    AmdTarget(
+        "pywrapped_model_cache_store_integration_test_rocm:" + case,
+        "rtp_llm/cpp/models/test/pywrapped_model_cache_store_integration_test.py",
+        case=case,
+    )
+    for case in (
+        "test_successful_generation_prefill_capture_does_not_reserve_request_blocks",
+        "test_clean_generation_prefill_capture_failure_fails_init_without_cache_allocation",
+        "test_unsupported_generation_prefill_backend_fails_init_without_cache_allocation",
+        "test_late_constructor_failure_destroys_clean_graphs_without_cache_allocation",
+        "test_dirty_generation_prefill_capture_does_not_retain_cache_manager",
+        "test_multi_tag_uses_each_tag_local_physical_block_table",
+        "test_micro_batch_slices_request_metadata_with_block_rows",
+        "test_mtp_writer_uses_selected_sub_config_for_real_write",
+    )
 )
 
 AMD_GTEST_CASES = (

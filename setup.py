@@ -17,6 +17,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -675,8 +676,14 @@ _REAPI_MAX_RETRIES = reapi_max_retries()
 _STAGED_OUTPUT_CORE = "core"
 _STAGED_OUTPUT_RUNTIME = "runtime"
 _STAGED_OUTPUT_TEST = "test"
+_STAGED_OUTPUT_PYTHON = "python"
 
 _CORE_BAZEL_STAGED_OUTPUTS = [
+    (
+        _STAGED_OUTPUT_CORE,
+        "//:mm_rdma_exporter",
+        ("libmm_rdma_exporter.so",),
+    ),
     (
         _STAGED_OUTPUT_CORE,
         "//:th_transformer",
@@ -732,6 +739,14 @@ _ROCM_TEST_BAZEL_STAGED_OUTPUTS = [
         _STAGED_OUTPUT_TEST,
         "//rtp_llm/models_py/bindings/rocm/ops/tests:beam_search_op_test_bin",
         (("beam_search_op_test_bin", "test/rocm_beam_search_op_test"),),
+    ),
+]
+
+_ROCM_PYTHON_BAZEL_STAGED_OUTPUTS = [
+    (
+        _STAGED_OUTPUT_PYTHON,
+        "//rtp_llm/models_py/triton_kernels:aiter_gdr_decode_padding_source",
+        (("fla/_aiter_gdr_decode_padding.py", "models_py/triton_kernels/fla/_aiter_gdr_decode_padding.py"),),
     ),
 ]
 
@@ -816,7 +831,9 @@ def _selected_bazel_staged_outputs(build_config: str, bazel_args: list = None) -
     staged_outputs = list(_CORE_BAZEL_STAGED_OUTPUTS)
     if build_config == "rocm" or "rocm" in _bazel_config_names(bazel_args):
         staged_outputs.extend(_ROCM_TEST_BAZEL_STAGED_OUTPUTS)
-    if "cuda12_9" in _bazel_config_names(bazel_args):
+        staged_outputs.extend(_ROCM_PYTHON_BAZEL_STAGED_OUTPUTS)
+        staged_outputs.extend(_CUDA129_TEST_BAZEL_STAGED_OUTPUTS)
+    if {"cuda12_9", "cuda13", "cuda13_arm"} & _bazel_config_names(bazel_args):
         # Python-native CUDA tests run in the H20 pytest session. Keep their
         # bindings below libs/test/ so remote-session archives them, while
         # wheel package-data (libs/*.so) does not publish test-only modules.
@@ -825,6 +842,14 @@ def _selected_bazel_staged_outputs(build_config: str, bazel_args: list = None) -
     if include_remote_kvcm:
         staged_outputs.extend(_REMOTE_KVCM_RUNTIME_BAZEL_STAGED_OUTPUTS)
         staged_outputs.extend(_REMOTE_KVCM_SERVER_BAZEL_STAGED_OUTPUTS)
+    overlay = _find_overlay("internal_source/pyproject_internal.toml")
+    overlay_config = _read_toml_file(overlay) if overlay else {}
+    for entry in overlay_config.get("tool", {}).get("rtp-llm", {}).get("native_test_outputs", []):
+        if build_config in entry["configs"]:
+            staged_outputs.append((
+                _STAGED_OUTPUT_TEST, entry["target"],
+                ((entry["source"], "test/" + entry["destination"]),),
+            ))
     return staged_outputs
 
 
@@ -1145,7 +1170,7 @@ def stage_bazel_outputs(
     staged_outputs: list,
     require_all_outputs: bool = True,
 ) -> None:
-    """Copy Bazel target outputs into ``rtp_llm/libs``.
+    """Copy native libraries and generated Python sources into the package.
 
     Each copied file is declared next to its Bazel target in the staged-output
     tables above. This keeps top-level build targets and packaging
@@ -1162,12 +1187,17 @@ def stage_bazel_outputs(
         print(f"  target {target}:")
         for output_spec in output_specs:
             output_name, dest_relpath = _normalize_staged_output(output_spec)
-            dst = target_dir / dest_relpath
+            destination_root = (
+                project_root / "rtp_llm"
+                if kind == _STAGED_OUTPUT_PYTHON
+                else target_dir
+            )
+            dst = destination_root / dest_relpath
             dst.parent.mkdir(parents=True, exist_ok=True)
             src = _find_bazel_output_for_target(bazel_bin, target, output_name)
             if not src:
                 print(f"    Warning: {output_name} not found for {target}")
-                if require_all_outputs or kind == _STAGED_OUTPUT_CORE:
+                if require_all_outputs or kind in (_STAGED_OUTPUT_CORE, _STAGED_OUTPUT_PYTHON):
                     missing.append((target, output_name))
                 continue
             print(f"    {src} -> {dst}")
@@ -1730,14 +1760,17 @@ class BazelTest(Command):
         # Use same bazel cmd prefix as build_bazel_extensions for cache reuse
         cmd, build_args = _get_bazel_cmd_prefix(build_config)
         build_args = _with_default_remote_download(build_args, "minimal")
+        test_targets = shlex.split(self.test_target)
+        if not test_targets:
+            raise ValueError("At least one native test target is required")
 
         if self.compile_only:
-            cmd.extend(["build", self.test_target, "--build_tests_only"])
+            cmd.extend(["build", *test_targets, "--build_tests_only"])
         else:
             cmd.extend(
                 [
                     "test",
-                    self.test_target,
+                    *test_targets,
                     "--build_tests_only=1",
                     "--run_under=//rtp_llm/test/utils:gpu_lock",
                 ]

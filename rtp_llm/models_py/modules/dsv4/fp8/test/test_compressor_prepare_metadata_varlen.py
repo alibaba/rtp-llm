@@ -25,8 +25,8 @@ Run:
 
 from __future__ import annotations
 
-import unittest
 import sys
+import unittest
 from types import SimpleNamespace
 from typing import Optional
 from unittest import mock
@@ -63,6 +63,8 @@ class _StubCompressor:
         self._state_tokens_per_block = state_eb
         self._kv_block_table = kv_block_table
         self._kv_eb = kv_eb
+        self._kv_tokens_per_block = kv_eb * compress_ratio
+        self._kv_owner_tokens_per_block = self._kv_tokens_per_block
         self._kv_cache_sharded = False
         self._cp_ctx = None
         self._kv_pool_view = None  # disable the pool-row overflow guard

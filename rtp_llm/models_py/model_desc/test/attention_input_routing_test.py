@@ -6,11 +6,16 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.model_desc.block_map import get_group_tags_for_layers
+from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3_next import (
     Qwen3NextGatedDeltaNetDecode,
     Qwen3NextMetadata,
+    _cpu_sequence_lengths,
+    _is_cuda_graph_forward,
     _maybe_write_cp_cache_store,
+    _should_use_aiter_flydsl_gdn_prefill,
+    _validate_aiter_flydsl_gdn_decode_eager_state,
     _write_cp_cache_store,
 )
 
@@ -37,6 +42,97 @@ class RoutingModel(GptModelBase):
 
 
 class AttentionInputRoutingTest(unittest.TestCase):
+    @staticmethod
+    def _invalid_gdn_state_metadata():
+        return SimpleNamespace(
+            host_block_map=torch.tensor([[1, 0]], dtype=torch.int32),
+            host_sequence_lengths=torch.tensor([1024], dtype=torch.int32),
+            block_map_width=2,
+            seq_size_per_block=1024,
+            state_pool_size=3,
+        )
+
+    def test_graph_disabled_decode_rejects_invalid_live_state_block(self):
+        with self.assertRaisesRegex(RuntimeError, "invalid state block IDs"):
+            _validate_aiter_flydsl_gdn_decode_eager_state(
+                self._invalid_gdn_state_metadata(),
+                is_cuda_graph=False,
+            )
+
+    def test_graph_miss_normal_forward_rejects_invalid_live_state_block(self):
+        # PyWrappedModel calls prepare_fmha_impl(..., False) after canRun()
+        # rejects a graph, so a miss has the same explicit eager contract as a
+        # graph-disabled request.
+        with self.assertRaisesRegex(RuntimeError, "invalid state block IDs"):
+            _validate_aiter_flydsl_gdn_decode_eager_state(
+                self._invalid_gdn_state_metadata(),
+                is_cuda_graph=False,
+            )
+
+    def test_graph_capture_defers_synthetic_state_block_validation(self):
+        _validate_aiter_flydsl_gdn_decode_eager_state(
+            self._invalid_gdn_state_metadata(),
+            is_cuda_graph=True,
+        )
+
+    def test_mixed_cache_propagates_fmha_graph_state_to_linear_layers(self):
+        inputs = SimpleNamespace(
+            attention_inputs={
+                "full": SimpleNamespace(is_cuda_graph=True),
+                "linear": SimpleNamespace(is_cuda_graph=False),
+            }
+        )
+        self.assertTrue(_is_cuda_graph_forward(inputs))
+
+    def test_aiter_prefill_metadata_is_bound_to_exact_cu_seqlens(self):
+        cu_seqlens = torch.tensor([0, 8], dtype=torch.int32)
+        metadata = object()
+        attn_meta = Qwen3NextMetadata(
+            aiter_gdn_prefill_metadata={
+                id(cu_seqlens): (cu_seqlens, metadata),
+            }
+        )
+
+        self.assertIs(attn_meta.get_aiter_gdn_prefill_metadata(cu_seqlens), metadata)
+        self.assertIsNone(attn_meta.get_aiter_gdn_prefill_metadata(cu_seqlens.clone()))
+
+    def test_aiter_prefill_requires_metadata_and_supported_inputs(self):
+        tensors = [Mock() for _ in range(5)]
+        with patch(
+            "rtp_llm.models_py.model_desc.qwen3_next._is_aiter_flydsl_gdn_prefill_enabled",
+            return_value=True,
+        ), patch(
+            "rtp_llm.models_py.model_desc.qwen3_next.is_aiter_flydsl_gdn_prefill_supported",
+            return_value=True,
+        ) as supported:
+            self.assertFalse(
+                _should_use_aiter_flydsl_gdn_prefill(*tensors, prefill_metadata=None)
+            )
+            supported.assert_not_called()
+            self.assertTrue(
+                _should_use_aiter_flydsl_gdn_prefill(
+                    *tensors, prefill_metadata=object()
+                )
+            )
+
+    def test_aiter_prefill_falls_back_for_unsupported_inputs(self):
+        with patch(
+            "rtp_llm.models_py.model_desc.qwen3_next._is_aiter_flydsl_gdn_prefill_enabled",
+            return_value=True,
+        ), patch(
+            "rtp_llm.models_py.model_desc.qwen3_next.is_aiter_flydsl_gdn_prefill_supported",
+            return_value=False,
+        ):
+            self.assertFalse(
+                _should_use_aiter_flydsl_gdn_prefill(
+                    *[Mock() for _ in range(5)], prefill_metadata=object()
+                )
+            )
+
+    def test_aiter_prefill_metadata_uses_only_existing_cpu_lengths(self):
+        lengths = torch.tensor([3, 5], dtype=torch.int32)
+        self.assertEqual(_cpu_sequence_lengths(lengths), (3, 5))
+
     def test_qwen3_next_cuda_graph_uses_narrow_block_map_view(self):
         block_map = torch.arange(12, dtype=torch.int32).reshape(3, 4)
         attention_inputs = SimpleNamespace(
@@ -135,14 +231,20 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
         with patch(
             "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
-            side_effect=lambda _config, _parallelism_config, _weight, group_inputs, _fmha_config, _is_cuda_graph: (
-                group_inputs
-            ),
+            side_effect=lambda **kwargs: kwargs["attn_inputs"],
         ) as factory:
-            fmha_impl = model.prepare_fmha_impl(inputs, is_cuda_graph=True)
+            fmha_impl = model.prepare_fmha_impl(
+                inputs,
+                is_cuda_graph=True,
+                cuda_graph_selection_mode="generation_prefill_graph",
+            )
 
         self.assertEqual(fmha_impl, {"full": inputs_by_tag["full"]})
         factory.assert_called_once()
+        self.assertEqual(
+            factory.call_args.kwargs["cuda_graph_selection_mode"],
+            "generation_prefill_graph",
+        )
 
     def test_default_model_prepares_every_tag(self):
         inputs_by_tag = {"group0": object(), "group1": object()}
@@ -151,14 +253,55 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
         with patch(
             "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
-            side_effect=lambda _config, _parallelism_config, _weight, group_inputs, _fmha_config, _is_cuda_graph: (
-                group_inputs
-            ),
+            side_effect=lambda **kwargs: kwargs["attn_inputs"],
         ) as factory:
             fmha_impl = model.prepare_fmha_impl(inputs)
 
         self.assertEqual(fmha_impl, inputs_by_tag)
         self.assertEqual(factory.call_count, 2)
+
+    def test_dspark_commit_publishes_only_with_swa_inputs(self):
+        model = object.__new__(DeepSeekV4DSparkModel)
+        nn.Module.__init__(model)
+        model.v4 = SimpleNamespace(layers=[object(), object()])
+        published = []
+
+        class DraftKVCache:
+            group_tags = ["csa_kv", "swa_kv"]
+
+            def get_layer_cache(self, layer_idx, tag):
+                return SimpleNamespace(layer_idx=layer_idx, tag=tag)
+
+        model.kv_cache = DraftKVCache()
+        model._swa_block_table = Mock(return_value=torch.ones(1, 1, dtype=torch.int32))
+        model._commit_layer_features = Mock()
+        csa_inputs = SimpleNamespace(tag="csa_kv")
+        swa_inputs = SimpleNamespace(tag="swa_kv")
+        inputs = SimpleNamespace(
+            attention_inputs={"csa_kv": csa_inputs, "swa_kv": swa_inputs}
+        )
+
+        def make_writer(group_inputs, kv_cache):
+            self.assertIs(group_inputs, swa_inputs)
+            self.assertIs(kv_cache, model.kv_cache)
+            return lambda layer_cache: published.append(layer_cache)
+
+        module = "rtp_llm.models_py.model_desc.deepseek_v4_dspark_model"
+        with patch(f"{module}.require_pool_tokens_per_block", return_value=16), patch(
+            f"{module}.create_write_cache_store_impl", side_effect=make_writer
+        ):
+            model.commit_feature_rows(
+                torch.zeros(1, 4),
+                torch.zeros(1, dtype=torch.int32),
+                torch.zeros(1, dtype=torch.int32),
+                torch.ones(1, dtype=torch.int32),
+                inputs,
+            )
+
+        self.assertEqual(
+            [(cache.layer_idx, cache.tag) for cache in published],
+            [(0, "swa_kv"), (1, "swa_kv")],
+        )
 
 
 if __name__ == "__main__":

@@ -200,6 +200,7 @@ class TraceTelemetryLifecycleTest(TestCase):
         app.py_env_configs = MagicMock()
         app.py_env_configs.generate_env_config.think_terminate_token_id = -1
         app.py_env_configs.profiling_debug_logging_config.log_file_backup_count = 1
+        app.py_env_configs.grammar_config.num_workers = 8
         app._grpc_server = MagicMock()
         app._shutdown_manager = MagicMock()
         app._shutdown_event = MagicMock()
@@ -440,6 +441,7 @@ class PreStopDrainSecondsTest(TestCase):
             clear=True,
         ):
             handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+            self.assertTrue(app.wait_for_signal_dispatch())
             self.assertTrue(app._shutdown_manager.is_unavailable())
             self.assertFalse(app._shutdown_manager.is_draining())
             self.assertEqual(
@@ -482,6 +484,7 @@ class PreStopDrainSecondsTest(TestCase):
             os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "10"}, clear=True
         ):
             handlers[signal.SIGTERM](signal.SIGTERM, None)
+            self.assertTrue(app.wait_for_signal_dispatch())
 
         self.assertFalse(app._shutdown_manager.try_begin_request())
         self.assertFalse(app._shutdown_manager.is_draining())
@@ -516,10 +519,12 @@ class PreStopDrainSecondsTest(TestCase):
             os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "10"}, clear=True
         ):
             handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+            self.assertTrue(app.wait_for_signal_dispatch())
             watchdog = app._pre_stop_timer
             self.assertIsNotNone(watchdog)
             with patch.object(watchdog, "cancel", wraps=watchdog.cancel) as cancel:
                 handlers[signal.SIGTERM](signal.SIGTERM, None)
+                self.assertTrue(app.wait_for_signal_dispatch())
 
         cancel.assert_called_once()
         self.assertTrue(app._shutdown_requested)

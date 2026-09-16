@@ -59,6 +59,7 @@ struct PrefillStatInfo {
     ExecuteStage saveStage() const;
     void         restoreStage(ExecuteStage stage);
     void         nextStage();
+    void         finishStage();
 };
 
 struct RPCContext {
@@ -149,7 +150,7 @@ public:
     bool                                 grpc_stream_closed             = false;
     grpc::Status                         last_grpc_stream_closed_status = grpc::Status::OK;
     PrefillStatInfo                      stat_info;
-    int64_t                              loading_cache_requests               = 0;
+    const std::atomic<size_t>*           loading_cache_requests               = nullptr;
     int64_t                              prefill_stop_stream_wait_timeout_ms_ = 2000;
 
     // P->D RemoteGenerate CLIENT span. Recreated per retry attempt in

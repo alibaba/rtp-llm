@@ -1,6 +1,5 @@
 package org.flexlb.consistency;
 
-import io.micrometer.core.instrument.util.NamedThreadFactory;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.domain.consistency.LBConsistencyConfig;
@@ -8,28 +7,19 @@ import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.util.JsonUtils;
-import org.flexlb.util.Logger;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PreDestroy;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @Slf4j
 @Component
 public class LBStatusConsistencyService implements MasterElectService {
 
     public static final String MASTER_CHANGE_NOTIFY_PATH = "/rtp_llm/notify_master";
-    public static final ScheduledExecutorService SCHEDULED_EXECUTOR_SERVICE = new ScheduledThreadPoolExecutor(
-            4,
-            new NamedThreadFactory("LBStatusConsistencyService-Schedule-Thread"),
-            new ThreadPoolExecutor.AbortPolicy()
-    );
 
     private final ZookeeperMasterElectService zookeeperMasterElectService;
     private final Environment environment;
@@ -131,7 +121,6 @@ public class LBStatusConsistencyService implements MasterElectService {
         }
         String masterHostIp = zookeeperMasterElectService.getMasterHostIp(false);
         if (masterHostIp == null) {
-            Logger.warn("getMasterHostIpPort: masterHostIp is null.");
             return null;
         }
         return masterHostIp + ":" + serverPort;
@@ -163,22 +152,15 @@ public class LBStatusConsistencyService implements MasterElectService {
 
     public SyncLBStatusResp dumpLBStatus() {
         SyncLBStatusResp resp = new SyncLBStatusResp();
+        Map<String, Object> snapshot = new LinkedHashMap<>();
+        snapshot.put("consistency_enabled", isNeedConsistency());
+        snapshot.put("master", isMaster());
+        snapshot.put("local_host", localHostIp);
+        snapshot.put("master_host", getMasterHostIpPort());
+        snapshot.put("server_port", serverPort);
         resp.setSuccess(true);
-        // TODO Get master status
+        resp.setMsg("leadership snapshot");
+        resp.setLbStatus(JsonUtils.toStringOrEmpty(snapshot));
         return resp;
-    }
-
-    @PreDestroy
-    public void shutdown() {
-        log.info("Shutting down LBStatusConsistencyService executor.");
-        SCHEDULED_EXECUTOR_SERVICE.shutdown();
-        try {
-            if (!SCHEDULED_EXECUTOR_SERVICE.awaitTermination(5, TimeUnit.SECONDS)) {
-                SCHEDULED_EXECUTOR_SERVICE.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            SCHEDULED_EXECUTOR_SERVICE.shutdownNow();
-            Thread.currentThread().interrupt();
-        }
     }
 }

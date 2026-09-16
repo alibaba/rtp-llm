@@ -247,8 +247,8 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                 .propose_tokens_gpu     = std::move(propose_tokens_gpu),
                 .last_hidden_states_gpu = sp_output_buffer->hidden_states,
                 .draft_all_probs_gpu    = sp_output_buffer->all_probs,
-                .last_real_seq_len      = stream->seqLength(),
-                .next_real_seq_len      = stream->seqLength(),
+                .previous_seq_len_upper_bound = stream->seqLength(),
+                .next_seq_len_upper_bound     = stream->seqLength(),
             });
         }
         RTP_LLM_LOG_DEBUG("applyP2PSideChannel: propose_tokens count=%zu", payload->propose_tokens.size());
@@ -495,6 +495,10 @@ bool StreamCacheResource::asyncLoadCache() {
     if (load_cache_once_.exchange(true)) {
         return true;
     }
+    return submitAsyncLoadCache();
+}
+
+bool StreamCacheResource::submitAsyncLoadCache() {
     auto meta = std::make_shared<MetaImpl>(
         reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
     meta->generate_stream_ = stream_;
@@ -511,11 +515,10 @@ bool StreamCacheResource::loadCacheDone() {
     if (!load_cache_context_->done()) {
         return false;  // coordinator 后台线程尚未处理完
     }
-    // 加载完成（无论成功失败），更新 reuse lengths
-    waitLoadCacheDone(load_cache_context_);
-    if (!load_cache_context_->success()) {
+    const auto completed_context = load_cache_context_;
+    if (!completed_context->success()) {
         // 区分匹配失败和传输失败
-        auto      read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
+        auto      read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(completed_context);
         bool      should_retry = false;
         const int max_retry    = resource_context_.load_cache_retry_times;
         if (read_context && read_context->fusedMatchContext()) {
@@ -544,6 +547,10 @@ bool StreamCacheResource::loadCacheDone() {
             }
         }
 
+        // A retryable transfer failure must not mark the stream failed before
+        // the retry budget is exhausted. Non-retryable failures preserve the
+        // existing synchronous error-reporting behavior.
+        waitLoadCacheDone(completed_context, !should_retry);
         load_cache_context_.reset();
 
         if (should_retry) {
@@ -560,13 +567,23 @@ bool StreamCacheResource::loadCacheDone() {
                 return true;
             }
             load_cache_retry_count_++;
-            asyncLoadCache();
+            if (!submitAsyncLoadCache()) {
+                RTP_LLM_LOG_WARNING("load cache retry submission failed at retry %d/%d, stream: [%ld]",
+                                    load_cache_retry_count_,
+                                    max_retry,
+                                    stream_->streamId());
+                stream_->reportEventWithoutLock(
+                    StreamEvents::Error, ErrorCode::LOAD_CACHE_TIMEOUT, "load cache retry submission failed");
+                releaseResource();
+                return true;
+            }
             return false;  // 失败重试
         } else {
             // 匹配失败：不重试，继续执行
             return true;
         }
     }
+    waitLoadCacheDone(completed_context);
     load_cache_context_.reset();
     return true;
 }
@@ -676,7 +693,7 @@ void StreamCacheResource::loadCacheSync() {
     // TODO: scheduler will call incrkvblock after load cache, or may lack block on p2p connector
 }
 
-void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context) {
+void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context, bool report_error) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!load_context) {
         return;
@@ -687,7 +704,7 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
         RTP_LLM_LOG_WARNING("load cache done but not success, stream: [%s], error: %s",
                             stream_->streamLogTag().c_str(),
                             error.ToString().c_str());
-        if (error.hasError()) {
+        if (report_error && error.hasError()) {
             // loadCacheDone() is called from moveToNext(), which already holds the stream mutex.
             stream_->reportErrorWithoutLock(error.code(), error.ToString());
         }
@@ -703,19 +720,38 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
 }
 
 void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context) {
-    const int block_tokens     = reuseBlockTokens();
-    const int total_reuse_len  = read_context->resource()->reuseBlockNum() * block_tokens;
-    const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * block_tokens;
-    const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * block_tokens;
-    const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * block_tokens;
+    const auto& resource     = *read_context->resource();
+    const int   block_tokens = reuseBlockTokens();
+
+    // Reuse counters are expressed in canonical cache-key units. Cap them before token conversion so
+    // every reused key is complete while at least one prompt token remains executable. Under CP this
+    // preserves a complete virtual block even when the prompt ends in an incomplete next virtual block.
+    const int    reusable_tokens = std::max(stream_->seqLength() - 1, 0);
+    const size_t reusable_block_cap =
+        std::min(resource.reuseBlockNum(), static_cast<size_t>(reusable_tokens / block_tokens));
+
+    size_t     remaining_reuse_blocks = reusable_block_cap;
+    const auto take_reuse_blocks      = [&remaining_reuse_blocks](size_t block_count) {
+        const auto reused = std::min(block_count, remaining_reuse_blocks);
+        remaining_reuse_blocks -= reused;
+        return reused;
+    };
+    const size_t device_reuse_blocks = take_reuse_blocks(resource.deviceReuseBlockNum());
+    const size_t memory_reuse_blocks = take_reuse_blocks(resource.memoryReuseBlockNum());
+    const size_t remote_reuse_blocks = take_reuse_blocks(resource.remoteReuseBlockNum());
+
+    const int device_reuse_len = device_reuse_blocks * block_tokens;
+    const int memory_reuse_len = memory_reuse_blocks * block_tokens;
+    const int remote_reuse_len = remote_reuse_blocks * block_tokens;
+    const int total_reuse_len  = device_reuse_len + memory_reuse_len + remote_reuse_len;
     RTP_LLM_LOG_DEBUG("CACHE_REUSE_BLOCK_CONVERSION stream_id=%ld block_tokens=%d total_blocks=%zu device_blocks=%zu "
                       "memory_blocks=%zu remote_blocks=%zu total_tokens=%d",
                       stream_->streamId(),
                       block_tokens,
-                      read_context->resource()->reuseBlockNum(),
-                      read_context->resource()->deviceReuseBlockNum(),
-                      read_context->resource()->memoryReuseBlockNum(),
-                      read_context->resource()->remoteReuseBlockNum(),
+                      device_reuse_blocks + memory_reuse_blocks + remote_reuse_blocks,
+                      device_reuse_blocks,
+                      memory_reuse_blocks,
+                      remote_reuse_blocks,
                       total_reuse_len);
     if (total_reuse_len > 0) {
         stream_->setInitialReuseLength(total_reuse_len);

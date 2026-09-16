@@ -15,6 +15,7 @@ def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
     model._gen_num_per_cycle = gamma
     model._dspark_commit_cp_enabled = False
     model._dspark_kv_cache_sharded = False
+    model.kv_cache = None
     model.tp_size = 2
     model.tp_rank = 0
     model._v4_args = type(
@@ -31,6 +32,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         )
         model.kv_cache = None
         model._dspark_width = 3
+        model._dspark_query_width = 3
         model._dspark_hidden_dim = 8
         propose_inputs = PyModelInputs()
         propose_inputs.input_ids = torch.zeros(3, dtype=torch.int32)

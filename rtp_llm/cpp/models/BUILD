@@ -79,6 +79,7 @@ cc_library(
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
+        "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/config:config_modules",
@@ -185,12 +186,14 @@ cc_library(
         "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
+        "//rtp_llm/cpp/cuda_graph:prepared_attention_inputs_guard",
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
     ] + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/kernels:attention_input_metadata",
-            "//rtp_llm/models_py/bindings/cuda:bf16_gemm_op"
+            "//rtp_llm/models_py/bindings/cuda:bf16_gemm_op",
+            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         ],
         "//conditions:default": [],
     }),

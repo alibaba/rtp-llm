@@ -1,5 +1,8 @@
 #include "gtest/gtest.h"
 
+#include <algorithm>
+#include <unistd.h>
+
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/test/CacheStoreTestBase.h"
@@ -151,6 +154,59 @@ TEST_F(RequestBlockBufferStoreTest, testAfterDelRequestBlockBuffer) {
     ASSERT_FALSE(store->setRequestBlockBufferWatchFunc(
         "request-1",
         [](bool success, const std::vector<std::shared_ptr<BlockBuffer>>& blocks) { EXPECT_FALSE(success); }));
+}
+
+TEST_F(RequestBlockBufferStoreTest, testBatchedStagingKeepsPerBlockContent) {
+    auto store         = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    auto request_block = std::make_shared<RequestBlockBuffer>("request-1");
+
+    constexpr int      block_count = 32;
+    constexpr uint32_t block_len   = 1000;  // unaligned on purpose
+    for (int i = 0; i < block_count; i++) {
+        request_block->addBlock(
+            block_buffer_util_->makeBlockBuffer("b" + std::to_string(i), block_len, static_cast<char>('a' + i), true));
+    }
+    ASSERT_TRUE(store->setRequestBlockBuffer(request_block));
+
+    std::vector<std::pair<char*, char*>> ranges;
+    for (int i = 0; i < block_count; i++) {
+        auto block = store->getBlockBuffer("request-1", "b" + std::to_string(i));
+        ASSERT_TRUE(block != nullptr);
+        ASSERT_TRUE(block_buffer_util_->verifyBlock(
+            block, "b" + std::to_string(i), block_len, false, static_cast<char>('a' + i)));
+        auto* begin = static_cast<char*>(block->addr.get());
+        ranges.push_back({begin, begin + block_len});
+    }
+
+    std::sort(ranges.begin(), ranges.end());
+    for (size_t i = 1; i < ranges.size(); i++) {
+        ASSERT_LE(ranges[i - 1].second, ranges[i].first);
+    }
+}
+
+TEST_F(RequestBlockBufferStoreTest, testExpiredRequestCacheReclaimed) {
+    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    // Shrink the tombstone TTL so reclamation is observable without sleeping
+    // for the production default (one hour).
+    constexpr int64_t kTestTtlUs = 1000 * 50;  // 50ms
+    store->setExpiredRequestCacheTtlUsForTest(kTestTtlUs);
+
+    auto make_request = [this](const std::string& requestid) {
+        auto request_block = std::make_shared<RequestBlockBuffer>(requestid);
+        request_block->addBlock(block_buffer_util_->makeBlockBuffer("b1", 1024, '0', true));
+        return request_block;
+    };
+
+    ASSERT_TRUE(store->setRequestBlockBuffer(make_request("request-1")));
+    store->delRequestBlockBuffer("request-1");
+    ASSERT_FALSE(store->setRequestBlockBuffer(make_request("request-1")));
+
+    // A newer tombstone must not shield the older one from cleanup.
+    usleep(kTestTtlUs + 1000);
+    store->delRequestBlockBuffer("request-2");
+
+    ASSERT_TRUE(store->setRequestBlockBuffer(make_request("request-1")));
+    ASSERT_TRUE(store->getBlockBuffer("request-1", "b1") != nullptr);
 }
 
 }  // namespace rtp_llm

@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from packaging.requirements import Requirement
 from packaging.version import Version
-from setuptools import find_namespace_packages
+from setuptools import Distribution, find_namespace_packages
 
 try:
     import tomllib
@@ -30,7 +30,7 @@ INTERNAL_ONLY_HOST_MARKERS = ("sinian-metrics-platform",)
 # `rocm` is intentionally excluded: its wheel is not published to public indexes, so its
 # internal `sinian-metrics-platform` pins never ship to external users. If ROCm wheels ever
 # become publicly published, add "rocm" here and relocate those pins to the internal overlay.
-PUBLIC_PLATFORM_EXTRAS = ("cuda12", "cuda12_arm", "cuda12_9")
+PUBLIC_PLATFORM_EXTRAS = ("cuda12", "cuda12_arm", "cuda12_9", "cuda13", "cuda13_arm")
 
 
 def _oss_optional_extras() -> dict:
@@ -80,6 +80,22 @@ def _load_setup_module():
 
 
 class BuildPackagingContractTest(TestCase):
+    def test_native_test_command_preserves_multiple_cpp_targets(self):
+        setup_module = _load_setup_module()
+        command = setup_module.BazelTest(Distribution())
+        command.test_target = "//rtp_llm/cpp/utils/test:oom //rtp_llm/cpp/cuda_graph/tests:retry"
+        with patch.object(setup_module, "rewrite_torch_root"), patch.object(
+            setup_module, "detect_build_config", return_value="cuda13"
+        ), patch.object(
+            setup_module, "_get_bazel_cmd_prefix", return_value=(["bazel"], [])
+        ), patch.object(
+            setup_module, "_run_bazel_with_retry", return_value=SimpleNamespace(returncode=0)
+        ) as run:
+            command.run()
+        self.assertEqual(run.call_args.args[0][1:4], [
+            "test", "//rtp_llm/cpp/utils/test:oom", "//rtp_llm/cpp/cuda_graph/tests:retry"
+        ])
+
     def test_arch_select_has_unique_top_level_functions(self):
         source = (PROJECT_ROOT / "arch_config" / "arch_select.bzl").read_text(
             encoding="utf-8"
@@ -454,7 +470,7 @@ class BuildPackagingContractTest(TestCase):
             staged,
         )
 
-    def test_pywrapped_model_integration_test_is_h20_pytest_only(self):
+    def test_pywrapped_model_integration_test_is_native_pytest_only(self):
         build_file = PROJECT_ROOT / "rtp_llm/cpp/models/test/BUILD"
         self.assertTrue(build_file.exists(), "source-only Bazel BUILD file is not staged")
         build_text = build_file.read_text(encoding="utf-8")
@@ -479,7 +495,10 @@ class BuildPackagingContractTest(TestCase):
             and node.name == "PyWrappedModelCacheStoreIntegrationTest"
         )
         decorators = {ast.unparse(node) for node in test_class.decorator_list}
-        self.assertIn("pytest.mark.H20", decorators)
+        self.assertIn(
+            "pytest.mark.gpu(type='MI308X' if torch.version.hip else 'H20')",
+            decorators,
+        )
         test_text = test_file.read_text(encoding="utf-8")
         self.assertIn("subprocess.run(", test_text)
         self.assertIn('"--native-scenario"', test_text)
@@ -570,14 +589,14 @@ class BuildPackagingContractTest(TestCase):
             self.assertIn("setUp", methods)
             self.assertNotIn("__init__", methods)
 
-    def test_non_cuda129_builds_do_not_stage_cuda_graph_pytest_binding(self):
+    def test_rocm_stages_generation_graph_and_beam_search_bindings(self):
         setup_module = _load_setup_module()
 
         staged = setup_module._selected_bazel_staged_outputs(
             "rocm", ["--config=rocm"]
         )
 
-        self.assertNotIn(
+        self.assertIn(
             "//rtp_llm/cpp/cuda_graph/tests:test_cuda_graph_runner",
             [entry[1] for entry in staged],
         )
@@ -589,6 +608,24 @@ class BuildPackagingContractTest(TestCase):
             ),
             staged,
         )
+
+    def test_rdma_exporter_and_generated_aiter_source_are_staged(self):
+        setup_module = _load_setup_module()
+        entries = setup_module._selected_bazel_staged_outputs("rocm", ["--config=rocm"])
+        targets = {"//:mm_rdma_exporter", "//rtp_llm/models_py/triton_kernels:aiter_gdr_decode_padding_source"}
+        selected = [entry for entry in entries if entry[1] in targets]
+        self.assertEqual({entry[1] for entry in selected}, targets)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "bazel-bin").mkdir()
+            (root / "bazel-bin/libmm_rdma_exporter.so").write_bytes(b"exporter")
+            source = root / "bazel-bin/rtp_llm/models_py/triton_kernels/fla/_aiter_gdr_decode_padding.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("PADDING_BACKEND = 'patched'\n")
+            setup_module.stage_bazel_outputs(root, selected)
+            self.assertEqual((root / "rtp_llm/libs/libmm_rdma_exporter.so").read_bytes(), b"exporter")
+            generated = root / "rtp_llm/models_py/triton_kernels/fla/_aiter_gdr_decode_padding.py"
+            self.assertEqual(generated.read_text(), source.read_text())
 
     def test_dynamic_version_uses_release_version(self):
         setup_module = _load_setup_module()
@@ -702,6 +739,10 @@ class BuildPackagingContractTest(TestCase):
         profiles = pyproject["tool"]["rtp_llm"]["pytest_ci"]["profiles"]
         profile = profiles["py_ut_amd"]
         expected_paths = [
+            "rtp_llm/models_py/triton_kernels/fla/test/test_aiter_flydsl_gdn_decode.py",
+            "rtp_llm/models_py/triton_kernels/fla/test/test_aiter_flydsl_gdn_prefill.py",
+            "rtp_llm/cpp/cuda_graph/tests/cuda_graph_copy_kernel_test.py",
+            "rtp_llm/cpp/models/test/pywrapped_model_cache_store_integration_test.py",
             "rtp_llm/model_loader/test/test_inline_fp8_quant.py",
             "rtp_llm/models_py/modules/factory/fused_moe/defs/test/fused_moe_allreduce_contract_test.py",
             "rtp_llm/models_py/triton_kernels/fla/test/test_gdn_decode.py",
@@ -1177,7 +1218,7 @@ class BuildPackagingContractTest(TestCase):
         self.assertEqual(len(test_cases.elts), 4)
 
         fused_quant_tree = parse(
-            "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/test/"
+            "rtp_llm/models_py/kernels/cuda/test/"
             "fused_silu_mul_token_quant_batched_test.py"
         )
         fused_quant_text = ast.unparse(fused_quant_tree)
@@ -1405,14 +1446,14 @@ class BuildPackagingContractTest(TestCase):
 
         profiles = pyproject["tool"]["rtp_llm"]["pytest_ci"]["profiles"]
         expected_counts = {
-            "smoke_h20_light_oss": 14,
-            "smoke_h20_full_oss": 57,
+            "smoke_h20_light_oss": 16,
+            "smoke_h20_full_oss": 58,
             "smoke_sm8x_light_oss": 9,
             "smoke_sm8x_full_oss": 9,
             "smoke_sm100_oss": 12,
             "smoke_sm100_eval_oss": 1,
-            "smoke_sm120_oss": 6,
-            "smoke_rocm_oss": 25,
+            "smoke_sm120_oss": 8,
+            "smoke_rocm_oss": 26,
             "smoke_rocm_qwen35_mtp_manual": 1,
             "smoke_remote_cache_oss": 11,
         }

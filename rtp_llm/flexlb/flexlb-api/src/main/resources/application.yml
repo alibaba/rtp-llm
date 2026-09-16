@@ -56,5 +56,7 @@ flexlb:
     # Set to false to aggregate per-engine metrics (reduces ~139K series to ~250)
     # Default: per-engine tags retained (high cardinality with many engines)
     per-engine-tags: true
-    # Default: critical-only metrics reported. Set FLEXLB_MONITOR_MODE=all to report all metrics.
-    mode: critical-only
+    # flexlb.* exposure is filtered by flexlb.monitor.metric-whitelist
+    # (env FLEXLB_MONITOR_METRIC_WHITELIST); unset defaults to the built-in
+    # critical preset (~6 core link latency series). Set the whitelist to
+    # the bare "flexlb_" prefix to expose every flexlb_* series.

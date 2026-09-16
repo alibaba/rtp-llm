@@ -488,6 +488,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("dsv4_fixed_pool_use_memory", &KVCacheConfig::dsv4_fixed_pool_use_memory)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
+        .def_readwrite("kv_cache_event_publisher_type", &KVCacheConfig::kv_cache_event_publisher_type)
+        .def_readwrite("kv_cache_event_manager_endpoint", &KVCacheConfig::kv_cache_event_manager_endpoint)
+        .def_readwrite("kv_cache_event_instance_group", &KVCacheConfig::kv_cache_event_instance_group)
+        .def_readwrite("kv_cache_event_instance_id", &KVCacheConfig::kv_cache_event_instance_id)
+        .def_readwrite("kv_cache_event_host_ip_port", &KVCacheConfig::kv_cache_event_host_ip_port)
         // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
         .def_readwrite("reco_vipserver_domain", &KVCacheConfig::reco_vipserver_domain)
@@ -569,10 +574,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.load_cache_retry_times,
                                       self.dsv4_fixed_pool_blocks,
                                       self.dsv4_hca_state_pool_blocks,
-                                      self.dsv4_fixed_pool_use_memory);
+                                      self.dsv4_fixed_pool_use_memory,
+                                      // This unreleased event-field block follows declaration order.
+                                      // Future fields must be appended after the block.
+                                      self.kv_cache_event_publisher_type,
+                                      self.kv_cache_event_manager_endpoint,
+                                      self.kv_cache_event_instance_group,
+                                      self.kv_cache_event_instance_id,
+                                      self.kv_cache_event_host_ip_port);
             },
             [](py::tuple t) {
-                if (t.size() != 43 && t.size() != 54 && t.size() != 57)
+                if (t.size() != 43 && t.size() != 54 && t.size() != 57 && t.size() != 62)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -637,6 +649,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.dsv4_fixed_pool_blocks     = t[54].cast<uint32_t>();
                         c.dsv4_hca_state_pool_blocks = t[55].cast<uint32_t>();
                         c.dsv4_fixed_pool_use_memory = t[56].cast<bool>();
+                    }
+                    if (t.size() == 62) {
+                        // Keep these indices aligned with the event-field declaration order
+                        // in __getstate__; append future fields after this block.
+                        c.kv_cache_event_publisher_type   = t[57].cast<std::string>();
+                        c.kv_cache_event_manager_endpoint = t[58].cast<std::string>();
+                        c.kv_cache_event_instance_group   = t[59].cast<std::string>();
+                        c.kv_cache_event_instance_id      = t[60].cast<std::string>();
+                        c.kv_cache_event_host_ip_port     = t[61].cast<std::string>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
@@ -729,6 +750,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register HWKernelConfig
     py::class_<HWKernelConfig>(m, "HWKernelConfig")
         .def(py::init<>())
+        .def_property_readonly_static(
+            "generation_prefill_cuda_graph_max_capture_tokens",
+            [](py::object) { return HWKernelConfig::kGenerationPrefillCudaGraphMaxCaptureTokens; })
+        .def_property_readonly_static(
+            "generation_prefill_cuda_graph_max_capture_buckets",
+            [](py::object) { return HWKernelConfig::kGenerationPrefillCudaGraphMaxCaptureBuckets; })
+        .def_property_readonly_static("generation_prefill_cuda_graph_max_requests_limit",
+                                      [](py::object) { return HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests; })
         .def_readwrite("deep_gemm_num_sm", &HWKernelConfig::deep_gemm_num_sm)
         .def_readwrite("arm_gemm_use_kai", &HWKernelConfig::arm_gemm_use_kai)
         .def_readwrite("enable_multi_block_mode", &HWKernelConfig::enable_multi_block_mode)
@@ -738,6 +767,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("force_legacy_fp8_ptpc", &HWKernelConfig::force_legacy_fp8_ptpc)
         .def_readwrite("enable_cuda_graph", &HWKernelConfig::enable_cuda_graph)
         .def_readwrite("enable_cuda_graph_debug_mode", &HWKernelConfig::enable_cuda_graph_debug_mode)
+        .def_readwrite("generation_prefill_cuda_graph_max_requests",
+                       &HWKernelConfig::generation_prefill_cuda_graph_max_requests)
+        .def_readwrite("generation_prefill_capture_token_buckets",
+                       &HWKernelConfig::generation_prefill_capture_token_buckets)
         .def_readwrite("enable_native_cuda_graph", &HWKernelConfig::enable_native_cuda_graph)
         .def_readwrite("num_native_cuda_graph", &HWKernelConfig::num_native_cuda_graph)
         .def_readwrite("prefill_capture_seq_lens", &HWKernelConfig::prefill_capture_seq_lens)
@@ -761,10 +794,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.decode_capture_batch_sizes,
                                       self.disable_dpc_random,
                                       self.rocm_disable_custom_ag,
+                                      self.generation_prefill_cuda_graph_max_requests,
+                                      self.generation_prefill_capture_token_buckets,
                                       self.force_legacy_fp8_ptpc);
             },
             [](py::tuple t) {
-                if (t.size() != 14 && t.size() != 15)
+                if (t.size() != 14 && t.size() != 15 && t.size() != 16 && t.size() != 17)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
@@ -782,8 +817,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.decode_capture_batch_sizes   = t[11].cast<std::vector<int>>();
                     c.disable_dpc_random           = t[12].cast<bool>();
                     c.rocm_disable_custom_ag       = t[13].cast<bool>();
+                    // Native used a 15-field layout; main used a distinct 16-field layout.
                     if (t.size() == 15) {
                         c.force_legacy_fp8_ptpc = t[14].cast<bool>();
+                    }
+                    if (t.size() >= 16) {
+                        c.generation_prefill_cuda_graph_max_requests = t[14].cast<int>();
+                        c.generation_prefill_capture_token_buckets = t[15].cast<std::vector<int>>();
+                    }
+                    if (t.size() == 17) {
+                        c.force_legacy_fp8_ptpc = t[16].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());
@@ -941,6 +984,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("quantization", &SpeculativeExecutionConfig::quantization)
         .def_readwrite("checkpoint_path", &SpeculativeExecutionConfig::checkpoint_path)
         .def_readwrite("sp_dspark_mask_token_id", &SpeculativeExecutionConfig::sp_dspark_mask_token_id)
+        .def_readwrite("sp_dspark_sample_from_anchor", &SpeculativeExecutionConfig::sp_dspark_sample_from_anchor)
         .def("to_string", [](const SpeculativeExecutionConfig& self) { return self.to_string(); })
         .def(py::pickle(
             [](const SpeculativeExecutionConfig& self) {
@@ -954,10 +998,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.force_score_context_attention,
                                       self.quantization,
                                       self.checkpoint_path,
-                                      self.sp_dspark_mask_token_id);
+                                      self.sp_dspark_mask_token_id,
+                                      self.sp_dspark_sample_from_anchor);
             },
             [](py::tuple t) {
-                if (t.size() != 10 && t.size() != 11)
+                if (t.size() != 10 && t.size() != 11 && t.size() != 12)
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
@@ -973,6 +1018,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.checkpoint_path               = t[9].cast<std::string>();
                     if (t.size() == 11) {
                         c.sp_dspark_mask_token_id = t[10].cast<int64_t>();
+                    }
+                    if (t.size() == 12) {
+                        c.sp_dspark_mask_token_id = t[10].cast<int64_t>();
+                        c.sp_dspark_sample_from_anchor = t[11].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());
@@ -1360,6 +1409,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &GrammarConfig::constrained_json_disable_any_whitespace)
         .def_readwrite("terminate_without_stop_token", &GrammarConfig::terminate_without_stop_token)
         .def_readwrite("num_workers", &GrammarConfig::num_workers)
+        .def_readwrite("compile_timeout_ms", &GrammarConfig::compile_timeout_ms)
+        .def_readwrite("compile_concurrency", &GrammarConfig::compile_concurrency)
+        .def_readwrite("compile_queue_size", &GrammarConfig::compile_queue_size)
         .def_readwrite("tokenizer_info_json", &GrammarConfig::tokenizer_info_json)
         .def_readwrite("compiler_cache_bytes", &GrammarConfig::compiler_cache_bytes)
         .def("to_string", &GrammarConfig::to_string)
@@ -1369,7 +1421,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                  oss << "GrammarConfig(constrained_json_disable_any_whitespace="
                      << c.constrained_json_disable_any_whitespace
                      << ", terminate_without_stop_token=" << c.terminate_without_stop_token
-                     << ", num_workers=" << c.num_workers << ", compiler_cache_bytes=" << c.compiler_cache_bytes << ")";
+                     << ", num_workers=" << c.num_workers << ", compile_timeout_ms=" << c.compile_timeout_ms
+                     << ", compile_concurrency=" << c.compile_concurrency
+                     << ", compile_queue_size=" << c.compile_queue_size
+                     << ", compiler_cache_bytes=" << c.compiler_cache_bytes << ")";
                  return oss.str();
              })
         .def(py::pickle(
@@ -1378,10 +1433,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.num_workers,
                                       self.tokenizer_info_json,
                                       self.compiler_cache_bytes,
-                                      self.terminate_without_stop_token);
+                                      self.terminate_without_stop_token,
+                                      self.compile_timeout_ms,
+                                      self.compile_concurrency,
+                                      self.compile_queue_size);
             },
             [](py::tuple t) {
-                if (t.size() != 5 && t.size() != 6)
+                if (t.size() != 5 && t.size() != 6 && t.size() != 8)
                     throw std::runtime_error("Invalid state!");
                 GrammarConfig c;
                 try {
@@ -1399,7 +1457,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.constrained_json_disable_any_whitespace = t[0].cast<bool>();
                         c.num_workers                             = t[1].cast<int>();
                         c.tokenizer_info_json                     = t[2].cast<std::string>();
-                        if (t.size() == 6) {
+                        if (t.size() == 8) {
+                            // Current layout appends compile controls after the prior five-field state.
+                            c.compiler_cache_bytes         = t[3].cast<int64_t>();
+                            c.terminate_without_stop_token = t[4].cast<bool>();
+                            c.compile_timeout_ms           = t[5].cast<int>();
+                            c.compile_concurrency          = t[6].cast<int>();
+                            c.compile_queue_size           = t[7].cast<int>();
+                        } else if (t.size() == 6) {
                             // Previous layout:
                             // (disable_any_whitespace, num_workers, tokenizer_info_json, override_stop_tokens,
                             //  compiler_cache_bytes, terminate_without_stop_token).

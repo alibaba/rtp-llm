@@ -412,10 +412,13 @@ class FIFOSchedulerConfig:
 
 
 class GrammarConfig:
+    compile_concurrency: int
+    compile_queue_size: int
+    compile_timeout_ms: int
+    compiler_cache_bytes: int
     constrained_json_disable_any_whitespace: bool
-    grammar_backend: str
     num_workers: int
-    override_stop_tokens: list[int]
+    terminate_without_stop_token: bool
     tokenizer_info_json: str
 
     def __getstate__(self) -> tuple:
@@ -433,14 +436,16 @@ class GrammarConfig:
 
 class FMHAConfig:
     absorb_opt_len: int
+    attn_backend: str
+    prefill_attn_backend: str
+    decode_attn_backend: str
+    disable_attn_backends: str
+    disable_flash_infer: bool
     disable_flashinfer_hybrid_prefill: bool
-    disable_flashinfer_native: bool
-    enable_flashinfer_trtllm_gen: bool
-    enable_flashinfer_trt_fmha_v2: bool
+    enable_trt_fmha: bool
     enable_fmha: bool
     enable_open_source_fmha: bool
-    enable_paged_flashinfer_trt_fmha_v2: bool
-    enable_paged_open_source_fmha: bool
+    enable_paged_trt_fmha: bool
     enable_xqa: bool
     use_aiter_pa: bool
     use_asm_pa: bool
@@ -568,9 +573,13 @@ class FfnDisAggregateConfig:
     def to_string(self) -> str:
         ...
 class GrammarConfig:
+    compile_concurrency: int
+    compile_queue_size: int
+    compile_timeout_ms: int
     compiler_cache_bytes: int
     constrained_json_disable_any_whitespace: bool
     num_workers: int
+    terminate_without_stop_token: bool
     tokenizer_info_json: str
     def __getstate__(self) -> tuple:
         ...
@@ -602,6 +611,9 @@ class GrpcConfig:
     def to_string(self) -> str:
         ...
 class HWKernelConfig:
+    generation_prefill_cuda_graph_max_capture_buckets: typing.ClassVar[int]
+    generation_prefill_cuda_graph_max_capture_tokens: typing.ClassVar[int]
+    generation_prefill_cuda_graph_max_requests_limit: typing.ClassVar[int]
     arm_gemm_use_kai: bool
     decode_capture_batch_sizes: list[int]
     deep_gemm_num_sm: int
@@ -616,6 +628,8 @@ class HWKernelConfig:
     ft_disable_custom_ar: bool
     num_native_cuda_graph: int
     prefill_capture_seq_lens: list[int]
+    generation_prefill_capture_token_buckets: list[int]
+    generation_prefill_cuda_graph_max_requests: int
     rocm_disable_custom_ag: bool
     rocm_hipblaslt_config: str
     use_swizzleA: bool
@@ -737,6 +751,11 @@ class KVCacheConfig:
     enable_independent_group_eviction: bool
     device_cache_min_free_blocks: int
     load_cache_retry_times: int
+    kv_cache_event_publisher_type: str
+    kv_cache_event_manager_endpoint: str
+    kv_cache_event_instance_group: str
+    kv_cache_event_instance_id: str
+    kv_cache_event_host_ip_port: str
     ssm_state_dtype: str
     test_block_num: int
     use_block_cache: int

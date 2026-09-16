@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 import unittest
+from itertools import accumulate
 from typing import List, Optional, Sequence
 from unittest.mock import patch
 
@@ -52,7 +53,9 @@ try:
         AiterPrefillImplAsm,
         AiterPrefillImplNonAsm,
         AiterPrefillImplPaged,
+        AiterPrefillImplTriton,
         FMHAParams,
+        _PrefillGraphMetadata,
         _run_triton_paged_attention,
         validate_v_layout,
     )
@@ -599,19 +602,20 @@ class TestAiterPrefillAttnOp(unittest.TestCase):
 class TestAiterPrefillImplPagedSupport(unittest.TestCase):
     """Unit tests for AiterPrefillImplPaged.support() classmethod.
 
-    Validates prefix_lengths boundary logic. MTP draft prefill capture inputs are
-    pre-filled with non-zero prefix in cuda_graph_runner.cc, so support() needs
-    only the prefix>0 check.
+    Validates that CK paged prefill remains a prefix-only implementation.
     """
 
-    def _make_attn_inputs(self, prefix_lengths):
+    def _make_attn_inputs(
+        self, prefix_lengths, *, is_cuda_graph=False, block_table=None
+    ):
         from types import SimpleNamespace
 
         return SimpleNamespace(
             prefix_lengths=prefix_lengths,
-            is_cuda_graph=False,
+            is_cuda_graph=is_cuda_graph,
             is_prefill=True,
             input_lengths=torch.tensor([4], dtype=torch.int32),
+            kv_cache_kernel_block_id_device=block_table,
         )
 
     def _make_attn_configs(self, *, mrope=False, interleaved=False):
@@ -621,7 +625,10 @@ class TestAiterPrefillImplPagedSupport(unittest.TestCase):
             rope_config=SimpleNamespace(
                 style=RopeStyle.Mrope if mrope else RopeStyle.Base,
                 mrope_interleaved=interleaved,
-            )
+            ),
+            dtype=torch.bfloat16,
+            kv_cache_dtype=KvCacheDataType.BASE,
+            is_causal=True,
         )
 
     def test_support_true_for_real_prefix(self):
@@ -660,6 +667,42 @@ class TestAiterPrefillImplPagedSupport(unittest.TestCase):
             )
         )
 
+    def test_paged_support_false_for_no_prefix_generation_prefill_cuda_graph(self):
+        pl = torch.zeros(5, dtype=torch.int32)
+        block_table = torch.zeros(5, 4, dtype=torch.int32)
+        self.assertFalse(
+            AiterPrefillImplPaged.support(
+                self._make_attn_configs(),
+                self._make_attn_inputs(pl, is_cuda_graph=True, block_table=block_table),
+            )
+        )
+
+    def test_triton_support_is_limited_to_generation_prefill_cuda_graph(self):
+        pl = torch.zeros(5, dtype=torch.int32)
+        block_table = torch.zeros(5, 4, dtype=torch.int32)
+        for is_cuda_graph, expected in ((False, False), (True, True)):
+            with self.subTest(is_cuda_graph=is_cuda_graph):
+                self.assertEqual(
+                    AiterPrefillImplTriton.support(
+                        self._make_attn_configs(),
+                        self._make_attn_inputs(
+                            pl,
+                            is_cuda_graph=is_cuda_graph,
+                            block_table=block_table,
+                        ),
+                    ),
+                    expected,
+                )
+
+    def test_support_false_for_no_prefix_graph_without_block_table(self):
+        pl = torch.zeros(5, dtype=torch.int32)
+        self.assertFalse(
+            AiterPrefillImplTriton.support(
+                self._make_attn_configs(),
+                self._make_attn_inputs(pl, is_cuda_graph=True),
+            )
+        )
+
     def test_support_false_for_non_interleaved_mrope(self):
         pl = torch.tensor([128], dtype=torch.int32)
         self.assertFalse(
@@ -694,13 +737,14 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
         fmha_params = SimpleNamespace(
             cu_seqlens_q=torch.zeros(batch_size + 1, dtype=torch.int32),
             cu_seqlens_k=torch.zeros(batch_size + 1, dtype=torch.int32),
-            prefix_lengths=None,
+            prefix_lengths=torch.zeros(batch_size, dtype=torch.int32),
+            graph_metadata=_PrefillGraphMetadata(batch_size, torch.device("cpu")),
             max_seq_len=0,
             max_seqlen_q=0,
             max_seqlen_k=0,
             token_q_num=0,
             token_kv_num=0,
-            kv_cache_block_id_device=None,
+            kv_cache_block_id_device=torch.zeros(batch_size, 4, dtype=torch.int32),
             prefill_seqlen_k_int32=torch.zeros(batch_size, dtype=torch.int32),
         )
         stub = AiterPrefillImplPaged.__new__(AiterPrefillImplPaged)
@@ -748,6 +792,77 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
         self.assertEqual(p.token_kv_num, 20)
         # prefill_seqlen_k_int32 must be synced from cu_seqlens_k
         self.assertEqual(p.prefill_seqlen_k_int32.tolist(), [5, 5, 5, 5])
+
+    def test_replay_reuses_staging_and_clears_inactive_slots(self):
+        from contextlib import ExitStack
+
+        stub = self._make_stub(batch_size=4)
+        params = stub.fmha_params
+        buffers = {
+            (owner_name, name): tensor
+            for owner_name, owner in (
+                ("device", params),
+                ("host", params.graph_metadata),
+            )
+            for name, tensor in vars(owner).items()
+            if isinstance(tensor, torch.Tensor)
+        }
+        pointers = {name: tensor.data_ptr() for name, tensor in buffers.items()}
+        for lengths, prefixes in (
+            ([2, 4, 0, 1], [5, 1, 8, 0]),
+            ([3], None),
+            ([], None),
+        ):
+            with self.subTest(lengths=lengths):
+                inputs = self._make_attn_inputs(
+                    lengths,
+                    prefix_lengths=(
+                        torch.tensor(prefixes, dtype=torch.int32)
+                        if prefixes is not None
+                        else None
+                    ),
+                    kv_block_id=torch.zeros(4, 4, dtype=torch.int32),
+                )
+                with ExitStack() as stack:
+                    for name in ("zeros", "empty", "tensor", "full"):
+                        stack.enter_context(
+                            patch.object(
+                                torch,
+                                name,
+                                side_effect=AssertionError("replay allocation"),
+                            )
+                        )
+                    for name in ("to", "cpu", "item", "tolist", "numpy", "sum", "max"):
+                        stack.enter_context(
+                            patch.object(
+                                torch.Tensor,
+                                name,
+                                side_effect=AssertionError(
+                                    "replay conversion/reduction"
+                                ),
+                            )
+                        )
+                    self._call_update(stub, inputs)
+                padded_q = lengths + [0] * (4 - len(lengths))
+                padded_prefix = (prefixes or [0] * len(lengths)) + [0] * (
+                    4 - len(lengths)
+                )
+                kv_lengths = [q + p for q, p in zip(padded_q, padded_prefix)]
+                self.assertEqual(params.prefix_lengths.tolist(), padded_prefix)
+                self.assertEqual(params.prefill_seqlen_k_int32.tolist(), kv_lengths)
+                self.assertEqual(params.token_q_num, sum(lengths))
+                self.assertEqual(params.token_kv_num, sum(kv_lengths))
+                self.assertEqual(params.max_seqlen_q, max(padded_q))
+                self.assertEqual(params.max_seqlen_k, max(kv_lengths))
+                for owner_name, owner in (
+                    ("device", params),
+                    ("host", params.graph_metadata),
+                ):
+                    for name, tensor in vars(owner).items():
+                        if isinstance(tensor, torch.Tensor):
+                            self.assertEqual(
+                                tensor.data_ptr(), pointers[(owner_name, name)]
+                            )
 
     def test_rebuild_with_prefix(self):
         """Rebuild cu_seqlens from input_lengths + prefix_lengths."""
@@ -829,18 +944,19 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._call_update(stub, inputs)
 
-    def test_replay_query_length_above_capture_capacity_raises(self):
-        stub = self._make_stub(batch_size=2)
-        stub.fmha_params.graph_query_length = 4
-        stub.fmha_params.graph_token_q_capacity = 8
-        inputs = self._make_attn_inputs(
-            [5, 0], prefix_lengths=torch.tensor([100, 100], dtype=torch.int32)
-        )
-
-        with self.assertRaisesRegex(
-            ValueError, "query length exceeds capture capacity"
+    def test_replay_capacity_raises(self):
+        for attr, capacity, lengths, prefix, error in (
+            ("graph_query_length", 4, [5, 0], [100, 100], "query length"),
+            ("graph_token_q_capacity", 8, [5, 5], [0, 0], "token count"),
+            ("graph_max_seqlen_k", 512, [1, 0], [600, 0], "kv length"),
         ):
-            self._call_update(stub, inputs)
+            stub = self._make_stub(2)
+            setattr(stub.fmha_params, attr, capacity)
+            inputs = self._make_attn_inputs(
+                lengths, prefix_lengths=torch.tensor(prefix, dtype=torch.int32)
+            )
+            with self.assertRaisesRegex(ValueError, f"{error} exceeds capture"):
+                self._call_update(stub, inputs)
 
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillImplPaged module")
@@ -848,10 +964,20 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
     """Unit tests for small-q dispatch under CUDA graph."""
 
     def _make_impl_with_mocked_prepare(
-        self, input_lengths, is_cuda_graph, need_rope_kv_cache=False
+        self,
+        input_lengths,
+        is_cuda_graph,
+        need_rope_kv_cache=False,
+        *,
+        use_triton_pa=False,
+        use_asm_pa=True,
+        impl_class=None,
     ):
         from types import SimpleNamespace
         from unittest.mock import MagicMock, patch
+
+        if impl_class is None:
+            impl_class = AiterPrefillImplPaged
 
         batch_params = SimpleNamespace(workspace_bytes=1024)
         triton_params = SimpleNamespace(workspace_bytes=2048)
@@ -870,14 +996,25 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
 
         cfg = SimpleNamespace(
             need_rope_kv_cache=need_rope_kv_cache,
+            head_num=8,
             kv_head_num=1,
             size_per_head=8,
             kernel_tokens_per_block=16,
+            dtype=torch.bfloat16,
+            kv_cache_dtype=KvCacheDataType.BASE,
+            is_causal=True,
         )
         attn_inputs = SimpleNamespace(
             is_cuda_graph=is_cuda_graph,
             input_lengths=torch.tensor(input_lengths, dtype=torch.int32),
+            prefix_lengths=torch.zeros(len(input_lengths), dtype=torch.int32),
+            kv_cache_kernel_block_id_device=torch.zeros(
+                len(input_lengths), 4, dtype=torch.int32
+            ),
         )
+        fmha_config = FMHAConfig()
+        fmha_config.use_triton_pa = use_triton_pa
+        fmha_config.use_asm_pa = use_asm_pa
         module_path = "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter"
         with patch(
             f"{module_path}.AiterPrefillAttnOpPaged", return_value=batch_impl
@@ -886,9 +1023,11 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         ), patch(
             f"{module_path}.FusedRopeKVCachePrefillOpAsm", return_value=rope_impl
         ), patch(
+            f"{module_path}.FusedRopeKVCachePrefillOpNonAsm", return_value=rope_impl
+        ), patch(
             f"{module_path}.common.create_write_cache_store_impl"
         ):
-            impl = AiterPrefillImplPaged(cfg, attn_inputs)
+            impl = impl_class(cfg, attn_inputs, fmha_config=fmha_config)
 
         return (
             impl,
@@ -899,30 +1038,21 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
             observed_pad_query,
         )
 
-    def test_cuda_graph_prepares_only_selected_backend_workspace(self):
-        cases = [([4, 1], "triton"), ([5, 1], "batch")]
-        for input_lengths, expected_backend in cases:
+    def test_cuda_graph_supports_triton_and_batch_backends(self):
+        for input_lengths, expected_backend in (
+            ([4, 1], "triton"),
+            ([8, 8], "batch"),
+        ):
             with self.subTest(expected_backend=expected_backend):
-                (
-                    impl,
-                    batch_impl,
-                    triton_impl,
-                    batch_params,
-                    triton_params,
-                    _,
-                ) = self._make_impl_with_mocked_prepare(input_lengths, True)
-
+                impl, batch_impl, triton_impl, *_ = self._make_impl_with_mocked_prepare(
+                    input_lengths, True
+                )
                 self.assertEqual(impl.backend, expected_backend)
-                if expected_backend == "triton":
-                    triton_impl.prepare.assert_called_once_with(impl.attn_inputs)
-                    batch_impl.prepare.assert_not_called()
-                    self.assertIs(impl.triton_fmha_params, triton_params)
-                    self.assertIsNone(impl.fmha_params)
-                else:
-                    batch_impl.prepare.assert_called_once_with(impl.attn_inputs)
-                    triton_impl.prepare.assert_not_called()
-                    self.assertIs(impl.fmha_params, batch_params)
-                    self.assertIsNone(impl.triton_fmha_params)
+                self.assertTrue(impl.support_cuda_graph())
+                selected = triton_impl if expected_backend == "triton" else batch_impl
+                rejected = batch_impl if expected_backend == "triton" else triton_impl
+                selected.prepare.assert_called_once_with(impl.attn_inputs)
+                rejected.prepare.assert_not_called()
 
     def test_eager_prepares_only_selected_backend_during_construction(self):
         impl, batch_impl, triton_impl, _, triton_params, _ = (
@@ -933,6 +1063,79 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         triton_impl.prepare.assert_called_once_with(impl.attn_inputs)
         self.assertIs(impl.triton_fmha_params, triton_params)
         self.assertIsNone(impl.fmha_params)
+
+    def test_generation_prefill_cuda_graph_backend_uses_unified_triton_for_eager_and_graph(
+        self,
+    ):
+        for is_cuda_graph in (False, True):
+            with self.subTest(is_cuda_graph=is_cuda_graph):
+                impl, batch_impl, triton_impl, _, triton_params, _ = (
+                    self._make_impl_with_mocked_prepare(
+                        [0, 0, 0, 0, 64],
+                        is_cuda_graph,
+                        use_triton_pa=True,
+                        impl_class=AiterPrefillImplTriton,
+                    )
+                )
+
+                self.assertTrue(impl.use_unified_attention)
+                self.assertEqual(impl.backend, "triton")
+                self.assertTrue(impl.supports_generation_prefill_cuda_graph())
+                batch_impl.prepare.assert_not_called()
+                triton_impl.prepare.assert_called_once_with(impl.attn_inputs)
+                self.assertIs(impl.triton_fmha_params, triton_params)
+
+    def test_generation_prefill_cuda_graph_requires_asm_kv_layout(self):
+        flags = FMHAConfig()
+        flags.use_triton_pa = True
+        flags.use_asm_pa = False
+
+        self.assertTrue(
+            attn_factory._is_fmha_impl_disabled("AiterPrefillImplTriton", flags)
+        )
+        impl, *_ = self._make_impl_with_mocked_prepare(
+            [0, 0, 0, 0, 64],
+            True,
+            use_triton_pa=True,
+            use_asm_pa=False,
+            impl_class=AiterPrefillImplTriton,
+        )
+        self.assertTrue(impl.linear_v)
+        self.assertFalse(impl.supports_generation_prefill_cuda_graph())
+
+    def test_triton_backend_feature_gate(self):
+        flags = FMHAConfig()
+        flags.use_asm_pa = True
+        flags.use_triton_pa = False
+        self.assertTrue(
+            attn_factory._is_fmha_impl_disabled("AiterPrefillImplTriton", flags)
+        )
+
+        flags.use_triton_pa = True
+        self.assertFalse(
+            attn_factory._is_fmha_impl_disabled("AiterPrefillImplTriton", flags)
+        )
+
+    def test_generation_prefill_cuda_graph_capability_rejects_unsupported_attention_modes(
+        self,
+    ):
+        impl, *_ = self._make_impl_with_mocked_prepare(
+            [0, 0, 0, 0, 64],
+            True,
+            use_triton_pa=True,
+            impl_class=AiterPrefillImplTriton,
+        )
+        cases = (
+            ("dtype", torch.float16),
+            ("kv_cache_dtype", KvCacheDataType.FP8),
+            ("is_causal", False),
+        )
+        for attr, value in cases:
+            with self.subTest(attr=attr, value=value):
+                old_value = getattr(impl.attn_configs, attr)
+                setattr(impl.attn_configs, attr, value)
+                self.assertFalse(impl.supports_generation_prefill_cuda_graph())
+                setattr(impl.attn_configs, attr, old_value)
 
     def test_capture_stride_is_requested_only_for_graph_triton_rope(self):
         cases = (
@@ -986,6 +1189,7 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         stub.fmha_params = fmha_params
         stub.enable_cuda_graph = True
         stub.backend = "triton"
+        stub.use_unified_attention = False
         stub.need_rope_kv_cache = False
         stub.write_cache_store_impl = None
         stub.attn_inputs = SimpleNamespace(is_prefill=True, cache_store_inputs=None)
@@ -1139,8 +1343,87 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
         self.assertEqual(fmha_params.compact_indices.shape, (8,))
         self.assertEqual(fmha_params.graph_query_length, 4)
         self.assertEqual(fmha_params.graph_token_q_capacity, 8)
+        self.assertEqual(fmha_params.graph_max_seqlen_k, 256)
         self.assertFalse(hasattr(fmha_params, "kv_scale"))
         self.assertFalse(hasattr(op, "_graph_output"))
+
+    def test_paged_graph_block_table_buffer_keeps_capture_address(self):
+        from types import SimpleNamespace
+
+        op = AiterPrefillAttnOpPaged(_make_attn_configs(4, 2, 8))
+        params = SimpleNamespace(
+            cu_seqlens_q=torch.zeros(3, dtype=torch.int32),
+            cu_seqlens_k=torch.zeros(3, dtype=torch.int32),
+            kv_cache_block_id_device=torch.zeros(2, 2, dtype=torch.int32),
+        )
+        infer_device = f"{AiterPrefillAttnOpPaged.__module__}._infer_cuda_graph_device"
+        with patch(infer_device, return_value=torch.device("cpu")):
+            op.prepare_cuda_graph(params, SimpleNamespace())
+            captured = op.sanitized_bt_buf
+            op.prepare_cuda_graph(params, SimpleNamespace())
+            self.assertIs(op.sanitized_bt_buf, captured)
+            params.kv_cache_block_id_device = torch.zeros(2, 3, dtype=torch.int32)
+            with self.assertRaisesRegex(ValueError, "recapture required"):
+                op.prepare_cuda_graph(params, SimpleNamespace())
+
+    def test_generation_prefill_cuda_graph_allocates_only_stable_packed_output(self):
+        from types import SimpleNamespace
+
+        cfg = _make_attn_configs(head_num=4, head_num_kv=2, head_dim=8)
+        op = AiterPrefillAttnOpTriton(cfg, use_unified_attention=True)
+        fmha_params = SimpleNamespace(token_q_num=64)
+
+        op._allocate_graph_workspace(
+            fmha_params,
+            num_seqs=5,
+            query_length=64,
+            max_seq_len=64,
+            attn_dtype=torch.bfloat16,
+            device=torch.device("cpu"),
+        )
+
+        self.assertEqual(fmha_params.attention_output.shape, (64, 4, 8))
+        self.assertEqual(fmha_params.graph_query_length, 64)
+        self.assertEqual(fmha_params.graph_token_q_capacity, 64)
+        self.assertFalse(hasattr(fmha_params, "compact_output"))
+        self.assertFalse(hasattr(fmha_params, "compact_indices"))
+
+    def test_generation_prefill_cuda_graph_calls_unified_attention_with_shuffled_cache(
+        self,
+    ):
+        from types import SimpleNamespace
+
+        cfg = _make_attn_configs(head_num=4, head_num_kv=2, head_dim=8)
+        op = AiterPrefillAttnOpTriton(cfg, use_unified_attention=True)
+        query = torch.empty(6, 4, 8, dtype=torch.float16)
+        output = torch.empty_like(query)
+        block_table = torch.zeros(2, 2, dtype=torch.int32)
+        fmha_params = SimpleNamespace(
+            kv_cache_block_id_device=block_table,
+            cu_seqlens_q=torch.tensor([0, 2, 6], dtype=torch.int32),
+            prefill_seqlen_k_int32=torch.tensor([2, 4], dtype=torch.int32),
+            max_seqlen_q=4,
+            max_seqlen_k=4,
+            token_q_num=6,
+            attention_output=output,
+        )
+        kv_cache = SimpleNamespace(
+            kv_cache_base=torch.empty(3, 2, 2, 16, 8, dtype=torch.float16),
+            kv_scale_base=None,
+        )
+
+        kernel_path = "aiter.ops.triton.attention.unified_attention.unified_attention"
+        with patch(kernel_path, return_value=output) as unified_attention:
+            actual = op.forward((query,), kv_cache, fmha_params)
+
+        self.assertEqual(actual.shape, (6, 32))
+        kwargs = unified_attention.call_args.kwargs
+        self.assertIs(kwargs["q"], query)
+        self.assertIs(kwargs["out"], output)
+        self.assertIs(kwargs["block_table"], block_table)
+        self.assertTrue(kwargs["shuffled_kv_cache"])
+        self.assertEqual(kwargs["k"].shape, (3, 2, 1, 16, 8))
+        self.assertEqual(kwargs["v"].shape, (3, 2, 2, 8, 8))
 
     def test_forward_uses_prepared_graph_workspace_without_allocation(self):
         from types import SimpleNamespace
@@ -1201,6 +1484,7 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
         cfg = _make_attn_configs(head_num=4, head_num_kv=2, head_dim=8)
         op = AiterPrefillAttnOpTriton(cfg)
         device = torch.device("cuda")
+        captured_block_ids = torch.full((3, 2), -1, dtype=torch.int32, device=device)
         fmha_params = SimpleNamespace(
             cu_seqlens_q=torch.zeros(4, dtype=torch.int32, device=device),
             cu_seqlens_k=torch.zeros(4, dtype=torch.int32, device=device),
@@ -1208,10 +1492,13 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
                 (3,), -1, dtype=torch.int32, device=device
             ),
             compact_indices=torch.full((6,), -1, dtype=torch.int32, device=device),
+            kv_cache_block_id_device=captured_block_ids,
             graph_device=device,
             token_q_num=6,
             max_seqlen_q=2,
             max_seqlen_k=9,
+            prefix_lengths=torch.zeros(3, dtype=torch.int32, device=device),
+            graph_metadata=_PrefillGraphMetadata(3, device),
         )
         prefill_ptr = fmha_params.prefill_seqlen_k_int32.data_ptr()
         block_ids = torch.zeros(3, 2, dtype=torch.int32, device=device)
@@ -1235,9 +1522,8 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
         self.assertEqual(fmha_params.max_seqlen_k, 7)
         self.assertEqual(fmha_params.token_q_num, 3)
         self.assertEqual(fmha_params.token_kv_num, 21)
-        self.assertEqual(
-            fmha_params.kv_cache_block_id_device.data_ptr(), block_ids.data_ptr()
-        )
+        self.assertIs(fmha_params.kv_cache_block_id_device, captured_block_ids)
+        torch.testing.assert_close(captured_block_ids, block_ids)
         self.assertEqual(fmha_params.compact_indices.cpu().tolist(), [0, 1, 3, 0, 0, 0])
 
     def test_triton_paged_attention_requires_caller_scale_when_kv_scale_base_exists(
@@ -1295,6 +1581,60 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
         self.assertIsNone(kernel.call_args.args[11])
         self.assertIsNone(kernel.call_args.args[12])
         self.assertIsNone(kernel.call_args.args[13])
+
+
+@unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOp module")
+class TestAiterPrefillAttnOpPagedCudaGraphWorkspace(unittest.TestCase):
+    """Regression tests for fixed-address batch-prefill graph workspace."""
+
+    def test_repeated_prepare_keeps_captured_workspace_addresses(self):
+        from types import SimpleNamespace
+
+        cfg = _make_attn_configs(head_num=4, head_num_kv=2, head_dim=8)
+        cfg.kernel_tokens_per_block = 16
+        op = AiterPrefillAttnOpPaged(cfg)
+        device = torch.device("cuda")
+        block_table = torch.zeros(3, 4, dtype=torch.int32, device=device)
+        fmha_params = SimpleNamespace(
+            cu_seqlens_q=torch.tensor(
+                [0, 8, 16, 24], dtype=torch.int32, device=device
+            ),
+            cu_seqlens_k=torch.tensor(
+                [0, 40, 80, 120], dtype=torch.int32, device=device
+            ),
+            kv_cache_block_id_device=block_table,
+        )
+        attn_inputs = SimpleNamespace(
+            input_lengths_device=torch.full(
+                (3,), 8, dtype=torch.int32, device=device
+            ),
+            prefix_lengths_device=torch.full(
+                (3,), 32, dtype=torch.int32, device=device
+            ),
+            kv_cache_kernel_block_id_device=block_table,
+            kv_cache_block_id_device=block_table,
+        )
+
+        op.prepare_cuda_graph(fmha_params, attn_inputs)
+        captured_ptrs = {
+            "seqlen_k": op.seqlen_k_buf.data_ptr(),
+            "kv_indptr": op.kv_indptr_buf.data_ptr(),
+            "kv_page_indices": op.kv_page_indices_buf.data_ptr(),
+            "descale": op.descale_buf.data_ptr(),
+            "sanitized_block_table": op.sanitized_bt_buf.data_ptr(),
+        }
+
+        op.prepare_cuda_graph(fmha_params, attn_inputs)
+
+        replay_ptrs = {
+            "seqlen_k": op.seqlen_k_buf.data_ptr(),
+            "kv_indptr": op.kv_indptr_buf.data_ptr(),
+            "kv_page_indices": op.kv_page_indices_buf.data_ptr(),
+            "descale": op.descale_buf.data_ptr(),
+            "sanitized_block_table": op.sanitized_bt_buf.data_ptr(),
+        }
+        self.assertEqual(replay_ptrs, captured_ptrs)
 
 
 @unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
@@ -1483,6 +1823,340 @@ class TestAiterPrefillTritonCudaGraphNumerics(unittest.TestCase):
                 ):
                     self._run_replay_case(kv_cache_dtype, replay_lengths)
 
+    def test_fp8_page32_writer_reader(self):
+        self.TOKENS_PER_BLOCK = 32
+        self._run_replay_case(KvCacheDataType.FP8, self.REPLAY_LENGTH_CASES[0])
+
+
+@unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+@unittest.skipUnless(_AITER_AVAILABLE, "Requires aiter")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrapper module")
+class TestAiterGenerationPrefillCudaGraphNumerics(unittest.TestCase):
+    """MI308 generation-prefill contract with Qwen2.5-0.5B attention geometry."""
+
+    BUCKET = 64
+    MAX_REQUESTS = 4
+    HEAD_NUM = 14
+    HEAD_NUM_KV = 2
+    HEAD_DIM = 64
+    TOKENS_PER_BLOCK = 16
+    REAL_LENGTH_CASES = ([24, 32], [64], [32, 32], [16, 16, 16, 16])
+
+    def setUp(self):
+        torch.manual_seed(23)
+        self.device = torch.device("cuda")
+        self.dtype = torch.bfloat16
+        self.blocks_per_row = self.BUCKET // self.TOKENS_PER_BLOCK
+        # BlockPool reserves block 0. Real rows use unique blocks while every
+        # logical page in the positive-length padding sentinel aliases block 0,
+        # matching production generation-prefill replay.
+        real_block_table = torch.arange(
+            1,
+            1 + self.MAX_REQUESTS * self.blocks_per_row,
+            dtype=torch.int32,
+            device=self.device,
+        ).view(self.MAX_REQUESTS, self.blocks_per_row)
+        self.block_table = torch.cat(
+            (
+                real_block_table,
+                torch.zeros(
+                    (1, self.blocks_per_row),
+                    dtype=torch.int32,
+                    device=self.device,
+                ),
+            ),
+            dim=0,
+        )
+        self.num_blocks = 1 + real_block_table.numel()
+        self.poison = 17.0
+
+    def _make_inputs(self, lengths, block_table, *, is_cuda_graph):
+        inputs = _make_rope_prefill_inputs(lengths, self.device, self.dtype)
+        inputs.is_cuda_graph = is_cuda_graph
+        inputs.kv_cache_kernel_block_id = block_table.cpu().pin_memory()
+        inputs.kv_cache_kernel_block_id_device = block_table.clone()
+        inputs.kv_cache_block_id_device = inputs.kv_cache_kernel_block_id_device
+        return inputs
+
+    def _make_cache(self, *, poison=False):
+        cache = LayerKVCache()
+        cache.kv_cache_base = torch.full(
+            (
+                self.num_blocks,
+                2,
+                self.HEAD_NUM_KV,
+                self.TOKENS_PER_BLOCK,
+                self.HEAD_DIM,
+            ),
+            fill_value=self.poison if poison else 0.0,
+            dtype=self.dtype,
+            device=self.device,
+        )
+        cache.kv_scale_base = torch.empty(0, dtype=torch.float32, device=self.device)
+        return cache
+
+    def _make_qkv(self, token_num):
+        query = torch.randn(
+            token_num,
+            self.HEAD_NUM,
+            self.HEAD_DIM,
+            dtype=self.dtype,
+            device=self.device,
+        )
+        key = torch.randn(
+            token_num,
+            self.HEAD_NUM_KV,
+            self.HEAD_DIM,
+            dtype=self.dtype,
+            device=self.device,
+        )
+        value = torch.randn_like(key)
+        return _pack_qkv(query, key, value)
+
+    def _sdpa_expected(self, packed_qkv, input_lengths):
+        """Independent base-RoPE + Torch SDPA reference for real request rows."""
+
+        token_num = packed_qkv.shape[0]
+        query_width = self.HEAD_NUM * self.HEAD_DIM
+        kv_width = self.HEAD_NUM_KV * self.HEAD_DIM
+        query = packed_qkv[:, :query_width].view(
+            token_num, self.HEAD_NUM, self.HEAD_DIM
+        )
+        key = packed_qkv[:, query_width : query_width + kv_width].view(
+            token_num, self.HEAD_NUM_KV, self.HEAD_DIM
+        )
+        value = packed_qkv[:, query_width + kv_width :].view(
+            token_num, self.HEAD_NUM_KV, self.HEAD_DIM
+        )
+        query, key = _apply_base_rope(query, key, list(input_lengths))
+        cumulative_lengths = [0]
+        for length in input_lengths:
+            cumulative_lengths.append(cumulative_lengths[-1] + length)
+        cu_seqlens = torch.tensor(
+            cumulative_lengths, dtype=torch.int32, device=self.device
+        )
+        return _sdpa_reference(
+            query,
+            key,
+            value,
+            cu_seqlens,
+            cu_seqlens,
+            causal=True,
+        )
+
+    def _copy_replay_metadata(self, capture_inputs, replay_inputs):
+        capture_inputs.input_lengths.copy_(replay_inputs.input_lengths)
+        capture_inputs.sequence_lengths.copy_(replay_inputs.sequence_lengths)
+        capture_inputs.prefix_lengths.copy_(replay_inputs.prefix_lengths)
+        capture_inputs.cu_seqlens_device.copy_(replay_inputs.cu_seqlens_device)
+        capture_inputs.cu_kv_seqlens_device.copy_(replay_inputs.cu_kv_seqlens_device)
+        # Production replay metadata uses the fixed graph token capacity as the
+        # batch stride.  The eager input helper instead uses max(input_lengths),
+        # which maps later requests into the wrong captured output row.
+        token_cursor = 0
+        for batch_idx, input_length in enumerate(replay_inputs.input_lengths.tolist()):
+            offset = batch_idx * self.BUCKET - token_cursor
+            capture_inputs.padding_offset[
+                token_cursor : token_cursor + input_length
+            ].fill_(offset)
+            token_cursor += input_length
+        self.assertEqual(token_cursor, self.BUCKET)
+        capture_inputs.kv_cache_kernel_block_id.copy_(
+            replay_inputs.kv_cache_kernel_block_id
+        )
+        capture_inputs.kv_cache_kernel_block_id_device.copy_(
+            replay_inputs.kv_cache_kernel_block_id_device
+        )
+
+    def test_dynamic_request_layouts_match_eager(self):
+        cfg = _make_rope_attn_configs(
+            self.HEAD_NUM,
+            self.HEAD_NUM_KV,
+            self.HEAD_DIM,
+            self.dtype,
+            self.TOKENS_PER_BLOCK,
+        )
+        cfg.max_seq_len = 32768
+        cfg.kv_cache_dtype = KvCacheDataType.BASE
+        fmha_config = FMHAConfig()
+        fmha_config.use_triton_pa = True
+        fmha_config.use_asm_pa = True
+
+        capture_lengths = [0] * self.MAX_REQUESTS + [self.BUCKET]
+        capture_inputs = self._make_inputs(
+            capture_lengths, self.block_table, is_cuda_graph=True
+        )
+        static_qkv = self._make_qkv(self.BUCKET)
+        graph_cache = self._make_cache()
+        graph_impl = AiterPrefillImplTriton(
+            cfg, capture_inputs, fmha_config=fmha_config
+        )
+        self.assertEqual(graph_impl.backend, "triton")
+        self.assertTrue(graph_impl.supports_generation_prefill_cuda_graph())
+        # CK batch backend is not prepared.
+        self.assertIsNone(graph_impl.fmha_params)
+        params = graph_impl.triton_fmha_params
+        captured_tensors = {
+            name: getattr(params, name)
+            for name in (
+                "cu_seqlens_q",
+                "cu_seqlens_k",
+                "prefill_seqlen_k_int32",
+                "prefix_lengths",
+                "kv_cache_block_id_device",
+                "attention_output",
+            )
+        }
+        captured_pointers = {
+            name: tensor.data_ptr() for name, tensor in captured_tensors.items()
+        }
+
+        warmup_stream = torch.cuda.Stream()
+        warmup_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup_stream):
+            graph_impl.forward(static_qkv, graph_cache, layer_idx=0)
+        torch.cuda.current_stream().wait_stream(warmup_stream)
+        graph_cache.kv_cache_base.zero_()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_output = graph_impl.forward(static_qkv, graph_cache, layer_idx=0)
+
+        # Revisit the first request layout with different physical blocks. This
+        # also exercises consecutive replays in the single-layout long-bucket case.
+        replay_cases = (*self.REAL_LENGTH_CASES, self.REAL_LENGTH_CASES[0])
+        for replay_index, real_lengths in enumerate(replay_cases):
+            with self.subTest(replay_index=replay_index, real_lengths=real_lengths):
+                # Keep the captured shape and block-0 sentinel, but change every
+                # real row's physical block IDs before each replay.
+                replay_block_table = self.block_table.clone()
+                replay_block_table[: self.MAX_REQUESTS] = torch.roll(
+                    self.block_table[: self.MAX_REQUESTS].reshape(-1),
+                    shifts=replay_index + 1,
+                ).view(self.MAX_REQUESTS, self.blocks_per_row)
+                real_token_num = sum(real_lengths)
+                sentinel_len = self.BUCKET - real_token_num
+                replay_lengths = (
+                    list(real_lengths)
+                    + [0] * (self.MAX_REQUESTS - len(real_lengths))
+                    + [sentinel_len]
+                )
+                replay_inputs = self._make_inputs(
+                    replay_lengths, replay_block_table, is_cuda_graph=False
+                )
+
+                real_qkv = self._make_qkv(real_token_num)
+                eager_inputs = self._make_inputs(
+                    list(real_lengths),
+                    replay_block_table[: len(real_lengths)],
+                    is_cuda_graph=False,
+                )
+                eager_cache = self._make_cache(poison=True)
+                eager_impl = AiterPrefillImplTriton(
+                    cfg, eager_inputs, fmha_config=fmha_config
+                )
+                eager_output = eager_impl.forward(
+                    real_qkv, eager_cache, layer_idx=0
+                ).clone()
+                expected = self._sdpa_expected(real_qkv, real_lengths)
+                torch.testing.assert_close(
+                    eager_output.reshape(real_token_num, -1),
+                    expected,
+                    atol=0.02,
+                    rtol=0.02,
+                )
+
+                static_qkv[:real_token_num].copy_(real_qkv)
+                if sentinel_len:
+                    static_qkv[real_token_num:].copy_(self._make_qkv(sentinel_len))
+                graph_cache.kv_cache_base.fill_(self.poison)
+                self._copy_replay_metadata(capture_inputs, replay_inputs)
+                graph_impl.prepare_cuda_graph(capture_inputs)
+                for name, tensor in captured_tensors.items():
+                    self.assertIs(getattr(params, name), tensor)
+                    self.assertEqual(tensor.data_ptr(), captured_pointers[name], name)
+                graph.replay()
+                torch.cuda.synchronize()
+
+                torch.testing.assert_close(
+                    params.kv_cache_block_id_device, replay_block_table
+                )
+                self.assertEqual(
+                    params.cu_seqlens_q.cpu().tolist(),
+                    [0] + list(accumulate(replay_lengths)),
+                )
+                self.assertEqual(
+                    params.prefill_seqlen_k_int32.cpu().tolist(), replay_lengths
+                )
+                self.assertEqual(
+                    params.prefix_lengths.cpu().tolist(), [0] * len(replay_lengths)
+                )
+
+                torch.testing.assert_close(
+                    graph_output[:real_token_num].reshape(real_token_num, -1),
+                    expected.reshape(real_token_num, -1),
+                    atol=0.02,
+                    rtol=0.02,
+                )
+                real_used_blocks = {
+                    int(replay_block_table[row, column].item())
+                    for row, length in enumerate(real_lengths)
+                    for column in range(
+                        (length + self.TOKENS_PER_BLOCK - 1) // self.TOKENS_PER_BLOCK
+                    )
+                }
+                sentinel_used_blocks = {
+                    int(replay_block_table[self.MAX_REQUESTS, column].item())
+                    for column in range(
+                        (sentinel_len + self.TOKENS_PER_BLOCK - 1)
+                        // self.TOKENS_PER_BLOCK
+                    )
+                }
+                poison_block = torch.full_like(
+                    graph_cache.kv_cache_base[0], self.poison
+                )
+
+                for block_id in real_used_blocks:
+                    self.assertTrue(
+                        torch.equal(
+                            graph_cache.kv_cache_base[block_id],
+                            eager_cache.kv_cache_base[block_id],
+                        ),
+                        "generation-prefill HIP Graph wrote different real-request KV data",
+                    )
+
+                # Zero-length padding rows, unused real-row capacity, and
+                # unused sentinel columns must remain isolated. Block 0 is the
+                # only legal sink for every padding-token KV write.
+                untouched_blocks = (
+                    set(range(self.num_blocks))
+                    - real_used_blocks
+                    - sentinel_used_blocks
+                )
+                for block_id in untouched_blocks:
+                    self.assertTrue(
+                        torch.equal(graph_cache.kv_cache_base[block_id], poison_block),
+                        f"padding/sentinel replay polluted block {block_id}",
+                    )
+                for block_id in sentinel_used_blocks:
+                    self.assertFalse(
+                        torch.equal(graph_cache.kv_cache_base[block_id], poison_block),
+                        f"reserved dummy block {block_id} was not written",
+                    )
+
+
+@unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+@unittest.skipUnless(_AITER_AVAILABLE, "Requires aiter")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrapper module")
+class TestAiterGenerationPrefillCudaGraphLongBucketNumerics(
+    TestAiterGenerationPrefillCudaGraphNumerics
+):
+    """Exercise unified_attention's >512-token graph path against Torch SDPA."""
+
+    BUCKET = 768
+    MAX_REQUESTS = 1
+    REAL_LENGTH_CASES = ([600],)
+
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOp module")
 class TestCompactGatherReshape(unittest.TestCase):
@@ -1493,10 +2167,9 @@ class TestCompactGatherReshape(unittest.TestCase):
     block_table sanitize/pad logic correctly fills padding columns.
 
     These tests run on CPU (no aiter kernel needed) — they only exercise the
-    tensor reshape / gather / sanitize logic. End-to-end kernel coverage
-    (including the actual mha_batch_prefill_func call with real kv_cache_base
-    and block_table) is provided by ROCm smoke tests that exercise the full
-    prefill-with-prefix path on GPU.
+    tensor reshape / gather / sanitize logic. End-to-end GPU coverage is
+    provided above for both prefix-cache prefill and no-prefix generation-prefill
+    HIP Graph replay.
     """
 
     def _make_op(
@@ -1514,7 +2187,7 @@ class TestCompactGatherReshape(unittest.TestCase):
         )
         if kv_cache_dtype is not None:
             cfg.kv_cache_dtype = kv_cache_dtype
-        return AiterPrefillAttnOp(cfg, v1_kv_layout=True)
+        return AiterPrefillAttnOp(cfg, linear_v=True)
 
     def _make_kv_cache_5d(self, num_blocks, hk, ps, hd, dtype=torch.float16):
         """Create a 5D KV cache: [num_blocks, 2, hk, ps, hd]."""
@@ -1565,16 +2238,15 @@ class TestCompactGatherReshape(unittest.TestCase):
         # for CK speculative prefetch safety (no dedup since torch.unique removed).
         self.assertEqual(k_compact.shape[0], orig_indices.numel() + 1)
 
-    def test_kv_cache_dtype_controls_compact_mode(self):
-        cases = [
-            (KvCacheDataType.BASE, torch.float16, True),
-            (KvCacheDataType.FP8, torch.float8_e4m3fn, False),
-        ]
-        for kv_cache_dtype, expected_torch_dtype, expected_use_compact in cases:
+    def test_kv_cache_dtype_preserves_linear_contract(self):
+        for kv_cache_dtype, expected_torch_dtype in (
+            (KvCacheDataType.BASE, torch.float16),
+            (KvCacheDataType.FP8, torch.float8_e4m3fn),
+        ):
             with self.subTest(kv_cache_dtype=kv_cache_dtype):
                 op = self._make_op(kv_cache_dtype=kv_cache_dtype)
                 self.assertEqual(op.kv_cache_torch_dtype, expected_torch_dtype)
-                self.assertEqual(op.use_compact, expected_use_compact)
+                self.assertTrue(op.linear_v)
 
     # ---- 5D cache path ----------------------------------------------------
 
@@ -1595,18 +2267,7 @@ class TestCompactGatherReshape(unittest.TestCase):
         op = self._make_op()
         kv = self._make_kv_cache_5d(16, 4, 16, 128)
         bt = torch.tensor([[0, 0, 1], [0, 2, 2]], dtype=torch.int32)
-        block_indices, compact_bt, k_buf, v_buf = self._make_compact_bufs(
-            bt, 4, 16, 128
-        )
-        k_compact, v_compact = op._gather_and_reshape_kv_compact(
-            kv, block_indices, k_buf, v_buf
-        )
-        k_full, _ = op._reshape_kv_cache_vectorized(kv)
-        orig_indices = bt.reshape(-1).to(torch.int64)
-        torch.testing.assert_close(
-            k_compact[compact_bt.reshape(-1).to(torch.int64)], k_full[orig_indices]
-        )
-        self.assertEqual(k_compact.shape[0], bt.numel() + 1)
+        self._assert_compact_equiv(op, kv, bt)
 
     def test_5d_non_contiguous_blocks(self):
         """Block indices are sparse across a large pool."""
@@ -1633,18 +2294,7 @@ class TestCompactGatherReshape(unittest.TestCase):
         op = self._make_op()
         kv = self._make_kv_cache_2d(16, 4, 16, 128)
         bt = torch.tensor([[0, 0, 1], [0, 2, 2]], dtype=torch.int32)
-        block_indices, compact_bt, k_buf, v_buf = self._make_compact_bufs(
-            bt, 4, 16, 128
-        )
-        k_compact, v_compact = op._gather_and_reshape_kv_compact(
-            kv, block_indices, k_buf, v_buf
-        )
-        k_full, _ = op._reshape_kv_cache_vectorized(kv)
-        orig_indices = bt.reshape(-1).to(torch.int64)
-        torch.testing.assert_close(
-            k_compact[compact_bt.reshape(-1).to(torch.int64)], k_full[orig_indices]
-        )
-        self.assertEqual(k_compact.shape[0], bt.numel() + 1)
+        self._assert_compact_equiv(op, kv, bt)
 
     def test_2d_oversized_stride_truncates_to_prefix(self):
         op = self._make_op()
@@ -1721,8 +2371,49 @@ class TestCompactGatherReshape(unittest.TestCase):
         ):
             op._forward_paged(q, kv_cache, fmha_params)
 
-        self.assertFalse(op.use_compact)
+        self.assertTrue(op.linear_v)
         self.assertEqual(full_reshape.call_count, 1)
+
+    def test_paged_prefill_forwards_noncausal_semantics(self):
+        from types import SimpleNamespace
+
+        cfg = _make_attn_configs(
+            head_num=2, head_num_kv=1, head_dim=8, tokens_per_block=8
+        )
+        cfg.is_causal = False
+        op = AiterPrefillAttnOp(cfg)
+        query = torch.zeros(2, 2, 8, dtype=torch.float16)
+        cache = SimpleNamespace(
+            kv_cache_base=torch.zeros(2, 2, 1, 8, 8, dtype=torch.float16)
+        )
+        block_table = torch.tensor([[0]], dtype=torch.int32)
+        params = SimpleNamespace(
+            cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
+            prefill_seqlen_k_int32=torch.tensor([2], dtype=torch.int32),
+            max_seqlen_q=2,
+            max_seqlen_k=2,
+            token_q_num=2,
+            sanitized_block_table=block_table,
+        )
+        k_cache = torch.zeros(2, 1, 1, 8, 8, dtype=torch.float16)
+        v_cache = torch.zeros(2, 1, 1, 8, 8, dtype=torch.float16)
+        seen_causal = []
+
+        def fake_prefill(*args, **kwargs):
+            seen_causal.append(kwargs["causal"])
+            return torch.zeros_like(query)
+
+        prefill_func = (
+            "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter."
+            "aiter.mha_batch_prefill_func"
+        )
+        with patch.object(
+            op, "_reshape_kv_cache_vectorized", return_value=(k_cache, v_cache)
+        ), patch(prefill_func, side_effect=fake_prefill):
+            output = op._forward_paged(query, cache, params)
+
+        self.assertEqual(tuple(output.shape), (2, 16))
+        self.assertEqual(seen_causal, [False])
 
     # ---- block table sanitization ------------------------------------------
 
@@ -2663,7 +3354,7 @@ class TestAiterPrefillImplMropePositionIds(unittest.TestCase):
         self._check_mrope_matches_reference(AiterPrefillImplNonAsm)
 
 
-@unittest.skipUnless(_is_rocm() and _OPS_IMPORTABLE, "Requires ROCm attention wrappers")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrappers")
 class TestVLayoutContract(unittest.TestCase):
     def _make_case(self, head_dim: int, page: int):
         config = _make_attn_configs(8, 2, head_dim, page)
@@ -2671,6 +3362,8 @@ class TestVLayoutContract(unittest.TestCase):
         config.dtype = torch.bfloat16
         inputs = PyAttentionInputs()
         inputs.is_prefill = True
+        inputs.prefix_lengths = torch.ones(1, dtype=torch.int32)
+        inputs.kv_cache_kernel_block_id = torch.ones(1, 1, dtype=torch.int32)
         return config, inputs
 
     def _decode_flags(self, aiter: bool, asm: bool, triton: bool):
@@ -2678,63 +3371,63 @@ class TestVLayoutContract(unittest.TestCase):
         flags.use_aiter_pa, flags.use_asm_pa, flags.use_triton_pa = aiter, asm, triton
         return flags
 
-    def test_invalid_geometry(self):
-        for head, page, dtype, error in (
-            (100, 32, KvCacheDataType.BASE, "V geometry"),
-            (128, 8, KvCacheDataType.FP8, "width=16"),
-            (128, 12, KvCacheDataType.BASE, "V geometry"),
+    def test_backend_flag_layout_contract(self):
+        for head, page, dtype, flags, error in (
+            (100, 32, KvCacheDataType.BASE, FMHAConfig(), "invalid V geometry"),
+            (128, 8, KvCacheDataType.FP8, FMHAConfig(), "invalid V geometry"),
+            (
+                128,
+                16,
+                KvCacheDataType.BASE,
+                self._decode_flags(False, False, False),
+                "every ROCm",
+            ),
+            (
+                256,
+                32,
+                KvCacheDataType.BASE,
+                self._decode_flags(True, True, False),
+                "layout mismatch",
+            ),
         ):
+            config, inputs = self._make_case(head, page)
+            inputs.is_prefill = False
+            config.kv_cache_dtype = dtype
             with self.subTest(head=head, page=page, dtype=dtype):
-                config, inputs = self._make_case(head, page)
-                config.kv_cache_dtype = dtype
                 with self.assertRaisesRegex(ValueError, error):
-                    validate_v_layout(config, inputs, FMHAConfig())
+                    validate_v_layout(config, inputs, flags)
 
-    def test_factory_rejects_layout_mismatch(self):
-        config, inputs = self._make_case(256, 16)
+        config, inputs = self._make_case(256, 32)
         inputs.is_prefill = False
-        flags = self._decode_flags(aiter=True, asm=True, triton=False)
-        with self.assertRaisesRegex(ValueError, "layout mismatch"):
-            attn_factory.get_fmha_impl(config, None, inputs, fmha_config=flags)
-
-    def test_layout_mismatch_accepted_when_page_equals_width(self):
-        config, inputs = self._make_case(256, 8)
-        inputs.is_prefill = False
-        validate_v_layout(
-            config, inputs, self._decode_flags(aiter=False, asm=True, triton=False)
+        config.kv_cache_dtype = KvCacheDataType.FP8
+        self.assertTrue(
+            validate_v_layout(config, inputs, self._decode_flags(True, False, True))
         )
 
-    def test_fp8_no_asm_requires_page_equals_width(self):
-        config, inputs = self._make_case(128, 32)
-        config.kv_cache_dtype, inputs.is_prefill = KvCacheDataType.FP8, False
-        flags = self._decode_flags(aiter=True, asm=False, triton=False)
-        with self.assertRaisesRegex(ValueError, "layout mismatch"):
-            validate_v_layout(config, inputs, flags)
-        config.kernel_tokens_per_block = 16
-        validate_v_layout(config, inputs, flags)
-
-    def test_constructor_fallback_is_strict_only_with_layout_validator(self):
+    def test_constructor_failure_fallback_respects_fatal_device_faults(self):
         class BrokenImpl:
             accepts_fmha_config = False
+            error = torch.cuda.OutOfMemoryError("out of memory")
             support = support_parallelism_config = staticmethod(lambda *_: True)
 
             def __init__(self, *_):
-                raise RuntimeError("constructor failed")
+                raise type(self).error
 
         class WorkingImpl(BrokenImpl):
             def __init__(self, *_):
                 pass
 
-        _, inputs = self._make_case(128, 16)
+        config, inputs = self._make_case(128, 16)
+        config.need_rope_kv_cache = False
         inputs.is_prefill = False
         with patch.object(attn_factory, "DECODE_MHA_IMPS", [BrokenImpl, WorkingImpl]):
-            with patch.object(attn_factory, "VALIDATE_FMHA_CONFIG", None):
-                with self.assertLogs(level="WARNING"):
-                    impl = attn_factory.get_fmha_impl(AttentionConfigs(), None, inputs)
-                self.assertIsInstance(impl, WorkingImpl)
-            with patch.object(attn_factory, "VALIDATE_FMHA_CONFIG", lambda *_: True):
-                with self.assertRaisesRegex(RuntimeError, "constructor failed"):
-                    attn_factory.get_fmha_impl(AttentionConfigs(), None, inputs)
+            with self.assertLogs(level="WARNING"):
+                impl = attn_factory.get_fmha_impl(config, None, inputs)
+            self.assertIsInstance(impl, WorkingImpl)
+
+            BrokenImpl.error = RuntimeError("HIP error: illegal memory access")
+            with self.assertRaisesRegex(RuntimeError, "illegal memory access"):
+                attn_factory.get_fmha_impl(config, None, inputs)
 
 
 if __name__ == "__main__":

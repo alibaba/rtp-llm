@@ -14,6 +14,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeSt
 class RocmBf16PureTPStrategy(MoeStrategy):
     """ROCm BF16 (no quantization) pure TP strategy"""
 
+    strategy_name = "no_quant_cpp"
+
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.rocm_moe import (
             RocmExpertsBf16,

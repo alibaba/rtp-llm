@@ -5,123 +5,71 @@
 
 namespace rtp_llm {
 
-namespace {
-
-size_t dtypeSize(TensorPB::DataType dtype) {
-    switch (dtype) {
-        case TensorPB::FP32:
-            return sizeof(float);
-        case TensorPB::INT32:
-            return sizeof(int32_t);
-        case TensorPB::FP16:
-            return sizeof(c10::Half);
-        case TensorPB::BF16:
-            return sizeof(c10::BFloat16);
-        default:
-            throw std::runtime_error("Unsupported TensorPB data type.");
-    }
-}
-
-size_t dataBytes(const TensorPB& tensor_pb) {
-    switch (tensor_pb.data_type()) {
-        case TensorPB::FP32:
-            return tensor_pb.fp32_data().size();
-        case TensorPB::INT32:
-            return tensor_pb.int32_data().size();
-        case TensorPB::FP16:
-            return tensor_pb.fp16_data().size();
-        case TensorPB::BF16:
-            return tensor_pb.bf16_data().size();
-        default:
-            throw std::runtime_error("Unsupported TensorPB data type.");
-    }
-}
-
-torch::ScalarType pbDtypeToTorch(TensorPB::DataType dtype) {
-    switch (dtype) {
-        case TensorPB::FP32:
-            return torch::kFloat32;
-        case TensorPB::INT32:
-            return torch::kInt32;
-        case TensorPB::FP16:
-            return torch::kFloat16;
-        case TensorPB::BF16:
-            return torch::kBFloat16;
-        default:
-            throw std::runtime_error("Unsupported TensorPB data type.");
-    }
-}
-
-}  // namespace
-
 torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
     std::vector<int64_t> shape(tensor_pb.shape().begin(), tensor_pb.shape().end());
-
-    int64_t numel = 1;
-    for (auto dim : shape) {
-        if (dim < 0) {
-            throw std::runtime_error("TensorPB shape dimension must be non-negative, got "
-                                     + std::to_string(dim));
-        }
-        if (dim != 0 && numel > std::numeric_limits<int64_t>::max() / dim) {
-            throw std::runtime_error("TensorPB shape numel overflow");
-        }
-        numel *= dim;
-    }
-
-    // Default-constructed / empty TensorPB has no shape and no data. Do not
-    // treat it as a scalar; return an empty 1-D tensor. Also handle explicitly
-    // zero-volume tensors (e.g., shape {0}).
-    if (shape.empty() && dataBytes(tensor_pb) == 0) {
-        return torch::empty({0});
-    }
-    if (numel == 0) {
-        auto options = torch::TensorOptions().dtype(pbDtypeToTorch(tensor_pb.data_type()));
-        return torch::empty(shape, options);
-    }
-
-    // Validate that the declared payload size matches shape * dtype size before
-    // reading the data pointer.
-    const size_t expected_bytes = static_cast<size_t>(numel) * dtypeSize(tensor_pb.data_type());
-    const size_t actual_bytes   = dataBytes(tensor_pb);
-    if (actual_bytes != expected_bytes) {
-        throw std::runtime_error("TensorPB data size mismatch: expected "
-                                 + std::to_string(expected_bytes) + " bytes, got "
-                                 + std::to_string(actual_bytes) + " bytes for shape ["
-                                 + [&shape]() {
-                                       std::string s;
-                                       for (size_t i = 0; i < shape.size(); ++i) {
-                                           if (i) s += ", ";
-                                           s += std::to_string(shape[i]);
-                                       }
-                                       return s;
-                                   }()
-                                 + "] and dtype " + std::to_string(tensor_pb.data_type()) + ".");
-    }
-
-    void*                data_ptr = nullptr;
-    auto                 options  = torch::TensorOptions().dtype(pbDtypeToTorch(tensor_pb.data_type()));
+    const std::string*   payload      = nullptr;
+    c10::ScalarType      scalar_type  = torch::kFloat32;
+    size_t               element_size = 0;
     switch (tensor_pb.data_type()) {
         case TensorPB::FP32: {
-            data_ptr = const_cast<char*>(tensor_pb.fp32_data().data());
+            payload      = &tensor_pb.fp32_data();
+            scalar_type  = torch::kFloat32;
+            element_size = sizeof(float);
             break;
         }
         case TensorPB::INT32: {
-            data_ptr = const_cast<char*>(tensor_pb.int32_data().data());
+            payload      = &tensor_pb.int32_data();
+            scalar_type  = torch::kInt32;
+            element_size = sizeof(int32_t);
             break;
         }
         case TensorPB::FP16: {
-            data_ptr = const_cast<char*>(tensor_pb.fp16_data().data());
+            payload      = &tensor_pb.fp16_data();
+            scalar_type  = torch::kFloat16;
+            element_size = sizeof(c10::Half);
             break;
         }
         case TensorPB::BF16: {
-            data_ptr = const_cast<char*>(tensor_pb.bf16_data().data());
+            payload      = &tensor_pb.bf16_data();
+            scalar_type  = torch::kBFloat16;
+            element_size = sizeof(c10::BFloat16);
             break;
         }
         default:
             throw std::runtime_error("Unsupported TensorPB data type.");
     }
-    return torch::from_blob(data_ptr, shape, options).clone();
+
+    if (shape.empty() && payload->empty()) {
+        return torch::empty({0}, torch::TensorOptions().dtype(scalar_type));
+    }
+
+    size_t numel = 1;
+    for (int64_t dim : shape) {
+        if (dim < 0) {
+            throw std::runtime_error("TensorPB shape contains a negative dimension.");
+        }
+        const size_t unsigned_dim = static_cast<size_t>(dim);
+        if (unsigned_dim > 0 && numel > std::numeric_limits<size_t>::max() / unsigned_dim) {
+            throw std::runtime_error("TensorPB element count overflows.");
+        }
+        if (unsigned_dim > 0 && numel > static_cast<size_t>(std::numeric_limits<int64_t>::max()) / unsigned_dim) {
+            throw std::runtime_error("TensorPB element count exceeds the tensor index range.");
+        }
+        numel *= unsigned_dim;
+    }
+    if (element_size > 0 && numel > std::numeric_limits<size_t>::max() / element_size) {
+        throw std::runtime_error("TensorPB byte size overflows.");
+    }
+    const size_t expected_bytes = numel * element_size;
+    if (payload->size() != expected_bytes) {
+        throw std::runtime_error("TensorPB payload size does not match shape and dtype.");
+    }
+    if (numel == 0) {
+        return torch::empty(shape, torch::TensorOptions().dtype(scalar_type));
+    }
+
+    void* data_ptr = const_cast<char*>(payload->data());
+    return torch::from_blob(data_ptr, shape, torch::TensorOptions().dtype(scalar_type)).clone();
 }
 
 void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const torch::Tensor& tensor) {

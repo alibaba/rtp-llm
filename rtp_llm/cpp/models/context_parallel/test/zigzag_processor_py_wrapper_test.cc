@@ -84,6 +84,30 @@ zigzagHandleInputsWithHidden(const torch::Tensor& total_input_tokens,
                            cp_params.prefill_shuffle_indices.cpu().clone());
 }
 
+// Binds the caller's ``input_lengths`` storage directly (no clone): handleInputs
+// must publish the rank-local chunk on ``model_input`` without rewriting the
+// caller's tensor, which MtpExecutor snapshots to rebuild the global batch for
+// the draft pass.
+std::tuple<torch::Tensor, torch::Tensor> zigzagHandleInputsCallerLengths(const torch::Tensor& total_input_tokens,
+                                                                         const torch::Tensor& input_lengths,
+                                                                         int                  cp_rank,
+                                                                         int                  cp_size) {
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_rank = cp_rank;
+    parallelism_config.tp_size = cp_size;
+    ZigZagProcessor processor(parallelism_config, /*split_hidden_states=*/false);
+
+    GptModelInputs model_input;
+    model_input.combo_tokens     = total_input_tokens.contiguous();
+    model_input.input_lengths    = input_lengths;
+    model_input.sequence_lengths = torch::empty({0}, torch::TensorOptions(torch::kInt32));
+
+    torch_ext::PyContextParallelParams cp_params;
+    processor.handleInputs(model_input, cp_params);
+
+    return std::make_tuple(input_lengths.cpu().clone(), model_input.input_lengths.cpu().clone());
+}
+
 // Wrapper for ZigZagProcessor::computeLocalLastHidden — this rank's contribution
 // to the gathered last-token hidden (no comm). The Python test sums these across
 // ranks to simulate the all-reduce in handleOutputsLastHidden.
@@ -206,6 +230,14 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
           py::arg("cp_size"),
           py::arg("split_hidden_states") = true,
           "Run CP handleInputs and return split input tokens, lengths, hidden states, and shuffle indices");
+
+    m.def("handle_inputs_caller_lengths",
+          &zigzagHandleInputsCallerLengths,
+          py::arg("total_input_tokens"),
+          py::arg("input_lengths"),
+          py::arg("cp_rank"),
+          py::arg("cp_size"),
+          "Run CP handleInputs on a caller-owned input_lengths tensor and return (caller view, published view)");
 
     m.def("compute_local_last_hidden",
           &zigzagComputeLocalLastHidden,

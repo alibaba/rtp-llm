@@ -22,6 +22,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 class CudaW4a8Int4PerChannelNoDPStrategy(MoeStrategy):
     """CUDA W4A8 INT4 PerChannel single GPU strategy"""
 
+    strategy_name = "w4a8_int4_per_channel_no_dp"
+
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         resolver = MoeConfigResolver()
@@ -30,7 +32,10 @@ class CudaW4a8Int4PerChannelNoDPStrategy(MoeStrategy):
             quant_method
             in ("W4A8_INT4_PER_CHANNEL", "W4A8_INT4_PER_CHANNEL_COMPRESSED")
         )
-        checker.check(config.moe_strategy == "w4a8_int4_per_channel_no_dp" or config.moe_strategy == "auto")
+        checker.check(
+            config.moe_strategy == "w4a8_int4_per_channel_no_dp"
+            or config.moe_strategy == "auto"
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_w4a8_moe import (
@@ -54,6 +59,8 @@ class CudaW4a8Int4PerChannelNoDPStrategy(MoeStrategy):
 class CudaW4a8Int4PerChannelEpLowLatencyStrategy(MoeStrategy):
     """CUDA W4A8 INT4 PerChannel EP low latency strategy"""
 
+    strategy_name = "w4a8_int4_per_channel_ep_low_latency"
+
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         resolver = MoeConfigResolver()
@@ -62,7 +69,10 @@ class CudaW4a8Int4PerChannelEpLowLatencyStrategy(MoeStrategy):
             quant_method
             in ("W4A8_INT4_PER_CHANNEL", "W4A8_INT4_PER_CHANNEL_COMPRESSED")
         )
-        checker.check(config.moe_strategy == "w4a8_int4_per_channel_ep_low_latency" or config.moe_strategy == "auto")
+        checker.check(
+            config.moe_strategy == "w4a8_int4_per_channel_ep_low_latency"
+            or config.moe_strategy == "auto"
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_w4a8_moe import (
@@ -86,6 +96,8 @@ class CudaW4a8Int4PerChannelEpLowLatencyStrategy(MoeStrategy):
 class CudaW4a8Int4PerChannelEpNormalStrategy(MoeStrategy):
     """CUDA W4A8 INT4 PerChannel EP normal mode strategy"""
 
+    strategy_name = "w4a8_int4_per_channel_ep_normal"
+
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         resolver = MoeConfigResolver()
@@ -94,7 +106,10 @@ class CudaW4a8Int4PerChannelEpNormalStrategy(MoeStrategy):
             quant_method
             in ("W4A8_INT4_PER_CHANNEL", "W4A8_INT4_PER_CHANNEL_COMPRESSED")
         )
-        checker.check(config.moe_strategy == "w4a8_int4_per_channel_ep_normal" or config.moe_strategy == "auto")
+        checker.check(
+            config.moe_strategy == "w4a8_int4_per_channel_ep_normal"
+            or config.moe_strategy == "auto"
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_w4a8_moe import (

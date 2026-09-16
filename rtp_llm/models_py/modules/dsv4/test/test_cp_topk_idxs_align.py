@@ -1,7 +1,7 @@
 """Phase D: lock down the CP B=1 fresh-prefill alignment between
 ``_get_window_topk_idxs_varlen`` and the all-gathered ``kv_full[seq_len_full]``.
 
-Loads the function via importlib (avoids the heavyweight rtp_llm package
+Loads only the helper functions from their AST (avoids the heavyweight rtp_llm package
 init / .so binding) so the test stays a pure CPU unit test.
 
 The contract under verification:
@@ -14,46 +14,29 @@ The contract under verification:
   i.e. exactly the global flat indices into ``kv_full``.
 """
 
-import importlib.util
-import sys
-import types
+import ast
+from pathlib import Path
 
 import torch
 
 
 def _load_attention_helper():
-    # Stub the package chain so attention.py's relative imports don't drag
-    # in the .so-bound rtp_llm root. We only need `_get_window_topk_idxs_varlen`
-    # which depends on torch + torch.nn.functional alone.
-    pkg_root = "rtp_llm"
-    if pkg_root not in sys.modules:
-        for n in [
-            "rtp_llm",
-            "rtp_llm.models_py",
-            "rtp_llm.models_py.modules",
-            "rtp_llm.models_py.modules.dsv4",
-        ]:
-            sys.modules[n] = types.ModuleType(n)
-    # Inline lift just the helpers from the source file (avoids importing
-    # fp8/attention.py's body which pulls in compute_ops etc.).
-    src_path = "rtp_llm/models_py/modules/dsv4/fp8/attention.py"
-    with open(src_path) as f:
-        src = f.read()
-    flat_start = src.index("def _flat_1d(")
-    flat_end = src.index("\n_V4_FP8_BLOCK_CFG", flat_start)
-    start = src.index("def _get_window_topk_idxs_varlen(")
-    # Find the next top-level "def "/"class " to bound the function
-    end = src.index("\nclass SwaPrefillMeta", start)
-    snippet = (
-        "import torch\n"
-        "import torch.nn.functional as F\n"
-        + src[flat_start:flat_end]
-        + "\n"
-        + src[start:end]
+    src_path = Path(__file__).resolve().parents[1] / "fp8" / "attention.py"
+    tree = ast.parse(src_path.read_text(), filename=str(src_path))
+    required = {"_flat_1d", "_get_window_topk_idxs_varlen"}
+    helpers = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in required
+    ]
+    if {node.name for node in helpers} != required:
+        raise RuntimeError("attention source is missing the CP top-k helpers")
+    namespace = {"torch": torch}
+    exec(
+        compile(ast.Module(body=helpers, type_ignores=[]), str(src_path), "exec"),
+        namespace,
     )
-    mod = types.ModuleType("varlen_topk_helper")
-    exec(compile(snippet, "<varlen_topk_helper>", "exec"), mod.__dict__)
-    return mod._get_window_topk_idxs_varlen
+    return namespace["_get_window_topk_idxs_varlen"]
 
 
 _get_window_topk_idxs_varlen = _load_attention_helper()

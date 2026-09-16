@@ -10,18 +10,18 @@ Two RoPE bases per model:
 """
 
 import math
-from typing import Dict, Optional, Tuple
+import weakref
+from typing import Optional, Tuple
 
 import torch
 
-# Process-local memoization keyed by (params, device). All DSV4 compressor
-# layers compute identical freqs_cis (they share rope params), so a single
-# shared tensor replaces what was 61 distinct CPU + 61 distinct GPU copies
-# during model init. Cascade: identical id(freqs_cis) → `_ensure_cos_sin_cache`
-# in compressor.py dedupes the derived 256 MiB cos_sin_cache (91× → 1×).
-_FREQS_CIS_CACHE: Dict[
+# Process-local memoization keyed by (params, device). Weak values let active
+# model modules share one tensor while ensuring a model reload can reclaim the
+# old device allocation once its last user is gone. Tensor-owning modules keep
+# normal strong references, so eviction cannot invalidate a running model.
+_FREQS_CIS_CACHE: weakref.WeakValueDictionary[
     Tuple[int, int, int, float, float, int, int, Optional[str]], torch.Tensor
-] = {}
+] = weakref.WeakValueDictionary()
 
 
 def precompute_freqs_cis(

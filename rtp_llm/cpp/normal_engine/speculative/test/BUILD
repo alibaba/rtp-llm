@@ -7,9 +7,9 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
-cc_import(
+alias(
     name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+    actual = "@torch//:torch",
 )
 
 cuda13_torch_link_deps = select({
@@ -35,11 +35,12 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
-    # CPU-only logic but normal_engine links libtorch_cuda; H20 host needed for loader.
+    # CPU-only logic, but normal_engine links libtorch_cuda, so the loader needs a
+    # CUDA host. Any generic CUDA worker suffices (default gpu=gpu_cuda12) — no H20.
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(

@@ -30,16 +30,16 @@ SMOKE_FRAMEWORK_DIR = REPO_ROOT / "rtp_llm" / "test" / "smoke_framework"
 
 EXPECTED_OSS_SUITE_COUNTS = {
     "cuda_remote_cache": 9,
-    "h20_dense": 8,
+    "h20_dense": 10,
     "h20_eagle": 6,
     "h20_grammar_heavy": 2,
     "h20_kimi_linear": 6,
     "h20_mla": 15,
-    "h20_moe": 11,
+    "h20_moe": 12,
     "h20_next": 17,
     "h20_vl": 5,
     "h20_jit_cache": 1,
-    "rocm_basic": 3,
+    "rocm_basic": 4,
     "rocm_dense": 5,
     "rocm_eagle": 2,
     "rocm_jit_cache": 1,
@@ -51,11 +51,14 @@ EXPECTED_OSS_SUITE_COUNTS = {
     "sm100_dense": 3,
     "sm100_eval": 1,
     "sm100_moe": 9,
-    "sm120_basic": 6,
+    "sm120_basic": 8,
     "sm8x_basic": 9,
 }
 
 EXPECTED_INTERNAL_SUITE_COUNTS = {
+    "cuda13_arm": 5,
+    "cuda13_x86": 2,
+    "cuda13_flexlb": 2,
     "h20_dense_internal": 1,
     "ppu_basic": 8,
     "ppu_pd": 8,
@@ -66,15 +69,15 @@ EXPECTED_INTERNAL_SUITE_COUNTS = {
 }
 
 EXPECTED_OSS_PROFILE_COUNTS = {
-    "smoke_h20_light_oss": 14,
-    "smoke_h20_full_oss": 57,
+    "smoke_h20_light_oss": 16,
+    "smoke_h20_full_oss": 58,
     "smoke_sm8x_light_oss": 9,
     "smoke_sm8x_full_oss": 9,
-    "smoke_rocm_oss": 25,
+    "smoke_rocm_oss": 26,
     "smoke_rocm_qwen35_mtp_manual": 1,
     "smoke_sm100_oss": 12,
     "smoke_sm100_eval_oss": 1,
-    "smoke_sm120_oss": 6,
+    "smoke_sm120_oss": 8,
 }
 
 LIGHT_SUITES = {

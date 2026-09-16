@@ -34,7 +34,8 @@ public:
                                 const std::shared_ptr<KVCacheAllocator>& allocator,
                                 const kmonitor::MetricsReporterPtr&      metrics_reporter   = nullptr,
                                 const PDSepConfig&                       pd_sep_config      = PDSepConfig{},
-                                const CacheStoreConfig&                  cache_store_config = CacheStoreConfig{});
+                                const CacheStoreConfig&                  cache_store_config = CacheStoreConfig{},
+                                std::function<void()>                    capacity_release_callback = nullptr);
     virtual ~KVCacheConnectorCoordinator();
 
 public:
@@ -88,6 +89,7 @@ private:
     kmonitor::MetricsReporterPtr      metrics_reporter_;
     PDSepConfig                       pd_sep_config_;
     CacheStoreConfig                  cache_store_config_;
+    std::function<void()>             capacity_release_callback_;
 
     std::vector<std::shared_ptr<KVCacheConnector>>    connectors_;
     std::shared_ptr<KVCacheMemoryConnector>           memory_connector_;

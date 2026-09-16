@@ -46,6 +46,8 @@ struct StreamUpdateInfo {
     // prompt scoring
     std::optional<PromptLogitsOutput> prompt_logits;
     std::optional<ErrorInfo>          error_info;
+    GenerationPrefillCudaGraphStatus  generation_prefill_cuda_graph_status{
+        GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
 };
 
 struct StreamSpecUpdateInfo {
@@ -157,10 +159,13 @@ public:
         return false;
     }
 
-    virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
-    void         update(const StreamUpdateInfo& update_info);
-    void         specUpdate(const StreamSpecUpdateInfo& update_info);
-    bool         updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
+    virtual void                             updateOutput(const StreamUpdateInfo& update_info) = 0;
+    virtual GenerationPrefillCudaGraphStatus generationPrefillCudaGraphStatus() const {
+        return GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
+    }
+    void update(const StreamUpdateInfo& update_info);
+    void specUpdate(const StreamSpecUpdateInfo& update_info);
+    bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
     virtual size_t scoreLen() const {
         return score_len_ == 0 ? 1 : score_len_;
@@ -213,6 +218,7 @@ public:
     bool   returnPromptLogits() const;
     bool   returnCumLogProbs() const;
     bool   genTimeline() const;
+    bool   genTimelineAtSeqLength(int seq_length) const;
     int    profileStep() const;
     void   setGenTimeline(bool gen_timeline);
     bool   updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt);
@@ -331,6 +337,12 @@ public:
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is finished
     bool                isActive() const;    // Returns true if stream is active (no error and not finished)
+
+    // A response consumer may observe GenerateDone before the scheduler has
+    // committed RUNNING -> FINISHED. Preserve that successful completion and
+    // wait for scheduler-owned resource release; otherwise publish cancellation
+    // and wait for the same terminal transition.
+    bool finishOrCancel(int64_t wait_timeout_ms, const std::string& cancel_reason);
     bool                isSubGenerateDoneWithoutLock(int batch_id) const;
 
     size_t iterCount() const;
@@ -562,21 +574,6 @@ public:
         return sp_output_buffer_;
     }
 
-    // Opaque CUDA event used by async MTP to wait for linear-attention KV swaps
-    // without including cuda_runtime.h in this header.
-    void setPendingSwapDoneEvent(std::shared_ptr<void> event) {
-        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
-        pending_swap_done_event_ = std::move(event);
-    }
-    std::shared_ptr<void> getPendingSwapDoneEvent() const {
-        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
-        return pending_swap_done_event_;
-    }
-    void clearPendingSwapDoneEvent() {
-        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
-        pending_swap_done_event_.reset();
-    }
-
     // Count worker claims on this stream's KV resource.
     // releaseResource waits for zero so worker-side update/specUpdate cannot
     // write into blocks already returned to the pool.
@@ -595,31 +592,50 @@ public:
         torch::Tensor accept_len_gpu;
         torch::Tensor accept_tokens_gpu;
         torch::Tensor next_seq_len_gpu;
+        // Position tuple of the next round's newest committed token.  DSpARK
+        // carries this beside next_seq_len so MRoPE target-verify graphs can
+        // be prepared without consulting worker-owned host bookkeeping.
+        torch::Tensor next_position_ids_gpu;
         torch::Tensor propose_tokens_gpu;
+        // Immutable physical and logical-to-kernel page tables for the next
+        // speculative round. The async worker may still be committing the
+        // equivalent host-side swaps; model input gathering consumes this
+        // pair instead of racing the mutable BlockIds object. Keeping the pair
+        // atomic at the state level is required by hybrid models: attention
+        // consumes the physical table while recurrent kernels consume the
+        // kernel-granularity table.
+        torch::Tensor next_kv_cache_block_id_gpu;
+        torch::Tensor next_kv_cache_kernel_block_id_gpu;
         // Main-thread mirrors used when DROP_BROAD_SYNC lets the next step run
         // before worker-side specUpdate has written sp_output_buffer fields.
         torch::Tensor last_hidden_states_gpu;
         torch::Tensor draft_all_probs_gpu;
-        // True host seqLength observed when this state is published. MTP async
-        // uses it as the base for the next KV allocation upper bound.
+        // Upper bound for the sequence length represented by the previous
+        // round. It equals host seqLength when no worker is pending; otherwise
+        // it chains from the prior published bound so multiple overlapped
+        // bookkeeping rounds can never make cache allocation underestimate
+        // the device sequence.
         // -1 = unset (first iter / cleared).
-        int last_real_seq_len = -1;
-        // Host seq_len override for the next iter's incrKVBlock. In async MTP
-        // this may be an upper bound based on last_real_seq_len, not a value to
-        // chain as the next round's true length.
+        int previous_seq_len_upper_bound = -1;
+        // Conservative host-visible bound for the next iteration. It advances
+        // monotonically while workers overlap and resets to exact host state
+        // once bookkeeping catches up.
         // -1 = unset (first iter / cleared).
-        int next_real_seq_len = -1;
+        int next_seq_len_upper_bound = -1;
     };
 
     uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state) {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         state.epoch      = ++mtp_async_epoch_counter_;
         mtp_async_state_ = std::move(state);
         return mtp_async_state_.epoch;
     }
-    const MtpAsyncDeviceState& getMtpAsyncDeviceState() const {
+    MtpAsyncDeviceState getMtpAsyncDeviceState() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_;
     }
     bool clearMtpAsyncDeviceState(uint64_t epoch) {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         // Legacy/testing escape hatch. Active MTP decode paths should keep
         // device tensors alive and overwrite them on the next publish.
         if (mtp_async_state_.epoch != epoch) {
@@ -641,27 +657,63 @@ public:
         state.propose_tokens_gpu = std::move(propose_tokens_gpu);
         setMtpAsyncDeviceState(std::move(state));
     }
-    const torch::Tensor& getAcceptLenGpu() const {
+    torch::Tensor getAcceptLenGpu() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_.accept_len_gpu;
     }
-    const torch::Tensor& getAcceptTokensGpu() const {
+    torch::Tensor getAcceptTokensGpu() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_.accept_tokens_gpu;
     }
-    const torch::Tensor& getNextSeqLenGpu() const {
+    torch::Tensor getNextSeqLenGpu() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_.next_seq_len_gpu;
     }
-    const torch::Tensor& getProposeTokensGpu() const {
+    torch::Tensor getNextPositionIdsGpu() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+        return mtp_async_state_.next_position_ids_gpu;
+    }
+    torch::Tensor getProposeTokensGpu() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_.propose_tokens_gpu;
     }
-    const torch::Tensor& getLastHiddenStatesGpu() const {
+    torch::Tensor getNextKVCacheBlockIdGpu() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+        return mtp_async_state_.next_kv_cache_block_id_gpu;
+    }
+    torch::Tensor getNextKVCacheKernelBlockIdGpu() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+        return mtp_async_state_.next_kv_cache_kernel_block_id_gpu;
+    }
+    static bool hasMtpCacheSnapshot(const MtpAsyncDeviceState& state) {
+        const auto valid = [](const torch::Tensor& table) {
+            return table.defined() && table.is_cuda() && table.scalar_type() == torch::kInt32 && table.dim() == 3
+                   && table.size(1) == 1;
+        };
+        const auto& physical = state.next_kv_cache_block_id_gpu;
+        const auto& kernel   = state.next_kv_cache_kernel_block_id_gpu;
+        return valid(physical) && valid(kernel) && physical.size(0) == kernel.size(0);
+    }
+    bool hasMtpCacheSnapshot() const {
+        return hasMtpCacheSnapshot(getMtpAsyncDeviceState());
+    }
+    void clearMtpCacheSnapshot() {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+        mtp_async_state_.next_kv_cache_block_id_gpu        = torch::Tensor();
+        mtp_async_state_.next_kv_cache_kernel_block_id_gpu = torch::Tensor();
+    }
+    torch::Tensor getLastHiddenStatesGpu() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_.last_hidden_states_gpu;
     }
-    const torch::Tensor& getDraftAllProbsGpu() const {
+    torch::Tensor getDraftAllProbsGpu() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_.draft_all_probs_gpu;
     }
     void clearSpecDecodeDeviceState() {
         // Unconditional legacy/testing escape hatch. Active MTP decode paths
         // should publish/overwrite MtpAsyncDeviceState instead of clearing it.
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         mtp_async_state_ = MtpAsyncDeviceState{};
     }
 
@@ -772,6 +824,11 @@ public:
     bool     queryPdSep() const;
 
 protected:
+    // moveToNext() runs under mutex_, while the async MTP worker needs the
+    // same mutex to commit accepted tokens/cache swaps.  Decide whether a
+    // capacity-boundary join is needed before taking mutex_.
+    bool needsAsyncBookkeepingJoinForKvReservation() const;
+
     // Consumer-visible state is read and written under mutex_. Public readers
     // acquire the lock; already-locked engine paths use these helpers.
     void         checkTimeoutWithoutLock();
@@ -819,7 +876,10 @@ protected:
     bool                                  generation_done_             = false;
     int64_t                               generation_done_time_us_     = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
-    std::shared_ptr<bool>                 is_context_stream_;
+    // Prefill-to-decode transition is committed by the output/bookkeeping
+    // worker and observed by the scheduler thread. Keep this flag atomic; the
+    // shared_ptr preserves the existing CopyOnWrite sharing semantics.
+    std::shared_ptr<std::atomic<bool>>    is_context_stream_;
     size_t                                iter_count_    = 0;
     size_t                                sp_iter_count_ = 0;
     std::vector<int32_t>                  speculative_accepted_tokens_per_pos_;
@@ -872,6 +932,7 @@ protected:
     size_t                             propose_step_         = 0;
     size_t                             score_len_            = 0;
     size_t                             reserve_step_         = 0;
+    bool                               stream_async_reserve_ = false;
     bool                               acceped_bouns_token_  = false;
     int                                sp_edit_search_index_ = 0;
     bool                               sp_edit_first_time_   = true;
@@ -880,12 +941,6 @@ protected:
     bool                               contain_propose_token_ = false;
     int                                mtp_token_index_       = 0;
     SpeculativeExecutorStreamOutputPtr sp_output_buffer_      = nullptr;
-    // cudaEvent_t (type-erased) recorded after specUpdate runs
-    // swapLinearBlocks. MtpExecutor waits on it before issuing the next
-    // target verify. nullptr on streams without pending swaps.
-    std::shared_ptr<void>       pending_swap_done_event_;
-    std::shared_ptr<std::mutex> pending_swap_done_event_mutex_ = std::make_shared<std::mutex>();
-
     // Separate lock/cv avoids deadlocking releaseResource with worker updates
     // that need mutex_. Shared ownership preserves the coordinator across
     // GenerateStream copies captured by async workers.
@@ -900,6 +955,7 @@ protected:
     // Stream-async device-resident state for the next decode step's prepare.
     // These structs stay default-constructed (epoch=0, undefined tensors) until
     // their corresponding async/sync publisher installs a usable state.
+    std::shared_ptr<std::mutex>        mtp_async_state_mutex_ = std::make_shared<std::mutex>();
     MtpAsyncDeviceState                mtp_async_state_;
     uint64_t                           mtp_async_epoch_counter_ = 0;
     NormalAsyncDeviceState             normal_async_state_;

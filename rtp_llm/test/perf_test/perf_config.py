@@ -4,7 +4,7 @@ import argparse
 import logging
 import os
 import sys
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from rtp_llm.test.perf_test.dataclass import PerfTestConfig
 from rtp_llm.test.perf_test.dataset import KNOWN_DATASETS, extract_arg
@@ -16,7 +16,9 @@ from rtp_llm.test.perf_test.perf_utils import auto_generate_bs_list
 from rtp_llm.test.perf_test.sampling import prepare_distribution_config
 
 
-def parse_args() -> Tuple[argparse.Namespace, List[str]]:
+def parse_args(
+    argv: Optional[List[str]] = None,
+) -> Tuple[argparse.Namespace, List[str]]:
     parser = argparse.ArgumentParser(
         description="RTP-LLM batch decode performance test runner. "
         "Unrecognized arguments are forwarded to the engine server.",
@@ -75,6 +77,36 @@ def parse_args() -> Tuple[argparse.Namespace, List[str]]:
     )
     perf.add_argument("--decode_test_length", type=int, default=10)
     perf.add_argument(
+        "--cache_grid_json",
+        type=str,
+        default="",
+        help=(
+            "JSON describing an explicit total-seq x prefix-cache grid. "
+            "Each case inserts a prefix, then verifies aux_info.reuse_len."
+        ),
+    )
+    perf.add_argument(
+        "--cache_measure_runs",
+        type=int,
+        default=3,
+        help="Measured requests per cache-grid case (default: 3)",
+    )
+    perf.add_argument(
+        "--cache_request_timeout",
+        type=int,
+        default=int(os.environ.get("PERF_REQUEST_TIMEOUT", "7200")),
+        help="Per-request timeout in seconds for cache-grid mode (default: 7200)",
+    )
+    perf.add_argument(
+        "--cache_commit_tail_tokens",
+        type=int,
+        default=int(os.environ.get("CACHE_COMMIT_TAIL_TOKENS", "4096")),
+        help=(
+            "Extra seed tokens used to commit the requested cache prefix "
+            "before measurement (default: 4096)"
+        ),
+    )
+    perf.add_argument(
         "--num_measures",
         type=int,
         default=5,
@@ -86,6 +118,41 @@ def parse_args() -> Tuple[argparse.Namespace, List[str]]:
         default=0,
         help="Target TPOT (ms). When set, binary search for max BS satisfying TPOT, compute TPS",
     )
+    perf.add_argument(
+        "--warmup_runs",
+        type=int,
+        default=None,
+        help="Override PERF_FORMAL_WARMUP_RUNS for every case.",
+    )
+    perf.add_argument(
+        "--measure_runs",
+        type=int,
+        default=None,
+        help="Override PERF_MEASURE_RUNS for every case.",
+    )
+    perf.add_argument(
+        "--profile_runs",
+        type=int,
+        default=None,
+        help="Override PERF_PROFILE_RUNS for every case.",
+    )
+    perf.add_argument(
+        "--engine_arg",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Repeatable engine argument shorthand, e.g. tp_size=8.",
+    )
+    perf.add_argument(
+        "--engine_env",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help=(
+            "Repeatable engine environment override; explicit engine CLI arguments "
+            "take precedence when both configure the same setting."
+        ),
+    )
 
     engine = parser.add_argument_group(
         "engine args consumed by perf test (also forwarded to server)"
@@ -94,8 +161,54 @@ def parse_args() -> Tuple[argparse.Namespace, List[str]]:
     engine.add_argument("--max_seq_len", type=int, default=8192)
     engine.add_argument("--concurrency_limit", type=int, default=64)
 
-    args, remaining = parser.parse_known_args()
+    parsed_argv = sys.argv[1:] if argv is None else argv
+    args, remaining = parser.parse_known_args(parsed_argv)
+    args.batch_size_explicit = any(
+        item == "--batch_size" or item.startswith("--batch_size=")
+        for item in parsed_argv
+    )
     return args, remaining
+
+
+def _parse_name_value(value: str, option: str) -> Tuple[str, str]:
+    if "=" not in value:
+        raise ValueError(f"{option} expects NAME=VALUE, got {value!r}")
+    name, parsed = value.split("=", 1)
+    name = name.strip().lstrip("-")
+    if not name or any(ch.isspace() for ch in name):
+        raise ValueError(f"{option} has invalid name in {value!r}")
+    return name, parsed
+
+
+def _engine_arg_argv(engine_args: List[str]) -> List[str]:
+    result: List[str] = []
+    for item in engine_args:
+        name, value = _parse_name_value(item, "--engine_arg")
+        result.extend([f"--{name}", value])
+    return result
+
+
+def _apply_engine_env(engine_env: List[str]) -> List[str]:
+    names: List[str] = []
+    for item in engine_env:
+        name, value = _parse_name_value(item, "--engine_env")
+        os.environ[name] = value
+        names.append(name)
+    return sorted(set(names))
+
+
+def _apply_run_overrides(args: argparse.Namespace) -> None:
+    for option, env_name in (
+        ("warmup_runs", "PERF_FORMAL_WARMUP_RUNS"),
+        ("measure_runs", "PERF_MEASURE_RUNS"),
+        ("profile_runs", "PERF_PROFILE_RUNS"),
+    ):
+        value = getattr(args, option)
+        if value is None:
+            continue
+        if value < 0:
+            raise ValueError(f"--{option} must be >= 0, got {value}")
+        os.environ[env_name] = str(value)
 
 
 def _replace_cli_value(argv: List[str], key: str, new_value: str) -> None:
@@ -131,7 +244,11 @@ def resolve_perf_engine_paths(remaining: List[str]) -> List[str]:
 
 def prepare_config(args: argparse.Namespace, remaining: List[str]) -> PerfTestConfig:
     """Build a unified PerfTestConfig from CLI args."""
-    batch_size_explicit = any(a.startswith("--batch_size") for a in sys.argv[1:])
+    batch_size_explicit = getattr(
+        args,
+        "batch_size_explicit",
+        any(a.startswith("--batch_size") for a in sys.argv[1:]),
+    )
     distribution_mode = (
         args.dataset_name or args.dataset_path or args.dataset or args.test_json
     )

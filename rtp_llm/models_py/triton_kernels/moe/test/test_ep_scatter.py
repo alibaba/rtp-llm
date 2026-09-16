@@ -14,6 +14,7 @@ Run with bazel:
 """
 
 import math
+import os
 import unittest
 
 import torch
@@ -192,10 +193,27 @@ class TestEpScatter1PoisonRegression(unittest.TestCase):
             running += c
         return ref
 
+    @unittest.skipUnless(
+        os.environ.get("RTP_LLM_EP_SCATTER_POISON_DIAG"),
+        "poison diagnostic is opt-in: set RTP_LLM_EP_SCATTER_POISON_DIAG=1",
+    )
     def test_old_kernel_reads_poison(self) -> None:
         """Diagnostic: check if old kernel (global memory load) reads stale
         poison values. This is NOT a CI gate — if Triton compiler is updated
-        to insert bar.sync, 0 mismatches is expected and acceptable."""
+        to insert bar.sync, 0 mismatches is expected and acceptable.
+
+        Opt-in, because it is a net negative in CI. It asserts nothing -- it only
+        prints a mismatch count -- so it can never gate anything, yet it drives a
+        kernel that is known to be racy 100 times. When that raises an illegal
+        memory access the CUDA context is poisoned for the rest of the process and
+        every sibling test in this target dies with it, which is how this target
+        became order-dependent (2 of 3 sm86 runs failed; it passed when run
+        alone). A test that cannot fail but can destroy its neighbours does not
+        belong in a default run.
+
+        Run it deliberately when you want the answer:
+            RTP_LLM_EP_SCATTER_POISON_DIAG=1 bazel test <target>
+        """
         num_experts = 256
         counts = [128] * num_experts
         counts_gpu = torch.tensor(counts, dtype=torch.int32, device=self.device)

@@ -2101,6 +2101,9 @@ class RemoteREAPIPlugin:
         profile_paths_args = ""
         profile_ignore_args = ""
         profile_isolated_paths: List[str] = []
+        profile_isolated_gpu_counts: Dict[str, int] = {}
+        require_isolated_tests = False
+        forbid_skips = False
         profile_isolated_ignore_args = ""
         if ci_profile:
             try:
@@ -2114,6 +2117,8 @@ class RemoteREAPIPlugin:
                 if default_cli:
                     profile_cli_args = default_cli + " "
                 prof = _get_profile(Path(self.config.rootpath), ci_profile)
+                require_isolated_tests = bool(prof.get("require_isolated_tests", False))
+                forbid_skips = bool(prof.get("forbid_skips", False))
                 paths = prof.get("paths") or []
                 if isinstance(paths, list) and paths:
                     worker_paths = []
@@ -2136,7 +2141,7 @@ class RemoteREAPIPlugin:
                             wp = wp[3:]
                         worker_ignores.append(shlex.quote(f"--ignore={wp}"))
                     profile_ignore_args = " ".join(worker_ignores) + " "
-                isolated_paths = prof.get("isolated_paths") or []
+                isolated_paths = (paths if prof.get("isolate_all_paths") else prof.get("isolated_paths")) or []
                 if isinstance(isolated_paths, list) and all(
                     isinstance(path, str) for path in isolated_paths
                 ):
@@ -2145,14 +2150,35 @@ class RemoteREAPIPlugin:
                         while worker_path.startswith("../"):
                             worker_path = worker_path[3:]
                         profile_isolated_paths.append(worker_path)
+                        profile_isolated_gpu_counts[worker_path] = (
+                            prof.get("isolated_gpu_counts", {}).get(path, 1)
+                        )
                     profile_isolated_ignore_args = " ".join(
                         shlex.quote(f"--ignore={path}")
                         for path in profile_isolated_paths
                     )
                     if profile_isolated_ignore_args:
                         profile_isolated_ignore_args += " "
-            except Exception:
-                profile_cli_args = f"-v --tb=short --timeout={self.timeout_policy.pytest_timeout_seconds} "
+                    if paths:
+                        parallel_paths = [
+                            path for path in worker_paths
+                            if path not in profile_isolated_paths
+                        ]
+                        profile_paths_args = " ".join(
+                            shlex.quote(path) for path in parallel_paths
+                        ) + " "
+                        if not parallel_paths:
+                            phases = []
+            except Exception as exc:
+                raise pytest.UsageError(
+                    f"Cannot resolve remote CI profile {ci_profile!r}: {exc}"
+                ) from exc
+
+        for path, count in profile_isolated_gpu_counts.items():
+            if not isinstance(count, int) or count < 1 or count > total_gpus:
+                raise pytest.UsageError(
+                    f"Isolated test {path} requires {count} GPUs; session has {total_gpus}"
+                )
 
         # Common pytest arguments shared by all phases
         # Note: profile_arg is NOT forwarded — the rtp-ci-profile plugin is blocked
@@ -2166,6 +2192,8 @@ class RemoteREAPIPlugin:
             f"--tb=short "
             f"--timeout={self.timeout_policy.pytest_timeout_seconds}"
         ).strip()
+        if ci_profile in {"py_ut_cuda13_arm", "py_ut_cuda13_x86"}:
+            common += " -p rtp_llm.test.cuda13_preflight"
         parallel_common = f"{common} {profile_isolated_ignore_args}".strip()
 
         # Deselect args via file to avoid ARG_MAX overflow (nodeids can be 100+ chars each,
@@ -2238,17 +2266,18 @@ class RemoteREAPIPlugin:
         single_gpu_mark = next(
             (phase_mark for tier, _, phase_mark in phases if tier == 1), ""
         )
-        isolated_mark_arg = (
-            f"-m {shlex.quote(single_gpu_mark)} " if single_gpu_mark else ""
-        )
         for index, isolated_path in enumerate(profile_isolated_paths):
+            gpu_count = profile_isolated_gpu_counts.get(isolated_path, 1)
+            isolated_mark = markexpr if require_isolated_tests or gpu_count > 1 else single_gpu_mark
+            isolated_mark_arg = f"-m {shlex.quote(isolated_mark)} " if isolated_mark else ""
             isolated_output = f"bazel-testlogs/pytest/test_isolated_{index}.xml"
+            empty_guard = "" if require_isolated_tests else "[ $ec -ne 5 ] && "
             lines.append(
                 f'echo "--- Isolated file: {isolated_path} ---"; '
                 f"{_heartbeat_shell(f'isolated_{index}_start')}; "
-                "export GPU_COUNT=1; "
+                f"export GPU_COUNT={gpu_count}; "
                 "unset WORLD_SIZE; "
-                "export GPU_COUNT_PER_WORKER=1; "
+                f"export GPU_COUNT_PER_WORKER={gpu_count}; "
                 "python rtp_llm/test/utils/device_resource.py "
                 "python -m pytest -p no:remote-gpu -p no:rtp-ci-profile "
                 f"-p rtp_remote_nodeid_plugin -p rtp_remote_heartbeat_plugin {common} "
@@ -2260,7 +2289,7 @@ class RemoteREAPIPlugin:
                 f"{deselect_file_arg} "
                 "2>&1; ec=$?; "
                 "[ $ec -ne 5 ] && any_ran=1; "
-                "[ $ec -ne 0 ] && [ $ec -ne 5 ] && [ $final_ec -eq 0 ] && final_ec=$ec; "
+                f"[ $ec -ne 0 ] && {empty_guard}[ $final_ec -eq 0 ] && final_ec=$ec; "
                 f"{_heartbeat_shell(f'isolated_{index}_done')}; "
                 f'echo ">>>PHASE:isolated_{index}_done $(date +%s)"'
             )
@@ -2289,22 +2318,27 @@ class RemoteREAPIPlugin:
                 f'echo ">>>PHASE:phase_{tier}gpu_done $(date +%s)"'
             )
 
-        # Merge per-phase junitxml into single file
-        lines.extend(
-            [
-                "python <<'_MERGE_PY_'",
-                "import xml.etree.ElementTree as ET, glob",
-                "s = ET.Element('testsuites')",
-                "files = glob.glob('bazel-testlogs/pytest/test_*gpu.xml')",
-                "files += glob.glob('bazel-testlogs/pytest/test_isolated_*.xml')",
-                "for f in sorted(files):",
-                "    try:",
-                "        r = ET.parse(f).getroot()",
-                "        for c in (list(r) if r.tag == 'testsuites' else [r]): s.append(c)",
-                "    except Exception: pass",
-                "ET.ElementTree(s).write('bazel-testlogs/pytest/test.xml', xml_declaration=True, encoding='unicode')",
-                "_MERGE_PY_",
-            ]
+        # Enumerate expected reports so missing files cannot disappear in a glob.
+        isolated_reports = [
+            f"bazel-testlogs/pytest/test_isolated_{index}.xml"
+            for index in range(len(profile_isolated_paths))
+        ]
+        reports = isolated_reports + [
+            f"bazel-testlogs/pytest/test_{tier}gpu.xml" for tier, _, _ in phases
+        ]
+        merge_args = [
+            "python", "-m", "rtp_llm.test.remote_tests.junit_merge",
+            "--output", "bazel-testlogs/pytest/test.xml",
+        ]
+        if forbid_skips:
+            merge_args.append("--forbid-skips")
+        if require_isolated_tests:
+            for report in isolated_reports:
+                merge_args.extend(["--required", report])
+        merge_args.extend(reports)
+        lines.append(
+            shlex.join(merge_args)
+            + "; ec=$?; [ $ec -ne 0 ] && [ $final_ec -eq 0 ] && final_ec=$ec"
         )
 
         lines.append("[ $any_ran -eq 0 ] && final_ec=5")

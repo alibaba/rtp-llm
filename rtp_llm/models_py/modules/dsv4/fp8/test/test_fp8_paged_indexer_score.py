@@ -53,9 +53,7 @@ def _make_packed_cache_with_block_table(k_bf16: torch.Tensor, block_size: int):
     )
     # Physical block id 0 is invalid; start slots and block_table at block 1.
     pool_3d = pool_uint8.view(num_blocks + 1, block_size, INDEXER_ENTRY_BYTES)
-    slot_mapping = (
-        torch.arange(T, dtype=torch.int64, device=k_bf16.device) + block_size
-    )
+    slot_mapping = torch.arange(T, dtype=torch.int64, device=k_bf16.device) + block_size
     quantize_indexer_k(k_bf16, slot_mapping, pool_3d)
     block_table = torch.arange(
         1, num_blocks + 1, dtype=torch.int32, device=k_bf16.device
@@ -65,9 +63,9 @@ def _make_packed_cache_with_block_table(k_bf16: torch.Tensor, block_size: int):
 
 def test_decode_equiv():
     """B=1, S=1, T=256, H=64, D=128 — typical decode shape."""
-    if not has_fp8_paged_mqa_logits():
-        print("  [SKIP] deep_gemm.fp8_paged_mqa_logits unavailable")
-        return
+    assert (
+        has_fp8_paged_mqa_logits()
+    ), "required DeepGEMM indexer interface is unavailable"
     torch.manual_seed(0)
     B, S, H, D = 1, 1, 64, INDEXER_HEAD_DIM
     T, block_size = 256, 64
@@ -127,9 +125,9 @@ def test_decode_equiv():
 def test_decode_partial_context():
     """Cache holds T_max=512 slots but only 100 are live (context_lens=100).
     DeepGEMM should mask past context_lens."""
-    if not has_fp8_paged_mqa_logits():
-        print("  [SKIP]")
-        return
+    assert (
+        has_fp8_paged_mqa_logits()
+    ), "required DeepGEMM indexer interface is unavailable"
     torch.manual_seed(1)
     B, S, H, D = 1, 1, 64, INDEXER_HEAD_DIM
     T_cache, T_live, block_size = 512, 100, 64
@@ -185,9 +183,9 @@ def test_decode_partial_context():
 
 def test_decode_batched():
     """B=4 with varying context_lens."""
-    if not has_fp8_paged_mqa_logits():
-        print("  [SKIP]")
-        return
+    assert (
+        has_fp8_paged_mqa_logits()
+    ), "required DeepGEMM indexer interface is unavailable"
     torch.manual_seed(2)
     B, S, H, D = 4, 1, 64, INDEXER_HEAD_DIM
     T_cache, block_size = 256, 64
@@ -270,9 +268,9 @@ def test_decode_batched():
 
 def test_decode_batched_mtp_next_n_gt_1():
     """B=2, S=3: DeepGEMM rows must map to block_table[b] with row b*S+s."""
-    if not has_fp8_paged_mqa_logits():
-        print("  [SKIP]")
-        return
+    assert (
+        has_fp8_paged_mqa_logits()
+    ), "required DeepGEMM indexer interface is unavailable"
     torch.manual_seed(3)
     B, S, H, D = 2, 3, 64, INDEXER_HEAD_DIM
     T_cache, block_size = 256, 64
@@ -295,18 +293,16 @@ def test_decode_batched_mtp_next_n_gt_1():
     k_full = torch.zeros(B, T_cache, D, dtype=torch.bfloat16, device="cuda")
     for b in range(B):
         # Make request rows intentionally different so a row//S mapping bug is visible.
-        k_b = (
-            torch.randn(T_cache, D, dtype=torch.bfloat16, device="cuda") * 0.5
-            + float(b)
-        )
+        k_b = torch.randn(
+            T_cache, D, dtype=torch.bfloat16, device="cuda"
+        ) * 0.5 + float(b)
         k_full[b] = k_b
         base = 1 + b * num_blocks_per_req
         block_table[b] = torch.arange(
             base, base + num_blocks_per_req, device="cuda", dtype=torch.int32
         )
         slots = (
-            torch.arange(T_cache, device="cuda", dtype=torch.int64)
-            + base * block_size
+            torch.arange(T_cache, device="cuda", dtype=torch.int64) + base * block_size
         )
         quantize_indexer_k(k_b, slots, pool_3d)
 

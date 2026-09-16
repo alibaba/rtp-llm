@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -13,6 +14,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -25,6 +27,7 @@ class CacheStore;
 class KVCacheConnectorCoordinator;
 class KVCacheConnectorReadWriteContext;
 class PrefillCacheHitMetricsReporter;
+class KVCacheAllocationWaitState;
 
 class KVCacheManager {
 public:
@@ -37,11 +40,14 @@ public:
                    const SpeculativeExecutionConfig&  sp_config                  = SpeculativeExecutionConfig{},
                    const PDSepConfig&                 pd_sep_config              = PDSepConfig{},
                    const CacheStoreConfig&            cache_store_config         = CacheStoreConfig{},
-                   bool                               use_cuda_malloc_block_pool = false);
+                   bool                               use_device_malloc_block_pool = false);
     ~KVCacheManager();
 
     // 初始化和配置相关
     bool init();
+    bool initialized() const {
+        return allocator_ != nullptr;
+    }
 
     const CacheConfig& cacheConfig() const;
     const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
@@ -50,6 +56,13 @@ public:
     MallocResult malloc(const MallocInfo& malloc_info);
     void         free(const FreeInfo& free_info);
     void         insertIntoCache(const InsertInfo& insert_info);
+
+    // Decode-side P/D admission allocates destination blocks before cache handoff.  When pools are
+    // temporarily full, waiters use this generation instead of polling malloc in a tight loop.
+    // Capture the generation before an allocation attempt; waitForAllocationChange() then cannot
+    // miss a release racing with that attempt.
+    uint64_t allocationGeneration() const;
+    bool     waitForAllocationChange(uint64_t observed_generation, int64_t timeout_ms);
 
     int
     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
@@ -168,9 +181,13 @@ public:
 
 private:
     void initConnectorCoordinator();
+    void initCacheEventPublisher();
+    void stopCacheEventPublisher();
     void allocateAndSync();
     void reportMetricsLoop();
     void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
+    void notifyAllocationChange();
+    std::function<void()> allocationChangeCallback() const;
 
     // 成员变量
     CacheConfig         config_;
@@ -183,7 +200,8 @@ private:
     const SpeculativeExecutionConfig   sp_config_;
     const PDSepConfig                  pd_sep_config_;
     const CacheStoreConfig             cache_store_config_;
-    const bool                         use_cuda_malloc_block_pool_;
+    const bool                         use_device_malloc_block_pool_;
+    const bool                         warmup_;
 
     std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
     std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;
@@ -191,10 +209,14 @@ private:
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
 
+    std::shared_ptr<KVCacheAllocationWaitState> allocation_wait_state_;
+
     std::shared_ptr<KVCacheConnectorCoordinator> coordinator_;
 
     mutable std::mutex                 cache_status_snapshot_mutex_;
     std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;
+    KVCacheEventPublisherPtr           cache_event_publisher_;
+    SharedBlockCachePtr                publisher_shared_cache_;
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;

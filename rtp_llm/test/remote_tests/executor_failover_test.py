@@ -771,6 +771,42 @@ def test_session_command_runs_profile_isolated_paths_in_fresh_processes(monkeypa
     cleanup = shell.index("rm -f bazel-testlogs/pytest/test.xml")
     assert cleanup < isolated_start
 
+def test_cuda13_session_isolates_two_gpu_targets_and_rejects_empty_files(monkeypatch):
+    paths = ["rtp_llm/test/single_test.py", "rtp_llm/test/distributed_test.py"]
+    monkeypatch.setattr(ci_profile_plugin, "_get_pytest_ci_section", lambda root: {})
+    monkeypatch.setattr(ci_profile_plugin, "_get_profile", lambda root, name: {
+        "paths": paths,
+        "isolate_all_paths": True,
+        "isolated_gpu_counts": {paths[1]: 2},
+        "require_isolated_tests": True,
+    })
+    plugin = object.__new__(remote_plugin.RemoteREAPIPlugin)
+    plugin.workers = 2
+    plugin._collect_outputs = False
+    plugin.config = SimpleNamespace(
+        option=SimpleNamespace(markexpr="not manual", keyword=""), rootpath=Path(".")
+    )
+    plugin.timeout_policy = select_remote_timeout_policy("py_ut_cuda13_arm", per_test=False)
+    runtime = remote_exec_rtp.RemoteRuntimeConfig(
+        ignore_args=[], env_vars={},
+        platform_properties={"gpu": "SM100_ARM_CU13", "gpu_count": "2"},
+        remote_setup_prefix="",
+    )
+    shell = plugin._build_session_command("", runtime, ci_profile="py_ut_cuda13_arm")[2]
+    first = shell.index(f"--- Isolated file: {paths[0]} ---")
+    second = shell.index(f"--- Isolated file: {paths[1]} ---")
+    assert "export GPU_COUNT=1;" in shell[first:second]
+    assert "export GPU_COUNT=2;" in shell[second:]
+    assert "export GPU_COUNT_PER_WORKER=2;" in shell[second:]
+    assert "--- Phase:" not in shell
+    assert "[ $ec -ne 0 ] && [ $final_ec -eq 0 ] && final_ec=$ec" in shell
+    assert "[ $ec -ne 0 ] && [ $ec -ne 5 ]" not in shell
+
+    plugin.workers = 1
+    with pytest.raises(pytest.UsageError, match="requires 2 GPUs"):
+        plugin._build_session_command("", runtime, ci_profile="py_ut_cuda13_arm")
+
+
 def test_executor_pool_resolves_hostname_inside_remote_framework(monkeypatch):
     monkeypatch.setattr(
         endpoint_info,

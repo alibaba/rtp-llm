@@ -57,6 +57,12 @@ def _get_profile(root: Path, name: str) -> Dict[str, Any]:
         raise pytest.UsageError(
             f"--rtp-ci-profile: profile {name!r} missing 'markexpr'"
         )
+    if name.startswith("py_ut_") and not name.startswith("py_ut_cuda13_"):
+        prof = dict(prof)
+        prof["ignore_paths"] = list(dict.fromkeys(
+            list(prof.get("ignore_paths", []))
+            + list(pytest_ci.get("cuda13_only_paths", []))
+        ))
     return prof
 
 
@@ -131,6 +137,15 @@ def pytest_configure(config: pytest.Config) -> None:
         _apply_default_cli(config, default_cli)
 
     prof = _get_profile(root, name)
+    if name in {"py_ut_cuda13_arm", "py_ut_cuda13_x86"} and not config.getoption(
+        "--remote-session", default=False
+    ):
+        if not config.option.collectonly:
+            raise pytest.UsageError(
+                f"{name} requires --remote-session for test-process isolation; "
+                "individual test files can also run directly with pytest"
+            )
+        config.pluginmanager.import_plugin("rtp_llm.test.cuda13_preflight")
     if name == "py_ut_amd" and config.getoption("--remote-session", default=False):
         workers = config.getoption("--remote-workers", default=4)
         if workers < 8:
@@ -197,13 +212,23 @@ def pytest_configure(config: pytest.Config) -> None:
                 ignored.append(path)
         config.option.ignore = ignored
 
-    isolated_paths = prof.get("isolated_paths")
+    isolated_paths = prof.get("paths") if prof.get("isolate_all_paths") else prof.get("isolated_paths")
     if isolated_paths is not None and (
         not isinstance(isolated_paths, list)
         or not all(isinstance(p, str) for p in isolated_paths)
     ):
         raise pytest.UsageError(
             f"--rtp-ci-profile: profile {name!r} 'isolated_paths' must be a list of strings"
+        )
+    isolated_gpu_counts = prof.get("isolated_gpu_counts", {})
+    if not isinstance(isolated_gpu_counts, dict) or any(
+        path not in (isolated_paths or [])
+        or not isinstance(count, int)
+        or count < 1
+        for path, count in isolated_gpu_counts.items()
+    ):
+        raise pytest.UsageError(
+            f"--rtp-ci-profile: profile {name!r} has invalid isolated_gpu_counts"
         )
 
 

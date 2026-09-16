@@ -53,6 +53,8 @@ PLATFORM_CONFIG_VERSIONS = {
     "cuda12_6": "cu126",
     "cuda12_9": "cu129",
     "cuda12_9_arm": "cu129",
+    "cuda13": "cu130",
+    "cuda13_arm": "cu130",
     "rocm": "rocm72",
 }
 
@@ -61,6 +63,8 @@ CONFIG_TO_EXTRAS = {
     "cuda12_6": "cuda12",
     "cuda12_9": "cuda12_9",
     "cuda12_9_arm": "cuda12_arm",
+    "cuda13": "cuda13",
+    "cuda13_arm": "cuda13_arm",
     "rocm": "rocm",
 }
 
@@ -316,6 +320,8 @@ def _get_cuda_config_from_version(version_str: str) -> str:
 
     version_key = _parse_cuda_major_minor(version_str)
     if version_key:
+        if version_key >= (13, 0):
+            return "cuda13"
         if version_key >= (12, 9):
             return "cuda12_9"
         if version_key >= (12, 6):
@@ -477,9 +483,9 @@ def detect_build_config(verbose: bool = True) -> str:
                 f"Detected CUDA environment (version: {cuda_version}, config: {cuda_config})"
             )
 
-        if platform.machine() == "aarch64" and cuda_config == "cuda12_9":
-            _cached_build_config = "cuda12_9_arm"
-            return "cuda12_9_arm"
+        if platform.machine() == "aarch64" and cuda_config in ("cuda12_9", "cuda13"):
+            _cached_build_config = cuda_config + "_arm"
+            return _cached_build_config
 
         _cached_build_config = cuda_config
         return cuda_config

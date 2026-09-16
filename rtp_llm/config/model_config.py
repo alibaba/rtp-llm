@@ -42,13 +42,39 @@ def kv_cache_dtype_to_torch_dtype(
 
 def ssm_state_dtype_str_to_data_type(ssm_state_dtype: str) -> DataType:
     ssm_state_dtype = ssm_state_dtype.lower()
-    if ssm_state_dtype == "bf16":
+    if ssm_state_dtype in ("bf16", "bfloat16"):
         return DataType.TYPE_BF16
-    if ssm_state_dtype == "fp16":
+    if ssm_state_dtype in ("fp16", "float16"):
         return DataType.TYPE_FP16
-    if ssm_state_dtype == "fp32":
+    if ssm_state_dtype in ("fp32", "float32"):
         return DataType.TYPE_FP32
     raise ValueError(f"Unsupported ssm_state_dtype: {ssm_state_dtype}")
+
+
+def resolve_ssm_state_dtype(
+    configured_ssm_state_dtype: str,
+    model_ssm_state_dtype: DataType,
+    enable_remote_cache: bool,
+) -> DataType:
+    configured_ssm_state_dtype = configured_ssm_state_dtype.lower()
+    if configured_ssm_state_dtype != "auto":
+        return ssm_state_dtype_str_to_data_type(configured_ssm_state_dtype)
+
+    # The legacy remote connector addresses KV cache through one contiguous
+    # BlockPool. A model-declared recurrent-state dtype that differs from the
+    # attention cache dtype requires independent physical pools, which that
+    # connector explicitly rejects. Keep ``auto`` backward compatible for this
+    # connector while preserving an explicit user override for fail-fast
+    # validation once independent pools are requested deliberately.
+    if enable_remote_cache and model_ssm_state_dtype != DataType.TYPE_BF16:
+        logging.warning(
+            "SSM_STATE_DTYPE=auto resolved to %s, but remote cache requires a "
+            "contiguous shared KV cache pool; falling back to bf16",
+            model_ssm_state_dtype,
+        )
+        return DataType.TYPE_BF16
+
+    return model_ssm_state_dtype
 
 
 class ModelConfig(CppModelConfig):
@@ -58,6 +84,7 @@ class ModelConfig(CppModelConfig):
         "dspark_noise_token_id",
         "dspark_target_layer_ids",
         "dspark_markov_rank",
+        "dspark_sample_from_anchor",
         "capture_aux_hidden_layer_ids",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
@@ -72,7 +99,12 @@ class ModelConfig(CppModelConfig):
         "model_name",
         "quant_config",
         "inter_size",
+        "dense_inter_size",
         "moe_inter_size",
+        "moe_w1_layout",
+        "moe_prefill_max_tokens_per_rank",
+        "n_shared_experts",
+        "dsv4_fixed_pool_use_memory",
         "generate_env_config",
         "render_config",
         "phy2log_path",
@@ -369,19 +401,25 @@ class ModelConfig(CppModelConfig):
         # Use isGatedActivation() to determine if we need 3 weights (gated) or 2 weights (non-gated like GELU)
         ffn_w_count = 3 if self.isGatedActivation() else 2
         if self.moe_style == 1:
-            # Pure MOE: all layers use routed experts with moe_inter_size
+            # Routed-only MoE models may still have dense layers before (or
+            # between) their routed layers.  Count each set with its own
+            # intermediate width instead of treating every layer as MoE.
+            moe_layer_count = len(self.moe_layer_index)
+            dense_layer_count = self.num_layers - moe_layer_count
+            dense_inter_size = self.dense_inter_size or self.inter_size
             layer_weight_param_count = (
                 layer_weight_param_count
-                + self.num_layers
+                + moe_layer_count
                 * self.moe_inter_size
                 * hidden_size
                 * ffn_w_count
                 * ffn_expert_num
+                + dense_layer_count * dense_inter_size * hidden_size * ffn_w_count
             )
             # Gate weights for MOE layers
             layer_weight_param_count = (
                 layer_weight_param_count
-                + self.num_layers * hidden_size * ffn_expert_num
+                + moe_layer_count * hidden_size * ffn_expert_num
             )
         elif self.moe_style == 2:
             # Hybrid MOE: shared experts + routed experts
@@ -429,9 +467,10 @@ class ModelConfig(CppModelConfig):
         ffn_w_count = 3 if self.isGatedActivation() else 2
 
         if self.moe_style == 1:
-            # Pure MOE: all layers use routed experts
+            # Routed-only models can retain dense layers outside
+            # ``moe_layer_index``; only count routed expert weights here.
             return (
-                self.num_layers
+                len(self.moe_layer_index)
                 * self.moe_inter_size
                 * hidden_size
                 * ffn_w_count
@@ -530,6 +569,7 @@ class ModelConfig(CppModelConfig):
         self.dspark_noise_token_id: Optional[int] = None
         self.dspark_target_layer_ids: Optional[list[int]] = None
         self.dspark_markov_rank: Optional[int] = None
+        self.dspark_sample_from_anchor: bool = True
         # Target-side decoder layer outputs exported to the DSpARK draft.
         self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
         self.normalize_lm_head_weight: bool = False
@@ -554,9 +594,16 @@ class ModelConfig(CppModelConfig):
 
         # Model architecture fields
         self.inter_size: int = 0  # FFN intermediate size (for regular FFN layers)
+        self.dense_inter_size: int = 0  # Dense FFN width in mixed dense/MoE models
         self.moe_inter_size: int = (
             0  # MOE intermediate size (for MOE expert FFN layers)
         )
+        # Canonical W.moe_w1 producers stack up_proj before gate_proj.
+        self.moe_w1_layout: str = "up_gate"
+        self.n_shared_experts: int = 0
+        self.dsv4_fixed_pool_use_memory: Optional[bool] = None
+        # None uses max_seq_len until ModelFactory finalizes the scheduler bound.
+        self.moe_prefill_max_tokens_per_rank: Optional[int] = None
 
         # Renderer configuration fields
         self.generate_env_config: Optional[Any] = (
@@ -899,13 +946,18 @@ def build_model_config(
         kv_cache_config=kv_cache_config, act_type=model_args.act_type
     )
     model_config.attn_config.tokens_per_block = kv_cache_config.seq_size_per_block
+    model_config.dsv4_fixed_pool_use_memory = bool(
+        kv_cache_config.dsv4_fixed_pool_use_memory
+    )
     model_config.attn_config.kernel_tokens_per_block = (
         kv_cache_config.kernel_seq_size_per_block
         if kv_cache_config.kernel_seq_size_per_block > 0
         else kv_cache_config.seq_size_per_block
     )
-    model_config.linear_attention_config.ssm_state_dtype = (
-        ssm_state_dtype_str_to_data_type(kv_cache_config.ssm_state_dtype)
+    model_config.linear_attention_config.ssm_state_dtype = resolve_ssm_state_dtype(
+        kv_cache_config.ssm_state_dtype,
+        model_config.linear_attention_config.ssm_state_dtype,
+        kv_cache_config.enable_remote_cache,
     )
     model_config.linear_attention_config.conv_state_dtype = model_config.data_type
 

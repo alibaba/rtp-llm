@@ -70,14 +70,13 @@ class _PrefillPagedCudaGraphTestMixin:
         for il in input_lengths:
             cu.append(cu[-1] + il)
 
-        if with_copy_params:
-            inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32).pin_memory()
-            inp.cu_kv_seqlens_device = torch.tensor(cu, dtype=torch.int32).pin_memory()
-        else:
-            inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
-            inp.cu_kv_seqlens_device = torch.tensor(
-                cu, dtype=torch.int32, device="cuda"
-            )
+        # Device, in both cases. These are what FlashInfer keeps as its persistent
+        # graph buffers and dereferences on the device at each replay, and the
+        # field names say _device. The copy-params path uses device metadata too,
+        # including cuda_graph_prefill_batch_size below; pinned host tensors do
+        # not satisfy that contract.
+        inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
+        inp.cu_kv_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
 
         max_blocks = max(math.ceil(s / PAGE_SIZE) for s in seq_lengths)
         block_ids = torch.zeros(batch_size, max_blocks, dtype=torch.int32)
@@ -92,8 +91,8 @@ class _PrefillPagedCudaGraphTestMixin:
             ms = max_seq_len if max_seq_len > 0 else max(input_lengths)
             cp = PyPrefillCudaGaphCopyParams()
             cp.cuda_graph_prefill_batch_size = torch.tensor(
-                [active_batch_size], dtype=torch.int32
-            ).pin_memory()
+                [active_batch_size], dtype=torch.int32, device="cuda"
+            )
             cp.max_seq_len = ms
             cp.max_batch_size = batch_size
             inp.prefill_cuda_graph_copy_params = cp
@@ -185,7 +184,7 @@ class _PrefillPagedCudaGraphTestMixin:
         normal_op.prepare(normal_inp)
         normal_out = normal_op.forward(q, kv_cache)
 
-        # CUDA graph path: capture then replay
+        # Exercise persistent copy/plan buffers; engine capture/replay is covered by smoke.
         cg_init = self._make_inputs(
             capture_input_lengths, capture_prefix_lengths, True, max_seq_len
         )
@@ -214,6 +213,11 @@ class _PrefillPagedCudaGraphTestMixin:
             cg_op.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size.item(),
             active_batch_size,
         )
+        self.assertTrue(
+            cg_replay.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size.is_cuda
+        )
+        self.assertTrue(cg_op.input_lengths.is_cuda)
+        self.assertTrue(cg_op.cu_seq_lens.is_cuda)
         cg_out = cg_op.forward(q, kv_cache)
 
         if verify_cast_buffer_reuse:

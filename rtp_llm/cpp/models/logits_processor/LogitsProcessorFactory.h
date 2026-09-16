@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
@@ -16,8 +17,10 @@ struct GrammarConfig;
 
 class LogitsProcessorFactory {
 public:
-    static void
-    init(const ModelConfig& model_config, const GrammarConfig& grammar_config, const std::string& tree_decode_config);
+    static void init(const ModelConfig&             model_config,
+                     const GrammarConfig&           grammar_config,
+                     const std::string&             tree_decode_config,
+                     kmonitor::MetricsReporterPtr   metrics_reporter = nullptr);
 
     static ErrorResult<std::vector<BaseLogitsProcessorPtr>>
     createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,

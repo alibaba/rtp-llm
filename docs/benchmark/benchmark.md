@@ -31,7 +31,49 @@ CI performance tests run through pytest profile `perf_sm9x`, backed by
 `rtp_llm/test/remote_tests/test_perf_remote.py` and
 `internal_source/rtp_llm/test/perf_test/perf_defs.py`.
 
-For local/manual single-node experiments, call the perf entrypoint directly:
+For local/manual experiments, the Python entrypoint accepts model, workload,
+engine, repetition, and output settings independently.
+
+| Group | Interface | Meaning |
+| --- | --- | --- |
+| Model | `--model_type`, `--checkpoint_path`, `--tokenizer_path` | Model implementation and local/Hub paths. |
+| Workload | `--batch_size=1,2,4`, `--input_len=1024,4096`, `--partial=2` | Grid shape and phase (0 both, 1 decode, 2 prefill). |
+| Engine | `--engine_arg=NAME=VALUE` | Repeatable engine option. |
+| Environment | `--engine_env=NAME=VALUE` | Repeatable default; an existing environment value wins. |
+| Repetitions | `--warmup_runs=1`, `--measure_runs=3`, `--profile_runs=0` | Warmup, measurement, and profiling counts per case. |
+| Output | `--result_dir=/path/to/results` | Directory for results and diagnostics. |
+
+For example:
+
+```shell
+python -m rtp_llm.test.perf_test.batch_decode_test \
+    --model_type=deepseek_v4 \
+    --checkpoint_path=/models/DeepSeek-V4 \
+    --tokenizer_path=/models/DeepSeek-V4 \
+    --batch_size=1,2,4,8 \
+    --input_len=1024,4096,16384,65536 \
+    --partial=2 --decode_test_length=1 \
+    --engine_arg=tp_size=8 --engine_arg=ep_size=8 \
+    --engine_arg=world_size=8 --engine_arg=fp8_kv_cache=1 \
+    --engine_arg=load_method=fastsafetensors \
+    --warmup_runs=1 --measure_runs=3 --profile_runs=0 \
+    --result_dir=/tmp/rtp-perf-results
+```
+
+Engine arguments are forwarded as normal engine CLI options. Raw engine flags
+remain supported; specify each flag in only one form to avoid ambiguous values.
+
+Each run writes `test_info.json` (schema version 2), including model paths,
+workload, effective repetitions, redacted invocation, engine arguments and
+environment names. Its status changes from `running` to `completed` only after
+successful completion. Prefill and decode result files contain one record per
+batch-size/input-length point. Profiler output goes under `timelines/`.
+
+Startup or request failures return a nonzero exit code and retain diagnostics.
+The entrypoint does not infer model-specific topology; supply the required
+engine settings explicitly.
+
+Additional local examples:
 
 ```shell
 # Grid: override sizes and run decode + prefill (partial=0) or decode-only

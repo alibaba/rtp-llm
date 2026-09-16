@@ -15,6 +15,21 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Lean multimodal protobuf converter shared with multimodal_processor without a dependency cycle.
+cc_library(
+    name = "multimodal_pb_converter",
+    srcs = ["MultimodalPbConverter.cc"],
+    hdrs = ["MultimodalPbConverter.h"],
+    copts = copts(),
+    deps = [
+        ":tensor_pb_convert",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_types",
+        "//rtp_llm/cpp/utils:error_code",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "rpc_error_code",
     hdrs = [
@@ -34,6 +49,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:core_utils",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ],
@@ -46,6 +62,7 @@ cc_library(
         ["*.cc"],
         exclude = [
             "TensorPbConvert.cc",
+            "MultimodalPbConverter.cc",
         ],
     ),
     hdrs = glob(
@@ -68,7 +85,9 @@ cc_library(
         "//rtp_llm/cpp/metrics",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:hash_util",
+        "//rtp_llm/cpp/utils:torch_cuda_oom",
         "//rtp_llm/cpp/multimodal_processor",
+        "//rtp_llm/cpp/multimodal_processor:mm_processor_config",
         "//rtp_llm/cpp/normal_engine",
         "//rtp_llm/cpp/telemetry",
         "//rtp_llm/cpp/utils:atomic_util",
