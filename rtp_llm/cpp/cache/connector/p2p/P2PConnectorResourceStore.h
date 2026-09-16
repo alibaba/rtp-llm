@@ -6,6 +6,8 @@
 #include <optional>
 #include <string>
 #include <map>
+#include <set>
+#include <utility>
 #include <mutex>
 #include <thread>
 #include <atomic>
@@ -56,7 +58,8 @@ public:
 public:
     bool init();
 
-    // GenerateStream registers the local request deadline; duplicates cannot renew it.
+    // GenerateStream registers the local request deadline; duplicates cannot renew it
+    // while the record exists. A new handoff attempt must use a new unique_key.
     int64_t requestDeadline(const std::string& unique_key, int64_t timeout_ms);
 
     // Wait for GenerateStream registration without creating request state.
@@ -105,16 +108,15 @@ public:
     void clearPrefillPayload(const std::string& unique_key);
 
 private:
-    void checkTimeout();
+    void checkTimeout(int64_t now_ms);
     void runDeadlineLoop();
-    void scheduleDeadlineCheckLocked();
     std::optional<int64_t> nextDeadlineMsLocked() const;
     void reportMetrics(bool timeout, bool cancelled, int64_t wait_start_time_us);
 
     struct RequestState {
         int64_t request_deadline_ms;
         int64_t load_deadline_ms = 0;
-        int64_t retain_until_ms = 0;
+        int64_t scheduled_deadline_ms = 0;
         bool request_registered = false;
         bool consumed = false;
         bool terminal = false;
@@ -125,12 +127,17 @@ private:
         }
     };
 
+    void scheduleDeadlineCheckLocked(const std::string& unique_key, RequestState& state);
+
     mutable std::mutex resource_map_mutex_;
     std::condition_variable resource_cv_;
     std::condition_variable deadline_cv_;
     std::map<std::string, std::shared_ptr<P2PConnectorResourceEntry>> resource_map_;
     // Lifecycle survives resource transfer without retaining the KV resource.
     std::map<std::string, RequestState> request_states_;
+    // Exactly one index entry per request. Updating a deadline replaces its old
+    // entry, so repeated publications cannot accumulate stale timer records.
+    std::set<std::pair<int64_t, std::string>> deadline_index_;
 
     kmonitor::MetricsReporterPtr metrics_reporter_;
 

@@ -77,12 +77,8 @@ int64_t P2PConnectorResourceStore::requestDeadline(const std::string& unique_key
     }
     std::lock_guard<std::mutex> lock(resource_map_mutex_);
     auto [it, inserted] = request_states_.try_emplace(unique_key, RequestState{now + timeout_ms});
-    if (inserted) {
-        // Match the existing default cancelled-key retention window.
-        it->second.retain_until_ms = now + timeout_ms + 3600 * 1000;
-    }
     it->second.request_registered = true;
-    scheduleDeadlineCheckLocked();
+    scheduleDeadlineCheckLocked(unique_key, it->second);
     resource_cv_.notify_all();
     return it->second.request_deadline_ms;
 }
@@ -132,22 +128,28 @@ bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>& meta,
     bool release_layers = false;
     {
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
-        auto [it, inserted] = request_states_.try_emplace(routing->unique_key, RequestState{routing->deadline_ms});
-        auto& state = it->second;
-        release_layers = state.terminal || currentTimeMs() >= state.deadlineMs();
-        if (!state.terminal && !state.consumed && currentTimeMs() < state.deadlineMs()
-            && state.request_deadline_ms == routing->deadline_ms && !resource_map_.count(routing->unique_key)) {
-            auto entry = std::make_shared<P2PConnectorResourceEntry>();
-            entry->request_id = routing->request_id;
-            entry->unique_key = routing->unique_key;
-            entry->kv_cache_resource = resource;
-            entry->request_deadline_ms = state.request_deadline_ms;
-            entry->deadline_ms = state.deadlineMs();
-            entry->add_time_us = currentTimeUs();
-            resource_map_.emplace(routing->unique_key, std::move(entry));
-            accepted = true;
+        if (currentTimeMs() >= routing->deadline_ms) {
+            // Late callbacks carry the original deadline. Reject them without
+            // recreating state after its terminal record has been collected.
+            release_layers = true;
+        } else {
+            auto [it, inserted] = request_states_.try_emplace(routing->unique_key, RequestState{routing->deadline_ms});
+            auto& state = it->second;
+            release_layers = state.terminal || currentTimeMs() >= state.deadlineMs();
+            if (!state.terminal && !state.consumed && currentTimeMs() < state.deadlineMs()
+                && state.request_deadline_ms == routing->deadline_ms && !resource_map_.count(routing->unique_key)) {
+                auto entry = std::make_shared<P2PConnectorResourceEntry>();
+                entry->request_id = routing->request_id;
+                entry->unique_key = routing->unique_key;
+                entry->kv_cache_resource = resource;
+                entry->request_deadline_ms = state.request_deadline_ms;
+                entry->deadline_ms = state.deadlineMs();
+                entry->add_time_us = currentTimeUs();
+                resource_map_.emplace(routing->unique_key, std::move(entry));
+                accepted = true;
+            }
+            scheduleDeadlineCheckLocked(routing->unique_key, state);
         }
-        scheduleDeadlineCheckLocked();
     }
     if (release_layers && on_request_released_) {
         on_request_released_(routing->request_id, routing->deadline_ms);
@@ -167,7 +169,7 @@ void P2PConnectorResourceStore::markTerminal(const std::string& unique_key, int6
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
         auto it = request_states_.find(unique_key);
         if (it == request_states_.end()) {
-            if (!validDeadline(request_deadline_ms)) {
+            if (!validDeadline(request_deadline_ms) || currentTimeMs() >= request_deadline_ms) {
                 return;
             }
             it = request_states_.emplace(unique_key, RequestState{request_deadline_ms}).first;
@@ -181,7 +183,7 @@ void P2PConnectorResourceStore::markTerminal(const std::string& unique_key, int6
             reportMetrics(false, true, resource->second->add_time_us);
             resource_map_.erase(resource);
         }
-        scheduleDeadlineCheckLocked();
+        scheduleDeadlineCheckLocked(unique_key, it->second);
     }
     retired.reset();
     resource_cv_.notify_all();
@@ -209,7 +211,7 @@ std::shared_ptr<P2PConnectorResourceEntry> P2PConnectorResourceStore::waitAndSte
     if (resource != resource_map_.end()) {
         resource->second->deadline_ms = state.deadlineMs();
     }
-    scheduleDeadlineCheckLocked();
+    scheduleDeadlineCheckLocked(unique_key, state);
     resource_cv_.notify_all();
     // Re-find state on each wake: the scanner may remove an expired request.
     const auto stopped = [&]() {
@@ -234,15 +236,17 @@ std::shared_ptr<P2PConnectorResourceEntry> P2PConnectorResourceStore::waitAndSte
     return entry;
 }
 
-void P2PConnectorResourceStore::checkTimeout() {
+void P2PConnectorResourceStore::checkTimeout(int64_t now_ms) {
     std::vector<std::pair<int64_t, int64_t>> released;
     std::vector<P2PConnectorResourceEntry::SideChannelData> retired;
     {
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
-        const auto now = currentTimeMs();
-        for (auto it = request_states_.begin(); it != request_states_.end();) {
+        while (!deadline_index_.empty() && deadline_index_.begin()->first <= now_ms) {
+            const auto it = request_states_.find(deadline_index_.begin()->second);
+            deadline_index_.erase(deadline_index_.begin());
             auto& state = it->second;
-            if (now >= state.deadlineMs()) {
+            state.scheduled_deadline_ms = 0;
+            if (!state.terminal) {
                 state.terminal = true;
                 if (state.side_channel_data) {
                     retired.push_back(std::move(*state.side_channel_data));
@@ -255,10 +259,12 @@ void P2PConnectorResourceStore::checkTimeout() {
                     resource_map_.erase(resource);
                 }
             }
-            if (now >= std::max(state.request_deadline_ms, state.retain_until_ms)) {
-                it = request_states_.erase(it);
+            if (now_ms >= state.request_deadline_ms) {
+                request_states_.erase(it);
             } else {
-                ++it;
+                // A load timeout seals the request, but its terminal record is
+                // still needed until the original request deadline rejects late callbacks.
+                scheduleDeadlineCheckLocked(it->first, state);
             }
         }
         if (metrics_reporter_) {
@@ -276,26 +282,33 @@ void P2PConnectorResourceStore::checkTimeout() {
     }
 }
 
-void P2PConnectorResourceStore::scheduleDeadlineCheckLocked() {
-    ++deadline_generation_;
-    deadline_cv_.notify_one();
+void P2PConnectorResourceStore::scheduleDeadlineCheckLocked(const std::string& unique_key, RequestState& state) {
+    const int64_t deadline_ms = state.terminal ? state.request_deadline_ms : state.deadlineMs();
+    if (state.scheduled_deadline_ms == deadline_ms) {
+        return;
+    }
+    const auto previous_deadline = nextDeadlineMsLocked();
+    if (state.scheduled_deadline_ms > 0) {
+        deadline_index_.erase({state.scheduled_deadline_ms, unique_key});
+    }
+    deadline_index_.emplace(deadline_ms, unique_key);
+    state.scheduled_deadline_ms = deadline_ms;
+    if (previous_deadline != nextDeadlineMsLocked()) {
+        ++deadline_generation_;
+        deadline_cv_.notify_one();
+    }
 }
 
 std::optional<int64_t> P2PConnectorResourceStore::nextDeadlineMsLocked() const {
-    std::optional<int64_t> next_deadline_ms;
-    for (const auto& [unique_key, state] : request_states_) {
-        (void)unique_key;
-        const int64_t cleanup_deadline_ms = state.terminal ? std::max(state.request_deadline_ms, state.retain_until_ms) : state.deadlineMs();
-        if (!next_deadline_ms || cleanup_deadline_ms < *next_deadline_ms) {
-            next_deadline_ms = cleanup_deadline_ms;
-        }
+    if (deadline_index_.empty()) {
+        return std::nullopt;
     }
-    return next_deadline_ms;
+    return deadline_index_.begin()->first;
 }
 
 void P2PConnectorResourceStore::runDeadlineLoop() {
     while (true) {
-        checkTimeout();
+        checkTimeout(currentTimeMs());
 
         std::unique_lock<std::mutex> lock(resource_map_mutex_);
         if (stopping_) {
@@ -325,15 +338,18 @@ void P2PConnectorResourceStore::publishPrefillPayload(const std::string&        
     std::optional<P2PConnectorResourceEntry::SideChannelData> retired;
     {
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
+        if (currentTimeMs() >= request_deadline_ms) {
+            return;
+        }
         auto [it, inserted] = request_states_.try_emplace(unique_key, RequestState{request_deadline_ms});
         auto& state = it->second;
+        scheduleDeadlineCheckLocked(unique_key, state);
         if (state.terminal || currentTimeMs() >= state.deadlineMs()
             || state.request_deadline_ms != request_deadline_ms) {
             return;
         }
         retired.swap(state.side_channel_data);
         state.side_channel_data.emplace(std::move(data));
-        scheduleDeadlineCheckLocked();
     }
     resource_cv_.notify_all();
 }

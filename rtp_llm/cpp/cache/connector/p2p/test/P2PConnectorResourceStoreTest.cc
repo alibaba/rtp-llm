@@ -693,4 +693,135 @@ TEST(P2PRequestTimeoutTest, InvalidDurationsDoNotCreateRequest) {
     EXPECT_GT(store.requestDeadline("key", 1000), currentTimeMs());
 }
 
+// Drive cleanup with an explicit time instead of sleeping or racing the deadline thread.
+class P2PResourceStoreDeadlineIndexTest: public P2PConnectorResourceStoreTest {
+protected:
+    void SetUp() override {
+        stream_store_ = std::make_unique<P2PConnectorResourceStore>(nullptr, 100);
+    }
+};
+
+TEST_F(P2PResourceStoreDeadlineIndexTest, TerminalStateExpiresAtOriginalRequestDeadline) {
+    auto& store = *stream_store_;
+    const std::string key = "terminal";
+    const auto deadline = store.requestDeadline(key, 60000);
+    ASSERT_TRUE(store.addResource(createMockMeta(key, 6101, deadline), createMockKVCacheResource()));
+    const auto load_deadline = currentTimeMs() + 10000;
+    ASSERT_NE(store.waitAndStealResource(key, load_deadline, deadline), nullptr);
+    EXPECT_EQ(store.nextDeadlineMsLocked(), load_deadline);
+    store.markTerminal(key, deadline);
+    EXPECT_EQ(store.nextDeadlineMsLocked(), deadline);
+    store.checkTimeout(load_deadline);
+    EXPECT_EQ(store.request_states_.size(), 1u);
+
+    store.checkTimeout(deadline - 1);
+    EXPECT_TRUE(store.isMarkedCancelled(key));
+    EXPECT_EQ(store.requestDeadline(key, 120000), deadline);
+    EXPECT_FALSE(store.addResource(createMockMeta(key, 6101, deadline), createMockKVCacheResource()));
+    P2PConnectorResourceEntry::SideChannelData data;
+    store.publishPrefillPayload(key, deadline, std::move(data));
+    EXPECT_FALSE(store.takePrefillPayload(key, data));
+    ASSERT_EQ(store.deadline_index_.size(), 1u);
+    EXPECT_EQ(store.nextDeadlineMsLocked(), deadline);
+
+    // No extra hour of retention after the original request deadline.
+    store.checkTimeout(deadline);
+    EXPECT_TRUE(store.request_states_.empty());
+    EXPECT_TRUE(store.deadline_index_.empty());
+    EXPECT_FALSE(store.nextDeadlineMsLocked().has_value());
+}
+
+TEST_F(P2PResourceStoreDeadlineIndexTest, LoadExpiryReleasesResourcesAndKeepsTerminalUntilRequestExpiry) {
+    auto& store = *stream_store_;
+    // Insert in the opposite order to expiry, including an unrelated live request.
+    const auto later_deadline = store.requestDeadline("later", 120000);
+    const auto request_deadline = store.requestDeadline("loading", 60000);
+    const auto load_deadline = currentTimeMs() + 10000;
+    auto resource = createMockKVCacheResource();
+    std::weak_ptr<KVCacheResource> weak_resource = resource;
+    ASSERT_TRUE(store.addResource(createMockMeta("loading", 6102, request_deadline), resource));
+    resource.reset();
+    int released = 0;
+    store.setOnRequestReleased([&](int64_t request_id, int64_t deadline) {
+        ++released;
+        EXPECT_EQ(request_id, 6102);
+        EXPECT_EQ(deadline, request_deadline);
+        // The callback may re-enter the store; it must run outside the store lock.
+        EXPECT_TRUE(store.isMarkedCancelled("loading"));
+    });
+
+    const auto generation = store.deadline_generation_;
+    // Establish the shorter load deadline without consuming the stored resource.
+    EXPECT_EQ(store.waitAndStealResource("loading", load_deadline, request_deadline, [] { return true; }), nullptr);
+    EXPECT_GT(store.deadline_generation_, generation);
+    EXPECT_EQ(store.nextDeadlineMsLocked(), load_deadline);
+    EXPECT_EQ(store.deadline_index_.size(), 2u);
+    P2PConnectorResourceEntry::SideChannelData data;
+    store.publishPrefillPayload("loading", request_deadline, std::move(data));
+
+    store.checkTimeout(load_deadline - 1);
+    EXPECT_FALSE(weak_resource.expired());
+    EXPECT_EQ(released, 0);
+    store.checkTimeout(load_deadline);
+    EXPECT_TRUE(weak_resource.expired());
+    EXPECT_EQ(released, 1);
+    EXPECT_TRUE(store.isMarkedCancelled("loading"));
+    EXPECT_FALSE(store.takePrefillPayload("loading", data));
+    EXPECT_FALSE(store.addResource(createMockMeta("loading", 6102, request_deadline), createMockKVCacheResource()));
+    EXPECT_EQ(released, 2);  // A rejected late add also releases its computed layers.
+    EXPECT_EQ(store.nextDeadlineMsLocked(), request_deadline);
+    EXPECT_EQ(store.deadline_index_.size(), 2u);
+
+    store.checkTimeout(request_deadline - 1);
+    store.checkTimeout(request_deadline);
+    EXPECT_EQ(released, 2);
+    EXPECT_EQ(store.request_states_.count("loading"), 0u);
+    EXPECT_EQ(store.request_states_.count("later"), 1u);
+    EXPECT_EQ(store.nextDeadlineMsLocked(), later_deadline);
+    store.checkTimeout(later_deadline);
+    EXPECT_TRUE(store.request_states_.empty());
+    EXPECT_TRUE(store.deadline_index_.empty());
+}
+
+TEST_F(P2PResourceStoreDeadlineIndexTest, PublicationsShareDeadlineWithoutAccumulatingTimers) {
+    auto& store = *stream_store_;
+    const auto deadline = currentTimeMs() + 60000;
+    for (const std::string key : {"first", "second"}) {
+        for (int i = 0; i < 16; ++i) {
+            P2PConnectorResourceEntry::SideChannelData data;
+            data.has_first_token = true;
+            data.first_token_id = i;
+            store.publishPrefillPayload(key, deadline, std::move(data));
+        }
+    }
+    EXPECT_EQ(store.deadline_index_.size(), 2u);
+    EXPECT_EQ(store.request_states_.size(), 2u);
+    const auto generation = store.deadline_generation_;
+    EXPECT_EQ(store.requestDeadline("first", 120000), deadline);
+    // Completing a request with this same expiry needs no timer wakeup.
+    store.markTerminal("first", deadline);
+    EXPECT_EQ(store.deadline_generation_, generation);
+    EXPECT_EQ(store.deadline_index_.size(), 2u);
+    P2PConnectorResourceEntry::SideChannelData consumed;
+    ASSERT_TRUE(store.takePrefillPayload("second", consumed));
+    EXPECT_EQ(consumed.first_token_id, 15);
+
+    store.checkTimeout(deadline);
+    EXPECT_TRUE(store.request_states_.empty());
+    EXPECT_TRUE(store.deadline_index_.empty());
+}
+
+TEST_F(P2PResourceStoreDeadlineIndexTest, ExpiredCallbacksDoNotRecreateCollectedState) {
+    auto& store = *stream_store_;
+    const auto expired_deadline = currentTimeMs() - 1;
+    EXPECT_FALSE(store.addResource(createMockMeta("expired", 6103, expired_deadline), createMockKVCacheResource()));
+    P2PConnectorResourceEntry::SideChannelData data;
+    store.publishPrefillPayload("expired", expired_deadline, std::move(data));
+    store.markTerminal("expired", expired_deadline);
+    EXPECT_EQ(store.waitAndStealResource("expired", expired_deadline, expired_deadline), nullptr);
+    EXPECT_TRUE(store.request_states_.empty());
+    EXPECT_TRUE(store.resource_map_.empty());
+    EXPECT_TRUE(store.deadline_index_.empty());
+}
+
 }  // namespace rtp_llm
