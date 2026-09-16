@@ -121,6 +121,45 @@ TEST_F(MultimodalProcessorTest, testEmbeddingEngineRejectInputEmbeddingsWithMult
     EXPECT_EQ(res.code(), ErrorCode::MM_NOT_SUPPORTED_ERROR);
 }
 
+TEST_F(MultimodalProcessorTest, testEmbeddingPreservesPositionsAndDeepstack) {
+    class PositionalProcessor: public FakeMultimodalProcessor {
+    public:
+        PositionalProcessor(): FakeMultimodalProcessor(py::none(), {{1}}, false, 64) {}
+
+    private:
+        ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput> inputs,
+                                                          std::string                        addr = "") override {
+            MultimodalOutput output;
+            output.mm_features = {torch::zeros({2, 1})};
+            output.mm_position_ids =
+                std::vector<torch::Tensor>{torch::tensor({0, 0, 0, 0, 0, 1}, torch::kInt32).reshape({2, 3})};
+            output.mm_extra_input = std::vector<torch::Tensor>{torch::ones({6})};
+            return output;
+        }
+    } processor;
+    auto input = std::make_shared<EmbeddingInput>(
+        std::vector<int32_t>{0, 1, 2}, std::vector<int32_t>(3, 0), std::vector<int32_t>{3}, 0);
+    ASSERT_TRUE(processor.updateMultimodalFeatures(input, {MultimodalInput("image")}, "").ok());
+    const auto& mm = input->multimodal_features.value();
+    ASSERT_TRUE(mm.position_ids.has_value());
+    ASSERT_TRUE(mm.extra_input.has_value());
+    EXPECT_TRUE(torch::equal(mm.position_ids->at(0), torch::tensor({0, 0, 0, 0, 0, 1}, torch::kInt32).reshape({2, 3})));
+    EXPECT_TRUE(torch::equal(mm.extra_input->at(0), torch::ones({6})));
+}
+
+TEST_F(MultimodalProcessorTest, testEmbeddingBatchExpansionPreservesLengths) {
+    auto processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 64);
+    auto input     = std::make_shared<EmbeddingInput>(
+        std::vector<int32_t>{0, 1, 2, 3, 1, 4, 5}, std::vector<int32_t>(7, 0), std::vector<int32_t>{3, 4}, 0);
+    std::vector<MultimodalInput> mm_inputs;
+    mm_inputs.emplace_back("3");
+    mm_inputs.emplace_back("4");
+    ASSERT_TRUE(processor.updateMultimodalFeatures(input, mm_inputs, "").ok());
+    EXPECT_EQ(input->total_length, 12);
+    EXPECT_TRUE(torch::equal(input->input_lengths, torch::tensor({5, 7}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(input->multimodal_features->locs, torch::tensor({1, 6}, torch::kInt32)));
+}
+
 TEST_F(MultimodalProcessorTest, testMultiInput) {
     FakeMultimodalProcessor processor =
         FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}, {2, 3}}, false, 10);

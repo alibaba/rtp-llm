@@ -30,7 +30,10 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
                 crop_positions.push_back(crop_position);
             }
             MultimodalInput feature(pb_feature.multimodal_url(),
-                                    QueryConverter::transTensor(pb_feature.multimodal_tensor()),
+                                    pb_feature.has_multimodal_tensor()
+                                            && pb_feature.multimodal_tensor().ByteSizeLong() > 0 ?
+                                        QueryConverter::transTensor(pb_feature.multimodal_tensor()) :
+                                        torch::empty({0}),
                                     pb_feature.multimodal_type(),
                                     mm_preprocess_config->width(),
                                     mm_preprocess_config->height(),

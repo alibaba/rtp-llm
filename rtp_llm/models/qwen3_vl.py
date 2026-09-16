@@ -93,8 +93,13 @@ class QWen3_VL(QwenV3):
         if config_json.get("hidden_size") is not None:
             config.hidden_size = config_json["hidden_size"]
         config.num_layers = config_json["num_hidden_layers"]
-        config.attn_config.rope_config.base = config_json.get(
-            "rope_theta", config.attn_config.rope_config.base
+        # Transformers 5 stores theta and MRoPE sections in rope_parameters.
+        rope_parameters = (
+            config_json.get("rope_parameters") or config_json.get("rope_scaling") or {}
+        )
+        config.attn_config.rope_config.base = rope_parameters.get(
+            "rope_theta",
+            config_json.get("rope_theta", config.attn_config.rope_config.base),
         )
         config.vocab_size = config_json["vocab_size"]
         config.attn_config.rope_config.dim = config.attn_config.size_per_head
@@ -105,7 +110,7 @@ class QWen3_VL(QwenV3):
         config.attn_config.rope_config.style = 7
         # Qwen3-VL interleaves T/H/W rotary pairs; the model default for a
         # 128-dim rotary region is 24/20/20 (64 pairs total).
-        rope_scaling = config_json.get("rope_scaling", {})
+        rope_scaling = rope_parameters
         if "mrope_section" not in rope_scaling:
             logging.warning(
                 "Qwen3-VL config does not specify mrope_section; using the "

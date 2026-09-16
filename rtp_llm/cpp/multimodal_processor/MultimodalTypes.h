@@ -16,11 +16,13 @@ struct MultimodalOutput {
 
 class MultimodalFeature {
 public:
-    std::vector<torch::Tensor>   features;
-    std::vector<MultimodalInput> inputs;
-    torch::Tensor                text_tokens_mask;  // text part for 1 and multimodal part for 0
-    torch::Tensor                locs;              // multimodal input locations
-    torch::Tensor                expanded_ids;
+    std::vector<torch::Tensor>                features;
+    std::optional<std::vector<torch::Tensor>> position_ids = std::nullopt;
+    std::optional<std::vector<torch::Tensor>> extra_input  = std::nullopt;
+    std::vector<MultimodalInput>              inputs;
+    torch::Tensor                             text_tokens_mask;  // text part for 1 and multimodal part for 0
+    torch::Tensor                             locs;              // multimodal input locations
+    torch::Tensor                             expanded_ids;
     MultimodalFeature() {}
     std::string debugString() const {
         std::stringstream debug_string;

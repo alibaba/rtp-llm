@@ -10,13 +10,9 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.metrics import GaugeMetrics, kmonitor
-from rtp_llm.models.downstream_modules.embedding.api_datatype import (
-    ChatCompletionRequest,
-    ChatMessage,
-)
-from rtp_llm.models.downstream_modules.openai_render import (
-    OpenAIRenderBasicInfo,
-)
+from rtp_llm.models.downstream_modules.embedding.api_datatype import ChatMessage
+from rtp_llm.models.downstream_modules.openai_render import OpenAIRenderBasicInfo
+from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.utils.time_util import current_time_ms
 
 
@@ -75,7 +71,11 @@ class CommonInputGenerator(object):
                 ).to(torch.int32)
                 input_lengths = torch.from_numpy(encoded["length"]).to(torch.int32)
             elif isinstance(prompt, list) and isinstance(prompt[0], ChatMessage):
-                chat_request = ChatCompletionRequest(messages=prompt)
+                chat_request = ChatCompletionRequest(
+                    messages=[
+                        message.model_dump(exclude_none=True) for message in prompt
+                    ]
+                )
                 rendered_input = self.openai_render_info.chat_renderer.render_chat(
                     chat_request
                 )

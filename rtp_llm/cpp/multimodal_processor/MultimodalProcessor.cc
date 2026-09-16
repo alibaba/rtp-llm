@@ -285,7 +285,9 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     }
     CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs, vit_role_addr));
     MultimodalFeature mm_features;
-    mm_features.features = std::move(mm_embedding_res.mm_features);
+    mm_features.features     = std::move(mm_embedding_res.mm_features);
+    mm_features.position_ids = std::move(mm_embedding_res.mm_position_ids);
+    mm_features.extra_input  = std::move(mm_embedding_res.mm_extra_input);
     CHECK_AND_RETURN_REF(expanded_ids,
                          expandTokenIds(mm_features.features, input->token_ids, mm_inputs, input->token_type_ids));
     mm_features.expanded_ids     = expanded_ids.expanded_ids;
@@ -294,10 +296,25 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     input->multimodal_features.emplace(mm_features);
     input->token_ids      = expanded_ids.expanded_ids;
     input->token_type_ids = expanded_ids.token_type_ids;
-    if (input->input_lengths.numel() == 1 && expanded_ids.expanded_ids.defined()) {
-        input->input_lengths.data_ptr<int32_t>()[0] = expanded_ids.expanded_ids.size(0);
-        input->total_length                         = expanded_ids.expanded_ids.size(0);
+    // Preserve sequence boundaries when image/video placeholders expand in a batch.
+    auto    lengths      = input->input_lengths.clone();
+    int32_t source_start = 0;
+    size_t  mm_index     = 0;
+    for (int64_t i = 0; i < lengths.numel(); ++i) {
+        const int32_t source_end = source_start + input->input_lengths.data_ptr<int32_t>()[i];
+        while (mm_index < expanded_ids.source_locs.size() && expanded_ids.source_locs[mm_index].first < source_end) {
+            const auto [start, end] = expanded_ids.source_locs[mm_index];
+            if (start < source_start || end > source_end) {
+                return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
+                                 "multimodal tag crosses an embedding sequence boundary");
+            }
+            lengths.data_ptr<int32_t>()[i] += mm_features.features[mm_index].size(0) - (end - start);
+            ++mm_index;
+        }
+        source_start = source_end;
     }
+    input->input_lengths = std::move(lengths);
+    input->total_length  = expanded_ids.expanded_ids.size(0);
     return ErrorInfo::OkStatus();
 }
 
@@ -306,7 +323,9 @@ MultimodalProcessor::getMultimodalFeatures(const torch::Tensor&                 
                                            const std::vector<rtp_llm::MultimodalInput>& mm_inputs) {
     MultimodalFeature mm_features;
     CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs));
-    mm_features.features = std::move(mm_embedding_res.mm_features);
+    mm_features.features     = std::move(mm_embedding_res.mm_features);
+    mm_features.position_ids = std::move(mm_embedding_res.mm_position_ids);
+    mm_features.extra_input  = std::move(mm_embedding_res.mm_extra_input);
     CHECK_AND_RETURN_REF(expanded_ids, expandTokenIds(mm_features.features, input_ids, mm_inputs));
     mm_features.expanded_ids     = expanded_ids.expanded_ids;
     mm_features.text_tokens_mask = expanded_ids.text_tokens_mask;

@@ -7,3 +7,9 @@ py_test(
         "//rtp_llm:rtp_llm_lib",
     ],
 )
+
+py_test(
+    name = "test_mrope_contract",
+    srcs = ["test_mrope_contract.py"],
+    deps = ["//rtp_llm:testlib"],
+)

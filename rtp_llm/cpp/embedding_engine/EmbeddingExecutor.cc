@@ -6,6 +6,7 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <ATen/TensorIndexing.h>
@@ -118,22 +119,28 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
 
     model_input.combo_tokens          = torch::empty({token_num}, i32_options);
     model_input.combo_tokens_type_ids = torch::empty({token_num}, i32_options);
-    model_input.combo_position_ids    = torch::empty({token_num}, i32_options);
-    model_input.input_lengths         = torch::empty({batch_size}, i32_options);
-    model_input.sequence_lengths      = torch::empty({0}, i32_options);
-    model_input.prefix_lengths        = torch::zeros({batch_size}, i32_options);
-    int* merged_tokens                = model_input.combo_tokens.data_ptr<int>();
-    int* input_lengths                = model_input.input_lengths.data_ptr<int>();
-    int* merged_positon_ids           = model_input.combo_position_ids.data_ptr<int>();
-    int* merged_token_type_ids        = model_input.combo_tokens_type_ids.data_ptr<int>();
-    int  token_idx                    = 0;
-    int  batch_idx                    = 0;
-    int  position_bias                = 0;
+    const auto position_style  = static_cast<PositionIdsStyle>(model_config_.mm_model_config.mm_position_ids_style);
+    const int  position_factor = position_style == PositionIdsStyle::MROPE ? 3 : 1;
+    if (position_factor != model_config_.attn_config.rope_config.index_factor) {
+        return absl::InvalidArgumentError("embedding position style and RoPE index_factor disagree");
+    }
+    model_input.combo_position_ids = torch::empty({token_num * position_factor}, i32_options);
+    model_input.input_lengths      = torch::empty({batch_size}, i32_options);
+    model_input.sequence_lengths   = torch::empty({0}, i32_options);
+    model_input.prefix_lengths     = torch::zeros({batch_size}, i32_options);
+    int* merged_tokens             = model_input.combo_tokens.data_ptr<int>();
+    int* input_lengths             = model_input.input_lengths.data_ptr<int>();
+    int* merged_positon_ids        = model_input.combo_position_ids.data_ptr<int>();
+    int* merged_token_type_ids     = model_input.combo_tokens_type_ids.data_ptr<int>();
+    int  token_idx                 = 0;
+    int  batch_idx                 = 0;
+    int  position_bias             = 0;
     if (model_config_.position_ids_style == 1) {
         position_bias = model_config_.special_tokens.pad_token_id + 1;
     }
 
     std::vector<torch::Tensor> gathered_mm_features;
+    std::vector<torch::Tensor> gathered_mm_extra_input;
     std::vector<int>           new_locs;
     std::vector<int>           merged_text_mask;
     std::vector<torch::Tensor> gathered_input_embeddings;
@@ -152,6 +159,10 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         }
 
         if (mm_feature.has_value()) {
+            if (mm_feature->extra_input.has_value()) {
+                const auto& extra = mm_feature->extra_input.value();
+                gathered_mm_extra_input.insert(gathered_mm_extra_input.end(), extra.begin(), extra.end());
+            }
             for (const auto& feature : mm_feature.value().features) {
                 gathered_mm_features.emplace_back(feature);
             }
@@ -200,9 +211,47 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
                                     int(seqLen),
                                     int(position_bias),
                                     (int)max_position_ids_tensor_.size(0));
-            memcpy(merged_positon_ids + token_idx + length_idx,
-                   max_position_ids_tensor_.data_ptr<int32_t>() + position_bias,
-                   seqLen * sizeof(int32_t));
+            auto* destination = merged_positon_ids + (token_idx + length_idx) * position_factor;
+            if (position_style == PositionIdsStyle::DEFAULT) {
+                memcpy(destination,
+                       max_position_ids_tensor_.data_ptr<int32_t>() + position_bias,
+                       seqLen * sizeof(int32_t));
+            } else {
+                std::optional<torch::Tensor>              local_locs;
+                std::optional<std::vector<torch::Tensor>> local_positions;
+                if (mm_feature.has_value() && !mm_feature->features.empty()) {
+                    const auto& mm = mm_feature.value();
+                    if (!mm.position_ids.has_value() || mm.position_ids->size() != mm.features.size()
+                        || mm.locs.numel() != mm.features.size()) {
+                        return absl::InvalidArgumentError(
+                            "embedding multimodal position ids are missing or misaligned");
+                    }
+                    std::vector<int32_t>       locs;
+                    std::vector<torch::Tensor> positions;
+                    for (size_t j = 0; j < mm.features.size(); ++j) {
+                        const int loc = mm.locs.data_ptr<int32_t>()[j];
+                        if (loc < length_idx || loc >= length_idx + seqLen) {
+                            continue;
+                        }
+                        const auto& pos         = mm.position_ids->at(j);
+                        const int   feature_len = mm.features[j].size(0);
+                        if (loc + feature_len > length_idx + seqLen || pos.size(0) != feature_len
+                            || pos.numel() != feature_len * position_factor) {
+                            return absl::InvalidArgumentError(
+                                "embedding multimodal positions cross a sequence boundary or have invalid shape");
+                        }
+                        locs.push_back(loc - length_idx);
+                        positions.push_back(pos.to(torch::kCPU).to(torch::kInt32).contiguous());
+                    }
+                    if (!locs.empty()) {
+                        local_locs      = torch::tensor(locs, torch::kInt32);
+                        local_positions = std::move(positions);
+                    }
+                }
+                auto positions =
+                    PositionIdsGenerator::generatePositionIds(seqLen, position_style, local_locs, local_positions);
+                memcpy(destination, positions.data_ptr<int32_t>(), positions.numel() * sizeof(int32_t));
+            }
             length_idx += seqLen;
         }
 
@@ -211,6 +260,12 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         }
         batch_idx += stream->batchSize();
         token_idx += length;
+    }
+    if (!gathered_mm_extra_input.empty()) {
+        if (gathered_mm_extra_input.size() != gathered_mm_features.size()) {
+            return absl::InvalidArgumentError("embedding multimodal extra inputs and features are misaligned");
+        }
+        model_input.mm_extra_input = std::move(gathered_mm_extra_input);
     }
     if (!gathered_mm_features.empty()) {
         model_input.multimodal_features = std::move(gathered_mm_features);

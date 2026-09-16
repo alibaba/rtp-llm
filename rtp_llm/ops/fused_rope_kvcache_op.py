@@ -9,13 +9,18 @@ from librtp_compute_ops import LayerKVCache, PyAttentionInputs, get_scalar_type
 from rtp_llm.ops.attention_input_utils import select_prefill_position_ids
 from libth_transformer_config import (
     AttentionConfigs,
+    RopeStyle,
     check_rope_cache,
     get_rope_cache_once,
 )
 
 
-class DecodeRopeContractError(RuntimeError):
-    """Decode RoPE input/state invariant violation that must not fall back."""
+class RopeContractError(RuntimeError):
+    """RoPE input/state invariant violation that must not fall back."""
+
+
+class DecodeRopeContractError(RopeContractError):
+    """Decode RoPE input/state invariant violation."""
 
 
 @cache
@@ -64,6 +69,18 @@ class FusedRopeKVCachePrefillOpBase:
         # them for models such as Qwen3-VL whose mRoPE positions have three axes;
         # shuffle indices are only a fallback for models without position IDs.
         position_ids = select_prefill_position_ids(attn_inputs)
+        rope_config = self.attn_configs.rope_config
+        if rope_config.style == RopeStyle.Mrope:
+            # Metadata checks only: do not synchronize device tensors here.
+            token_num = attn_inputs.padding_offset.numel()
+            required = token_num * rope_config.index_factor
+            actual = 0 if position_ids is None else position_ids.numel()
+            if actual < required:
+                raise RopeContractError(
+                    f"MRoPE prefill combo_position_ids too small: got {actual}, "
+                    f"expected at least {required} (token_num={token_num}, "
+                    f"index_factor={rope_config.index_factor})"
+                )
 
         return FusedRopeAttnParams(
             kv_cache_offset,

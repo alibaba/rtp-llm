@@ -18,6 +18,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/stream:stream",
         "//rtp_llm/cpp/config:eplb_config",
         "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/models:position_ids_generator",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/models:context_parallel",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",

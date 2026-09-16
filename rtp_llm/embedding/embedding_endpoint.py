@@ -159,7 +159,11 @@ class EmbeddingEndpoint(object):
                 pb2.MultimodalInputPB(
                     multimodal_type=feature.mm_type,
                     multimodal_url=feature.url,
-                    multimodal_tensor=trans_from_tensor(feature.tensor),
+                    multimodal_tensor=(
+                        trans_from_tensor(feature.tensor)
+                        if feature.tensor is not None and feature.tensor.numel() > 0
+                        else None
+                    ),
                     mm_preprocess_config=preprocess_config,
                 )
             )
