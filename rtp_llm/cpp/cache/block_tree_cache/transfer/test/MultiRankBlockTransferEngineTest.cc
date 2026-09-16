@@ -298,17 +298,13 @@ TEST_F(MultiRankBlockTransferEngineTest, PollingDoneSettlesSuccessAndErrorState)
         auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
             TransferTask(makeBroadcastDescriptors(), std::chrono::milliseconds(500)));
 
-        // BroadcastResult completion is driven by waitDone(). Exercise the public
-        // polling contract concurrently and verify that observing done also means
-        // the success/error state has already been settled.
-        std::thread waiter([&context]() { context->waitDone(); });
-        const auto  deadline      = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        bool        observed_done = false;
+        // Completion is driven by the BroadcastManager callback. Poll without
+        // an auxiliary blocking waiter so a done() regression fails at the deadline.
+        const auto deadline      = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        bool       observed_done = false;
         while (!(observed_done = context->done()) && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        waiter.join();
-
         ASSERT_TRUE(observed_done);
         EXPECT_EQ(context->success(), response_code == MemoryOperationResponsePB::OK);
         EXPECT_EQ(context->errorInfo().ok(), response_code == MemoryOperationResponsePB::OK);

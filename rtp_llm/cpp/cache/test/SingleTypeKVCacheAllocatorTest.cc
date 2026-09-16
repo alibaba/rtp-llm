@@ -1060,6 +1060,35 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
     }
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, CommitQueueRejectionReleasesAllRequestBlocksBeforeReturning) {
+    ScopedSingleTypeDiskDirectory disk_directory;
+    const auto config = createSingleTypeTestConfig(/*layer_num=*/2, /*block_num=*/16, /*seq_size_per_block=*/4);
+    allocator_        = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
+    allocator_->setBlockTreeCacheConfigForTest(makeSingleTypeTieredConfig(Tier::HOST, disk_directory.path()));
+    ASSERT_TRUE(allocator_->init());
+    const auto& cache = allocator_->blockTreeCacheOwner();
+    ASSERT_NE(cache, nullptr);
+    const auto source = seedSingleTypeLowerTier(*cache, Tier::HOST, /*key=*/100);
+    ASSERT_NE(source, NULL_BLOCK_IDX);
+    const auto& group       = cache->groupSets().front();
+    const auto  source_refs = group->hostPool()->treeRefCount(source);
+    ASSERT_GT(source_refs, 0u);
+    const auto free_before = allocator_->freeBlocksNum();
+    // Use the real admission-rejection path after materialization and outer malloc.
+    cache->task_pool_->stopAdmission();
+    auto resource = createBatchKVCacheResource(/*batch_size=*/2, config);
+    resource->setBatchCacheKeys(0, CacheKeysType{100, 200, 300});
+    auto       tokens = createCompleteTokenIds(/*batch_size=*/2, /*seq_length=*/9, /*seq_size_per_block=*/4);
+    const auto result = allocator_->malloc(MallocInfo{resource, tokens});
+    EXPECT_FALSE(result.success);
+    EXPECT_TRUE(result.load_attempted);
+    EXPECT_EQ(result.async_context, nullptr);
+    EXPECT_EQ(resource->curBlocksNum(), 0);
+    EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
+    EXPECT_EQ(group->hostPool()->treeRefCount(source), source_refs);
+    // No caller-side free() is needed to recover this failed initialization.
+}
+
 TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadExactlyOnce) {
     ScopedSingleTypeDiskDirectory disk_directory;
     const auto config  = createSingleTypeTestConfig(/*layer_num=*/2, /*block_num=*/16, /*seq_size_per_block=*/4);

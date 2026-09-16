@@ -1146,8 +1146,10 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
     kmonitor::MetricsTags tags;
     auto                  reporter = std::make_shared<kmonitor::MetricsReporter>("", "", tags);
     stream_->setMetricsReporter(reporter);
-    auto* metrics          = reporter->getMetricsGroup<RtpLLMCacheOperationMetrics>();
-    auto  expect_retry_qps = [&](double expected) {
+    auto* metrics = reporter->getMetricsGroup<RtpLLMCacheOperationMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    ASSERT_NE(metrics->malloc_retry_qps_metric, nullptr);
+    auto expect_retry_qps = [&](double expected) {
         auto* series = metrics->malloc_retry_qps_metric->DeclareMetric(&tags);
         ASSERT_NE(series, nullptr);
         kmonitor::MetricsRecord record(nullptr, nullptr, 0);
