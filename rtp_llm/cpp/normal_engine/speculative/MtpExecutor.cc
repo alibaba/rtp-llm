@@ -740,6 +740,16 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
  * @param streams
  * @return absl::Status
  */
+torch::Tensor MtpExecutor::snapshotPrefillInputToCuda(const torch::Tensor& tensor, TensorHolder& holder) {
+    if (!tensor.defined()) {
+        return tensor;
+    }
+    // A non-blocking H2D from the original pinned tensor is not a snapshot:
+    // handleInputs can rewrite its lengths before the queued DMA reads them.
+    // clone() also prevents aliasing when the input is already on CUDA.
+    return toCudaWithHostHold(tensor.clone(), holder);
+}
+
 absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& streams,
                                       MtpMetricsCollector&                metrics_collector,
                                       int64_t                             schedule_time_us) {
@@ -755,7 +765,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     GptModelOutputs draft_model_output;
     SamplerOutput   draft_sampler_output;
     torch::Tensor   draft_last_hidden_states;
-    const bool      cp_enabled = parallelism_config_.prefill_cp_config.is_enabled();
+    const bool      cp_enabled =
+        buildExecProperties(parallelism_config_, DeviceResourceConfig{}).enable_prefill_cp;
 
     // placeholder for some tensors
     torch::Tensor                      draft_probs;
@@ -805,10 +816,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // Only rank 0 restores; non-root ranks get the restored view from the
     // second tpSync, so skip the snapshot copies there.
     if (cp_enabled && isTpRank0()) {
-        saved_combo_tokens  = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
-        saved_input_lengths = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
+        saved_combo_tokens  = snapshotPrefillInputToCuda(model_input.combo_tokens, buffer_holder_);
+        saved_input_lengths = snapshotPrefillInputToCuda(model_input.input_lengths, buffer_holder_);
         if (model_input.combo_position_ids.defined()) {
-            saved_combo_position_ids = toCudaWithHostHold(model_input.combo_position_ids, buffer_holder_);
+            saved_combo_position_ids = snapshotPrefillInputToCuda(model_input.combo_position_ids, buffer_holder_);
         }
     }
 

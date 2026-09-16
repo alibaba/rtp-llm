@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
+#include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 
 #include <type_traits>
 
@@ -166,4 +167,32 @@ TEST_F(ModelDataTest, testComboPositionIdsDeviceIsEncodedInTpShapeHints) {
     EXPECT_EQ(device_bits & GptModelInputDeviceBit::kDeviceBitComboPositionIds, 0u);
 }
 
+}  // namespace rtp_llm
+
+namespace rtp_llm {
+TEST_F(ModelDataTest, testPrefillCPSnapshotOwnsInputStorage) {
+    for (const bool cuda_input : {false, true}) {
+        TensorHolder holder;
+        auto input = torch::full({1}, 11, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+        if (cuda_input) {
+            input = input.to(torch::kCUDA);
+        }
+        auto snapshot = MtpExecutor::snapshotPrefillInputToCuda(input, holder);
+        ASSERT_TRUE(snapshot.is_cuda());
+        ASSERT_NE(snapshot.data_ptr(), input.data_ptr());
+        input.fill_(4);  // target CP's local padded length for global 11 / CP4
+        EXPECT_EQ(snapshot.cpu().item<int32_t>(), 11);
+        EXPECT_EQ(input.cpu().item<int32_t>(), 4);
+    }
+}
+
+TEST_F(ModelDataTest, testPrefillCPSnapshotPreservesAbsentAndEmptyInputs) {
+    TensorHolder holder;
+    EXPECT_FALSE(MtpExecutor::snapshotPrefillInputToCuda(torch::Tensor(), holder).defined());
+    const auto input = torch::empty({0, 2}, torch::kInt32);
+    const auto snapshot = MtpExecutor::snapshotPrefillInputToCuda(input, holder);
+    EXPECT_TRUE(snapshot.is_cuda());
+    EXPECT_EQ(snapshot.sizes(), input.sizes());
+    EXPECT_EQ(snapshot.scalar_type(), input.scalar_type());
+}
 }  // namespace rtp_llm
