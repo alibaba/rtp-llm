@@ -21,6 +21,7 @@
 #include "rtp_llm/cpp/normal_engine/pipeline/PPBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPTransport.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPTypes.h"
+#include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 
@@ -80,19 +81,20 @@ private:
 
     absl::Status warmUp(const ScheduleOutput& schedule_output);
 
-    void prepareStreams(const std::list<GenerateStreamPtr>& streams) const;
+    void prepareStreams(std::list<GenerateStreamPtr>& streams);
 
     absl::StatusOr<PPExecutionPlan> buildPlan(const StreamGroups&         stream_groups,
                                               const std::vector<int64_t>& finished_request_ids);
 
-    absl::StatusOr<PPExecutionResult> sampleTokens(const PPExecutionPlan& plan, const GptModelOutputs& model_output);
+    void sampleTokens(const PPExecutionPlan& plan, const GptModelOutputs& model_output, PPExecutionResult& result);
 
     void advanceSamplingStates(const PPSamplingPlan& sampling_plan, PPExecutionResult& result);
 
+    void clipMtpAcceptedLengths(const PPSamplingPlan& sampling_plan, PPExecutionResult& result) const;
+
     absl::Status processExecutionResult(InflightBatch& batch);
 
-    absl::StatusOr<PPExecutionResult> verifyDraftTokens(const PPExecutionPlan& plan,
-                                                        const torch::Tensor&   target_logits);
+    void verifyDraftTokens(const PPExecutionPlan& plan, const torch::Tensor& target_logits, PPExecutionResult& result);
 
     GptModelInputs prepareDraftInputForPrefill(const GptModelInputs&  target_input,
                                                const GptModelOutputs& target_output,
@@ -103,6 +105,8 @@ private:
                                               const GptModelOutputs& target_output,
                                               const torch::Tensor&   accepted_token_ids,
                                               const torch::Tensor&   accepted_lengths);
+
+    void runDSparkCommit(const GptModelInputs& target_input, const GptModelOutputs& target_output);
 
     void draftSampleAndPropose(const PPExecutionPlan& plan,
                                const GptModelOutputs& model_output,
@@ -148,9 +152,12 @@ private:
     TensorHolder                            buffer_holder_;
     SamplingStates                          sampling_states_;
 
-    bool                                             mtp_enabled_            = false;
+    bool                                             sp_enabled_             = false;
+    bool                                             is_dspark_              = false;
+    int32_t                                          dspark_mask_token_id_   = -1;
     size_t                                           propose_step_           = 0;
     size_t                                           position_id_len_factor_ = 1;
+    mtp::DSparkProposeInputBuffers                   dspark_propose_input_buffers_;
     std::unique_ptr<SpecLogitsVerifyRunner>          spec_logits_verify_runner_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
     std::unique_ptr<ModelBase>                       draft_model_;

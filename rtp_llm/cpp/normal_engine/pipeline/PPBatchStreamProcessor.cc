@@ -42,9 +42,9 @@ PPBatchStreamProcessor::PPBatchStreamProcessor(const ModelConfig&               
                                                const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                                                const CacheConfig&                 cache_config,
                                                bool                               warm_up,
-                                               bool                               mtp_enabled):
+                                               bool                               sp_enabled):
     NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
-    mtp_enabled_(mtp_enabled),
+    sp_enabled_(sp_enabled),
     output_vocab_ids_(model_config.output_vocab_ids),
     processor_eos_token_id_(getProcessorEosTokenId(model_config)) {}
 
@@ -57,15 +57,10 @@ PPSamplingPlan PPBatchStreamProcessor::gatherSamplingPlan(const StreamGroups& st
 
     int64_t total_batch_size = 0;
     for (const auto& stream : all_streams) {
-        const auto& config = *stream->generateConfig();
         RTP_LLM_CHECK_WITH_INFO(!stream->hasNumBeams(),
                                 "PP sampling does not support beam search, "
                                 "request_id=%ld",
                                 stream->streamId());
-        const auto grammar_count = config.json_schema.has_value() + config.regex.has_value() + config.ebnf.has_value()
-                                   + config.structural_tag.has_value();
-        RTP_LLM_CHECK_WITH_INFO(
-            grammar_count <= 1, "only one grammar constraint may be set, request_id=%ld", stream->streamId());
         total_batch_size += stream->currentBatchSize();
     }
 
@@ -83,6 +78,7 @@ PPSamplingPlan PPBatchStreamProcessor::gatherSamplingPlan(const StreamGroups& st
     const std::vector<int64_t> total_batch_shape{total_batch_size};
     sampling_plan.input_lengths        = torch::empty(total_batch_shape, pinned_i32);
     sampling_plan.sequence_lengths     = torch::empty(total_batch_shape, pinned_i32);
+    sampling_plan.max_tokens           = torch::empty(total_batch_shape, pinned_i32);
     sampling_plan.top_k                = torch::empty(total_batch_shape, pinned_i32);
     sampling_plan.top_p                = torch::empty(total_batch_shape, pinned_f32);
     sampling_plan.temperature          = torch::empty(total_batch_shape, pinned_f32);
@@ -92,7 +88,7 @@ PPSamplingPlan PPBatchStreamProcessor::gatherSamplingPlan(const StreamGroups& st
     sampling_plan.no_repeat_ngram_size = torch::empty(total_batch_shape, pinned_i32);
     sampling_plan.do_sample            = torch::empty(total_batch_shape, pinned_bool);
     sampling_plan.finished_mask        = torch::empty(total_batch_shape, pinned_bool);
-    if (mtp_enabled_) {
+    if (sp_enabled_) {
         sampling_plan.spec_do_sample  = torch::empty({static_cast<int64_t>(stream_count)}, pinned_bool);
         sampling_plan.force_sp_accept = torch::empty({static_cast<int64_t>(stream_count)}, torch::kBool);
     }
@@ -100,6 +96,7 @@ PPSamplingPlan PPBatchStreamProcessor::gatherSamplingPlan(const StreamGroups& st
     auto* request_ids          = sampling_plan.request_ids.data_ptr<int64_t>();
     auto* input_lengths        = sampling_plan.input_lengths.data_ptr<int32_t>();
     auto* sequence_lengths     = sampling_plan.sequence_lengths.data_ptr<int32_t>();
+    auto* max_tokens           = sampling_plan.max_tokens.data_ptr<int32_t>();
     auto* top_k                = sampling_plan.top_k.data_ptr<int32_t>();
     auto* top_p                = sampling_plan.top_p.data_ptr<float>();
     auto* temperature          = sampling_plan.temperature.data_ptr<float>();
@@ -116,7 +113,7 @@ PPSamplingPlan PPBatchStreamProcessor::gatherSamplingPlan(const StreamGroups& st
         auto& config = *stream->generateConfig();
         sampling_plan.random_seeds.push_back(config.random_seed);
         sampling_plan.num_return_sequences.push_back(config.num_return_sequences);
-        if (mtp_enabled_) {
+        if (sp_enabled_) {
             sampling_plan.spec_do_sample.data_ptr<bool>()[stream_idx]  = !config.top1();
             sampling_plan.force_sp_accept.data_ptr<bool>()[stream_idx] = stream->forceSpAccept();
         }
@@ -145,12 +142,14 @@ PPSamplingPlan PPBatchStreamProcessor::gatherSamplingPlan(const StreamGroups& st
         const auto complete_token_ids    = stream->completeTokenIds();
         const auto complete_token_stride = complete_token_ids.size(1);
         const auto seq_len               = stream->seqLength();
+        const auto max_token_num         = static_cast<int32_t>(stream->maxTokenNum());
         const auto stream_batch_size     = stream->currentBatchSize();
         request_ids[stream_idx]          = stream->streamId();
 
         for (int sequence_idx = 0; sequence_idx < stream_batch_size; ++sequence_idx) {
             input_lengths[batch_idx]        = stream->inputLength();
             sequence_lengths[batch_idx]     = seq_len;
+            max_tokens[batch_idx]           = max_token_num;
             top_k[batch_idx]                = config.top_k;
             top_p[batch_idx]                = config.top_p;
             temperature[batch_idx]          = config.temperature;
@@ -199,12 +198,49 @@ PPOutputConfig PPBatchStreamProcessor::gatherOutputConfig(const StreamGroups& st
     return output_config;
 }
 
-absl::StatusOr<SamplerInputs> PPBatchStreamProcessor::gatherSamplerInputs(const PPSamplingPlan& sampling_plan,
-                                                                       const PPOutputConfig& output_config,
-                                                                       const torch::Tensor&  logits,
-                                                                       SamplingStates&       sampling_states,
-                                                                       bool                  score_batch,
-                                                                       size_t                propose_step) const {
+void PPBatchStreamProcessor::initSamplingStates(const PPSamplingPlan& sampling_plan,
+                                               SamplingStates&       sampling_states,
+                                               PPExecutionResult&    result) const {
+    const auto  stream_count = sampling_plan.request_ids.size(0);
+    const auto* request_ids  = sampling_plan.request_ids.data_ptr<int64_t>();
+    int64_t sequence_offset = 0;
+    for (int64_t stream_idx = 0; stream_idx < stream_count; ++stream_idx) {
+        const auto stream_sequence_count = std::max<int32_t>(sampling_plan.num_return_sequences[stream_idx], 1);
+        if (sampling_states.find(request_ids[stream_idx]) == sampling_states.end()) {
+            SamplingState state;
+            state.cum_log_probs = torch::zeros({stream_sequence_count}, torch::kFloat32);
+            if (sampling_plan.random_seeds[stream_idx].has_value()) {
+#if defined(USING_CUDA) || defined(USING_ROCM)
+                state.generator = torch::make_generator<torch::CUDAGeneratorImpl>();
+#else
+                state.generator = torch::make_generator<torch::CPUGeneratorImpl>();
+#endif
+                state.generator.set_current_seed(sampling_plan.random_seeds[stream_idx].value());
+            }
+
+            auto error = initLogitsProcessors(state.logits_processors, sampling_plan, stream_idx, sequence_offset);
+            if (error.has_value()) {
+                RTP_LLM_LOG_ERROR("PP tail processor initialization failed after stream initialization: "
+                                  "request_id=%ld, error_code=%d, error=%s",
+                                  request_ids[stream_idx],
+                                  static_cast<int>(error->code()),
+                                  error->ToString().c_str());
+                state.logits_processors.clear();
+                result.request_errors[stream_idx] = std::move(error.value());
+            }
+            sampling_states.emplace(request_ids[stream_idx], std::move(state));
+        }
+        sequence_offset += stream_sequence_count;
+    }
+}
+
+SamplerInputs PPBatchStreamProcessor::gatherSamplerInputs(const PPSamplingPlan& sampling_plan,
+                                                          const PPOutputConfig& output_config,
+                                                          const torch::Tensor&  logits,
+                                                          const SamplingStates& sampling_states,
+                                                          bool                  score_batch,
+                                                          size_t                propose_step,
+                                                          const torch::Tensor&  verify_tokens) const {
     RTP_LLM_CHECK(score_batch || propose_step == 0);
     const auto stream_count     = sampling_plan.request_ids.size(0);
     const auto sequence_count   = sampling_plan.token_ids.size(0);
@@ -213,7 +249,7 @@ absl::StatusOr<SamplerInputs> PPBatchStreamProcessor::gatherSamplerInputs(const 
 
     auto inputs       = allocateSamplerInputs(sampling_plan, output_config, total_batch_size, propose_step);
     inputs.vocab_size = logits.size(-1);
-    RETURN_IF_STATUS_ERROR(fillSamplerInputs(inputs, sampling_plan, sampling_states, score_batch, propose_step));
+    fillSamplerInputs(inputs, sampling_plan, sampling_states, score_batch, propose_step, verify_tokens);
 
     inputs.logits = score_batch || output_config.return_logits || output_config.return_softmax_probs ?
                         logits.clone() :
@@ -242,8 +278,7 @@ SamplerInputs PPBatchStreamProcessor::allocateSamplerInputs(const PPSamplingPlan
     sampler_inputs.step           = sampling_plan.token_ids.size(1) - 1 + propose_step;
 
     const auto batch_size = static_cast<int64_t>(total_batch_size);
-    sampler_inputs.token_ids =
-        torch::empty({batch_size, static_cast<int64_t>(sampler_inputs.step + 1)}, pinned_i32);
+    sampler_inputs.token_ids = torch::zeros({batch_size, static_cast<int64_t>(sampler_inputs.step + 1)}, pinned_i32);
     sampler_inputs.input_lengths        = torch::empty({batch_size}, pinned_i32);
     sampler_inputs.sequence_lengths     = torch::empty({batch_size}, pinned_i32);
     sampler_inputs.num_beams_in         = torch::empty({batch_size}, pinned_i64);
@@ -264,15 +299,22 @@ SamplerInputs PPBatchStreamProcessor::allocateSamplerInputs(const PPSamplingPlan
     return sampler_inputs;
 }
 
-absl::Status PPBatchStreamProcessor::fillSamplerInputs(SamplerInputs&        sampler_inputs,
-                                                     const PPSamplingPlan& sampling_plan,
-                                                     SamplingStates&       sampling_states,
-                                                     bool                  score_batch,
-                                                     size_t                propose_step) const {
+void PPBatchStreamProcessor::fillSamplerInputs(SamplerInputs&        sampler_inputs,
+                                               const PPSamplingPlan& sampling_plan,
+                                               const SamplingStates& sampling_states,
+                                               bool                  score_batch,
+                                               size_t                propose_step,
+                                               const torch::Tensor&  verify_tokens) const {
     const auto stream_count   = sampling_plan.request_ids.size(0);
     const auto sequence_count = sampling_plan.token_ids.size(0);
     RTP_LLM_CHECK(sampling_plan.num_return_sequences.size() == static_cast<size_t>(stream_count));
-    RTP_LLM_CHECK(score_batch || propose_step == 0);
+    torch::Tensor verify_tokens_cpu;
+    if (score_batch) {
+        RTP_LLM_CHECK(verify_tokens.defined() && verify_tokens.scalar_type() == torch::kInt32
+                      && verify_tokens.numel() == stream_count * static_cast<int64_t>(propose_step + 1));
+        verify_tokens_cpu =
+            verify_tokens.to(torch::kCPU).reshape({stream_count, static_cast<int64_t>(propose_step + 1)}).contiguous();
+    }
 
     auto* token_ids            = sampler_inputs.token_ids.data_ptr<int32_t>();
     auto* input_lengths        = sampler_inputs.input_lengths.data_ptr<int32_t>();
@@ -318,13 +360,7 @@ absl::Status PPBatchStreamProcessor::fillSamplerInputs(SamplerInputs&        sam
         RTP_LLM_CHECK(sampling_offset + stream_sampling_rows <= static_cast<int64_t>(sampler_inputs.batch_size));
         RTP_LLM_CHECK(!score_batch || stream_sequence_count == 1);
 
-        auto state_it = sampling_states.find(request_ids[stream_idx]);
-        if (state_it == sampling_states.end()) {
-            auto state_status = createSamplingState(sampling_plan, stream_idx, sequence_offset);
-            RETURN_IF_STATUS_OR_ERROR(state_status);
-            state_it = sampling_states.emplace(request_ids[stream_idx], std::move(state_status.value())).first;
-        }
-        const auto& state               = state_it->second;
+        const auto& state               = sampling_states.at(request_ids[stream_idx]);
         const auto* state_cum_log_probs = cum_log_probs ? state.cum_log_probs.data_ptr<float>() : nullptr;
 
         for (int64_t row = 0; row < stream_sampling_rows; ++row) {
@@ -333,10 +369,10 @@ absl::Status PPBatchStreamProcessor::fillSamplerInputs(SamplerInputs&        sam
             const auto target_row   = sampling_offset + row;
             const auto seq_len      = plan_sequence_lengths[source_row];
             RTP_LLM_CHECK(seq_len >= 0 && seq_len <= sampling_plan.token_ids.size(1)
-                          && seq_len <= static_cast<int64_t>(sampler_inputs.step));
+                          && seq_len + (score_batch ? row : 0) <= static_cast<int64_t>(sampler_inputs.step));
 
             input_lengths[target_row]        = plan_input_lengths[source_row];
-            sequence_lengths[target_row]     = seq_len + static_cast<int32_t>(propose_step);
+            sequence_lengths[target_row]     = seq_len + (score_batch ? static_cast<int32_t>(row) : 0);
             num_beams_in[target_row]         = 1;
             num_beams_out[target_row]        = 1;
             top_k[target_row]                = plan_top_k[source_row];
@@ -359,6 +395,12 @@ absl::Status PPBatchStreamProcessor::fillSamplerInputs(SamplerInputs&        sam
             std::memcpy(token_ids + target_row * token_stride,
                         plan_token_ids + source_row * plan_token_stride,
                         seq_len * sizeof(int32_t));
+            if (score_batch && row > 0) {
+                // Verification row j sees committed history followed by c1..cj.
+                std::memcpy(token_ids + target_row * token_stride + seq_len,
+                            verify_tokens_cpu.data_ptr<int32_t>() + stream_idx * (propose_step + 1) + 1,
+                            row * sizeof(int32_t));
+            }
         }
         for (const auto& processor : state.logits_processors) {
             processor_states->insert(processor, sampling_offset, sampling_offset + stream_sampling_rows);
@@ -369,14 +411,13 @@ absl::Status PPBatchStreamProcessor::fillSamplerInputs(SamplerInputs&        sam
     RTP_LLM_CHECK(sequence_offset == sequence_count);
     RTP_LLM_CHECK(sampling_offset == static_cast<int64_t>(sampler_inputs.batch_size));
     sampler_inputs.logits_processor_states_ptr = std::move(processor_states);
-    return absl::OkStatus();
 }
 
-absl::StatusOr<SamplingState> PPBatchStreamProcessor::createSamplingState(const PPSamplingPlan& sampling_plan,
-                                                                       int64_t               stream_idx,
-                                                                       int64_t               sequence_offset) const {
+std::optional<ErrorInfo> PPBatchStreamProcessor::initLogitsProcessors(std::vector<BaseLogitsProcessorPtr>& processors,
+                                                                      const PPSamplingPlan& sampling_plan,
+                                                                      int64_t               stream_idx,
+                                                                      int64_t               sequence_offset) const {
     const auto  stream_sequence_count = std::max<int32_t>(sampling_plan.num_return_sequences[stream_idx], 1);
-    const auto  request_id            = sampling_plan.request_ids.data_ptr<int64_t>()[stream_idx];
     const auto* input_lengths         = sampling_plan.input_lengths.data_ptr<int32_t>();
     const auto& processor_config      = sampling_plan.logits_processor_configs[stream_idx];
     auto        config                = std::make_shared<GenerateConfig>();
@@ -389,7 +430,7 @@ absl::StatusOr<SamplingState> PPBatchStreamProcessor::createSamplingState(const 
     } else if (processor_config.grammar_type == "structural_tag") {
         config->structural_tag = processor_config.grammar_value;
     } else if (!processor_config.grammar_type.empty()) {
-        return absl::InvalidArgumentError("unsupported grammar type: " + processor_config.grammar_type);
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "unsupported grammar type: " + processor_config.grammar_type);
     }
     config->combo_token_size              = processor_config.combo_token_size;
     config->banned_combo_token_ids        = processor_config.banned_combo_token_ids;
@@ -405,38 +446,42 @@ absl::StatusOr<SamplingState> PPBatchStreamProcessor::createSamplingState(const 
     auto processors_result = LogitsProcessorFactory::createLogitsProcessors(
         std::move(generate_input), stream_sequence_count, stream_sequence_count, processor_eos_token_id_);
     if (!processors_result.ok()) {
-        return absl::InvalidArgumentError("failed to initialize sampling state for request_id="
-                                          + std::to_string(request_id) + ": "
-                                          + processors_result.status().ToString());
+        return processors_result.status();
     }
 
-    SamplingState state;
-    state.logits_processors = std::move(processors_result.value());
-    state.cum_log_probs     = torch::zeros({stream_sequence_count}, torch::kFloat32);
-    if (sampling_plan.random_seeds[stream_idx].has_value()) {
-#if defined(USING_CUDA) || defined(USING_ROCM)
-        state.generator = torch::make_generator<torch::CUDAGeneratorImpl>();
-#else
-        state.generator = torch::make_generator<torch::CPUGeneratorImpl>();
-#endif
-        state.generator.set_current_seed(sampling_plan.random_seeds[stream_idx].value());
+    processors = std::move(processors_result.value());
+    /**
+     * First PD decode replays the committed anchor; initial prefill has no output history.
+     * New samples are applied later by advanceSamplingStates().
+     */
+    const auto committed_count =
+        sampling_plan.sequence_lengths.data_ptr<int32_t>()[sequence_offset] - input_lengths[sequence_offset];
+    if (committed_count > 0) {
+        const auto committed = sampling_plan.token_ids.narrow(0, sequence_offset, stream_sequence_count)
+                                   .narrow(1, input_lengths[sequence_offset], committed_count)
+                                   .contiguous();
+        for (const auto& processor : processors) {
+            const auto error = processor->updateStatus(committed, committed_count);
+            if (error.has_value()) {
+                return error.value();
+            }
+        }
     }
-    return state;
+    return std::nullopt;
 }
 
-absl::StatusOr<PPExecutionResult> PPBatchStreamProcessor::makeExecutionResult(
-    const PPExecutionPlan& plan, const GptModelOutputs& model_output, const SamplerOutput& sampler_output) const {
+void PPBatchStreamProcessor::fillExecutionResult(const PPExecutionPlan& plan,
+                                                const GptModelOutputs& model_output,
+                                                const SamplerOutput&   sampler_output,
+                                                PPExecutionResult&     result) const {
     const auto stream_count     = plan.sampling_plan.request_ids.size(0);
     const auto total_batch_size = plan.sampling_plan.token_ids.size(0);
-    if (!sampler_output.token_ids.defined() || sampler_output.token_ids.dim() != 2
-        || sampler_output.token_ids.size(0) != total_batch_size || sampler_output.token_ids.size(1) == 0
-        || !sampler_output.success.defined() || sampler_output.success.dim() != 1
-        || sampler_output.success.size(0) != total_batch_size) {
-        return absl::InternalError("sampler returned invalid tensors for PP execution result");
-    }
-
-    PPExecutionResult result;
-    result.request_ids = plan.sampling_plan.request_ids.to(torch::kCPU).contiguous();
+    RTP_LLM_CHECK_WITH_INFO(
+        sampler_output.token_ids.defined() && sampler_output.token_ids.dim() == 2
+            && sampler_output.token_ids.size(0) == total_batch_size && sampler_output.token_ids.size(1) > 0
+            && sampler_output.success.defined() && sampler_output.success.dim() == 1
+            && sampler_output.success.size(0) == total_batch_size,
+        "sampler returned invalid tensors for PP execution result");
     if (plan.output_config.return_logits) {
         result.logits = model_output.logits.to(torch::kCPU).contiguous();
     }
@@ -466,7 +511,20 @@ absl::StatusOr<PPExecutionResult> PPBatchStreamProcessor::makeExecutionResult(
         }
     }
 
-    result.sample_success = sampler_output.success.to(torch::kCPU).contiguous();
+    const auto success_cpu     = sampler_output.success.to(torch::kCPU).contiguous();
+    int64_t    sampling_offset = 0;
+    for (int64_t stream_idx = 0; stream_idx < stream_count; ++stream_idx) {
+        const auto stream_batch_size = std::max<int32_t>(plan.sampling_plan.num_return_sequences[stream_idx], 1);
+        auto&      error             = result.request_errors[stream_idx];
+        if (error.ok()) {
+            auto sampler_error = collectStreamSamplerError(
+                sampler_output.processor_errors, success_cpu, sampling_offset, stream_batch_size);
+            if (sampler_error.has_value()) {
+                error = std::move(sampler_error.value());
+            }
+        }
+        sampling_offset += stream_batch_size;
+    }
     if (plan.output_config.return_cum_log_probs) {
         result.cum_log_probs = sampler_output.cum_log_probs.to(torch::kCPU).contiguous();
     }
@@ -479,7 +537,6 @@ absl::StatusOr<PPExecutionResult> PPBatchStreamProcessor::makeExecutionResult(
     if (plan.output_config.return_all_hidden_states) {
         result.all_hidden_states = model_output.all_hidden_states.to(torch::kCPU).contiguous();
     }
-    result.prompt_logits.resize(stream_count);
 
     /** Prompt loss and prompt logits are stream-level; return sequences share the first batch row. */
     if (plan.model_input.need_all_logits) {
@@ -528,24 +585,20 @@ absl::StatusOr<PPExecutionResult> PPBatchStreamProcessor::makeExecutionResult(
             result.loss = torch::cat(losses).to(torch::kCPU).contiguous();
         }
     }
-
-    result.processor_errors = sampler_output.processor_errors;
-    result.processor_errors.resize(total_batch_size);
-    return result;
 }
 
 absl::Status PPBatchStreamProcessor::dispatchExecutionResult(const StreamGroups& stream_groups,
                                                              const PPExecutionResult& result) const {
-    if (mtp_enabled_) {
+    validateExecutionResult(stream_groups, result);
+    if (sp_enabled_) {
         return dispatchMtpExecutionResult(stream_groups, result);
     }
     return dispatchNormalExecutionResult(stream_groups, result);
 }
 
-PPBatchStreamProcessor::ExecutionResultLayout
-PPBatchStreamProcessor::validateExecutionResult(const std::list<GenerateStreamPtr>& all_streams,
-                                                const PPExecutionResult& result) const {
-    const auto stream_count = static_cast<int64_t>(all_streams.size());
+void PPBatchStreamProcessor::validateExecutionResult(const StreamGroups&      stream_groups,
+                                                     const PPExecutionResult& result) const {
+    const auto stream_count = static_cast<int64_t>(stream_groups.size());
     RTP_LLM_CHECK_WITH_INFO(result.request_ids.defined() && result.request_ids.device().is_cpu()
                                 && result.request_ids.scalar_type() == torch::kInt64
                                 && result.request_ids.dim() == 1 && result.request_ids.size(0) == stream_count,
@@ -553,79 +606,37 @@ PPBatchStreamProcessor::validateExecutionResult(const std::list<GenerateStreamPt
     RTP_LLM_CHECK_WITH_INFO(result.prompt_logits.size() == static_cast<size_t>(stream_count),
                             "PP prompt-logits result count does not match the inflight stream count");
 
-    ExecutionResultLayout layout;
-    const auto* request_ids = result.request_ids.data_ptr<int64_t>();
-    int64_t stream_idx = 0;
-    for (const auto& stream : all_streams) {
-        const auto batch_size = static_cast<int64_t>(stream->currentBatchSize());
-        const auto token_size = static_cast<int64_t>(stream->currentExecuteTokenSize());
-        RTP_LLM_CHECK(batch_size > 0);
-        layout.batch_size += batch_size;
-        layout.token_size += token_size;
-        layout.loss_size += std::max<int64_t>(token_size / batch_size - 1, 0);
-        RTP_LLM_CHECK_WITH_INFO(request_ids[stream_idx] == stream->streamId(),
-                                "PP execution result request order does not match the inflight stream order");
-        ++stream_idx;
-    }
-
-    RTP_LLM_CHECK_WITH_INFO(
-        result.new_token_ids.defined() && result.new_token_ids.device().is_cpu()
-            && result.new_token_ids.scalar_type() == torch::kInt32 && result.new_token_ids.dim() == 2
-            && result.new_token_ids.size(0) == layout.batch_size
-            && result.sample_success.defined() && result.sample_success.device().is_cpu()
-            && result.sample_success.scalar_type() == torch::kBool && result.sample_success.dim() == 1
-            && result.sample_success.size(0) == layout.batch_size
-            && result.processor_errors.size() == static_cast<size_t>(layout.batch_size),
-        "PP execution result has invalid token, success or error fields");
-    return layout;
-}
-
-void PPBatchStreamProcessor::validateRequestedOutputs(const PPOutputConfig& output_config,
-                                                      const PPExecutionResult& result,
-                                                      const ExecutionResultLayout& layout) const {
-    const auto valid_batch_matrix = [&layout](bool requested, const torch::Tensor& tensor) {
-        return !requested || (tensor.defined() && tensor.dim() == 2 && tensor.size(0) == layout.batch_size);
-    };
-    const bool valid_shapes =
-        valid_batch_matrix(output_config.return_hidden_states, result.hidden_states)
-        && valid_batch_matrix(output_config.return_logits, result.logits)
-        && valid_batch_matrix(output_config.return_all_probs != ReturnAllProbsMode::NONE, result.all_probs)
-        && (!output_config.return_softmax_probs
-            || (result.softmax_probs.defined() && result.softmax_probs.dim() == 2
-                && result.softmax_probs.size(0) == layout.batch_size && result.softmax_probs.size(1) == 1))
-        && (!output_config.return_cum_log_probs
-            || (result.cum_log_probs.defined() && result.cum_log_probs.dim() == 1
-                && result.cum_log_probs.size(0) == layout.batch_size))
-        && (!output_config.return_all_hidden_states
-            || (result.all_hidden_states.defined() && result.all_hidden_states.dim() == 2
-                && result.all_hidden_states.size(0) == layout.token_size))
-        && (!output_config.calculate_loss || layout.loss_size == 0
-            || (result.loss.defined() && result.loss.dim() == 1 && result.loss.numel() == layout.loss_size));
-    RTP_LLM_CHECK_WITH_INFO(valid_shapes,
-                            "PP execution result is missing a requested tensor or has invalid tensor shapes");
+    RTP_LLM_CHECK_WITH_INFO(result.request_errors.size() == static_cast<size_t>(stream_count),
+                            "PP request error counts do not match the inflight stream count");
 }
 
 absl::Status PPBatchStreamProcessor::dispatchNormalExecutionResult(const StreamGroups& stream_groups,
                                                                    const PPExecutionResult& result) const {
     const auto all_streams = stream_groups.allStreams();
-    const auto layout = validateExecutionResult(all_streams, result);
-    RTP_LLM_CHECK_WITH_INFO(result.new_token_ids.size(1) == 1
-                                && !result.accept_len.defined() && !result.propose_token_ids.defined(),
+    RTP_LLM_CHECK_WITH_INFO(!result.accept_len.defined() && !result.propose_token_ids.defined(),
                             "ordinary PP execution result must not contain speculative fields");
-    validateRequestedOutputs(gatherOutputConfig(stream_groups), result, layout);
 
-    int64_t batch_idx = 0;
-    int64_t stream_idx = 0;
-    int64_t token_offset = 0;
-    int64_t loss_offset = 0;
+    const auto* request_ids  = result.request_ids.data_ptr<int64_t>();
+    int64_t     batch_idx    = 0;
+    int64_t     stream_idx   = 0;
+    int64_t     token_offset = 0;
+    int64_t     loss_offset  = 0;
     for (const auto& stream : all_streams) {
-        const auto stream_batch_size = static_cast<int64_t>(stream->currentBatchSize());
-        const auto token_size = static_cast<int64_t>(stream->currentExecuteTokenSize());
-        const auto loss_size = std::max<int64_t>(token_size / stream_batch_size - 1, 0);
-        auto error_info =
-            collectStreamSamplerError(result.processor_errors, result.sample_success, batch_idx, stream_batch_size);
-        dispatchNormalSingleStream(
-            stream, result, stream_idx, batch_idx, stream_batch_size, token_offset, loss_offset, std::move(error_info));
+        RTP_LLM_CHECK_WITH_INFO(request_ids[stream_idx] == stream->streamId(),
+                                "PP execution result request order does not match the inflight stream order");
+        const auto stream_batch_size   = static_cast<int64_t>(stream->currentBatchSize());
+        const auto tokens_per_sequence = stream->isContextStream() ? stream->contextLength() : 1;
+        const auto token_size          = tokens_per_sequence * stream_batch_size;
+        const auto loss_size           = std::max<int64_t>(tokens_per_sequence - 1, 0);
+        dispatchNormalSingleStream(stream,
+                                   result,
+                                   stream_idx,
+                                   batch_idx,
+                                   stream_batch_size,
+                                   token_offset,
+                                   token_size,
+                                   loss_offset,
+                                   loss_size);
         stream->clearPPInflight();
         ++stream_idx;
         batch_idx += stream_batch_size;
@@ -635,16 +646,24 @@ absl::Status PPBatchStreamProcessor::dispatchNormalExecutionResult(const StreamG
     return absl::OkStatus();
 }
 
-void PPBatchStreamProcessor::dispatchNormalSingleStream(const GenerateStreamPtr& stream,
-                                                        const PPExecutionResult& result,
-                                                        int64_t stream_idx,
-                                                        int64_t batch_idx,
-                                                        int64_t stream_batch_size,
-                                                        int64_t token_offset,
-                                                        int64_t loss_offset,
-                                                        std::optional<ErrorInfo> error_info) const {
-    const auto token_size = static_cast<int64_t>(stream->currentExecuteTokenSize());
-    const auto loss_size = std::max<int64_t>(token_size / stream_batch_size - 1, 0);
+void PPBatchStreamProcessor::dispatchNormalSingleStream(const GenerateStreamPtr&  stream,
+                                                        const PPExecutionResult&  result,
+                                                        int64_t                   stream_idx,
+                                                        int64_t                   batch_idx,
+                                                        int64_t                   stream_batch_size,
+                                                        int64_t                   token_offset,
+                                                        int64_t                   token_size,
+                                                        int64_t                   loss_offset,
+                                                        int64_t                   loss_size) const {
+    const auto& error = result.request_errors[stream_idx];
+    if (error.hasError()) {
+        StreamUpdateInfo update_info{};
+        update_info.error_info = error;
+        stream->updateFromPP(update_info);
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(result.new_token_ids.size(1) == 1,
+                            "ordinary PP execution result must contain one token per successful row");
     torch::Tensor hidden_states;
     if (stream->generateConfig()->return_hidden_states) {
         hidden_states = result.hidden_states.narrow(0, batch_idx, stream_batch_size).clone();
@@ -687,12 +706,12 @@ void PPBatchStreamProcessor::dispatchNormalSingleStream(const GenerateStreamPtr&
                           true,
                           false,
                           std::move(prompt_logits),
-                          std::move(error_info)});
+                          std::nullopt});
 }
 
 torch::Tensor PPBatchStreamProcessor::gatherDraftNextPositionIds(const StreamGroups&   stream_groups,
                                                                const GptModelInputs& model_input) const {
-    if (!mtp_enabled_ || model_input.is_target_verify || !model_input.combo_position_ids.defined()) {
+    if (!sp_enabled_ || model_input.is_target_verify || !model_input.combo_position_ids.defined()) {
         return {};
     }
 
@@ -749,58 +768,47 @@ absl::StatusOr<GptModelInputs> PPBatchStreamProcessor::gatherTargetVerifyModelIn
     return model_input;
 }
 
-void PPBatchStreamProcessor::validateMtpExecutionResult(const std::list<GenerateStreamPtr>& all_streams,
-                                                       const PPExecutionResult& result,
-                                                       const ExecutionResultLayout& layout) const {
-    const bool is_prefill = all_streams.empty() || all_streams.front()->isContextStream();
-    RTP_LLM_CHECK_WITH_INFO(
-        layout.batch_size == static_cast<int64_t>(all_streams.size())
-            && result.accept_len.defined() && result.accept_len.device().is_cpu()
-            && result.accept_len.scalar_type() == torch::kInt32 && result.accept_len.dim() == 1
-            && result.accept_len.size(0) == layout.batch_size
-            && result.propose_token_ids.defined() && result.propose_token_ids.device().is_cpu()
-            && result.propose_token_ids.scalar_type() == torch::kInt32 && result.propose_token_ids.dim() == 2
-            && result.propose_token_ids.size(0) == layout.batch_size && result.propose_token_ids.size(1) > 0
-            && result.new_token_ids.size(1) == (is_prefill ? 1 : result.propose_token_ids.size(1) + 1),
-        "PP MTP execution result requires single-sequence accepted-token and proposal fields");
-
-    const auto* accept_lengths = result.accept_len.data_ptr<int32_t>();
-    const auto* success = result.sample_success.data_ptr<bool>();
-    int64_t row = 0;
-    for (const auto& stream : all_streams) {
-        RTP_LLM_CHECK_WITH_INFO(stream->isContextStream() == is_prefill,
-                                "PP MTP result batch must contain only prefill or only decode requests");
-        // Failed rows are reported through StreamSpecUpdateInfo, without indexing
-        // a possibly invalid accepted-token window.
-        if (success[row] && !result.processor_errors[row].has_value()) {
-            RTP_LLM_CHECK_WITH_INFO(accept_lengths[row] >= 1
-                                        && accept_lengths[row] <= result.new_token_ids.size(1)
-                                        && (!is_prefill || accept_lengths[row] == 1),
-                                    "PP MTP execution result has an invalid accepted length");
-            const auto sp_output_buffer = stream->getSPOutputBuffer();
-            RTP_LLM_CHECK_WITH_INFO(sp_output_buffer
-                                        && sp_output_buffer->propose_step
-                                               == static_cast<size_t>(result.propose_token_ids.size(1)),
-                                    "PP MTP execution result does not match the prepared proposal count");
-        }
-        ++row;
-    }
-}
-
 absl::Status PPBatchStreamProcessor::dispatchMtpExecutionResult(const StreamGroups& stream_groups,
                                                                 const PPExecutionResult& result) const {
-    const auto all_streams = stream_groups.allStreams();
-    const auto layout = validateExecutionResult(all_streams, result);
-    validateMtpExecutionResult(all_streams, result, layout);
+    const auto all_streams   = stream_groups.allStreams();
+    const auto batch_size    = static_cast<int64_t>(all_streams.size());
+    const bool is_prefill    = all_streams.empty() || all_streams.front()->isContextStream();
+    const bool is_pd_prefill = is_prefill && model_input_gatherer_config_.role_type == RoleType::PREFILL;
+    RTP_LLM_CHECK_WITH_INFO(
+        stream_groups.totalModelBatchSize() == all_streams.size() && result.accept_len.defined()
+            && result.accept_len.device().is_cpu() && result.accept_len.scalar_type() == torch::kInt32
+            && result.accept_len.dim() == 1 && result.accept_len.size(0) == batch_size,
+        "PP speculative execution result requires one accepted length per request");
 
+    const auto* request_ids    = result.request_ids.data_ptr<int64_t>();
+    const auto* accept_lengths = result.accept_len.data_ptr<int32_t>();
     int64_t row = 0;
     for (const auto& stream : all_streams) {
-        auto error_info = collectStreamSamplerError(result.processor_errors, result.sample_success, row, 1);
-        const int accepted_length = error_info.has_value() ? 0 : result.accept_len.data_ptr<int32_t>()[row];
-        const auto draft_tokens = error_info.has_value() ? torch::Tensor() : result.propose_token_ids[row];
-        auto new_tokens = result.new_token_ids.narrow(0, row, 1);
+        RTP_LLM_CHECK_WITH_INFO(request_ids[row] == stream->streamId(),
+                                "PP execution result request order does not match the inflight stream order");
+        RTP_LLM_CHECK_WITH_INFO(stream->isContextStream() == is_prefill,
+                                "PP speculative result batch must contain only prefill or only decode requests");
+        std::optional<ErrorInfo> error_info;
+        if (result.request_errors[row].hasError()) {
+            error_info = result.request_errors[row];
+        }
+        int  accepted_length = 0;
+        torch::Tensor draft_tokens;
+        torch::Tensor new_tokens;
         if (!error_info.has_value()) {
-            new_tokens = new_tokens.narrow(1, 0, accepted_length).contiguous();
+            accepted_length = accept_lengths[row];
+            RTP_LLM_CHECK_WITH_INFO(accepted_length >= 1 && accepted_length <= result.new_token_ids.size(1)
+                                        && (!is_prefill || accepted_length == 1),
+                                    "PP speculative execution result has an invalid accepted length");
+            const auto sp_output_buffer = stream->getSPOutputBuffer();
+            RTP_LLM_CHECK_WITH_INFO(
+                sp_output_buffer
+                    && ((is_pd_prefill && result.propose_token_ids.size(1) == 1)
+                        || sp_output_buffer->propose_step == static_cast<size_t>(result.propose_token_ids.size(1)))
+                    && result.new_token_ids.size(1) == (is_prefill ? 1 : sp_output_buffer->propose_step + 1),
+                "PP speculative execution result does not match the prepared proposal count");
+            draft_tokens = result.propose_token_ids[row];
+            new_tokens = result.new_token_ids.narrow(0, row, 1).narrow(1, 0, accepted_length).contiguous();
         }
 
         stream->specUpdate({std::move(new_tokens),

@@ -3,7 +3,6 @@
 #include <mutex>
 #include <memory>
 #include <unistd.h>
-#include <limits.h>
 #include <condition_variable>
 #include <unordered_set>
 #include <c10/core/DeviceGuard.h>
@@ -317,33 +316,34 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                                         .clone();
         generate_stream->setContextPositionIds(context_position_ids);
     }
-    if (!propose_maga_init_params_) {
+    const bool sp_enabled = maga_init_params_.sp_config.type != SP_TYPE_NONE;
+    if (!sp_enabled) {
         generate_stream->markGrpcNormalDeviceStatePending();
     }
-    if (propose_maga_init_params_) {
+    if (sp_enabled) {
         // gRPC handler threads default to CUDA device 0; pin allocations below
         // to this worker's device so local_rank>0 workers don't place the MTP
         // device-state tensors on the wrong GPU.
         c10::DeviceGuard device_guard(torch::Device(
             torch::kCUDA, static_cast<c10::DeviceIndex>(maga_init_params_.parallelism_config.local_rank)));
-        const size_t     propose_step = propose_maga_init_params_->gen_num_per_circle;
+        const size_t propose_step = maga_init_params_.sp_config.gen_num_per_cycle;
         RTP_LLM_CHECK_WITH_INFO(propose_step > 0, "decode rpc propose_step should be positive");
-        if (maga_init_params_.sp_config.gen_num_per_cycle > 0) {
-            RTP_LLM_CHECK_WITH_INFO(propose_step == static_cast<size_t>(maga_init_params_.sp_config.gen_num_per_cycle),
-                                    "decode rpc propose_step mismatch, propose_params=%zu, sp_config=%ld",
-                                    propose_step,
-                                    maga_init_params_.sp_config.gen_num_per_cycle);
-        }
 
+        const bool is_pipeline = maga_init_params_.parallelism_config.pp_size > 1;
+        const bool pp_mtp      = is_pipeline && !engine_->isDSpark();
         std::vector<int> propose_tokens;
         propose_tokens.assign(generate_request.propose_token_ids().begin(), generate_request.propose_token_ids().end());
-        // A DSpARK seeding handoff carries no proposal (commit-only prefill);
-        // the decode round head produces the first one. Traditional MTP/Eagle
-        // retain their target+draft handoff contract.
-        RTP_LLM_CHECK_WITH_INFO(engine_->isDSpark() ? propose_tokens.empty() : propose_tokens.size() >= 2,
-                                "decode rpc speculative handoff has invalid proposal count=%zu for dspark=%d",
+        /** DSpARK seeds without proposals; PP MTP hands off only the anchor and d1. */
+        RTP_LLM_CHECK_WITH_INFO(engine_->isDSpark() ? propose_tokens.empty() :
+                                   (pp_mtp ? propose_tokens.size() == 2 : propose_tokens.size() >= 2),
+                                "decode rpc speculative handoff has invalid proposal count=%zu for dspark=%d pp_mtp=%d",
                                 propose_tokens.size(),
-                                static_cast<int>(engine_->isDSpark()));
+                                static_cast<int>(engine_->isDSpark()),
+                                static_cast<int>(pp_mtp));
+        if (pp_mtp) {
+            /** Keep P's argmax d1 and pad deterministic candidates for fixed-width target verification. */
+            propose_tokens.resize(propose_step + 1, 0);
+        }
         generate_stream->initSpeculativeHandoffPositions();
         if (!propose_tokens.empty()) {
             generate_stream->setContainProposeToken(true);
@@ -356,33 +356,35 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
             memcpy(
                 sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
-            auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
-            auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
-
-            const auto cuda_i32             = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-            sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
-            sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
-
-            auto propose_tokens_gpu = torch::empty({1}, cuda_i32);
-            auto accept_len         = torch::ones({1}, cuda_i32);
-            auto accept_tokens      = torch::zeros({1, static_cast<int64_t>(propose_step + 1)}, cuda_i32);
-            accept_tokens[0][0]     = sp_output_buffer->tokens[0][0];
-            propose_tokens_gpu[0]   = sp_output_buffer->tokens[0][1];
-
-            auto next_seq_len = torch::ones({1}, cuda_i32);
-            next_seq_len[0]   = generate_stream->seqLength();
-
+            if (!pp_mtp) {
+                auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
+                auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
+                sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
+                sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
+            }
             generate_stream->setSPOutputBuffer(sp_output_buffer);
-            // The per-step refresher (MtpExecutor's device-state publish) is gated
-            // on RTP_LLM_STREAM_ASYNC / RTP_LLM_MTP_ASYNC_DEVICE_STATE. Publishing
-            // this static snapshot without those pipelines active would leave a
-            // stale next_real_seq_len that overrides incrKVBlock forever (same
-            // failure mode as the normal-decode grpc device state).
+
+            /**
+             * MtpExecutor refreshes this state only with RTP_LLM_STREAM_ASYNC or
+             * RTP_LLM_MTP_ASYNC_DEVICE_STATE enabled. Otherwise, stale next_real_seq_len
+             * keeps overriding incrKVBlock's sequence length.
+             * PPExecutor does not support this refresh yet.
+             */
+            const bool supports_mtp_device_state = !is_pipeline;
             auto env_on = [](const char* name) {
                 const char* value = std::getenv(name);
                 return value != nullptr && std::string(value) == "1";
             };
-            if (env_on("RTP_LLM_STREAM_ASYNC") || env_on("RTP_LLM_MTP_ASYNC_DEVICE_STATE")) {
+            if (supports_mtp_device_state
+                && (env_on("RTP_LLM_STREAM_ASYNC") || env_on("RTP_LLM_MTP_ASYNC_DEVICE_STATE"))) {
+                const auto cuda_i32     = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+                auto propose_tokens_gpu = torch::empty({1}, cuda_i32);
+                auto accept_len         = torch::ones({1}, cuda_i32);
+                auto accept_tokens      = torch::zeros({1, static_cast<int64_t>(propose_step + 1)}, cuda_i32);
+                accept_tokens[0][0]     = sp_output_buffer->tokens[0][0];
+                propose_tokens_gpu[0]   = sp_output_buffer->tokens[0][1];
+                auto next_seq_len       = torch::ones({1}, cuda_i32);
+                next_seq_len[0]         = generate_stream->seqLength();
                 generate_stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
                     .epoch                  = 0,
                     .accept_len_gpu         = std::move(accept_len),
@@ -1136,9 +1138,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                                                        static_cast<uint32_t>(layer_num),
                                                                                        static_cast<int>(layer_id));
                         RTP_LLM_CHECK_WITH_INFO(stage_pool_layer_id != std::numeric_limits<uint32_t>::max(),
-                                                "invalid decode MTP global layer: main=%ld module=%zu "
+                                                "invalid decode MTP global layer: main=%u module=%zu "
                                                 "module_layers=%zu local=%zu",
-                                                maga_init_params_.model_config_.num_layers,
+                                                cache_config.layer_num,
                                                 mtp_model_id,
                                                 layer_num,
                                                 layer_id);

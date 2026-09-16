@@ -515,7 +515,8 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
 
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
-    if (sp_output_buffer && !engine_->isDSpark()) {
+    /** PP MTP/EAGLE verifies argmax proposals by token ID and rebuilds draft inputs on D. */
+    if (sp_output_buffer && !engine_->isDSpark() && maga_init_params_.parallelism_config.pp_size == 1) {
         auto all_probs_cpu =
             sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
         torch::Tensor hidden_states_cpu;

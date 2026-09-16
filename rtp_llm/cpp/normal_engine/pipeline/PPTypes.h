@@ -40,6 +40,7 @@ struct PPSamplingPlan {
     torch::Tensor token_ids;         // [total_batch_size, max_sequence_length + 1]
     torch::Tensor input_lengths;     // [total_batch_size]
     torch::Tensor sequence_lengths;  // [total_batch_size]
+    torch::Tensor max_tokens;        // [total_batch_size], total sequence limit from stream->maxTokenNum()
 
     torch::Tensor top_k;                 // [total_batch_size]
     torch::Tensor top_p;                 // [total_batch_size]
@@ -93,9 +94,8 @@ struct PPIntermediateTensors {
 
 /** Final outputs produced by the lm-head stage TP root. */
 struct PPExecutionResult {
-    torch::Tensor request_ids;     // [stream_count]
-    torch::Tensor new_token_ids;   // [total_batch_size, 1]; MTP decode: [total_batch_size, propose_step + 1]
-    torch::Tensor sample_success;  // [total_batch_size]
+    torch::Tensor request_ids;    // [stream_count]
+    torch::Tensor new_token_ids;  // [total_batch_size, 1]; speculative decode: [total_batch_size, propose_step + 1]
 
     torch::Tensor logits;         // optional [total_batch_size, vocab_size]
     torch::Tensor softmax_probs;  // optional [total_batch_size, 1]
@@ -107,11 +107,14 @@ struct PPExecutionResult {
     torch::Tensor hidden_states;      // optional [total_batch_size, hidden_size]
     torch::Tensor all_hidden_states;  // optional [executed_token_count, hidden_size]
 
-    std::vector<std::optional<PromptLogitsOutput>> prompt_logits;     // [stream_count]
-    std::vector<std::optional<ErrorInfo>>          processor_errors;  // [total_batch_size]
+    std::vector<std::optional<PromptLogitsOutput>> prompt_logits;  // [stream_count]
+
+    // [stream_count], aligned with request_ids. Keep the first error from initialization,
+    // processing/verification, sampling, or state update; NONE_ERROR means success.
+    std::vector<ErrorInfo> request_errors;
 
     torch::Tensor accept_len;         // [total_batch_size], includes correction/bonus
-    torch::Tensor propose_token_ids;  // [total_batch_size, propose_step], next candidates in target vocabulary
+    torch::Tensor propose_token_ids;  // [total_batch_size, draft_count]; PD MTP/EAGLE prefill uses 1, otherwise K
 };
 
 }  // namespace rtp_llm

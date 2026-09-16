@@ -34,8 +34,8 @@ cc_test(
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ] + torch_deps(),
-    # CPU-only logic but normal_engine links libtorch_cuda; H20 host needed for loader.
+    ] + torch_deps() + cuda13_torch_link_deps,
+    # Includes CUDA point-mass rejection sampling and force-accept coverage.
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

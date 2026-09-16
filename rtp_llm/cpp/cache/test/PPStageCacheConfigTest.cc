@@ -396,7 +396,7 @@ TEST(PPStageCacheConfig, mtpOnlyLastStageOwnsCompleteDraftCache) {
                                                    CacheConfigCreator::createConfig(
                                             score, pc, RuntimeConfig{}, kv_cache_config, std::nullopt, sp_config);
                 const uint32_t target_layers = pc.pp_stage_layer_counts[rank];
-                const uint32_t draft_layers  = rank == 2 ? 2 : 0;
+                const uint32_t draft_layers  = rank == 2 ? 2 * steps : 0;
                 const uint32_t total_layers  = target_layers + draft_layers;
                 EXPECT_EQ(config.layer_num, target_layers);
                 EXPECT_EQ(config.layer_all_num, total_layers);
@@ -407,7 +407,7 @@ TEST(PPStageCacheConfig, mtpOnlyLastStageOwnsCompleteDraftCache) {
                 // K/V * two KV heads / TP * head dim * four tokens * FP16 bytes.
                 EXPECT_EQ(config.block_size_bytes, total_layers * (512u / tp_size));
                 EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(0), 2u);
-                ASSERT_EQ(config.mtp_sub_configs.size(), rank == 2 ? 1 : 0);
+                ASSERT_EQ(config.mtp_sub_configs.size(), rank == 2 ? steps : 0);
                 for (const auto& sub : config.mtp_sub_configs) {
                     ASSERT_TRUE(sub);
                     EXPECT_EQ(sub->layer_num, 2u);
@@ -447,7 +447,7 @@ TEST(PPStageCacheConfig, mtpJointBudgetUsesLocalTargetAndDraftLayers) {
                         score, propose, pc, RuntimeConfig{}, kv_cache_config, sp_config, std::nullopt, true, false) :
                     CacheConfigCreator::createConfig(
                         score, pc, RuntimeConfig{}, kv_cache_config, std::nullopt, sp_config);
-            const size_t bytes_per_block = 5u * 512u;
+            const size_t bytes_per_block = (rank == 0 ? 5u : 7u) * 512u;
             const auto   expected_blocks = (1024u * 1024u) / bytes_per_block;
             EXPECT_EQ(config.block_size_bytes, bytes_per_block);
             EXPECT_EQ(config.block_num, expected_blocks);
@@ -462,17 +462,17 @@ TEST(PPStageCacheConfig, mtpJointBudgetUsesLocalTargetAndDraftLayers) {
         const auto validation = validatePPTopology(snapshots);
         ASSERT_TRUE(validation.ok) << validation.error;
         ASSERT_EQ(validation.canonical_groups.size(), 1u);
-        EXPECT_EQ(validation.canonical_groups[0].logical_block_num, 409u);
+        EXPECT_EQ(validation.canonical_groups[0].logical_block_num, 292u);
         for (auto& config : configs) {
             config.finalizeBlockNums(
                 validation.agreed.paged_block_num, RuntimeConfig{}, &validation.agreed.block_num_overrides);
             EXPECT_NO_THROW(validatePPComposedBlockNums(config, validation.agreed));
             applyPPCanonicalIndices(config, validation);
-            EXPECT_EQ(config.block_num, 409u);
-            EXPECT_EQ(config.blockNumForGroup(0), 409u);
+            EXPECT_EQ(config.block_num, 292u);
+            EXPECT_EQ(config.blockNumForGroup(0), 292u);
             for (const auto& sub : config.mtp_sub_configs) {
-                EXPECT_EQ(sub->block_num, 409u);
-                EXPECT_EQ(sub->blockNumForGroup(0), 409u);
+                EXPECT_EQ(sub->block_num, 292u);
+                EXPECT_EQ(sub->blockNumForGroup(0), 292u);
             }
         }
     }
@@ -502,7 +502,7 @@ TEST(PPStageCacheConfig, negotiatedCapacityUpdatesMtpSubConfigsAndCanonicalGroup
             const auto config              = CacheConfigCreator::createSpConfig(
                 score, propose, last_pc, RuntimeConfig{}, kv_cache_config, sp_config, std::nullopt, true, false);
             ASSERT_EQ(config.groupNums(), 1);
-            ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+            ASSERT_EQ(config.mtp_sub_configs.size(), static_cast<size_t>(steps));
             const auto draft_topology = config.mtp_sub_configs[0]->topologyPtr();
             const auto draft_strides  = config.mtp_sub_configs[0]->layer_to_block_stride_bytes;
             ASSERT_EQ(draft_topology->groupById(0).block_num, 32u);
@@ -595,10 +595,11 @@ TEST_F(PPCacheNegotiationTest, snapshotSizingDoesNotMutateMtpConfig) {
                                                                    std::nullopt,
                                                                    true,
                                                                    false);
-            ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
-            const auto                topology       = config.topologyPtr();
-            const auto                draft          = config.mtp_sub_configs[0];
-            const auto                draft_topology = draft->topologyPtr();
+            ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+            const auto topology         = config.topologyPtr();
+            const auto drafts           = config.mtp_sub_configs;
+            const auto draft_topologies =
+                std::vector{drafts[0]->topologyPtr(), drafts[1]->topologyPtr()};
             PPCacheCapacityNegotiator negotiator;
             if (first_blocks == 24u) {
                 const auto validation = negotiator.negotiate(config, 28, RuntimeConfig{});
@@ -616,10 +617,12 @@ TEST_F(PPCacheNegotiationTest, snapshotSizingDoesNotMutateMtpConfig) {
             EXPECT_EQ(local_snapshot_.group_tags, StageCacheSnapshot::fromConfig(config).group_tags);
             EXPECT_EQ(config.block_num, 32u);
             EXPECT_EQ(config.topologyPtr(), topology);
-            ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
-            EXPECT_EQ(config.mtp_sub_configs[0], draft);
-            EXPECT_EQ(draft->block_num, 32u);
-            EXPECT_EQ(draft->topologyPtr(), draft_topology);
+            ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+            for (size_t i = 0; i < drafts.size(); ++i) {
+                EXPECT_EQ(config.mtp_sub_configs[i], drafts[i]);
+                EXPECT_EQ(drafts[i]->block_num, 32u);
+                EXPECT_EQ(drafts[i]->topologyPtr(), draft_topologies[i]);
+            }
         }
     }
 }
@@ -644,7 +647,7 @@ TEST(PPStageCacheConfig, composedCapacityRejectsMtpSubConfigMismatch) {
                                                          std::nullopt,
                                                          true,
                                                          false);
-        ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+        ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
         const auto validation = validatePPTopology({StageCacheSnapshot::fromConfig(config)});
         ASSERT_TRUE(validation.ok) << validation.error;
         const auto topology = config.topologyPtr();
@@ -695,48 +698,34 @@ TEST(PPStageCacheConfig, mtpPp1KeepsAllTargetAndDraftLayers) {
     }
 }
 
-TEST(PPStageCacheConfig, speculativeGateRejectsMtpOnNonLastStages) {
-    const auto    score   = makeSingleModelConfig(7);
+TEST(PPStageCacheConfig, speculativeGateAcceptsDSparkOnLastStage) {
+    const auto    score   = makeSingleModelConfig(4);
+    const auto    propose = makeSingleModelConfig(3);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 32;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 3;
+
+    const auto config = CacheConfigCreator::createSpConfig(
+        score, propose, makePpConfig(4, 2, 1), RuntimeConfig{}, kv_cache_config, sp_config, std::nullopt, true, false);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    EXPECT_EQ(config.mtp_sub_configs[0]->layer_num, 3u);
+}
+
+TEST(PPStageCacheConfig, speculativeGateAcceptsEagleOnLastStage) {
+    const auto    score   = makeSingleModelConfig(4);
     const auto    propose = makeSingleModelConfig(2);
     KVCacheConfig kv_cache_config;
     kv_cache_config.test_block_num = 32;
     SpeculativeExecutionConfig sp_config;
-    sp_config.type              = SP_TYPE_MTP;
-    sp_config.gen_num_per_cycle = 1;
-    for (int rank : {0, 1}) {
-        EXPECT_THROW(CacheConfigCreator::createSpConfig(score,
-                                                        propose,
-                                                        makePpConfig(7, 3, rank),
-                                                        RuntimeConfig{},
-                                                        kv_cache_config,
-                                                        sp_config,
-                                                        std::nullopt,
-                                                        true,
-                                                        false),
-                     std::exception);
-    }
-}
+    sp_config.type              = SP_TYPE_EAGLE;
+    sp_config.gen_num_per_cycle = 3;
 
-TEST(PPStageCacheConfig, speculativeGateRejectsOtherDraftTypes) {
-    const auto    score   = makeSingleModelConfig(4);
-    const auto    propose = makeSingleModelConfig(1);
-    KVCacheConfig kv_cache_config;
-    kv_cache_config.test_block_num = 32;
-    SpeculativeExecutionConfig sp_config;
-    sp_config.gen_num_per_cycle = 1;
-    for (auto type : {SP_TYPE_VANILLA, SP_TYPE_EAGLE3, SP_TYPE_DSPARK}) {
-        sp_config.type = type;
-        EXPECT_THROW(CacheConfigCreator::createSpConfig(score,
-                                                        propose,
-                                                        makePpConfig(4, 2, 1),
-                                                        RuntimeConfig{},
-                                                        kv_cache_config,
-                                                        sp_config,
-                                                        std::nullopt,
-                                                        true,
-                                                        false),
-                     std::exception);
-    }
+    const auto config = CacheConfigCreator::createSpConfig(
+        score, propose, makePpConfig(4, 2, 1), RuntimeConfig{}, kv_cache_config, sp_config, std::nullopt, true, true);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    EXPECT_EQ(config.mtp_sub_configs[0]->layer_num, 2u);
 }
 
 TEST(PPStageCacheConfig, overrideTableAppliesPerTagCounts) {

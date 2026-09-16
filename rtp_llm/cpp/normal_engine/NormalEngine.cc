@@ -11,7 +11,6 @@
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/PPTopologyValidator.h"
-#include "rtp_llm/cpp/config/RankLayout.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -113,8 +112,9 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         const char* stream_async = std::getenv("RTP_LLM_STREAM_ASYNC");
         RTP_LLM_CHECK_WITH_INFO(stream_async == nullptr || std::strcmp(stream_async, "1") != 0,
                                 "pipeline parallelism does not support async runner (RTP_LLM_STREAM_ASYNC)");
-        RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE || sp_config.type == SP_TYPE_MTP,
-                                "pipeline parallelism only supports MTP speculative decoding");
+        RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE || sp_config.type == SP_TYPE_MTP
+                                    || sp_config.type == SP_TYPE_EAGLE || sp_config.type == SP_TYPE_DSPARK,
+                                "pipeline parallelism only supports MTP, EAGLE and DSpARK speculative decoding");
         RTP_LLM_CHECK_WITH_INFO(!eplb_config.enable_eplb(), "pipeline parallelism does not support EPLB");
         RTP_LLM_CHECK_WITH_INFO(!ffn_disaggregate_config.enable_ffn_disaggregate,
                                 "pipeline parallelism does not support FFN disaggregation");
@@ -502,12 +502,11 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
-    const auto pp_layout                  = RankLayout::fromParallelismConfig(parallelism_config);
     std::shared_ptr<PPCacheCapacityNegotiator> pp_negotiator;
     if (parallelism_config.pp_size > 1) {
         pp_negotiator = std::make_shared<PPCacheCapacityNegotiator>();
     }
-    if (propose_params_ && propose_params_->draftModel() && pp_layout.hasLmHead()) {
+    if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,
                                                          propose_params_->getEngineInitParams().model_config_,
                                                          parallelism_config,

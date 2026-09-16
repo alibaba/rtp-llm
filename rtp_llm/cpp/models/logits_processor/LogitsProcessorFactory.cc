@@ -80,6 +80,19 @@ void LogitsProcessorFactory::init(const ModelConfig&   model_config,
     PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(model_config.ckpt_path, tree_decode_config);
 }
 
+std::optional<ErrorInfo>
+LogitsProcessorFactory::validateMtpCompatibility(const std::vector<BaseLogitsProcessorPtr>& processors) {
+    for (size_t i = 0; i < processors.size(); ++i) {
+        const auto capability = processors[i]->mtpCapability();
+        if (capability.mode == MtpProcessorMode::UNSUPPORTED) {
+            return ErrorInfo(ErrorCode::INVALID_PARAMS,
+                             "MTP decode is incompatible with logits processor: processor_index=" + std::to_string(i)
+                                 + ", mode=unsupported, reason=" + std::string(capability.reason));
+        }
+    }
+    return std::nullopt;
+}
+
 ErrorResult<std::vector<BaseLogitsProcessorPtr>>
 LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,
                                                int32_t                        init_batch_size,

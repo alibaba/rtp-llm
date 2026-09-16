@@ -769,32 +769,6 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
                                     host_holder);
 }
 
-torch::Tensor MtpBatchStreamProcessor::dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors) {
-    const int64_t draft_width = propose_step_;
-    if (!dspark_combo_cache_.defined() || dspark_combo_cache_.size(0) < batch_size
-        || dspark_combo_cache_.size(1) != draft_width) {
-        dspark_combo_cache_ = fullInt32OnCuda({batch_size, draft_width}, dspark_mask_token_id_);
-    }
-    auto combo = dspark_combo_cache_.narrow(0, 0, batch_size);
-    combo.select(1, 0).copy_(anchors);
-    return combo.reshape({-1});
-}
-
-torch::Tensor MtpBatchStreamProcessor::dsparkDraftInputLengths(int64_t batch_size) {
-    if (!dspark_input_lengths_cache_.defined() || dspark_input_lengths_cache_.size(0) < batch_size) {
-        dspark_input_lengths_cache_ = fullInt32OnCuda({batch_size}, propose_step_);
-    }
-    return dspark_input_lengths_cache_.narrow(0, 0, batch_size);
-}
-
-torch::Tensor MtpBatchStreamProcessor::dsparkDraftLmIndexes(int64_t batch_size) {
-    const int64_t draft_width = propose_step_;
-    if (!dspark_lm_indexes_cache_.defined() || dspark_lm_indexes_cache_.size(0) < batch_size) {
-        dspark_lm_indexes_cache_ = torch::arange(0, batch_size * draft_width, draft_width, cudaInt32Options());
-    }
-    return dspark_lm_indexes_cache_.narrow(0, 0, batch_size);
-}
-
 void MtpBatchStreamProcessor::validatePrefillDSparkCommitInput(const GptModelInputs& model_input) const {
     // The commit call keeps the target's own incremental-prefill geometry:
     // combo = prompt suffix tokens, input_lengths = suffix rows,
@@ -812,19 +786,13 @@ void MtpBatchStreamProcessor::buildDSparkProposeInput(GptModelInputs&      model
                                                       const torch::Tensor& anchors,
                                                       const torch::Tensor& committed_ends,
                                                       TensorHolder&        host_holder) {
-    const int64_t batch_size = anchors.numel();
-    RTP_LLM_CHECK_WITH_INFO(propose_step_ > 0, "dspark draft width must be positive");
-    RTP_LLM_CHECK_WITH_INFO(
-        dspark_mask_token_id_ >= 0, "dspark requires a non-negative noise token id, got %d", dspark_mask_token_id_);
-    // Fixed-width proposal block: no feature input (the block reads the
-    // committed feature KV written by the commit call).
-    model_input.combo_tokens       = dsparkComboTokens(batch_size, toCudaInt32(anchors, host_holder));
-    model_input.last_hidden_states = torch::Tensor();
-    model_input.prefix_lengths     = toCudaInt32(committed_ends, host_holder).contiguous();
-    model_input.input_lengths      = dsparkDraftInputLengths(batch_size);
-    model_input.sequence_lengths   = emptyInt32OnCuda({0});
-    model_input.lm_output_indexes  = dsparkDraftLmIndexes(batch_size);
-    model_input.dspark_call_phase  = DSparkCallPhase::PROPOSE;
+    mtp::prepareDSparkProposeInput(model_input,
+                                   anchors,
+                                   committed_ends,
+                                   propose_step_,
+                                   dspark_mask_token_id_,
+                                   dspark_propose_input_buffers_,
+                                   host_holder);
 }
 
 MtpBatchStreamProcessor::DSparkRoundHead MtpBatchStreamProcessor::buildDSparkRoundHead(
@@ -884,8 +852,7 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(GptModelInputs& 
     // combo_tokens remains [anchor, p1, ..., p_gamma], independent of the
     // rejection result; later rounds overwrite rows beyond the accepted
     // prefix. Only the rank-local target feature tensor is rebound here.
-    model_input.last_hidden_states = target_features;
-    model_input.dspark_call_phase  = DSparkCallPhase::COMMIT;
+    mtp::prepareDSparkCommitInput(model_input, target_features);
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(

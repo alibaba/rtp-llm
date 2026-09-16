@@ -115,18 +115,6 @@ bool hasSpecLogitsProcessor(const std::list<GenerateStreamPtr>& streams) {
     return false;
 }
 
-std::optional<ErrorInfo> validateMtpCompatibility(const std::vector<BaseLogitsProcessorPtr>& processors) {
-    for (size_t i = 0; i < processors.size(); ++i) {
-        const auto capability = processors[i]->mtpCapability();
-        if (capability.mode == MtpProcessorMode::UNSUPPORTED) {
-            return ErrorInfo(ErrorCode::INVALID_PARAMS,
-                             "MTP decode is incompatible with logits processor: processor_index=" + std::to_string(i)
-                                 + ", mode=unsupported, reason=" + std::string(capability.reason));
-        }
-    }
-    return std::nullopt;
-}
-
 torch::Tensor toCudaWithHostHold(const torch::Tensor& tensor, TensorHolder& holder) {
     if (!tensor.defined() || tensor.is_cuda()) {
         return tensor;
@@ -2002,7 +1990,8 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
     for (auto& stream : streams) {
         // Capability compatibility is a stream admission property: reject the
         // single stream instead of failing the whole engine step (main #1006).
-        if (auto error = validateMtpCompatibility(stream->getAllLogitsProcessorPtr()); error.has_value()) {
+        if (auto error = LogitsProcessorFactory::validateMtpCompatibility(stream->getAllLogitsProcessorPtr());
+            error.has_value()) {
             stream->reportError(error->code(), error->ToString());
             continue;
         }
