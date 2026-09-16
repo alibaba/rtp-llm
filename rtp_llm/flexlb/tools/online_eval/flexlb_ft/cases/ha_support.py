@@ -112,7 +112,7 @@ def tier3_dual_spec(ctx) -> EnvSpec:
 
     FLEXLB_ADVERTISED_IP and FLEXLB_SYNC_CONSISTENCY_CONFIG are injected
     per the cross-agent contract (flexlb-sync owner); both instances share
-    one HIPPO_ROLE (mutual master/follower over /master_lb_leader/{role}).
+    one BIZ_NAME:DEPLOYMENT_NAME:ZONE_NAME identity for the shared ZK election path.
     """
     return EnvSpec(
         label=f"ha_t3_{ctx.profile}",
