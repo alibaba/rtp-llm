@@ -24,14 +24,40 @@ CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
 }
 
 // IDLE -> RUNNING. Resets bookkeeping for a new forward-pass cycle.
+//
+// SELF-HEAL a stale RUNNING state instead of asserting. The caller (PyWrappedModel) runs
+// init() ... waitAllDone() with no scope guard between them, so a forward that throws in that
+// region (the pybind11 python forward, fusedCopy, or an output-size RTP_LLM_CHECK) skips
+// waitAllDone() and leaves state_==RUNNING. The old RTP_LLM_CHECK then made EVERY subsequent
+// init() throw -> the engine-loop catch-all swallowed and retried -> an unbounded "already
+// RUNNING" retry loop that floods the log with no recovery. Draining the abandoned cycle's
+// in-flight tasks (the same wait_cv_/pending_count_ mechanism waitAllDone uses) and resetting
+// makes the writer recoverable so subsequent requests succeed. The happy path is unchanged:
+// init() is normally entered with state_==IDLE and pending_count_==0, so the drain wait returns
+// immediately.
 void CacheStoreAsyncWriter::init() {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    RTP_LLM_CHECK_WITH_INFO(state_ == State::IDLE,
-                            "CacheStoreAsyncWriter::init() called while already RUNNING. "
-                            "Must call waitAllDone() before re-initializing.");
-    pending_count_.store(0, std::memory_order_relaxed);
-    stored_exception_ = nullptr;
-    state_            = State::RUNNING;
+    bool stale = false;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        stale = (state_ == State::RUNNING);
+    }
+    if (stale) {
+        RTP_LLM_LOG_ERROR("CacheStoreAsyncWriter::init() found stale RUNNING state (a prior cycle "
+                          "did not reach waitAllDone(), likely an escaped forward exception); "
+                          "draining in-flight tasks and resetting to avoid an 'already RUNNING' "
+                          "retry storm.");
+        std::unique_lock<std::mutex> lock(wait_mutex_);
+        wait_cv_.wait(lock, [this]() { return pending_count_.load(std::memory_order_acquire) == 0; });
+    }
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        pending_count_.store(0, std::memory_order_relaxed);
+        state_ = State::RUNNING;
+    }
+    {
+        std::lock_guard<std::mutex> ex_lock(exception_mutex_);
+        stored_exception_ = nullptr;
+    }
 }
 
 // Enqueue a task to the background thread pool. Must be in RUNNING state.

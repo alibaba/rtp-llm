@@ -504,6 +504,12 @@ void NormalEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
     cudaPreRun(getDeviceId());
+    // A PERSISTENT step() failure would otherwise spin this loop at full rate, logging every
+    // iteration and flooding the log. Track consecutive failures: rate-limit the log and back off
+    // (bounded sleep) so a stuck step cannot flood the disk, while a transient failure (counter
+    // resets on the next ok step) is unaffected. Defense-in-depth alongside the
+    // CacheStoreAsyncWriter::init self-heal.
+    int64_t consecutive_failures = 0;
     while (running_) {
         // Ticket 1 Phase 1 belt-and-braces: this loop runs on a bare
         // autil::Thread — any exception escaping step() reaches
@@ -517,10 +523,29 @@ void NormalEngine::loop() {
                 RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
                 THROW_IF_STATUS_ERROR(trySaveStepError());
             }
+            consecutive_failures = 0;
         } catch (const std::exception& e) {
-            RTP_LLM_LOG_ERROR("[Ticket1] engine loop survived a step exception: %s", e.what());
+            ++consecutive_failures;
+            if (consecutive_failures <= 20 || consecutive_failures % 1000 == 0) {
+                RTP_LLM_LOG_ERROR("[Ticket1] engine loop survived a step exception (%ld consecutive): %s",
+                                  (long)consecutive_failures, e.what());
+            }
+            if (consecutive_failures >= 5) {
+                int64_t backoff_ms = 20 * consecutive_failures;
+                if (backoff_ms > 1000) { backoff_ms = 1000; }
+                std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+            }
         } catch (...) {
-            RTP_LLM_LOG_ERROR("[Ticket1] engine loop survived an unknown step exception");
+            ++consecutive_failures;
+            if (consecutive_failures <= 20 || consecutive_failures % 1000 == 0) {
+                RTP_LLM_LOG_ERROR("[Ticket1] engine loop survived an unknown step exception (%ld consecutive)",
+                                  (long)consecutive_failures);
+            }
+            if (consecutive_failures >= 5) {
+                int64_t backoff_ms = 20 * consecutive_failures;
+                if (backoff_ms > 1000) { backoff_ms = 1000; }
+                std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+            }
         }
     }
 }
