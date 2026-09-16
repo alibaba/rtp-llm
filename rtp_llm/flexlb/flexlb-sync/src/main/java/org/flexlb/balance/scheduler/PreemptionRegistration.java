@@ -85,7 +85,7 @@ public final class PreemptionRegistration {
         return true;
     }
 
-    /** Finish this registration once; this does not release endpoint resources or publish a response. */
+    /** Record protocol completion once; resource cleanup and terminal notification still belong to the slot. */
     boolean tryFinish() {
         if (finished) {
             return false;

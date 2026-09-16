@@ -81,6 +81,7 @@ The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fie
 | Setting | Schema 3 behavior |
 | --- | --- |
 | `dispatcher.maxInflightPerPrefillWorker` | Positive integer, default 2 in every mode. BATCH counts batches; NON_BATCH / DIRECT count requests. |
+| `dispatcher.fetchAttachTimeoutMs` | Positive integer, default 3000 ms. BATCH sends this as Engine `fetch_attach_timeout_ms`, limiting the wait for `FetchResponse` attachment. Engine caps it by the remaining request timeout when present. Once attached, this timer does not limit generation duration. |
 | Prefill ownership | Work remains tracked until authoritative completion, safe rollback or retirement. PDFUSION has no distinct Prefill-completion signal, so its ownership lasts through request termination. |
 | `requestLifecycle.request.timeoutMs` | Required positive integer; maximum request inactivity in milliseconds, renewed by matching Engine request status. No default. |
 | `workerRegistry.health.cleanupIntervalMs` | Positive integer, default 3000 ms; scan interval for retiring workers whose status exceeds `statusStaleAfterMs`. |
@@ -104,7 +105,7 @@ export FLEXLB_CONFIG='{
     "ordering": {"type": "FIFO"},
     "decision": {"type": "FIXED_WINDOW", "maxRequests": 8, "maxCollectionWaitMs": 300}
   },
-  "dispatcher": {"type": "BATCH", "maxInflightPerPrefillWorker": 2},
+  "dispatcher": {"type": "BATCH", "maxInflightPerPrefillWorker": 2, "fetchAttachTimeoutMs": 3000},
   "requestLifecycle": {
     "request": {"timeoutMs": 60000},
     "decision": {"lifetime": 2.0}

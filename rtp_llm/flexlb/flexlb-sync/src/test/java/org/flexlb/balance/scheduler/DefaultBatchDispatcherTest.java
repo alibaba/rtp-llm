@@ -17,6 +17,7 @@ import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -79,6 +80,26 @@ class DefaultBatchDispatcherTest {
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS), "onSuccess should be called");
         assertEquals(1, callback.successCount.get());
         assertEquals(0, callback.failureCount.get());
+        ArgumentCaptor<EngineRpcService.EnqueueBatchRequestPB> request =
+                ArgumentCaptor.forClass(EngineRpcService.EnqueueBatchRequestPB.class);
+        verify(grpcClient).batchEnqueueAsync(anyString(), anyInt(), request.capture());
+        assertEquals(3000, request.getValue().getFetchAttachTimeoutMs());
+    }
+
+    @Test
+    void dispatchPassesConfiguredFetchAttachTimeoutToEngine() throws Exception {
+        config.getDispatcher().setFetchAttachTimeoutMs(1500);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, createPrefillEndpoint());
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                .thenReturn(CompletableFuture.completedFuture(ackResponse(1L, List.of(1L))));
+
+        submit(List.of(item), 1L, 100, "test_reason", callback);
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS), "onSuccess should be called");
+        ArgumentCaptor<EngineRpcService.EnqueueBatchRequestPB> request =
+                ArgumentCaptor.forClass(EngineRpcService.EnqueueBatchRequestPB.class);
+        verify(grpcClient).batchEnqueueAsync(anyString(), anyInt(), request.capture());
+        assertEquals(1500, request.getValue().getFetchAttachTimeoutMs());
     }
 
     @Test
@@ -199,7 +220,7 @@ class DefaultBatchDispatcherTest {
         BiConsumer<ScheduledRequest, DeliveryResult> throwingCallback =
                 (exactItem, completion) -> {
                 ScheduledRequest item = assertInstanceOf(ScheduledRequest.class, exactItem);
-                if (completion.status() == DeliveryResult.Status.FAILED) {
+                if (completion.status() == DeliveryResult.Status.NOT_SENT) {
                     failures.incrementAndGet();
                     attempted.countDown();
                     if (item.requestId() == 1L) {
@@ -232,7 +253,7 @@ class DefaultBatchDispatcherTest {
         BiConsumer<ScheduledRequest, DeliveryResult> throwingCallback =
                 (exactItem, completion) -> {
                 ScheduledRequest item = assertInstanceOf(ScheduledRequest.class, exactItem);
-                if (completion.status() == DeliveryResult.Status.FAILED) {
+                if (completion.status() == DeliveryResult.Status.NOT_SENT) {
                     failures.incrementAndGet();
                 } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
                     uncertain.incrementAndGet();
@@ -308,7 +329,10 @@ class DefaultBatchDispatcherTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
-        submit(List.of(item), 1L, 100, "test", callback);
+        submit(List.of(item), 1L, 100, "test", (exact, result) -> {
+            assertEquals(DeliveryResult.Status.PREFILL_REJECTED, result.status());
+            callback.accept(exact, result);
+        });
 
         assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
         assertEquals(1, callback.failureCount.get());
@@ -364,7 +388,7 @@ class DefaultBatchDispatcherTest {
                 if (completion.status() == DeliveryResult.Status.DELIVERED) {
                     successes.incrementAndGet();
                     callbacksAttempted.countDown();
-                } else if (completion.status() == DeliveryResult.Status.FAILED) {
+                } else if (completion.status() == DeliveryResult.Status.PREFILL_REJECTED) {
                     failures.incrementAndGet();
                     callbacksAttempted.countDown();
                     throw new IllegalStateException(
@@ -744,7 +768,8 @@ class DefaultBatchDispatcherTest {
             if (completion.status() == DeliveryResult.Status.DELIVERED) {
                 successCount.incrementAndGet();
                 successLatch.countDown();
-            } else if (completion.status() == DeliveryResult.Status.FAILED) {
+            } else if (completion.status() == DeliveryResult.Status.NOT_SENT
+                    || completion.status() == DeliveryResult.Status.PREFILL_REJECTED) {
                 lastError = completion.cause();
                 failureCount.incrementAndGet();
                 failureLatch.countDown();

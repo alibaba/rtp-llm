@@ -1,0 +1,6 @@
+Unit: 111 suites, {'tests': 1158, 'failures': 0, 'errors': 0, 'skipped': 0}
+Shared fixture integration tests: 6 passed
+Performance: all 10 measured cases passed across 5 JVM runs
+SHA-256: 475/475 passed before and after remote run; current workspace matches
+Commit inputs: 472 tracked inputs match; 3 non-source files excluded.
+Clean rebuild: all 1246 production and test class files byte-for-byte identical.

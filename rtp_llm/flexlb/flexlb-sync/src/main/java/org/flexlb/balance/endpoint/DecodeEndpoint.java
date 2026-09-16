@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
@@ -374,8 +375,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    /** Result of settling one transport-level rejection for an exact reservation. */
-    public enum DispatchRejectionSettlement {
+    /** Result of releasing a reservation for a request that was not sent to Engine. */
+    public enum ReservationReleaseResult {
         RELEASED,
         ENGINE_ACCEPTED,
         STALE,
@@ -1031,24 +1032,25 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Settle a definitive transport rejection without treating an ambiguous
-     * Engine outcome as a local rollback. The reservation token and endpoint
-     * generation fence request-id reuse; a concurrent WorkerStatus acceptance
+     * Release the master reservation for a request that failed before RPC invocation. A Prefill Engine
+     * rejection is not sufficient: it may already have allocated Decode resources.
+     * The reservation token and endpoint generation fence request-id reuse;
+     * a concurrent WorkerStatus acceptance
      * always wins.
      */
-    public DispatchRejectionSettlement settleDefiniteDispatchRejection(
+    public ReservationReleaseResult releaseUnsentRequestReservation(
             ReservationHandle reservation) {
         if (reservation == null) {
             throw new IllegalArgumentException(
-                    "Decode reservation is required for dispatch rejection");
+                    "Decode reservation is required for an unsent request");
         }
         if (reservation.endpointGenerationId()
                 != getStatus().getGenerationId()) {
-            return DispatchRejectionSettlement.STALE;
+            return ReservationReleaseResult.STALE;
         }
 
         boolean capacityChanged = false;
-        DispatchRejectionSettlement result;
+        ReservationReleaseResult result;
         admissionLock.lock();
         try {
             long requestId = reservation.requestId();
@@ -1057,24 +1059,24 @@ public class DecodeEndpoint extends WorkerEndpoint {
             DecodeRequestState confirmed = confirmedRequest(requestId);
             if (confirmed != null
                     && exactState) {
-                return DispatchRejectionSettlement.ENGINE_ACCEPTED;
+                return ReservationReleaseResult.ENGINE_ACCEPTED;
             }
 
             PreemptionClaim claim = state == null
                     ? null : state.preemptionClaim;
             if (claim != null && exactState) {
                 if (claim.owner == ClaimOwner.ENGINE_CONFIRMED) {
-                    return DispatchRejectionSettlement.ENGINE_ACCEPTED;
+                    return ReservationReleaseResult.ENGINE_ACCEPTED;
                 }
                 if (!settlePriorityClaimTerminalLocked(
                         claim.attemptToken, reservation, claim)) {
-                    return DispatchRejectionSettlement.CONFLICT;
+                    return ReservationReleaseResult.CONFLICT;
                 }
                 capacityChanged = true;
-                result = DispatchRejectionSettlement.RELEASED;
+                result = ReservationReleaseResult.RELEASED;
             } else {
                 if (hasExactIncomingAttemptLocked(reservation)) {
-                    return DispatchRejectionSettlement.CONFLICT;
+                    return ReservationReleaseResult.CONFLICT;
                 }
 
                 DecodeRequestState shadow = shadowReservation(requestId);
@@ -1088,7 +1090,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                         hasEngineLifecycleReservationExactLocked(reservation);
                 if (!exactShadow && !exactDispatchPermit
                         && !exactEngineLifecycle) {
-                    return DispatchRejectionSettlement.STALE;
+                    return ReservationReleaseResult.STALE;
                 }
 
                 capacityChanged = settleAuthoritativeTerminalLocked(
@@ -1096,7 +1098,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 if (capacityChanged) {
                     admissionVersion.incrementAndGet();
                 }
-                result = DispatchRejectionSettlement.RELEASED;
+                result = ReservationReleaseResult.RELEASED;
             }
         } finally {
             admissionLock.unlock();
@@ -1105,6 +1107,37 @@ public class DecodeEndpoint extends WorkerEndpoint {
             publishCapacityRelease();
         }
         return result;
+    }
+
+    /**
+     * Settle a failed request only when this endpoint no longer owes its exact capacity.
+     * A Prefill rejection selects the user result, but does not prove Decode has stopped.
+     * A missing/replaced exact owner has no remaining obligation here; protocol owners
+     * are included in this check. No caller needs to interpret a STALE mutation result.
+     */
+    public boolean settleFailedRequest(ReservationHandle reservation,
+                                      DeliveryResult.Status source) {
+        if (source != DeliveryResult.Status.NOT_SENT
+                && source != DeliveryResult.Status.PREFILL_REJECTED) {
+            throw new IllegalArgumentException("expected a definite request failure");
+        }
+        if (reservation == null) { return true; }
+        if (source == DeliveryResult.Status.NOT_SENT) {
+            releaseUnsentRequestReservation(reservation);
+        }
+        admissionLock.lock();
+        try {
+            if (reservation.endpointGenerationId() != getStatus().getGenerationId()) {
+                // Each endpoint instance owns one generation; never touch another one.
+                return true;
+            }
+            DecodeRequestState state = requestState(reservation.requestId());
+            return !(isExactReservation(state, reservation)
+                    && (state.ownsRequest() || state.hasProtocolOwner()))
+                    && !hasExactIncomingAttemptLocked(reservation);
+        } finally {
+            admissionLock.unlock();
+        }
     }
 
     /** Caller holds {@link #admissionLock}. */

@@ -529,7 +529,7 @@ public class DefaultBatchDispatcher {
         for (ScheduledRequest item : items) {
             try {
                 observer.accept(
-                        item, DeliveryResult.failed(error));
+                        item, DeliveryResult.notSent(error));
             } catch (Throwable callbackFailure) {
                 Logger.error("Dispatch-failure callback failed request_id={} batch_id={}",
                         item.requestId(), batchId, callbackFailure);
@@ -622,7 +622,7 @@ public class DefaultBatchDispatcher {
                             : "missing error_info";
                     observer.accept(
                             item,
-                            DeliveryResult.failed(
+                            DeliveryResult.prefillRejected(
                                     new RuntimeException(
                                             "EnqueueBatch rejected request "
                                                     + item.requestId()
@@ -651,7 +651,10 @@ public class DefaultBatchDispatcher {
     private EngineRpcService.EnqueueBatchRequestPB buildBatchRequest(long batchId, List<ScheduledRequest> items)
             throws InvalidProtocolBufferException {
         EngineRpcService.EnqueueBatchRequestPB.Builder builder =
-                EngineRpcService.EnqueueBatchRequestPB.newBuilder().setBatchId(batchId);
+                EngineRpcService.EnqueueBatchRequestPB.newBuilder()
+                        .setBatchId(batchId)
+                        .setFetchAttachTimeoutMs(configService.loadBalanceConfig()
+                                .getDispatcher().getFetchAttachTimeoutMs());
         BatchRoleAddressCache roleAddresses = new BatchRoleAddressCache();
         if (!items.isEmpty()) {
             long dpRank = items.get(0).prefill().getDpRank();
