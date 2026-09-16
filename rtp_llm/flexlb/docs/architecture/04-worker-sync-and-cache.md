@@ -24,9 +24,14 @@ KVCM（外部 KV Cache Manager）、LOCAL_STANDBY（KVCM 的本地兜底）。
 
 一个服务发现 frontend 会按 Endpoint `multi_engine_num` 展开为 N 个逻辑 worker，map key
 统一为 `ip:httpPort@index`（N=1 也是 `@0`）。frontend HTTP/gRPC 地址保持共享；第 i 个
-`GrpcWorkerStatusRunner` 在 N>1 时独立连接 `worker_status_port + i`；N=1 使用发现到的
-legacy gRPC port。N>1 必须显式配置 status base，配置加载时同时校验 count、base 和
+`GrpcWorkerStatusRunner` 连接显式配置的 `worker_status_port + i`，N=1 时同样接受该覆盖；
+未配置时使用发现归一化后的 gRPC port。N>1 必须显式配置 status base，配置加载时同时校验 count、base 和
 `base + N - 1 <= 65535`。
+
+状态同步客户端按 `ip:实际RPC端口:serviceType` 复用 channel。发现刷新时先去重物理
+frontend 地址，再维护默认 gRPC channel；同一在线 IP 上按需创建的独立状态端口 channel
+会保留，只有 IP 完全退出发现集合后才关闭。该规则不区分 DashScope 与 VipServer。
+当前 endpoint 配置不热更新；同一 IP 上废弃的端口连接会随 IP 下线或进程退出清理。
 
 worker 地址表示由不可变 `WorkerIdentity` 一次性预计算并保存，调用方不再解析或临时拼接：
 
