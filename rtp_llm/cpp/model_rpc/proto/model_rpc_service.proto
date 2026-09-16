@@ -132,6 +132,8 @@ message GenerateConfigPB {
     bool return_target_logprob = 67;
     // 请求级 L3 写入开关；RPC 缺失时为 false。
     bool enable_disk_cache = 68;
+    // Preserve logits from the output whose generated-token count matches this index.
+    google.protobuf.Int32Value logits_index = 69;
 }
 
 message MMPreprocessConfigPB {

@@ -92,6 +92,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->frequency_penalty  = config_proto->frequency_penalty();
     generate_config->do_sample          = config_proto->do_sample();
     TRANS_OPTIONAL(no_repeat_ngram_size);
+    TRANS_OPTIONAL(logits_index);
     TRANS_OPTIONAL(random_seed);
     TRANS_OPTIONAL(top_p_decay);
     TRANS_OPTIONAL(top_p_min);

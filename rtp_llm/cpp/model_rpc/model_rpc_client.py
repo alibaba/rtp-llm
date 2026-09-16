@@ -139,6 +139,7 @@ def trans_input(input_py: GenerateInput):
     )
     generate_config_pb.calculate_loss = input_py.generate_config.calculate_loss
     generate_config_pb.return_logits = input_py.generate_config.return_logits
+    trans_option(generate_config_pb, input_py.generate_config, "logits_index")
     generate_config_pb.return_prompt_logits = (
         input_py.generate_config.return_prompt_logits
     )

@@ -10,11 +10,17 @@ ErrorInfo BatchStreamOutputCollector::add(GenerateOutputs output) {
     if (empty()) {
         tokens_.resize(output.generate_outputs.size());
         softmax_probs_.resize(tokens_.size());
+        selected_logits_.resize(tokens_.size());
     } else if (output.generate_outputs.size() != tokens_.size() || output.request_id != output_.request_id) {
         return ErrorInfo(ErrorCode::UNKNOWN_ERROR, "batch item output count or request ID changed");
     }
     for (size_t i = 0; i < tokens_.size(); ++i) {
         auto& next = output.generate_outputs[i];
+        // Match the streaming client's output_len semantics before optional-output
+        // fallback. Later logits must not replace the requested step's result.
+        if (logits_index_ && next.aux_info.output_len == *logits_index_ && next.logits.has_value()) {
+            selected_logits_[i] = next.logits;
+        }
         if (next.output_ids.defined()) {
             tokens_[i].push_back(next.output_ids);
         }
@@ -46,6 +52,9 @@ ErrorInfo BatchStreamOutputCollector::add(GenerateOutputs output) {
 GenerateOutputs BatchStreamOutputCollector::finish() {
     for (size_t i = 0; i < tokens_.size(); ++i) {
         auto& output = output_.generate_outputs[i];
+        if (selected_logits_[i].has_value()) {
+            output.logits = selected_logits_[i];
+        }
         if (!tokens_[i].empty()) {
             output.output_ids               = torch::cat(tokens_[i], -1);
             output.aux_info.step_output_len = output.output_ids.size(-1);

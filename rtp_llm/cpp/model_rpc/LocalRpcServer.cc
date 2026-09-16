@@ -161,7 +161,11 @@ grpc::Status LocalRpcServer::pollBatchStreamOutput(grpc::ServerContext*         
                                                    const std::vector<std::shared_ptr<GenerateStream>>& streams,
                                                    BatchGenerateOutputsPB*                             response,
                                                    const std::function<FirstError::Snapshot(bool&)>&   check_remote) {
-    std::vector<BatchStreamOutputCollector> collectors(streams.size());
+    std::vector<BatchStreamOutputCollector> collectors;
+    collectors.reserve(streams.size());
+    for (const auto& stream : streams) {
+        collectors.emplace_back(stream->generateConfig()->logits_index);
+    }
     FirstError::Snapshot                    observed_error;
     auto                                    fail = [&](const grpc::Status& status) {
         FirstError failure;

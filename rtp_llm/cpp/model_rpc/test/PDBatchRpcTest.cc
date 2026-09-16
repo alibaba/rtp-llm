@@ -2,6 +2,7 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 #include <thread>
 #include "gtest/gtest.h"
@@ -541,6 +542,46 @@ TEST_F(PDBatchRpcTest, IndividualDeadlineIsNotExtendedToBatchDeadline) {
     const auto             start = currentTimeMs();
     EXPECT_EQ(decode.BatchGenerateCall(&context, &batch, &response).error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
     EXPECT_LT(currentTimeMs() - start, 3000);
+}
+
+TEST_F(PDBatchRpcTest, BatchOutputPreservesEachRequestsLogitsIndex) {
+    const std::vector<std::optional<int>> indices{std::nullopt, 1, 2, 3, 4};
+    std::vector<GenerateStreamPtr>        streams;
+    for (size_t i = 0; i < indices.size(); ++i) {
+        auto item = batchItem(i + 1);
+        item.mutable_generate_config()->set_return_logits(true);
+        if (indices[i]) {
+            item.mutable_generate_config()->mutable_logits_index()->set_value(*indices[i]);
+        }
+        GenerateInputPB wire;
+        ASSERT_TRUE(wire.ParseFromString(item.SerializeAsString()));
+        auto input = QueryConverter::transQuery(&wire);
+        EXPECT_EQ(input->generate_config->logits_index, indices[i]);
+        auto stream = std::static_pointer_cast<BatchTestStream>(decode_engine->makeStream(input));
+        for (int step = 1; step <= 3; ++step) {
+            auto output                                   = chunk(i + 1, {step}, step == 3);
+            output.generate_outputs[0].aux_info.output_len = step;
+            output.generate_outputs[0].logits              = torch::full({1, 2}, static_cast<float>(10 * i + step));
+            stream->enqueueGenerateOutput(std::move(output));
+        }
+        stream->terminal = true;
+        streams.push_back(std::move(stream));
+    }
+
+    grpc::ServerContext    context;
+    BatchGenerateOutputsPB response;
+    ASSERT_TRUE(decode.pollBatchStreamOutput(&context, streams, &response).ok());
+    ASSERT_EQ(response.results_size(), indices.size());
+    for (size_t i = 0; i < indices.size(); ++i) {
+        const auto& output = response.results(i).final_output();
+        // No index, or an index beyond generation, retains the latest logits.
+        const int selected_step = indices[i] && *indices[i] <= 3 ? *indices[i] : 3;
+        auto      logits        = QueryConverter::transTensor(output.flatten_output().logits());
+        EXPECT_TRUE(torch::equal(logits.flatten(), torch::full({2}, static_cast<float>(10 * i + selected_step))));
+        auto tokens = QueryConverter::transTensor(output.flatten_output().output_ids());
+        EXPECT_TRUE(torch::equal(tokens.flatten(), torch::tensor({1, 2, 3}, torch::kInt32)));
+        EXPECT_EQ(output.flatten_output().aux_info(0).output_len(), 3);
+    }
 }
 
 TEST(BatchStreamOutputCollectorTest, ConcatenatesDeltasAndPreservesOptionalOutputs) {

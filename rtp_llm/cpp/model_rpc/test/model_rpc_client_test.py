@@ -190,6 +190,25 @@ class ModelRpcClientTest(TestCase):
             generate_config_pb = trans_input(input).generate_config
             self.assertEqual(generate_config_pb.enable_disk_cache, enabled)
 
+    def test_logits_index_serialization_preserves_presence_and_value(self):
+        for logits_index in (None, 0, 2):
+            with self.subTest(logits_index=logits_index):
+                input = GenerateInput(
+                    token_ids=torch.tensor([1, 2]),
+                    generate_config=GenerateConfig(
+                        return_logits=True, logits_index=logits_index
+                    ),
+                    request_id=123,
+                    mm_inputs=[],
+                )
+                request = GenerateInputPB.FromString(
+                    trans_input(input).SerializeToString()
+                )
+                config = request.generate_config
+                self.assertEqual(config.HasField("logits_index"), logits_index is not None)
+                if logits_index is not None:
+                    self.assertEqual(config.logits_index.value, logits_index)
+
     def test_generate_stream_with_logits_index(self):
         client = FakeModelRpcClient()
         generate_config: GenerateConfig = GenerateConfig(
