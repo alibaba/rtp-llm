@@ -370,18 +370,9 @@ class IndexerFP8(PoolBackedModule):
         self.weights_proj = (
             layer_weights[W.v4_indexer_weights_proj_w] * _wp_scale
         ).contiguous()
-        # DSV4_SM120_BF16_PRETRANSPOSE (default off): cache the [K,N] transpose of
-        # weights_proj ONCE at load time so decode's forward can call
-        # torch.mm(x, W_T) (cuBLASLt `nn`) instead of F.linear(x, W) (`tn`). On SM120
-        # the `tn` bf16 path picks an SM80-era cutlass_80_wmma kernel that is
-        # pathological at N=64 (~18.6 us/launch standalone, ~24.4 in-engine); the `nn`
-        # path is ~6.4 us (2.9x), worth ~0.26 ms/round at the decode indexer. Transposed
-        # here at __init__ (eager, before any CUDA-graph capture) so it is a static
-        # buffer -> capture-safe. DECODE ONLY: the prefill sites (forward /
-        # forward_with_pending_nested) keep F.linear because at large M the probe
-        # showed `nn` is not faster and can be worse. Numerics: bf16->bf16 both ways,
-        # max|diff| ~7.8e-3 from tn/nn re-association, and the result is immediately
-        # re-quantized to fp8 downstream, so the effect on the indexer score is nil.
+        # Optional decode-only nn-layout projection from donor 960194925.
+        # A reduction-order/numerical variant, NOT made equivalent by downstream
+        # FP8 requantization. Prefill projection sites remain unchanged.
         self._weights_proj_T = (
             self.weights_proj.t().contiguous()
             if os.environ.get("DSV4_SM120_BF16_PRETRANSPOSE", "0") == "1"

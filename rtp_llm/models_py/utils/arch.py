@@ -104,3 +104,12 @@ def _is_explicit_non_cuda_device(
     if isinstance(device_id, str):
         return not device_id.startswith("cuda")
     return isinstance(device_id, torch.device) and device_id.type != "cuda"
+
+
+def sm120_native_fp8_enabled(device_id=None) -> bool:
+    """Explicit numerical variant; requires a separately qualified DeepGEMM build.
+
+    The default preserves the established SM120 CUTLASS/FlashInfer recipe.
+    Other architectures and models are not implicitly opted into this path.
+    """
+    return os.environ.get("DSV4_SM120_NATIVE_FP8", "0") == "1" and is_sm120(device_id)

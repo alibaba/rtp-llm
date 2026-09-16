@@ -7,7 +7,7 @@ logger.debug("Registered CUDA Linear strategies")
 
 
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
-from rtp_llm.models_py.utils.arch import is_blackwell, is_cuda, is_sm120
+from rtp_llm.models_py.utils.arch import is_blackwell, is_cuda, is_sm120, sm120_native_fp8_enabled
 
 # Register CUDA strategies
 from .f16_linear import CudaF16Linear
@@ -36,7 +36,11 @@ if is_cuda():
         try:
             from .fp8_vllm_blockwise_sm120_linear import CudaFp8VllmBlockwiseLinear
 
-            LinearFactory.register(CudaFp8VllmBlockwiseLinear)
+            if sm120_native_fp8_enabled():
+                from .fp8_deepgemm_linear import CudaFp8DeepGEMMLinear
+                LinearFactory.register(CudaFp8DeepGEMMLinear)
+            else:
+                LinearFactory.register(CudaFp8VllmBlockwiseLinear)
         except ImportError as e:
             logger.warning("SM120 FP8 blockwise backend unavailable: %s", e)
 

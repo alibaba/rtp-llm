@@ -1587,7 +1587,7 @@ def warmup_batched_fp8_einsum_jit(
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
         return
-    if is_sm120(device):
+    if is_sm120(device) and os.environ.get("DSV4_SM120_WOA_EINSUM", "0") != "1":
         return
     _assert_not_capturing()
 

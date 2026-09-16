@@ -105,6 +105,17 @@ def _get_num_sms(device: torch.device) -> int:
     return _num_sms_cache
 
 
+def sm120_paged_deepgemm_ready(block_size: int) -> bool:
+    """Fail closed for an explicitly requested native decode score provider."""
+    if os.environ.get("DSV4_INDEXER_FP8_DEEPGEMM_PAGED", "0") != "1":
+        return False
+    if block_size != 64:
+        raise ValueError("SM120 native paged FP8 indexer requires 64 indexer entries/block (physical page 256 at ratio 4)")
+    if not _HAS_DEEP_GEMM:
+        raise RuntimeError("native paged score requested but DeepGEMM API is unavailable")
+    return True
+
+
 def fp8_paged_indexer_score(
     q_fp8: torch.Tensor,  # [B, next_n, H, D] float8_e4m3fn
     w_fold: torch.Tensor,  # [B*next_n, H]    fp32
@@ -122,7 +133,7 @@ def fp8_paged_indexer_score(
     DeepGEMM keeps its native padding semantics; its caller applies any
     required mask before top-k selection.
     """
-    if q_fp8.is_cuda and is_sm120(q_fp8.device):
+    if q_fp8.is_cuda and is_sm120(q_fp8.device) and not sm120_paged_deepgemm_ready(block_size):
         return _fp8_paged_indexer_score_sm120(
             q_fp8,
             w_fold,

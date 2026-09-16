@@ -17,7 +17,7 @@ import torch.nn as nn
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
 from .warmup_sync import cuda_graph_warmup_forward_enabled
-from rtp_llm.models_py.utils.arch import is_sm120
+from rtp_llm.models_py.utils.arch import is_sm120, sm120_native_fp8_enabled
 
 
 _SHARED_EXPERT_WORKSPACE_CACHE: dict[tuple, dict[str, torch.Tensor | int | torch.device]] = {}
@@ -31,7 +31,13 @@ def _mode() -> str:
 def strict_fused_moe_enabled() -> bool:
     return os.environ.get("DSV4_MOE_STRICT_FUSED", "1") != "0"
 def _requires_sm120_linear(x: torch.Tensor) -> bool:
-    return x.is_cuda and is_sm120(x.device)
+    if x.is_cuda and is_sm120(x.device):
+        if os.environ.get("DSV4_SM120_SHARED_EXPERT_FUSED", "0") == "1":
+            if not sm120_native_fp8_enabled(x.device):
+                raise RuntimeError("SM120 fused shared expert requires DSV4_SM120_NATIVE_FP8=1 and packed scales")
+            return False
+        return True
+    return False
 
 
 def _normalize_cuda_device(device: torch.device) -> torch.device | None:

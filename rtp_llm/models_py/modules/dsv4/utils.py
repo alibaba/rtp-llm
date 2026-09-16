@@ -7,13 +7,13 @@ from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
-from rtp_llm.models_py.utils.arch import is_sm120
+from rtp_llm.models_py.utils.arch import is_sm120, sm120_native_fp8_enabled
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 def _decode_ue8m0(scale: torch.Tensor, groups: int) -> torch.Tensor:
     if scale.dtype != torch.int32:
         return scale.float().contiguous()
-    raw = scale.contiguous().view(torch.uint8).reshape(*scale.shape[:-1], -1)
+    raw = scale.contiguous().reshape(-1).view(torch.uint8).reshape(*scale.shape[:-1], -1)
     return (raw[..., :groups].to(torch.int32) - 127).float().exp2()
 def _sm120_forward_quantized(
     self,
@@ -59,6 +59,7 @@ def _enable_sm120_cached_weight_scale(linear):
         or weight is None
         or not weight.is_cuda
         or not is_sm120(weight.device)
+        or sm120_native_fp8_enabled(weight.device)
     ):
         return linear
     weight_scale = _decode_ue8m0(linear.weight_scales, (linear.K + 127) // 128)
@@ -88,9 +89,9 @@ def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     # Blackwell.  Keep the compact checkpoint scale for the SM120 CUTLASS
     # blockwise backend; only data-center architectures use the DeepGEMM
     # TMA-aligned packed representation.
-    from rtp_llm.models_py.utils.arch import is_sm120
+    from rtp_llm.models_py.utils.arch import is_sm120, sm120_native_fp8_enabled
 
-    if s.dtype == torch.float8_e8m0fnu and not is_sm120(s.device):
+    if s.dtype == torch.float8_e8m0fnu and (not is_sm120(s.device) or sm120_native_fp8_enabled(s.device)):
         s = _repack_v4_fp8_scale_to_int32(s)
     local = {"_w": w, "_s": s}
     linear = LinearFactory.create_linear_from_weights(
@@ -106,9 +107,9 @@ def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
     """Backwards-compat bridge over ``_v4_fp8_linear`` for flat dict callers."""
     w = weights[weight_key]
     s = weights[scale_key]
-    from rtp_llm.models_py.utils.arch import is_sm120
+    from rtp_llm.models_py.utils.arch import is_sm120, sm120_native_fp8_enabled
 
-    if s.dtype == torch.float8_e8m0fnu and not is_sm120(s.device):
+    if s.dtype == torch.float8_e8m0fnu and (not is_sm120(s.device) or sm120_native_fp8_enabled(s.device)):
         s = _repack_v4_fp8_scale_to_int32(s)
         weights[scale_key] = s
     return _v4_fp8_linear(w, s)

@@ -461,9 +461,9 @@ def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     # DeepGEMM's packed int32 UE8M0 contract is unsupported on consumer
     # Blackwell. Keep the compact raw UE8M0 scale for the SM120 CUTLASS
     # blockwise backend, which decodes it to float32 at construction time.
-    from rtp_llm.models_py.utils.arch import is_sm120
+    from rtp_llm.models_py.utils.arch import is_sm120, sm120_native_fp8_enabled
 
-    if s.dtype == torch.float8_e8m0fnu and not is_sm120(s.device):
+    if s.dtype == torch.float8_e8m0fnu and (not is_sm120(s.device) or sm120_native_fp8_enabled(s.device)):
         s = _repack_v4_fp8_scale_to_int32(s)
     # LinearFactory.create_linear_from_weights consumes a (weights_dict,
     # weight_key, scale_key) triple — feed it a one-shot dict so the
@@ -486,9 +486,9 @@ def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
     packed form so subsequent callers don't repack."""
     w = weights[weight_key]
     s = weights[scale_key]
-    from rtp_llm.models_py.utils.arch import is_sm120
+    from rtp_llm.models_py.utils.arch import is_sm120, sm120_native_fp8_enabled
 
-    if s.dtype == torch.float8_e8m0fnu and not is_sm120(s.device):
+    if s.dtype == torch.float8_e8m0fnu and (not is_sm120(s.device) or sm120_native_fp8_enabled(s.device)):
         s = _repack_v4_fp8_scale_to_int32(s)
         weights[scale_key] = s
     return _v4_fp8_linear(w, s)
@@ -2127,7 +2127,7 @@ class AttentionFP8(nn.Module):
         ``"bhr,hdr->bhd"`` + recipe ``(1, 1, 128)`` for SM100 UE8M0)."""
         M, G, _K = o_fp8.shape
         R = self.o_lora_rank
-        if is_sm120(o_fp8.device):
+        if is_sm120(o_fp8.device) and os.environ.get("DSV4_SM120_WOA_EINSUM", "0") != "1":
             from flashinfer.gemm import gemm_fp8_nt_groupwise
 
             def _ue8m0_to_fp32(scale: torch.Tensor) -> torch.Tensor:

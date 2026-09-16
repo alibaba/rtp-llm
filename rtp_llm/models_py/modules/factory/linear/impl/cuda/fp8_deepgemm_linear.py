@@ -5,7 +5,7 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.utils.arch import is_sm12x
+from rtp_llm.models_py.utils.arch import is_sm12x, sm120_native_fp8_enabled
 
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     fp8_gemm_nt,
@@ -49,7 +49,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
         # DeepGEMM does not ship a working FP8 PER_BLOCK recipe for consumer
         # Blackwell (SM12x).  Leave those tensors to the SM120 CUTLASS backend.
-        if is_sm12x(weight.device):
+        if is_sm12x(weight.device) and not sm120_native_fp8_enabled(weight.device):
             return False
 
         # Check quantization method - handle all other FP8 methods
@@ -69,7 +69,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         super().__init__(
             weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
         )
-        if is_sm12x(weight.device):
+        if is_sm12x(weight.device) and not sm120_native_fp8_enabled(weight.device):
             raise RuntimeError(
                 "DeepGEMM FP8_PER_BLOCK is unsupported on SM12x; "
                 "use the SM120 CUTLASS blockwise backend"
