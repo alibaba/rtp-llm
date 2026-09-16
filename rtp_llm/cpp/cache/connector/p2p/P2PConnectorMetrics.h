@@ -2,6 +2,7 @@
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include <atomic>
 
 namespace rtp_llm {
 
@@ -12,6 +13,9 @@ public:
     DecodeSchedulerMetricsCollector(const std::shared_ptr<kmonitor::MetricsReporter>& metrics_reporter):
         start_time_us(currentTimeUs()), metrics_reporter_(metrics_reporter) {}
     ~DecodeSchedulerMetricsCollector() {
+        if (total_cost_time_us < 0) {
+            total_cost_time_us = currentTimeUs() - start_time_us;
+        }
         if (metrics_reporter_) {
             metrics_reporter_->report<P2PConnectorMetrics, DecodeSchedulerMetricsCollector>(nullptr, this);
         }
@@ -20,9 +24,15 @@ public:
 public:
     bool    success                  = true;
     int64_t start_time_us            = 0;
-    int64_t server_call_cost_time_us = 0;
-    int64_t tp_sync_cost_time_us     = 0;
-    int64_t total_cost_time_us       = 0;
+    std::atomic<int64_t> server_call_cost_time_us{-1};
+    std::atomic<int64_t> tp_sync_cost_time_us{-1};
+    int64_t              total_cost_time_us       = -1;
+    int64_t              plan_cost_time_us        = -1;
+    int64_t              kickoff_queue_time_us    = -1;
+    int64_t              server_submit_time_us    = -1;
+    int64_t              broadcast_submit_time_us = -1;
+    int64_t              lease_query_time_us      = -1;
+    int64_t              lease_hold_time_us       = -1;
 
 private:
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter_;
@@ -36,8 +46,11 @@ public:
 public:
     bool    success                  = true;
     int64_t total_block_count        = 0;
-    int64_t first_layer_wait_time_us = 0;
-    int64_t total_cost_time_us       = 0;
+    int64_t first_layer_wait_time_us = -1;
+    int64_t total_cost_time_us       = -1;
+    int64_t prepare_time_us          = -1;
+    int64_t recv_wait_time_us        = -1;
+    int64_t recv_task_time_us        = -1;
 };
 
 class DecodeSchedulerStatusMetricsCollector final {
@@ -53,7 +66,17 @@ public:
 
 public:
     bool    success            = true;
-    int64_t total_cost_time_us = 0;
+    int64_t total_cost_time_us       = -1;
+    int64_t plan_cost_time_us        = -1;
+    int64_t broadcast_submit_time_us = -1;
+    int64_t broadcast_wait_time_us   = -1;
+    // A separate sample from processRead, including rendezvous and side channel.
+    int64_t process_read_time_us      = -1;
+    int64_t resource_register_time_us = -1;
+    int64_t check_plan_time_us        = -1;
+    int64_t resource_wait_time_us     = -1;
+    int64_t side_channel_wait_time_us = -1;
+    int64_t side_channel_fill_time_us = -1;
 };
 
 class PrefillWorkerStoreMetricsCollector final {
@@ -82,9 +105,16 @@ public:
 
 public:
     bool    success                  = true;
-    int64_t first_layer_wait_time_us = 0;
-    int64_t last_layer_wait_time_us  = 0;
-    int64_t total_cost_time_us       = 0;
+    int64_t first_layer_wait_time_us = -1;
+    int64_t last_layer_wait_time_us  = -1;
+    int64_t total_cost_time_us       = -1;
+    int64_t add_buffer_time_us       = -1;
+    int64_t dispatch_time_us         = -1;
+    int64_t callback_wait_time_us    = -1;
+    // Per (layer, tag, route), reported independently of the request sample.
+    int64_t sender_queue_time_us  = -1;
+    int64_t send_submit_time_us   = -1;
+    int64_t send_complete_time_us = -1;
 };
 
 class StreamStoreCountMetricsCollector final {
@@ -126,6 +156,35 @@ public:
     void report(const kmonitor::MetricsTags* tags, CacheWriteOpFailureMetricsCollector* collector);
 
 private:
+    kmonitor::MutableMetric* decode_schedule_server_call_cost_time_us_metric    = nullptr;
+    kmonitor::MutableMetric* decode_schedule_tp_sync_cost_time_us_metric        = nullptr;
+    kmonitor::MutableMetric* decode_schedule_plan_cost_time_us_metric           = nullptr;
+    kmonitor::MutableMetric* decode_schedule_kickoff_queue_time_us_metric       = nullptr;
+    kmonitor::MutableMetric* decode_schedule_server_submit_time_us_metric       = nullptr;
+    kmonitor::MutableMetric* decode_schedule_broadcast_submit_time_us_metric    = nullptr;
+    kmonitor::MutableMetric* decode_schedule_lease_query_time_us_metric         = nullptr;
+    kmonitor::MutableMetric* decode_schedule_lease_hold_time_us_metric          = nullptr;
+    kmonitor::MutableMetric* decode_worker_prepare_time_us_metric               = nullptr;
+    kmonitor::MutableMetric* decode_worker_recv_wait_time_us_metric             = nullptr;
+    kmonitor::MutableMetric* decode_worker_recv_task_time_us_metric             = nullptr;
+    kmonitor::MutableMetric* prefill_scheduler_plan_cost_time_us_metric         = nullptr;
+    kmonitor::MutableMetric* prefill_scheduler_broadcast_submit_time_us_metric  = nullptr;
+    kmonitor::MutableMetric* prefill_scheduler_broadcast_wait_time_us_metric    = nullptr;
+    kmonitor::MutableMetric* prefill_scheduler_process_read_time_us_metric      = nullptr;
+    kmonitor::MutableMetric* prefill_scheduler_resource_wait_time_us_metric     = nullptr;
+    kmonitor::MutableMetric* prefill_scheduler_side_channel_wait_time_us_metric = nullptr;
+    kmonitor::MutableMetric* prefill_scheduler_side_channel_fill_time_us_metric = nullptr;
+    kmonitor::MutableMetric* prefill_worker_write_add_buffer_time_us_metric     = nullptr;
+    kmonitor::MutableMetric* prefill_worker_write_dispatch_time_us_metric       = nullptr;
+    kmonitor::MutableMetric* prefill_worker_write_callback_wait_time_us_metric  = nullptr;
+    kmonitor::MutableMetric* prefill_worker_write_sender_queue_time_us_metric   = nullptr;
+    kmonitor::MutableMetric* prefill_worker_write_send_submit_time_us_metric    = nullptr;
+    kmonitor::MutableMetric* prefill_worker_write_send_complete_time_us_metric  = nullptr;
+
+    kmonitor::MutableMetric* prefill_scheduler_resource_register_time_us_metric = nullptr;
+
+    kmonitor::MutableMetric* prefill_scheduler_check_plan_time_us_metric = nullptr;
+
     // decode schedule metrics
     kmonitor::MutableMetric* decode_schedule_qps_metric          = nullptr;
     kmonitor::MutableMetric* decode_schedule_failed_qps_metric   = nullptr;

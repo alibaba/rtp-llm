@@ -52,8 +52,25 @@ bool P2PConnectorAsyncReadContext::setCallResults(
         tp_sync_result_     = tp_sync_result;
         server_call_result_ = server_call_result;
         kickoff_state_      = KickoffState::CALLS_READY;
-        tp_sync_result_->setDoneCallback(completionCallback());
-        server_call_result_->setDoneCallback(completionCallback());
+        const auto notify_done = completionCallback();
+        tp_sync_result_->setDoneCallback([notify_done,
+                                          collector   = collector_,
+                                          no_transfer = no_transfer_,
+                                          weak_result = std::weak_ptr<P2PBroadcastClient::Result>(tp_sync_result_)] {
+            if (auto result = weak_result.lock(); result && collector && !no_transfer && result->done()) {
+                collector->tp_sync_cost_time_us = result->totalCostTimeUs();
+            }
+            notify_done();
+        });
+        server_call_result_->setDoneCallback(
+            [notify_done,
+             collector   = collector_,
+             weak_result = std::weak_ptr<DecodeLoadHelper::Result>(server_call_result_)] {
+                if (auto result = weak_result.lock(); result && collector) {
+                    collector->server_call_cost_time_us = result->totalCostTimeUs();
+                }
+                notify_done();
+            });
     }
     calls_ready_.store(true, std::memory_order_release);
     notify();
@@ -107,6 +124,7 @@ void P2PConnectorAsyncReadContext::beginLeaseHold() {
     lease_poll_next_ms_.store(std::min(now_ms + kLeasePollInitialIntervalMs, hold_until_ms),
                               std::memory_order_relaxed);
     lease_poll_retry_count_.store(0, std::memory_order_relaxed);
+    lease_hold_start_us_.store(currentTimeUs(), std::memory_order_relaxed);
     lease_hold_pending_.store(true, std::memory_order_release);
 }
 
@@ -208,8 +226,6 @@ void P2PConnectorAsyncReadContext::applyMergedReadOutcome(const MergedReadOutcom
         if (collector_) {
             collector_->success                  = false;
             collector_->total_cost_time_us       = currentTimeUs() - collector_->start_time_us;
-            collector_->tp_sync_cost_time_us     = tp_sync_result_->totalCostTimeUs();
-            collector_->server_call_cost_time_us = server_call_result_->totalCostTimeUs();
         }
         return;
     }
@@ -235,8 +251,6 @@ void P2PConnectorAsyncReadContext::applyMergedReadOutcome(const MergedReadOutcom
                      server_call_result_->totalCostTimeUs());
     collector_->success                  = success_;
     collector_->total_cost_time_us       = currentTimeUs() - collector_->start_time_us;
-    collector_->tp_sync_cost_time_us     = tp_sync_result_->totalCostTimeUs();
-    collector_->server_call_cost_time_us = server_call_result_->totalCostTimeUs();
 }
 
 ErrorInfo P2PConnectorAsyncReadContext::errorInfo() const {
@@ -283,6 +297,10 @@ void P2PConnectorAsyncReadContext::cancel(const std::shared_ptr<P2PBroadcastClie
                 success_       = false;
                 error_code_    = ErrorCode::CANCELLED;
                 error_message_ = "P2P async read cancelled before kickoff";
+                if (collector_) {
+                    collector_->success            = false;
+                    collector_->total_cost_time_us = currentTimeUs() - collector_->start_time_us;
+                }
             }
             done_cv_.notify_all();
             notify();
@@ -411,7 +429,12 @@ void P2PConnectorAsyncReadContext::pollLeaseIfNeeded(const std::shared_ptr<P2PBr
 
     const int64_t remaining_hold_ms = hold_until_ms > 0 ? hold_until_ms - now : kLeasePollRpcTimeoutMs;
     const int64_t poll_timeout_ms   = std::max<int64_t>(1, std::min(kLeasePollRpcTimeoutMs, remaining_hold_ms));
+    const auto    query_start_us    = currentTimeUs();
     auto          result            = tp_broadcast_client->queryLeaseStatus(unique_key, poll_timeout_ms);
+    if (collector_) {
+        collector_->lease_query_time_us =
+            std::max<int64_t>(0, collector_->lease_query_time_us) + currentTimeUs() - query_start_us;
+    }
     const int64_t after_poll_ms     = currentTimeMs();
     if (hold_until_ms > 0 && after_poll_ms >= hold_until_ms) {
         failStopIfLeaseUnconfirmed();
@@ -430,6 +453,10 @@ void P2PConnectorAsyncReadContext::pollLeaseIfNeeded(const std::shared_ptr<P2PBr
     }
 
     if (result.allStopped()) {
+        const auto hold_start_us = lease_hold_start_us_.exchange(0);
+        if (collector_ && hold_start_us > 0) {
+            collector_->lease_hold_time_us = currentTimeUs() - hold_start_us;
+        }
         RTP_LLM_LOG_DEBUG("pollLeaseIfNeeded: all ranks stopped, unique_key=%s retry=%d", unique_key.c_str(), retry);
         lease_all_ranks_stopped_.store(true, std::memory_order_release);
         lease_hold_pending_.store(false, std::memory_order_release);

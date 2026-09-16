@@ -1043,6 +1043,44 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_CancelRead) {
     EXPECT_EQ(mock_receiver_->taskCount(), 0);
 }
 
+TEST_F(P2PConnectorWorkerTest, FirstLayerMetricWaitsForAllRoutesAndIgnoresFailedLayer) {
+    auto group                  = std::make_shared<P2PConnectorWorkerDecode::ReadTaskGroup>();
+    auto a                      = std::make_shared<MockIKVCacheRecvTask>();
+    auto b                      = std::make_shared<MockIKVCacheRecvTask>();
+    auto failed                 = std::make_shared<MockIKVCacheRecvTask>();
+    group->tasks                = {a, b, failed};
+    group->task_buffer_keys     = {{"a", "layer0_full"}, {"b", "layer0_full"}, {"failed", "layer1_full"}};
+    group->pending_buffer_tasks = {{"layer0_full", 2}, {"layer1_full", 1}};
+    group->partition_keys       = {"a"};
+    decode_->registerTaskCompletionCallback(a, "metric", group);
+    group->partition_keys.push_back("b");
+    decode_->registerTaskCompletionCallback(b, "metric", group);
+    group->partition_keys.push_back("failed");
+    decode_->registerTaskCompletionCallback(failed, "metric", group);
+
+    failed->setDone(false);
+    EXPECT_EQ(group->first_layer_done_time_us.load(), -1);
+    a->setDone(true);
+    EXPECT_EQ(group->first_layer_done_time_us.load(), -1);
+    const auto before = currentTimeUs();
+    b->setDone(true);
+    EXPECT_GE(group->first_layer_done_time_us.load(), before);
+    EXPECT_LE(group->first_layer_done_time_us.load(), currentTimeUs());
+}
+
+TEST_F(P2PConnectorWorkerTest, FirstLayerMetricHandlesAlreadyCompletedTask) {
+    auto group                  = std::make_shared<P2PConnectorWorkerDecode::ReadTaskGroup>();
+    auto task                   = std::make_shared<MockIKVCacheRecvTask>();
+    group->tasks                = {task};
+    group->partition_keys       = {"ready"};
+    group->task_buffer_keys     = {{"ready", "layer0_full"}};
+    group->pending_buffer_tasks = {{"layer0_full", 1}};
+    task->setDone(true);
+    decode_->registerTaskCompletionCallback(task, "metric", group);
+    EXPECT_GE(group->first_layer_done_time_us.load(), 0);
+    EXPECT_EQ(group->pending_buffer_tasks.at("layer0_full"), 0);
+}
+
 TEST_F(P2PConnectorWorkerTest, RecvCompletionBeforeWaitAndLeasePublicationIsNotLost) {
     auto group = std::make_shared<P2PConnectorWorkerDecode::ReadTaskGroup>();
     auto task  = std::make_shared<MockIKVCacheRecvTask>();

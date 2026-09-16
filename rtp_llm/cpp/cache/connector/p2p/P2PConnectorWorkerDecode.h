@@ -58,6 +58,11 @@ private:
         // including completion before the request is published in lease_map_.
         std::mutex              completion_mutex;
         std::condition_variable completion_cv;
+        // Maps are immutable after preparation except pending counts, protected by completion_mutex.
+        std::unordered_map<std::string, int64_t>     task_start_time_us;
+        std::unordered_map<std::string, std::string> task_buffer_keys;
+        std::unordered_map<std::string, size_t>      pending_buffer_tasks;
+        std::atomic<int64_t>                         first_layer_done_time_us{-1};
     };
 
     enum class ReadWaitOutcome {
@@ -87,7 +92,10 @@ private:
 
     RecvResultInfo aggregateRecvTaskResults(const std::shared_ptr<ReadTaskGroup>& task_group) const;
 
-    void reportReadMetrics(int total_block_count, bool success, int64_t read_start_time_us) const;
+    void reportReadMetrics(DecodeWorkerMetricsCollector&         collector,
+                           bool                                  success,
+                           int64_t                               read_start_time_us,
+                           const std::shared_ptr<ReadTaskGroup>& task_group) const;
 
     void cleanupRecvTaskStore(const std::shared_ptr<ReadTaskGroup>& task_group, bool cancel_pending_tasks) const;
 

@@ -82,6 +82,10 @@ bool StoreWaitContextChecker::checkContext(StoreWaitContext& context) {
             if (context.collector) {
                 context.collector->success                 = false;
                 context.collector->store_wait_done_time_us = currentTimeUs() - context.collector->start_time_us;
+                if (metrics_reporter_) {
+                    metrics_reporter_->report<P2PConnectorMetrics, PrefillWorkerStoreMetricsCollector>(
+                        nullptr, context.collector.get());
+                }
             }
             return true;
         } catch (...) {
@@ -93,6 +97,10 @@ bool StoreWaitContextChecker::checkContext(StoreWaitContext& context) {
             if (context.collector) {
                 context.collector->success                 = false;
                 context.collector->store_wait_done_time_us = currentTimeUs() - context.collector->start_time_us;
+                if (metrics_reporter_) {
+                    metrics_reporter_->report<P2PConnectorMetrics, PrefillWorkerStoreMetricsCollector>(
+                        nullptr, context.collector.get());
+                }
             }
             return true;
         }

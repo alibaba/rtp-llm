@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 
 #include <set>
 
@@ -85,7 +86,14 @@ std::shared_ptr<AsyncContext> P2PConnectorPrefill::registerResource(const KVCach
         RTP_LLM_LOG_WARNING("asyncRead failed, meta, resource, or generate_stream is null");
         return nullptr;
     }
-    if (!stream_store_->addResource(meta, resource)) {
+    const auto register_start_us = currentTimeUs();
+    const bool registered        = stream_store_->addResource(meta, resource);
+    if (metrics_reporter_) {
+        PrefillSchedulerMetricsCollector collector;
+        collector.resource_register_time_us = currentTimeUs() - register_start_us;
+        metrics_reporter_->report<P2PConnectorMetrics, PrefillSchedulerMetricsCollector>(nullptr, &collector);
+    }
+    if (!registered) {
         RTP_LLM_LOG_WARNING("asyncRead failed, stream_store add resource failed");
         return nullptr;
     }
@@ -131,10 +139,19 @@ bool P2PConnectorPrefill::writeByLayerTag(int                                   
 void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& request,
                                       P2PConnectorStartLoadResponsePB&      response,
                                       std::function<bool()>                 is_cancelled) {
+    const int64_t                    process_start_us = currentTimeUs();
+    PrefillSchedulerMetricsCollector collector;
+    auto                             report_process_metrics = [&] {
+        collector.process_read_time_us = currentTimeUs() - process_start_us;
+        if (metrics_reporter_) {
+            metrics_reporter_->report<P2PConnectorMetrics, PrefillSchedulerMetricsCollector>(nullptr, &collector);
+        }
+    };
     if (scheduler_ == nullptr) {
         RTP_LLM_LOG_WARNING("handleRead failed, scheduler not initialized (only tp_rank 0 has scheduler)");
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
         response.set_error_message("scheduler not initialized");
+        report_process_metrics();
         return;
     }
 
@@ -145,6 +162,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         stream_store_->clearPrefillPayload(unique_key);
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
         response.set_error_message("invalid StartLoad unique_key or load timeout");
+        report_process_metrics();
         return;
     }
     // Registration wait consumes this same load budget; never restart it after registration.
@@ -156,8 +174,10 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         decode_transfer_servers.emplace_back(worker.ip(), worker.cache_store_port());
     }
     if (!request.no_transfer()) {
+        const auto check_plan_start_us = currentTimeUs();
         const auto plan_error = scheduler_->checkPlanDigest(
             static_cast<int>(decode_transfer_servers.size()), request.plan_digest(), unique_key);
+        collector.check_plan_time_us = currentTimeUs() - check_plan_start_us;
         if (plan_error.hasError()) {
             RTP_LLM_LOG_WARNING("handleRead rejected StartLoad, unique_key=%s, error=%s",
                                 unique_key.c_str(),
@@ -166,6 +186,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
             stream_store_->clearPrefillPayload(unique_key);
             response.set_error_code(transErrorCodeToRPC(plan_error.code()));
             response.set_error_message(plan_error.ToString());
+            report_process_metrics();
             return;
         }
     }
@@ -182,6 +203,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         response.set_error_code(transErrorCodeToRPC(cancelled ? ErrorCode::CANCELLED : ErrorCode::GENERATE_TIMEOUT));
         response.set_error_message(cancelled ? "request registration wait cancelled" :
                                                "request registration or load deadline expired");
+        report_process_metrics();
         return;
     }
 
@@ -191,9 +213,11 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
                      handle_read_start_us);
 
     std::shared_ptr<P2PConnectorResourceEntry> resource_entry = nullptr;
+    const int64_t                              resource_wait_start_us = currentTimeUs();
     grpc::Status wait_status = waitForResourceEntry(
         unique_key, request_deadline_ms, transfer_deadline_ms, is_cancelled, resource_entry);
-    auto         wait_resource_cost_us = currentTimeUs() - handle_read_start_us;
+    auto wait_resource_cost_us      = currentTimeUs() - resource_wait_start_us;
+    collector.resource_wait_time_us = wait_resource_cost_us;
     if (!wait_status.ok()) {
         RTP_LLM_LOG_WARNING("[PD-DIAG] handleRead waitForResourceEntry failed, unique_key=%s, cost_us=%ld, status=%s",
                             unique_key.c_str(),
@@ -207,6 +231,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         }
         response.set_error_code(transErrorCodeToRPC(error_code));
         response.set_error_message("waitForResourceEntry failed: " + wait_status.error_message());
+        report_process_metrics();
         return;
     }
 
@@ -258,6 +283,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         stream_store_->clearPrefillPayload(unique_key);
         response.set_error_code(transErrorCodeToRPC(error_info.code()));
         response.set_error_message(error_info.ToString());
+        report_process_metrics();
         return;
     }
 
@@ -265,7 +291,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     // in the complete log; demote to DEBUG to reduce log volume.
     RTP_LLM_LOG_DEBUG(
         "[PD-DIAG] handleRead sendKVCache done, unique_key=%s, send_cost_us=%ld", unique_key.c_str(), send_cost_us);
-    waitPrefillPayloadAndFillResponse(resource_entry, response, is_cancelled);
+    waitPrefillPayloadAndFillResponse(resource_entry, response, is_cancelled, collector);
     // waitPrefillPayloadAndFillResponse clears the currently visible payload. Mark terminal
     // and clear once more to close the race with a notification arriving
     // between its final clear and this handler returning.
@@ -278,13 +304,18 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
                      currentTimeUs() - handle_read_start_us,
                      wait_resource_cost_us,
                      send_cost_us);
+    report_process_metrics();
 }
 
-void P2PConnectorPrefill::waitPrefillPayloadAndFillResponse(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
-                                              P2PConnectorStartLoadResponsePB&                  response,
-                                              std::function<bool()>                             is_cancelled) {
+void P2PConnectorPrefill::waitPrefillPayloadAndFillResponse(
+    const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
+    P2PConnectorStartLoadResponsePB&                 response,
+    std::function<bool()>                           is_cancelled,
+    PrefillSchedulerMetricsCollector&               collector) {
     const auto& unique_key = resource_entry->unique_key;
+    const auto  wait_start_us = currentTimeUs();
     const bool ready = stream_store_->waitPrefillPayloadReady(unique_key, resource_entry->deadline_ms, is_cancelled);
+    collector.side_channel_wait_time_us = currentTimeUs() - wait_start_us;
     P2PConnectorResourceEntry::SideChannelData data;
     if (!ready || !stream_store_->takePrefillPayload(unique_key, data)) {
         stream_store_->clearPrefillPayload(unique_key);
@@ -293,7 +324,9 @@ void P2PConnectorPrefill::waitPrefillPayloadAndFillResponse(const std::shared_pt
         response.set_error_message("side-channel wait cancelled or expired");
         return;
     }
+    const auto   fill_start_us          = currentTimeUs();
     grpc::Status fill_status = fillStartLoadResponsePayload(data, response);
+    collector.side_channel_fill_time_us = currentTimeUs() - fill_start_us;
     if (!fill_status.ok()) {
         RTP_LLM_LOG_WARNING("waitPrefillPayloadAndFillResponse failed, unique_key: %s, error: %s",
                             resource_entry->unique_key.c_str(),

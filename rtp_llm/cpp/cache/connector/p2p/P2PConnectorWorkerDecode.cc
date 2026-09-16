@@ -113,6 +113,8 @@ ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&    
             recv_req.block_info  = std::move(key_block_infos.value());
             recv_req.deadline_ms = deadline_ms;
 
+            task_group->task_buffer_keys.emplace(partition_layer_key, layer_cache_buffer->bufferKey());
+            task_group->pending_buffer_tasks.emplace(layer_cache_buffer->bufferKey(), 0);
             prepared.push_back({std::move(recv_req),
                                 "read: layer=" + std::to_string(layer_id) + " tag=" + route.cache_tag
                                     + " route=" + std::to_string(route.route_id) + " unique_key=" + unique_key});
@@ -120,6 +122,11 @@ ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&    
     }
     // No receiver task is registered until every route/layer has valid metadata.
     for (const auto& receive : prepared) {
+        task_group->task_start_time_us.emplace(receive.request.unique_key, 0);
+        ++task_group->pending_buffer_tasks.at(task_group->task_buffer_keys.at(receive.request.unique_key));
+    }
+    for (const auto& receive : prepared) {
+        const int64_t recv_start_us = currentTimeUs();
         auto task = receiver_->recv(receive.request);
         if (!task) {
             return fail_registration(receive.context + ": create recv task failed");
@@ -127,6 +134,7 @@ ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&    
         task_group->lease->onTransferStarted();
         task_group->partition_keys.push_back(receive.request.unique_key);
         task_group->tasks.push_back(task);
+        task_group->task_start_time_us.at(receive.request.unique_key) = recv_start_us;
         registerTaskCompletionCallback(task, unique_key, task_group);
         total_block_count += static_cast<int>(receive.request.block_info.size());
     }
@@ -195,18 +203,20 @@ P2PConnectorWorkerDecode::waitRecvTasksWithReadDeadlinePolicy(const std::shared_
             return ReadWaitOutcome::ReturnDeadlineIncomplete;
 }
 
-void P2PConnectorWorkerDecode::reportReadMetrics(int     total_block_count,
-                                                 bool    success,
-                                                 int64_t read_start_time_us) const {
+void P2PConnectorWorkerDecode::reportReadMetrics(DecodeWorkerMetricsCollector&         collector,
+                                                 bool                                  success,
+                                                 int64_t                               read_start_time_us,
+                                                 const std::shared_ptr<ReadTaskGroup>& task_group) const {
     if (!metrics_reporter_) {
         return;
     }
-    auto collector                      = std::make_shared<DecodeWorkerMetricsCollector>();
-    collector->total_block_count        = total_block_count;
-    collector->success                  = success;
-    collector->total_cost_time_us       = currentTimeUs() - read_start_time_us;
-    collector->first_layer_wait_time_us = 0;
-    metrics_reporter_->report<P2PConnectorMetrics, DecodeWorkerMetricsCollector>(nullptr, collector.get());
+    collector.success            = success;
+    collector.total_cost_time_us = currentTimeUs() - read_start_time_us;
+    const int64_t first_done_us  = task_group->first_layer_done_time_us.load();
+    if (first_done_us >= 0) {
+        collector.first_layer_wait_time_us = first_done_us - read_start_time_us;
+    }
+    metrics_reporter_->report<P2PConnectorMetrics, DecodeWorkerMetricsCollector>(nullptr, &collector);
 }
 
 ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
@@ -229,6 +239,7 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
     auto          task_group         = std::make_shared<ReadTaskGroup>();
     task_group->lease                = std::make_shared<DecodeTargetWriteLease>();
     int total_block_count            = 0;
+    DecodeWorkerMetricsCollector collector;
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
         auto                        pending_cancel = pending_cancel_keys_.find(unique_key);
@@ -237,6 +248,7 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
             pending_cancel_keys_.erase(pending_cancel);
             schedulePendingCancelExpiryLocked();
             if (still_valid) {
+                reportReadMetrics(collector, false, read_start_time_us, task_group);
                 return ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED,
                                  "read cancelled before recv registration");
             }
@@ -244,8 +256,12 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
         building_read_keys_.insert(unique_key);
     }
 
+    const auto prepare_start_us = currentTimeUs();
     ErrorInfo build_result = buildRecvTasks(worker_plan, unique_key, deadline_ms, task_group, total_block_count);
+    collector.prepare_time_us   = currentTimeUs() - prepare_start_us;
+    collector.total_block_count = total_block_count;
     if (build_result.hasError()) {
+        reportReadMetrics(collector, false, read_start_time_us, task_group);
         const bool has_inflight_task = std::any_of(
             task_group->tasks.begin(), task_group->tasks.end(), [](const auto& task) { return task && !task->done(); });
         {
@@ -298,8 +314,10 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
         }
     }
 
+    const auto            recv_wait_start_us = currentTimeUs();
     const ReadWaitOutcome outcome =
         waitRecvTasksWithReadDeadlinePolicy(task_group, deadline_ms, request_id, unique_key);
+    collector.recv_wait_time_us = currentTimeUs() - recv_wait_start_us;
 
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
@@ -317,7 +335,7 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
                 ++done_count;
             }
         }
-        reportReadMetrics(total_block_count, false, read_start_time_us);
+        reportReadMetrics(collector, false, read_start_time_us, task_group);
         const auto        first = task_group->first_error.snapshot().error;
         const std::string msg   = first.ToString();
         RTP_LLM_LOG_WARNING("read failed, request_id: %ld, unique_key: %s, %s, done_tasks=%d/%zu",
@@ -350,7 +368,7 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
 
     auto recv_result = aggregateRecvTaskResults(task_group);
 
-    reportReadMetrics(total_block_count, recv_result.success, read_start_time_us);
+    reportReadMetrics(collector, recv_result.success, read_start_time_us, task_group);
 
     if (!recv_result.success) {
         RTP_LLM_LOG_WARNING("read failed, request_id: %ld, unique_key: %s, error_code: %s, error_msg: %s",
@@ -454,22 +472,50 @@ void P2PConnectorWorkerDecode::registerTaskCompletionCallback(
     const std::weak_ptr<ReadTaskGroup> weak_task_group = task_group;
     const std::string task_key = task_group->partition_keys.empty() ? unique_key : task_group->partition_keys.back();
     std::weak_ptr<transfer::IKVCacheRecvTask> weak_task = task;
-    task->setDoneCallback([callback_state, unique_key, weak_task_group, weak_task, task_key]() {
+    const auto                                start_it  = task_group->task_start_time_us.find(task_key);
+    const int64_t recv_start_us = start_it == task_group->task_start_time_us.end() ? -1 : start_it->second;
+    task->setDoneCallback([callback_state,
+                           unique_key,
+                           weak_task_group,
+                           weak_task,
+                           task_key,
+                           reporter = metrics_reporter_,
+                           recv_start_us]() {
+        const auto completed_us = currentTimeUs();
+        const auto completed    = weak_task.lock();
         // This signal owns no worker pointer. It is safe even after worker
         // teardown, and must also run before lease_map_ registration completes.
         if (auto group = weak_task_group.lock()) {
-            if (auto completed = weak_task.lock(); completed && !completed->success()) {
+            if (completed && !completed->success()) {
                 group->first_error.record(ErrorInfo(transfer::toErrorCode(completed->errorCode()),
                                                     "Decode recv key=" + task_key + " transfer_code="
                                                         + std::to_string(static_cast<int>(completed->errorCode()))
                                                         + ": " + completed->errorMessage()));
             }
             std::lock_guard<std::mutex> lock(group->completion_mutex);
+            if (completed && completed->success()) {
+                const auto key = group->task_buffer_keys.find(task_key);
+                if (key != group->task_buffer_keys.end()) {
+                    auto& remaining = group->pending_buffer_tasks.at(key->second);
+                    if (remaining > 0 && --remaining == 0) {
+                        int64_t unset = -1;
+                        group->first_layer_done_time_us.compare_exchange_strong(unset, completed_us);
+                    }
+                }
+            }
             group->completion_cv.notify_all();
         }
-        std::lock_guard<std::mutex> lock(callback_state->mutex);
-        if (callback_state->owner) {
-            callback_state->owner->onRecvTaskDone(unique_key, weak_task_group);
+        {
+            std::lock_guard<std::mutex> lock(callback_state->mutex);
+            if (callback_state->owner) {
+                callback_state->owner->onRecvTaskDone(unique_key, weak_task_group);
+            }
+        }
+        if (completed && reporter && recv_start_us >= 0) {
+            DecodeWorkerMetricsCollector collector;
+            collector.success           = completed->success();
+            collector.recv_task_time_us = completed_us - recv_start_us;
+            reporter->report<P2PConnectorMetrics, DecodeWorkerMetricsCollector>(nullptr, &collector);
         }
     });
 }

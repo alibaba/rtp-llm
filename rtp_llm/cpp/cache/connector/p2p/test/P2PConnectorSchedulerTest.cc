@@ -1397,6 +1397,39 @@ TEST(P2PReadNotificationTest, BusyControlJobDoesNotDelayDeadline) {
     pool->stop();
 }
 
+TEST(P2PReadNotificationTest, MetricsWaitForAllBroadcastRanksAndKeepStartLoadIndependent) {
+    using Broadcast = P2PBroadcastClient::TpBroadcastResult;
+    auto a          = std::make_shared<Broadcast::WorkerRpcContext>();
+    auto b          = std::make_shared<Broadcast::WorkerRpcContext>();
+    auto rpc        = std::make_shared<Broadcast>(std::vector<std::shared_ptr<Broadcast::WorkerRpcContext>>{a, b});
+    auto broadcast  = std::make_shared<P2PBroadcastClient::Result>("metrics", rpc);
+    auto server     = std::make_shared<DecodeLoadHelper::Result>();
+    server->response.mutable_payload()->set_has_first_generate_token(true);
+    auto collector = std::make_shared<DecodeSchedulerMetricsCollector>(nullptr);
+    auto context   = std::make_shared<P2PConnectorAsyncReadContext>(nullptr, "metrics", collector, 1000);
+    context->setCallResults(broadcast, server);
+    EXPECT_EQ(collector->tp_sync_cost_time_us.load(), -1);
+    EXPECT_EQ(collector->server_call_cost_time_us.load(), -1);
+    rpc->complete(0, true);
+    EXPECT_EQ(collector->tp_sync_cost_time_us.load(), -1);
+    server->complete(true);
+    EXPECT_GE(collector->server_call_cost_time_us.load(), 0);
+    EXPECT_EQ(collector->tp_sync_cost_time_us.load(), -1);
+    rpc->complete(1, true);
+    EXPECT_GE(collector->tp_sync_cost_time_us.load(), 0);
+}
+
+TEST(P2PReadNotificationTest, NoTransferDoesNotEmitReadBroadcastDuration) {
+    auto collector = std::make_shared<DecodeSchedulerMetricsCollector>(nullptr);
+    auto context   = std::make_shared<P2PConnectorAsyncReadContext>(nullptr, "no-transfer", collector, 1000, true);
+    auto server    = std::make_shared<DecodeLoadHelper::Result>();
+    server->response.mutable_payload()->set_has_first_generate_token(true);
+    server->complete(true);
+    context->setCallResults(std::make_shared<P2PBroadcastClient::Result>("no-transfer"), server);
+    EXPECT_EQ(collector->tp_sync_cost_time_us.load(), -1);
+    EXPECT_GE(collector->server_call_cost_time_us.load(), 0);
+}
+
 TEST(P2PReadNotificationTest, LateCompletionAfterCheckerDestructionIsSafe) {
     auto context = std::make_shared<P2PConnectorAsyncReadContext>(
         nullptr, "late", std::make_shared<DecodeSchedulerMetricsCollector>(nullptr), 1000, true);

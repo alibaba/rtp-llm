@@ -78,6 +78,9 @@ private:
     void loopCheckProc();
 
     struct SendTransferResult {
+        // Written by the dispatch thread, sampled after dispatch returns.
+        int64_t                 first_buffer_ready_us = -1;
+        int64_t                 last_buffer_ready_us  = -1;
         std::atomic<int>        done_count{0};
         std::atomic<bool>       all_success{true};
         std::atomic<bool>       dispatch_failed{false};

@@ -20,6 +20,7 @@ class P2PBroadcastClient;
 class P2PConnectorSchedulerPrefill;
 class LayerBlockConverter;
 class P2PConnectorWorkerPrefill;
+class PrefillSchedulerMetricsCollector;
 
 class P2PConnectorPrefill {
 public:
@@ -78,11 +79,12 @@ private:
 
     // Wait for local Prefill output, then include it in the StartLoad response to Decode.
     void waitPrefillPayloadAndFillResponse(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
-                             P2PConnectorStartLoadResponsePB&                  response,
-                             std::function<bool()>                             is_cancelled = nullptr);
+                                           P2PConnectorStartLoadResponsePB&                 response,
+                                           std::function<bool()>                           is_cancelled,
+                                           PrefillSchedulerMetricsCollector&               collector);
 
     grpc::Status fillStartLoadResponsePayload(const P2PConnectorResourceEntry::SideChannelData& data,
-                                            P2PConnectorStartLoadResponsePB&                  response);
+                                              P2PConnectorStartLoadResponsePB&                 response);
 
 private:
     const P2PConnectorConfig                       config_;

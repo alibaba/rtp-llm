@@ -179,6 +179,7 @@ private:
     bool                    success_{false};
     ErrorCode               error_code_;
     std::string             error_message_;
+    std::atomic<int64_t>                         lease_hold_start_us_{0};
     std::atomic<bool>       lease_hold_pending_{false};
     std::atomic<int64_t>    lease_hold_until_ms_{0};
     std::atomic<bool>                            tp_cancel_broadcast_triggered_{false};

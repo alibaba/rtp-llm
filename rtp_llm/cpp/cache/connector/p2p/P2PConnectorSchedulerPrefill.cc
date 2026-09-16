@@ -113,6 +113,7 @@ P2PConnectorSchedulerPrefill::sendKVCache(const std::string&                    
     };
 
     if (!no_transfer && !config_.topology) {
+        report_metric_func(false);
         return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
                          "sendKVCache: cache topology is null");
     }
@@ -128,7 +129,9 @@ P2PConnectorSchedulerPrefill::sendKVCache(const std::string&                    
             report_metric_func(false);
             return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "worker list is empty");
         }
+        const auto plan_start_us     = currentTimeUs();
         auto plan = planFor(static_cast<int>(decode_transfer_servers.size()), unique_key);
+        collector->plan_cost_time_us = currentTimeUs() - plan_start_us;
         if (!plan->ok()) {
             RTP_LLM_LOG_WARNING("sendKVCache: transfer plan failed, unique_key=%s, error=%s",
                                 unique_key.c_str(),
@@ -152,6 +155,7 @@ P2PConnectorSchedulerPrefill::sendKVCache(const std::string&                    
             }
         }
         rank_routes = buildPrefillRankRoutes(plan->plan, worker_num, active_route_ids);
+        collector->plan_cost_time_us = currentTimeUs() - plan_start_us;
     }
 
     P2PBroadcastClient::BroadcastParams params;
@@ -165,7 +169,9 @@ P2PConnectorSchedulerPrefill::sendKVCache(const std::string&                    
     params.routes      = std::move(rank_routes);
     params.plan_digest = plan_digest;
 
+    const auto broadcast_start_us       = currentTimeUs();
     auto result = tp_broadcast_client_->broadcast(std::move(params));
+    collector->broadcast_submit_time_us = currentTimeUs() - broadcast_start_us;
     if (!result) {
         std::string error_msg = "sendKVCache: broadcast failed, request_id: " + std::to_string(request_id);
         RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
@@ -174,6 +180,7 @@ P2PConnectorSchedulerPrefill::sendKVCache(const std::string&                    
     }
 
     bool deadline_exceeded = false;
+    const auto wait_start_us          = currentTimeUs();
     auto cancel_result = waitForBroadcastCompletion(result,
                                                     unique_key,
                                                     request_id,
@@ -181,6 +188,7 @@ P2PConnectorSchedulerPrefill::sendKVCache(const std::string&                    
                                                     request_deadline_ms,
                                                     std::move(is_cancelled),
                                                     &deadline_exceeded);
+    collector->broadcast_wait_time_us = currentTimeUs() - wait_start_us;
     report_metric_func(!cancel_result && !deadline_exceeded && result->success());
 
     if (deadline_exceeded) {

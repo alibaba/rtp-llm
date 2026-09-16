@@ -262,8 +262,15 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
     std::shared_ptr<GenerateInput> input;
     GenerateInputPB                prefill_request;
     PrefillPeerInfo                peer_info;
+    const auto                     prepare_start_us = currentTimeUs();
     auto                           prepare_status = preparePDRequest(
         *effective_request, request_entry_ms + normalized_timeout_ms, input, prefill_request, peer_info);
+    {
+        RpcMetricsCollector collector;
+        collector.min_response_done_time_us      = 0;
+        collector.prepare_generate_context_rt_us = currentTimeUs() - prepare_start_us;
+        generate_context.reportMetrics(collector);
+    }
     if (!prepare_status.ok()) {
         generate_context.error_status = prepare_status;
         return prepare_status;
@@ -294,8 +301,15 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
         }
         updatePrefillRoleAddr(*input, prefill_request, target_ip, target_port);
 
+        const auto prefill_call_start_us = currentTimeUs();
         auto started = prefill_server_caller_->callPrefill(
             &prefill_request, target_ip, target_port, unique_key, request_deadline_ms);
+        {
+            RpcMetricsCollector collector;
+            collector.min_response_done_time_us = 0;
+            collector.remote_generate_rt_us     = currentTimeUs() - prefill_call_start_us;
+            generate_context.reportMetrics(collector);
+        }
         if (started.ok())
             prefill_caller_ctx = std::move(started.value());
         else

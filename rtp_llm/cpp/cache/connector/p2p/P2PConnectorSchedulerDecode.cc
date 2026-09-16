@@ -269,7 +269,9 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
             return {nullptr,
                     ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "worker list is empty")};
         }
+        const auto plan_start_us     = currentTimeUs();
         auto plan = planFor(prefill_tp_size, prefill_cp_size, unique_key);
+        collector->plan_cost_time_us = currentTimeUs() - plan_start_us;
         if (!plan->ok()) {
             RTP_LLM_LOG_WARNING("asyncRead: transfer plan failed, unique_key=%s, error=%s",
                                 unique_key.c_str(),
@@ -279,6 +281,7 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
         }
         plan_digest = plan->plan.digest();
         auto routes = buildDecodeRankRoutes(plan->plan, *resource, block_range, worker_num);
+        collector->plan_cost_time_us = currentTimeUs() - plan_start_us;
         if (!routes.ok()) {
             RTP_LLM_LOG_WARNING("asyncRead: route projection failed, unique_key=%s, error=%s",
                                 unique_key.c_str(),
@@ -316,7 +319,8 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
                                                                         request_deadline_ms,
                                                                         transfer_deadline_ms);
 
-    auto submit_result = async_read_pool_->pushTask(
+    const auto enqueue_time_us = currentTimeUs();
+    auto       submit_result   = async_read_pool_->pushTask(
         [this,
          request_id,
          prefill_ip   = prefill_addr.first,
@@ -330,7 +334,9 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
          collector,
          async_context,
          prefill_tp_size,
-         no_transfer]() mutable {
+         no_transfer,
+         enqueue_time_us]() mutable {
+            collector->kickoff_queue_time_us = currentTimeUs() - enqueue_time_us;
             if (!async_context->beginKickoff()) {
                 return;
             }
@@ -422,6 +428,7 @@ P2PConnectorSchedulerDecode::startAsyncReadCalls(int64_t            request_id,
                                                    plan_digest,
                                                    active_route_ids);
     const int64_t server_load_cost_us = currentTimeUs() - server_load_start_us;
+    collector->server_submit_time_us   = server_load_cost_us;
     if (server_load_cost_us >= 100000) {
         RTP_LLM_LOG_WARNING("[PD-DIAG] startAsyncReadCalls slow server_caller->load, "
                             "unique_key=%s, prefill=%s:%u, cost_us=%ld",
@@ -454,6 +461,9 @@ P2PConnectorSchedulerDecode::startAsyncReadCalls(int64_t            request_id,
         tp_sync_result             = tp_broadcast_client_->broadcast(std::move(params));
     }
     const int64_t broadcast_cost_us = currentTimeUs() - broadcast_start_us;
+    if (!no_transfer) {
+        collector->broadcast_submit_time_us = broadcast_cost_us;
+    }
     if (broadcast_cost_us >= 100000) {
         RTP_LLM_LOG_WARNING(
             "[PD-DIAG] startAsyncReadCalls slow tp_broadcast_client->broadcast, unique_key=%s, cost_us=%ld",
