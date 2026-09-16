@@ -139,7 +139,7 @@ class RequestResourceAccountingTest {
         try (Fixture f = new Fixture()) {
             DeliveryClaim claim = f.handoff();
             f.assertHandedOff();
-            claim.complete(DeliveryResult.failed(new IllegalStateException("not delivered")));
+            claim.complete(DeliveryResult.notSent(new IllegalStateException("not delivered")));
             assertFalse(f.item.future().get(2, TimeUnit.SECONDS).isSuccess());
             f.assertEmpty();
             f.assertCapacityReusable();
@@ -147,7 +147,7 @@ class RequestResourceAccountingTest {
     }
 
     @Test
-    void runningDecodeWinsAgainstTransportFailureAndTerminalReclaimsBothEndpoints() throws Exception {
+    void runningDecodeWinsAgainstUncertainTransportAndTerminalReclaimsBothEndpoints() throws Exception {
         try (Fixture f = new Fixture()) {
             DeliveryClaim claim = f.handoff();
             TaskInfo running = task(ID);
@@ -155,11 +155,12 @@ class RequestResourceAccountingTest {
             assertEquals(1, f.decode.layeredAdmissionView().runningCount());
             assertEquals(1, f.decode.routingView().engineCapacityUsed());
             assertEquals(0, f.decode.routingView().inflightHardKv(), "Engine status replaces the local KV prediction");
-            claim.complete(DeliveryResult.failed(new IllegalStateException("late transport failure")));
+            claim.complete(DeliveryResult.uncertain(new IllegalStateException("late transport failure")));
             assertTrue(f.item.future().get(2, TimeUnit.SECONDS).isSuccess());
             assertEquals(1, f.requests.liveRequestCount());
             assertEquals(1, f.decode.layeredAdmissionView().runningCount());
             assertEquals(1, f.prefill.getLocallyOwnedRequestCount());
+            applyStatus(f.prefill, status(RoleType.PREFILL, 2L, Map.of(), Map.of("101", running), TOTAL_KV));
             f.decodeStatus(Map.of(), Map.of("101", running), TOTAL_KV);
             f.assertEmpty();
             f.assertCapacityReusable();
@@ -281,7 +282,8 @@ class RequestResourceAccountingTest {
             var member = new PrefillAdmissionResources.Member(item, acquisition.permit());
             try (var owner = PrefillAdmissionResources.createCommittedOwner(List.of(member))) {
                 owner.bindPrefillHandoff(prefillHandoff);
-                var claim = requests.claimRouteDelivery(item, owner);
+                var claim = RequestLifecycleTestSupport.claimBatchWithoutPrediction(
+                        requests, item, 1L, () -> owner.transferToEndpoint(item));
                 assertNotNull(claim);
                 return claim;
             }

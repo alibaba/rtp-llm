@@ -122,14 +122,14 @@ class EndpointCleanupDeadlockTest {
                 sweep = () -> assertEquals(0, endpoint.evictExpiredRequests(-1L, ownership));
                 if (kind.equals("decode-rejection")) {
                     doAnswer(invocation -> {
-                        assertTrue(Thread.holdsLock(slot));
+                        assertFalse(Thread.holdsLock(slot), "reservation release must not hold the Slot monitor");
                         slotHeld.countDown();
                         assertTrue(endpointHeld.await(5, TimeUnit.SECONDS));
                         return invocation.callRealMethod();
-                    }).when(endpoint).settleDefiniteDispatchRejection(reservation);
+                    }).when(endpoint).releaseUnsentRequestReservation(reservation);
                 }
                 endpointOperation = kind.equals("decode-rejection")
-                        ? () -> claim.complete(org.flexlb.balance.delivery.DeliveryResult.failed(
+                        ? () -> claim.complete(org.flexlb.balance.delivery.DeliveryResult.notSent(
                                 new IllegalStateException("definite dispatch rejection")))
                         : () -> registry.setDeliveryPrediction(
                         claim, new org.flexlb.balance.projection.WorkSnapshot(
@@ -146,7 +146,7 @@ class EndpointCleanupDeadlockTest {
             Thread holder = new Thread(() -> {
                 try {
                     if (kind.equals("decode-rejection")) {
-                        // The real completion operation releases Slot before executing effects.
+                        // Reservation release and cleanup can contend for the endpoint without holding Slot.
                         endpointOperation.run();
                     } else {
                         synchronized (slot) {

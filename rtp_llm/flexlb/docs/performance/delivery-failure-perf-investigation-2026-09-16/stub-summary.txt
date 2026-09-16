@@ -1,0 +1,80 @@
+PERF_WINDOW begin epoch_ms=1789547483689 requests=30000 qps=3000
+PERF_WINDOW end epoch_ms=1789547493700 requests=30000 qps=3000
+FlexLB offered traffic: requests=30000 target_qps=3000 offered_qps=3000.1 pacing_lag_avg_us=18675.286 issue_call_avg_us=77.464
+FlexLB client latency: requests=30000 target_qps=3000 client_avg=212.190ms
+PERF_WINDOW begin epoch_ms=1789547495052 requests=30000 qps=3000
+PERF_WINDOW end epoch_ms=1789547505063 requests=30000 qps=3000
+FlexLB offered traffic: requests=30000 target_qps=3000 offered_qps=3000.1 pacing_lag_avg_us=247.299 issue_call_avg_us=14.205
+FlexLB client latency: requests=30000 target_qps=3000 client_avg=20.506ms
+FlexLB Master engine-scale E2E: delivery=BATCH decision=FIXED_WINDOW prefill=750 decode=750 target_qps=3000 requests=30000 client_qps=2996.8 master_qps=3000.3 master_avg=19.492ms client_p50=10.980ms client_p90=11.567ms client_p95=38.519ms client_p99=316.072ms master_p50=10ms master_p90=11ms master_p95=14ms master_p99=315ms active_prefill_rpc=750 active_prefill_route=750 active_decode_route=750 batch_wait_count=30000 batch_wait_p50=10ms batch_wait_p90=10ms batch_wait_p95=10ms batch_wait_p99=305ms delivery_wait_count=30000 delivery_wait_p50=10ms delivery_wait_p90=10ms delivery_wait_p95=11ms delivery_wait_p99=11ms dispatch_ack_count=1625 dispatch_ack_p99=2ms engine_batches=29916 batch_full=0 window_timeout=29916 predicted_execution_cap=0 single_request=0 avg_batch=1.00 max_batch=4 grpc_queue_p99=<1ms route_submit_p99=1ms ack_response_count=1625 ack_response_p99=<1ms terminal_without_ack_count=28375
+PERF_WINDOW begin epoch_ms=1789547511947 requests=100000 qps=10000
+PERF_WINDOW end epoch_ms=1789547521958 requests=100000 qps=10000
+FlexLB offered traffic: requests=100000 target_qps=10000 offered_qps=10000.1 pacing_lag_avg_us=7692.269 issue_call_avg_us=16.237
+FlexLB client latency: requests=100000 target_qps=10000 client_avg=29.777ms
+PERF_WINDOW begin epoch_ms=1789547526415 requests=100000 qps=10000
+PERF_WINDOW end epoch_ms=1789547536426 requests=100000 qps=10000
+FlexLB offered traffic: requests=100000 target_qps=10000 offered_qps=10000.1 pacing_lag_avg_us=836.529 issue_call_avg_us=14.495
+FlexLB client latency: requests=100000 target_qps=10000 client_avg=12.702ms
+FlexLB Master engine-scale E2E: delivery=BATCH decision=FIXED_WINDOW prefill=750 decode=750 target_qps=10000 requests=100000 client_qps=9989.1 master_qps=10004.1 master_avg=11.059ms client_p50=11.019ms client_p90=11.854ms client_p95=29.071ms client_p99=40.176ms master_p50=10ms master_p90=11ms master_p95=14ms master_p99=36ms active_prefill_rpc=750 active_prefill_route=750 active_decode_route=750 batch_wait_count=100000 batch_wait_p50=10ms batch_wait_p90=10ms batch_wait_p95=10ms batch_wait_p99=33ms delivery_wait_count=100000 delivery_wait_p50=10ms delivery_wait_p90=10ms delivery_wait_p95=11ms delivery_wait_p99=33ms dispatch_ack_count=17010 dispatch_ack_p99=1ms engine_batches=100000 batch_full=0 window_timeout=100000 predicted_execution_cap=0 single_request=0 avg_batch=1.00 max_batch=1 grpc_queue_p99=<1ms route_submit_p99=7ms ack_response_count=17010 ack_response_p99=<1ms terminal_without_ack_count=82990
+[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:696 client E2E P99 316.072 ms exceeds ceiling 250.000 ms ==> expected: <true> but was: <false>
+[INFO] BUILD FAILURE
+PERF_WINDOW begin epoch_ms=1789547555545 requests=30000 qps=3000
+PERF_WINDOW end epoch_ms=1789547565557 requests=30000 qps=3000
+FlexLB offered traffic: requests=30000 target_qps=3000 offered_qps=3000.1 pacing_lag_avg_us=7917.744 issue_call_avg_us=68.301
+FlexLB client latency: requests=30000 target_qps=3000 client_avg=165.088ms
+PERF_WINDOW begin epoch_ms=1789547566994 requests=30000 qps=3000
+PERF_WINDOW end epoch_ms=1789547577005 requests=30000 qps=3000
+FlexLB offered traffic: requests=30000 target_qps=3000 offered_qps=3000.1 pacing_lag_avg_us=375.869 issue_call_avg_us=17.444
+FlexLB client latency: requests=30000 target_qps=3000 client_avg=18.116ms
+FlexLB Master engine-scale E2E: delivery=BATCH decision=FIXED_WINDOW prefill=750 decode=750 target_qps=3000 requests=30000 client_qps=2996.8 master_qps=3001.3 master_avg=16.946ms client_p50=10.976ms client_p90=11.531ms client_p95=28.117ms client_p99=257.239ms master_p50=10ms master_p90=11ms master_p95=12ms master_p99=256ms active_prefill_rpc=750 active_prefill_route=750 active_decode_route=750 batch_wait_count=30000 batch_wait_p50=10ms batch_wait_p90=10ms batch_wait_p95=10ms batch_wait_p99=245ms delivery_wait_count=30000 delivery_wait_p50=10ms delivery_wait_p90=10ms delivery_wait_p95=10ms delivery_wait_p99=11ms dispatch_ack_count=1506 dispatch_ack_p99=5ms engine_batches=29956 batch_full=0 window_timeout=29956 predicted_execution_cap=0 single_request=0 avg_batch=1.00 max_batch=3 grpc_queue_p99=<1ms route_submit_p99=1ms ack_response_count=1506 ack_response_p99=<1ms terminal_without_ack_count=28494
+PERF_WINDOW begin epoch_ms=1789547584057 requests=100000 qps=10000
+PERF_WINDOW end epoch_ms=1789547594075 requests=100000 qps=10000
+FlexLB offered traffic: requests=100000 target_qps=10000 offered_qps=9996.1 pacing_lag_avg_us=7061.549 issue_call_avg_us=14.864
+FlexLB client latency: requests=100000 target_qps=10000 client_avg=34.997ms
+PERF_WINDOW begin epoch_ms=1789547598556 requests=100000 qps=10000
+PERF_WINDOW end epoch_ms=1789547608568 requests=100000 qps=10000
+FlexLB offered traffic: requests=100000 target_qps=10000 offered_qps=10000.1 pacing_lag_avg_us=766.114 issue_call_avg_us=11.856
+FlexLB client latency: requests=100000 target_qps=10000 client_avg=12.510ms
+FlexLB Master engine-scale E2E: delivery=BATCH decision=FIXED_WINDOW prefill=750 decode=750 target_qps=10000 requests=100000 client_qps=9988.6 master_qps=10004.8 master_avg=10.933ms client_p50=10.991ms client_p90=11.748ms client_p95=27.025ms client_p99=37.790ms master_p50=10ms master_p90=11ms master_p95=13ms master_p99=34ms active_prefill_rpc=750 active_prefill_route=750 active_decode_route=750 batch_wait_count=100000 batch_wait_p50=10ms batch_wait_p90=10ms batch_wait_p95=10ms batch_wait_p99=32ms delivery_wait_count=100000 delivery_wait_p50=10ms delivery_wait_p90=10ms delivery_wait_p95=11ms delivery_wait_p99=32ms dispatch_ack_count=12832 dispatch_ack_p99=<1ms engine_batches=100000 batch_full=0 window_timeout=100000 predicted_execution_cap=0 single_request=0 avg_batch=1.00 max_batch=1 grpc_queue_p99=<1ms route_submit_p99=5ms ack_response_count=12832 ack_response_p99=<1ms terminal_without_ack_count=87168
+[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:696 client E2E P99 257.239 ms exceeds ceiling 250.000 ms ==> expected: <true> but was: <false>
+[INFO] BUILD FAILURE
+PERF_WINDOW begin epoch_ms=1789547627563 requests=30000 qps=3000
+PERF_WINDOW end epoch_ms=1789547637598 requests=30000 qps=3000
+FlexLB offered traffic: requests=30000 target_qps=3000 offered_qps=3000.1 pacing_lag_avg_us=13543.562 issue_call_avg_us=68.412
+FlexLB client latency: requests=30000 target_qps=3000 client_avg=177.018ms
+PERF_WINDOW begin epoch_ms=1789547638927 requests=30000 qps=3000
+PERF_WINDOW end epoch_ms=1789547648938 requests=30000 qps=3000
+FlexLB offered traffic: requests=30000 target_qps=3000 offered_qps=3000.1 pacing_lag_avg_us=431.048 issue_call_avg_us=12.061
+FlexLB client latency: requests=30000 target_qps=3000 client_avg=19.350ms
+FlexLB Master engine-scale E2E: delivery=BATCH decision=FIXED_WINDOW prefill=750 decode=750 target_qps=3000 requests=30000 client_qps=2996.8 master_qps=3000.7 master_avg=18.055ms client_p50=10.931ms client_p90=11.473ms client_p95=39.740ms client_p99=284.101ms master_p50=10ms master_p90=11ms master_p95=13ms master_p99=283ms active_prefill_rpc=750 active_prefill_route=750 active_decode_route=750 batch_wait_count=30000 batch_wait_p50=10ms batch_wait_p90=10ms batch_wait_p95=10ms batch_wait_p99=277ms delivery_wait_count=30000 delivery_wait_p50=10ms delivery_wait_p90=10ms delivery_wait_p95=10ms delivery_wait_p99=11ms dispatch_ack_count=993 dispatch_ack_p99=12ms engine_batches=29945 batch_full=0 window_timeout=29945 predicted_execution_cap=0 single_request=0 avg_batch=1.00 max_batch=5 grpc_queue_p99=<1ms route_submit_p99=1ms ack_response_count=993 ack_response_p99=<1ms terminal_without_ack_count=29007
+PERF_WINDOW begin epoch_ms=1789547655645 requests=100000 qps=10000
+PERF_WINDOW end epoch_ms=1789547665657 requests=100000 qps=10000
+FlexLB offered traffic: requests=100000 target_qps=10000 offered_qps=10000.1 pacing_lag_avg_us=3445.821 issue_call_avg_us=13.917
+FlexLB client latency: requests=100000 target_qps=10000 client_avg=21.351ms
+PERF_WINDOW begin epoch_ms=1789547670058 requests=100000 qps=10000
+PERF_WINDOW end epoch_ms=1789547680069 requests=100000 qps=10000
+FlexLB offered traffic: requests=100000 target_qps=10000 offered_qps=10000.1 pacing_lag_avg_us=1000.146 issue_call_avg_us=12.802
+FlexLB client latency: requests=100000 target_qps=10000 client_avg=13.262ms
+FlexLB Master engine-scale E2E: delivery=BATCH decision=FIXED_WINDOW prefill=750 decode=750 target_qps=10000 requests=100000 client_qps=9989.0 master_qps=10002.7 master_avg=11.396ms client_p50=11.004ms client_p90=18.626ms client_p95=30.977ms client_p99=44.804ms master_p50=10ms master_p90=12ms master_p95=17ms master_p99=35ms active_prefill_rpc=750 active_prefill_route=750 active_decode_route=750 batch_wait_count=100000 batch_wait_p50=10ms batch_wait_p90=10ms batch_wait_p95=10ms batch_wait_p99=32ms delivery_wait_count=100000 delivery_wait_p50=10ms delivery_wait_p90=11ms delivery_wait_p95=11ms delivery_wait_p99=32ms dispatch_ack_count=14724 dispatch_ack_p99=2ms engine_batches=100000 batch_full=0 window_timeout=100000 predicted_execution_cap=0 single_request=0 avg_batch=1.00 max_batch=1 grpc_queue_p99=<1ms route_submit_p99=9ms ack_response_count=14724 ack_response_p99=<1ms terminal_without_ack_count=85276
+[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:696 client E2E P99 284.101 ms exceeds ceiling 250.000 ms ==> expected: <true> but was: <false>
+[INFO] BUILD FAILURE
+PERF_WINDOW begin epoch_ms=1789547698989 requests=30000 qps=3000
+PERF_WINDOW end epoch_ms=1789547709007 requests=30000 qps=3000
+FlexLB offered traffic: requests=30000 target_qps=3000 offered_qps=3000.1 pacing_lag_avg_us=30192.436 issue_call_avg_us=83.798
+FlexLB client latency: requests=30000 target_qps=3000 client_avg=224.726ms
+PERF_WINDOW begin epoch_ms=1789547710471 requests=30000 qps=3000
+PERF_WINDOW end epoch_ms=1789547720482 requests=30000 qps=3000
+FlexLB offered traffic: requests=30000 target_qps=3000 offered_qps=3000.1 pacing_lag_avg_us=305.277 issue_call_avg_us=16.908
+FlexLB client latency: requests=30000 target_qps=3000 client_avg=18.938ms
+FlexLB Master engine-scale E2E: delivery=BATCH decision=FIXED_WINDOW prefill=750 decode=750 target_qps=3000 requests=30000 client_qps=2996.7 master_qps=3001.4 master_avg=17.860ms client_p50=10.977ms client_p90=11.480ms client_p95=27.566ms client_p99=283.502ms master_p50=10ms master_p90=11ms master_p95=12ms master_p99=283ms active_prefill_rpc=750 active_prefill_route=750 active_decode_route=750 batch_wait_count=30000 batch_wait_p50=10ms batch_wait_p90=10ms batch_wait_p95=10ms batch_wait_p99=273ms delivery_wait_count=30000 delivery_wait_p50=10ms delivery_wait_p90=10ms delivery_wait_p95=10ms delivery_wait_p99=11ms dispatch_ack_count=1454 dispatch_ack_p99=4ms engine_batches=29953 batch_full=0 window_timeout=29953 predicted_execution_cap=0 single_request=0 avg_batch=1.00 max_batch=3 grpc_queue_p99=<1ms route_submit_p99=1ms ack_response_count=1454 ack_response_p99=<1ms terminal_without_ack_count=28546
+PERF_WINDOW begin epoch_ms=1789547727225 requests=100000 qps=10000
+PERF_WINDOW end epoch_ms=1789547737237 requests=100000 qps=10000
+FlexLB offered traffic: requests=100000 target_qps=10000 offered_qps=10000.1 pacing_lag_avg_us=2801.401 issue_call_avg_us=14.687
+FlexLB client latency: requests=100000 target_qps=10000 client_avg=18.973ms
+PERF_WINDOW begin epoch_ms=1789547741604 requests=100000 qps=10000
+PERF_WINDOW end epoch_ms=1789547751615 requests=100000 qps=10000
+FlexLB offered traffic: requests=100000 target_qps=10000 offered_qps=10000.1 pacing_lag_avg_us=1038.391 issue_call_avg_us=13.655
+FlexLB client latency: requests=100000 target_qps=10000 client_avg=12.998ms
+FlexLB Master engine-scale E2E: delivery=BATCH decision=FIXED_WINDOW prefill=750 decode=750 target_qps=10000 requests=100000 client_qps=9989.1 master_qps=10004.6 master_avg=11.142ms client_p50=10.997ms client_p90=14.721ms client_p95=31.187ms client_p99=41.856ms master_p50=10ms master_p90=11ms master_p95=14ms master_p99=38ms active_prefill_rpc=750 active_prefill_route=750 active_decode_route=750 batch_wait_count=100000 batch_wait_p50=10ms batch_wait_p90=10ms batch_wait_p95=10ms batch_wait_p99=35ms delivery_wait_count=100000 delivery_wait_p50=10ms delivery_wait_p90=10ms delivery_wait_p95=11ms delivery_wait_p99=36ms dispatch_ack_count=16189 dispatch_ack_p99=1ms engine_batches=100000 batch_full=0 window_timeout=100000 predicted_execution_cap=0 single_request=0 avg_batch=1.00 max_batch=1 grpc_queue_p99=<1ms route_submit_p99=6ms ack_response_count=16189 ack_response_p99=<1ms terminal_without_ack_count=83811
+[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:696 client E2E P99 283.502 ms exceeds ceiling 250.000 ms ==> expected: <true> but was: <false>
+[INFO] BUILD FAILURE

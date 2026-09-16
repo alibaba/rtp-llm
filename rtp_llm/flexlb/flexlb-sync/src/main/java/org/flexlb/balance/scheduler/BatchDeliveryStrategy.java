@@ -276,7 +276,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 Throwable completionFailure = null;
                 for (ClaimedMember member : claimed) {
                     try {
-                        member.claim().complete(DeliveryResult.failed(handoffFailure));
+                        member.claim().complete(DeliveryResult.notSent(handoffFailure));
                     } catch (Throwable memberFailure) {
                         completionFailure = append(
                                 completionFailure, memberFailure);

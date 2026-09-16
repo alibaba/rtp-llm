@@ -137,7 +137,7 @@ public class RequestRegistry {
 
     void projectPrefillRetirementItem(PrefillEndpoint source, ScheduledRequest exact) {
         if (exact == null || exact.prefillEp() != source) { return; }
-        RequestSlot slot = entryFor(exact);
+        RequestSlot slot = requestSlot(exact.requestId());
         if (slot != null) { slot.recordPrefillRetirement(source, exact); }
     }
 

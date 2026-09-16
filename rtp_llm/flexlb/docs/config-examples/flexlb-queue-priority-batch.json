@@ -24,7 +24,8 @@
   },
   "dispatcher": {
     "type": "BATCH",
-    "maxInflightPerPrefillWorker": 2
+    "maxInflightPerPrefillWorker": 2,
+    "fetchAttachTimeoutMs": 3000
   },
   "router": {
     "roles": {

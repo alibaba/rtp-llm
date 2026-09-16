@@ -47,6 +47,7 @@ import java.util.concurrent.TimeUnit;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 /**
  * Base class for mock-worker integration tests.
@@ -141,7 +142,8 @@ public abstract class FlexLBMockTestBase {
 
         // 2. Create config
         config = createConfig();
-        configService = mock(ConfigService.class);
+        // These tests need config values, not an ever-growing history of config reads.
+        configService = mock(ConfigService.class, withSettings().stubOnly());
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         // 3. Create gRPC infrastructure
