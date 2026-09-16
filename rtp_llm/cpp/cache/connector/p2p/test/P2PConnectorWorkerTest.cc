@@ -1563,6 +1563,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackTimeoutSkipsQueued
     worker_config_.tp_rank       = 0;
     worker_config_.layer_all_num = 12;
     worker_config_.topology      = makeOneGroupPerLayerTopology(worker_config_.layer_all_num);
+    prefill_.reset();
     prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(
         worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
     ASSERT_TRUE(prefill_->init());
@@ -1591,14 +1592,12 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackTimeoutSkipsQueued
         done   = true;
     });
 
-    int wait_count = 0;
-    while (mock_sender_->getTransferCallCount() < 4 && wait_count < 400) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        wait_count++;
+    const bool observed_four_sends = mock_sender_->waitForTransferCallCount(4, std::chrono::milliseconds(2000));
+    if (!observed_four_sends) {
+        mock_sender_->setBlockSend(false);
     }
-    EXPECT_GE(mock_sender_->getTransferCallCount(), 4);
 
-    wait_count = 0;
+    int wait_count = 0;
     while (!done && wait_count < 200) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         wait_count++;
@@ -1608,6 +1607,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackTimeoutSkipsQueued
         handle_read_thread.join();
     }
 
+    ASSERT_TRUE(observed_four_sends);
     EXPECT_TRUE(done);
     EXPECT_TRUE(result.hasError());
     EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
@@ -1759,6 +1759,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Timeout_ReleasesQueuedLayerDescriptio
     worker_config_.tp_rank       = 0;
     worker_config_.layer_all_num = 6;
     worker_config_.topology      = makeOneGroupPerLayerTopology(worker_config_.layer_all_num);
+    prefill_.reset();
     prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(
         worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
     ASSERT_TRUE(prefill_->init());

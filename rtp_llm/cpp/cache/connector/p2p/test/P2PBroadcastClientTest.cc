@@ -1,4 +1,7 @@
 #include <thread>
+#include <chrono>
+#include <future>
+#include <mutex>
 #include <gtest/gtest.h>
 #include "grpc++/grpc++.h"
 
@@ -296,6 +299,89 @@ TEST_F(P2PBroadcastClientTest, CancelSurvivesCallerReleaseAndReclaimsAfterFinish
     for (auto& server : servers_) {
         EXPECT_EQ(server->service()->getBroadcastTpCancelCallCount(), 1);
     }
+}
+
+class P2PCancelLifetimeTest: public ::testing::Test {
+protected:
+    void checkLifetime(P2PConnectorBroadcastType type, bool expire) {
+        class GatedService: public RpcService::Service {
+        public:
+            GatedService(): released_(release_.get_future().share()) {}
+
+            grpc::Status ExecuteFunction(grpc::ServerContext*, const FunctionRequestPB*,
+                                         FunctionResponsePB* response) override {
+                entered.set_value();
+                released_.wait();
+                response->mutable_p2p_response()->set_error_code(ErrorCodePB::NONE_ERROR);
+                return grpc::Status::OK;
+            }
+
+            void release() {
+                std::call_once(release_once_, [this] { release_.set_value(); });
+            }
+
+            std::promise<void> entered;
+
+        private:
+            std::promise<void> release_;
+            std::shared_future<void> released_;
+            std::once_flag release_once_;
+        } service;
+
+        grpc::ServerBuilder builder;
+        int port = 0;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+        builder.RegisterService(&service);
+        auto server = builder.BuildAndStart();
+        ASSERT_NE(server, nullptr);
+        // Release the handler before shutdown, including on fatal assertions.
+        auto shutdown = std::shared_ptr<void>(nullptr, [&](void*) {
+            service.release();
+            server->Shutdown();
+        });
+
+        auto client = std::make_unique<P2PBroadcastClient>(
+            std::vector<std::string>{"127.0.0.1:" + std::to_string(port)}, expire ? 2000 : 5000);
+        ASSERT_TRUE(client->init());
+        const auto deadline_ms = currentTimeMs() + 10000;
+        auto result = client->cancel("cancel_lifetime", type, deadline_ms, 3014, deadline_ms);
+        ASSERT_NE(result, nullptr);
+        ASSERT_EQ(service.entered.get_future().wait_for(std::chrono::seconds(1)), std::future_status::ready);
+        std::weak_ptr<P2PBroadcastClient::TpBroadcastResult> weak_result = result->tp_broadcast_result_;
+        // Keep only the RPC storage for checking status, not the result owner.
+        auto context = result->tp_broadcast_result_->worker_contexts_.front();
+        auto completed = std::make_shared<std::promise<void>>();
+        auto completion = completed->get_future();
+        auto complete_once = std::make_shared<std::once_flag>();
+        result->setDoneCallback([weak_result, completed, complete_once] {
+            if (auto current = weak_result.lock(); current && current->done()) {
+                std::call_once(*complete_once, [&] { completed->set_value(); });
+            }
+        });
+
+        result.reset();
+        client.reset();
+        ASSERT_FALSE(weak_result.expired());
+        if (!expire) {
+            service.release();
+        }
+        ASSERT_EQ(completion.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        EXPECT_EQ(context->status.error_code(), expire ? grpc::StatusCode::DEADLINE_EXCEEDED : grpc::StatusCode::OK);
+
+        const auto release_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        while (!weak_result.expired() && std::chrono::steady_clock::now() < release_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        EXPECT_TRUE(weak_result.expired());
+    }
+};
+
+TEST_F(P2PCancelLifetimeTest, CancelHandleReadSurvivesCallerReleaseUntilCompletion) {
+    checkLifetime(P2PConnectorBroadcastType::CANCEL_HANDLE_READ, false);
+}
+
+TEST_F(P2PCancelLifetimeTest, CancelReadReleasesKeepaliveAfterRpcTimeout) {
+    checkLifetime(P2PConnectorBroadcastType::CANCEL_READ, true);
 }
 
 }  // namespace rtp_llm
