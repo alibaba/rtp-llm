@@ -31,6 +31,8 @@ import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -141,7 +143,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeFuture =
                     routeLocally(requestContext);
 
-            routeFuture.whenComplete((response, ex) -> {
+            // Pending routes may complete under scheduler locks. Capture lifecycle
+            // synchronously above, then move response I/O and reporting off those locks.
+            Executor responseExecutor = routeFuture.isDone() ? Runnable::run : ForkJoinPool.commonPool();
+            routeFuture.whenCompleteAsync((response, ex) -> {
                 try {
                     if (responded.compareAndSet(false, true)) {
                         if (ex != null) {
@@ -159,7 +164,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 } finally {
                     token.close();
                 }
-            });
+            }, responseExecutor);
 
         } catch (Exception e) {
             Logger.error("FlexlbService.schedule error, request_id={}", request.getRequestId(), e);

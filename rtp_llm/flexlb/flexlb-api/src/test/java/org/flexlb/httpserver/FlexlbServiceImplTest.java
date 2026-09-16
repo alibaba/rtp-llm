@@ -26,6 +26,12 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.slf4j.LoggerFactory;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -395,6 +401,67 @@ class FlexlbServiceImplTest {
         assertEquals(FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_ACKNOWLEDGED,
                 captor.getValue().getLifecycle().getState());
         assertEquals(1001L, captor.getValue().getLifecycle().getBatchId());
+    }
+
+    @Test
+    void testSchedule_slowObserverDoesNotBlockRouteCompletionOrDelayLifecycleSnapshot() throws Exception {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        CompletableFuture<Response> routed = new CompletableFuture<>();
+        when(routeService.route(any())).thenReturn(routed);
+        AtomicReference<Thread> producerThread = new AtomicReference<>();
+        AtomicReference<Thread> snapshotThread = new AtomicReference<>();
+        when(routeService.getRequestState(701L, 0)).thenAnswer(invocation -> {
+            snapshotThread.set(Thread.currentThread());
+            return new RequestLifecycleSnapshot(701L, RequestLifecycleState.ACKNOWLEDGED,
+                    1001L, 10L, 20L, "engine acknowledged batch");
+        });
+
+        CountDownLatch observerEntered = new CountDownLatch(1);
+        CountDownLatch releaseObserver = new CountDownLatch(1);
+        CountDownLatch tokenClosed = new CountDownLatch(1);
+        ActiveRequestCounter.RequestToken token = mock(ActiveRequestCounter.RequestToken.class);
+        when(activeRequestCounter.acquire()).thenReturn(token);
+        doAnswer(invocation -> {
+            tokenClosed.countDown();
+            return null;
+        }).when(token).close();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        AtomicReference<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> emitted = new AtomicReference<>();
+        doAnswer(invocation -> {
+            emitted.set(invocation.getArgument(0));
+            observerEntered.countDown();
+            releaseObserver.await();
+            return null;
+        }).when(observer).onNext(any());
+
+        ExecutorService producer = Executors.newSingleThreadExecutor();
+        try {
+            service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                    .setRequestId(701L).build(), observer);
+            Response response = new Response();
+            response.setSuccess(true);
+            response.setCode(200);
+            Future<?> completion = producer.submit(() -> {
+                producerThread.set(Thread.currentThread());
+                routed.complete(response);
+            });
+            assertTrue(observerEntered.await(5, TimeUnit.SECONDS));
+            // The response consumer is blocked, but the scheduler producer must be free.
+            completion.get(5, TimeUnit.SECONDS);
+            assertSame(producerThread.get(), snapshotThread.get());
+            assertEquals(FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_ACKNOWLEDGED,
+                    emitted.get().getLifecycle().getState());
+            assertEquals(1001L, emitted.get().getLifecycle().getBatchId());
+            verify(token, never()).close();
+            releaseObserver.countDown();
+            assertTrue(tokenClosed.await(5, TimeUnit.SECONDS));
+            verify(observer).onCompleted();
+            verify(token).close();
+        } finally {
+            releaseObserver.countDown();
+            producer.shutdown();
+            assertTrue(producer.awaitTermination(5, TimeUnit.SECONDS));
+        }
     }
 
     @Test
