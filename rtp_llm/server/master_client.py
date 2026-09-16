@@ -40,6 +40,7 @@ route_logger = logging.getLogger("route_logger")
 
 SUCCESS_CODE = 200
 VIT_ROUTE_STALE_CODE = 8408
+DEFAULT_REQUEST_TIMEOUT_SEC = 30.0
 # gRPC = HTTP + 2 for FlexLB's own servers (consistent with FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET).
 # This is NOT the same as the backend engine offset (HTTP+1)—see CommonConstants.GRPC_PORT_OFFSET.
 FLEXLB_GRPC_PORT_OFFSET = 2

@@ -63,7 +63,7 @@ def _runtime_exception_reason(error: FtRuntimeException) -> str:
     return f"runtime_{error.exception_type.category.value}"
 
 
-def _merge_embedding_results(results: list[MMEmbeddingRes]) -> MMEmbeddingRes:
+def merge_embedding_results(results: list[MMEmbeddingRes]) -> MMEmbeddingRes:
     embeddings, position_ids, extra_input = [], [], []
     hashes = [] if all(result.feature_hashes is not None for result in results) else None
     for result in results:
@@ -75,6 +75,9 @@ def _merge_embedding_results(results: list[MMEmbeddingRes]) -> MMEmbeddingRes:
         if hashes is not None:
             hashes.extend(result.feature_hashes)
     return MMEmbeddingRes(embeddings, position_ids or None, extra_input or None, hashes)
+
+
+_merge_embedding_results = merge_embedding_results
 
 
 def _mark_vit_error_reported(context, status_details=None) -> None:
@@ -170,7 +173,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 request_id=multimodal_inputs.request_id,
                 cancellation_event=cancellation_event,
             )
-            res = _merge_embedding_results(results)
+            res = merge_embedding_results(results)
             output_pb = self._transport.transfer(multimodal_inputs, res)
             kmonitor.report(
                 GaugeMetrics.VIT_RPC_SERVER_HANDLER_RT_US_METRIC,

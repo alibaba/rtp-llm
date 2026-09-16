@@ -1545,7 +1545,7 @@ class ServerArgsSetTest(TestCase):
         )
         self.assertEqual(
             config["server_config"]["grpc.max_receive_message_length"],
-            64 * 1024 * 1024,
+            expected,
         )
 
 

@@ -13,7 +13,10 @@ class GrpcHostChannelPoolTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         """Setup test environment"""
         self.test_host = "localhost:50051"
-        self.test_options = [("grpc.max_receive_message_length", 1000000)]
+        self.test_options = [
+            ("grpc.max_receive_message_length", 1000000),
+            ("grpc.enable_http_proxy", 0),
+        ]
         self.pool = GrpcHostChannelPool(
             options=self.test_options, cleanup_interval=3600
         )

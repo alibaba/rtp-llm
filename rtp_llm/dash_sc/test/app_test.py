@@ -97,6 +97,9 @@ class BindBarrierTest(TestCase):
         app._shutdown_event = Mock()
         app._install_signal_handlers = Mock()
         app._start_enqueue_loop = Mock(return_value=Mock())
+        app.dash_sc_grpc_config = SimpleNamespace(get_server_config=lambda: {})
+        app._enqueue_loop = None
+        app._enqueue_loop_thread = None
         app.stop = Mock()
 
         events = []
@@ -211,6 +214,9 @@ class TraceTelemetryLifecycleTest(TestCase):
         app._shutdown_event = MagicMock()
         app._install_signal_handlers = MagicMock()
         app._start_enqueue_loop = MagicMock(return_value=MagicMock())
+        app.dash_sc_grpc_config = SimpleNamespace(get_server_config=lambda: {})
+        app._enqueue_loop = None
+        app._enqueue_loop_thread = None
         app.stop = MagicMock()
 
         with patch.object(

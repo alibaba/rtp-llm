@@ -470,7 +470,10 @@ class RpcTimeoutTest(TestCase):
         request.multimodal_inputs.add().mm_preprocess_config.mm_timeout_ms = 2000
         request.multimodal_inputs.add().mm_preprocess_config.mm_timeout_ms = 3500
 
-        self.assertEqual(_resolve_rpc_timeout_seconds(request, 123.0), 3.5)
+        self.assertEqual(
+            _resolve_rpc_timeout_seconds(request, 123.0),
+            3.5 + VIT_WORKER_RPC_TIMEOUT_MARGIN_SECONDS,
+        )
 
 
 class LoadBalancerLeastConnectionsTest(TestCase):

@@ -245,6 +245,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         visitor.seq_size_per_block = 128
         visitor._page_rr_route_cache_keys = True
         visitor._page_rr_cp_size = 4
+        visitor._mm_cache_routing = False
         visitor._report_recent_cache_key_metrics = lambda _keys: None
         visitor.master_client = _FakeMasterClient()
         generate_input = _FakeRouteInput()
@@ -272,6 +273,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         visitor._report_recent_cache_key_metrics = lambda keys: None
         visitor._page_rr_route_cache_keys = False
         visitor._page_rr_cp_size = 1
+        visitor._mm_cache_routing = False
 
         input = _FakeRouteInput()
 

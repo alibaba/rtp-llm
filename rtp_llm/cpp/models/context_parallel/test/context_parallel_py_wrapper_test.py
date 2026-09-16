@@ -186,7 +186,7 @@ class TestContextParallelProcessor(unittest.TestCase):
                 [feature],
                 [],
                 torch.empty(0, dtype=torch.int32),
-                r"multimodal_features \(1\) and mm_features_locs \(0\) length mismatch",
+                r"multimodal_features require mm_features_locs",
             ),
             (
                 [feature],

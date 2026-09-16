@@ -313,7 +313,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         async def route(*args, **kwargs):
             if kwargs.get("vit_only"):
                 return FlexlbResponse(
-                    role_addrs=[self.vit], result={"server_status": [self.status]}
+                    role_addrs=[self.vit], server_status=[self.status]
                 )
             self.assertIsNone(saved[0]())
             self.assertTrue(kwargs["block_cache_keys"])
@@ -351,7 +351,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             FlexlbResponse.error_response(404),
             FlexlbResponse(
                 role_addrs=[self.prefill, self.vit],
-                result={"server_status": [self.status]},
+                server_status=[self.status],
             ),
             FlexlbResponse.ok([self.prefill, self.vit]),
         ]
@@ -380,7 +380,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             FlexlbResponse.error_response(VIT_ROUTE_STALE_CODE),
             FlexlbResponse(
                 role_addrs=[self.prefill, new_vit],
-                result={"server_status": [new_status]},
+                server_status=[new_status],
             ),
             FlexlbResponse.ok([self.prefill, new_vit]),
         ]
@@ -515,7 +515,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         client = MasterClient()
         client.get_backend_role_addrs = AsyncMock(
             side_effect=[
-                FlexlbResponse(role_addrs=[vit], result={"server_status": [status]}),
+                FlexlbResponse(role_addrs=[vit], server_status=[status]),
                 FlexlbResponse.ok([self.prefill, vit]),
             ]
         )

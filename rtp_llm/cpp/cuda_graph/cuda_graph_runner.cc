@@ -1203,7 +1203,7 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs,
         }
         return false;
     }
-    const bool draft_prefill_graph_mode = num_tokens_per_bs_ != max_seq_len_;
+    const bool draft_prefill_graph_mode = isMtpDraftPrefillCudaGraph();
     if (draft_prefill_graph_mode) {
         const int expected_tokens = state.current_batch_size * num_tokens_per_bs_;
         if (state.current_seq_len != expected_tokens) {

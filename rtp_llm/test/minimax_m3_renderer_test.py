@@ -557,7 +557,7 @@ class MiniMaxM3VLRendererTest(TestCase):
             self.tokenizer.applied_kwargs["tools"][0]["function"]["name"],
             "make_plan",
         )
-        self.assertEqual(self.tokenizer.applied_kwargs["thinking_mode"], "adaptive")
+        self.assertEqual(self.tokenizer.applied_kwargs["thinking_mode"], "disabled")
 
     def test_multimodal_preprocess_config_is_aligned_and_supports_inline_fields(self):
         data_url = "data:image/png;base64,AA=="

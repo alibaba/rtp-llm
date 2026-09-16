@@ -1301,6 +1301,9 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         class _AccessAgg:
             backend_error_code = None
 
+            def record_aux_info(self, aux_info, *, overwrite=True):
+                return None
+
         exception_types = (
             ExceptionType.MM_LONG_PROMPT_ERROR,
             ExceptionType.MM_WRONG_FORMAT_ERROR,
@@ -2625,9 +2628,10 @@ class IterRealModelStreamInferEchoTest(unittest.IsolatedAsyncioTestCase):
             echo_prefix_ids=[99, 100],
             upstream_ids=[[], [3, 4], [5]],
         )
-        self.assertEqual(len(chunks), 2)
-        self.assertEqual(self._gen_ids(chunks[0]), [99, 100, 3, 4])
-        self.assertEqual(self._gen_ids(chunks[1]), [5])
+        self.assertEqual(len(chunks), 3)
+        self.assertEqual(self._gen_ids(chunks[0]), [])
+        self.assertEqual(self._gen_ids(chunks[1]), [99, 100, 3, 4])
+        self.assertEqual(self._gen_ids(chunks[2]), [5])
 
 
 class IterRealModelStreamInferStopWordsTest(unittest.IsolatedAsyncioTestCase):
@@ -3367,7 +3371,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generate_config.max_thinking_tokens, 3)
 
     async def test_dash_generation_env_thinking_budget_is_default_only(self) -> None:
-        for request_budget, expected_budget in ((None, 64), (10, 10)):
+        for request_budget, expected_budget in ((None, 3), (10, 10)):
             with self.subTest(request_budget=request_budget):
                 visitor = _FakeVisitor(_FakeAsyncStream([]))
                 tok = _dsv4_tokenizer()

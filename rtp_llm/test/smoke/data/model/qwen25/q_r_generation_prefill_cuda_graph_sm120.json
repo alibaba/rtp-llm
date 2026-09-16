@@ -39,7 +39,7 @@
             },
             "compare_config": {
                 "required_aux_info": {
-                    "generation_prefill_cuda_graph_status": "graph_input_shape_mismatch"
+                    "generation_prefill_cuda_graph_status": "replayed"
                 }
             }
         },
@@ -89,7 +89,7 @@
             },
             "compare_config": {
                 "required_aux_info": {
-                    "generation_prefill_cuda_graph_status": "graph_input_shape_mismatch"
+                    "generation_prefill_cuda_graph_status": "replayed"
                 }
             }
         },
@@ -110,13 +110,13 @@
                     {
                         "response": " Flask is a lightweight web framework for Python,",
                         "aux_info": {
-                            "generation_prefill_cuda_graph_status": "graph_input_shape_mismatch"
+                            "generation_prefill_cuda_graph_status": "replayed"
                         }
                     },
                     {
                         "response": "\n\nI am trying to use the screen\\_",
                         "aux_info": {
-                            "generation_prefill_cuda_graph_status": "graph_input_shape_mismatch"
+                            "generation_prefill_cuda_graph_status": "replayed"
                         }
                     }
                 ]

@@ -450,7 +450,7 @@ class MMSchedulerTest(TestCase):
         sched = MMScheduler(fake, max_batch_images=5)
         try:
             with self.assertRaisesRegex(RuntimeError, "has no work estimate"):
-                sched.submit_and_wait([_FakeWorkItem()])
+                sched.submit_and_wait([_FakeWorkItem(), _FakeWorkItem()])
         finally:
             sched.close()
 
@@ -461,8 +461,8 @@ class MMSchedulerTest(TestCase):
         item = _FakeWorkItem()
         item.work_estimate = object()
         try:
-            with self.assertRaisesRegex(TypeError, "must be MMWorkEstimate"):
-                sched.submit_and_wait([item])
+            with self.assertRaisesRegex(RuntimeError, "must be MMWorkEstimate"):
+                sched.submit_and_wait([item, _FakeWorkItem()])
         finally:
             sched.close()
 

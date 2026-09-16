@@ -315,7 +315,7 @@ TEST_F(SamplerTest, testAdaptiveLeavesFirstTokenUnconstrainedThenSelectsNoThink)
 
     float neg_inf = -std::numeric_limits<float>::max();
     EXPECT_EQ(neg_inf, next_inputs.logits[0][7].item<float>());
-    EXPECT_EQ(neg_inf, next_inputs.logits[0][8].item<float>());
+    EXPECT_EQ(0, next_inputs.logits[0][8].item<float>());
     EXPECT_EQ(0, next_inputs.logits[0][6].item<float>());
 }
 

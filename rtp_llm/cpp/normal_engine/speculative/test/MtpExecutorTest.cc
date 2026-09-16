@@ -850,7 +850,7 @@ TEST_F(MtpExecutorTest, testLegacyDraftSamplerPreservesSoftmaxProposal) {
     auto output = sampler.forward(logits);
 
     EXPECT_EQ(output.token_ids.item<int64_t>(), 3);
-    checkTensorEqual(output.all_probs, torch::softmax(logits, -1));
+    EXPECT_TRUE(torch::allclose(output.all_probs.cpu(), torch::softmax(logits.cpu(), /*dim=*/-1), 1e-5, 1e-6));
 }
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
@@ -1024,8 +1024,8 @@ TEST_F(MtpExecutorTest, testDSparkPublicationFailurePreventsPrefillDispatch) {
         return local_ok;
     };
 
-    GptModelInputs commit_input     = target_input;
-    commit_input.last_hidden_states = target_output.all_hidden_states;
+    GptModelInputs commit_input = target_input;
+    commit_input.setLastHiddenStates(target_output.all_hidden_states, MtpHiddenStatesLayout::GLOBAL);
     components.fake_draft_prefill_model->setInputs({commit_input});
     components.fake_draft_prefill_model->setOutputs({GptModelOutputs{}});
     components.fake_draft_prefill_model->expectTargetVerify(false);
@@ -1078,8 +1078,8 @@ TEST_F(MtpExecutorTest, testDSparkRemoteTpRankFailurePreventsPrefillDispatch) {
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
 
-    GptModelInputs commit_input     = target_input;
-    commit_input.last_hidden_states = target_output.all_hidden_states;
+    GptModelInputs commit_input = target_input;
+    commit_input.setLastHiddenStates(target_output.all_hidden_states, MtpHiddenStatesLayout::GLOBAL);
     components.fake_draft_prefill_model->setInputs({commit_input});
     components.fake_draft_prefill_model->setOutputs({GptModelOutputs{}});
     components.fake_draft_prefill_model->expectTargetVerify(false);

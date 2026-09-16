@@ -457,6 +457,7 @@ py_test(
     srcs = ["minimax_m3_eagle1_test.py"],
     deps = ["//rtp_llm:testlib"],
     timeout = "short",
+    exec_properties = {"gpu": "A10"},
 )
 
 py_test(
@@ -464,6 +465,7 @@ py_test(
     srcs = ["minimax_m3_eagle3_test.py"],
     deps = ["//rtp_llm:testlib"],
     timeout = "short",
+    exec_properties = {"gpu": "A10"},
 )
 
 py_test(
@@ -471,4 +473,5 @@ py_test(
     srcs = ["minimax_m3_mtp_test.py"],
     deps = ["//rtp_llm:testlib"],
     timeout = "short",
+    exec_properties = {"gpu": "A10"},
 )

@@ -2154,6 +2154,7 @@ class MiniMaxM3VLPreprocessTest(TestCase):
 
     def test_max_total_pixels_is_the_default_max_pixels(self):
         from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.image_processor import (
+            IMAGE_MAX_TOTAL_PIXELS,
             smart_resize,
         )
 

@@ -396,7 +396,7 @@ class DashScGrpcRequestTest(TestCase):
         op = parse_request_controls(req)
 
         self.assertEqual(json.loads(sp.response_format), {"type": "json_object"})
-        self.assertIsNone(op.enable_thinking)
+        self.assertIs(op.enable_thinking, False)
 
     def test_build_model_infer_request_preserves_json_controls(self) -> None:
         req = build_model_infer_request(
@@ -679,7 +679,7 @@ class DashScGrpcRequestTest(TestCase):
 
     def test_default_thinking_budget_follows_max_new_tokens(self) -> None:
         generate_config = SamplingParams(max_new_tokens=123).to_generate_config(
-            other=OtherParams(enable_thinking=True)
+            request_controls=DashScRequestControls(enable_thinking=True)
         )
 
         self.assertEqual(generate_config.max_new_tokens, 123)
@@ -693,7 +693,7 @@ class DashScGrpcRequestTest(TestCase):
         )
 
         generate_config = sampling.to_generate_config(
-            other=OtherParams(enable_thinking=True)
+            request_controls=DashScRequestControls(enable_thinking=True)
         )
 
         self.assertEqual(generate_config.max_new_tokens, 80)
@@ -1071,8 +1071,8 @@ class DashScGrpcRequestTest(TestCase):
     def test_parse_multimodal_parts_invalid_json(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["payload"].string_param = "not json"
-        # Fail-open: returns [] instead of raising.
-        self.assertEqual(parse_multimodal_parts_from_request(req), [])
+        with self.assertRaises(DashScParameterError):
+            parse_multimodal_parts_from_request(req)
 
     def test_parse_multimodal_parts_url_as_string(self) -> None:
         # Defensive: hand-built clients may pass image_url as plain string.

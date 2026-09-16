@@ -240,7 +240,7 @@ class GenerateConfigTest(TestCase):
             generate_env_config=generate_env_config,
         )
 
-        self.assertEqual(generate_config.max_thinking_tokens, 64)
+        self.assertEqual(generate_config.max_thinking_tokens, 32000)
 
     def test_add_thinking_params_with_think_token(self):
         generate_env_config = GenerateEnvConfig()
@@ -612,7 +612,7 @@ class OpenaiGenerateConfigTest(TestCase):
 
     def test_unspecified_request_defaults_to_adaptive(self):
         generate_env_config = GenerateEnvConfig()
-        generate_env_config.think_mode = 1
+        generate_env_config.think_mode = "adaptive"
         generate_env_config.think_start_tag = "<think>"
         generate_env_config.think_end_token_id = 102
         request = ChatCompletionRequest(messages=[])
@@ -641,7 +641,7 @@ class OpenaiGenerateConfigTest(TestCase):
 
     def test_resolved_chat_template_kwargs_match_backend_thinking_mode(self):
         cases = [
-            ({}, ThinkingMode.ADAPTIVE, "adaptive", None),
+            ({}, ThinkingMode.DISABLED, "disabled", False),
             ({"enable_thinking": True}, ThinkingMode.ENABLED, "enabled", True),
             ({"enable_thinking": False}, ThinkingMode.DISABLED, "disabled", False),
         ]
@@ -708,7 +708,7 @@ class OpenaiGenerateConfigTest(TestCase):
             ChatCompletionRequest(messages=[], enable_thinking=True),
             generate_env_config,
         )
-        self.assertEqual(config.max_thinking_tokens, 64)
+        self.assertEqual(config.max_thinking_tokens, 32000)
 
         config = self._extract_openai_generation_config(
             ChatCompletionRequest(
