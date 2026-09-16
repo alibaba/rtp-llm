@@ -138,6 +138,37 @@ TEST(MtpExecutorPolicyTest, DSparkPositionStateAdvancesByAcceptedLength) {
     EXPECT_TRUE(next_positions.is_cuda());
 }
 
+TEST(MtpExecutorPolicyTest, TorchSpecDSparkGammaFiveAndSevenAdvanceEveryAcceptedLength) {
+    for (const int32_t gamma: {5, 7}) {
+        SCOPED_TRACE(gamma);
+        constexpr int64_t batch_size      = 2;
+        constexpr int64_t position_factor = 3;
+        const int64_t     verify_width    = gamma + 1;
+        auto verify_positions = torch::arange(0,
+                                              batch_size * verify_width * position_factor,
+                                              torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        for (int32_t accepted_draft = 0; accepted_draft <= gamma; ++accepted_draft) {
+            // accept_len includes the bonus/replacement target token, hence
+            // every accepted_draft count advances by one through gamma + 1.
+            auto accept_len = torch::tensor({accepted_draft + 1, gamma - accepted_draft + 1},
+                                            torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+            auto next = MtpExecutor::advanceDSparkPositionIds(verify_positions, accept_len, batch_size, verify_width);
+            auto expected = torch::tensor(std::vector<int32_t>{accepted_draft + 1,
+                                             accepted_draft + 2,
+                                             accepted_draft + 3,
+                                             static_cast<int32_t>(verify_width * position_factor + gamma
+                                                                  - accepted_draft + 1),
+                                             static_cast<int32_t>(verify_width * position_factor + gamma
+                                                                  - accepted_draft + 2),
+                                             static_cast<int32_t>(verify_width * position_factor + gamma
+                                                                  - accepted_draft + 3)},
+                                          torch::kInt32);
+            EXPECT_TRUE(torch::equal(next.reshape({-1}).cpu(), expected));
+            EXPECT_TRUE(next.is_cuda());
+        }
+    }
+}
+
 struct MtpExecutorTestConfig {
     size_t  max_seq_len            = 2048;
     size_t  vocab_size             = 4;
@@ -1848,6 +1879,79 @@ TEST_F(MtpExecutorTest, testDSparkDraftUsesDenseSequentialMarkovDistribution) {
         auto sampled_token = output.token_ids.select(1, step).to(torch::kLong);
         EXPECT_TRUE(actual_q.gather(1, sampled_token.unsqueeze(1)).gt(0).all().item<bool>());
         previous_tokens = std::move(sampled_token);
+    }
+}
+
+TEST_F(MtpExecutorTest, testDSparkBFloat16MarkovUsesPreviousProposalAtGammaFiveAndSeven) {
+    constexpr int32_t batch_size = 2;
+    constexpr int32_t vocab_size = 5;
+    for (const int32_t gamma: {5, 7}) {
+        SCOPED_TRACE(gamma);
+        MtpExecutorTestConfig test_config;
+        test_config.vocab_size           = vocab_size;
+        test_config.gen_num_per_cycle    = gamma;
+        test_config.vocab_size_override  = vocab_size;
+        test_config.sp_type              = SP_TYPE_DSPARK;
+        test_config.dspark_mask_token_id = 0;
+        auto components                  = createMtpExecutorComponents(test_config);
+
+        auto first_stream = createContextStream(
+            components.model_config, components.runtime_config, components.resource_context, {0, 1});
+        first_stream->generateConfig()->do_sample   = true;
+        first_stream->generateConfig()->top_k       = 0;
+        first_stream->generateConfig()->top_p       = 0.4f;
+        first_stream->generateConfig()->temperature = 0.7f;
+        auto second_stream = createContextStream(
+            components.model_config, components.runtime_config, components.resource_context, {1, 2});
+        second_stream->generateConfig()->do_sample   = true;
+        second_stream->generateConfig()->top_k       = 0;
+        second_stream->generateConfig()->top_p       = 0.9f;
+        second_stream->generateConfig()->temperature = 1.7f;
+        StreamGroups stream_groups({first_stream, second_stream});
+
+        auto markov_w1 = torch::tensor({0.0f, 0.3f, 0.6f, 0.9f, 1.2f}, torch::kBFloat16)
+                             .reshape({vocab_size, 1})
+                             .to(torch::kCUDA);
+        auto markov_w2 = torch::tensor({-0.4f, -0.2f, 0.0f, 0.2f, 0.4f}, torch::kBFloat16)
+                             .reshape({vocab_size, 1})
+                             .to(torch::kCUDA);
+        components.executor->dspark_markov_w1_ = markov_w1;
+        components.executor->dspark_markov_w2_ = markov_w2;
+
+        auto base_logits = torch::zeros(
+            {batch_size, gamma, vocab_size}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        // Make the first proposal a different, effectively deterministic token
+        // for both streams, so step one must not keep conditioning on anchors.
+        base_logits.select(1, 0).select(1, 2).fill_(40.0f);
+        auto anchors = torch::tensor({0, 1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+        auto output = components.executor->sampleDSparkDraft(
+            stream_groups, base_logits.reshape({batch_size * gamma, vocab_size}), anchors);
+
+        ASSERT_EQ((std::vector<int64_t>{batch_size, gamma, vocab_size}), output.all_probs.sizes().vec());
+        EXPECT_EQ((std::vector<int32_t>{2, 2}), toVec<int32_t>(output.token_ids.select(1, 0).cpu()));
+        EXPECT_TRUE(torch::allclose(output.all_probs.sum(-1).cpu(), torch::ones({batch_size, gamma})));
+        EXPECT_EQ(output.all_probs.gt(0).sum().item<int64_t>(), batch_size * gamma * vocab_size);
+
+        auto previous_tokens = anchors.to(torch::kLong);
+        auto temperatures = torch::tensor({0.7f, 1.7f}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))
+                                .unsqueeze(1);
+        for (int64_t step = 0; step < gamma; ++step) {
+            // Preserve BF16 matmul rounding before converting its bias to the
+            // FP32 base-logit domain, exactly as sampleDSparkDraft does.
+            auto markov_bias =
+                torch::mm(markov_w1.index_select(0, previous_tokens), markov_w2.transpose(0, 1)).to(torch::kFloat32);
+            auto expected_q = torch::softmax((base_logits.select(1, step) + markov_bias) / temperatures, -1);
+            EXPECT_TRUE(torch::allclose(output.all_probs.select(1, step), expected_q, 1e-5, 1e-6));
+            if (step == 1) {
+                auto anchor_bias =
+                    torch::mm(markov_w1.index_select(0, anchors.to(torch::kLong)), markov_w2.transpose(0, 1))
+                        .to(torch::kFloat32);
+                auto anchor_q = torch::softmax((base_logits.select(1, step) + anchor_bias) / temperatures, -1);
+                EXPECT_FALSE(torch::allclose(expected_q, anchor_q));
+            }
+            previous_tokens = output.token_ids.select(1, step).to(torch::kLong);
+        }
     }
 }
 
