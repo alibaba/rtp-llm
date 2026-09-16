@@ -620,8 +620,9 @@ class MasterSpec:
       (LBStatusConsistencyService.getMasterHostIpPort) and SELF_TARGET
       compares bare IPs (FlexlbGrpcForwarder.sameHost) — a distinct-port
       same-IP pair breaks on all three.  Both instances share ONE
-      HIPPO_ROLE: the ZK lock path is /master_lb_leader/{HIPPO_ROLE}, so
-      the same roleId is what makes them mutual master/follower.
+      deployment identity: BIZ_NAME:DEPLOYMENT_NAME:ZONE_NAME. The ZK lock
+      path is /master_lb_leader/{deploymentId}, so the same deploymentId
+      makes them mutual master/follower.
 
     RULING (2026-09-02): the same-host distinct-IP Tier-3 layout is
     DEAD — the election localIp comes only from InetAddress.getLocalHost()
@@ -654,8 +655,8 @@ class MasterSpec:
     # RULING in the docstring above) — kept as the env-injection contract
     # reference for the phase-2 dual-container Tier-3.
     advertised_ip: Optional[str] = None
-    # Default: BOTH instances share spec.label's role (mutual backup).
-    hippo_role: Optional[str] = None
+    # Default: BOTH instances share spec.label's deployment (mutual backup).
+    deployment_name: Optional[str] = None
     log_dir_name: Optional[str] = None  # default logs_{name} under run_dir
     extra_env: dict = field(default_factory=dict)  # per-master overrides
     extra_args: list = field(default_factory=list)  # per-master CLI args
@@ -678,7 +679,7 @@ class MasterSpec:
             "management_port": self.management(),
             "bind_ip": self.bind_ip,
             "advertised_ip": self.advertised_ip,
-            "hippo_role": self.hippo_role,
+            "deployment_name": self.deployment_name,
             "extra_env": self.extra_env,
             "extra_args": self.extra_args,
         }
@@ -1326,7 +1327,7 @@ def flexlb_config_for_profile(profile: str, **overrides) -> str:
 
 # Master env that is actually consumed by the v2 code:
 #   FLEXLB_CONFIG          — set per spec from the profile generator below
-#   HIPPO_ROLE             — flexlb-sync (zookeeper elect / LB status)
+#   BIZ_NAME / DEPLOYMENT_NAME / ZONE_NAME — deployment identity for ZK / Nacos
 #   OTEL_TRACE_SKIP_PATTERN — flexlb-api application.yml (spring tracing)
 #   OTEL_EXPORTER_OTLP_ENDPOINT — OpenTelemetry SDK exporter ("none" disables)
 #   FLEXLB_MONITOR_PROVIDER / FLEXLB_MONITOR_METRIC_WHITELIST — enable and
@@ -1605,10 +1606,10 @@ class EnvManager:
     def _master_env(self, env: FlexEnv, mspec: Optional[MasterSpec] = None) -> dict:
         """Master JVM env.
 
-        *mspec* is None on the single-master legacy path (byte-identical
-        behaviour).  A MasterSpec layers the per-instance keys on top of
-        the shared base: HIPPO_ROLE (default = the shared label role, the
-        mutual-backup pairing), FLEXLB_ADVERTISED_IP (Tier-2/3),
+        *mspec* is None for a single master. A MasterSpec layers the
+        per-instance keys on top of the shared base: DEPLOYMENT_NAME
+        (default = the shared label deployment, the mutual-backup pairing),
+        FLEXLB_ADVERTISED_IP (Tier-2/3),
         FLEXLB_SYNC_CONSISTENCY_CONFIG (Tier-2/3, built from the live ZK
         helper connectString) and the per-instance extra_env.
         """
@@ -1639,7 +1640,9 @@ class EnvManager:
         env.pv_log_path = app_log_dir / "pv.log"
         if spec.master_profile != "none":
             menv["FLEXLB_CONFIG"] = flexlb_config_for_profile(spec.master_profile)
-        menv["HIPPO_ROLE"] = f"flexlb_ft_{spec.label}"
+        menv["BIZ_NAME"] = "flexlb_ft"
+        menv["DEPLOYMENT_NAME"] = spec.label
+        menv["ZONE_NAME"] = "master"
         if spec.discovery == "file":
             payload = json.loads(env.endpoint_file.read_text(encoding="utf-8"))
             for key, value in payload.get("env", {}).items():
@@ -1686,8 +1689,8 @@ class EnvManager:
         if mspec is not None:
             # Per-instance layer (HA dual-master path only — the legacy
             # single-master path keeps mspec None and never reaches here).
-            if mspec.hippo_role:
-                menv["HIPPO_ROLE"] = mspec.hippo_role
+            if mspec.deployment_name:
+                menv["DEPLOYMENT_NAME"] = mspec.deployment_name
             if mspec.advertised_ip:
                 menv["FLEXLB_ADVERTISED_IP"] = mspec.advertised_ip
             if spec.zk_consistency is not None:

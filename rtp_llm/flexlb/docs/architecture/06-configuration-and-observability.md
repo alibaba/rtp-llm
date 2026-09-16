@@ -124,7 +124,17 @@ eligible 请求绑定的快照读取 B/等待/规划预算，并在下一个配�
 未显式配置 DataId 时，部署标识优先使用
 `SPECTRUM_WORKSPACE_ID`、`SPECTRUM_APPLICATION_NAME`、
 `SPECTRUM_DEPLOYMENT_NAME` 组成
-`spectrum:<workspace>:<application>:<deployment>`；旧环境回退 `HIPPO_ROLE`。
+`spectrum:<workspace>:<application>:<deployment>`。Spectrum 三元组不完整时，
+要求 `BIZ_NAME`、`DEPLOYMENT_NAME`、`ZONE_NAME` 全部非空，依次以冒号拼接为
+`<bizName>:<deploymentName>:<zoneName>`，例如 `dash_pd:ea118_RTX_PRO_5000_72GB:master`。
+变量值会去除首尾空白。两组三元组均不完整时启动失败，错误信息列出六个字段及其值；
+`null` 表示变量未设置或只有空白。使用第二组三元组时，部署身份不属于 Spectrum，不能用于 UniConfig。
+部署标识同时用于 ZooKeeper 选举和主节点变更通知；
+显式设置 `FLEXLB_NACOS_DATA_ID` 只覆盖 Nacos DataId。
+
+选中 Nacos 配置来源时，启动阶段必须读取到非空配置正文。配置不存在、正文为空或只有空白、
+读取异常均导致启动失败。配置缺失或空白的错误包含 DataId、group 和 namespace；读取异常保留原始原因。
+启动过程不回退其他 DataId、环境变量配置或默认配置。
 
 UniConfig / Nacos 的 v1 部分更新示例：
 

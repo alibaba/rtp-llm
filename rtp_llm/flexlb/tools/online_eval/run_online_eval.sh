@@ -180,7 +180,9 @@ FLEXLB_MONITOR_ENABLED="${FLEXLB_MONITOR_ENABLED:-true}"
 # closed (no flexlb_* series at all); use the bare "flexlb_" prefix to
 # expose everything flexlb_*.
 FLEXLB_MONITOR_METRIC_WHITELIST="${FLEXLB_MONITOR_METRIC_WHITELIST:-flexlb_app_cache_,flexlb_app_flexlb_batcher_queue_size,flexlb_app_flexlb_inflight_max_age_ms,flexlb_app_flexlb_inflight_ttl,flexlb_app_engine_balancing_master_dispatch_reason_total,flexlb_app_engine_balancing_master_batch_size,flexlb_auto_tpm_request_count,flexlb_app_engine_balancing_master_all_qps,flexlb_app_flexlb_scheduler_inflight_size,flexlb_app_flexlb_inflight_batch_count,flexlb_app_flexlb_inflight_request_count,flexlb_auto_tpm_decode_reserved_count,flexlb_auto_tpm_decode_running_count}"
-HIPPO_ROLE="${HIPPO_ROLE:-test}"
+BIZ_NAME="${BIZ_NAME:-flexlb_eval}"
+DEPLOYMENT_NAME="${DEPLOYMENT_NAME:-test}"
+ZONE_NAME="${ZONE_NAME:-master}"
 
 DEFAULT_FLEXLB_CONFIG='{
   "schemaVersion": 2,
@@ -228,7 +230,6 @@ DEFAULT_FLEXLB_CONFIG='{
 }'
 OTEL_TRACE_SKIP_PATTERN="${OTEL_TRACE_SKIP_PATTERN:-.*}"
 OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-none}"
-HIPPO_ROLE="${HIPPO_ROLE:-flexlb_eval_master}"
 
 # Optional file-based service discovery (dynamic engine add/remove).
 # Empty (default) = disabled: mock engine keeps the env-file (NoOp discovery)
@@ -1025,7 +1026,9 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
       "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
       "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
       "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
-      "HIPPO_ROLE=${HIPPO_ROLE}" \
+      "BIZ_NAME=${BIZ_NAME}" \
+      "DEPLOYMENT_NAME=${DEPLOYMENT_NAME}" \
+      "ZONE_NAME=${ZONE_NAME}" \
       "FLEXLB_LOG_PATH=${FLEXLB_LOG_PATH}" \
       bash -lc "${FLEXLB_START_CMD}" >"${RUN_DIR}/flexlb.log" 2>&1 &
   else
@@ -1043,7 +1046,9 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
       "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
       "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
       "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
-      "HIPPO_ROLE=${HIPPO_ROLE}" \
+      "BIZ_NAME=${BIZ_NAME}" \
+      "DEPLOYMENT_NAME=${DEPLOYMENT_NAME}" \
+      "ZONE_NAME=${ZONE_NAME}" \
       "FLEXLB_LOG_PATH=${FLEXLB_LOG_PATH}" \
       java -XX:StartFlightRecording=filename=${JFR_FILE},settings=profile,duration=${JFR_DURATION},disk=true,maxsize=256m,dumponexit=true "${JAVA_HEAP_OPTS[@]}" "${JAVA_MODULE_OPTS[@]}" "${JVM_SYSTEM_PROPS[@]}" -jar "${FLEXLB_JAR}" \
       --server.port="${FLEXLB_HTTP_PORT}" \
