@@ -956,7 +956,7 @@ def _run_rank():
     ]
     starts, records, rejected_batches = [0, 0], [], []
     for epoch, lengths in enumerate(((3, 1), (130, 18), (1000, 1028))):
-        read_queries = (4, 1, 32)[epoch]
+        read_queries = (cp_attention._READ_QUERIES, 1, 32)[epoch]
         if epoch == 0:
             os.environ.pop("DSV41_CP_READ_QUERIES", None)
         else:
@@ -989,7 +989,7 @@ def _run_rank():
                 ).contiguous()
                 local.masked_fill_(~context.valid[:, None], torch.nan)
                 if epoch == layer == index == 0:
-                    for value in ("0", "33", "-1", "not-an-integer"):
+                    for value in ("0", "513", "-1", "not-an-integer"):
                         with patch.dict(os.environ, {"DSV41_CP_READ_QUERIES": value}):
                             try:
                                 models[layer](local, context)
@@ -1113,7 +1113,7 @@ def _run_rank():
         for index, context in enumerate(contexts):
             _compare_pages(layout, context, references[index])
             assert context.completed_layers == set(_LAYERS)
-            assert context.max_gather_live_bytes <= 64 * 1024 * 1024
+            assert context.max_gather_live_bytes <= cp_attention.MAX_GATHER_BYTES
             assert context.gather_count > 0
             if epoch == 0 and rank >= 3:
                 assert not bool(contexts[0].valid.any().item())

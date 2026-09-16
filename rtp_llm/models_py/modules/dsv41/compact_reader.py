@@ -25,7 +25,10 @@ from rtp_llm.models_py.modules.dsv41._compact_reader_triton import (
 )
 from rtp_llm.models_py.modules.dsv41.cache_layout import ENCODINGS, CacheRegion
 
-MAX_GATHER_BYTES = 64 * 1024 * 1024
+# Guard against runaway receive lifetimes, not a hardware limit. Raised from
+# 64 MiB so the CP query-tile A/B (up to 512 rows) stays inside the budget:
+# 512 rows x SWA_WINDOW x 528B x 24 transient ~= 830 MiB.
+MAX_GATHER_BYTES = 1024 * 1024 * 1024
 _FORMAT_IDS = {CacheRegion.SWA: 0, CacheRegion.GLOBAL: 1, CacheRegion.INDEX_K: 2}
 
 

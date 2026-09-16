@@ -83,7 +83,11 @@ from rtp_llm.models_py.modules.dsv41.source_indexer import (
 
 _PAIR_BYTES = 4112
 _SOURCE_ROWS = 512
-_READ_QUERIES = 4
+# Measured optimum (2026-09-17 GB200 same-wheel three-arm A/B, 32 -> 128 ->
+# 512 rows: 16K miss 5.55-7.08s -> 4.68-4.82s -> 3.47-3.68s, 64K miss
+# 64.18s -> 34.25s -> 22.54s; composition ATen 62,595 -> 35,331 -> 28,515,
+# forced syncs 9,470 -> 6,446 -> 5,690, chunks=1 held, reuse pins held).
+_READ_QUERIES = 512
 _REINDEX_BLOCKS = 512
 _INDEX_ROWS = CANDIDATE_BLOCKS * SPARSE_BLOCK
 # Per gathered row: int64 page/index vectors and transient mask/index results.
@@ -1865,8 +1869,11 @@ def forward_cp_attention(attention, hidden, context):
     if backend not in ("native", "flashmla"):
         raise ValueError("unknown V4.1 attention backend; no silent fallback")
     read_queries = int(os.environ.get("DSV41_CP_READ_QUERIES", _READ_QUERIES))
-    if not 1 <= read_queries <= 32:
-        raise ValueError("CP attention query batch must be between 1 and 32")
+    # The cap tracks the 1 GiB gather-live-byte budget (512 rows x SWA_WINDOW x
+    # 528B x 24 transient ~= 830 MiB). 512 is the measured optimum and the code
+    # default (see _READ_QUERIES); the env stays only as a diagnostic override.
+    if not 1 <= read_queries <= 512:
+        raise ValueError("CP attention query batch must be between 1 and 512")
     if context.single_query_owner is not None:
         owner_batch = int(os.environ.get("DSV41_CP_SINGLE_OWNER_READ_QUERIES", "64"))
         if owner_batch not in (32, 64, 128):

@@ -200,9 +200,44 @@ def moe_gate(
     return weights * route_scale, indices
 
 
+def _rms_norm_native_supported(hidden, weight):
+    # Code-default on (R4-3): <=1 BF16 ulp vs the reference path measured on
+    # B300 SM103 (W10-032) and GB200 SM100 (W10-070); the env stays only as a
+    # diagnostic override.
+    return (
+        os.environ.get("DSV41_RMSNORM_NATIVE", "1") == "1"
+        and not torch.is_grad_enabled()
+        and not torch.is_autocast_enabled()
+        and hidden.is_cuda
+        and hidden.dtype == torch.bfloat16
+        and hidden.ndim >= 2
+        and hidden.numel() > 0
+        and hidden.is_contiguous()
+        and weight.ndim == 1
+        and weight.shape == (hidden.shape[-1],)
+        and weight.dtype == torch.bfloat16
+        and weight.device == hidden.device
+        and weight.is_contiguous()
+        and torch.version.cuda is not None
+        and torch.version.cuda.split(".")[0] == "13"
+        and torch.cuda.get_device_capability(hidden.device)[0] == 10
+    )
+
+
 def rms_norm(
     hidden: torch.Tensor, weight: torch.Tensor, eps: float = 1e-20
 ) -> torch.Tensor:
+    # The native kernel preserves the fp32-upcast formula; measured contract is
+    # at most one BF16 ulp from the reference path with no worse FP64 error.
+    if _rms_norm_native_supported(hidden, weight):
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        flat = hidden.view(-1, hidden.shape[-1])
+        out = torch.empty_like(flat)
+        rtp_llm_ops.rmsnorm(
+            out, flat, weight, eps, torch.cuda.current_stream().cuda_stream
+        )
+        return out.view(hidden.shape)
     values = hidden.float()
     return (
         values

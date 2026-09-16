@@ -14,6 +14,7 @@ hc_post = _math.hc_post
 hc_pre = _math.hc_pre
 identity_pre_mix = _math.identity_pre_mix
 moe_gate = _math.moe_gate
+rms_norm = _math.rms_norm
 swiglu_activation = _math.swiglu_activation
 
 
@@ -195,6 +196,82 @@ class MathTest(unittest.TestCase):
         )
         self.assertTrue(torch.equal(result[0], hidden[0]))
         self.assertTrue(torch.all(result[1] > hidden[1]).item())
+
+    @torch.inference_mode()
+    def test_rms_norm_native_matches_reference(self):
+        if self.device.type != "cuda" or torch.cuda.get_device_capability(0)[0] != 10:
+            self.skipTest("native rmsnorm requires a Blackwell CUDA device")
+        shapes = [(2, 5120), (7, 1280), (2048, 512), (4, 512, 5120), (3, 128), (1, 5120)]
+        for index, shape in enumerate(shapes):
+            torch.manual_seed(83 + index)
+            hidden = torch.randn(*shape, device=self.device).bfloat16()
+            weight = (torch.randn(shape[-1], device=self.device) * 0.5 + 1).bfloat16()
+            with patch.dict(os.environ, {"DSV41_RMSNORM_NATIVE": "0"}):
+                reference = rms_norm(hidden, weight)
+            expected = (
+                hidden.float()
+                * torch.rsqrt(hidden.float().square().mean(-1, keepdim=True) + 1e-20)
+                * weight.float()
+            ).to(hidden.dtype)
+            self.assertTrue(torch.equal(reference, expected))
+            with patch.dict(os.environ, {"DSV41_RMSNORM_NATIVE": "1"}):
+                native = rms_norm(hidden, weight)
+            ai = native.view(torch.int16).to(torch.int32)
+            bi = reference.view(torch.int16).to(torch.int32)
+            ulp = (
+                torch.where(ai >= 0, ai, -32768 - ai)
+                - torch.where(bi >= 0, bi, -32768 - bi)
+            ).abs()
+            exact = (native == reference).float().mean().item()
+            self.assertGreaterEqual(exact, 0.999, (shape, exact))
+            self.assertLessEqual(int(ulp.max().item()), 1, (shape, int(ulp.max())))
+
+    @torch.inference_mode()
+    def test_rms_norm_native_default_on(self):
+        # R4-3: with the env absent the native kernel is the default path;
+        # the result must equal the explicit env=1 arm.
+        if self.device.type != "cuda" or torch.cuda.get_device_capability(0)[0] != 10:
+            self.skipTest("native rmsnorm requires a Blackwell CUDA device")
+        torch.manual_seed(91)
+        hidden = torch.randn(2048, 512, device=self.device).bfloat16()
+        weight = (torch.randn(512, device=self.device) * 0.5 + 1).bfloat16()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DSV41_RMSNORM_NATIVE", None)
+            self.assertTrue(_math._rms_norm_native_supported(hidden, weight))
+            defaulted = rms_norm(hidden, weight)
+        with patch.dict(os.environ, {"DSV41_RMSNORM_NATIVE": "1"}):
+            explicit = rms_norm(hidden, weight)
+        self.assertTrue(torch.equal(defaulted, explicit))
+
+    @torch.inference_mode()
+    def test_rms_norm_native_fallbacks(self):
+        hidden = torch.randn(4, 5120, device=self.device).bfloat16()
+        weight = torch.randn(5120, device=self.device).bfloat16()
+        with patch.dict(os.environ, {"DSV41_RMSNORM_NATIVE": "1"}):
+            if self.device.type == "cuda" and torch.cuda.get_device_capability(0)[0] == 10:
+                self.assertTrue(_math._rms_norm_native_supported(hidden, weight))
+                self.assertFalse(
+                    _math._rms_norm_native_supported(hidden, weight.float())
+                )
+                self.assertFalse(
+                    _math._rms_norm_native_supported(hidden.float(), weight)
+                )
+                wide = torch.randn(4, 10240, device=self.device).bfloat16()
+                self.assertFalse(
+                    _math._rms_norm_native_supported(wide[:, :5120], weight)
+                )
+                self.assertFalse(
+                    _math._rms_norm_native_supported(hidden, weight.cpu())
+                )
+        with patch.dict(os.environ, {"DSV41_RMSNORM_NATIVE": "0"}):
+            self.assertFalse(_math._rms_norm_native_supported(hidden, weight))
+        mixed = rms_norm(hidden, weight.float())
+        expected = (
+            hidden.float()
+            * torch.rsqrt(hidden.float().square().mean(-1, keepdim=True) + 1e-20)
+            * weight.float()
+        ).to(hidden.dtype)
+        self.assertTrue(torch.equal(mixed, expected))
 
 
 if __name__ == "__main__":
