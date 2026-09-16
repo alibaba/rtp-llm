@@ -207,6 +207,7 @@ def test_collect_remote_files_includes_tipc_jit_sources(tmp_path):
 def test_collect_repo_runtime_files_includes_source_contracts(tmp_path):
     source_contracts = {
         "3rdparty/cub_compat.h",
+        "3rdparty/flashinfer/flashinfer_cu13.BUILD",
         "arch_config/arch_select.bzl",
         "rtp_llm/cpp/cache/test/BUILD",
         "rtp_llm/cpp/cache/test/KVCacheManagerCPSlotMapperTest.cc",

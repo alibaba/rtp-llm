@@ -45,6 +45,7 @@ _REMOTE_INPUT_DIR = Path(".pytest_cache") / "remote_inputs"
 # explicit CAS inputs.
 _SOURCE_CONTRACT_FILES = (
     "3rdparty/cub_compat.h",
+    "3rdparty/flashinfer/flashinfer_cu13.BUILD",
     "arch_config/arch_select.bzl",
     "rtp_llm/cpp/cache/test/BUILD",
     "rtp_llm/cpp/cache/test/KVCacheManagerCPSlotMapperTest.cc",
