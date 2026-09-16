@@ -324,15 +324,20 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
             seq_size_per_block=128,
         )
         sequence_lengths = [256, 512]
+        # The block table and the paged-KV buffers are sized for the real
+        # sequences, but capture plans the smallest possible schedule: one page
+        # per request. Replay below has to replace that plan.
         attn_inputs = self._create_attention_inputs(
             batch_size=2,
             sequence_lengths=sequence_lengths,
             seq_size_per_block=config.seq_size_per_block,
         )
         attn_inputs.is_cuda_graph = True
-        attn_inputs.sequence_lengths_plus_1_device = torch.tensor(
-            sequence_lengths, dtype=torch.int32, device="cuda"
-        )
+        # sequence_lengths holds the cached length, so zero means a single live
+        # KV token: exactly one page whose last page holds one token.
+        attn_inputs.sequence_lengths = torch.zeros(
+            2, dtype=torch.int32, device="cpu"
+        ).pin_memory()
 
         attn_op = PyFlashinferDecodeAttnOp(config.attn_configs)
         params = attn_op.prepare(attn_inputs)
@@ -354,10 +359,18 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
             return original_plan(*args, **kwargs)
 
         attn_op.decode_wrapper.plan = counted_plan
+        # Replay carries the real KV lengths; the captured one-page plan must be
+        # replaced while the graph-owned paged-KV buffers keep their storage.
+        attn_inputs.sequence_lengths = (
+            torch.tensor(sequence_lengths, dtype=torch.int32, device="cpu") - 1
+        ).pin_memory()
         attn_op.prepare_for_cuda_graph_replay(attn_inputs)
         torch.cuda.synchronize()
         self.assertEqual(len(plan_calls), 1)
-        self.assertEqual(params.kvlen_d.cpu().tolist(), sequence_lengths)
+        self.assertEqual(
+            params.decode_page_indptr_d.cpu().tolist()[: len(sequence_lengths) + 1],
+            [0, 2, 6],
+        )
         self.assertEqual(
             attn_op.decode_wrapper._paged_kv_indptr_buf.data_ptr(), indptr_ptr
         )
@@ -389,6 +402,12 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
         attn_inputs.sequence_lengths_plus_1_device = torch.tensor(
             sequence_lengths, dtype=torch.int32, device=self.device
         )
+        real_cached_lengths = attn_inputs.sequence_lengths
+        # Capture the one-page schedule: the block table stays sized for the
+        # full 638-page sequence, so replay can widen the plan in place.
+        attn_inputs.sequence_lengths = torch.zeros(
+            1, dtype=torch.int32, device="cpu"
+        ).pin_memory()
 
         attn_op = PyFlashinferDecodeAttnOp(config.attn_configs)
         params = attn_op.prepare(attn_inputs)
@@ -403,7 +422,7 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
             config.seq_size_per_block,
             config.head_num_kv,
             config.size_per_head,
-            dtype=torch.bfloat16,
+            dtype=self.cache_dtype(config.attn_configs),
         )
 
         # Compile/JIT the captured one-page schedule before graph capture.
@@ -424,6 +443,7 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
         torch.cuda.synchronize()
         stale_plan_output = graph_output.clone()
 
+        attn_inputs.sequence_lengths = real_cached_lengths
         attn_op.prepare_for_cuda_graph_replay(attn_inputs)
         graph.replay()
         torch.cuda.synchronize()
@@ -434,8 +454,8 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
         )
         ref_output = compute_flashinfer_decode_reference(
             q,
-            k_cache,
-            v_cache,
+            k_cache.to(q.dtype),
+            v_cache.to(q.dtype),
             sequence_lengths,
             block_ids,
             config.seq_size_per_block,
