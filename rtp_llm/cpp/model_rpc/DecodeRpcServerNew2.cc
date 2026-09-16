@@ -186,7 +186,6 @@ grpc::Status DecodeRpcServerNew2::preparePDRequest(const GenerateInputPB&       
     if (!status.ok())
         return serializeErrorMsg(std::to_string(request.request_id()), status);
     prefill_request.CopyFrom(request);
-    prefill_request.mutable_pd_input_snapshot()->CopyFrom(snapshotPDInput(*input));
     prefill_request.mutable_generate_config()->set_timeout_ms(input->generate_config->timeout_ms);
     const auto  address = prefillAddress(request);
     std::string ip;

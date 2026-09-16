@@ -268,9 +268,6 @@ grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*      
     int64_t phase_start = currentTimeUs();
 
     auto preprocess_status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle());
-    if (preprocess_status.ok()) {
-        preprocess_status = validatePDInput(*input, *request);
-    }
     mm_cost_us = currentTimeUs() - phase_start;
     if (!preprocess_status.ok()) {
         generate_context.error_status = serializeErrorMsg(generate_context.request_key, preprocess_status);
@@ -378,8 +375,6 @@ grpc::Status PrefillRpcServerNew2::BatchGenerateCall(grpc::ServerContext*       
         auto        input  = QueryConverter::transQuery(&item);
         input->request_deadline_ms = local_deadlines[i];
         auto        status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle());
-        if (status.ok())
-            status = validatePDInput(*input, item);
         if (!status.ok())
             return serializeErrorMsg("batch item " + std::to_string(i), status);
         inputs.push_back(std::move(input));

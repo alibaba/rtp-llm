@@ -227,9 +227,6 @@ public:
         auto batch = request();
         for (auto& item : *batch.mutable_inputs()) {
             item.mutable_generate_config()->set_unique_key("handoff-" + std::to_string(item.request_id()));
-            auto input = QueryConverter::transQuery(&item);
-            EXPECT_TRUE(preprocessForPD(input, nullptr, false).ok());
-            *item.mutable_pd_input_snapshot() = snapshotPDInput(*input);
         }
         return batch;
     }
@@ -267,7 +264,6 @@ TEST_F(PDBatchRpcTest, OneRpcAndOneEnqueuePerSidePreserveIdentityKeysAndOutputOr
         EXPECT_EQ(sent.generate_config().unique_key(), stream->uniqueKey());
         EXPECT_NE(sent.generate_config().unique_key(), "business-key");
         EXPECT_EQ(sent.generate_config().timeout_ms(), stream->generateConfig()->timeout_ms);
-        EXPECT_TRUE(sent.has_pd_input_snapshot());
         EXPECT_EQ(stream->generateInput()->batch_group_size, 2);
         EXPECT_EQ(stream->generateInput()->batch_group_id, 77);
         EXPECT_EQ(sent.batch_group_size(), 2);

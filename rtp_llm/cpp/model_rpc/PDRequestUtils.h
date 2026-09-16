@@ -19,8 +19,4 @@ ErrorInfo         validatePDHandoff(const GenerateInputPB& request);
 // separate so the prefill-entrance path retains its RPC and MM timing stages.
 ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input, MultimodalProcessor* processor, bool is_mtp_eagle);
 
-// Capture before makeStream/enqueue can add a system prompt or mutate the input.
-PDInputSnapshotPB snapshotPDInput(const GenerateInput& input);
-ErrorInfo         validatePDInput(const GenerateInput& input, const GenerateInputPB& request);
-
 }  // namespace rtp_llm
