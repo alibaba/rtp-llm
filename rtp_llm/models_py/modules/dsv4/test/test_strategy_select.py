@@ -598,5 +598,64 @@ import rtp_llm.models_py.modules.dsv4.moe.strategies  # noqa: F401
             )
 
 
+
+class NativeGraphWarmupFlagTest(unittest.TestCase):
+    def setUp(self):
+        from rtp_llm.models_py.modules.dsv4.moe import warmup_sync
+        self.module = warmup_sync
+        self.name = "RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"
+        self.old_native = warmup_sync._native_getenv(self.name.encode())
+        self.old_python = os.environ.pop(self.name, None)
+        os.unsetenv(self.name)
+
+    def tearDown(self):
+        if self.old_python is not None:
+            os.environ[self.name] = self.old_python
+        else:
+            os.environ.pop(self.name, None)
+        if self.old_native is None:
+            os.unsetenv(self.name)
+        else:
+            os.putenv(self.name, self.old_native.decode())
+
+    def test_native_scope_visible_without_python_mapping_mutation(self):
+        self.assertFalse(self.module.cuda_graph_warmup_forward_enabled())
+        # os.putenv calls native setenv, exactly like the C++ scoped writer;
+        # intentionally does not update os.environ.
+        os.putenv(self.name, "1")
+        self.assertNotIn(self.name, os.environ)
+        self.assertTrue(self.module.cuda_graph_warmup_forward_enabled())
+        os.unsetenv(self.name)
+        self.assertFalse(self.module.cuda_graph_warmup_forward_enabled())
+
+    def test_only_exact_one_enables(self):
+        for value in ("", "0", "True", "11"):
+            os.putenv(self.name, value)
+            self.assertFalse(self.module.cuda_graph_warmup_forward_enabled())
+        os.environ[self.name] = "1"
+        self.assertTrue(self.module.cuda_graph_warmup_forward_enabled())
+        # Native restoration must win even if Python retained a stale one.
+        os.putenv(self.name, "0")
+        self.assertFalse(self.module.cuda_graph_warmup_forward_enabled())
+
+    def test_native_warmup_uses_capture_backend_then_restores_eager(self):
+        strategy = GroupedFP4Strategy(_cfg(ep_size=1))
+        x = torch.zeros(2, 8, dtype=torch.bfloat16)
+        weights = torch.ones(2, 1)
+        indices = torch.zeros(2, 1, dtype=torch.int64)
+        capture_result, eager_result = object(), object()
+        with mock.patch.object(grouped_fp4_module, "is_sm120", return_value=True), \
+             mock.patch.object(torch.cuda, "is_current_stream_capturing", return_value=False), \
+             mock.patch.object(strategy, "_forward_capture_sm120", return_value=capture_result) as cap, \
+             mock.patch.object(strategy, "forward_sm120_eager", return_value=eager_result) as eager:
+            os.putenv(self.name, "1")
+            self.assertIs(strategy(x, weights, indices), capture_result)
+            cap.assert_called_once_with(x, weights, indices)
+            eager.assert_not_called()
+            os.unsetenv(self.name)
+            self.assertIs(strategy(x, weights, indices), eager_result)
+            eager.assert_called_once_with(x, weights, indices)
+
+
 if __name__ == "__main__":
     unittest.main()
