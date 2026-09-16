@@ -214,10 +214,14 @@ class Block(nn.Module):
         )
         self._prefill_fast_hc_impls_cached = self._resolve_prefill_fast_hc_impls()
         self._moe_front_adapter = None
+        self._moe_front_required = False
+        self._moe_front_fallback_logged = False
 
     def enable_moe_front(self, *, required: bool = False) -> None:
         """Attach the standalone CUDA-extension front to MegaMoE-SE."""
 
+        self._moe_front_required = bool(required)
+        self._moe_front_fallback_logged = False
         strategy_name = getattr(self.ffn, "strategy_name", "")
         if strategy_name != "mega_moe_se":
             if required:
@@ -240,17 +244,23 @@ class Block(nn.Module):
             )
             return
 
-        from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.mega_front import (
-            MegaMoeFrontAdapter,
-        )
-
         try:
+            from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.mega_front import (
+                MegaMoeFrontAdapter,
+            )
+
             self._moe_front_adapter = MegaMoeFrontAdapter(
                 self.ffn,
                 self.ffn_hc,
                 self.ffn_norm,
             )
-        except (ImportError, RuntimeError) as exc:
+        except (
+            ImportError,
+            AttributeError,
+            TypeError,
+            ValueError,
+            RuntimeError,
+        ) as exc:
             if required:
                 raise
             logging.warning(
@@ -258,6 +268,16 @@ class Block(nn.Module):
                 "MoE path: %s",
                 exc,
             )
+
+    def disable_moe_front(self) -> None:
+        """Release extension plans and restore the ordinary MoE prefix."""
+
+        adapter = self._moe_front_adapter
+        self._moe_front_adapter = None
+        self._moe_front_required = False
+        self._moe_front_fallback_logged = False
+        if adapter is not None:
+            adapter.close()
 
     def _moe_observer(self, positions: Optional[torch.Tensor]):
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
@@ -457,23 +477,40 @@ class Block(nn.Module):
             self._moe_front_adapter is not None
             and self._moe_front_adapter.supports(x, input_ids)
         )
+        if self._moe_front_required and not use_moe_front:
+            raise RuntimeError(
+                "DSV4_MEGA_MOE_FRONT is required, but the current decode input "
+                "does not satisfy the MoE-front tensor or capacity contract"
+            )
+        if (
+            self._moe_front_adapter is not None
+            and not use_moe_front
+            and not self._moe_front_fallback_logged
+        ):
+            logging.warning(
+                "DSV4 MoE front layer %d is falling back to the ordinary MoE "
+                "prefix because the decode input is outside its tensor or "
+                "capacity contract",
+                self.layer_id,
+            )
+            self._moe_front_fallback_logged = True
         if use_moe_front:
             ffn_out, x_pre, post, comb = self._moe_front_adapter.forward(x, input_ids)
         else:
             x_pre, post, comb = self.ffn_hc.pre(
                 x,
                 dbg_tag=(
-                    f"L{self.layer_id:02d}_decode_ffn_hc_pre"
-                    if _dbg_layer
-                    else None
+                    f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None
                 ),
             )
             bsz, q_len, dim_ = x_pre.shape
             x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(
                 bsz, q_len, dim_
             )
+            if _dbg_layer:
+                _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
             ffn_out = self.ffn(x_pre, input_ids, is_decode_forward=True)
-        if _dbg_layer:
+        if _dbg_layer and use_moe_front:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)

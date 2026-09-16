@@ -213,7 +213,6 @@ class V4Transformer(nn.Module):
             ]
         )
 
-        self._moe_front_enabled = False
         if not self.commit_only and args.is_decode_role:
             from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.mega_front import (
                 moe_front_mode,
@@ -221,14 +220,18 @@ class V4Transformer(nn.Module):
 
             mode = moe_front_mode()
             if mode != "off":
-                for layer in self.layers:
-                    layer.enable_moe_front(required=mode == "required")
-                self._moe_front_enabled = all(
-                    layer._moe_front_adapter is not None for layer in self.layers
-                )
-                if not self._moe_front_enabled:
+                try:
                     for layer in self.layers:
-                        layer._moe_front_adapter = None
+                        layer.enable_moe_front(required=mode == "required")
+                except Exception:
+                    for layer in self.layers:
+                        layer.disable_moe_front()
+                    raise
+                if not all(
+                    layer._moe_front_adapter is not None for layer in self.layers
+                ):
+                    for layer in self.layers:
+                        layer.disable_moe_front()
 
         # MTP draft is a separate model (``DeepSeekV4MtpModel``) that
         # holds its own V4Transformer — no MTP layers live on the main
