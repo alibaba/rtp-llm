@@ -30,6 +30,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.buffer import (
     _get_or_create_mega_output,
     _mega_moe_available,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.group import (
+    get_validated_world_ep_group as _get_validated_world_ep_group,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.input_packer import (
     get_mega_moe_input_packer,
 )
@@ -146,21 +149,6 @@ def _log_pre_kernel_barrier(
         device,
         _PRE_KERNEL_BARRIER_VERBOSE_ENV,
     )
-
-
-def _get_validated_world_ep_group(cfg, dist):
-    if not dist.is_initialized():
-        raise RuntimeError("MegaMoE requires torch.distributed to be initialized")
-    group = dist.group.WORLD
-    actual_size = dist.get_world_size(group)
-    actual_rank = dist.get_rank(group)
-    if actual_size != cfg.ep_size or actual_rank != cfg.ep_rank:
-        raise RuntimeError(
-            "MegaMoE currently requires the EP group to equal WORLD: "
-            f"runtime WORLD is rank {actual_rank}/{actual_size}, but "
-            f"configuration EP is rank {cfg.ep_rank}/{cfg.ep_size}"
-        )
-    return group
 
 
 class MegaMoeExecutor(Fp8Fp4ExecutorBase):

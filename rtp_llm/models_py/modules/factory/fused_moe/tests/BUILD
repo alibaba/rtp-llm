@@ -62,3 +62,21 @@ py_test(
     ],
     target_compatible_with = _CUDA13_ONLY,
 )
+
+py_test(
+    name = "test_mega_moe_fp8",
+    srcs = ["test_mega_moe_fp8.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    tags = ["open_skip", "H20"],
+    # Back on H20 after measuring on sm86: 42 tests run, 4 fail on
+    # assertTrue(strategy.can_handle(config)). The test mocks has_deep_gemm but
+    # not the capability gate, and DeepGemmMaskedExecutorV2.check_conditions has
+    # checker.check(get_sm()[0] >= 9) (deepgemm_masked_executor_v2.py:41), so
+    # every DeepGemmMaskedExecutorV2-backed strategy correctly declines below
+    # sm90. Staying on H20 by decision, not as a TODO: the test is correct about
+    # what the executor does, and mocking the capability gate to relocate it would
+    # make it assert something the hardware does not do.
+    exec_properties = {'gpu':'H20'},
+)
