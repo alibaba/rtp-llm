@@ -27,7 +27,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import static org.mockito.ArgumentMatchers.eq;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -322,15 +321,17 @@ class DeliverySettlementTest {
         synchronized (member.slot()) {
             preemption = member.slot().tryInstallPreemption(90L, 91L, "priority victim");
             assertNotNull(preemption);
-            member.slot().applyPreemptionPhase(preemption, PreemptionCancelPhase.CANCEL_IN_FLIGHT);
+            assertTrue(member.slot().updatePreemption(preemption, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
             if (phase != PreemptionCancelPhase.CANCEL_IN_FLIGHT) {
-                member.slot().applyPreemptionPhase(preemption, phase);
+                assertTrue(member.slot().updatePreemption(preemption, phase));
             }
         }
         reject(member);
         assertOccupancy(0, 0);
         assertFalse(preemption.terminalObservation().toCompletableFuture().isDone());
-        verify(member.item().decodeEp(), never()).updatePreemption(anyLong(), argThat(update -> update.kind() == DecodeEndpoint.PreemptionUpdate.Kind.FINISHED));
+        verify(member.item().decodeEp(), never()).updatePreemption(
+                anyLong(),
+                argThat(update -> update.kind() == DecodeEndpoint.PreemptionUpdate.Kind.FINISHED));
         decodeFinished(member);
         assertTrue(preemption.terminalObservation().toCompletableFuture().isDone());
     }
@@ -342,8 +343,8 @@ class DeliverySettlementTest {
         PreemptionRegistration claim;
         synchronized (member.slot()) {
             claim = member.slot().tryInstallPreemption(101L, 102L, "priority victim");
-            member.slot().applyPreemptionPhase(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT);
-            member.slot().applyPreemptionPhase(claim, PreemptionCancelPhase.CANCEL_UNKNOWN);
+            assertTrue(member.slot().updatePreemption(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
+            assertTrue(member.slot().updatePreemption(claim, PreemptionCancelPhase.CANCEL_UNKNOWN));
         }
 
         reject(member);
@@ -444,7 +445,7 @@ class DeliverySettlementTest {
                             + config.getRequestLifecycle().getRequest().getTimeoutMs() + 1L;
                     member.slot().expireInactiveRequest(expiredAt);
                     synchronized (member.slot()) {
-                        member.slot().applyDecodeStatusLocked(member.item().decodeEp(),
+                        org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(member.slot(), "applyDecodeStatusLocked", member.item().decodeEp(),
                                 DecodeEndpoint.WorkerStatusFact.active(member.item().decodeReservation()), expiredAt + 1L);
                     }
                     assertFalse(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
@@ -520,7 +521,7 @@ class DeliverySettlementTest {
         PreemptionRegistration claim;
         synchronized (member.slot()) {
             claim = member.slot().tryInstallPreemption(104L, 105L, "priority victim");
-            member.slot().applyPreemptionPhase(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT);
+            assertTrue(member.slot().updatePreemption(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
         }
         when(member.item().decodeEp().settleFailedRequest(
                 member.item().decodeReservation(), DeliveryResult.Status.PREFILL_REJECTED))
@@ -560,7 +561,7 @@ class DeliverySettlementTest {
         PreemptionRegistration claim;
         synchronized (member.slot()) {
             claim = member.slot().tryInstallPreemption(107L, 108L, "priority victim");
-            member.slot().applyPreemptionPhase(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT);
+            assertTrue(member.slot().updatePreemption(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
         }
         reject(member);
         Response response = member.item().future().get(1, TimeUnit.SECONDS);

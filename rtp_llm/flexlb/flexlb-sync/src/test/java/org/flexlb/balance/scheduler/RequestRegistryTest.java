@@ -104,14 +104,17 @@ class RequestRegistryTest {
     }
 
     @Test
-    void slotLockContractIsEnforcedWithoutJvmAssertions() {
+    void publicQueriesOwnTheirLockAndPrivateDecisionsStillRequireIt() {
         lifecycle.register(context(102L));
         RequestSlot slot = lifecycle.requestSlot(102L);
-
-        IllegalStateException failure = assertThrows(
-                IllegalStateException.class, slot::activeItem);
-
+        assertNull(slot.activeItem());
+        assertTrue(slot.isOpen());
+        assertTrue(slot.isLiveGeneration());
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                        slot, "recordCancellationLocked", CancelReason.CLIENT_CANCELLED, "client cancelled"));
         assertTrue(failure.getMessage().contains("requires slot lock"));
+        assertEquals(RequestState.Phase.QUEUED, slot.snapshot().state());
     }
 
     @Test
@@ -260,13 +263,15 @@ class RequestRegistryTest {
                 commitRoute(lifecycle, registered));
         RequestSlot slot = lifecycle.requestSlot(602L);
         synchronized (slot) {
-            slot.applyPrefillStatusLocked(registered.item().prefillEp(), org.flexlb.dao.route.RoleType.PREFILL,
+            org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyPrefillStatusLocked", registered.item().prefillEp(), org.flexlb.dao.route.RoleType.PREFILL,
                     org.flexlb.balance.endpoint.PrefillState.WorkerStatusFact.active(registered.item()), System.currentTimeMillis());
         }
         lifecycle.cancelRequest(602L, 0L, CancelReason.DEADLINE_EXCEEDED);
         assertEquals(RequestState.Phase.TIMED_OUT,
                 lifecycle.getRequestState(602L, 0L).state());
-        verify(registered.item().decodeEp()).release(registered.item().decodeReservation(), DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+        verify(registered.item().decodeEp()).release(
+                registered.item().decodeReservation(),
+                DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
     }
 
     @Test
