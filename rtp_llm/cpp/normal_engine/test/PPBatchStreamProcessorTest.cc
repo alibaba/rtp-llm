@@ -2265,4 +2265,42 @@ TEST_F(PPBatchStreamProcessorTest, PromptLogitsPlanResultRoundTripAndDispatch) {
               (std::vector<float>{9.0f, 10.0f}));
 }
 
+// Regression for the official PP request-error refactor + local fastgen merge.
+// The stream has already advanced to the FINAL chunk when an older result arrives.
+TEST_F(PPBatchStreamProcessorTest, DelayedChunkResultUsesDispatchSnapshot) {
+    ResourceContext resources;
+    const auto model_config = makeModelConfig();
+    auto stream = makeStream(resources, model_config, 901, {1, 2, 3, 4, 5, 6, 7, 8}, 1);
+    stream->enable_fast_gen_ = true;
+    stream->resetChunkLen(8, 8);
+    ASSERT_FALSE(stream->isChunkStream());
+    stream->ppChunkDispatched();
+    PPBatchStreamProcessor processor(model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, CacheConfig{}, true);
+    PPExecutionResult result;
+    result.request_ids = torch::tensor({901}, torch::kInt64);
+    result.new_token_ids = intTensor({12}).reshape({1, 1});
+    result.prompt_logits.resize(1);
+    result.request_errors.resize(1);
+    const std::vector<PPStreamRoundSnapshot> intermediate{{1, 4, true}};
+    ASSERT_TRUE(processor.dispatchExecutionResult(StreamGroups({stream}), result, intermediate).ok());
+    EXPECT_EQ(stream->seqLength(), 8);
+    EXPECT_TRUE(stream->isContextStream());
+    EXPECT_EQ(stream->ppOutstandingResults(), 0);
+    const std::vector<PPStreamRoundSnapshot> final_round{{1, 4, false}};
+    ASSERT_TRUE(processor.dispatchExecutionResult(StreamGroups({stream}), result, final_round).ok());
+    EXPECT_EQ(stream->seqLength(), 9);
+    EXPECT_FALSE(stream->isContextStream());
+}
+
+TEST_F(PPBatchStreamProcessorTest, SnapshotCardinalityRejectsBeforeDispatch) {
+    ResourceContext resources;
+    const auto model_config = makeModelConfig();
+    auto stream = makeStream(resources, model_config, 902, {1, 2}, 1);
+    PPBatchStreamProcessor processor(model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, CacheConfig{}, true);
+    PPExecutionResult result;
+    EXPECT_THROW(processor.dispatchExecutionResult(StreamGroups({stream}), result, {}), std::runtime_error);
+    EXPECT_EQ(stream->seqLength(), 2);
+    EXPECT_TRUE(stream->isContextStream());
+}
+
 }  // namespace rtp_llm

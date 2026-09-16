@@ -71,7 +71,7 @@ def _pack_slots_to_paged_torch(
     dst = _as_block_bytes(paged)
 
     rows = torch.arange(slot_count, device=k_cache.device, dtype=torch.int64)
-    valid = slots >= 0
+    valid = (slots >= 0) & (slots < k_cache.shape[0] * src_page)
     safe = torch.where(valid, slots, torch.zeros_like(slots))
     src_block = safe // src_page
     src_pos = safe - src_block * src_page
@@ -191,6 +191,12 @@ class PackSlotsToPagedPrecisionTest(unittest.TestCase):
             num_blocks=4,
             slots=hca_slots,
         )
+
+    def test_out_of_pool_and_int64_do_not_narrow_or_read(self) -> None:
+        slots = torch.tensor([0, -1, 512, 2**32, 2**32 + 1, 511],
+                             dtype=torch.int64, device=self.device)
+        self._assert_matches_reference(src_page=128, dst_page=64,
+                                       num_blocks=4, slots=slots)
 
     def test_random_slots_non_multiple_last_page(self) -> None:
         src_page, dst_page, num_blocks = 128, 64, 4
