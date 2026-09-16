@@ -47,6 +47,16 @@ custom_smoke_test(
     gpu_type = ["H20"],
 )
 
+# PD separation across pp x tp variants, each compared against a PDFUSION
+# baseline of matching TP. world_size only feeds the GPU reservation (max 6
+# across variants); each server sets its own parallelism.
+custom_smoke_test(
+    name = "qwen3_pd_pp_test",
+    main = "pd_pp_test.py",
+    smoke_args = "--tp_size 1 --dp_size 1 --world_size 6 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 2048 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
+    gpu_type = ["H20"],
+)
+
 h20_oss_suites()
 sm8x_suites()
 sm100_suites()

@@ -355,6 +355,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     CacheConfig config;
     config.layer_num                 = static_cast<uint32_t>(stage_model_config.num_layers);
     config.layer_all_num             = config.layer_num;
+    config.global_layer_begin        = stage_model_config.global_layer_begin;
     config.block_num                 = 0;
     config.seq_size_per_block        = physical_tokens_per_block;
     config.kernel_seq_size_per_block = kernel_tokens_per_block;

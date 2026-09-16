@@ -515,7 +515,13 @@ def clear_comm_ops() -> None:
     Clear registered Python communication callbacks.
     """
 
-def register_pp_ops(isend_fn: typing.Callable, irecv_fn: typing.Callable, pp_snapshot_exchange_fn: typing.Callable) -> None: ...
+def register_pp_ops(
+    isend_fn: typing.Callable[[torch.Tensor, int, int], typing.Any],
+    irecv_fn: typing.Callable[[torch.Tensor, int, int], typing.Any],
+    pp_snapshot_exchange_fn: typing.Callable,
+) -> None:
+    """Register P2P callbacks taking (tensor, global_peer, backend: 0=NCCL, 1=GLOO)."""
+
 def clear_pp_ops() -> None: ...
 
 def init_cpu_tp_broadcaster(tp_rank: int, tp_size: int, base_path: str) -> None: ...

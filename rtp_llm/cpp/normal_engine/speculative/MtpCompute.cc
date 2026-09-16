@@ -207,12 +207,6 @@ void prepareDraftInputForDecode(GptModelInputs&      draft_input,
     std::vector<torch::Tensor> accepted_hidden_states;
     accepted_hidden_states.reserve(batch_size);
     for (size_t i = 0; i < batch_size; ++i) {
-        RTP_LLM_CHECK_WITH_INFO(accepted_lengths_per_request[i] > 0
-                                    && accepted_lengths_per_request[i] <= tokens_per_request,
-                                "invalid accept_len[%zu]=%d for token width=%ld",
-                                i,
-                                accepted_lengths_per_request[i],
-                                tokens_per_request);
         memcpy(combo_tokens_ptr + token_offset,
                accepted_token_ids_ptr + i * tokens_per_request,
                accepted_lengths_per_request[i] * sizeof(int32_t));
@@ -270,6 +264,51 @@ void advanceDraftInput(GptModelInputs&      draft_input,
         }
         draft_input.sequence_lengths = toCudaInt32(sequence_lengths_cpu, host_holder);
     }
+}
+
+void prepareDSparkProposeInput(GptModelInputs&            draft_input,
+                               const torch::Tensor&       anchors,
+                               const torch::Tensor&       committed_ends,
+                               size_t                     propose_step,
+                               int32_t                    mask_token_id,
+                               DSparkProposeInputBuffers& buffers,
+                               TensorHolder&              host_holder) {
+    RTP_LLM_CHECK_WITH_INFO(anchors.defined() && anchors.dim() == 1, "dspark propose anchors must be a 1-D tensor");
+    RTP_LLM_CHECK_WITH_INFO(committed_ends.defined() && committed_ends.numel() == anchors.numel(),
+                            "dspark propose committed ends must contain one value per anchor");
+
+    const int64_t batch_size     = anchors.numel();
+    const int64_t draft_width    = static_cast<int64_t>(propose_step);
+    const auto    cuda_i32       = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    if (!buffers.combo_tokens.defined() || buffers.combo_tokens.size(0) < batch_size) {
+        buffers.combo_tokens = torch::full({batch_size, draft_width}, mask_token_id, cuda_i32);
+    }
+    if (!buffers.input_lengths.defined() || buffers.input_lengths.size(0) < batch_size) {
+        buffers.input_lengths = torch::full({batch_size}, draft_width, cuda_i32);
+    }
+    if (!buffers.lm_output_indexes.defined() || buffers.lm_output_indexes.size(0) < batch_size) {
+        buffers.lm_output_indexes = torch::arange(0, batch_size * draft_width, draft_width, cuda_i32);
+    }
+
+    auto combo_tokens = buffers.combo_tokens.narrow(0, 0, batch_size);
+    combo_tokens.select(1, 0).copy_(toCudaInt32(anchors, host_holder));
+
+    draft_input.combo_tokens            = combo_tokens.reshape({-1});
+    draft_input.last_hidden_states      = torch::Tensor();
+    draft_input.prefix_lengths          = toCudaInt32(committed_ends, host_holder).contiguous();
+    draft_input.input_lengths           = buffers.input_lengths.narrow(0, 0, batch_size);
+    draft_input.sequence_lengths        = torch::empty({0}, cuda_i32);
+    draft_input.sequence_lengths_plus_1 = torch::Tensor();
+    draft_input.lm_output_indexes       = buffers.lm_output_indexes.narrow(0, 0, batch_size);
+    draft_input.is_target_verify        = false;
+    draft_input.dspark_call_phase       = DSparkCallPhase::PROPOSE;
+}
+
+void prepareDSparkCommitInput(GptModelInputs& draft_input, const torch::Tensor& target_features) {
+    RTP_LLM_CHECK_WITH_INFO(target_features.defined(), "dspark commit requires target features");
+    draft_input.last_hidden_states = target_features;
+    draft_input.is_target_verify   = false;
+    draft_input.dspark_call_phase  = DSparkCallPhase::COMMIT;
 }
 
 void runRejectionSampling(speculative::SpeculativeSampler&               sampler,

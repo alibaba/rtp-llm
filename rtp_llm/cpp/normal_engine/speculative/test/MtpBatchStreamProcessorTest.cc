@@ -1439,6 +1439,23 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
     EXPECT_EQ((std::vector<int32_t>{gamma, gamma}), toVec<int32_t>(model_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{0, gamma}), toVec<int32_t>(model_input.lm_output_indexes));
     EXPECT_EQ(model_input.dspark_call_phase, DSparkCallPhase::PROPOSE);
+    EXPECT_FALSE(model_input.sequence_lengths_plus_1.defined());
+
+    // The shared workspace is grow-only, but every returned view must match
+    // the current batch and preserve the fixed mask columns.
+    processor.buildDSparkProposeInput(
+        model_input, torch::tensor({303}, torch::kInt32), torch::tensor({11}, torch::kInt32), host_holder);
+    EXPECT_EQ((std::vector<int32_t>{303, mask_id, mask_id}), toVec<int32_t>(model_input.combo_tokens));
+    EXPECT_EQ((std::vector<int32_t>{11}), toVec<int32_t>(model_input.prefix_lengths));
+    EXPECT_EQ((std::vector<int32_t>{0}), toVec<int32_t>(model_input.lm_output_indexes));
+
+    processor.buildDSparkProposeInput(model_input,
+                                      torch::tensor({401, 402, 403}, torch::kInt32),
+                                      torch::tensor({12, 13, 14}, torch::kInt32),
+                                      host_holder);
+    EXPECT_EQ((std::vector<int32_t>{401, mask_id, mask_id, 402, mask_id, mask_id, 403, mask_id, mask_id}),
+              toVec<int32_t>(model_input.combo_tokens));
+    EXPECT_EQ((std::vector<int32_t>{0, gamma, 2 * gamma}), toVec<int32_t>(model_input.lm_output_indexes));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGeometry) {
@@ -1460,6 +1477,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGe
     model_input.input_lengths     = torch::tensor({gamma + 1, gamma + 1}, torch::kInt32);
     model_input.prefix_lengths    = torch::tensor({7, 15}, torch::kInt32);
     model_input.lm_output_indexes = torch::tensor({3, 7}, torch::kInt32);
+    model_input.is_target_verify  = true;
     const auto combo_tokens       = model_input.combo_tokens.clone();
     const auto input_lengths      = model_input.input_lengths.clone();
     const auto prefix_lengths     = model_input.prefix_lengths.clone();
@@ -1474,6 +1492,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGe
     EXPECT_TRUE(torch::equal(model_input.prefix_lengths, prefix_lengths));
     EXPECT_TRUE(torch::equal(model_input.lm_output_indexes, lm_output_indexes));
     EXPECT_TRUE(torch::equal(model_input.last_hidden_states, target_features));
+    EXPECT_FALSE(model_input.is_target_verify);
     EXPECT_EQ(model_input.dspark_call_phase, DSparkCallPhase::COMMIT);
 }
 

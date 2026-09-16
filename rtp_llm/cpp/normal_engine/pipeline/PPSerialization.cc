@@ -15,7 +15,7 @@ namespace {
 /* Versioned byte stream; readers bounds-check every field. The tensor
    presence flag encodes definedness so defined-but-empty tensors survive;
    host tensors are rebuilt pinned to match gatherModelInput plan tensors. */
-constexpr uint32_t kVersion = 1;
+constexpr uint32_t kVersion = 12;
 
 struct ByteWriter {
     std::vector<uint8_t> buf;
@@ -37,6 +37,16 @@ struct ByteWriter {
     void str(const std::string& s) {
         val<uint64_t>(s.size());
         raw(s.data(), s.size());
+    }
+
+    void errors(const std::vector<ErrorInfo>& errors) {
+        val<uint64_t>(errors.size());
+        for (const auto& error : errors) {
+            val<int32_t>(static_cast<int32_t>(error.code()));
+            if (error.hasError()) {
+                str(error.ToString());
+            }
+        }
     }
 
     void tensor(const torch::Tensor& t) {
@@ -111,6 +121,17 @@ struct ByteReader {
         return s;
     }
 
+    std::vector<ErrorInfo> errors() {
+        std::vector<ErrorInfo> errors(val<uint64_t>());
+        for (auto& error : errors) {
+            const auto code = static_cast<ErrorCode>(val<int32_t>());
+            if (code != ErrorCode::NONE_ERROR) {
+                error = ErrorInfo(code, str());
+            }
+        }
+        return errors;
+    }
+
     torch::Tensor tensor() {
         if (!flag()) {
             return {};
@@ -178,6 +199,7 @@ void writeModelInput(ByteWriter& w, const GptModelInputs& in) {
     w.tensor(in.kv_cache_kernel_block_id);
     w.tensor(in.kv_cache_group_types);
     w.tensor(in.kv_cache_update_mapping);
+    w.tensor(in.kv_cache_blocks_to_zero);
     w.tensor(in.text_tokens_mask);
     w.tensor(in.mm_features_locs);
     w.tensor(in.input_embeddings_locs);
@@ -220,6 +242,7 @@ void readModelInput(ByteReader& r, GptModelInputs& in) {
     in.kv_cache_kernel_block_id = r.tensor();
     in.kv_cache_group_types     = r.tensor();
     in.kv_cache_update_mapping  = r.tensor();
+    in.kv_cache_blocks_to_zero  = r.tensor();
     in.text_tokens_mask         = r.tensor();
     in.mm_features_locs         = r.tensor();
     in.input_embeddings_locs    = r.tensor();
@@ -281,6 +304,7 @@ void writeSamplingPlan(ByteWriter& w, const PPSamplingPlan& s) {
     w.tensor(s.token_ids);
     w.tensor(s.input_lengths);
     w.tensor(s.sequence_lengths);
+    w.tensor(s.max_tokens);
     w.tensor(s.top_k);
     w.tensor(s.top_p);
     w.tensor(s.temperature);
@@ -335,6 +359,7 @@ void readSamplingPlan(ByteReader& r, PPSamplingPlan& s) {
     s.token_ids            = r.tensor();
     s.input_lengths        = r.tensor();
     s.sequence_lengths     = r.tensor();
+    s.max_tokens           = r.tensor();
     s.top_k                = r.tensor();
     s.top_p                = r.tensor();
     s.temperature          = r.tensor();
@@ -434,7 +459,6 @@ torch::Tensor serializeExecutionResult(const PPExecutionResult& result) {
     w.tensor(result.new_token_ids);
     w.tensor(result.accept_len);
     w.tensor(result.propose_token_ids);
-    w.tensor(result.sample_success);
     w.tensor(result.hidden_states);
     w.tensor(result.logits);
     w.tensor(result.softmax_probs);
@@ -454,15 +478,7 @@ torch::Tensor serializeExecutionResult(const PPExecutionResult& result) {
         w.val<int32_t>(prompt_logits->start_pos);
         w.val<int32_t>(prompt_logits->end_pos);
     }
-    w.val<uint64_t>(result.processor_errors.size());
-    for (const auto& error : result.processor_errors) {
-        w.flag(error.has_value());
-        if (!error.has_value()) {
-            continue;
-        }
-        w.val<int32_t>(static_cast<int32_t>(error->code()));
-        w.str(error->ToString());
-    }
+    w.errors(result.request_errors);
     return w.finish();
 }
 
@@ -475,7 +491,6 @@ PPExecutionResult deserializeExecutionResult(const torch::Tensor& buffer) {
     result.new_token_ids     = r.tensor();
     result.accept_len        = r.tensor();
     result.propose_token_ids = r.tensor();
-    result.sample_success    = r.tensor();
     result.hidden_states     = r.tensor();
     result.logits            = r.tensor();
     result.softmax_probs     = r.tensor();
@@ -499,15 +514,7 @@ PPExecutionResult deserializeExecutionResult(const torch::Tensor& buffer) {
         prompt_logits          = std::move(output);
     }
 
-    const auto processor_error_num = r.val<uint64_t>();
-    result.processor_errors.resize(processor_error_num);
-    for (uint64_t index = 0; index < processor_error_num; ++index) {
-        if (!r.flag()) {
-            continue;
-        }
-        const auto error_code          = static_cast<ErrorCode>(r.val<int32_t>());
-        result.processor_errors[index] = ErrorInfo(error_code, r.str());
-    }
+    result.request_errors = r.errors();
     r.expectEnd();
     return result;
 }

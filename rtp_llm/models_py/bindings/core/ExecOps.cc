@@ -337,7 +337,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             const std::string cache_key = makeCacheKey(
                 cache_model_id,
                 std::to_string(cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(key_index)]),
-                layer_kv.layer_id,
+                cache_config.global_layer_begin + layer_kv.layer_id,
                 layer_kv.tag);
             const int32_t block_id = host_kv_cache_offset[input_index][static_cast<int64_t>(offset_index)];
             // Host block-offset tables use -1 as the null block sentinel.
@@ -678,8 +678,9 @@ public:
         if (!work_) {
             return;
         }
-        const bool completed = work_.attr("wait")().cast<bool>();
-        RTP_LLM_CHECK_WITH_INFO(completed, "P2P work wait failed");
+        /** PyTorch's CUDA caching allocator delays memory reuse until NCCL communication completes. */
+        const bool wait_succeeded = work_.attr("wait")().cast<bool>();
+        RTP_LLM_CHECK_WITH_INFO(wait_succeeded, "P2P work wait failed");
     }
 
 private:
@@ -687,8 +688,11 @@ private:
     torch::Tensor tensor_;
 };
 
-std::unique_ptr<P2PWork>
-runP2PCallback(const torch::Tensor& tensor, int64_t global_peer, py::function** callback, const char* callback_name) {
+std::unique_ptr<P2PWork> runP2PCallback(const torch::Tensor& tensor,
+                                        int64_t              global_peer,
+                                        P2PBackend           backend,
+                                        py::function**       callback,
+                                        const char*          callback_name) {
     py::gil_scoped_acquire gil;
     py::function           fn;
     {
@@ -699,7 +703,7 @@ runP2PCallback(const torch::Tensor& tensor, int64_t global_peer, py::function** 
     }
     RTP_LLM_CHECK_WITH_INFO(
         static_cast<bool>(fn), "%s called but its callback is not registered via register_pp_ops", callback_name);
-    py::object work = fn(tensor, global_peer);
+    py::object work = fn(tensor, global_peer, static_cast<int>(backend));
     RTP_LLM_CHECK_WITH_INFO(!work.is_none(), "%s callback returned None", callback_name);
     RTP_LLM_CHECK_WITH_INFO(py::hasattr(work, "wait"), "%s callback returned an object without wait()", callback_name);
     return std::make_unique<PythonP2PWork>(std::move(work), tensor);
@@ -790,12 +794,12 @@ void execAllGather(const AllGatherParams& params) {
     fn(recv_list, static_cast<int>(params.mode), send_list, params.inplace);
 }
 
-std::unique_ptr<P2PWork> execISend(const torch::Tensor& tensor, int64_t global_peer) {
-    return runP2PCallback(tensor, global_peer, &g_isend_fn, "execISend");
+std::unique_ptr<P2PWork> execISend(const torch::Tensor& tensor, int64_t global_peer, P2PBackend backend) {
+    return runP2PCallback(tensor, global_peer, backend, &g_isend_fn, "execISend");
 }
 
-std::unique_ptr<P2PWork> execIRecv(torch::Tensor& tensor, int64_t global_peer) {
-    return runP2PCallback(tensor, global_peer, &g_irecv_fn, "execIRecv");
+std::unique_ptr<P2PWork> execIRecv(torch::Tensor& tensor, int64_t global_peer, P2PBackend backend) {
+    return runP2PCallback(tensor, global_peer, backend, &g_irecv_fn, "execIRecv");
 }
 
 std::vector<std::string> execPPSnapshotExchange(const std::string& local_snapshot) {
@@ -934,7 +938,8 @@ void registerExecCtxOps(pybind11::module& m) {
         py::arg("irecv_fn"),
         py::arg("pp_snapshot_exchange_fn"),
         "Register all PP communication callbacks: P2P tensor transport "
-        "(isend/irecv) and the startup snapshot exchange.");
+        "(isend/irecv) and the startup snapshot exchange. P2P callbacks take "
+        "(tensor, global_peer, backend), where backend is P2PBackend (0=NCCL, 1=GLOO).");
 
     m.def(
         "clear_comm_ops",

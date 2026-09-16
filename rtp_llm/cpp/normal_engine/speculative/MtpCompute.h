@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
@@ -10,6 +12,12 @@ namespace mtp {
 enum class DraftInputLayout {
     COMPACT,
     FIXED_WIDTH,
+};
+
+struct DSparkProposeInputBuffers {
+    torch::Tensor combo_tokens;
+    torch::Tensor input_lengths;
+    torch::Tensor lm_output_indexes;
 };
 
 void prepareDraftInputForPrefill(GptModelInputs&      draft_input,
@@ -32,6 +40,16 @@ void advanceDraftInput(GptModelInputs&      draft_input,
                        const torch::Tensor& draft_token_ids,
                        size_t               position_id_len_factor,
                        TensorHolder&        host_holder);
+
+void prepareDSparkProposeInput(GptModelInputs&            draft_input,
+                               const torch::Tensor&       anchors,
+                               const torch::Tensor&       committed_ends,
+                               size_t                     propose_step,
+                               int32_t                    mask_token_id,
+                               DSparkProposeInputBuffers& buffers,
+                               TensorHolder&              host_holder);
+
+void prepareDSparkCommitInput(GptModelInputs& draft_input, const torch::Tensor& target_features);
 
 void runRejectionSampling(speculative::SpeculativeSampler&               sampler,
                           const speculative::SpeculativeSamplingParams& params,

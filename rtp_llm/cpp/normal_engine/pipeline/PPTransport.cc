@@ -7,50 +7,43 @@
 
 namespace rtp_llm {
 
-#if USING_CUDA
-namespace {
+PPCommTicket::PPCommTicket(std::unique_ptr<P2PWork> work): work_(std::move(work)) {
+    RTP_LLM_CHECK_WITH_INFO(work_ != nullptr, "PPCommTicket requires non-null P2P work");
+}
 
-class NcclPPCommTicket final: public PPCommTicket {
-public:
-    NcclPPCommTicket(const torch::Tensor& tensor, std::unique_ptr<P2PWork> work):
-        PPCommTicket(tensor), work_(std::move(work)) {}
+PPCommTicket::~PPCommTicket() = default;
 
-    void wait() override {
-        if (work_) {
-            work_->wait();
-            work_.reset();
-        }
+void PPCommTicket::wait() {
+    if (work_) {
+        work_->wait();
+        work_.reset();
     }
+}
 
-private:
-    std::unique_ptr<P2PWork> work_;
-};
-
-}  // namespace
-#endif
-
-NcclPPTransport::NcclPPTransport(int64_t previous_rank, int64_t next_rank):
+TorchDistributedPPTransport::TorchDistributedPPTransport(int64_t previous_rank, int64_t next_rank):
     previous_rank_(previous_rank), next_rank_(next_rank) {
 #if !USING_CUDA
-    RTP_LLM_FAIL("NcclPPTransport requires a CUDA build");
+    RTP_LLM_FAIL("TorchDistributedPPTransport requires a CUDA build");
 #endif
 }
 
-std::unique_ptr<PPCommTicket> NcclPPTransport::asyncSend(const torch::Tensor& tensor) {
+std::unique_ptr<PPCommTicket> TorchDistributedPPTransport::asyncSend(const torch::Tensor& tensor) {
 #if USING_CUDA
-    return std::make_unique<NcclPPCommTicket>(tensor, execISend(tensor, next_rank_));
+    const auto backend = tensor.is_cuda() ? P2PBackend::NCCL : P2PBackend::GLOO;
+    return std::make_unique<PPCommTicket>(execISend(tensor, next_rank_, backend));
 #else
     (void)tensor;
-    RTP_LLM_FAIL("NcclPPTransport requires a CUDA build");
+    RTP_LLM_FAIL("TorchDistributedPPTransport requires a CUDA build");
 #endif
 }
 
-std::unique_ptr<PPCommTicket> NcclPPTransport::asyncReceive(torch::Tensor& tensor) {
+std::unique_ptr<PPCommTicket> TorchDistributedPPTransport::asyncReceive(torch::Tensor& tensor) {
 #if USING_CUDA
-    return std::make_unique<NcclPPCommTicket>(tensor, execIRecv(tensor, previous_rank_));
+    const auto backend = tensor.is_cuda() ? P2PBackend::NCCL : P2PBackend::GLOO;
+    return std::make_unique<PPCommTicket>(execIRecv(tensor, previous_rank_, backend));
 #else
     (void)tensor;
-    RTP_LLM_FAIL("NcclPPTransport requires a CUDA build");
+    RTP_LLM_FAIL("TorchDistributedPPTransport requires a CUDA build");
 #endif
 }
 

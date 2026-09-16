@@ -3,7 +3,6 @@
 #include <mutex>
 #include <memory>
 #include <unistd.h>
-#include <limits.h>
 #include <condition_variable>
 #include <unordered_set>
 #include <c10/core/DeviceGuard.h>
@@ -16,6 +15,8 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/StagePeerGroups.h"
+#include "rtp_llm/cpp/config/RankLayout.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/LockFreeThreadPool.h"
@@ -63,6 +64,33 @@ torch::Tensor pinGrpcTensor(torch::Tensor tensor) {
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("[decode-grpc] pin_memory failed, fallback to pageable CPU tensor: %s", e.what());
         return tensor;
+    }
+}
+
+std::vector<StagePeerGroup>
+parseStagePeerGroups(const google::protobuf::RepeatedPtrField<StagePeerGroupPB>& pb_groups) {
+    std::vector<StagePeerGroup> groups;
+    groups.reserve(static_cast<size_t>(pb_groups.size()));
+    for (const auto& group_pb : pb_groups) {
+        StagePeerGroup group;
+        group.range.begin   = group_pb.layer_begin();
+        group.range.size    = group_pb.layer_count();
+        group.is_last_stage = group_pb.is_last_stage();
+        group.peer_addrs.assign(group_pb.peer_addrs().begin(), group_pb.peer_addrs().end());
+        groups.push_back(std::move(group));
+    }
+    return groups;
+}
+
+void appendStagePeerGroups(BroadcastLoadRequestPB& request, const std::vector<StagePeerGroup>& groups) {
+    for (const auto& group : groups) {
+        auto* group_pb = request.add_stage_peer_groups();
+        group_pb->set_layer_begin(group.range.begin);
+        group_pb->set_layer_count(group.range.size);
+        group_pb->set_is_last_stage(group.is_last_stage);
+        for (const auto& peer : group.peer_addrs) {
+            group_pb->add_peer_addrs(peer);
+        }
     }
 }
 
@@ -158,6 +186,10 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
 
     for (auto& addr : allocate_request.peer_addrs()) {
         decode_context.peer_addrs.push_back(addr);
+    }
+    decode_context.remote_stage_peer_groups = parseStagePeerGroups(allocate_request.stage_peer_groups());
+    if (!decode_context.remote_stage_peer_groups.empty()) {
+        validateStagePeerGroups(decode_context.remote_stage_peer_groups, maga_init_params_.model_config_.num_layers);
     }
     if (maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded
         && maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
@@ -284,33 +316,34 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                                         .clone();
         generate_stream->setContextPositionIds(context_position_ids);
     }
-    if (!propose_maga_init_params_) {
+    const bool sp_enabled = maga_init_params_.sp_config.type != SP_TYPE_NONE;
+    if (!sp_enabled) {
         generate_stream->markGrpcNormalDeviceStatePending();
     }
-    if (propose_maga_init_params_) {
+    if (sp_enabled) {
         // gRPC handler threads default to CUDA device 0; pin allocations below
         // to this worker's device so local_rank>0 workers don't place the MTP
         // device-state tensors on the wrong GPU.
         c10::DeviceGuard device_guard(torch::Device(
             torch::kCUDA, static_cast<c10::DeviceIndex>(maga_init_params_.parallelism_config.local_rank)));
-        const size_t propose_step = propose_maga_init_params_->gen_num_per_circle;
+        const size_t propose_step = maga_init_params_.sp_config.gen_num_per_cycle;
         RTP_LLM_CHECK_WITH_INFO(propose_step > 0, "decode rpc propose_step should be positive");
-        if (maga_init_params_.sp_config.gen_num_per_cycle > 0) {
-            RTP_LLM_CHECK_WITH_INFO(propose_step == static_cast<size_t>(maga_init_params_.sp_config.gen_num_per_cycle),
-                                    "decode rpc propose_step mismatch, propose_params=%zu, sp_config=%ld",
-                                    propose_step,
-                                    maga_init_params_.sp_config.gen_num_per_cycle);
-        }
 
+        const bool is_pipeline = maga_init_params_.parallelism_config.pp_size > 1;
+        const bool pp_mtp      = is_pipeline && !engine_->isDSpark();
         std::vector<int> propose_tokens;
         propose_tokens.assign(generate_request.propose_token_ids().begin(), generate_request.propose_token_ids().end());
-        // A DSpARK seeding handoff carries no proposal (commit-only prefill);
-        // the decode round head produces the first one. Traditional MTP/Eagle
-        // retain their target+draft handoff contract.
-        RTP_LLM_CHECK_WITH_INFO(engine_->isDSpark() ? propose_tokens.empty() : propose_tokens.size() >= 2,
-                                "decode rpc speculative handoff has invalid proposal count=%zu for dspark=%d",
+        /** DSpARK seeds without proposals; PP MTP hands off only the anchor and d1. */
+        RTP_LLM_CHECK_WITH_INFO(engine_->isDSpark() ? propose_tokens.empty() :
+                                   (pp_mtp ? propose_tokens.size() == 2 : propose_tokens.size() >= 2),
+                                "decode rpc speculative handoff has invalid proposal count=%zu for dspark=%d pp_mtp=%d",
                                 propose_tokens.size(),
-                                static_cast<int>(engine_->isDSpark()));
+                                static_cast<int>(engine_->isDSpark()),
+                                static_cast<int>(pp_mtp));
+        if (pp_mtp) {
+            /** Keep P's argmax d1 and pad deterministic candidates for fixed-width target verification. */
+            propose_tokens.resize(propose_step + 1, 0);
+        }
         generate_stream->initSpeculativeHandoffPositions();
         if (!propose_tokens.empty()) {
             generate_stream->setContainProposeToken(true);
@@ -323,33 +356,35 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
             memcpy(
                 sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
-            auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
-            auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
-
-            const auto cuda_i32             = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-            sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
-            sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
-
-            auto propose_tokens_gpu = torch::empty({1}, cuda_i32);
-            auto accept_len         = torch::ones({1}, cuda_i32);
-            auto accept_tokens      = torch::zeros({1, static_cast<int64_t>(propose_step + 1)}, cuda_i32);
-            accept_tokens[0][0]     = sp_output_buffer->tokens[0][0];
-            propose_tokens_gpu[0]   = sp_output_buffer->tokens[0][1];
-
-            auto next_seq_len = torch::ones({1}, cuda_i32);
-            next_seq_len[0]   = generate_stream->seqLength();
-
+            if (!pp_mtp) {
+                auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
+                auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
+                sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
+                sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
+            }
             generate_stream->setSPOutputBuffer(sp_output_buffer);
-            // The per-step refresher (MtpExecutor's device-state publish) is gated
-            // on RTP_LLM_STREAM_ASYNC / RTP_LLM_MTP_ASYNC_DEVICE_STATE. Publishing
-            // this static snapshot without those pipelines active would leave a
-            // stale next_real_seq_len that overrides incrKVBlock forever (same
-            // failure mode as the normal-decode grpc device state).
+
+            /**
+             * MtpExecutor refreshes this state only with RTP_LLM_STREAM_ASYNC or
+             * RTP_LLM_MTP_ASYNC_DEVICE_STATE enabled. Otherwise, stale next_real_seq_len
+             * keeps overriding incrKVBlock's sequence length.
+             * PPExecutor does not support this refresh yet.
+             */
+            const bool supports_mtp_device_state = !is_pipeline;
             auto env_on = [](const char* name) {
                 const char* value = std::getenv(name);
                 return value != nullptr && std::string(value) == "1";
             };
-            if (env_on("RTP_LLM_STREAM_ASYNC") || env_on("RTP_LLM_MTP_ASYNC_DEVICE_STATE")) {
+            if (supports_mtp_device_state
+                && (env_on("RTP_LLM_STREAM_ASYNC") || env_on("RTP_LLM_MTP_ASYNC_DEVICE_STATE"))) {
+                const auto cuda_i32     = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+                auto propose_tokens_gpu = torch::empty({1}, cuda_i32);
+                auto accept_len         = torch::ones({1}, cuda_i32);
+                auto accept_tokens      = torch::zeros({1, static_cast<int64_t>(propose_step + 1)}, cuda_i32);
+                accept_tokens[0][0]     = sp_output_buffer->tokens[0][0];
+                propose_tokens_gpu[0]   = sp_output_buffer->tokens[0][1];
+                auto next_seq_len       = torch::ones({1}, cuda_i32);
+                next_seq_len[0]         = generate_stream->seqLength();
                 generate_stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
                     .epoch                  = 0,
                     .accept_len_gpu         = std::move(accept_len),
@@ -391,21 +426,30 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     request.set_partition_id(0);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
 
-    if (load_context.prefill_cp_size > 1) {
+    if (!load_context.remote_stage_peer_groups.empty()) {
+        // PP: workers route by stage groups; the flat peer fields are unused.
+    } else if (load_context.prefill_cp_size > 1) {
         // CP-sharded prefill: every decode rank must pull the shard owned by
         // every prefill CP peer.
         for (const auto& addr : peer_addrs) {
             request.add_peer_addrs(addr);
         }
-    } else if (resource_.workers.size() % peer_addrs.size() == 0) {
-        // D >= P
-        int part_cnt = resource_.workers.size() / peer_addrs.size();
-        request.add_peer_addrs(peer_addrs[index / part_cnt]);
     } else {
-        // P >= D, load multi block of prefill
-        int group_num = peer_addrs.size() / resource_.workers.size();
-        request.add_peer_addrs(peer_addrs[index * group_num]);
+        const int64_t tp_d = std::max<int64_t>(1, maga_init_params_.parallelism_config.tp_size);
+        const int64_t lane = index % tp_d;
+        const int64_t tp_p = static_cast<int64_t>(peer_addrs.size());
+        RTP_LLM_CHECK_WITH_INFO(tp_p > 0, "peer_addrs is empty");
+        RTP_LLM_CHECK_WITH_INFO(
+            tp_d % tp_p == 0 || tp_p % tp_d == 0, "unsupported TP ratio prefill=%ld decode=%ld", tp_p, tp_d);
+        if (tp_d >= tp_p) {
+            // D >= P: several decode lanes share one peer's whole replicated block.
+            request.add_peer_addrs(peer_addrs[lane / (tp_d / tp_p)]);
+        } else {
+            // P >= D: any peer of my lane's span carries the replicated block.
+            request.add_peer_addrs(peer_addrs[lane * (tp_p / tp_d)]);
+        }
     }
+    appendStagePeerGroups(request, load_context.remote_stage_peer_groups);
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
@@ -434,7 +478,11 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     request.set_request_key(load_context.request_key);
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
-    if (load_context.prefill_cp_size > 1) {
+    if (!load_context.remote_stage_peer_groups.empty()) {
+        // PP: workers route by stage groups; the flat peer/partition fields are unused.
+        request.set_partition_count(1);
+        request.set_partition_id(0);
+    } else if (load_context.prefill_cp_size > 1) {
         // CP-sharded prefill: each peer owns a page-level or in-page shard.
         // Keep one logical partition and let loadCache route groups/blocks to
         // the owning peer.
@@ -451,22 +499,29 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
         request.set_partition_id(index % part_cnt);
         request.add_peer_addrs(peer_addrs[index % peer_cnt]);
     } else {
-        if (resource_.workers.size() % peer_addrs.size() == 0) {
-            // D >= P, load part block of prefill
-            int part_cnt = resource_.workers.size() / peer_addrs.size();
-            request.set_partition_count(part_cnt);
-            request.set_partition_id(index % part_cnt);
-            request.add_peer_addrs(peer_addrs[index / part_cnt]);
+        const int64_t tp_d = std::max<int64_t>(1, maga_init_params_.parallelism_config.tp_size);
+        const int64_t lane = index % tp_d;
+        const int64_t tp_p = static_cast<int64_t>(peer_addrs.size());
+        RTP_LLM_CHECK_WITH_INFO(tp_p > 0, "peer_addrs is empty");
+        RTP_LLM_CHECK_WITH_INFO(
+            tp_d % tp_p == 0 || tp_p % tp_d == 0, "unsupported TP ratio prefill=%ld decode=%ld", tp_p, tp_d);
+        if (tp_d >= tp_p) {
+            // D >= P: several decode lanes read one peer's head slice.
+            const int64_t part_cnt = tp_d / tp_p;
+            request.set_partition_count(static_cast<int>(part_cnt));
+            request.set_partition_id(static_cast<int>(lane % part_cnt));
+            request.add_peer_addrs(peer_addrs[lane / part_cnt]);
         } else {
-            // P >= D, load multi block of prefill
+            // P >= D: assemble consecutive prefill peers into my block.
             request.set_partition_count(1);
             request.set_partition_id(0);
-            int group_num = peer_addrs.size() / resource_.workers.size();
-            for (int i = 0; i < group_num; i++) {
-                request.add_peer_addrs(peer_addrs[index * group_num + i]);
+            const int64_t group_num = tp_p / tp_d;
+            for (int64_t i = 0; i < group_num; i++) {
+                request.add_peer_addrs(peer_addrs[lane * group_num + i]);
             }
         }
     }
+    appendStagePeerGroups(request, load_context.remote_stage_peer_groups);
 
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
@@ -495,7 +550,12 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     auto&       cache_keys         = generate_stream->cacheKeys(0);
     const auto& block_ids_by_group = generate_stream->kvCachePtr()->groupBlocks(0);
 
-    if (resource_.workers.size() % decode_context.peer_addrs.size() != 0
+    if (!decode_context.remote_stage_peer_groups.empty() && decode_context.prefill_cp_size > 1) {
+        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                         "PP stage routing with CP-sharded prefill is not supported yet");
+    }
+    if (decode_context.remote_stage_peer_groups.empty()
+        && resource_.workers.size() % decode_context.peer_addrs.size() != 0
         && decode_context.peer_addrs.size() % resource_.workers.size() != 0) {
         RTP_LLM_LOG_WARNING("request:[%s] peer ips size %d not equal to worker size %d",
                             decode_context.request_key.c_str(),
@@ -529,7 +589,8 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
                                     1,
                                     0,
                                     decode_context.server_context,
-                                    decode_context.prefill_cp_size};
+                                    decode_context.prefill_cp_size,
+                                    decode_context.remote_stage_peer_groups};
 
     // Prefill: TP = 1 && Decode: TP = 1
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
@@ -761,13 +822,15 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
 ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     RTP_LLM_PROFILE_FUNCTION();
     AtomicGuard request_guard(onflight_load_cache_requests_);
-    const auto& request_key   = load_context.request_key;
-    auto        cache_manager = engine_->resourceContext().cache_manager;
-    const auto& cache_config  = cache_manager->cacheConfig();
-    auto        layer_num     = maga_init_params_.model_config_.num_layers;
-
-    const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
-    RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
+    const auto& request_key               = load_context.request_key;
+    auto        cache_manager             = engine_->resourceContext().cache_manager;
+    const auto& cache_config              = cache_manager->cacheConfig();
+    const auto& pc                        = maga_init_params_.parallelism_config;
+    const auto  layout                    = RankLayout::fromParallelismConfig(pc);
+    const auto [global_begin, global_end] = layout.myLayerRange(maga_init_params_.model_config_.num_layers);
+    const int peer_cnt                    = static_cast<int>(load_context.peer_addrs.size());
+    RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0 || !load_context.remote_stage_peer_groups.empty(),
+                            "peer_addrs and stage peer groups are both empty");
 
     const bool   use_mla             = cache_config.use_mla;
     const bool   use_hybrid          = cache_config.groupNums() > 1;
@@ -926,12 +989,22 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             }
             return cache_key_index < cache_key_count;
         };
-    for (int i = 0; i < load_context.peer_addrs.size(); i++) {
-        auto&                                            peer_addr = load_context.peer_addrs[i];
+    const size_t gb = static_cast<size_t>(global_begin);
+    const size_t ge = static_cast<size_t>(global_end);
+    // One (peer, global-layer-range) load; shared by the flat and per-stage paths.
+    auto loadFromPeer = [&](const std::string& peer_addr,
+                            size_t             gl_begin,
+                            size_t             gl_end,
+                            int                i,
+                            int                peer_cnt,
+                            int                src_partition_count,
+                            int                src_partition_id,
+                            bool               include_mtp) -> ErrorInfo {
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
         RTP_LLM_LOG_DEBUG("load context request id is %d", load_context.request_id);
 
-        for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
+        for (size_t gl = gl_begin; gl < gl_end; ++gl) {
+            const size_t layer_id = gl - global_begin;
             // Some typed-region cache layouts let one logical layer own
             // multiple groups. Iterate every group the layer owns; other
             // layouts reduce to the legacy one-gid-per-layer behaviour.
@@ -973,8 +1046,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             cache_config, gid, block_pos, load_context.cache_keys.size(), cache_key_index)) {
                         continue;
                     }
-                    auto cache_key =
-                        makeCacheKey(model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, tag);
+                    auto cache_key = makeCacheKey(model_id,
+                                                  std::to_string(load_context.cache_keys[cache_key_index]),
+                                                  static_cast<size_t>(global_begin + layer_id),
+                                                  tag);
 
                     const bool             use_kv_key_prefix  = use_mla || use_opaque_kv_store || use_hybrid;
                     const bool             use_whole_kv_block = is_page_level_rr || use_kv_key_prefix;
@@ -1031,7 +1106,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             }
         }
 
-        if (engine_->isMTPEagle()) {
+        if (include_mtp && engine_->isMTPEagle() && layout.hasLmHead()) {
             if (propose_maga_init_params_ && propose_maga_init_params_->mtp_model_params_
                 && !propose_maga_init_params_->mtp_model_params_->empty()) {
                 const auto mtp_load_plan = makeMTPModuleLoadPlan(propose_maga_init_params_);
@@ -1058,15 +1133,14 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         // Same multi-group iteration as the main path.
                         std::vector<int> mtp_layer_gids = layerGroupIds(mtp_cache_cfg, mtp_use_hybrid, layer_id);
 
-                        const auto global_layer_id = CacheConfig::mtpGlobalLayerId(
-                            static_cast<uint32_t>(maga_init_params_.model_config_.num_layers),
-                            static_cast<int>(mtp_model_id),
-                            static_cast<uint32_t>(layer_num),
-                            static_cast<int>(layer_id));
-                        RTP_LLM_CHECK_WITH_INFO(global_layer_id != std::numeric_limits<uint32_t>::max(),
-                                                "invalid decode MTP global layer: main=%ld module=%zu "
+                        const auto stage_pool_layer_id = CacheConfig::mtpGlobalLayerId(cache_config.layer_num,
+                                                                                       static_cast<int>(mtp_model_id),
+                                                                                       static_cast<uint32_t>(layer_num),
+                                                                                       static_cast<int>(layer_id));
+                        RTP_LLM_CHECK_WITH_INFO(stage_pool_layer_id != std::numeric_limits<uint32_t>::max(),
+                                                "invalid decode MTP global layer: main=%u module=%zu "
                                                 "module_layers=%zu local=%zu",
-                                                maga_init_params_.model_config_.num_layers,
+                                                cache_config.layer_num,
                                                 mtp_model_id,
                                                 layer_num,
                                                 layer_id);
@@ -1119,10 +1193,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 const bool mtp_use_whole_kv_block = is_page_level_rr || mtp_use_kv_key_prefix;
                                 std::vector<BlockInfo> parts;
                                 if (mtp_use_whole_kv_block) {
-                                    parts = cache_manager->convertIndexToBufferByTag(block_id, global_layer_id, tag);
+                                    parts =
+                                        cache_manager->convertIndexToBufferByTag(block_id, stage_pool_layer_id, tag);
                                 } else {
                                     parts = cache_manager->convertIndexToBufferByTag(
-                                        block_id, global_layer_id, tag, peer_cnt, i);
+                                        block_id, stage_pool_layer_id, tag, peer_cnt, i);
                                 }
 
                                 parts            = sliceCpDestinationForPeer(std::move(parts), mtp_cache_cfg, gid, i);
@@ -1199,8 +1274,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                autil::StringUtil::strToInt32WithDefault(ip_parts[2].c_str(), 0),
                                                load_context.timeout_ms,
                                                cancel_check_func,
-                                               load_context.partition_count,
-                                               load_context.partition_id);
+                                               src_partition_count,
+                                               src_partition_id);
         if (!layer_cache_load_context) {
             logReadFailures(load_context.request_id,
                             peer_addr,
@@ -1210,6 +1285,51 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load kv cache failed");
         }
         load_contexts.emplace_back(peer_addr, layer_cache_load_context);
+        return ErrorInfo::OkStatus();
+    };
+
+    if (load_context.remote_stage_peer_groups.empty()) {
+        for (int i = 0; i < peer_cnt; ++i) {
+            auto error_info = loadFromPeer(load_context.peer_addrs[i],
+                                           gb,
+                                           ge,
+                                           i,
+                                           peer_cnt,
+                                           load_context.partition_count,
+                                           load_context.partition_id,
+                                           /*include_mtp=*/true);
+            if (!error_info.ok()) {
+                return error_info;
+            }
+        }
+    } else {
+        const bool replicated_kv = use_mla;
+        for (const auto& spg : load_context.remote_stage_peer_groups) {
+            const size_t g_begin = std::max(gb, static_cast<size_t>(spg.range.begin));
+            const size_t g_end   = std::min(ge, static_cast<size_t>(spg.range.end()));
+            if (g_begin >= g_end) {
+                continue;
+            }
+            RTP_LLM_CHECK_WITH_INFO(
+                !spg.peer_addrs.empty(), "empty stage peer group [%u, %u)", spg.range.begin, spg.range.end());
+            const auto slices = planStagePeerSlices(static_cast<int>(spg.peer_addrs.size()),
+                                                    static_cast<int>(pc.tp_size),
+                                                    static_cast<int>(pc.tp_rank),
+                                                    replicated_kv);
+            for (const auto& slice : slices) {
+                auto error_info = loadFromPeer(spg.peer_addrs[slice.peer_index],
+                                               g_begin,
+                                               g_end,
+                                               slice.dst_partition_id,
+                                               slice.dst_partition_count,
+                                               slice.src_partition_count,
+                                               slice.src_partition_id,
+                                               /*include_mtp=*/spg.is_last_stage);
+                if (!error_info.ok()) {
+                    return error_info;
+                }
+            }
+        }
     }
 
     for (auto& [peer_addr, layer_cache_load_context] : load_contexts) {
@@ -1263,7 +1383,8 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                  request->partition_count(),
                                  request->partition_id(),
                                  server_context,
-                                 request->prefill_cp_size() > 0 ? request->prefill_cp_size() : 1});
+                                 request->prefill_cp_size() > 0 ? request->prefill_cp_size() : 1,
+                                 parseStagePeerGroups(request->stage_peer_groups())});
     response->mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     response->mutable_error_info()->set_error_message(error_info.ToString());
     response->set_done_time_us(currentTimeUs());

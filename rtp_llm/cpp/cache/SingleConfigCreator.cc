@@ -116,6 +116,7 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     CacheConfig config;
     config.layer_num          = static_cast<uint32_t>(layer_num);
     config.layer_all_num      = static_cast<uint32_t>(layer_num);
+    config.global_layer_begin = stage_model_config.global_layer_begin;
     config.block_num          = 0;
     config.seq_size_per_block = tokens_per_block;
 

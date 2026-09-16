@@ -222,8 +222,9 @@ ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       
                             model_config.kv_cache_spec_descs.size(),
                             model_config.num_layers);
 
-    ModelConfig stage_config = model_config;
-    stage_config.num_layers  = end - begin;
+    ModelConfig stage_config        = model_config;
+    stage_config.num_layers         = end - begin;
+    stage_config.global_layer_begin = static_cast<uint32_t>(begin);
     stage_config.kv_cache_spec_descs.assign(model_config.kv_cache_spec_descs.begin() + begin,
                                             model_config.kv_cache_spec_descs.begin() + end);
 
@@ -324,11 +325,6 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                const std::optional<WarmUpResult>& warm_up_result,
                                                bool                               is_mtp,
                                                bool                               is_eagle) {
-    RTP_LLM_CHECK_WITH_INFO(parallelism_config.pp_size <= 1
-                                || (is_mtp && !is_eagle && sp_config.type == SP_TYPE_MTP
-                                    && RankLayout::fromParallelismConfig(parallelism_config).hasLmHead()),
-                            "pipeline parallelism (pp_size=%ld) requires MTP cache configuration on the last stage",
-                            parallelism_config.pp_size);
     CacheConfig score_config   = score_model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
                                      HybridPoolConfigCreator::createConfig(score_model_config,
                                                                          parallelism_config,
@@ -362,7 +358,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     setupKernelSeqSize(propose_config, kv_cache_config, "propose");
 
     int num_mtp_modules = 1;
-    if (is_mtp && parallelism_config.pp_size == 1) {
+    if (is_mtp) {
         num_mtp_modules = sp_config.gen_num_per_cycle;
         if (is_eagle || sp_config.type == SP_TYPE_DSPARK) {
             // DSpARK is one multi-layer block-draft model; gamma is its
