@@ -1228,6 +1228,127 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenFinishesSingleTokenRequestAfter
     EXPECT_EQ(stream_->seqLength(), stream_->inputLength() + 1);
 }
 
+TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoad) {
+    autil::EnvGuard real_outputs("PERF_TEST", "0");
+    for (bool requested : {false, true}) {
+        for (bool eos : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "requested=" << requested << ", eos=" << eos);
+            const std::string key = "first-token-outputs";
+            prepareP2PRegistrationResource(true, key);
+            auto&      prefill_connector = *cache_manager_->p2p_connector_->prefill_;
+            const auto deadline_ms       = stream_->generateInput()->request_deadline_ms;
+            const auto make_stream       = [&](RoleType role) {
+                auto input                      = std::make_shared<GenerateInput>();
+                input->input_ids                = torch::tensor({1, 2, 3, 4, 5, 6}, torch::kInt32);
+                input->request_deadline_ms      = deadline_ms;
+                input->generate_config          = std::make_shared<GenerateConfig>();
+                auto& config                    = *input->generate_config;
+                config.unique_key               = key;
+                config.pd_separation            = true;
+                config.max_new_tokens           = 2;
+                config.is_streaming             = true;
+                config.aux_info                 = requested;
+                config.return_logits            = requested;
+                config.select_tokens_id         = {2, 0};
+                config.return_hidden_states     = requested;
+                config.hidden_states_cut_dim    = 2;
+                config.return_all_hidden_states = requested;
+                config.return_softmax_probs     = requested;
+                config.return_cum_log_probs     = requested;
+                config.return_all_probs         = requested ? ReturnAllProbsMode::DEFAULT : ReturnAllProbsMode::NONE;
+                config.calculate_loss           = requested ? 2 : 0;
+                ModelConfig model;
+                model.max_seq_len                  = 32;
+                model.vocab_size                   = 16;
+                model.attn_config.tokens_per_block = 2;
+                model.special_tokens.eos_token_id  = eos ? 7 : 15;
+                ResourceContext resources;
+                resources.role_type       = role;
+                resources.decode_entrance = true;
+                resources.reuse_cache     = false;
+                resources.cache_manager   = cache_manager_;
+                auto result = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, resources, nullptr);
+                result->generate_status_->status = StreamState::RUNNING;
+                return result;
+            };
+            auto prefill    = make_stream(RoleType::PREFILL);
+            auto decode     = make_stream(RoleType::DECODE);
+            auto logits     = torch::arange(16, torch::kFloat32).reshape({1, 16});
+            auto hidden     = torch::arange(4, torch::kFloat32).reshape({1, 4});
+            auto all_hidden = torch::arange(24, torch::kFloat32).reshape({6, 4});
+            auto probs      = torch::full({1, 16}, 0.0625f);
+            auto loss       = torch::arange(5, torch::kFloat32);
+            prefill->step();
+            prefill->update({.new_tokens        = torch::tensor({7}, torch::kInt32).reshape({1, 1}),
+                             .num_new_tokens    = 1,
+                             .hidden_states     = hidden,
+                             .logits            = logits,
+                             .softmax_probs     = torch::full({1, 1}, 0.75f),
+                             .cum_log_probs     = torch::full({1}, -0.5f),
+                             .all_probs         = probs,
+                             .loss              = requested ? loss : torch::Tensor{},
+                             .all_hidden_states = all_hidden});
+            ASSERT_FALSE(prefill->hasError());
+            P2PConnectorResourceEntry::SideChannelData published;
+            ASSERT_TRUE(prefill_connector.stream_store_->takePrefillPayload(key, published));
+            EXPECT_EQ(published.first_token_tensors.size(), requested ? 7u : 0u);
+            // Reusing executor buffers after publication must not change the payload.
+            logits.fill_(-1);
+            hidden.fill_(-1);
+            all_hidden.fill_(-1);
+            probs.fill_(-1);
+            loss.fill_(-1);
+
+            auto result = std::make_shared<DecodeLoadHelper::Result>();
+            ASSERT_TRUE(prefill_connector.fillStartLoadResponsePayload(published, result->response).ok());
+            result->complete(true);
+            ASSERT_TRUE(result->success());
+            auto broadcast = std::make_shared<P2PBroadcastClient::Result>(key);
+            auto context   = std::make_shared<P2PConnectorAsyncReadContext>(
+                std::make_shared<KVCacheResource>(),
+                broadcast,
+                result,
+                std::make_shared<DecodeSchedulerMetricsCollector>(nullptr),
+                0,
+                true);
+            context->checkDone();
+            ASSERT_TRUE(context->success());
+            decode->streamCacheResource().p2p_load_context_ = context;
+            ASSERT_TRUE(decode->streamCacheResource().loadCacheDone());
+            ASSERT_FALSE(decode->hasError());
+            ASSERT_TRUE(decode->hasOutput());
+            auto output_result = decode->nextOutput();
+            ASSERT_TRUE(output_result.ok());
+            ASSERT_EQ(output_result.value().generate_outputs.size(), 1u);
+            const auto& output = output_result.value().generate_outputs.front();
+            EXPECT_EQ(output.output_ids.item<int32_t>(), 7);
+            EXPECT_EQ(output.finished, eos);
+            EXPECT_FALSE(decode->hasOutput());
+            // Rechecking completion must not enqueue the first token a second time.
+            ASSERT_TRUE(decode->streamCacheResource().loadCacheDone());
+            EXPECT_FALSE(decode->hasOutput());
+            ASSERT_EQ(output.logits.has_value(), requested);
+            ASSERT_EQ(output.hidden_states.has_value(), requested);
+            ASSERT_EQ(output.all_hidden_states.has_value(), requested);
+            ASSERT_EQ(output.loss.has_value(), requested);
+            ASSERT_EQ(output.aux_info.softmax_probs.has_value(), requested);
+            ASSERT_EQ(output.aux_info.cum_log_probs.has_value(), requested);
+            ASSERT_EQ(output.aux_info.all_probs.has_value(), requested);
+            if (requested) {
+                EXPECT_TRUE(torch::equal(*output.logits, torch::tensor({2.f, 0.f}).reshape({1, 2})));
+                EXPECT_TRUE(torch::equal(*output.hidden_states,
+                                         torch::arange(eos ? 2 : 4, torch::kFloat32).reshape({1, eos ? 2 : 4})));
+                EXPECT_TRUE(
+                    torch::equal(*output.all_hidden_states, torch::arange(24, torch::kFloat32).reshape({6, 4})));
+                EXPECT_TRUE(torch::equal(*output.loss, torch::arange(5, torch::kFloat32)));
+                EXPECT_FLOAT_EQ(output.aux_info.softmax_probs->item<float>(), 0.75f);
+                EXPECT_FLOAT_EQ(output.aux_info.cum_log_probs->item<float>(), -0.5f);
+                EXPECT_TRUE(torch::equal(*output.aux_info.all_probs, torch::full({1, 16}, 0.0625f)));
+            }
+        }
+    }
+}
+
 TEST_F(StreamCacheResourceTest, testReleaseResetsAllocatorContextBeforeFreeingRequestBlocks) {
     prepareResource(/*reuse_cache=*/false);
     auto& resource = stream_->streamCacheResource();

@@ -142,19 +142,23 @@ bool p2pLoadSafeToRelease(const std::shared_ptr<AsyncContext>& context) {
 
 void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* stream) {
     if (payload.has_first_token) {
+        const auto output_tensor = [&](const char* name) {
+            const auto it = payload.first_token_tensors.find(name);
+            return it == payload.first_token_tensors.end() ? torch::Tensor{} : TensorPbConvert::pbToTorch(it->second);
+        };
         stream->setIsContextStream(false);
         stream->step();
         stream->updateWithoutLock({.new_tokens =
                                        buildFirstTokenUpdateTokens(stream, static_cast<int32_t>(payload.first_token_id)),
                                    .num_new_tokens = 1,
-                                   .hidden_states = {},
-                                   .logits = {},
-                                   .softmax_probs = {},
-                                   .cum_log_probs = {},
-                                   .all_probs = {},
-                                   .loss = {},
+                                   .hidden_states = output_tensor("first_token_hidden_states"),
+                                   .logits = output_tensor("first_token_logits"),
+                                   .softmax_probs = output_tensor("first_token_softmax_probs"),
+                                   .cum_log_probs = output_tensor("first_token_cum_log_probs"),
+                                   .all_probs = output_tensor("first_token_all_probs"),
+                                   .loss = output_tensor("first_token_loss"),
                                    .src_batch_indices = {},
-                                   .all_hidden_states = {},
+                                   .all_hidden_states = output_tensor("first_token_all_hidden_states"),
                                    .update_remote_generate = false,
                                    .force_update_info = false});
     }

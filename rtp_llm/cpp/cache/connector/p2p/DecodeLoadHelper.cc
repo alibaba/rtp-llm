@@ -410,6 +410,19 @@ void DecodeLoadHelper::Result::updateStreamFromResponse() {
         side_channel_payload.disk_reuse_len   = payload.disk_reuse_len();
         side_channel_payload.has_data         = true;
 
+        for (const char* name : {"first_token_logits",
+                                 "first_token_hidden_states",
+                                 "first_token_all_hidden_states",
+                                 "first_token_loss",
+                                 "first_token_softmax_probs",
+                                 "first_token_cum_log_probs",
+                                 "first_token_all_probs"}) {
+            const auto it = payload.tensors().find(name);
+            if (it != payload.tensors().end() && it->second.has_tensor()) {
+                side_channel_payload.first_token_tensors[name].CopyFrom(it->second.tensor());
+            }
+        }
+
         // Extract tensors from the payload map
         auto it_propose = payload.tensors().find("propose_tokens");
         if (it_propose != payload.tensors().end() && it_propose->second.has_tensor()) {

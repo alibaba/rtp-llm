@@ -12,6 +12,7 @@
 #include <functional>
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -32,6 +33,7 @@ struct P2PSideChannelPayload {
     TensorPB             propose_probs;
     TensorPB             propose_hidden;
     std::vector<int32_t> position_ids;
+    std::map<std::string, TensorPB> first_token_tensors;
     bool                 has_data = false;
 };
 

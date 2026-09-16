@@ -208,6 +208,25 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
                 side_data.remote_reuse_len = remoteReuseLength();
                 side_data.memory_reuse_len = hostReuseLength();
                 side_data.disk_reuse_len   = diskReuseLength();
+                // Publish owned CPU snapshots. Decode applies these through its normal output path.
+                const auto& config      = *generate_input_->generate_config;
+                const auto  save_output = [&](const char* name, const torch::Tensor& tensor, bool requested) {
+                    if (requested && tensor.defined()) {
+                        side_data.first_token_tensors.emplace(name, tensor.to(torch::kCPU, false, true).contiguous());
+                    }
+                };
+                save_output("first_token_logits", update_info.logits, config.return_logits);
+                save_output("first_token_hidden_states", update_info.hidden_states, config.return_hidden_states);
+                save_output(
+                    "first_token_all_hidden_states", update_info.all_hidden_states, config.return_all_hidden_states);
+                save_output("first_token_loss", loss_, config.calculate_loss != 0);
+                save_output("first_token_softmax_probs",
+                            update_info.softmax_probs,
+                            config.aux_info && config.return_softmax_probs);
+                save_output("first_token_cum_log_probs", update_info.cum_log_probs, config.aux_info);
+                save_output("first_token_all_probs",
+                            update_info.all_probs,
+                            config.aux_info && config.return_all_probs != ReturnAllProbsMode::NONE);
                 if (getContainProposeToken()) {
                     side_data.propose_tokens = getProposeToken();
                 }

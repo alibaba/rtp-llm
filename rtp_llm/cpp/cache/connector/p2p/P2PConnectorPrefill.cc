@@ -483,6 +483,12 @@ grpc::Status P2PConnectorPrefill::fillStartLoadResponsePayload(const P2PConnecto
         };
         fill_tensor("propose_probs", data.propose_probs);
         fill_tensor("propose_hidden", data.propose_hidden);
+        for (const auto& [name, tensor] : data.first_token_tensors) {
+            if (!tensor.defined() || !tensor.device().is_cpu()) {
+                throw std::runtime_error("first token output tensor must be defined and on CPU");
+            }
+            TensorPbConvert::torchToPb((*payload->mutable_tensors())[name].mutable_tensor(), tensor);
+        }
         if (!data.position_ids.empty()) {
             auto& pos_tensor = (*payload->mutable_tensors())["position_ids"];
             auto* pos_pb     = pos_tensor.mutable_tensor();

@@ -41,6 +41,7 @@ struct P2PConnectorResourceEntry {
         torch::Tensor        propose_probs;
         torch::Tensor        propose_hidden;
         std::vector<int32_t> position_ids;
+        std::map<std::string, torch::Tensor> first_token_tensors;
     };
 };
 
