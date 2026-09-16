@@ -4,6 +4,10 @@ from unittest import mock
 
 import torch
 
+from rtp_llm.models_py.modules.factory.attention.attn_factory import (
+    PREFILL_MHA_IMPS,
+    _select_attn_impls,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_impl import flash_attn_3
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_attn_3 import (
     _MAX_QUERY_WIDTH,
@@ -17,6 +21,39 @@ from rtp_llm.ops.fused_rope_kvcache_op import FusedRopeKVCachePrefillOpQOut
 
 
 class FlashAttn3SupportTest(unittest.TestCase):
+    def test_backend_can_be_selected_explicitly(self) -> None:
+        config = SimpleNamespace(
+            attn_backend="auto",
+            prefill_attn_backend="fa3_paged_short_graph",
+            decode_attn_backend="",
+            disable_attn_backends="",
+        )
+        self.assertEqual(
+            _select_attn_impls(PREFILL_MHA_IMPS, config, is_prefill=True),
+            [FlashAttn3PagedShortGraphImpl],
+        )
+
+    def test_blocklist_excludes_backend_without_reordering_other_impls(self) -> None:
+        config = SimpleNamespace(
+            attn_backend="auto",
+            prefill_attn_backend="",
+            decode_attn_backend="",
+            disable_attn_backends="fa3_paged_short_graph",
+        )
+        self.assertIn(FlashAttn3PagedShortGraphImpl, PREFILL_MHA_IMPS)
+        self.assertEqual(
+            _select_attn_impls(PREFILL_MHA_IMPS, config, is_prefill=True),
+            [
+                impl
+                for impl in PREFILL_MHA_IMPS
+                if impl is not FlashAttn3PagedShortGraphImpl
+            ],
+        )
+        config.prefill_attn_backend = "fa3_paged_short_graph"
+        self.assertEqual(
+            _select_attn_impls(PREFILL_MHA_IMPS, config, is_prefill=True), []
+        )
+
     def _make_inputs(self):
         return SimpleNamespace(
             is_prefill=True,

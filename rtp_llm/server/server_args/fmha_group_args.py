@@ -32,7 +32,7 @@ def init_fmha_group_args(parser, fmha_config):
         help="Attention backend selection. 'auto' = priority-ordered auto-selection (default). "
         "'none' = disable all attention. Or a specific backend name: "
         "trt, trt_paged, flashinfer, py_flashinfer, py_flashinfer_paged, xqa, "
-        "trtllm_gen, trtllm_spec, headwise, headwise_fp8, "
+        "trtllm_gen, trtllm_spec, headwise, headwise_fp8, fa3_paged_short_graph, "
         "aiter_asm, aiter, aiter_triton, aiter_paged, cp_flashinfer, "
         "flashinfer_mla, sparse_mla, ppu_fa3.",
     )

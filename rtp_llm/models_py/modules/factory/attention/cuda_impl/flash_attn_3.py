@@ -104,6 +104,7 @@ class FlashAttn3PagedShortGraphImpl(FMHAImplBase):
     graph with a fixed query width and BF16/FP16 paged KV cache may select it.
     """
 
+    NAME = "fa3_paged_short_graph"
     cuda_graph_device_metadata_only = True
 
     def __init__(
