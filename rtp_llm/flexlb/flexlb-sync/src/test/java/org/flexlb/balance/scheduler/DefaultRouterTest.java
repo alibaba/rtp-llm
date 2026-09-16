@@ -231,7 +231,7 @@ class DefaultRouterTest {
             assertTrue(context.getFuture().get(2L, TimeUnit.SECONDS).isSuccess());
             RequestSlot slot = requests.requestSlot(9L);
             synchronized (slot) {
-                assertTrue(slot.decodeOwnsRequest());
+                assertTrue(RequestLifecycleTestSupport.<Boolean>inspect(slot, "decodeOwnsRequestLocked"));
                 assertTrue(slot.isLiveGeneration());
                 assertEquals(RequestState.Phase.ACKNOWLEDGED, slot.snapshot().state());
             }

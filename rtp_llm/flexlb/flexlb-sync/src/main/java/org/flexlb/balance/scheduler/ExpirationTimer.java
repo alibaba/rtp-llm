@@ -43,6 +43,49 @@ final class ExpirationTimer implements AutoCloseable {
             DecisionDeadline decisionDeadline, InactivityDeadline inactivityDeadline) {
     }
 
+    /** Timers detached atomically at ACTIVE -> TERMINALIZING. */
+    static final class DetachedRequestTimers {
+        private final RequestDeadline requestDeadline;
+        private final InactivityDeadline inactivityDeadline;
+        private final DecisionDeadline detachedDecisionDeadline;
+        private boolean released;
+
+        DetachedRequestTimers(
+                RequestDeadline requestDeadline,
+                DecisionDeadline detachedDecisionDeadline, InactivityDeadline inactivityDeadline) {
+            this.requestDeadline = requestDeadline;
+            this.inactivityDeadline = inactivityDeadline;
+            this.detachedDecisionDeadline = detachedDecisionDeadline;
+        }
+
+        synchronized void release(ExpirationTimer timer) {
+            if (released) {
+                return;
+            }
+            released = true;
+            Throwable failure = null;
+            if (inactivityDeadline != null) {
+                try { timer.cancel(inactivityDeadline); }
+                catch (Throwable timerFailure) { failure = timerFailure; }
+            }
+            if (requestDeadline != null) {
+                try {
+                    timer.cancel(requestDeadline);
+                } catch (Throwable timerFailure) {
+                    failure = RequestTerminalCleanup.appendFailure(failure, timerFailure);
+                }
+            }
+            if (detachedDecisionDeadline != null) {
+                try {
+                    timer.cancel(detachedDecisionDeadline);
+                } catch (Throwable admissionFailure) {
+                    failure = RequestTerminalCleanup.appendFailure(failure, admissionFailure);
+                }
+            }
+            RequestTerminalCleanup.rethrowCleanup(failure);
+        }
+    }
+
     private enum CloseState {
         OPEN,
         CLOSING,
@@ -172,6 +215,8 @@ final class ExpirationTimer implements AutoCloseable {
         executor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
     }
 
+    // ── 调度期限：注册、安装与触发 ──
+
     /**
      * Register one absolute request deadline.
      *
@@ -197,6 +242,26 @@ final class ExpirationTimer implements AutoCloseable {
             }
             throw timerStopped;
         }
+    }
+
+    private boolean installRequestDeadline(
+            RequestSlot exactSlot,
+            RequestDeadline exactDeadline) {
+        synchronized (exactSlot) {
+            return lifecycle.isCurrentSlot(exactSlot)
+                    && exactSlot.installRequestDeadline(exactDeadline);
+        }
+    }
+
+    private void requestDeadlineExpired(RequestSlot slot, RequestDeadline exact) {
+        slot.onSchedulingDeadline(exact);
+    }
+
+    // ── 可见性期限：计划、注册、触发与取消 ──
+
+    void attachDecisionDeadline(RequestSlot slot) {
+        OptionalLong deadline = slot.decisionDeadlineAtMs();
+        if (deadline.isPresent()) { registerDecisionDeadline(slot, deadline.getAsLong()); }
     }
 
     /**
@@ -225,6 +290,30 @@ final class ExpirationTimer implements AutoCloseable {
             throw timerStopped;
         }
     }
+
+    private boolean installDecisionDeadline(
+            RequestSlot exactSlot,
+            DecisionDeadline exactDeadline) {
+        synchronized (exactSlot) {
+            return lifecycle.isCurrentSlot(exactSlot)
+                    && exactSlot.installDecisionDeadline(exactDeadline);
+        }
+    }
+
+    private void decisionDeadlineExpired(RequestSlot slot, DecisionDeadline exact) {
+        slot.onDecisionVisibilityDeadline(exact);
+    }
+
+    void releaseDecisionDeadline(DecisionDeadline exact) {
+        if (exact == null) { return; }
+        try {
+            release(exact);
+        } catch (Throwable failure) {
+            Logger.error("Decision deadline cancellation failed", failure);
+        }
+    }
+
+    // ── 沉默期限：计划、注册与续期检查 ──
 
     InactivityDeadline attachInactivityDeadline(RequestSlot slot) {
         if (lifecycle.isShuttingDown()) {
@@ -257,68 +346,14 @@ final class ExpirationTimer implements AutoCloseable {
 
     private void inactivityDeadlineExpired(RequestSlot slot, InactivityDeadline exact) {
         try {
-            slot.expire(exact, clock.getAsLong());
+            slot.onInactivityDeadline(exact, clock.getAsLong());
         } finally {
             // A matching Engine fact may have extended the inactivity deadline.
             attachInactivityDeadline(slot);
         }
     }
 
-    boolean cancel(InactivityDeadline exactDeadline) {
-        return requireOwner(exactDeadline).cancel();
-    }
-
-    boolean cancel(RequestDeadline exactDeadline) {
-        return requireOwner(exactDeadline).cancel();
-    }
-
-    boolean cancel(DecisionDeadline exactDeadline) {
-        return requireOwner(exactDeadline).cancel();
-    }
-
-    void release(DecisionDeadline cleanup) {
-        if (cleanup == null) {
-            return;
-        }
-        try {
-            cancel(cleanup);
-        } catch (Throwable failure) {
-            Logger.error("Decision timer cleanup failed", failure);
-        }
-    }
-
-    /** Run one complete maintenance pass using one dynamic policy snapshot. */
-    void maintain(
-            BiConsumer<Long, LongPredicate> exactSweeper) {
-        if (lifecycle.isShuttingDown()) {
-            return;
-        }
-        long ttlMs = config.loadBalanceConfig().getWorkerRegistry().getHealth().getStatusStaleAfterMs();
-        long nowMs = clock.getAsLong();
-        List<RequestSlot> exactSlots = List.of();
-        Throwable failure = null;
-        try {
-            exactSlots = lifecycle.snapshotSlots();
-        } catch (RuntimeException | Error snapshotFailure) {
-            failure = snapshotFailure;
-        }
-
-        long terminalRecordCutoff = subtractSaturated(nowMs, ttlMs);
-        for (RequestSlot exactSlot : exactSlots) {
-            try {
-                lifecycle.removeExactTerminalRecord(exactSlot, terminalRecordCutoff);
-            } catch (RuntimeException | Error removalFailure) {
-                failure = append(failure, removalFailure);
-            }
-        }
-
-        try {
-            exactSweeper.accept(ttlMs, lifecycle::retainForSchedulerCleanup);
-        } catch (RuntimeException | Error sweepFailure) {
-            failure = append(failure, sweepFailure);
-        }
-        rethrow(failure);
-    }
+    // ── 精确句柄：注册协议、调度与取消 ──
 
     private <D extends DeadlineRegistration> D register(
             RequestSlot exactSlot,
@@ -350,39 +385,6 @@ final class ExpirationTimer implements AutoCloseable {
             return exact;
         } finally {
             endRegistration();
-        }
-    }
-
-    private boolean installRequestDeadline(
-            RequestSlot exactSlot,
-            RequestDeadline exactDeadline) {
-        synchronized (exactSlot) {
-            return lifecycle.isCurrentSlot(exactSlot)
-                    && exactSlot.installRequestDeadline(exactDeadline);
-        }
-    }
-
-    private boolean installDecisionDeadline(
-            RequestSlot exactSlot,
-            DecisionDeadline exactDeadline) {
-        synchronized (exactSlot) {
-            return lifecycle.isCurrentSlot(exactSlot)
-                    && exactSlot.installDecisionDeadline(exactDeadline);
-        }
-    }
-
-    private void requestDeadlineExpired(RequestSlot slot, RequestDeadline exact) {
-        slot.expire(exact);
-    }
-
-    private void decisionDeadlineExpired(RequestSlot slot, DecisionDeadline exact) {
-        slot.expire(exact);
-    }
-
-    private DetachedDeadlines detachDeadlinesForClose(
-            RequestSlot exactSlot) {
-        synchronized (exactSlot) {
-            return exactSlot.detachDeadlinesForTimerClose();
         }
     }
 
@@ -433,12 +435,70 @@ final class ExpirationTimer implements AutoCloseable {
         return delayMs < 0L ? Long.MAX_VALUE : delayMs;
     }
 
+    boolean cancel(InactivityDeadline exactDeadline) {
+        return requireOwner(exactDeadline).cancel();
+    }
+
+    boolean cancel(RequestDeadline exactDeadline) {
+        return requireOwner(exactDeadline).cancel();
+    }
+
+    boolean cancel(DecisionDeadline exactDeadline) {
+        return requireOwner(exactDeadline).cancel();
+    }
+
+    void release(DecisionDeadline cleanup) {
+        if (cleanup == null) {
+            return;
+        }
+        try {
+            cancel(cleanup);
+        } catch (Throwable failure) {
+            Logger.error("Decision timer cleanup failed", failure);
+        }
+    }
+
     private DeadlineRegistration requireOwner(DeadlineRegistration exact) {
         if (exact.owner != this) {
             throw new IllegalArgumentException(
                     "deadline belongs to another ExpirationTimer");
         }
         return exact;
+    }
+
+    // ── 保留期维护：先清终态目录，再扫描 Endpoint 孤儿 ──
+
+    /** Run one complete maintenance pass using one dynamic policy snapshot. */
+    void maintain(
+            BiConsumer<Long, LongPredicate> exactSweeper) {
+        if (lifecycle.isShuttingDown()) {
+            return;
+        }
+        long ttlMs = config.loadBalanceConfig().getWorkerRegistry().getHealth().getStatusStaleAfterMs();
+        long nowMs = clock.getAsLong();
+        List<RequestSlot> exactSlots = List.of();
+        Throwable failure = null;
+        try {
+            exactSlots = lifecycle.snapshotSlots();
+        } catch (RuntimeException | Error snapshotFailure) {
+            failure = snapshotFailure;
+        }
+
+        long terminalRecordCutoff = subtractSaturated(nowMs, ttlMs);
+        for (RequestSlot exactSlot : exactSlots) {
+            try {
+                lifecycle.removeExactTerminalRecord(exactSlot, terminalRecordCutoff);
+            } catch (RuntimeException | Error removalFailure) {
+                failure = append(failure, removalFailure);
+            }
+        }
+
+        try {
+            exactSweeper.accept(ttlMs, lifecycle::retainForSchedulerCleanup);
+        } catch (RuntimeException | Error sweepFailure) {
+            failure = append(failure, sweepFailure);
+        }
+        rethrow(failure);
     }
 
     private static long subtractSaturated(long value, long decrement) {
@@ -449,24 +509,7 @@ final class ExpirationTimer implements AutoCloseable {
         }
     }
 
-    private static Throwable append(Throwable first, Throwable next) {
-        if (first == null) {
-            return next;
-        }
-        if (first != next) {
-            first.addSuppressed(next);
-        }
-        return first;
-    }
-
-    private static void rethrow(Throwable failure) {
-        if (failure instanceof RuntimeException runtime) {
-            throw runtime;
-        }
-        if (failure instanceof Error error) {
-            throw error;
-        }
-    }
+    // ── 关闭：等待注册完成，摘除并取消全部句柄 ──
 
     @Override
     public void close() {
@@ -539,6 +582,13 @@ final class ExpirationTimer implements AutoCloseable {
         return failure;
     }
 
+    private DetachedDeadlines detachDeadlinesForClose(
+            RequestSlot exactSlot) {
+        synchronized (exactSlot) {
+            return exactSlot.detachDeadlinesForTimerClose();
+        }
+    }
+
     private Throwable cancelDetached(
             DeadlineRegistration exact,
             Throwable failure) {
@@ -552,4 +602,27 @@ final class ExpirationTimer implements AutoCloseable {
         }
         return failure;
     }
+
+    // ── 异常汇总 ──
+
+    private static Throwable append(Throwable first, Throwable next) {
+        if (first == null) {
+            return next;
+        }
+        if (first != next) {
+            first.addSuppressed(next);
+        }
+        return first;
+    }
+
+    private static void rethrow(Throwable failure) {
+        if (failure instanceof RuntimeException runtime) {
+            throw runtime;
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+    }
+
+
 }

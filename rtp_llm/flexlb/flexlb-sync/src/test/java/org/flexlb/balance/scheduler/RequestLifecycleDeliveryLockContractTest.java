@@ -470,7 +470,7 @@ class RequestLifecycleDeliveryLockContractTest {
         }
         RequestSlot slot = lifecycle.requestSlot(208L);
         synchronized (slot) {
-            assertTrue(slot.decodeOwnsRequest());
+            assertTrue(RequestLifecycleTestSupport.<Boolean>inspect(slot, "decodeOwnsRequestLocked"));
             assertTrue(slot.decisionDeadlineAtMs().isEmpty(), "accepted Decode needs no observation deadline");
         }
         if (batch) {

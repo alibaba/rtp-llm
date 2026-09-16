@@ -73,7 +73,7 @@ public class RequestRegistry {
                 this,
                 Objects.requireNonNull(configService, "configService"));
         this.completionPublisher = new RequestCompletionPublisher(
-                completionPublisherWorkers(configService));
+                completionPublisherWorkers(configService), reporter);
         this.terminalCleanup = new RequestTerminalCleanup(expirationTimer);
     }
 
@@ -179,10 +179,9 @@ public class RequestRegistry {
                             StrategyErrorType.DISPATCH_FAILED,
                             "request scheduler is shutting down"));
                 }
-                slot = new RequestSlot(completionPublisher, context.getRequestId(), expirationTimer, terminalCleanup, this::exitAdmissionHandleGate, reporter);
+                slot = new RequestSlot(completionPublisher, context.getRequestId(), expirationTimer, terminalCleanup, this::exitAdmissionHandleGate);
                 context.setEnqueueTime(System.currentTimeMillis());
                 synchronized (slot) {
-                    slot.configureDeadlineError(StrategyErrorType.BATCH_SLO_EXPIRED);
                     slot.configureInactivityTimeout(
                             context.getConfig().getRequestLifecycle().getRequest().getTimeoutMs());
                     requestSlots.put(context.getRequestId(), slot);
@@ -505,14 +504,14 @@ public class RequestRegistry {
             ScheduledRequest item, BatchDeliveryStrategy strategy) {
         RequestSlot slot = entryFor(item);
         return slot == null ? CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST)
-                : slot.prepareBatchDelivery(item, strategy);
+                : slot.prepareDispatch(item, () -> strategy.prepareAdmission(item));
     }
 
     public CapacityBoundary.Attempt<ScheduledRequest> prepareBatchMember(
             ScheduledRequest item, BatchDeliveryStrategy.BatchTransaction transaction) {
         RequestSlot slot = entryFor(item);
         return slot == null ? CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST)
-                : slot.prepareBatchMember(item, transaction);
+                : slot.prepareDispatch(item, () -> transaction.append(item));
     }
 
     public CapacityBoundary.Attempt<ScheduledRequest> prepareRouteMember(
@@ -520,17 +519,19 @@ public class RequestRegistry {
             PrefillTimePredictor.Evaluator evaluator) {
         RequestSlot slot = entryFor(item);
         return slot == null ? CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST)
-                : slot.prepareRouteMember(item, transaction, evaluator);
+                : slot.prepareDispatch(item, () -> transaction.append(item, evaluator));
     }
 
     public DeliveryClaim claimBatchDelivery(ScheduledRequest item, BatchDeliveryStrategy.BatchTransaction transaction) {
         RequestSlot slot = entryFor(item);
-        return slot == null ? null : slot.claimBatchDelivery(item, transaction);
+        return slot == null ? null : slot.claimDelivery(item, DeliveryClaimKind.BATCH_ENQUEUE,
+                transaction.batchId(), () -> transaction.transferToEndpoint(item));
     }
 
     public DeliveryClaim claimRouteDelivery(ScheduledRequest item, PrefillAdmissionResources.CommittedAdmissionOwner admission) {
         RequestSlot slot = entryFor(item);
-        return slot == null ? null : slot.claimRouteDelivery(item, admission);
+        return slot == null ? null : slot.claimDelivery(item, DeliveryClaimKind.ROUTE_DECISION,
+                0L, () -> admission.transferToEndpoint(item));
     }
 
     public void setDeliveryPrediction(DeliveryClaim claim, WorkSnapshot precedingWork, long predictedMs) {
@@ -568,7 +569,7 @@ public class RequestRegistry {
 
     boolean publishDecisionResponseAsync(long requestId, CompletableFuture<Response> future, Response response) {
         RequestSlot slot = requestSlots.get(requestId);
-        return slot != null && slot.ownsFuture(future) && slot.publishDecisionResponse(response);
+        return slot != null && slot.ownsFuture(future) && slot.terminateLocallyAndPublishResponse(response);
     }
 
     public boolean closeAdmissionAndAwaitMutations() {
@@ -603,7 +604,7 @@ public class RequestRegistry {
     private void completeOutstandingRequestsForShutdown() {
         List<TerminalAction> actions = new ArrayList<>();
         for (RequestSlot slot : requestSlots.values()) {
-            TerminalAction action = slot.prepareShutdown();
+            TerminalAction action = slot.claimShutdownAction();
             if (action != null) { actions.add(action); }
         }
         actions.forEach(terminalCleanup::submitTerminal);

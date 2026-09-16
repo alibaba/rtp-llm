@@ -123,7 +123,7 @@ class RequestAdmissionExpirationRaceTest {
                 registry.processDecodeStatus(decode,
                         DecodeEndpoint.WorkerStatusFact.accepted(reservation));
                 synchronized (slot) {
-                    slot.applyDecodeStatusLocked(decode, DecodeEndpoint.WorkerStatusFact.active(reservation), System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1L));
+                    org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", decode, DecodeEndpoint.WorkerStatusFact.active(reservation), System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1L));
                 }
             }
 
