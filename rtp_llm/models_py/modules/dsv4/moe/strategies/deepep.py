@@ -872,8 +872,17 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         return self._run_sm120_all_to_all_prepared(prep)
 
     def _forward_sm120_all_to_all_impl(self, x, weights, indices) -> torch.Tensor:
-        # Stock combinator: identical op order to the pre-C2 single body.
-        return self._run_sm120_all_to_all_prepared(
+        # Stock combinator: identical op order to the pre-C2 single body, but it
+        # MUST route by mode. _prepare_sm120_all_to_all returns the fixed_ep
+        # fallback dict (which carries no recv_counts) whenever the a2a payload
+        # would be oversized -- e.g. sum(recv_counts) > 65536 on a c>=4 32K
+        # prefill batch (~24000 tokens/rank). Calling _run_sm120_all_to_all_prepared
+        # directly on that dict did prep.pop("recv_counts") -> KeyError, which threw
+        # every prefill rank's eager forward each layer and stalled the request
+        # (no KV handoff -> client timeout). run_dispatch_prepared already routes
+        # fixed_ep vs a2a correctly and is rank-invariant, so reuse it here to keep
+        # the split (C2) and stock combinators in agreement.
+        return self.run_dispatch_prepared(
             self._prepare_sm120_all_to_all(x, weights, indices))
 
     def _prepare_sm120_all_to_all(self, x, weights, indices) -> dict:
