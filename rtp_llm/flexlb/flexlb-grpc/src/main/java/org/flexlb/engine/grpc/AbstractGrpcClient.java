@@ -62,12 +62,14 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
      */
     private void updateGrpcChannelPool(List<String> ipPortList) {
         Set<String/*ip:port:serviceType*/> currentKeys = new HashSet<>(channelPool.keySet());
+        Set<String> activeIps = new HashSet<>();
         List<String/*ip:port:serviceType*/> addedKeys = new ArrayList<>();
 
         // Identify new and retained workers, mark channels to be removed
-        for (String ipPort : ipPortList) {
+        for (String ipPort : new HashSet<>(ipPortList)) {
             String[] parts = ipPort.split(":");
             String ip = parts[0];
+            activeIps.add(ip);
             int httpPort = Integer.parseInt(parts[1]);
             int grpcPort = CommonUtils.toGrpcPort(httpPort);
 
@@ -79,6 +81,9 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
                 }
             }
         }
+
+        // 同一在线 IP 的状态 RPC 可使用独立端口，保留按需建立的连接。
+        currentKeys.removeIf(key -> activeIps.contains(parseServiceKey(key)[0]));
 
         if (addedKeys.isEmpty() && currentKeys.isEmpty()) {
             return;
