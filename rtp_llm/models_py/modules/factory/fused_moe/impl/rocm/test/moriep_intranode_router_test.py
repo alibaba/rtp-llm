@@ -30,6 +30,7 @@ import sys
 import time
 import types
 import unittest
+from contextlib import ExitStack
 from typing import Any, List, Optional, Tuple
 
 import pytest
@@ -336,7 +337,10 @@ def _cleanup_dist() -> None:
 
 
 def _init_moriep_shmem_and_wrapper(
-    mori_cfg: Any, mori_mod: Any, shmem_group_name: str = "default"
+    mori_cfg: Any,
+    mori_mod: Any,
+    shmem_cleanup: ExitStack,
+    shmem_group_name: str = "default",
 ) -> None:
     assert dist.is_initialized()
     rank = dist.get_rank()
@@ -349,6 +353,9 @@ def _init_moriep_shmem_and_wrapper(
         "after _register_process_group, before mori.shmem.shmem_torch_process_group_init",
     )
     mori_mod.shmem.shmem_torch_process_group_init(shmem_group_name)
+    # Finalizing uninitialized Mori state aborts and hides the original error.
+    if hasattr(mori_mod.shmem, "shmem_finalize"):
+        shmem_cleanup.callback(mori_mod.shmem.shmem_finalize)
     _moriep_log(
         rank,
         "after shmem_torch_process_group_init, before barrier #2 (sync before EpDispatchCombineOp)",
@@ -401,6 +408,7 @@ def worker_function(
     dist_port: int,
 ):
     mori_mod: Any = None
+    shmem_cleanup = ExitStack()
     _moriep_log(rank, "worker started")
     _moriep_log(rank, "before _ensure_moriep_symbols_loaded (importlib moriep_wrapper)")
     _ensure_moriep_symbols_loaded()
@@ -428,7 +436,9 @@ def worker_function(
             mori_mod=mori_mod,
         )
         _moriep_log(rank, "calling _init_moriep_shmem_and_wrapper")
-        _init_moriep_shmem_and_wrapper(mori_cfg, mori_mod, shmem_group_name="default")
+        _init_moriep_shmem_and_wrapper(
+            mori_cfg, mori_mod, shmem_cleanup, shmem_group_name="default"
+        )
 
         _moriep_log(rank, "MoriEPWrapper.get_instance()")
         wrapper = MoriEPWrapper.get_instance()
@@ -495,12 +505,7 @@ def worker_function(
             if inst is not None:
                 inst.reset_op()
             MoriEPWrapper.reset()
-        if (
-            mori_mod is not None
-            and hasattr(mori_mod, "shmem")
-            and hasattr(mori_mod.shmem, "shmem_finalize")
-        ):
-            mori_mod.shmem.shmem_finalize()
+        shmem_cleanup.close()
         _cleanup_dist()
 
 
