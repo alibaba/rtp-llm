@@ -14,7 +14,6 @@ namespace rtp_llm {
 
 constexpr int32_t kPeerInfoProbeDefaultMs = 1000;
 constexpr int32_t kPeerInfoProbeMaxMs     = 1000;
-constexpr int32_t kPeerInfoProbeMinMs     = 200;
 
 namespace {
 
@@ -294,9 +293,9 @@ PrefillServerCaller::getPrefillPeerInfo(const std::string& ip, uint32_t port, in
                          "GetPeerInfo getConnection peer=" + addr + ": " + conn.status().ToString());
     }
 
-    const auto probe_timeout_ms = std::clamp(request_timeout_ms > 0 ? request_timeout_ms : kPeerInfoProbeDefaultMs,
-                                            kPeerInfoProbeMinMs,
-                                            kPeerInfoProbeMaxMs);
+    // Never enlarge a positive remaining request budget for the peer-info probe.
+    const auto probe_timeout_ms = std::min(request_timeout_ms > 0 ? request_timeout_ms : kPeerInfoProbeDefaultMs,
+                                          kPeerInfoProbeMaxMs);
     grpc::ClientContext ctx;
     ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(probe_timeout_ms));
 
