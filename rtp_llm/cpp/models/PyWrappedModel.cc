@@ -696,6 +696,21 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
     } flag_guard{prepared_attention_inputs_};
 
+    // RAII guard: a pd_separation forward inits the cache-store writer and reaches waitAllDone()
+    // only on the success path. If anything below throws, the catch blocks re-throw and
+    // waitAllDone() is skipped, leaving the writer RUNNING; the next init() would then have to
+    // self-heal. Drain it back to IDLE here, at the point of failure, so recovery is prompt and
+    // the abandoned cycle's in-flight tasks are not carried into the next request. reset() is a
+    // no-op on the happy path (waitAllDone already idled it) and never throws during unwinding.
+    struct WriterResetGuard {
+        CacheStoreAsyncWriter* writer;
+        ~WriterResetGuard() {
+            if (writer) {
+                writer->reset();
+            }
+        }
+    } writer_guard{(!inputs.warmup && inputs.pd_separation) ? cache_store_async_writer_.get() : nullptr};
+
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 

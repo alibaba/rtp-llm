@@ -13,8 +13,10 @@ namespace rtp_llm {
 
 // Offloads writeCacheStore CPU-heavy work to a background thread pool so the
 // main thread can keep launching CUDA kernels without stalling.
-// Thread-safe: init / submit / waitAllDone can be called from any thread.
+// Thread-safe: init / submit / waitAllDone / reset can be called from any thread.
 // Lifecycle: init() -> submit()* -> waitAllDone() -> init() -> ...
+// reset() is the recovery hook for a cycle abandoned before waitAllDone() (see .cc); init()
+// calls it internally, so an abandoned RUNNING cycle self-heals instead of wedging.
 class CacheStoreAsyncWriter {
 public:
     explicit CacheStoreAsyncWriter(int device_id = -1);
@@ -23,6 +25,10 @@ public:
     void init();
     void submit(std::function<void()> task);
     void waitAllDone();
+    // Drain in-flight tasks and force IDLE, discarding any stored exception. Non-throwing and
+    // idempotent (no-op when already IDLE), so it is safe to call from a RAII guard during stack
+    // unwinding. Recovers a cycle that never reached waitAllDone().
+    void reset() noexcept;
 
 private:
     enum class State {

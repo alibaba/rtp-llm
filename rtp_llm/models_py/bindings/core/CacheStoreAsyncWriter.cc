@@ -23,32 +23,59 @@ CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
     }
 }
 
-// IDLE -> RUNNING. Resets bookkeeping for a new forward-pass cycle.
+// Drain any in-flight tasks and force the writer back to IDLE, discarding any stored exception.
+// Non-throwing and idempotent (a no-op when already IDLE), so it is safe to call from a RAII
+// guard during stack unwinding.
 //
-// SELF-HEAL a stale RUNNING state instead of asserting. The caller (PyWrappedModel) runs
-// init() ... waitAllDone() with no scope guard between them, so a forward that throws in that
-// region (the pybind11 python forward, fusedCopy, or an output-size RTP_LLM_CHECK) skips
-// waitAllDone() and leaves state_==RUNNING. The old RTP_LLM_CHECK then made EVERY subsequent
-// init() throw -> the engine-loop catch-all swallowed and retried -> an unbounded "already
-// RUNNING" retry loop that floods the log with no recovery. Draining the abandoned cycle's
-// in-flight tasks (the same wait_cv_/pending_count_ mechanism waitAllDone uses) and resetting
-// makes the writer recoverable so subsequent requests succeed. The happy path is unchanged:
-// init() is normally entered with state_==IDLE and pending_count_==0, so the drain wait returns
-// immediately.
-void CacheStoreAsyncWriter::init() {
-    bool stale = false;
-    {
+// This is the recovery hook for a cycle that never reached waitAllDone(). PyWrappedModel runs
+// init() ... waitAllDone() with no scope guard on the async-prepare path, and that prepare runs
+// on a SEPARATE thread (MtpExecutor target_verify_prepare_runner_) from the main-thread forward()
+// that calls waitAllDone(). A forward that throws (the pybind11 forward, fusedCopy, an output-size
+// RTP_LLM_CHECK, or a 32K CUDA-OOM), or an async prepare orphaned by a cancel before its forward,
+// can therefore leave state_==RUNNING. The old RTP_LLM_CHECK(state==IDLE) in init() turned that
+// recoverable state into an unbounded "already RUNNING" retry storm (the engine-loop catch-all
+// swallowed and retried forever, flooding the log). Draining here makes the writer reusable so
+// subsequent requests succeed.
+void CacheStoreAsyncWriter::reset() noexcept {
+    try {
+        bool was_running;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            was_running = (state_ == State::RUNNING);
+        }
+        if (!was_running) {
+            return;  // IDLE: nothing to drain.
+        }
+        RTP_LLM_LOG_WARNING("CacheStoreAsyncWriter::reset() draining a cycle that never reached "
+                            "waitAllDone() (a forward likely threw, or an async prepare was "
+                            "orphaned); recovering to IDLE so the next init() does not wedge.");
+        {
+            std::unique_lock<std::mutex> lock(wait_mutex_);
+            wait_cv_.wait(lock, [this]() { return pending_count_.load(std::memory_order_acquire) == 0; });
+        }
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            pending_count_.store(0, std::memory_order_relaxed);
+            state_ = State::IDLE;
+        }
+        {
+            std::lock_guard<std::mutex> ex_lock(exception_mutex_);
+            stored_exception_ = nullptr;
+        }
+    } catch (...) {
+        // reset() may run during stack unwinding (a forward() RAII guard); never propagate.
+        // Best effort: force IDLE so the writer is at least reusable.
         std::lock_guard<std::mutex> lock(state_mutex_);
-        stale = (state_ == State::RUNNING);
+        pending_count_.store(0, std::memory_order_relaxed);
+        state_ = State::IDLE;
     }
-    if (stale) {
-        RTP_LLM_LOG_ERROR("CacheStoreAsyncWriter::init() found stale RUNNING state (a prior cycle "
-                          "did not reach waitAllDone(), likely an escaped forward exception); "
-                          "draining in-flight tasks and resetting to avoid an 'already RUNNING' "
-                          "retry storm.");
-        std::unique_lock<std::mutex> lock(wait_mutex_);
-        wait_cv_.wait(lock, [this]() { return pending_count_.load(std::memory_order_acquire) == 0; });
-    }
+}
+
+// IDLE -> RUNNING. Resets bookkeeping for a new forward-pass cycle. If a prior cycle was
+// abandoned (still RUNNING), recover it first via reset() rather than asserting (see reset()).
+// The happy path is unchanged: reset() is a no-op when init() is entered at IDLE.
+void CacheStoreAsyncWriter::init() {
+    reset();
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         pending_count_.store(0, std::memory_order_relaxed);
