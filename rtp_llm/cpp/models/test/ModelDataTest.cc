@@ -85,13 +85,38 @@ TEST_F(ModelDataTest, testTensorHolderReleasesOnThirdRound) {
 }
 
 TEST_F(ModelDataTest, testPrefillCPExecutionFollowsRoleConfig) {
-    ParallelismConfig prefill_config;
-    prefill_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
-    EXPECT_TRUE(buildExecProperties(prefill_config, DeviceResourceConfig{}).enable_prefill_cp);
+    for (const auto method : {CPRotateMethod::ALL_GATHER, CPRotateMethod::PREFILL_CP}) {
+        for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION, RoleType::DECODE}) {
+            for (const auto tp_size : {1, 2, 4}) {
+                ParallelismConfig config;
+                config.role_type = role;
+                config.tp_size = tp_size;
+                config.prefill_cp_config.method = method;
+                config.prefill_cp_config.kv_cache_sharded = true;
+                config.prefill_cp_config.prefill_cp_size = 4;
+                const auto props = buildExecProperties(config, DeviceResourceConfig{});
+                const bool local_cp = role != RoleType::DECODE && tp_size > 1;
+                EXPECT_EQ(props.enable_prefill_cp, local_cp);
+                EXPECT_EQ(props.prefill_cp_kv_cache_sharded, local_cp);
+                // The receiving role must retain remote CP geometry for PD.
+                EXPECT_EQ(config.prefill_cp_config.method, method);
+                EXPECT_EQ(config.prefill_cp_config.prefill_cp_size, 4);
+                EXPECT_TRUE(config.prefill_cp_config.kv_cache_sharded);
+            }
+        }
+    }
+}
 
-    ParallelismConfig decode_config;
-    decode_config.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
-    EXPECT_FALSE(buildExecProperties(decode_config, DeviceResourceConfig{}).enable_prefill_cp);
+TEST_F(ModelDataTest, testDisabledCPDoesNotActivateFromRemoteGeometry) {
+    ParallelismConfig config;
+    config.role_type = RoleType::PREFILL;
+    config.tp_size = 4;
+    config.prefill_cp_config.method = CPRotateMethod::DISABLED;
+    config.prefill_cp_config.kv_cache_sharded = true;
+    config.prefill_cp_config.prefill_cp_size = 4;
+    const auto props = buildExecProperties(config, DeviceResourceConfig{});
+    EXPECT_FALSE(props.enable_prefill_cp);
+    EXPECT_FALSE(props.prefill_cp_kv_cache_sharded);
 }
 
 TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {
