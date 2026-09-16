@@ -789,7 +789,7 @@ TEST_F(DecodeLeaseRaceTest, D1_QueryLeaseStatus_CallbackDrivenFinishCounting) {
 }
 
 // D2: Multiple calls to queryLeaseStatus with no new completions between calls.
-//     finish_counted must not double-count.
+//     Completion counters must not double-count.
 TEST_F(DecodeLeaseRaceTest, D2_QueryLeaseStatus_NoDoubleCount) {
     const std::string key         = "d2_no_double_count";
     auto              buffers     = makeBuffers(2);

@@ -133,11 +133,8 @@ private:
     // recv task completion callbacks advance the counters; queries only read them.
     struct LeaseMapEntry {
         std::shared_ptr<ReadTaskGroup> task_group;
-        int                            finish_counted{0};  // how many tasks have been counted as finished so far
     };
 
-    // Requires lease_map_mutex_ to be held by caller.
-    static void advanceLeaseProgress(LeaseMapEntry& entry);
     mutable std::mutex                             lease_map_mutex_;
     std::unordered_map<std::string, LeaseMapEntry> lease_map_;
     std::shared_ptr<CompletionCallbackState>       completion_callback_state_;

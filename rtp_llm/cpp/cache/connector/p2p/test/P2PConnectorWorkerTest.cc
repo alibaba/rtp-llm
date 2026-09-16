@@ -1166,6 +1166,7 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_CancelRead) {
 
 TEST_F(P2PConnectorWorkerTest, FirstLayerMetricWaitsForAllRoutesAndIgnoresFailedLayer) {
     auto group                  = std::make_shared<P2PConnectorWorkerDecode::ReadTaskGroup>();
+    group->lease                = std::make_shared<DecodeTargetWriteLease>();
     auto a                      = std::make_shared<MockIKVCacheRecvTask>();
     auto b                      = std::make_shared<MockIKVCacheRecvTask>();
     auto failed                 = std::make_shared<MockIKVCacheRecvTask>();
@@ -1173,10 +1174,13 @@ TEST_F(P2PConnectorWorkerTest, FirstLayerMetricWaitsForAllRoutesAndIgnoresFailed
     group->task_buffer_keys     = {{"a", "layer0_full"}, {"b", "layer0_full"}, {"failed", "layer1_full"}};
     group->pending_buffer_tasks = {{"layer0_full", 2}, {"layer1_full", 1}};
     group->partition_keys       = {"a"};
+    group->lease->onTransferStarted();
     decode_->registerTaskCompletionCallback(a, "metric", group);
     group->partition_keys.push_back("b");
+    group->lease->onTransferStarted();
     decode_->registerTaskCompletionCallback(b, "metric", group);
     group->partition_keys.push_back("failed");
+    group->lease->onTransferStarted();
     decode_->registerTaskCompletionCallback(failed, "metric", group);
 
     failed->setDone(false);
@@ -1191,25 +1195,104 @@ TEST_F(P2PConnectorWorkerTest, FirstLayerMetricWaitsForAllRoutesAndIgnoresFailed
 
 TEST_F(P2PConnectorWorkerTest, FirstLayerMetricHandlesAlreadyCompletedTask) {
     auto group                  = std::make_shared<P2PConnectorWorkerDecode::ReadTaskGroup>();
+    group->lease                = std::make_shared<DecodeTargetWriteLease>();
     auto task                   = std::make_shared<MockIKVCacheRecvTask>();
     group->tasks                = {task};
     group->partition_keys       = {"ready"};
     group->task_buffer_keys     = {{"ready", "layer0_full"}};
     group->pending_buffer_tasks = {{"layer0_full", 1}};
     task->setDone(true);
+    group->lease->onTransferStarted();
     decode_->registerTaskCompletionCallback(task, "metric", group);
     EXPECT_GE(group->first_layer_done_time_us.load(), 0);
     EXPECT_EQ(group->pending_buffer_tasks.at("layer0_full"), 0);
 }
 
 TEST_F(P2PConnectorWorkerTest, RecvCompletionBeforeWaitAndLeasePublicationIsNotLost) {
-    auto group = std::make_shared<P2PConnectorWorkerDecode::ReadTaskGroup>();
-    auto task  = std::make_shared<MockIKVCacheRecvTask>();
+    auto group   = std::make_shared<P2PConnectorWorkerDecode::ReadTaskGroup>();
+    group->lease = std::make_shared<DecodeTargetWriteLease>();
+    auto task    = std::make_shared<MockIKVCacheRecvTask>();
     group->tasks.push_back(task);
     task->setDone(true);
+    group->lease->onTransferStarted();
     decode_->registerTaskCompletionCallback(task, "early-finish", group);
+    EXPECT_EQ(group->lease->finishedOps(), 1);
+    EXPECT_FALSE(group->lease->isStopped());
+    decode_->lease_map_["early-finish"] = P2PConnectorWorkerDecode::LeaseMapEntry{group};
+    group->lease->seal();
+    decode_->onRecvTaskDone("early-finish", group);
+    EXPECT_EQ(decode_->lease_map_.count("early-finish"), 0u);
+    EXPECT_EQ(group->lease->finishedOps(), 1);
     EXPECT_EQ(decode_->waitRecvTasksWithReadDeadlinePolicy(group, currentTimeMs() + 1000, 1, "early-finish"),
               P2PConnectorWorkerDecode::ReadWaitOutcome::AllDone);
+}
+
+TEST_F(P2PConnectorWorkerTest, RecvCompletionCountsOnlyItsOwnTaskWithoutScanning) {
+    class CountingTask: public MockIKVCacheRecvTask {
+    public:
+        bool done() const override {
+            ++done_checks;
+            return MockIKVCacheRecvTask::done();
+        }
+        mutable int done_checks{0};
+    };
+    auto group   = std::make_shared<P2PConnectorWorkerDecode::ReadTaskGroup>();
+    group->lease = std::make_shared<DecodeTargetWriteLease>();
+    auto a       = std::make_shared<CountingTask>();
+    auto b       = std::make_shared<CountingTask>();
+    group->tasks = {a, b};
+    for (const auto& task : group->tasks) {
+        group->lease->onTransferStarted();
+        decode_->registerTaskCompletionCallback(task, "count-once", group);
+    }
+    decode_->lease_map_["count-once"] = P2PConnectorWorkerDecode::LeaseMapEntry{group};
+    group->lease->seal();
+
+    a->setDone(true);
+    a->setDone(true);
+    EXPECT_EQ(group->lease->finishedOps(), 1);
+    EXPECT_FALSE(group->lease->isStopped());
+    EXPECT_EQ(decode_->lease_map_.count("count-once"), 1u);
+
+    b->setDone(false);
+    EXPECT_EQ(group->lease->finishedOps(), 2);
+    EXPECT_TRUE(group->lease->isStopped());
+    EXPECT_EQ(decode_->lease_map_.count("count-once"), 0u);
+    EXPECT_EQ(a->done_checks, 0);
+    EXPECT_EQ(b->done_checks, 0);
+}
+
+TEST_F(P2PConnectorWorkerTest, RecvConcurrentCompletionsCountEveryTaskOnce) {
+    auto group   = std::make_shared<P2PConnectorWorkerDecode::ReadTaskGroup>();
+    group->lease = std::make_shared<DecodeTargetWriteLease>();
+    std::vector<std::shared_ptr<MockIKVCacheRecvTask>> tasks;
+    for (int i = 0; i < 16; ++i) {
+        auto task = std::make_shared<MockIKVCacheRecvTask>();
+        tasks.push_back(task);
+        group->tasks.push_back(task);
+        group->lease->onTransferStarted();
+        decode_->registerTaskCompletionCallback(task, "concurrent-count", group);
+    }
+    decode_->lease_map_["concurrent-count"] = P2PConnectorWorkerDecode::LeaseMapEntry{group};
+    group->lease->seal();
+
+    std::promise<void> start;
+    auto ready = start.get_future().share();
+    std::vector<std::thread> finishers;
+    for (const auto& task : tasks) {
+        finishers.emplace_back([task, ready]() {
+            ready.wait();
+            task->setDone(true);
+        });
+    }
+    start.set_value();
+    for (auto& finisher : finishers) {
+        finisher.join();
+    }
+    EXPECT_EQ(group->lease->startedOps(), 16);
+    EXPECT_EQ(group->lease->finishedOps(), 16);
+    EXPECT_TRUE(group->lease->isStopped());
+    EXPECT_EQ(decode_->lease_map_.count("concurrent-count"), 0u);
 }
 
 TEST_F(P2PConnectorWorkerTest, RecvCompletionWakesAnAlreadyWaitingRequest) {
@@ -1230,6 +1313,7 @@ TEST_F(P2PConnectorWorkerTest, RecvCompletionWakesAnAlreadyWaitingRequest) {
     auto task     = std::make_shared<ObservedTask>();
     auto checking = task->checking_.get_future();
     group->tasks.push_back(task);
+    group->lease->onTransferStarted();
     decode_->registerTaskCompletionCallback(task, "wake-recv", group);
     auto waiting = std::async(std::launch::async, [&] {
         return decode_->waitRecvTasksWithReadDeadlinePolicy(group, currentTimeMs() + 2000, 2, "wake-recv");
@@ -1243,9 +1327,11 @@ TEST_F(P2PConnectorWorkerTest, RecvCompletionWakesAnAlreadyWaitingRequest) {
 }
 
 TEST_F(P2PConnectorWorkerTest, RecvLateCompletionDoesNotRetainGroupOrTouchDestroyedWorker) {
-    auto group = std::make_shared<P2PConnectorWorkerDecode::ReadTaskGroup>();
-    auto task  = std::make_shared<MockIKVCacheRecvTask>();
+    auto group   = std::make_shared<P2PConnectorWorkerDecode::ReadTaskGroup>();
+    group->lease = std::make_shared<DecodeTargetWriteLease>();
+    auto task    = std::make_shared<MockIKVCacheRecvTask>();
     group->tasks.push_back(task);
+    group->lease->onTransferStarted();
     decode_->registerTaskCompletionCallback(task, "late-recv", group);
     std::weak_ptr<P2PConnectorWorkerDecode::ReadTaskGroup> weak = group;
     group.reset();
@@ -1256,13 +1342,16 @@ TEST_F(P2PConnectorWorkerTest, RecvLateCompletionDoesNotRetainGroupOrTouchDestro
 }
 
 TEST_F(P2PConnectorWorkerTest, RecvLateCompletionCanNotifySurvivingGroupAfterWorkerDestruction) {
-    auto group = std::make_shared<P2PConnectorWorkerDecode::ReadTaskGroup>();
-    auto task  = std::make_shared<MockIKVCacheRecvTask>();
+    auto group   = std::make_shared<P2PConnectorWorkerDecode::ReadTaskGroup>();
+    group->lease = std::make_shared<DecodeTargetWriteLease>();
+    auto task    = std::make_shared<MockIKVCacheRecvTask>();
     group->tasks.push_back(task);
+    group->lease->onTransferStarted();
     decode_->registerTaskCompletionCallback(task, "surviving-group", group);
     decode_.reset();
     task->setDone(true);
     EXPECT_TRUE(group->tasks.front()->done());
+    EXPECT_EQ(group->lease->finishedOps(), 1);
 }
 
 TEST_F(P2PConnectorWorkerTest, RecvDeadlineCancellationAllowsInlineCompletionCallback) {
@@ -1270,11 +1359,14 @@ TEST_F(P2PConnectorWorkerTest, RecvDeadlineCancellationAllowsInlineCompletionCal
     group->lease = std::make_shared<DecodeTargetWriteLease>();
     auto task    = std::make_shared<MockIKVCacheRecvTask>();
     group->tasks.push_back(task);
+    group->lease->onTransferStarted();
     decode_->registerTaskCompletionCallback(task, "inline-cancel", group);
     EXPECT_EQ(decode_->waitRecvTasksWithReadDeadlinePolicy(group, currentTimeMs(), 3, "inline-cancel"),
               P2PConnectorWorkerDecode::ReadWaitOutcome::ReturnDeadlineIncomplete);
     EXPECT_TRUE(task->done());
     EXPECT_TRUE(group->lease->isSealed());
+    EXPECT_EQ(group->lease->finishedOps(), 1);
+    EXPECT_TRUE(group->lease->isStopped());
 }
 
 TEST_F(P2PConnectorWorkerTest, CancelRead_ReturnTrue_DuringRecvRegistrationWindow) {
@@ -2093,12 +2185,15 @@ TEST_F(P2PConnectorWorkerTest, SendFirstFailureSurvivesCancellationAndTimeout) {
 
 TEST_F(P2PConnectorWorkerTest, RecvFirstCallbackWinsOverTaskOrderAndLaterCancel) {
     auto group            = std::make_shared<P2PConnectorWorkerDecode::ReadTaskGroup>();
+    group->lease          = std::make_shared<DecodeTargetWriteLease>();
     auto a                = std::make_shared<MockIKVCacheRecvTask>();
     auto b                = std::make_shared<MockIKVCacheRecvTask>();
     group->tasks          = {a, b};
     group->partition_keys = {"task-0"};
+    group->lease->onTransferStarted();
     decode_->registerTaskCompletionCallback(a, "first-recv", group);
     group->partition_keys.push_back("task-1");
+    group->lease->onTransferStarted();
     decode_->registerTaskCompletionCallback(b, "first-recv", group);
     b->setDone(false);
     const auto first = group->first_error.snapshot();

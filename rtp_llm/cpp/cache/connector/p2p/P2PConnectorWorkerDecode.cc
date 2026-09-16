@@ -273,8 +273,7 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
             if (has_inflight_task) {
                 task_group->lease->seal();
                 std::lock_guard<std::mutex> lease_lock(lease_map_mutex_);
-                auto& lease_entry      = lease_map_[unique_key] = LeaseMapEntry{task_group, 0};
-                advanceLeaseProgress(lease_entry);
+                auto& lease_entry      = lease_map_[unique_key] = LeaseMapEntry{task_group};
                 if (lease_entry.task_group->lease->isStopped()) {
                     lease_map_.erase(unique_key);
                 }
@@ -299,8 +298,7 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
         // Publish the lease before registration stops being visible. A lease
         // query after CANCEL_READ acknowledgement must always observe one of them.
         std::lock_guard<std::mutex> lease_lock(lease_map_mutex_);
-        auto& lease_entry      = lease_map_[unique_key] = LeaseMapEntry{task_group, 0};
-        advanceLeaseProgress(lease_entry);
+        lease_map_[unique_key] = LeaseMapEntry{task_group};
     }
 
     if (pending_cancel) {
@@ -329,6 +327,8 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
     }
 
     if (outcome == ReadWaitOutcome::ReturnDeadlineIncomplete) {
+        // The deadline path has sealed the lease. Completions may have arrived before seal().
+        onRecvTaskDone(unique_key, task_group);
         int done_count = 0;
         for (const auto& task : task_group->tasks) {
             if (task->done()) {
@@ -351,18 +351,8 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
     task_group->lease->seal();
     cleanupRecvTaskStore(task_group, /*cancel_pending_tasks=*/outcome == ReadWaitOutcome::Failed);
 
-    // A completion callback may have arrived before seal(), so advance once more
-    // after sealing to release an already-finished lease without a polling pass.
-    {
-        std::lock_guard<std::mutex> lock(lease_map_mutex_);
-        auto                        it = lease_map_.find(unique_key);
-        if (it != lease_map_.end() && it->second.task_group == task_group) {
-            advanceLeaseProgress(it->second);
-            if (it->second.task_group->lease->isStopped()) {
-                lease_map_.erase(it);
-            }
-        }
-    }
+    // Recheck after sealing: all completion callbacks may have already run.
+    onRecvTaskDone(unique_key, task_group);
     // Cancelled path: TRANSFERRING tasks remain in lease_map_ until their completion
     // callbacks report physical completion, preventing premature block release.
 
@@ -450,20 +440,6 @@ bool P2PConnectorWorkerDecode::cancelRead(const std::string& unique_key, int64_t
     return true;
 }
 
-void P2PConnectorWorkerDecode::advanceLeaseProgress(LeaseMapEntry& entry) {
-    int done_now = 0;
-    for (const auto& task : entry.task_group->tasks) {
-        if (task && task->done()) {
-            ++done_now;
-        }
-    }
-    const int newly_done = done_now - entry.finish_counted;
-    for (int i = 0; i < newly_done; ++i) {
-        entry.task_group->lease->onTransferFinished();
-    }
-    entry.finish_counted = std::max(entry.finish_counted, done_now);
-}
-
 void P2PConnectorWorkerDecode::registerTaskCompletionCallback(
     const transfer::IKVCacheRecvTaskPtr& task,
     const std::string&                    unique_key,
@@ -503,6 +479,9 @@ void P2PConnectorWorkerDecode::registerTaskCompletionCallback(
                     }
                 }
             }
+            // Each task invokes this callback exactly once, including when it
+            // finishes before callback registration or lease-map publication.
+            group->lease->onTransferFinished();
             group->completion_cv.notify_all();
         }
         {
@@ -531,7 +510,6 @@ void P2PConnectorWorkerDecode::onRecvTaskDone(const std::string& unique_key,
     if (it == lease_map_.end() || it->second.task_group != task_group) {
         return;
     }
-    advanceLeaseProgress(it->second);
     if (it->second.task_group->lease->isStopped()) {
         lease_map_.erase(it);
     }
