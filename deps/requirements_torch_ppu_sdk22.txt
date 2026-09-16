@@ -1,0 +1,12 @@
+torch @ file:///opt/ppu-sdk22-wheelhouse/torch-2.10.0-cp312-cp312-linux_x86_64.whl#sha256=f22ed4ce8245d83025691299ea00e709e0ba1fd3173b6f9e342233a37b00f6db
+torchvision @ file:///opt/ppu-sdk22-wheelhouse/torchvision-0.25.0-cp312-cp312-linux_x86_64.whl#sha256=f9248ac5acbebc5a4ce79a83d09c629fff1323dd8c06bc0bf043394e8f756d06
+triton @ file:///opt/ppu-sdk22-wheelhouse/triton-3.6.0+gitbd82ab88-cp312-cp312-linux_x86_64.whl#sha256=d52a14adb07ed82533a874cf8250ead792654ebb24049dbc9ccac09cb4143b5b
+flash-attn @ file:///opt/ppu-sdk22-wheelhouse/flash_attn-2.7.4.post1-cp312-cp312-linux_x86_64.whl#sha256=ca29104d7c4f2131bee035457c3f9572521cfa533ec8a84c6e1c99f87e0cb7f4
+flash-attn-3 @ file:///opt/ppu-sdk22-wheelhouse/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl#sha256=8f4026c8ea08e1ef2e7dac0da25463bf3eb90098970aa26e383d3411d900a4ec
+flash-mla @ file:///opt/ppu-sdk22-wheelhouse/flash_mla-2.0.0+dev118.g33bf68-cp312-cp312-linux_x86_64.whl#sha256=c82372d482cc6fa68536dfa74497bed2d95d44300ed772056d4b81abfe4d00fc
+flashinfer-python @ file:///opt/ppu-sdk22-wheelhouse/flashinfer_python-0.6.12-py3-none-any.whl#sha256=337a70bdcb00664981f8e2d680e838ab9132030ed14e45154513c782ed12e2ba
+deep-gemm @ file:///opt/ppu-sdk22-wheelhouse/deep_gemm-1.0.0+dev358.g9fbbd6491-cp312-cp312-linux_x86_64.whl#sha256=354a02604c4e93763c62535e80aba8aa28e1931c13ff9b479a353ef1d2925132
+deep-ep @ file:///opt/ppu-sdk22-wheelhouse/deep_ep-2.2.0+local-cp312-cp312-linux_x86_64.whl#sha256=5695f33262e83d4c831e10353d375d29f964cb8461177d4ed1f93cf6659a90d9
+fast-hadamard-transform @ file:///opt/ppu-sdk22-wheelhouse/fast_hadamard_transform-1.0.4.post1-cp312-cp312-linux_x86_64.whl#sha256=01e1f7f0b1a30edddbaf74c962f1f427020de790836f2f9f2628fa9eed81f275
+grpcio-tools @ file:///opt/ppu-sdk22-wheelhouse/grpcio_tools-1.62.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl#sha256=b65288ebe12e38dd3650fea65d82fcce0d35df1ae4a770b525c10119ee71962f
+mkl==2021.1.1

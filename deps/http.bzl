@@ -15,6 +15,16 @@ def http_deps():
     )
 
     http_archive(
+        name = "torch_2.10_py312_ppu_sdk22",
+        sha256 = "f22ed4ce8245d83025691299ea00e709e0ba1fd3173b6f9e342233a37b00f6db",
+        urls = [
+            "file:///opt/ppu-sdk22-wheelhouse/torch-2.10.0-cp312-cp312-linux_x86_64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
+    http_archive(
         name = "rules_pkg",
         urls = [
             "https://mirror.bazel.build/github.com/bazelbuild/rules_pkg/releases/download/0.6.0/rules_pkg-0.6.0.tar.gz",

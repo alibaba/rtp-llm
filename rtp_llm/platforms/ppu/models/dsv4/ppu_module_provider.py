@@ -8,7 +8,15 @@ class PpuModuleProvider(M890PDsv4Provider):
     def build_hc_unit(self, *args, **kwargs):
         from .ppu_hc import PpuHCUnit
 
-        return PpuHCUnit(*args, options=self.execution_options, **kwargs)
+        norm = self.execution_options.get("DSV4_PPU_PREFILL_HC_NORM", "fused")
+        if norm not in ("separate", "fused"):
+            raise ValueError("PPU Prefill HC norm must be separate or fused")
+        return PpuHCUnit(
+            *args,
+            options=self.execution_options,
+            fuse_norm=norm == "fused",
+            **kwargs,
+        )
 
     def build_hc_head(self, *args, **kwargs):
         from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import FallbackHCHead

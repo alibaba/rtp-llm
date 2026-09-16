@@ -12,6 +12,7 @@ device, or external symbol fails closed.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from functools import lru_cache
 from typing import Dict, Tuple
@@ -265,6 +266,9 @@ class PpuGroupedFP4Strategy(torch.nn.Module):
         x: torch.Tensor,
         weights: torch.Tensor,
         indices: torch.Tensor,
+        *,
+        shared: torch.Tensor | None = None,
+        route_scale: float | None = None,
     ) -> torch.Tensor:
         """Route EP1 tokens, run two compact nopad PPU grouped GEMMs, and gather."""
 
@@ -298,14 +302,31 @@ class PpuGroupedFP4Strategy(torch.nn.Module):
                 "x, route weights, and expert indices must share one device"
             )
 
+        if (shared is None) != (route_scale is None):
+            raise ValueError("shared and route_scale must be provided together")
+        if shared is not None:
+            if (
+                shared.dtype != torch.bfloat16
+                or shared.shape != x.shape
+                or not shared.is_contiguous()
+                or shared.device != x.device
+            ):
+                raise TypeError(
+                    "shared must be contiguous BF16 with the same shape/device as x"
+                )
+            if not math.isfinite(float(route_scale)):
+                raise ValueError("route_scale must be finite")
+
         token_count, dim = x.shape
         if token_count == 0:
-            return torch.zeros((0, dim), dtype=torch.float32, device=x.device)
+            dtype = torch.bfloat16 if shared is not None else torch.float32
+            return torch.zeros((0, dim), dtype=dtype, device=x.device)
 
         from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.expert import (
             require_silu_mul_split,
         )
         from rtp_llm.platforms.ppu.kernels.ppu_moe_exact_gather import (
+            gather_and_combine_local_loop_compatible,
             gather_local_loop_compatible,
         )
         from rtp_llm.platforms.ppu.kernels.ppu_moe_nopad import (
@@ -370,6 +391,19 @@ class PpuGroupedFP4Strategy(torch.nn.Module):
             expert_ids,
             expert_counts,
         )
+
+        if shared is not None:
+            local = torch.empty_like(shared)
+            gather_and_combine_local_loop_compatible(
+                down,
+                adjusted_ids,
+                weights.contiguous(),
+                output_index,
+                shared,
+                local,
+                float(route_scale),
+            )
+            return local
 
         gathered = torch.empty((token_count, dim), dtype=torch.float32, device=x.device)
         gather_local_loop_compatible(

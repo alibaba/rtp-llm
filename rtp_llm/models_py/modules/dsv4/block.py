@@ -49,6 +49,24 @@ def _prefill_fast_norm(
     return norm(x)
 
 
+def _prefill_fast_hc_pre_norm(
+    hc: nn.Module,
+    pre_impl: Callable,
+    norm: nn.Module,
+    x: torch.Tensor,
+    *,
+    tp_size: int,
+    tp_rank: int,
+):
+    fused = getattr(hc, "prefill_fast_pre_norm", None)
+    if fused is not None:
+        result = fused(x, norm, tp_size=tp_size, tp_rank=tp_rank)
+        if result is not None:
+            return result, True
+    x_pre, post, comb = pre_impl(x)
+    return (x_pre, post, comb), False
+
+
 class Block(nn.Module):
     def __init__(
         self,
@@ -350,13 +368,21 @@ class Block(nn.Module):
     def prefill_fast_attn_pre(self, x: torch.Tensor):
         attn_hc_pre, _, _, _ = self._prefill_fast_hc_impls()
         residual = x
-        x_pre, post, comb = attn_hc_pre(x)
-        x_pre = _prefill_fast_norm(
+        (x_pre, post, comb), norm_fused = _prefill_fast_hc_pre_norm(
+            self.attn_hc,
+            attn_hc_pre,
             self.attn_norm,
-            x_pre,
+            x,
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
         )
+        if not norm_fused:
+            x_pre = _prefill_fast_norm(
+                self.attn_norm,
+                x_pre,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+            )
         return residual, x_pre, post, comb
 
     def prefill_fast_attn_body(
@@ -389,13 +415,21 @@ class Block(nn.Module):
     def prefill_fast_ffn_pre(self, x: torch.Tensor):
         _, ffn_hc_pre, _, _ = self._prefill_fast_hc_impls()
         residual = x
-        x_pre, post, comb = ffn_hc_pre(x)
-        x_pre = _prefill_fast_norm(
+        (x_pre, post, comb), norm_fused = _prefill_fast_hc_pre_norm(
+            self.ffn_hc,
+            ffn_hc_pre,
             self.ffn_norm,
-            x_pre,
+            x,
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
         )
+        if not norm_fused:
+            x_pre = _prefill_fast_norm(
+                self.ffn_norm,
+                x_pre,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+            )
         return residual, x_pre, post, comb
 
     def prefill_fast_ffn_body(
@@ -538,8 +572,22 @@ class Block(nn.Module):
         ) = self._prefill_fast_hc_impls()
 
         residual = x
-        x_pre, post, comb = attn_hc_pre(x)
-        if self.tp_size == 1 and self.attn.can_fuse_prefill_attn_norm_input_quant(
+        (x_pre, post, comb), norm_fused = _prefill_fast_hc_pre_norm(
+            self.attn_hc,
+            attn_hc_pre,
+            self.attn_norm,
+            x,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+        )
+        if norm_fused:
+            attn_out = self.attn(
+                x_pre,
+                positions,
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )
+        elif self.tp_size == 1 and self.attn.can_fuse_prefill_attn_norm_input_quant(
             x_pre, self.attn_norm.weight.data
         ):
             x_pre, shared_input_quant = self.attn.prefill_fused_attn_norm_input_quant(
@@ -571,13 +619,21 @@ class Block(nn.Module):
         self._sync_after_first_cp_prefill_attention()
 
         residual = x
-        x_pre, post, comb = ffn_hc_pre(x)
-        x_pre = _prefill_fast_norm(
+        (x_pre, post, comb), norm_fused = _prefill_fast_hc_pre_norm(
+            self.ffn_hc,
+            ffn_hc_pre,
             self.ffn_norm,
-            x_pre,
+            x,
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
         )
+        if not norm_fused:
+            x_pre = _prefill_fast_norm(
+                self.ffn_norm,
+                x_pre,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+            )
         ffn_out = self.ffn(x_pre, input_ids)
         return ffn_hc_post(ffn_out, residual, post, comb)
 

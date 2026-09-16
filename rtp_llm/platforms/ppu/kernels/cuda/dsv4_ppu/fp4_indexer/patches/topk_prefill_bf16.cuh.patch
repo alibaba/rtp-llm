@@ -1,5 +1,173 @@
---- csrc/deepseek_v4/topk_prefill_bf16.cuh
-+++ compat/topk_prefill_bf16.cuh
-@@ -1045 +1045 @@
+--- a/csrc/deepseek_v4/topk_prefill_bf16.cuh
++++ b/compat/topk_prefill_bf16.cuh
+@@ -579,7 +579,23 @@
+     hist_vec.fill(0);
+     smem->histogram_vec[tx] = hist_vec;
+     if (tx == 0) {
+-      smem->counter_gt = smem->counter_eq = 0;
++      smem->counter_gt = 0;
++      // Model rows are either entirely finite or entirely NaN. Use the first
++      // value as a cheap candidate check, then verify every value before the
++      // all-NaN shortcut so arbitrary partially-NaN inputs retain semantics.
++      smem->counter_eq = 0u;
++      if constexpr (!kIs2Pass) {
++        if (length <= prefill_bf16::kBlockSize) {
++          const float first_score = __bfloat162float(scores[0]);
++          if (isnan(first_score)) {
++            smem->counter_eq = 1u;
++          } else if (length > prefill_bf16::kTopK
++                     && __bfloat162float(scores[prefill_bf16::kTopK])
++                            == __bfloat162float(scores[length - 1])) {
++            smem->counter_eq = 2u;
++          }
++        }
++      }
+     }
+     __syncthreads();
+   }
+@@ -594,6 +610,77 @@
+     for (uint32_t e = 0; e < 4; ++e) {
+       const uint32_t idx = base + e;
+       local[v][e] = (idx < length) ? static_cast<float>(scores[idx]) : 0.0f;
++    }
++  }
++
++  // The real 4K/TP4 workload contains many rows whose valid score range is
++  // entirely NaN.  Their deterministic result is simply the lowest TopK raw
++  // indices, so avoid constructing and scanning a histogram for those rows.
++  if constexpr (!kIs2Pass) {
++    if (length <= prefill_bf16::kBlockSize && smem->counter_eq != 0u) {
++      if (smem->counter_eq == 1u) {
++        const bool valid = tx < length;
++        const bool all_nan = __syncthreads_and(!valid || isnan(__bfloat162float(scores[tx])));
++        if (all_nan) {
++          if (tx < prefill_bf16::kTopK) indices[tx] = static_cast<int32_t>(tx);
++          return;
++        }
++        if (tx == 0) smem->counter_eq = 0u;
++        __syncthreads();
++      } else {
++        // FP4 indexer padding starts at raw index TopK and repeats one BF16
++        // sentinel through the end of the local row. Verify that invariant,
++        // then select relative to the sentinel without a 4096-bin histogram.
++        const float sentinel = __bfloat162float(scores[length - 1]);
++        const bool in_tail = tx >= prefill_bf16::kTopK && tx < length;
++        const float score = tx < length ? __bfloat162float(scores[tx]) : 0.0f;
++        const bool same_tail = !in_tail || score == sentinel || (isnan(score) && isnan(sentinel));
++        const bool uniform_tail = __syncthreads_and(same_tail);
++        if (uniform_tail) {
++          const bool valid = tx < length;
++          const bool above = valid && score > sentinel;
++          const bool equal = valid && (score == sentinel || (isnan(score) && isnan(sentinel)));
++          const uint32_t above_mask = __ballot_sync(0xFFFFFFFFu, above);
++          const uint32_t equal_mask = __ballot_sync(0xFFFFFFFFu, equal);
++          if (lane_id == 0) {
++            smem->warp_sum[warp_id] = static_cast<uint32_t>(__popc(above_mask));
++            smem->histogram[warp_id] = static_cast<uint32_t>(__popc(equal_mask));
++          }
++          __syncthreads();
++          if (warp_id == 0) {
++            const uint32_t above_count = smem->warp_sum[lane_id];
++            const uint32_t equal_count = smem->histogram[lane_id];
++            const uint32_t above_inclusive = warp_inclusive_sum_pf(lane_id, above_count);
++            const uint32_t equal_inclusive = warp_inclusive_sum_pf(lane_id, equal_count);
++            smem->warp_sum[lane_id] = above_inclusive - above_count;
++            smem->histogram[lane_id] = equal_inclusive - equal_count;
++            if (lane_id == 31) {
++              smem->match.above_count = above_inclusive;
++              smem->match.equal_count = equal_inclusive;
++            }
++          }
++          __syncthreads();
++
++          const uint32_t num_above = smem->match.above_count;
++          const uint32_t num_equal = smem->match.equal_count;
++          if (num_above < prefill_bf16::kTopK && num_above + num_equal >= prefill_bf16::kTopK) {
++            const uint32_t lower_lanes = lane_id == 0 ? 0u : ((1u << lane_id) - 1u);
++            const uint32_t above_rank =
++                smem->warp_sum[warp_id] + static_cast<uint32_t>(__popc(above_mask & lower_lanes));
++            const uint32_t equal_rank =
++                smem->histogram[warp_id] + static_cast<uint32_t>(__popc(equal_mask & lower_lanes));
++            if (above) indices[above_rank] = static_cast<int32_t>(tx);
++            if (equal && equal_rank < prefill_bf16::kTopK - num_above) {
++              indices[num_above + equal_rank] = static_cast<int32_t>(tx);
++            }
++            return;
++          }
++
++          if (tx < prefill_bf16::kNumWarps) smem->histogram[tx] = 0u;
++        }
++        if (tx == 0) smem->counter_eq = 0u;
++        __syncthreads();
++      }
+     }
+   }
+
+@@ -621,7 +708,7 @@
+     __pipeline_commit();
+   }
+
+-  // Accumulate histogram via shared-memory atomics
++  // Accumulate histogram via shared-memory atomics.
+ #pragma unroll
+   for (uint32_t v = 0; v < prefill_bf16::kVecsPerThread; ++v) {
+ #pragma unroll
+@@ -774,6 +861,40 @@
+   const uint32_t num_ties = min(num_equal, prefill_bf16::kMaxTies);
+   const uint32_t topk_remain = prefill_bf16::kTopK - num_above;
+
++  // The FP4 indexer pads each short row with one repeated BF16 sentinel.
++  // At 4K context / TP4 this commonly leaves 500+ identical values in the
++  // threshold bin. Ranking every member against every other member below is
++  // quadratic and dominates prefill. For rows covered by one block, detect
++  // the uniform-bin case and select ties with an index-ordered prefix scan.
++  if (length <= prefill_bf16::kBlockSize && num_ties != 0u) {
++    const float reference_score = tie_buffer[0].score;
++    const bool valid = tx < length;
++    const float score = valid ? __bfloat162float(scores[tx]) : 0.0f;
++    const bool in_threshold_bin =
++        valid && extract_coarse_bin_pf<prefill_bf16::kHistBits>(score) == thr_bin;
++    const bool same_score = !in_threshold_bin || (score == reference_score) || (isnan(score) && isnan(reference_score));
++    const uint32_t threshold_mask = __ballot_sync(0xFFFFFFFFu, in_threshold_bin);
++    if (lane_id == 0) smem->warp_sum[warp_id] = static_cast<uint32_t>(__popc(threshold_mask));
++
++    const bool uniform_threshold_bin = __syncthreads_or(!same_score) == 0;
++    if (uniform_threshold_bin) {
++      if (warp_id == 0) {
++        const uint32_t count = smem->warp_sum[lane_id];
++        const uint32_t inclusive = warp_inclusive_sum_pf(lane_id, count);
++        smem->warp_sum[lane_id] = inclusive - count;
++      }
++      __syncthreads();
++
++      const uint32_t lower_lanes = lane_id == 0 ? 0u : ((1u << lane_id) - 1u);
++      const uint32_t rank =
++          smem->warp_sum[warp_id] + static_cast<uint32_t>(__popc(threshold_mask & lower_lanes));
++      if (in_threshold_bin && rank < topk_remain) {
++        topk_indices[num_above + rank] = static_cast<int32_t>(tx);
++      }
++      return;
++    }
++  }
++
+   const auto is_greater = [](const TieV3& a, const TieV3& b) {
+     return (a.score > b.score) || (a.score == b.score && a.idx < b.idx);
+   };
+@@ -920,7 +1041,7 @@
+ // and 2-pass register (<=32K) paths. Only allocates
+ // RegisterTopKSmemPF + s_topk_indices smem.
+ // ============================================================
+-__global__ __launch_bounds__(prefill_bf16::kBlockSize, 1) void topk_prefill_bf16_register_kernel(
++__global__ __launch_bounds__(prefill_bf16::kBlockSize, 2) void topk_prefill_bf16_register_kernel(
+     const TopKPrefillBF16Params params) {
+   using namespace prefill_bf16;
+
+@@ -1042,7 +1163,7 @@
+ void setup_kernel_smem_once_pf(host::DebugInfo where = {}) {
+   [[maybe_unused]]
+   static const auto result = [] {
 -    const auto fptr = std::bit_cast<const void*>(f);
 +    const auto fptr = reinterpret_cast<const void*>(f);
+     return ::cudaFuncSetAttribute(fptr, ::cudaFuncAttributeMaxDynamicSharedMemorySize, kMaxDynamicSMEM);
+   }();
+   host::RuntimeDeviceCheck(result, where);

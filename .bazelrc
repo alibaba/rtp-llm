@@ -478,5 +478,19 @@ build:ppu --define=using_cuda12_9_x86=false
 build:ppu --define=using_cuda12_arm=false
 build:ppu --define=using_cuda13_x86=false
 
+# PPU SDK 2.2 reference stack used by the SGLang comparison image:
+# Ubuntu 24.04, Python 3.12, PyTorch 2.10 and DeepEP 2.2.
+build:ppu_sdk22 --config=ppu
+build:ppu_sdk22 --python_top=//:python312
+build:ppu_sdk22 --action_env PYTHON_BIN_PATH="/usr/local/bin/python3"
+build:ppu_sdk22 --repo_env=PYTHON_BIN_PATH="/usr/local/bin/python3"
+build:ppu_sdk22 --action_env PATH="/usr/local/PPU_SDK/CUDA_SDK/bin:/usr/local/PPU_SDK/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+build:ppu_sdk22 --host_action_env PATH="/usr/local/PPU_SDK/CUDA_SDK/bin:/usr/local/PPU_SDK/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+build:ppu_sdk22 --action_env LD_LIBRARY_PATH="/usr/local/lib/python3.12/site-packages/torch/lib:/usr/local/PPU_SDK/lib:/usr/local/PPU_SDK/CUDA_SDK/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
+build:ppu_sdk22 --host_action_env LD_LIBRARY_PATH="/usr/local/lib/python3.12/site-packages/torch/lib:/usr/local/PPU_SDK/lib:/usr/local/PPU_SDK/CUDA_SDK/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
+build:ppu_sdk22 --define=ppu_sdk22=true
+test:ppu_sdk22 --test_env PPU_HOME="/usr/local/PPU_SDK/"
+test:ppu_sdk22 --test_env LD_LIBRARY_PATH="/usr/local/lib/python3.12/site-packages/torch/lib:/usr/local/PPU_SDK/lib:/usr/local/PPU_SDK/CUDA_SDK/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
+
 try-import %workspace%/internal_source/.internal_bazelrc
 try-import %workspace%/internal_source/.cicd_bazelrc

@@ -11,6 +11,7 @@ reference and its Apache License 2.0 text are preserved in the task evidence.
 
 from __future__ import annotations
 
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -18,6 +19,21 @@ from rtp_llm.platforms.ppu.kernels.moe_scale_gather import (
     gather_scale_mn_major,
     scale_gather_fused_enabled,
 )
+
+_COMPACTOR_ENV = "DSV4_MOE_ROUTE_COMPACTOR"
+
+
+def route_compactor_fused_enabled() -> bool:
+    """Use the fused Triton compactor by default; ``torch`` is the rollback."""
+
+    requested = os.environ.get(_COMPACTOR_ENV, "").strip().lower()
+    if requested in ("", "1", "on", "true", "yes", "fused", "triton"):
+        return True
+    if requested in ("0", "off", "false", "no", "torch", "eager"):
+        return False
+    raise ValueError(
+        f"invalid {_COMPACTOR_ENV}={requested!r}; expected fused or torch"
+    )
 
 
 def compact_mxfp4_routes_nopad(
@@ -61,6 +77,19 @@ def compact_mxfp4_routes_nopad(
     if any(tensor.device != packed.device for tensor in tensors):
         raise ValueError(
             "packed activation, scale, route ids, and counts must share a device"
+        )
+    topk_ids = topk_ids.contiguous()
+
+    if route_compactor_fused_enabled():
+        from rtp_llm.platforms.ppu.kernels.ppu_moe_route_compactor import (
+            compact_mxfp4_routes_nopad_triton,
+        )
+
+        return compact_mxfp4_routes_nopad_triton(
+            packed,
+            scale,
+            topk_ids,
+            num_experts,
         )
 
     flat_ids = topk_ids.reshape(-1)
@@ -112,4 +141,4 @@ def compact_mxfp4_routes_nopad(
     return packed_out, scale_out, expert_ids, output_index, expert_counts
 
 
-__all__ = ["compact_mxfp4_routes_nopad"]
+__all__ = ["compact_mxfp4_routes_nopad", "route_compactor_fused_enabled"]

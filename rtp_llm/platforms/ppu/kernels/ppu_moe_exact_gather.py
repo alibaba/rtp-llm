@@ -17,6 +17,7 @@ readback and contains no Python loop over experts.
 
 from __future__ import annotations
 
+import math
 import os
 
 import torch
@@ -121,8 +122,11 @@ def _fused_route_gather_kernel(
     route_weight_ptr,
     expert_ids_ptr,
     output_index_ptr,
+    shared_ptr,
     output_ptr,
     dim,
+    ROUTE_SCALE: tl.constexpr,
+    ADD_SHARED: tl.constexpr,
     TOPK: tl.constexpr,
     MAX_TOPK: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -169,11 +173,27 @@ def _fused_route_gather_kernel(
         accumulated += route_product
         remaining = remaining & ~selected
 
-    tl.store(
-        output_ptr + token * dim + offsets_d,
-        accumulated,
-        mask=dim_mask,
-    )
+    if ADD_SHARED:
+        # Preserve the public TP-MoE numerical contract exactly: the routed
+        # partial is scaled and rounded to BF16 before the shared partial is
+        # added. The final store performs the second BF16 rounding.
+        routed = (accumulated * ROUTE_SCALE).to(tl.bfloat16).to(tl.float32)
+        shared = tl.load(
+            shared_ptr + token * dim + offsets_d,
+            mask=dim_mask,
+            other=0.0,
+        ).to(tl.float32)
+        tl.store(
+            output_ptr + token * dim + offsets_d,
+            routed + shared,
+            mask=dim_mask,
+        )
+    else:
+        tl.store(
+            output_ptr + token * dim + offsets_d,
+            accumulated,
+            mask=dim_mask,
+        )
 
 
 def _fused_gather_enabled() -> bool:
@@ -292,7 +312,10 @@ def gather_local_loop_compatible(
             topk_ids,
             output_index,
             output,
+            output,
             dim,
+            ROUTE_SCALE=1.0,
+            ADD_SHARED=False,
             TOPK=topk,
             MAX_TOPK=fused_max_topk,
             BLOCK_D=fused_block_d,
@@ -326,4 +349,99 @@ def gather_local_loop_compatible(
     )
 
 
-__all__ = ["gather_local_loop_compatible"]
+def gather_and_combine_local_loop_compatible(
+    down: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    output_index: torch.Tensor,
+    shared: torch.Tensor,
+    output: torch.Tensor,
+    route_scale: float,
+) -> None:
+    """Gather routed rows and combine the shared TP partial in one kernel.
+
+    This is the fused equivalent of ``gather_local_loop_compatible`` followed
+    by ``combine_tp_partials``. It exposes only the qualified fused gather path;
+    the caller owns the old two-kernel rollback.
+    """
+
+    tensors = {
+        "down": down,
+        "topk_ids": topk_ids,
+        "topk_weights": topk_weights,
+        "output_index": output_index,
+        "shared": shared,
+        "output": output,
+    }
+    for name, tensor in tensors.items():
+        _require_tensor(name, tensor)
+    if down.ndim != 2 or down.dtype != torch.bfloat16 or not down.is_contiguous():
+        raise TypeError("down must be contiguous BF16 [routes, dim]")
+    if topk_ids.ndim != 2 or topk_ids.dtype not in _SUPPORTED_INDEX_DTYPES:
+        raise TypeError("topk_ids must be a signed int32/int64 rank-2 tensor")
+    if topk_weights.dtype != torch.float32 or topk_weights.shape != topk_ids.shape:
+        raise TypeError("topk_weights must be FP32 with the same shape as topk_ids")
+    if (
+        output_index.dtype not in _SUPPORTED_INDEX_DTYPES
+        or output_index.shape != topk_ids.shape
+    ):
+        raise TypeError(
+            "output_index must be int32/int64 with the same shape as topk_ids"
+        )
+    if any(
+        not tensor.is_contiguous()
+        for tensor in (topk_ids, topk_weights, output_index)
+    ):
+        raise ValueError("route ids, weights, and output_index must be contiguous")
+
+    tokens, topk = topk_ids.shape
+    if tokens <= 0 or not 1 <= topk <= _MAX_TOPK:
+        raise ValueError(f"route shape must be [tokens>0, 1<=topk<={_MAX_TOPK}]")
+    routes, dim = tokens * topk, down.shape[1]
+    if down.shape != (routes, dim) or dim <= 0:
+        raise ValueError("down must have exactly tokens * topk rows and positive dim")
+    if (
+        shared.dtype != torch.bfloat16
+        or output.dtype != torch.bfloat16
+        or shared.shape != (tokens, dim)
+        or output.shape != shared.shape
+        or not shared.is_contiguous()
+        or not output.is_contiguous()
+    ):
+        raise TypeError("shared and output must be contiguous BF16 [tokens, dim]")
+    if not math.isfinite(float(route_scale)):
+        raise ValueError("MoE route scale must be finite")
+    if not down.is_cuda or any(
+        tensor.device != down.device for tensor in tensors.values()
+    ):
+        raise ValueError("all tensors must be CUDA-compatible PPU tensors on one device")
+    output_pointer = output.untyped_storage().data_ptr()
+    if any(
+        tensor.untyped_storage().data_ptr() == output_pointer
+        for tensor in (down, topk_ids, topk_weights, output_index, shared)
+    ):
+        raise ValueError("output must not alias an input tensor")
+
+    fused_block_d, fused_max_topk = _fused_launch_config(dim, topk)
+    _fused_route_gather_kernel[(tokens, triton.cdiv(dim, fused_block_d))](
+        down,
+        down.stride(0),
+        topk_weights,
+        topk_ids,
+        output_index,
+        shared,
+        output,
+        dim,
+        ROUTE_SCALE=float(route_scale),
+        ADD_SHARED=True,
+        TOPK=topk,
+        MAX_TOPK=fused_max_topk,
+        BLOCK_D=fused_block_d,
+        num_warps=_FUSED_NUM_WARPS,
+    )
+
+
+__all__ = [
+    "gather_and_combine_local_loop_compatible",
+    "gather_local_loop_compatible",
+]

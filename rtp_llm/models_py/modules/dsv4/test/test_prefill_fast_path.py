@@ -880,5 +880,51 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         self.assertEqual(kwargs["max_seqlen_q"], 2)
 
 
+
+
+class PrefillFusedHCInterfaceTest(unittest.TestCase):
+    def test_fused_and_fallback_use_existing_attention_and_moe_interfaces(self):
+        # The fork deliberately has no _call_attention/_call_moe or
+        # numerical_status argument. Both fused and unfused paths must retain
+        # that interface and apply normalization exactly once per boundary.
+        class Attention:
+            def can_fuse_prefill_attn_norm_input_quant(self, *_):
+                return False
+
+            def __call__(self, x, positions, *, kv_cache, block_tables_by_type):
+                return x + 3
+
+        x = torch.arange(16, dtype=torch.float32).reshape(2, 1, 8)
+        norm = SimpleNamespace(weight=torch.ones(8))
+        pre = lambda x: (x + 1, None, None)
+        post = lambda y, residual, *_: y + residual
+        for tp_size in (1, 4):
+            outputs = []
+            for fused in (False, True):
+                hc = SimpleNamespace(
+                    prefill_fast_pre_norm=lambda x, norm, **kw: (
+                        ((x + 1) * 2, None, None) if fused else None
+                    )
+                )
+                block = SimpleNamespace(
+                    tp_size=tp_size, tp_rank=0,
+                    attn_hc=hc, ffn_hc=hc, attn_norm=norm, ffn_norm=norm,
+                    attn=Attention(), ffn=lambda h, ids: h * 5,
+                    _prefill_fast_hc_impls=lambda: (pre, pre, post, post),
+                    _sync_after_first_cp_prefill_attention=lambda: None,
+                )
+                with patch(
+                    "rtp_llm.models_py.modules.dsv4.block._prefill_fast_norm",
+                    side_effect=lambda norm, x, **kw: x * 2,
+                ) as normalize:
+                    outputs.append(Block._forward_prefill_fast_fp8(
+                        block, x, torch.tensor([1, 2]), torch.tensor([0, 1]),
+                        torch.tensor([0, 2]), kv_cache=object(),
+                        block_tables_by_type=object(),
+                    ))
+                self.assertEqual(normalize.call_count, 0 if fused else 2)
+            torch.testing.assert_close(outputs[0], outputs[1], rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     unittest.main()

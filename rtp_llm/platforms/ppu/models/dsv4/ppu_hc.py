@@ -33,8 +33,6 @@ class PpuHCUnit(TileLangHCUnit):
             )
         if allow_graph and (tp_size != 1 or self._backend != "deepgemm_deterministic"):
             raise ValueError("PPU HC Graph requires TP1 and deterministic prenorm")
-        if fuse_norm and not allow_graph:
-            raise ValueError("Fused HC norm requires the PPU Decode instance")
         if fuse_prenorm:
             if (
                 not allow_graph
@@ -78,8 +76,8 @@ class PpuHCUnit(TileLangHCUnit):
         leading = self._check_residual_shape(x, "pre_norm input")
         weight = norm.weight.data
         if (
-            tp_size != 1
-            or tp_rank != 0
+            tp_size <= 0
+            or not 0 <= tp_rank < tp_size
             or x.dtype != torch.bfloat16
             or not x.is_contiguous()
             or weight.shape != (self.dim,)
@@ -87,7 +85,9 @@ class PpuHCUnit(TileLangHCUnit):
             or weight.device != x.device
             or not weight.is_contiguous()
         ):
-            raise ValueError("Fused HC norm requires contiguous BF16 TP1 inputs")
+            raise ValueError(
+                "Fused HC norm requires replicated contiguous BF16 inputs"
+            )
         if x.numel() == 0:
             return (
                 x.new_empty((*leading, self.dim)),
@@ -133,6 +133,16 @@ class PpuHCUnit(TileLangHCUnit):
             for name, tensor in (("y", y), ("post", post), ("comb", comb)):
                 _rt.record_if_level(2, f"{dbg_tag}_fused_norm_{name}", tensor)
         return y, post, comb
+
+    def prefill_fast_pre_norm(self, x, norm, *, tp_size, tp_rank):
+        """Use the fused HC/RMSNorm boundary from Block's prefill fast path.
+
+        Returning ``None`` keeps the generic separate-norm path available for
+        controlled A/B runs without changing the cached HC PRE callables.
+        """
+        if not self._fuse_norm:
+            return None
+        return self.pre_norm(x, norm, tp_size=tp_size, tp_rank=tp_rank)
 
     def _pre_operator(
         self,

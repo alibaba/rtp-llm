@@ -140,6 +140,18 @@ config_setting(
 )
 
 config_setting(
+    name = "using_ppu_sdk22",
+    define_values = {
+        "ppu_sdk22": "true",
+        "use_ppu": "true",
+        "using_cuda": "true",
+        "using_cuda12_9_x86": "false",
+        "using_cuda12_arm": "false",
+        "using_cuda13_x86": "false",
+    },
+)
+
+config_setting(
     name = "using_remote_kv_cache",
     define_values = {"use_remote_kv_cache": "true"},
 )
@@ -241,6 +253,14 @@ py_runtime(
     interpreter_path = "/opt/conda310/bin/python",
     python_version = "PY3",
     stub_shebang = "#!/opt/conda310/bin/python",
+    visibility = ["//visibility:public"],
+)
+
+py_runtime(
+    name = "python312",
+    interpreter_path = "/usr/local/bin/python3",
+    python_version = "PY3",
+    stub_shebang = "#!/usr/bin/env python3",
     visibility = ["//visibility:public"],
 )
 

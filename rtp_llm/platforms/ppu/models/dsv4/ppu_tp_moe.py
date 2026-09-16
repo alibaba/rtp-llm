@@ -60,6 +60,9 @@ class PpuTPMoE(nn.Module):
         self.layer_id, self.dim = layer_id, dim
         self.max_tokens_per_rank = int(max_tokens_per_rank)
         self.route_scale = float(route_scale)
+        self._fused_gather_shared = platform_provider._bool(
+            "DSV4_MOE_GATHER_SHARED_FUSED", True
+        )
         self._platform_provider = platform_provider
         self.gate = Gate(
             layer_id,
@@ -141,9 +144,19 @@ class PpuTPMoE(nn.Module):
         with record_function_range("dsv4.moe.shared_expert_start"):
             shared = self.shared_experts(x)
         with record_function_range("dsv4.moe.routed_experts"):
-            routed = self._strategy(x, weights, indices)
-        with record_function_range("dsv4.moe.add_shared"):
-            local = combine_tp_partials(routed, shared, self.route_scale)
+            if self._fused_gather_shared:
+                local = self._strategy(
+                    x,
+                    weights,
+                    indices,
+                    shared=shared,
+                    route_scale=self.route_scale,
+                )
+            else:
+                routed = self._strategy(x, weights, indices)
+        if not self._fused_gather_shared:
+            with record_function_range("dsv4.moe.add_shared"):
+                local = combine_tp_partials(routed, shared, self.route_scale)
         if debug:
             recorder.record_if_level(2, prefix + "_tp_local_bf16", local)
         with record_function_range("dsv4.moe.tp_all_reduce_bf16"):

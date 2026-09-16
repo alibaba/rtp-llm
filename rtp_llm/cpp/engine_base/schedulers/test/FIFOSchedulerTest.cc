@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <algorithm>
@@ -25,6 +26,31 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* name, const char* value): name_(name) {
+        const char* old = std::getenv(name);
+        if (old != nullptr) {
+            old_value_ = old;
+            had_value_ = true;
+        }
+        setenv(name, value, 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (had_value_) {
+            setenv(name_.c_str(), old_value_.c_str(), 1);
+        } else {
+            unsetenv(name_.c_str());
+        }
+    }
+
+private:
+    std::string name_;
+    std::string old_value_;
+    bool        had_value_ = false;
+};
 
 bool enqueueIndividually(FIFOScheduler& scheduler, const vector<GenerateStreamPtr>& streams) {
     return std::all_of(streams.begin(), streams.end(), [&scheduler](const auto& stream) {
@@ -182,6 +208,64 @@ private:
     ModelSpecificConfig           model_specific_config;
     std::unique_ptr<SchedulerType> scheduler_;
 };
+
+TEST_F(FIFOSchedulerTest, pdPrefillAdmissionInterleavesDecodeEndpoints) {
+    ScopedEnvVar balance_env("RTP_PD_PREFILL_BALANCE_DECODE_RANK", "1");
+
+    CacheConfig cache_config = makeMhaCacheConfig(1, 32, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    resource_context.reuse_cache   = false;
+    resource_context.role_type     = RoleType::PREFILL;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 3;
+    PDSepConfig pd_sep_config;
+    pd_sep_config.role_type = RoleType::PREFILL;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto make_pd_stream = [&](int decode_rank) {
+        auto query             = std::make_shared<GenerateInput>();
+        query->input_ids       = torch::tensor({decode_rank + 1}, torch::kInt32);
+        query->generate_config = makeTestGenerateConfig();
+        query->generate_config->pd_separation = true;
+        query->generate_config->role_addrs.emplace_back(
+            RoleType::DECODE, "decode", 8000 + decode_rank, 9000 + decode_rank);
+        return std::make_shared<NormalGenerateStream>(
+            query, model_config, runtime_config, resource_context, nullptr);
+    };
+    std::vector<GenerateStreamPtr> streams = {
+        make_pd_stream(0), make_pd_stream(0), make_pd_stream(0),
+        make_pd_stream(1), make_pd_stream(1), make_pd_stream(2)};
+    ASSERT_TRUE(enqueueIndividually(scheduler, streams));
+
+    auto endpoint_rank = [](const GenerateStreamPtr& stream) {
+        return stream->generateConfig()->role_addrs.back().grpc_port - 9000;
+    };
+    std::vector<std::vector<int>> admitted;
+    for (int round = 0; round < 3; ++round) {
+        auto result = scheduler.schedule();
+        ASSERT_TRUE(result.ok());
+        ASSERT_EQ(result->size(), 2);
+        std::vector<int> ranks;
+        for (const auto& stream : *result) {
+            ranks.push_back(endpoint_rank(stream));
+            stream->reportEvent(StreamEvents::GenerateDone);
+        }
+        admitted.push_back(std::move(ranks));
+    }
+
+    EXPECT_EQ(admitted, (std::vector<std::vector<int>>{{0, 1}, {2, 0}, {1, 0}}));
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
+}
 
 TEST_F(FIFOSchedulerTest, testSimple) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
@@ -4666,6 +4750,36 @@ static void verifyGlobalChunkBudgetFourRoundPrefix(RoleType role_type, const std
 
 TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetFIFOFourRoundPrefix) {
     verifyGlobalChunkBudgetFourRoundPrefix<FIFOScheduler>(RoleType::PREFILL);
+}
+
+TEST_F(FIFOSchedulerTest, pdPrefillBalancePreservesChunkContinuation) {
+    ScopedEnvVar balance_env("RTP_PD_PREFILL_BALANCE_DECODE_RANK", "1");
+    ChunkSchedulerTestConfig config;
+    config.prefill_chunk_size = 4;
+    config.seq_size_per_block = 2;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+    auto first = env.makeStream({1, 2, 3, 4, 5, 6, 7, 8});
+    auto second = env.makeStream({9, 10, 11, 12});
+    int rank = 0;
+    for (const auto& stream : {first, second}) {
+        stream->generateConfig()->pd_separation = true;
+        stream->generateConfig()->role_addrs.emplace_back(
+            RoleType::DECODE, "decode", 8000 + rank, 9000 + rank);
+        ++rank;
+    }
+    ASSERT_TRUE(enqueueIndividually(scheduler, {first, second}));
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {4}));
+    first->update(makeSingleTokenUpdate(101));
+    EXPECT_TRUE(first->isContextStream());
+    EXPECT_EQ(first->seqLength(), 8);
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {4}));
+    first->update(makeSingleTokenUpdate(102));
+    EXPECT_FALSE(first->isContextStream());
+    EXPECT_EQ(first->seqLength(), 9);
+    first->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {second}, {4}));
 }
 
 TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetPDFusionFourRoundPrefix) {

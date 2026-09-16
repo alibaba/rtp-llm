@@ -35,6 +35,14 @@ def pip_deps():
     )
 
     pip_parse(
+        name = "pip_ppu_sdk22_torch",
+        requirements_lock = "@rtp_deps//:requirements_lock_torch_ppu_sdk22.txt",
+        python_interpreter = "/usr/local/bin/python3",
+        extra_pip_args = PIP_EXTRA_ARGS,
+        timeout = 3600,
+    )
+
+    pip_parse(
         name = "pip_gpu_cuda12_torch",
         requirements_lock = "@rtp_deps//:requirements_lock_torch_gpu_cuda12.txt",
         python_interpreter = "/opt/conda310/bin/python3",
