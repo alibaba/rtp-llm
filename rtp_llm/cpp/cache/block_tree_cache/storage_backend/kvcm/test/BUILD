@@ -144,6 +144,7 @@ cc_test_wrapper(
 cc_test_wrapper(
     name = "kvcm_independent_pool_test",
     testonly = True,
+    exec_properties = {"gpu": "A10"},
     srcs = ["KVCMIndependentPoolTest.cc", "KVCMMockTestBase.h", "MockKVCMClient.h"],
     copts = ["-fno-access-control"] + copts(),
     tags = ["exclusive-if-local"],
