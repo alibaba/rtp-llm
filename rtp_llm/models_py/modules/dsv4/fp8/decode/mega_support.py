@@ -1,10 +1,8 @@
-"""Startup capability and ABI checks for unified DSV4 Mega decode."""
+"""Startup capability and ABI checks for DSV4 Mega attention decode."""
 
 from __future__ import annotations
 
 import inspect
-import os
-import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
@@ -12,7 +10,6 @@ import torch
 
 from .mega_csa_weights import (
     GEOMETRY_BY_DIM,
-    HC_MIX,
     HEAD_DIM,
     INDEX_HEAD_DIM,
     INDEX_HEADS,
@@ -40,11 +37,6 @@ _EXTENSION_SYMBOLS_BY_COMPONENT = {
         "mla_o_inv_rope_quant",
         "q_rmsnorm_rope_cuda_",
         "wq_b_proj_gemm_merged_hca",
-    ),
-    "moe_front": (
-        "Dsv4MoeFrontPlan",
-        "build_info_moe_front",
-        "geometry_moe_front",
     ),
 }
 _REQUIRED_EXTENSION_SYMBOLS = tuple(
@@ -102,21 +94,6 @@ _REQUIRED_EXTENSION_PARAMETERS = {
         "output_scale",
     ),
 }
-_MOE_FRONT_PLAN_PARAMETERS = {
-    "run_learned_out": (
-        "router_logits",
-        "norm_eps",
-        "hc_eps",
-        "route_scale",
-        "use_pdl",
-    ),
-    "run_hash_out": (
-        "norm_eps",
-        "hc_eps",
-        "route_scale",
-        "use_pdl",
-    ),
-}
 _DEEP_GEMM_SYMBOLS_BY_COMPONENT = {
     "csa": (
         "get_num_sms",
@@ -124,7 +101,6 @@ _DEEP_GEMM_SYMBOLS_BY_COMPONENT = {
         "tf32_hc_prenorm_gemm",
     ),
     "hca": ("tf32_hc_prenorm_gemm",),
-    "moe_front": ("tf32_hc_prenorm_gemm",),
 }
 _REQUIRED_DEEP_GEMM_SYMBOLS = tuple(
     sorted(
@@ -164,60 +140,6 @@ def _requirements(
     return tuple(
         sorted({name for component in components for name in table[component]})
     )
-
-
-def _moe_front_plan_abi_reason(dsv4_mega: Any) -> Optional[str]:
-    plan_type = getattr(dsv4_mega, "Dsv4MoeFrontPlan", None)
-    if not callable(plan_type):
-        return "Dsv4MoeFrontPlan is missing or not callable"
-    for method_name, parameters in _MOE_FRONT_PLAN_PARAMETERS.items():
-        method = getattr(plan_type, method_name, None)
-        if not callable(method):
-            return f"Dsv4MoeFrontPlan.{method_name} is missing or not callable"
-        try:
-            signature = inspect.signature(method)
-        except (TypeError, ValueError):
-            # Some pybind builds do not expose signatures. Presence and
-            # callability still provide a useful ABI check in that case.
-            continue
-        absent = [name for name in parameters if name not in signature.parameters]
-        if absent:
-            return f"Dsv4MoeFrontPlan.{method_name} missing " f"{','.join(absent)}"
-    return None
-
-
-def _moe_front_build_info_reason(
-    dsv4_mega: Any, capability: tuple[int, int]
-) -> Optional[str]:
-    try:
-        build_info = dsv4_mega.build_info_moe_front()
-    except Exception as exc:
-        return f"failed to query MoE-front build info: {exc}"
-    if not isinstance(build_info, Mapping):
-        return "MoE-front build info is not a mapping"
-
-    arch = {(10, 0): "sm_100a", (10, 3): "sm_103a"}[capability]
-    for field in ("target_arches", "production_arch"):
-        arches = {
-            item.strip()
-            for item in str(build_info.get(field, "")).split(",")
-            if item.strip()
-        }
-        if arch not in arches:
-            return f"MoE-front build does not contain {arch} in {field}"
-    if build_info.get("kernel_count") != 4:
-        return (
-            "MoE-front build must publish four kernels, got "
-            f"{build_info.get('kernel_count')!r}"
-        )
-
-    source_commit = str(build_info.get("source_commit", ""))
-    source_sha256 = str(build_info.get("source_sha256", ""))
-    if not re.fullmatch(r"[0-9a-f]{8,40}", source_commit):
-        return f"MoE-front build has invalid source commit {source_commit!r}"
-    if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
-        return "MoE-front build has an invalid source SHA256"
-    return None
 
 
 def _runtime_unavailable_reason(
@@ -270,14 +192,6 @@ def _runtime_unavailable_reason(
             "rtp-kernel DSV4 Mega ABI is incompatible: " + "; ".join(incompatible),
             None,
         )
-    if "moe_front" in components:
-        reason = _moe_front_plan_abi_reason(dsv4_mega)
-        if reason is not None:
-            return "rtp-kernel DSV4 MoE-front ABI is incompatible: " + reason, None
-        reason = _moe_front_build_info_reason(dsv4_mega, capability)
-        if reason is not None:
-            return "rtp-kernel DSV4 MoE-front build is incompatible: " + reason, None
-
     try:
         import deep_gemm
     except Exception as exc:
@@ -302,18 +216,13 @@ def _mapping_mismatch(
     return f"rtp-kernel {name} geometry mismatch: {mismatched}" if mismatched else None
 
 
-def _compiled_geometry_reason(
-    args: Any, dsv4_mega: Any, *, require_moe_front: bool
-) -> Optional[str]:
+def _compiled_geometry_reason(args: Any, dsv4_mega: Any) -> Optional[str]:
     geometry = GEOMETRY_BY_DIM[int(args.dim)]
     csa_suffix = "" if geometry is PRO_GEOMETRY else "_flash"
     hca_suffix = "_pro" if geometry is PRO_GEOMETRY else "_flash"
     try:
         csa_geometry = dsv4_mega.geometry_csa()
         hca_geometry = dsv4_mega.geometry_hca()
-        front_geometry = (
-            dsv4_mega.geometry_moe_front(int(args.dim)) if require_moe_front else None
-        )
     except Exception as exc:
         return f"failed to query rtp-kernel DSV4 Mega ABI: {exc}"
 
@@ -350,22 +259,7 @@ def _compiled_geometry_reason(
             "slot_dtype_bits": 64,
         },
     )
-    if reason is not None or not require_moe_front:
-        return reason
-    return _mapping_mismatch(
-        "MoE-front",
-        front_geometry,
-        {
-            "abi_version": 1,
-            "kernel_contract_version": 3,
-            "hidden": int(args.dim),
-            "hc_mult": int(args.hc_mult),
-            "hc_width": HC_MIX,
-            "experts": int(args.n_routed_experts),
-            "topk": int(args.n_activated_experts),
-            "max_m": MAX_BATCH,
-        },
-    )
+    return reason
 
 
 def require_mega_runtime(device: torch.device, components: Sequence[str]) -> Any:
@@ -379,14 +273,12 @@ def require_mega_runtime(device: torch.device, components: Sequence[str]) -> Any
 
 
 def mega_decode_unavailable_reason(args: Any, device: torch.device) -> Optional[str]:
-    """Return why the complete CSA/HCA/MoE-front Mega path is unavailable."""
+    """Return why the complete CSA/HCA Mega attention path is unavailable."""
 
     if not bool(args.fp8_kv_cache):
         return "FP8 KV cache is required"
     if int(args.tp_size) != 1:
         return f"TP1 is required, got TP{args.tp_size}"
-    if os.environ.get("MOE_GATE_FP32", "0") == "1":
-        return "MOE_GATE_FP32=1 requires the ordinary DSV4 path"
     geometry_reason = _model_geometry_reason(args)
     if geometry_reason is not None:
         return geometry_reason
@@ -397,15 +289,12 @@ def mega_decode_unavailable_reason(args: Any, device: torch.device) -> Optional[
             "expected one of [128, 256, 512]"
         )
 
-    require_moe_front = int(args.ep_size) > 1
-    components = ("csa", "hca", "moe_front") if require_moe_front else ("csa", "hca")
+    components = ("csa", "hca")
     reason, dsv4_mega = _runtime_unavailable_reason(device, components)
     if reason is not None:
         return reason
     assert dsv4_mega is not None
-    return _compiled_geometry_reason(
-        args, dsv4_mega, require_moe_front=require_moe_front
-    )
+    return _compiled_geometry_reason(args, dsv4_mega)
 
 
 __all__ = ["mega_decode_unavailable_reason", "require_mega_runtime"]

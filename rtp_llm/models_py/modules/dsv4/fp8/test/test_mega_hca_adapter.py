@@ -43,7 +43,6 @@ def _block_stub(adapter: object | None) -> Block:
     block.layer_id = 3
     block._mega_csa_adapter = None
     block._mega_hca_adapter = adapter
-    block._mega_front_adapter = None
     block.attn_norm = _IdentityNorm()
     block.ffn_norm = _IdentityNorm()
     block.attn = MagicMock()
@@ -69,7 +68,6 @@ class MegaHCARoutingTest(unittest.TestCase):
                 super().__init__()
                 self.enable_mega_csa = MagicMock()
                 self.enable_mega_hca = MagicMock()
-                self.enable_mega_front = MagicMock()
 
         layer = _Layer()
         global_weights = MagicMock()
@@ -110,9 +108,6 @@ class MegaHCARoutingTest(unittest.TestCase):
         )
         layer.enable_mega_csa.assert_called_once_with(
             transformer._mega_csa_runtime, model_weights.weights[0]
-        )
-        layer.enable_mega_front.assert_called_once_with(
-            required=True, gen_num_per_cycle=0
         )
 
     def test_decode_q_len_one_uses_complete_hca_sublayer(self) -> None:

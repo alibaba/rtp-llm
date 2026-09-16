@@ -42,7 +42,6 @@ def _block_stub(adapter: object | None) -> Block:
     block.layer_id = 2
     block._mega_csa_adapter = adapter
     block._mega_hca_adapter = None
-    block._mega_front_adapter = None
     block.attn_norm = _IdentityNorm()
     block.ffn_norm = _IdentityNorm()
     block.attn = MagicMock()
@@ -99,7 +98,6 @@ class MegaCSARoutingTest(unittest.TestCase):
             layer = torch.nn.Module()
             layer.enable_mega_csa = MagicMock()
             layer.enable_mega_hca = MagicMock()
-            layer.enable_mega_front = MagicMock()
             layers.append(layer)
         args = V4Args(
             n_layers=2,
@@ -117,37 +115,11 @@ class MegaCSARoutingTest(unittest.TestCase):
         for layer in layers:
             layer.enable_mega_csa.assert_called_once()
             layer.enable_mega_hca.assert_called_once()
-            layer.enable_mega_front.assert_called_once_with(
-                required=False, gen_num_per_cycle=0
-            )
-
-    def test_auto_mega_keeps_non_se_front_optional_for_ep(self) -> None:
-        layer = torch.nn.Module()
-        layer.enable_mega_csa = MagicMock()
-        layer.enable_mega_hca = MagicMock()
-        layer.enable_mega_front = MagicMock()
-        args = V4Args(
-            n_layers=1,
-            n_mtp_layers=0,
-            compress_ratios=[4],
-            fp8_kv_cache=True,
-            tp_size=1,
-            ep_size=8,
-        )
-
-        with patch.dict(os.environ, {}, clear=True):
-            transformer = self._make_transformer(args, [layer])
-
-        self.assertTrue(transformer._mega_decode_enabled)
-        layer.enable_mega_front.assert_called_once_with(
-            required=False, gen_num_per_cycle=0
-        )
 
     def test_explicit_zero_disables_default_mega_path(self) -> None:
         layer = torch.nn.Module()
         layer.enable_mega_csa = MagicMock()
         layer.enable_mega_hca = MagicMock()
-        layer.enable_mega_front = MagicMock()
         args = V4Args(
             n_layers=1,
             n_mtp_layers=0,
@@ -163,13 +135,11 @@ class MegaCSARoutingTest(unittest.TestCase):
         self.assertFalse(transformer._mega_decode_enabled)
         layer.enable_mega_csa.assert_not_called()
         layer.enable_mega_hca.assert_not_called()
-        layer.enable_mega_front.assert_not_called()
 
     def test_unsupported_geometry_does_not_enable_mega_by_default(self) -> None:
         layer = torch.nn.Module()
         layer.enable_mega_csa = MagicMock()
         layer.enable_mega_hca = MagicMock()
-        layer.enable_mega_front = MagicMock()
         args = V4Args(
             n_layers=1,
             n_mtp_layers=0,
@@ -186,13 +156,11 @@ class MegaCSARoutingTest(unittest.TestCase):
         self.assertIsNone(transformer._mega_csa_runtime)
         layer.enable_mega_csa.assert_not_called()
         layer.enable_mega_hca.assert_not_called()
-        layer.enable_mega_front.assert_not_called()
 
     def test_missing_extension_abi_keeps_default_path(self) -> None:
         layer = torch.nn.Module()
         layer.enable_mega_csa = MagicMock()
         layer.enable_mega_hca = MagicMock()
-        layer.enable_mega_front = MagicMock()
         args = V4Args(n_layers=1, n_mtp_layers=0, compress_ratios=[4])
 
         with patch.dict(os.environ, {}, clear=True):
@@ -206,13 +174,11 @@ class MegaCSARoutingTest(unittest.TestCase):
         self.assertIsNone(transformer._mega_csa_runtime)
         layer.enable_mega_csa.assert_not_called()
         layer.enable_mega_hca.assert_not_called()
-        layer.enable_mega_front.assert_not_called()
 
     def test_explicit_mega_fails_fast_when_runtime_is_unsupported(self) -> None:
         layer = torch.nn.Module()
         layer.enable_mega_csa = MagicMock()
         layer.enable_mega_hca = MagicMock()
-        layer.enable_mega_front = MagicMock()
         args = V4Args(n_layers=1, n_mtp_layers=0, compress_ratios=[4])
 
         with patch.dict(os.environ, {"DSV4_MEGA": "1"}, clear=True):
@@ -225,7 +191,6 @@ class MegaCSARoutingTest(unittest.TestCase):
 
         layer.enable_mega_csa.assert_not_called()
         layer.enable_mega_hca.assert_not_called()
-        layer.enable_mega_front.assert_not_called()
 
     def test_pdfusion_role_can_attach_mega_adapter(self) -> None:
         class _Layer(torch.nn.Module):
@@ -233,7 +198,6 @@ class MegaCSARoutingTest(unittest.TestCase):
                 super().__init__()
                 self.enable_mega_csa = MagicMock()
                 self.enable_mega_hca = MagicMock()
-                self.enable_mega_front = MagicMock()
 
         layer = _Layer()
         global_weights = MagicMock()
@@ -273,9 +237,6 @@ class MegaCSARoutingTest(unittest.TestCase):
         )
         layer.enable_mega_hca.assert_called_once_with(
             transformer._mega_csa_runtime, model_weights.weights[0]
-        )
-        layer.enable_mega_front.assert_called_once_with(
-            required=False, gen_num_per_cycle=0
         )
 
     def test_decode_q_len_one_uses_complete_mega_sublayer(self) -> None:
@@ -371,42 +332,6 @@ class MegaCSARoutingTest(unittest.TestCase):
 
         adapter.forward_attention_sublayer.assert_not_called()
         block.attn.forward_decode.assert_called_once()
-
-    def test_flat_token_count_above_front_limit_keeps_existing_ffn_path(self) -> None:
-        adapter = MagicMock(wraps=MegaCSAAdapter.__new__(MegaCSAAdapter))
-        front = MagicMock()
-        front.supports.return_value = False
-        block = _block_stub(adapter)
-        block._mega_front_adapter = front
-        hidden = torch.zeros(86, 3, 1, 4)
-        metadata = SimpleNamespace(batch_size=86, q_len_per_req=3)
-
-        block.forward_decode(hidden, metadata, torch.zeros(86, 3))
-
-        front.supports.assert_called_once()
-        self.assertEqual(
-            tuple(front.supports.call_args.args[0].shape), tuple(hidden.shape)
-        )
-        front.forward.assert_not_called()
-        block.ffn.assert_called_once()
-
-    def test_attention_fallback_also_keeps_existing_ffn_front(self) -> None:
-        adapter = MagicMock()
-        adapter.supports_decode_shape.return_value = False
-        front = MagicMock()
-        front.supports.return_value = True
-        block = _block_stub(adapter)
-        block._mega_front_adapter = front
-        hidden = torch.zeros(8, 1, 1, 4)
-        metadata = SimpleNamespace(batch_size=7, q_len_per_req=1)
-
-        block.forward_decode(hidden, metadata, torch.zeros(8, 1))
-
-        block.attn.forward_decode.assert_called_once()
-        adapter.forward_attention_sublayer.assert_not_called()
-        front.supports.assert_called_once()
-        front.forward.assert_not_called()
-        block.ffn.assert_called_once()
 
     def test_mega_failure_is_not_retried_on_existing_path(self) -> None:
         adapter = MagicMock()

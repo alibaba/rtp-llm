@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import os
 import sys
 import unittest
 from types import SimpleNamespace
@@ -11,7 +10,6 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_weights import (
     FLASH_GEOMETRY,
-    HC_MIX,
     MAX_BATCH,
     PRO_GEOMETRY,
 )
@@ -43,32 +41,8 @@ def _module_with_symbols(names):
     return SimpleNamespace(**{name: _callable_with_parameters(name) for name in names})
 
 
-class _FakeMoeFrontPlan:
-    def run_learned_out(
-        self,
-        *args,
-        router_logits=None,
-        norm_eps=1.0e-6,
-        hc_eps=1.0e-6,
-        route_scale=2.5,
-        use_pdl=True,
-    ):
-        return None
-
-    def run_hash_out(
-        self,
-        *args,
-        norm_eps=1.0e-6,
-        hc_eps=1.0e-6,
-        route_scale=2.5,
-        use_pdl=True,
-    ):
-        return None
-
-
 def _supported_extension():
     extension = _module_with_symbols(_REQUIRED_EXTENSION_SYMBOLS)
-    extension.Dsv4MoeFrontPlan = _FakeMoeFrontPlan
     extension.geometry_csa = lambda: {
         "n_main": PRO_GEOMETRY.n_main,
         "n_index": 64 * 128,
@@ -90,23 +64,6 @@ def _supported_extension():
         "n_q_flash": FLASH_GEOMETRY.n_main,
         "front_n_fp8_flash": FLASH_GEOMETRY.front_fp8_rows,
         "max_m": MAX_BATCH,
-    }
-    extension.geometry_moe_front = lambda hidden: {
-        "abi_version": 1,
-        "kernel_contract_version": 3,
-        "hidden": hidden,
-        "hc_mult": 4,
-        "hc_width": HC_MIX,
-        "experts": 384 if hidden == 7168 else 256,
-        "topk": 6,
-        "max_m": MAX_BATCH,
-    }
-    extension.build_info_moe_front = lambda: {
-        "source_commit": "8bb15d3b",
-        "source_sha256": "7" * 64,
-        "target_arches": "sm_100a,sm_103a",
-        "production_arch": "sm_100a,sm_103a",
-        "kernel_count": 4,
     }
     return extension
 
@@ -145,7 +102,7 @@ class MegaSupportTest(unittest.TestCase):
             )
 
         self.assertIn("missing DSV4 Mega ABI", reason or "")
-        self.assertIn("geometry_moe_front", reason or "")
+        self.assertIn("geometry_csa", reason or "")
 
     def test_official_geometries_support_sm100_and_sm103(self) -> None:
         fake_rtp_kernel = SimpleNamespace(dsv4_mega=_supported_extension())
@@ -224,14 +181,6 @@ class MegaSupportTest(unittest.TestCase):
             self.assertIn(f"index_topk={args.index_topk}", reason or "")
             self.assertIn(f"expected {expected}", reason or "")
 
-    def test_fp32_gate_requires_the_ordinary_path(self) -> None:
-        with patch.dict(os.environ, {"MOE_GATE_FP32": "1"}):
-            reason = mega_decode_unavailable_reason(
-                V4Args(ep_size=8), torch.device("cuda:0")
-            )
-
-        self.assertEqual(reason, "MOE_GATE_FP32=1 requires the ordinary DSV4 path")
-
     def test_incompatible_attention_signature_is_reported_at_startup(self) -> None:
         extension = _supported_extension()
         extension.hc_reduce_fuse_out = lambda: None
@@ -263,7 +212,7 @@ class MegaSupportTest(unittest.TestCase):
 
         self.assertIn("HCA geometry mismatch", reason or "")
 
-    def test_attention_capacity_is_checked_even_without_moe_front(self) -> None:
+    def test_attention_capacity_is_checked(self) -> None:
         for name in ("csa", "hca"):
             for capacity in (None, 128, MAX_BATCH, MAX_BATCH * 2):
                 with self.subTest(component=name, capacity=capacity):
@@ -293,98 +242,6 @@ class MegaSupportTest(unittest.TestCase):
                         self.assertIn(f"{name.upper()} max_m=", reason or "")
                     else:
                         self.assertIsNone(reason)
-
-    def test_moe_front_geometry_requires_hc_width(self) -> None:
-        extension = _supported_extension()
-        extension.geometry_moe_front = lambda hidden: {
-            "abi_version": 1,
-            "kernel_contract_version": 3,
-            "hidden": hidden,
-            "hc_mult": 4,
-            "experts": 256,
-            "topk": 6,
-            "max_m": MAX_BATCH,
-        }
-        fake_rtp_kernel = SimpleNamespace(dsv4_mega=extension)
-        fake_deep_gemm = _module_with_symbols(_REQUIRED_DEEP_GEMM_SYMBOLS)
-        with patch.object(
-            torch.cuda, "get_device_capability", return_value=(10, 3)
-        ), patch.dict(
-            sys.modules,
-            {"rtp_kernel": fake_rtp_kernel, "deep_gemm": fake_deep_gemm},
-        ):
-            reason = mega_decode_unavailable_reason(
-                V4Args(ep_size=8), torch.device("cuda:0")
-            )
-
-        self.assertIn("MoE-front geometry mismatch", reason or "")
-        self.assertIn("hc_width", reason or "")
-
-    def test_moe_front_plan_methods_are_required(self) -> None:
-        class MissingHashPlan(_FakeMoeFrontPlan):
-            run_hash_out = None
-
-        extension = _supported_extension()
-        extension.Dsv4MoeFrontPlan = MissingHashPlan
-        fake_rtp_kernel = SimpleNamespace(dsv4_mega=extension)
-        fake_deep_gemm = _module_with_symbols(_REQUIRED_DEEP_GEMM_SYMBOLS)
-        with patch.object(
-            torch.cuda, "get_device_capability", return_value=(10, 3)
-        ), patch.dict(
-            sys.modules,
-            {"rtp_kernel": fake_rtp_kernel, "deep_gemm": fake_deep_gemm},
-        ):
-            reason = mega_decode_unavailable_reason(
-                V4Args(ep_size=8), torch.device("cuda:0")
-            )
-
-        self.assertIn("Dsv4MoeFrontPlan.run_hash_out", reason or "")
-
-    def test_stale_moe_front_build_is_rejected_at_startup(self) -> None:
-        extension = _supported_extension()
-        extension.build_info_moe_front = lambda: {
-            "source_commit": "unknown",
-            "source_sha256": "7" * 64,
-            "target_arches": "sm_100a,sm_103a",
-            "production_arch": "sm_100a,sm_103a",
-            "kernel_count": 4,
-        }
-        fake_rtp_kernel = SimpleNamespace(dsv4_mega=extension)
-        fake_deep_gemm = _module_with_symbols(_REQUIRED_DEEP_GEMM_SYMBOLS)
-        with patch.object(
-            torch.cuda, "get_device_capability", return_value=(10, 3)
-        ), patch.dict(
-            sys.modules,
-            {"rtp_kernel": fake_rtp_kernel, "deep_gemm": fake_deep_gemm},
-        ):
-            reason = mega_decode_unavailable_reason(
-                V4Args(ep_size=8), torch.device("cuda:0")
-            )
-
-        self.assertIn("MoE-front build is incompatible", reason or "")
-        self.assertIn("invalid source commit", reason or "")
-
-    def test_moe_front_plan_signature_is_checked_when_available(self) -> None:
-        class IncompletePlan(_FakeMoeFrontPlan):
-            def run_hash_out(self, *args, norm_eps=1.0e-6):
-                return None
-
-        extension = _supported_extension()
-        extension.Dsv4MoeFrontPlan = IncompletePlan
-        fake_rtp_kernel = SimpleNamespace(dsv4_mega=extension)
-        fake_deep_gemm = _module_with_symbols(_REQUIRED_DEEP_GEMM_SYMBOLS)
-        with patch.object(
-            torch.cuda, "get_device_capability", return_value=(10, 3)
-        ), patch.dict(
-            sys.modules,
-            {"rtp_kernel": fake_rtp_kernel, "deep_gemm": fake_deep_gemm},
-        ):
-            reason = mega_decode_unavailable_reason(
-                V4Args(ep_size=8), torch.device("cuda:0")
-            )
-
-        self.assertIn("Dsv4MoeFrontPlan.run_hash_out missing", reason or "")
-        self.assertIn("hc_eps", reason or "")
 
 
 if __name__ == "__main__":

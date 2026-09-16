@@ -1773,28 +1773,6 @@ void CudaGraphRunner::initCapture() {
         }
         max_num_token_ = isGenerationPrefillCudaGraph() ? capture_range_.back() : max_bs_ * num_tokens_per_bs_;
 
-        // DSV4 Mega MoE-front plans bind their TMA descriptor to the staging
-        // buffer and must exist before the first graph warmup/capture.  Reuse
-        // the final range selected by the ordinary graph runner so Python
-        // does not duplicate capture-config or default-bucket parsing. Draft
-        // prefill graphs use sequence buckets but execute a fixed-width decode;
-        // convert those buckets back to their corresponding batch sizes.
-        const bool draft_prefill_graph_mode = isMtpDraftPrefillCudaGraph();
-        if (!is_prefill_cuda_graph_mode_ || draft_prefill_graph_mode) {
-            py::gil_scoped_acquire gil;
-            if (py::hasattr(py_instance_, "prepare_mega_capture_plans")) {
-                py::list capture_batches;
-                for (int capture_value : capture_range_) {
-                    const int batch_size =
-                        draft_prefill_graph_mode ? capture_value / num_tokens_per_bs_ : capture_value;
-                    if (batch_size > 0) {
-                        capture_batches.append(batch_size);
-                    }
-                }
-                py_instance_.attr("prepare_mega_capture_plans")(capture_batches);
-            }
-        }
-
         PyModelInputs inputs;
         // Allocate top-level model inputs here. initCaptureAttentionInputs()
         // owns only attention metadata and must not replace this tensor because

@@ -95,9 +95,6 @@ class V4Args:
     # runtime
     max_batch_size: int = 4
     max_seq_len: int = 4096
-    # Canonical speculative width from the framework config. The Mega MoE
-    # front uses it only to derive draft/verify graph token widths.
-    gen_num_per_cycle: int = 0
     # Peak per-rank token count that the routed-MoE path must budget
     # for (Mega MoE's symmetric-memory dispatch buffer is sized from
     # this at init).  Defaults to ``max_seq_len`` downstream when not
@@ -295,14 +292,6 @@ class V4Transformer(nn.Module):
                 for layer_id, layer in enumerate(self.layers):
                     layer.enable_mega_csa(self._mega_csa_runtime, mw.weights[layer_id])
                     layer.enable_mega_hca(self._mega_csa_runtime, mw.weights[layer_id])
-                    # EP sharding requires the same MegaMoE-SE backend as the
-                    # ordinary path; Mega only replaces its decode front-end.
-                    # Auto mode keeps the ordinary FFN when a caller selected
-                    # a non-Mega-SE strategy. Explicit Mega remains strict.
-                    layer.enable_mega_front(
-                        required=mega_request is True and int(args.ep_size) > 1,
-                        gen_num_per_cycle=int(args.gen_num_per_cycle),
-                    )
 
             # LM head — plain weight matrix [vocab_size, dim].  Accept either
             # BF16 (ckpt-native) or FP32 (legacy path).
@@ -570,13 +559,6 @@ class V4Transformer(nn.Module):
         # Framework RMSNorm wants 2D — flatten to [T_total, dim] and
         # return that directly (the next reshape would no-op anyway).
         return self.norm(h.reshape(B * q_len, self.args.dim))
-
-    def prepare_mega_capture_plans(self, capture_batches: Sequence[int]) -> None:
-        """Pre-create MoE-front plans for the C++ graph capture buckets."""
-        if not self._mega_decode_enabled:
-            return
-        for layer in self.layers:
-            layer.prepare_mega_capture_plans(capture_batches)
 
     @torch.inference_mode()
     def forward(

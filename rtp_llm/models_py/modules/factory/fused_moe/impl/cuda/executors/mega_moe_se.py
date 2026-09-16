@@ -111,17 +111,10 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
 
         group = _get_validated_world_ep_group(cfg, dist)
         self._mega_group = group
-        buffer_capacity = max(cfg.max_tokens_per_rank, 1)
-        if getattr(cfg.model_config, "model_type", "") == "deepseek_v4":
-            from rtp_llm.models_py.modules.dsv4.mega_front import (
-                MEGA_MOE_FRONT_CAPACITY,
-            )
-
-            buffer_capacity = max(buffer_capacity, MEGA_MOE_FRONT_CAPACITY)
         self._mega_buf = _get_or_create_mega_se_buf(
             group=group,
             num_experts=cfg.n_routed_experts,
-            num_max_tokens_per_rank=buffer_capacity,
+            num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
             num_topk=cfg.n_activated_experts,
             hidden=D,
             intermediate_hidden=inter,
@@ -340,15 +333,6 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
         y = self._mega_y[:tokens]
         self._launch(y, tokens, x.device)
-        return y
-
-    def forward_prepacked(self, tokens: int, device: torch.device) -> torch.Tensor:
-        """Run MegaMoE-SE after the CUDA extension populated its input buffer."""
-        tokens = int(tokens)
-        self._validate_capacity(tokens)
-        y = self._mega_y[:tokens]
-        # Empty ranks must still participate in the collective.
-        self._launch(y, tokens, device)
         return y
 
     def forward_gate_pack(
