@@ -268,7 +268,7 @@ TEST_F(SamplerTest, testForceThinkEndToken) {
     }
 }
 
-TEST_F(SamplerTest, testNoThinkingMasksThinkBeginAndAllowsThinkEndBeforeSampling) {
+TEST_F(SamplerTest, testNoThinkingMasksThinkBoundaryTokensBeforeSampling) {
     SamplerDataBuilder builder;
 
     auto generate_input                                    = std::make_shared<GenerateInput>();
@@ -287,7 +287,7 @@ TEST_F(SamplerTest, testNoThinkingMasksThinkBeginAndAllowsThinkEndBeforeSampling
 
     float neg_inf = -std::numeric_limits<float>::max();
     EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128821].item<float>());
-    EXPECT_EQ(0, sampler_inputs.logits[0][128822].item<float>());
+    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128822].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][201].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
 }
@@ -380,7 +380,7 @@ TEST_F(SamplerTest, testNegativeThinkBudgetUsesMaxNewTokensForMtp) {
     EXPECT_EQ(processor->finishedThinkOutputLen(), 3);
 }
 
-TEST_F(SamplerTest, testThinkingMasksThinkBeginAndAllowsThinkEndAfterThinkEnd) {
+TEST_F(SamplerTest, testThinkingMasksThinkBoundaryTokensAfterThinkEnd) {
     SamplerDataBuilder builder;
 
     auto generate_input                                    = std::make_shared<GenerateInput>();
@@ -402,7 +402,7 @@ TEST_F(SamplerTest, testThinkingMasksThinkBeginAndAllowsThinkEndAfterThinkEnd) {
 
     float neg_inf = -std::numeric_limits<float>::max();
     EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128821].item<float>());
-    EXPECT_EQ(0, sampler_inputs.logits[0][128822].item<float>());
+    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128822].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][201].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
 }
@@ -463,7 +463,7 @@ TEST_F(SamplerTest, testThinkingForcesRemainingThinkEndAfterNaturalPrefix) {
     EXPECT_EQ(1, sampler_inputs.logits[0][9].item<float>());
 }
 
-TEST_F(SamplerTest, testNoThinkingAllowsThinkEndWithoutBeginTokenConfig) {
+TEST_F(SamplerTest, testNoThinkingMasksThinkEndWithoutBeginTokenConfig) {
     SamplerDataBuilder builder;
 
     auto generate_input                                  = std::make_shared<GenerateInput>();
@@ -480,7 +480,8 @@ TEST_F(SamplerTest, testNoThinkingAllowsThinkEndWithoutBeginTokenConfig) {
     processor->process(sampler_inputs, 0, 1);
 
     EXPECT_EQ(0, sampler_inputs.logits[0][201].item<float>());
-    EXPECT_EQ(0, sampler_inputs.logits[0][128822].item<float>());
+    float neg_inf = -std::numeric_limits<float>::max();
+    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128822].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
 }
 
@@ -510,7 +511,7 @@ TEST_F(SamplerTest, testZeroThinkBudgetFallsBackToMaxNewTokensAndForcesThinkEndW
     EXPECT_EQ(neg_inf, sampler_inputs.logits[0][271].item<float>());
 }
 
-TEST_F(SamplerTest, testClosingThinkFallbackMasksThinkBeginAndAllowsThinkEnd) {
+TEST_F(SamplerTest, testClosingThinkFallbackMasksThinkBoundaryTokens) {
     SamplerDataBuilder builder;
 
     StreamThinkInfo info(true, 4, {7}, {8}, 0, 0, false, nullptr);
@@ -522,7 +523,7 @@ TEST_F(SamplerTest, testClosingThinkFallbackMasksThinkBeginAndAllowsThinkEnd) {
 
     float neg_inf = -std::numeric_limits<float>::max();
     EXPECT_EQ(neg_inf, sampler_inputs.logits[0][7].item<float>());
-    EXPECT_EQ(0, sampler_inputs.logits[0][8].item<float>());
+    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][8].item<float>());
 }
 
 TEST_F(SamplerTest, testThinkingBudgetIncludesThinkTagsAndEnforcesAfterReasoningBudget) {
@@ -559,7 +560,7 @@ TEST_F(SamplerTest, testThinkingBudgetIncludesThinkTagsAndEnforcesAfterReasoning
     EXPECT_EQ(neg_inf, enforce_inputs.logits[0][9].item<float>());
 }
 
-TEST_F(SamplerTest, testForcedSingleTokenThinkEndRemainsAllowedBeforeAsyncStatusUpdate) {
+TEST_F(SamplerTest, testForcedSingleTokenThinkEndDoesNotRepeatBeforeAsyncStatusUpdate) {
     SamplerDataBuilder builder;
 
     auto generate_input                                    = std::make_shared<GenerateInput>();
@@ -587,7 +588,7 @@ TEST_F(SamplerTest, testForcedSingleTokenThinkEndRemainsAllowedBeforeAsyncStatus
 
     float neg_inf = -std::numeric_limits<float>::max();
     EXPECT_EQ(neg_inf, next_inputs.logits[0][7].item<float>());
-    EXPECT_EQ(0, next_inputs.logits[0][8].item<float>());
+    EXPECT_EQ(neg_inf, next_inputs.logits[0][8].item<float>());
 
     processor->updateStatus(torch::tensor({{8}}, torch::kInt32), 1);
     SamplerInputs committed_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
@@ -596,10 +597,10 @@ TEST_F(SamplerTest, testForcedSingleTokenThinkEndRemainsAllowedBeforeAsyncStatus
     processor->process(committed_inputs, 0, 1);
 
     EXPECT_EQ(neg_inf, committed_inputs.logits[0][7].item<float>());
-    EXPECT_EQ(0, committed_inputs.logits[0][8].item<float>());
+    EXPECT_EQ(neg_inf, committed_inputs.logits[0][8].item<float>());
 }
 
-TEST_F(SamplerTest, testSpecAfterThinkMasksThinkBeginAndAllowsThinkEnd) {
+TEST_F(SamplerTest, testSpecAfterThinkMasksThinkBoundaryTokens) {
     std::vector<int> end_think_token_ids = {8, 9};
     auto             dfa_ptr             = std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids);
     dfa_ptr->next(8);
@@ -624,10 +625,10 @@ TEST_F(SamplerTest, testSpecAfterThinkMasksThinkBeginAndAllowsThinkEnd) {
         return processor.tryAcceptAndFillBitmask(request);
     };
     EXPECT_EQ(accepted_tokens(7), 0);
-    EXPECT_EQ(accepted_tokens(8), 1);
+    EXPECT_EQ(accepted_tokens(8), 0);
 }
 
-TEST_F(SamplerTest, testSpecAfterThinkAllowsThinkEndWhileForcedEndIsPending) {
+TEST_F(SamplerTest, testSpecAfterThinkMasksThinkEndWhileForcedEndIsPending) {
     std::vector<int> end_think_token_ids = {8};
     auto             dfa_ptr             = std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids);
     dfa_ptr->next(8);
@@ -652,14 +653,14 @@ TEST_F(SamplerTest, testSpecAfterThinkAllowsThinkEndWhileForcedEndIsPending) {
         return processor.tryAcceptAndFillBitmask(request);
     };
     EXPECT_EQ(accepted_tokens(7), 0);
-    EXPECT_EQ(accepted_tokens(8), 1);
+    EXPECT_EQ(accepted_tokens(8), 0);
 
     processor.updateStatus(torch::tensor({{8}}, torch::kInt32), 1);
     EXPECT_EQ(accepted_tokens(7), 0);
-    EXPECT_EQ(accepted_tokens(8), 1);
+    EXPECT_EQ(accepted_tokens(8), 0);
 }
 
-TEST_F(SamplerTest, testSpecNoThinkMasksThinkBeginAndAllowsThinkEnd) {
+TEST_F(SamplerTest, testSpecNoThinkMasksThinkBoundaryTokens) {
     StreamThinkInfo          info(false, 0, {7}, {8, 9}, 0, 0, false, nullptr);
     ThinkModeLogitsProcessor processor({info});
 
@@ -678,10 +679,10 @@ TEST_F(SamplerTest, testSpecNoThinkMasksThinkBeginAndAllowsThinkEnd) {
         return processor.tryAcceptAndFillBitmask(request);
     };
     EXPECT_EQ(accepted_tokens(7), 0);
-    EXPECT_EQ(accepted_tokens(8), 1);
+    EXPECT_EQ(accepted_tokens(8), 0);
 }
 
-TEST_F(SamplerTest, testSpecClosingThinkFallbackMasksThinkBeginAndAllowsThinkEnd) {
+TEST_F(SamplerTest, testSpecClosingThinkFallbackMasksThinkBoundaryTokens) {
     StreamThinkInfo info(true, 4, {7}, {8}, 0, 0, false, nullptr);
     info.process_state = ThinkProcessState::CLOSING_THINK;
     ThinkModeLogitsProcessor processor({info});
@@ -701,7 +702,7 @@ TEST_F(SamplerTest, testSpecClosingThinkFallbackMasksThinkBeginAndAllowsThinkEnd
         return processor.tryAcceptAndFillBitmask(request);
     };
     EXPECT_EQ(accepted_tokens(7), 0);
-    EXPECT_EQ(accepted_tokens(8), 1);
+    EXPECT_EQ(accepted_tokens(8), 0);
 }
 
 TEST_F(SamplerTest, testForcedMultiTokenThinkEndAdvancesBeforeAsyncStatusUpdate) {

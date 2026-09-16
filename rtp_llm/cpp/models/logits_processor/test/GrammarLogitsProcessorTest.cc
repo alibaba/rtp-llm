@@ -735,7 +735,7 @@ TEST(ReasoningGrammarLogitsProcessorTest, BudgetForceCloseThenGrammar) {
     EXPECT_EQ(processor.acceptedTokenLen(), 3);
 }
 
-TEST(ReasoningGrammarLogitsProcessorTest, SingleTokenCloseAllowsEndBeforeAndAfterCommit) {
+TEST(ReasoningGrammarLogitsProcessorTest, SingleTokenCloseMasksEndBeforeAndAfterCommit) {
     auto backend  = makeBackend();
     auto compiled = backend.compileNow({"regex", "x"}).compiled;
     ASSERT_TRUE(compiled);
@@ -762,7 +762,7 @@ TEST(ReasoningGrammarLogitsProcessorTest, SingleTokenCloseAllowsEndBeforeAndAfte
     inputs.logits           = torch::zeros({1, 128}, torch::kFloat32);
     inputs.sequence_lengths = torch::tensor({2}, torch::kInt32);
     processor.process(inputs, 0, 1);
-    EXPECT_GT(inputs.logits[0][static_cast<int>('x')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('x')].item<float>(), BaseLogitsProcessor::neg_inf);
 
     const size_t W               = SpecLogitsProcessor::bitmaskWordCount(128);
     auto         accepted_tokens = [&](int32_t token_id) {
@@ -777,16 +777,16 @@ TEST(ReasoningGrammarLogitsProcessorTest, SingleTokenCloseAllowsEndBeforeAndAfte
         request.vocab_size         = 128;
         return processor.tryAcceptAndFillBitmask(request);
     };
-    EXPECT_EQ(accepted_tokens(static_cast<int32_t>('x')), 1);
+    EXPECT_EQ(accepted_tokens(static_cast<int32_t>('x')), 0);
 
     processor.updateStatus(torch::tensor({{static_cast<int32_t>('x')}}, torch::kInt32), 1);
     inputs.logits = torch::zeros({1, 128}, torch::kFloat32);
     processor.process(inputs, 0, 1);
 
-    EXPECT_GT(inputs.logits[0][static_cast<int>('x')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('x')].item<float>(), BaseLogitsProcessor::neg_inf);
     EXPECT_EQ(inputs.logits[0][static_cast<int>('<')].item<float>(), BaseLogitsProcessor::neg_inf);
     EXPECT_EQ(accepted_tokens(static_cast<int32_t>('<')), 0);
-    EXPECT_EQ(accepted_tokens(static_cast<int32_t>('x')), 1);
+    EXPECT_EQ(accepted_tokens(static_cast<int32_t>('x')), 0);
 }
 
 TEST(LogitsProcessorFactoryTest, GrammarThinkingCreatesReasoningGrammarAndSkipsThinkMode) {

@@ -76,6 +76,11 @@ void maskThinkBeginToken(const torch::Tensor& new_tokens_logits, size_t vocab_si
     maskToken(new_tokens_logits, vocab_size, firstTokenOrInvalid(info.begin_think_token_ids));
 }
 
+void maskThinkBoundaryTokens(const torch::Tensor& new_tokens_logits, size_t vocab_size, const StreamThinkInfo& info) {
+    maskThinkBeginToken(new_tokens_logits, vocab_size, info);
+    maskToken(new_tokens_logits, vocab_size, firstTokenOrInvalid(info.end_think_token_ids));
+}
+
 void clearTokenFromBitmask(int32_t* row, size_t words, int32_t token_id) {
     if (token_id < 0 || static_cast<size_t>(token_id / 32) >= words) {
         return;
@@ -93,6 +98,11 @@ void forceTokenInBitmask(int32_t* row, size_t words, int32_t token_id) {
 
 void maskThinkBeginTokenInBitmask(int32_t* row, size_t words, const StreamThinkInfo& info) {
     clearTokenFromBitmask(row, words, firstTokenOrInvalid(info.begin_think_token_ids));
+}
+
+void maskThinkBoundaryTokensInBitmask(int32_t* row, size_t words, const StreamThinkInfo& info) {
+    maskThinkBeginTokenInBitmask(row, words, info);
+    clearTokenFromBitmask(row, words, firstTokenOrInvalid(info.end_think_token_ids));
 }
 
 bool bitmaskAllowsToken(const int32_t* row, size_t words, int32_t token_id) {
@@ -125,18 +135,18 @@ void applyThinkSpecRowMask(int32_t* row, size_t words, StreamThinkInfo& info) {
     switch (info.process_state) {
         case ThinkProcessState::NO_THINK:
         case ThinkProcessState::AFTER_THINK: {
-            maskThinkBeginTokenInBitmask(row, words, info);
+            maskThinkBoundaryTokensInBitmask(row, words, info);
             break;
         }
         case ThinkProcessState::IN_THINK: {
             if (transitionToAfterThinkIfClosed(info)) {
-                maskThinkBeginTokenInBitmask(row, words, info);
+                maskThinkBoundaryTokensInBitmask(row, words, info);
                 break;
             }
             if (thinkEndCloseInProgress(info) || specThinkBudgetExhausted(info)) {
                 info.process_state = ThinkProcessState::CLOSING_THINK;
                 if (!forceThinkEndTokenInBitmask(row, words, info)) {
-                    maskThinkBeginTokenInBitmask(row, words, info);
+                    maskThinkBoundaryTokensInBitmask(row, words, info);
                 }
                 break;
             }
@@ -145,11 +155,11 @@ void applyThinkSpecRowMask(int32_t* row, size_t words, StreamThinkInfo& info) {
         }
         case ThinkProcessState::CLOSING_THINK: {
             if (transitionToAfterThinkIfClosed(info)) {
-                maskThinkBeginTokenInBitmask(row, words, info);
+                maskThinkBoundaryTokensInBitmask(row, words, info);
                 break;
             }
             if (!forceThinkEndTokenInBitmask(row, words, info)) {
-                maskThinkBeginTokenInBitmask(row, words, info);
+                maskThinkBoundaryTokensInBitmask(row, words, info);
             }
             break;
         }
@@ -206,12 +216,12 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start
         switch (info.process_state) {
             case ThinkProcessState::NO_THINK:
             case ThinkProcessState::AFTER_THINK: {
-                maskThinkBeginToken(inputs.logits[batch_idx], inputs.vocab_size, info);
+                maskThinkBoundaryTokens(inputs.logits[batch_idx], inputs.vocab_size, info);
                 break;
             }
             case ThinkProcessState::IN_THINK: {
                 if (transitionToAfterThinkIfClosed(info)) {
-                    maskThinkBeginToken(inputs.logits[batch_idx], inputs.vocab_size, info);
+                    maskThinkBoundaryTokens(inputs.logits[batch_idx], inputs.vocab_size, info);
                     break;
                 }
 
@@ -226,12 +236,12 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start
             }
             case ThinkProcessState::CLOSING_THINK: {
                 if (transitionToAfterThinkIfClosed(info)) {
-                    maskThinkBeginToken(inputs.logits[batch_idx], inputs.vocab_size, info);
+                    maskThinkBoundaryTokens(inputs.logits[batch_idx], inputs.vocab_size, info);
                     break;
                 }
 
                 if (!forceThinkEndToken(inputs.logits[batch_idx], info, inputs.vocab_size)) {
-                    maskThinkBeginToken(inputs.logits[batch_idx], inputs.vocab_size, info);
+                    maskThinkBoundaryTokens(inputs.logits[batch_idx], inputs.vocab_size, info);
                 }
                 break;
             }
