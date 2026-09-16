@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -27,6 +28,35 @@ namespace rtp_llm {
 namespace {
 
 bool shouldPinHostBlockPool();
+
+torch::Tensor allocateHostBuffer(size_t size_bytes) {
+    const auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
+    if (shouldPinHostBlockPool()) {
+        try {
+#if USING_CUDA
+            void*      ptr = nullptr;
+            const auto err = cudaHostAlloc(&ptr, size_bytes, cudaHostAllocDefault);
+            if (err != cudaSuccess) {
+                throw std::runtime_error(std::string("cudaHostAlloc failed: ") + cudaGetErrorString(err));
+            }
+            // Also frees the allocation if Tensor construction throws.
+            auto owner = std::shared_ptr<void>(ptr, [](void* p) noexcept { (void)cudaFreeHost(p); });
+            return torch::from_blob(
+                ptr, {static_cast<int64_t>(size_bytes)}, [owner = std::move(owner)](void*) {}, options);
+#else
+            return torch::empty({static_cast<int64_t>(size_bytes)}, options.pinned_memory(true));
+#endif
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING(
+                "pin host block pool failed, fallback to pageable CPU memory, total_size=%zu bytes, error=%s",
+                size_bytes,
+                e.what());
+        }
+    } else {
+        RTP_LLM_LOG_INFO("host block pool uses pageable CPU memory, total_size=%zu bytes", size_bytes);
+    }
+    return torch::empty({static_cast<int64_t>(size_bytes)}, options);
+}
 
 const char* allocationTypeName(AllocationType allocation_type) {
     switch (allocation_type) {
@@ -143,23 +173,7 @@ void BlockPool::validateConfig() const {
 
 void BlockPool::initializeCacheBuffer() {
     if (allocation_type_ == AllocationType::HOST) {
-        auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                       torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
-        if (shouldPinHostBlockPool()) {
-            try {
-                cache_aligned_buffer_ = cpu_buffer.pin_memory();
-            } catch (const std::exception& e) {
-                RTP_LLM_LOG_WARNING(
-                    "pin host block pool failed, fallback to pageable CPU memory, total_size=%zu bytes, error=%s",
-                    config_.total_size_bytes,
-                    e.what());
-                cache_aligned_buffer_ = std::move(cpu_buffer);
-            }
-        } else {
-            RTP_LLM_LOG_INFO("host block pool uses pageable CPU memory, total_size=%zu bytes",
-                             config_.total_size_bytes);
-            cache_aligned_buffer_ = std::move(cpu_buffer);
-        }
+        cache_aligned_buffer_ = allocateHostBuffer(config_.total_size_bytes);
         RTP_LLM_LOG_INFO("mark host block pool dont dump, ptr=%p, size=%zu",
                          cache_aligned_buffer_.data_ptr(),
                          config_.total_size_bytes);

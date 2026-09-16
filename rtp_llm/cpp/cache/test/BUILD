@@ -191,6 +191,16 @@ cc_test(
 )
 
 cc_test(
+    name = "block_pool_host_allocation_test",
+    srcs = ["BlockPoolHostAllocationTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    linkstatic = True,
+    linkopts = ["-Wl,--wrap=cudaHostAlloc", "-Wl,--wrap=cudaFreeHost"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+cc_test(
     name = "memory_layout_strategy_test",
     srcs = [
         "MemoryLayoutStrategyTest.cc",

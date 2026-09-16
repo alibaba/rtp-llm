@@ -5,6 +5,9 @@
 #include <torch/torch.h>
 #include <numeric>
 #include <optional>
+#include <cstdlib>
+#include <cstring>
+#include <string>
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -12,6 +15,10 @@
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
+
+#if USING_CUDA
+#include <cuda_runtime.h>
+#endif
 
 namespace rtp_llm {
 namespace test {
@@ -30,6 +37,43 @@ protected:
 };
 
 namespace {
+
+#if USING_CUDA
+struct ScopedHostPoolPinning {
+    ScopedHostPoolPinning() {
+        if (const char* value = std::getenv("RTP_LLM_PIN_HOST_BLOCK_POOL")) {
+            old_value = value;
+        }
+        setenv("RTP_LLM_PIN_HOST_BLOCK_POOL", "1", 1);
+    }
+    ~ScopedHostPoolPinning() {
+        if (old_value.has_value()) {
+            setenv("RTP_LLM_PIN_HOST_BLOCK_POOL", old_value->c_str(), 1);
+        } else {
+            unsetenv("RTP_LLM_PIN_HOST_BLOCK_POOL");
+        }
+    }
+    std::optional<std::string> old_value;
+};
+
+struct CudaBuffer {
+    ~CudaBuffer() {
+        if (ptr != nullptr) {
+            (void)cudaFree(ptr);
+        }
+    }
+    void* ptr = nullptr;
+};
+
+struct CudaStream {
+    ~CudaStream() {
+        if (stream != nullptr) {
+            (void)cudaStreamDestroy(stream);
+        }
+    }
+    cudaStream_t stream = nullptr;
+};
+#endif
 
 static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {
     rtp_llm::ModelConfig m;
@@ -93,6 +137,46 @@ TEST_F(BlockPoolTest, ConstructorAndInit) {
 
     EXPECT_EQ(block_pool_->freeBlocksNum(), config.block_num - 1);
 }
+
+#if USING_CUDA
+TEST_F(BlockPoolTest, HostPinnedBufferRoundTripsBytesThroughDevice) {
+    ScopedHostPoolPinning pin;
+    // Four layers * ten blocks * (256 KiB K + 256 KiB V) = 20 MiB.
+    auto config = createTestConfig(256 * 1024, 256 * 1024);
+    ASSERT_EQ(config.total_size_bytes, 20u * 1024 * 1024);
+    BlockPool pool(config, AllocationType::HOST);
+    ASSERT_TRUE(pool.init());
+    auto host = pool.allLayerCacheBase().at(0).flatten();
+    ASSERT_TRUE(host.is_pinned());
+
+    cudaPointerAttributes attributes{};
+    ASSERT_EQ(cudaPointerGetAttributes(&attributes, host.data_ptr()), cudaSuccess);
+    ASSERT_EQ(attributes.type, cudaMemoryTypeHost);
+
+    constexpr size_t kCopyBytes = 4096;
+    std::vector<uint8_t> expected(kCopyBytes);
+    for (size_t i = 0; i < kCopyBytes; ++i) {
+        expected[i] = static_cast<uint8_t>(i);
+    }
+    std::memcpy(host.data_ptr(), expected.data(), kCopyBytes);
+
+    CudaStream stream;
+    ASSERT_EQ(cudaStreamCreate(&stream.stream), cudaSuccess);
+    CudaBuffer device;
+    ASSERT_EQ(cudaMalloc(&device.ptr, kCopyBytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpyAsync(
+                  device.ptr, host.data_ptr(), kCopyBytes, cudaMemcpyHostToDevice, stream.stream),
+              cudaSuccess);
+    ASSERT_EQ(cudaStreamSynchronize(stream.stream), cudaSuccess);
+
+    std::memset(host.data_ptr(), 0, kCopyBytes);
+    ASSERT_EQ(cudaMemcpyAsync(
+                  host.data_ptr(), device.ptr, kCopyBytes, cudaMemcpyDeviceToHost, stream.stream),
+              cudaSuccess);
+    ASSERT_EQ(cudaStreamSynchronize(stream.stream), cudaSuccess);
+    EXPECT_EQ(std::memcmp(host.data_ptr(), expected.data(), kCopyBytes), 0);
+}
+#endif
 
 TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     // Use createSpConfig logic so that global_layer_ids is filled for main + sub-model layers.
