@@ -21,7 +21,10 @@ from rtp_llm.models_py.modules.base import FusedSiluAndMul
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
     CudaFp8DeepGEMMLinear,
 )
-from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
+from rtp_llm.models_py.modules.hybrid.dense_mlp import (
+    DenseMLP,
+    _get_fused_fp8_quant_params,
+)
 from rtp_llm.test.utils.numeric_util import calc_diff, per_block_cast_to_fp8
 
 
@@ -72,9 +75,16 @@ class TestDenseMLPFp8SiluFusion(unittest.TestCase):
         )()
         mlp_fused.act_fn = FusedSiluAndMul()
         mlp_fused.is_gated = True
+        mlp_fused.swiglu_oai_params = None
         mlp_fused.up_proj = up_linear
         mlp_fused.down_proj = down_linear
-        mlp_fused._fuse_silu_quant = down_linear.K % 128 == 0
+        mlp_fused._down_proj_fp8_quant_params = _get_fused_fp8_quant_params(
+            down_linear
+        )
+        mlp_fused._fuse_silu_quant = (
+            mlp_fused._down_proj_fp8_quant_params is not None
+            and down_linear.K % 128 == 0
+        )
         if mlp_fused._fuse_silu_quant and down_linear.scale_ue8m0:
             mlp_fused._fuse_silu_quant = down_linear.K % 512 == 0
 
@@ -85,8 +95,12 @@ class TestDenseMLPFp8SiluFusion(unittest.TestCase):
         mlp_unfused.parallelism_config = mlp_fused.parallelism_config
         mlp_unfused.act_fn = FusedSiluAndMul()
         mlp_unfused.is_gated = True
+        mlp_unfused.swiglu_oai_params = None
         mlp_unfused.up_proj = up_linear
         mlp_unfused.down_proj = down_linear
+        mlp_unfused._down_proj_fp8_quant_params = (
+            mlp_fused._down_proj_fp8_quant_params
+        )
         mlp_unfused._fuse_silu_quant = False
 
         return mlp_fused, mlp_unfused

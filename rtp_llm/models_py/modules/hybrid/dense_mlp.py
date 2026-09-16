@@ -26,6 +26,12 @@ if _DEVICE_TYPE == DeviceType.Cuda:
         )
     except ImportError:
         CudaMxfp8Linear = None  # type: ignore
+    try:
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
+            CudaFp8DeepGEMMLinear,
+        )
+    except ImportError:
+        CudaFp8DeepGEMMLinear = None  # type: ignore
     from rtp_llm.models_py.triton_kernels.common.activation import (
         silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd,
     )
@@ -33,6 +39,7 @@ if _DEVICE_TYPE == DeviceType.Cuda:
 else:
     CudaFp8GEMMLinear = None  # type: ignore
     CudaMxfp8Linear = None  # type: ignore
+    CudaFp8DeepGEMMLinear = None  # type: ignore
     silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd = None  # type: ignore
     swiglu_oai_torch = None  # type: ignore
 
@@ -64,6 +71,12 @@ def _get_fused_fp8_quant_params(linear: Any) -> Optional[_FusedFp8QuantParams]:
             group_size=getattr(linear, "input_quant_group_size", 32),
             scale_ue8m0=getattr(linear, "input_quant_scale_ue8m0", False),
             round_to_pow2=getattr(linear, "input_quant_round_to_pow2", True),
+        )
+    if CudaFp8DeepGEMMLinear is not None and isinstance(linear, CudaFp8DeepGEMMLinear):
+        return _FusedFp8QuantParams(
+            group_size=getattr(linear, "input_quant_group_size", 128),
+            scale_ue8m0=getattr(linear, "scale_ue8m0", False),
+            round_to_pow2=getattr(linear, "input_quant_round_to_pow2", False),
         )
     return None
 

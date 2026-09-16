@@ -98,6 +98,16 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         self._num_topk = wrapper.num_topk
         self._num_max_dispatch_tokens_per_rank = wrapper.ll_num_max_token_per_rank
         self._use_fp8_dispatch = use_fp8_dispatch
+        # NVFP4 dispatch is a separate DeepEP path (uint8 + fp8 scales). Keep
+        # the flag off unless the router quant_config is actually per-group FP4;
+        # MiniMax-M3 MXFP8 leaves both flags False and moves BF16 activations.
+        self._use_nvfp4_dispatch = (
+            (not use_fp8_dispatch)
+            and quant_config.is_quantized
+            and quant_config.quant_dtype == torch.uint8
+            and quant_config.block_shape is not None
+            and quant_config.block_shape[0] == 16
+        )
         self._zero_copy = False
         self._async_finish = False
         self._return_recv_hook = False

@@ -51,7 +51,13 @@ def mxfp8_quant_act_eager(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 def _mxfp8_quant_flashinfer_backend(x: torch.Tensor) -> str:
     # cute-dsl is faster for normal decode/prefill shapes, but it is not safe
     # once flattened input offsets exceed the 32-bit element-indexing range.
+    # H20 CI images also ship flashinfer without the cutlass extra that cute-dsl
+    # imports, so fall back to the CUDA kernel there.
     if x.numel() > _FLASHINFER_CUTE_DSL_MAX_NUMEL:
+        return "cuda"
+    try:
+        import cutlass  # noqa: F401
+    except ImportError:
         return "cuda"
     return "cute-dsl"
 
@@ -115,10 +121,11 @@ def pack_mxfp8_scale(
     """
     import deep_gemm
 
-    kwargs = dict(mn=mn, k=k, recipe=(1, MX_BLOCK))
-    if num_groups is not None:
-        kwargs["num_groups"] = num_groups
     sf = scale_fp32.contiguous()
+    # DeepGEMM 2.1 binds recipe as a 3-int tuple in the kwargs overload.
+    # The positional 2-int form (mn, k, (1, 32)) is the one other MX/FP4
+    # packers already use and what H20's pybind accepts.
+    recipe = (1, MX_BLOCK)
     # DeepGEMM's JIT kernel launches on the *current* CUDA device. During
     # weight loading each TP rank's tensors live on its own device (e.g.
     # cuda:5) while the current device may still be cuda:0, which makes the
@@ -126,8 +133,14 @@ def pack_mxfp8_scale(
     # tensor's device for the launch.
     if sf.is_cuda:
         with torch.cuda.device(sf.device):
-            return deep_gemm.transform_sf_into_required_layout(sf, **kwargs)
-    return deep_gemm.transform_sf_into_required_layout(sf, **kwargs)
+            if num_groups is None:
+                return deep_gemm.transform_sf_into_required_layout(sf, mn, k, recipe)
+            return deep_gemm.transform_sf_into_required_layout(
+                sf, mn, k, recipe, num_groups
+            )
+    if num_groups is None:
+        return deep_gemm.transform_sf_into_required_layout(sf, mn, k, recipe)
+    return deep_gemm.transform_sf_into_required_layout(sf, mn, k, recipe, num_groups)
 
 
 def mxfp8_linear(

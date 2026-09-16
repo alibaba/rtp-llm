@@ -54,6 +54,9 @@ import triton.language as tl
 _USE_CP_DIRECT_PAGED_PREFILL = (
     os.environ.get("M3_MSA_CP_DIRECT_PAGED_PREFILL", "0") == "1"
 )
+# Fused CP paged write is the production default. Tests patch this off to
+# prove the direct-paged gate stays closed without it.
+_USE_FUSED_CP_PAGED_WRITE = os.environ.get("M3_MSA_FUSED_CP_PAGED_WRITE", "1") == "1"
 # Fused paged->scratch main-K/V gather (one pass instead of torch's
 # index -> cast -> index_put). Set M3_MSA_FUSED_KV_GATHER=0 for the torch path.
 _FUSED_KV_GATHER = os.environ.get("M3_MSA_FUSED_KV_GATHER", "1") != "0"
@@ -2315,6 +2318,20 @@ class MSAAttention(nn.Module):
                 q, k, positions, rope_theta=self._rope_theta
             )
 
+    def _ensure_gather_scratch(
+        self,
+        _attn_inputs: Any,
+        _device: Any,
+        _dtype: Any,
+        bsz: Optional[int] = None,
+        max_kv: Optional[int] = None,
+        exact_cp_shape: bool = False,
+    ) -> None:
+        """Compatibility wrapper used by the CP prefix unit tests."""
+        self._ensure_scratch_addressing_capacity(
+            bsz=bsz, max_kv=max_kv, exact_cp_shape=exact_cp_shape
+        )
+
     def _ensure_scratch_addressing_capacity(
         self,
         bsz: Optional[int] = None,
@@ -2678,6 +2695,7 @@ class MSAAttention(nn.Module):
         paged_base = self._paged_kv_base_view(kv_cache)
         return bool(
             _USE_CP_DIRECT_PAGED_PREFILL
+            and _USE_FUSED_CP_PAGED_WRITE
             and self._kv_sharded
             and paged_base is not None
             and paged_base.dtype == torch.float8_e4m3fn
@@ -3153,8 +3171,25 @@ class MSAAttention(nn.Module):
         # CUDA pages use one fused scatter for K, V, and idx-K. E4M3 destinations
         # preserve raw bits; BF16 destinations convert the persistent E4M3 values
         # while scattering, matching the legacy prefix dequantization contract.
+        # CPU/BF16 is the unit-test path: index_copy does not implement float8.
         if not k_paged.is_cuda:
-            raise RuntimeError("MSA direct prefix restore requires CUDA working pages")
+            src_pages = (
+                None if gather_plan is None else gather_plan.restore_indices
+            )
+            page_size = int(self.page_size)
+            for logical_idx, dst_page in enumerate(dst_pages.tolist()):
+                src_page = (
+                    logical_idx
+                    if src_pages is None
+                    else int(src_pages[logical_idx].item())
+                )
+                k_paged[dst_page] = main_pages[src_page, 0].to(k_paged.dtype)
+                v_paged[dst_page] = main_pages[src_page, 1].to(v_paged.dtype)
+                slot = int(dst_page) * page_size
+                self._scratch_idx_k[slot : slot + page_size] = idx_pages[
+                    src_page
+                ].reshape(page_size, -1).to(self._scratch_idx_k.dtype)
+            return
         _scatter_cp_prefix_pages(
             main_pages,
             idx_pages,

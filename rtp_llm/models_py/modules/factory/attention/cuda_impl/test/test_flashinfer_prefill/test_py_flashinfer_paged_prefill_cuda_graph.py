@@ -31,6 +31,15 @@ PAGE_SIZE = 16
 class _PrefillPagedCudaGraphTestMixin:
     """Shared setup for BASE and FP8 CUDA graph tests."""
 
+    def _assert_graph_plan_ready(self, wrapper) -> None:
+        """FA2 stores split-KV in plan[-1]; FA3's 8-field plan does not."""
+        plan_info = getattr(wrapper, "_plan_info", None)
+        self.assertIsNotNone(plan_info)
+        self.assertGreater(len(plan_info), 0)
+        backend = getattr(wrapper, "_backend", None)
+        if backend == "fa2" and len(plan_info) == 15:
+            self.assertTrue(bool(plan_info[-1]))
+
     def _make_inputs(
         self,
         input_lengths,
@@ -185,7 +194,7 @@ class _PrefillPagedCudaGraphTestMixin:
         cg_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, cg_init)
         cg_op.prepare(cg_init)
         self.assertTrue(cg_op.prefill_wrapper.is_cuda_graph_enabled)
-        self.assertTrue(bool(cg_op.prefill_wrapper._plan_info[-1]))
+        self._assert_graph_plan_ready(cg_op.prefill_wrapper)
         cg_replay = self._make_inputs(input_lengths, prefix_lengths, True, max_seq_len)
         cg_op.prepare(cg_replay, forbid_realloc=True)
         self.assertTrue(
@@ -285,7 +294,7 @@ class TestPrefillPagedCudaGraph(_PrefillPagedCudaGraphTestMixin, BaseAttentionTe
         compact_op.prepare(capture_inputs)
 
         self.assertTrue(compact_op.prefill_wrapper.is_cuda_graph_enabled)
-        self.assertTrue(bool(compact_op.prefill_wrapper._plan_info[-1]))
+        self._assert_graph_plan_ready(compact_op.prefill_wrapper)
 
         replay_inputs = self._make_inputs(
             input_lengths,
@@ -293,7 +302,7 @@ class TestPrefillPagedCudaGraph(_PrefillPagedCudaGraphTestMixin, BaseAttentionTe
             is_cuda_graph=True,
         )
         compact_op.prepare(replay_inputs, forbid_realloc=True)
-        self.assertTrue(bool(compact_op.prefill_wrapper._plan_info[-1]))
+        self._assert_graph_plan_ready(compact_op.prefill_wrapper)
 
         seq_lengths = [
             prefix + input_len
