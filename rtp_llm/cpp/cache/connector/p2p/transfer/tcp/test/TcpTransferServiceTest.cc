@@ -381,6 +381,21 @@ TEST_F(TcpTransferServiceTest, C3_CancelDuringBlockedH2d_KeepsTaskInflightUntilP
     ASSERT_TRUE(gate.init());
     std::promise<cudaError_t> stream_primed;
     auto                      stream_primed_future = stream_primed.get_future();
+    torch::Tensor                                 gpu_buf;
+    ::tcp_transfer::TcpLayerBlockTransferRequest   req;
+    ::tcp_transfer::TcpLayerBlockTransferResponse  resp;
+    std::unique_ptr<BlockingClosure>               closure;
+    // Destroy the service before any state referenced by its asynchronous tasks,
+    // including when a fatal assertion returns before the gate is released.
+    struct Cleanup {
+        CudaEventGate&                       gate;
+        std::shared_ptr<TcpTransferService>& service;
+        ~Cleanup() {
+            gate.release();
+            service.reset();
+        }
+    } cleanup{gate, service_};
+
     ASSERT_EQ(service_->getWorkerThreadPool()->pushTask([&]() {
                   auto copy_stream = getNoBlockCopyStream(0).stream();
                   stream_primed.set_value(cudaStreamWaitEvent(copy_stream, gate.event(), 0));
@@ -391,14 +406,13 @@ TEST_F(TcpTransferServiceTest, C3_CancelDuringBlockedH2d_KeepsTaskInflightUntilP
 
     constexpr size_t  size = 64;
     const std::string content(size, 'H');
-    auto              gpu_buf = allocDevice(size);
+    gpu_buf = allocDevice(size);
     auto task = task_store_->addTask("k_c3", makeBlocks(1, gpu_buf.data_ptr(), size), currentTimeMs() + 5000);
     ASSERT_NE(task, nullptr);
 
-    auto req = makeRequest("k_c3", currentTimeMs() + 5000);
+    req = makeRequest("k_c3", currentTimeMs() + 5000);
     addRequestBlock(req, 1, {{size, content}});
-    ::tcp_transfer::TcpLayerBlockTransferResponse resp;
-    auto                                          closure = issueTransfer(&req, &resp);
+    closure = issueTransfer(&req, &resp);
 
     ASSERT_TRUE(waitForTransferring(task, std::chrono::seconds(1)));
     task->cancel();
