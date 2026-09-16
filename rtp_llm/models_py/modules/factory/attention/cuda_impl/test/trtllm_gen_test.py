@@ -286,6 +286,29 @@ class FlashInferPythonMHATest(TestCase):
             torch.float8_e4m3fn, [2, 129, 255, 63], is_prefill=True, use_prefill_op=True
         )
 
+    def test_flashinfer_trtllm_prefill_prepare_mixed_length_devices(self):
+        config = self._create_config(torch.float8_e4m3fn)
+        attn_inputs = gen_attention_inputs(
+            self.page_size, self.num_pages, input_lengths=[2, 3]
+        )
+        attn_inputs.prefix_lengths = torch.tensor(
+            [5, 7], dtype=torch.int32, device=self.device
+        )
+
+        params = FlashInferTRTLLMPrefillOp(config).prepare(attn_inputs)
+
+        self.assertEqual(params.max_q_len, 3)
+        self.assertEqual(params.max_kv_len, 10)
+        self.assertEqual(params.seq_lens.device.type, "cuda")
+        torch.testing.assert_close(
+            params.seq_lens,
+            torch.tensor([7, 10], dtype=torch.int32, device=self.device),
+        )
+        torch.testing.assert_close(
+            params.cu_kv_seqlens,
+            torch.tensor([0, 7, 17], dtype=torch.int32, device=self.device),
+        )
+
     def test_flashinfer_trtllm_spec_op_bf16(self):
         self._test_flashinfer_trtllm_base(
             torch.bfloat16, [11, 129, 255, 63], is_prefill=True, use_prefill_op=False
@@ -330,7 +353,6 @@ class PrepareCudaGraphKernelTest(TestCase):
         cu_kv_seqlens_out,
         block_id,
         kv_offset_out,
-        page_size,
         N,
         M,
         mode,
@@ -367,7 +389,6 @@ class PrepareCudaGraphKernelTest(TestCase):
                 cu_kv_seqlens_out,
                 block_id,
                 kv_offset_out,
-                page_size,
                 N,
                 M,
                 total_bm,
@@ -401,7 +422,7 @@ class PrepareCudaGraphKernelTest(TestCase):
         kv_offset = torch.zeros(N, 2, M, dtype=torch.int32, device=self.device)
 
         self._run_kernel(
-            src1, src2, seq_lens_out, cu_kv, block_id, kv_offset, 0, N, M, mode=0
+            src1, src2, seq_lens_out, cu_kv, block_id, kv_offset, N, M, mode=0
         )
         expected_kv = self._reference_kv_offset(block_id)
         torch.testing.assert_close(kv_offset, expected_kv)
@@ -417,7 +438,7 @@ class PrepareCudaGraphKernelTest(TestCase):
         kv_offset = torch.zeros(N, 2, M, dtype=torch.int32, device=self.device)
 
         self._run_kernel(
-            src1, src2, seq_lens_out, cu_kv, block_id, kv_offset, 0, N, M, mode=0
+            src1, src2, seq_lens_out, cu_kv, block_id, kv_offset, N, M, mode=0
         )
 
         torch.testing.assert_close(seq_lens_out, src1)
@@ -443,7 +464,6 @@ class PrepareCudaGraphKernelTest(TestCase):
             cu_kv,
             block_id,
             kv_offset,
-            0,
             N,
             M,
             mode=1,
@@ -469,7 +489,6 @@ class PrepareCudaGraphKernelTest(TestCase):
             cu_kv,
             block_id,
             kv_offset,
-            0,
             N,
             M,
             mode=1,
@@ -494,7 +513,6 @@ class PrepareCudaGraphKernelTest(TestCase):
             cu_kv,
             block_id,
             kv_offset,
-            0,
             N,
             M,
             mode=1,
@@ -509,7 +527,6 @@ class PrepareCudaGraphKernelTest(TestCase):
 
     def test_mode2_base(self):
         N, M = 4, 8
-        page_size = 64
         input_lens = torch.tensor(
             [10, 20, 30, 40], dtype=torch.int32, device=self.device
         )
@@ -528,7 +545,6 @@ class PrepareCudaGraphKernelTest(TestCase):
             cu_kv,
             block_id,
             kv_offset,
-            page_size,
             N,
             M,
             mode=2,
@@ -537,15 +553,12 @@ class PrepareCudaGraphKernelTest(TestCase):
         expected_seq = input_lens + prefix_lens
         torch.testing.assert_close(seq_lens_out, expected_seq)
         torch.testing.assert_close(kv_offset, self._reference_kv_offset(block_id))
-        total_seq = (input_lens + prefix_lens).cpu()
-        pages_per_seq = (total_seq + page_size - 1) // page_size
         expected_cu = torch.zeros(N + 1, dtype=torch.int32)
-        expected_cu[1:] = torch.cumsum(pages_per_seq, dim=0)
+        expected_cu[1:] = torch.cumsum(expected_seq.cpu(), dim=0)
         torch.testing.assert_close(cu_kv.cpu(), expected_cu)
 
     def test_mode2_large_batch(self):
         N, M = 128, 32
-        page_size = 128
         input_lens = torch.randint(1, 500, (N,), dtype=torch.int32, device=self.device)
         prefix_lens = torch.randint(0, 200, (N,), dtype=torch.int32, device=self.device)
         seq_lens_out = torch.zeros(N, dtype=torch.int32, device=self.device)
@@ -560,7 +573,6 @@ class PrepareCudaGraphKernelTest(TestCase):
             cu_kv,
             block_id,
             kv_offset,
-            page_size,
             N,
             M,
             mode=2,
@@ -569,10 +581,8 @@ class PrepareCudaGraphKernelTest(TestCase):
         expected_seq = input_lens + prefix_lens
         torch.testing.assert_close(seq_lens_out, expected_seq)
 
-        total_cpu = expected_seq.cpu()
-        pages = (total_cpu + page_size - 1) // page_size
         expected_cu = torch.zeros(N + 1, dtype=torch.int32)
-        expected_cu[1:] = torch.cumsum(pages, dim=0)
+        expected_cu[1:] = torch.cumsum(expected_seq.cpu(), dim=0)
         torch.testing.assert_close(cu_kv.cpu(), expected_cu)
         torch.testing.assert_close(kv_offset, self._reference_kv_offset(block_id))
 
@@ -588,8 +598,6 @@ class PrepareCudaGraphKernelTest(TestCase):
             cu_kv = torch.zeros(2, dtype=torch.int32, device=self.device)
             block_id = self._make_block_id(1, M)
             kv_offset = torch.zeros(1, 2, M, dtype=torch.int32, device=self.device)
-            page_size = 64 if mode == 2 else 0
-
             self._run_kernel(
                 src1,
                 src2,
@@ -597,7 +605,6 @@ class PrepareCudaGraphKernelTest(TestCase):
                 cu_kv,
                 block_id,
                 kv_offset,
-                page_size,
                 1,
                 M,
                 mode=mode,
@@ -609,16 +616,14 @@ class PrepareCudaGraphKernelTest(TestCase):
                 self.assertEqual(seq_lens_out.item(), 42 + 10)
             else:
                 self.assertEqual(seq_lens_out.item(), 42 + 10)
-                expected_pages = (52 + 64 - 1) // 64
                 self.assertEqual(cu_kv[0].item(), 0)
-                self.assertEqual(cu_kv[1].item(), expected_pages)
+                self.assertEqual(cu_kv[1].item(), 52)
 
             torch.testing.assert_close(kv_offset, self._reference_kv_offset(block_id))
 
-    def test_mode2_page_boundary(self):
-        """Sequences exactly on page boundaries."""
+    def test_mode2_sequence_lengths(self):
+        """Cumulative KV lengths are expressed in tokens, not pages."""
         N, M = 3, 4
-        page_size = 64
         input_lens = torch.tensor([64, 128, 192], dtype=torch.int32, device=self.device)
         prefix_lens = torch.zeros(N, dtype=torch.int32, device=self.device)
         seq_lens_out = torch.zeros(N, dtype=torch.int32, device=self.device)
@@ -633,21 +638,18 @@ class PrepareCudaGraphKernelTest(TestCase):
             cu_kv,
             block_id,
             kv_offset,
-            page_size,
             N,
             M,
             mode=2,
         )
 
         torch.testing.assert_close(seq_lens_out, input_lens)
-        # Exact page boundaries: 1, 2, 3 pages
-        expected_cu = torch.tensor([0, 1, 3, 6], dtype=torch.int32)
+        expected_cu = torch.tensor([0, 64, 192, 384], dtype=torch.int32)
         torch.testing.assert_close(cu_kv.cpu(), expected_cu)
 
-    def test_mode2_one_over_page_boundary(self):
-        """Sequences one token over page boundaries need an extra page."""
+    def test_mode2_non_page_aligned_sequence_lengths(self):
+        """KV offsets do not round sequence lengths to page boundaries."""
         N, M = 3, 8
-        page_size = 64
         input_lens = torch.tensor([65, 129, 193], dtype=torch.int32, device=self.device)
         prefix_lens = torch.zeros(N, dtype=torch.int32, device=self.device)
         seq_lens_out = torch.zeros(N, dtype=torch.int32, device=self.device)
@@ -662,14 +664,12 @@ class PrepareCudaGraphKernelTest(TestCase):
             cu_kv,
             block_id,
             kv_offset,
-            page_size,
             N,
             M,
             mode=2,
         )
 
-        # 65 -> 2 pages, 129 -> 3 pages, 193 -> 4 pages
-        expected_cu = torch.tensor([0, 2, 5, 9], dtype=torch.int32)
+        expected_cu = torch.tensor([0, 65, 194, 387], dtype=torch.int32)
         torch.testing.assert_close(cu_kv.cpu(), expected_cu)
 
     def test_large_M_multi_block(self):
@@ -683,7 +683,7 @@ class PrepareCudaGraphKernelTest(TestCase):
         kv_offset = torch.zeros(N, 2, M, dtype=torch.int32, device=self.device)
 
         self._run_kernel(
-            src1, src2, seq_lens_out, cu_kv, block_id, kv_offset, 0, N, M, mode=0
+            src1, src2, seq_lens_out, cu_kv, block_id, kv_offset, N, M, mode=0
         )
 
         torch.testing.assert_close(seq_lens_out, src1)
