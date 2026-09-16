@@ -425,9 +425,8 @@ def _silu_mul_fp8_quant_fp32scale_kernel(
 
     act_f32 = act_in.to(tl.float32)
     mul_f32 = mul_in.to(tl.float32)
-    # V4 SwiGLU clamp convention: gate upper-only, up symmetric. Clamping in fp32
-    # after the widening is identical to the eager path's clamp in bf16 -- min/max
-    # select an operand, and both operands are exactly representable in both types.
+    # V4 SwiGLU clamp convention: gate upper-only, up symmetric. The caller
+    # rounds the limit to bf16, matching the eager clamp before widening.
     if HAS_CLAMP:
         act_f32 = tl.minimum(act_f32, clamp_limit)
         mul_f32 = tl.clamp(mul_f32, -clamp_limit, clamp_limit)
@@ -497,7 +496,7 @@ def _silu_mul_quant_fp32scale(
         rows_per_e,
         q.stride(0),
         scale.stride(1),
-        float(clamp_limit),
+        float(torch.tensor(clamp_limit, dtype=gate_up3.dtype)) if clamp_limit > 0 else 0.0,
         N=2 * inter,
         NUM_GROUPS=num_groups,
         eps=1e-4,
@@ -699,13 +698,12 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         ep = cfg.ep_size
 
         # Validate the original batch before padding; padding must not conceal an
-        # unsupported graph size. LL keeps its existing positive-batch contract:
-        # N == 0 falls through to all-gather, not LL dispatch.
+        # unsupported graph size.
         self._assert_one_captured_size(N)
 
-        if self._ll_ok and N > 0:
+        if self._ll_ok:
             if os.environ.get(_EP_CHECK_SIZES_ENV) == "1":
-                self._assert_uniform_token_count(N, group, device)
+                self._assert_uniform_token_count(max(N, 1), group, device)
             buf, ll_max_tokens = _ll_buffer(ep, D, cfg.n_routed_experts)
             if N > ll_max_tokens:
                 # _ll_gate already established max_tokens_per_rank <=
@@ -723,9 +721,15 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
                     "DSV4_MOE_LL_MAX_TOKENS to cover the scheduler's bound, or "
                     "set DSV4_MOE_DEEPEP_LL=0 to use the all-gather exchange."
                 )
+            if N == 0:
+                # DeepEP does not promise a zero-row input. A dummy routed to no
+                # experts keeps this rank in the same collective as its peers.
+                x = x.new_zeros((1, D))
+                weights = weights.new_zeros((1, weights.shape[1]))
+                indices = indices.new_full((1, indices.shape[1]), -1)
             return self._local_experts_ll(
                 x, weights, indices, buf, ll_max_tokens
-            ).float()
+            ).float()[:N]
 
         exchange_n = N
         # Explicit decode roles need a fixed exchange even above the masked-GEMM
