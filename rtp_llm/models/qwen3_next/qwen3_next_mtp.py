@@ -103,8 +103,12 @@ class Qwen3NextMTPMixin:
         config.is_mtp = True
         if cls._mtp_use_base_rope:
             # Draft MTP consumes text tokens only. Plain RoPE keeps the
-            # PyFlashinfer prefill CUDA graph implementation eligible.
+            # PyFlashinfer prefill CUDA graph implementation eligible. The
+            # target model mRoPE parser sets index_factor=3; Base RoPE uses
+            # one position per token, so carrying that factor into decode
+            # makes kernels read past the position tensor.
             config.attn_config.rope_config.style = RopeStyle.Base
+            config.attn_config.rope_config.index_factor = 1
         return config
 
     @classmethod

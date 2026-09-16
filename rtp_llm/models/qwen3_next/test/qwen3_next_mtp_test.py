@@ -39,6 +39,7 @@ class Qwen35DenseMTPTest(unittest.TestCase):
             [HybridAttentionType.NONE],
         )
         self.assertEqual(config.attn_config.rope_config.style, RopeStyle.Base)
+        self.assertEqual(config.attn_config.rope_config.index_factor, 1)
         self.assertEqual(len(config.kv_cache_spec_descs), 1)
 
     def test_dense_mtp_uses_dense_ffn_checkpoint_keys(self):

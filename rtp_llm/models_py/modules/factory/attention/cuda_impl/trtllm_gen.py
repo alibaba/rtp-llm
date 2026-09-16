@@ -182,14 +182,13 @@ def _prepare_cg_prefill_kernel(
     cu_kv_seqlens_out_ptr,
     block_id_ptr,
     kv_offset_ptr,
-    page_size,
     N,
     M,
     total_bm,
     BLOCK_SIZE: tl.constexpr,
 ):
     """Prefill: seq_lens_out = input_lens + prefix_lens,
-    cu_kv_seqlens_out = [0, cumsum(ceil_div(seq_lens, page_size))],
+    cu_kv_seqlens_out = [0, cumsum(seq_lens)],
     block_id -> kv_offset.
     """
     pid = tl.program_id(0)
@@ -200,8 +199,7 @@ def _prepare_cg_prefill_kernel(
         prefix_lens = tl.load(prefix_lens_ptr + offsets_n, mask=mask_n, other=0)
         seq_lens = input_lens + prefix_lens
         tl.store(seq_lens_out_ptr + offsets_n, seq_lens, mask=mask_n)
-        page_per_seq = (seq_lens + page_size - 1) // page_size
-        cu_kv = tl.cumsum(page_per_seq, axis=0)
+        cu_kv = tl.cumsum(seq_lens, axis=0)
         tl.store(cu_kv_seqlens_out_ptr + offsets_n + 1, cu_kv, mask=mask_n)
         first_mask = offsets_n == 0
         tl.store(
@@ -243,7 +241,6 @@ class _PrefillCGParams(NamedTuple):
     seq_lens: torch.Tensor
     cu_kv_seqlens: torch.Tensor
     kv_cache_offset: torch.Tensor
-    page_size: int
     N: int
     M: int
     total_bm: int
@@ -288,7 +285,6 @@ def _init_prefill_cg_params(
     seq_lens,
     cu_kv_seqlens,
     kv_cache_offset,
-    page_size,
 ) -> _PrefillCGParams:
     """Pre-compute CUDA graph launch parameters for prefill."""
     grid, N, M, total_bm, BS = _compute_cg_grid(
@@ -300,7 +296,6 @@ def _init_prefill_cg_params(
         seq_lens=seq_lens,
         cu_kv_seqlens=cu_kv_seqlens,
         kv_cache_offset=kv_cache_offset,
-        page_size=page_size,
         N=N,
         M=M,
         total_bm=total_bm,
@@ -358,22 +353,18 @@ class FlashInferTRTLLMPrefillOp(object):
         prefix_lengths.copy_(attention_inputs.prefix_lengths, non_blocking=True)
         input_lengths.copy_(attention_inputs.input_lengths, non_blocking=True)
         sequence_lengths = input_lengths + prefix_lengths
-        page_size = self.seq_size_per_block
-        page_per_seq = (sequence_lengths + page_size - 1) // page_size
         cu_kv_seqlens = torch.zeros(
             attention_inputs.input_lengths.shape[0] + 1,
             device="cuda",
             dtype=attention_inputs.input_lengths.dtype,
         )
-        cu_kv_seqlens[1:] = torch.cumsum(page_per_seq, dim=0, dtype=torch.int32)
+        cu_kv_seqlens[1:] = torch.cumsum(
+            sequence_lengths, dim=0, dtype=torch.int32
+        )
         return FlashInferTRTLLMParams(
             batch_size=attention_inputs.input_lengths.size(0),
             max_q_len=attention_inputs.input_lengths.max().item(),
-            max_kv_len=(
-                attention_inputs.prefix_lengths + attention_inputs.input_lengths
-            )
-            .max()
-            .item(),
+            max_kv_len=sequence_lengths.max().item(),
             seq_lens=sequence_lengths,
             input_lens=attention_inputs.input_lengths,
             block_tables=attention_inputs.kv_cache_kernel_block_id_device,
@@ -573,7 +564,6 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
             self.fmha_params.seq_lens,
             self.fmha_params.cu_kv_seqlens,
             self.rope_params.kv_cache_offset,
-            self.fmha_impl.seq_size_per_block,
         )
 
     @classmethod
@@ -608,7 +598,6 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
             p.cu_kv_seqlens,
             attn_inputs.kv_cache_kernel_block_id_device,
             p.kv_cache_offset,
-            p.page_size,
             p.N,
             p.M,
             p.total_bm,
