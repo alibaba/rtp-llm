@@ -315,13 +315,22 @@ class KimiLinearNewLoaderTest(unittest.TestCase):
             attention_inputs={"full": full_inputs, "linear0": linear_inputs},
         )
 
-        with patch(
-            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
-            side_effect=lambda _config, _parallelism, weight, group_inputs, _fmha, _graph: SimpleNamespace(
-                weight=weight, group_inputs=group_inputs
-            ),
-        ) as factory:
-            fmha_impl = model.prepare_fmha_impl(inputs)
+        for mode in (None, "generation_prefill_graph"):
+            with self.subTest(mode=mode), patch(
+                "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
+                side_effect=lambda model_config, parallelism_config, weight, attn_inputs, fmha_config, is_cuda_graph, cuda_graph_selection_mode: SimpleNamespace(
+                    weight=weight, group_inputs=attn_inputs
+                ),
+            ) as factory:
+                fmha_impl = model.prepare_fmha_impl(
+                    inputs,
+                    is_cuda_graph=mode is not None,
+                    cuda_graph_selection_mode=mode,
+                )
+                factory.assert_called_once()
+                self.assertEqual(
+                    factory.call_args.kwargs["cuda_graph_selection_mode"], mode
+                )
 
         self.assertEqual(model._get_fmha_group_tags(), ["full"])
         self.assertEqual(set(fmha_impl), {"full"})

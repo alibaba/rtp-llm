@@ -143,10 +143,17 @@ class MlaRuntimeLayoutMixin:
             )
 
     def prepare_fmha_impl(
-        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: Optional[str] = None,
     ) -> Any:
         if not getattr(self, "use_mla", True):
-            return super().prepare_fmha_impl(inputs, is_cuda_graph)
+            return super().prepare_fmha_impl(
+                inputs,
+                is_cuda_graph,
+                cuda_graph_selection_mode=cuda_graph_selection_mode,
+            )
         self._ensure_mla_kernel_layout()
         return AttnImplFactory.get_fmha_impl(
             self.config,
@@ -155,6 +162,7 @@ class MlaRuntimeLayoutMixin:
             inputs.attention_inputs,
             self.fmha_config,
             is_cuda_graph,
+            cuda_graph_selection_mode=cuda_graph_selection_mode,
         )
 
 
