@@ -318,6 +318,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillState.terminalizeCommittedItem(exactItem);
     }
 
+    /** End the exact failed member, whether still queued or committed to a batch. */
+    public void settleFailedRequest(ScheduledRequest exactItem) {
+        removeQueued(exactItem, "REQUEST_FAILED");
+        releaseCommittedItem(exactItem);
+    }
+
     /** Expire an exact local committed lease without claiming Engine completion. */
     public boolean expireCommittedItem(ScheduledRequest exactItem) {
         return prefillState.terminalizeCommittedItem(exactItem);

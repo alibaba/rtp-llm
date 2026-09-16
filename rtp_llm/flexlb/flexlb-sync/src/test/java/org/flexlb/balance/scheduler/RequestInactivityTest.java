@@ -50,8 +50,7 @@ class RequestInactivityTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        FlexlbConfig config = SchedulingTestConfig.newConfig();
-        SchedulingTestConfig.useNonBatchDispatcher(config);
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
         config.getRequestLifecycle().getRequest().setTimeoutMs(TIMEOUT_MS);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
@@ -72,8 +71,8 @@ class RequestInactivityTest {
         item = new ScheduledRequest(context, future, new Response(), prefillStatus, null,
                 prefill, decode, reservation, registeredAtMs);
         var registered = new RequestLifecycleTestSupport.Registered(item, future);
-        RequestLifecycleTestSupport.bindRoute(registry, registered);
-        claim = RequestLifecycleTestSupport.claimRoute(registry, item, () -> true);
+        RequestLifecycleTestSupport.bind(registry, registered);
+        claim = RequestLifecycleTestSupport.claimBatch(registry, item, 1L, () -> true);
         assertNotNull(claim);
     }
 
@@ -96,7 +95,7 @@ class RequestInactivityTest {
             registry.expireInactiveRequest(slot, observedAt + TIMEOUT_MS / 2L - 1L);
             assertLiveAndCharged();
         }
-        assertTrue(item.future().isDone(), "the public route response does not end activity tracking");
+        assertTrue(item.future().isDone(), "the delivery response does not end activity tracking");
     }
 
     @ParameterizedTest

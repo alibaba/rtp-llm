@@ -565,9 +565,11 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 WARMUP_REQUESTS,
                 Math.max(prefillEngineCount * ENGINE_MATRIX_WARMUP_REQUESTS_PER_PREFILL,
                         targetQps * ENGINE_MATRIX_WARMUP_MS / 1_000));
+        // Exercise the same nine-byte request-id decoding path in warmup and measurement.
+        // Switching varint widths at measurement start deoptimizes the hot protobuf parser.
         TrafficResult warmup = runTraffic(
                 warmupRequests,
-                50_000_000L + prefillEngineCount * 10_000L + targetQps,
+                (1L << 60) + 50_000_000L + prefillEngineCount * 10_000L + targetQps,
                 targetQps);
         assertSuccessful(warmup);
         awaitCompletionCount(warmupRequests);
@@ -588,7 +590,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         int requestCount = Math.max(
                 Math.max(ENGINE_MATRIX_MIN_REQUESTS, fleetCoverageRequests),
                 targetQps * ENGINE_MATRIX_DURATION_MS / 1_000);
-        long firstRequestId = 10_000_000L
+        long firstRequestId = (1L << 60) + 10_000_000L
                 + prefillEngineCount * 1_000_000L
                 + targetQps * 100L;
 

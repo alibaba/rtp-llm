@@ -248,6 +248,26 @@ class FlexlbConfigSchedulingModeTest {
     }
 
     @Test
+    void fetch_attach_timeout_defaults_to_three_seconds_and_can_be_overridden() {
+        assertEquals(3000, parse("QUEUE", "BATCH", "").getDispatcher().getFetchAttachTimeoutMs());
+        for (int timeoutMs : new int[]{1, 5000, Integer.MAX_VALUE}) {
+            FlexlbConfig config = parse("QUEUE", "BATCH", ",\"fetchAttachTimeoutMs\":" + timeoutMs);
+            assertEquals(timeoutMs, config.getDispatcher().getFetchAttachTimeoutMs());
+        }
+    }
+
+    @Test
+    void fetch_attach_timeout_requires_a_positive_integer_without_json_coercion() {
+        for (String value : new String[]{"0", "-1", "1.5", "\"3000\"", "true", "null", "[]", "{}", "2147483648"}) {
+            assertThrows(ConfigValidationException.class,
+                    () -> parse("QUEUE", "BATCH", ",\"fetchAttachTimeoutMs\":" + value), value);
+        }
+        FlexlbConfig config = parse("QUEUE", "BATCH", "");
+        config.getDispatcher().setFetchAttachTimeoutMs(0);
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigValidator.validate(config));
+    }
+
+    @Test
     void removed_concurrency_fields_and_direct_queue_settings_are_rejected() {
         for (String type : new String[]{"BATCH", "NON_BATCH"}) {
             for (String field : new String[]{"maxInflightBatchesPerPrefillWorker", "inflightMultiplier", "inflightRequestMultiplier"}) {

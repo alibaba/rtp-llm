@@ -484,8 +484,8 @@ class RequestLifetimeTest {
     }
 
     private static void finishInactivity(RequestSlot slot) {
-        TerminalAction terminal = slot.beginTerminalizing(
-                TerminalOutcome.timeout("request inactive"), null);
+        TerminalAction terminal = slot.finishRequest(null,
+                TerminalOutcome.timeout("request inactive"), null, false);
         assertNotNull(terminal);
         assertNotNull(slot.finishTermination(terminal).terminal());
     }

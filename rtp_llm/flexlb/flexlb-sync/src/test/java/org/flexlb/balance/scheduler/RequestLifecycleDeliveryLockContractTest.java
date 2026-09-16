@@ -328,7 +328,7 @@ class RequestLifecycleDeliveryLockContractTest {
 
         try {
             Future<DeliveryClaim> committed = owner.submit(() ->
-                    RequestLifecycleTestSupport.claimRoute(lifecycle,
+                    RequestLifecycleTestSupport.claimRouteWithoutPrediction(lifecycle,
                             registered.item(),
                             () -> {
                                 assertTrue(Thread.holdsLock(slot));
@@ -354,7 +354,8 @@ class RequestLifecycleDeliveryLockContractTest {
             assertFalse(contender.isAlive());
             assertEquals(0L, contenderEntered.getCount());
 
-            claim.complete(DeliveryResult.delivered());
+            lifecycle.publishRoute(claim,
+                    new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L);
             assertTrue(registered.future().get(5, TimeUnit.SECONDS).isSuccess());
         } finally {
             releaseTransfer.countDown();
@@ -431,7 +432,7 @@ class RequestLifecycleDeliveryLockContractTest {
         Registered replacement = registerItem(207L, endpoint);
         bind(lifecycle, replacement);
         lifecycle.setDeliveryPrediction(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
-        claim.complete(DeliveryResult.failed(new IllegalStateException("late RPC failure")));
+        claim.complete(DeliveryResult.notSent(new IllegalStateException("late RPC failure")));
         assertFalse(replacement.future().isDone());
         assertQueuedWithoutClaim(207L);
     }
@@ -498,6 +499,9 @@ class RequestLifecycleDeliveryLockContractTest {
 
         claim.complete(DeliveryResult.delivered());
         assertTrue(registered.future().join().isSuccess());
+        assertThrows(IllegalStateException.class,
+                () -> claim.complete(DeliveryResult.notSent(new IllegalStateException("duplicate callback"))));
+        assertTrue(registered.future().join().isSuccess());
     }
 
     @Test
@@ -511,7 +515,11 @@ class RequestLifecycleDeliveryLockContractTest {
                 registered.item(),
                 () -> true);
         assertNotNull(claim);
-        lifecycle.publishRoute(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 10L);
+        assertThrows(IllegalArgumentException.class, () -> claim.complete(DeliveryResult.delivered()));
+        assertFalse(registered.future().isDone(), "a batch callback cannot publish a route");
+        WorkSnapshot precedingWork = new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L);
+        lifecycle.publishRoute(claim, precedingWork, 10L);
+        assertThrows(IllegalStateException.class, () -> lifecycle.publishRoute(claim, precedingWork, 10L));
 
         assertTrue(registered.future().join().isSuccess());
         assertEquals(RequestState.Phase.ACKNOWLEDGED,

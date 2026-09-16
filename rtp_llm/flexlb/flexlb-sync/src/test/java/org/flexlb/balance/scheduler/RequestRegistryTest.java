@@ -346,11 +346,11 @@ class RequestRegistryTest {
         claim.complete(org.flexlb.balance.delivery.DeliveryResult.delivered());
         assertTrue(registered.future().get(5, TimeUnit.SECONDS).isSuccess());
         assertThrows(IllegalStateException.class, () -> claim.complete(
-                org.flexlb.balance.delivery.DeliveryResult.failed(new IllegalStateException("duplicate failure"))));
+                org.flexlb.balance.delivery.DeliveryResult.notSent(new IllegalStateException("duplicate failure"))));
 
         assertEquals(RequestState.Phase.ACKNOWLEDGED, lifecycle.getRequestState(705L, 23L).state());
         org.mockito.Mockito.verify(registered.item().decodeEp(), org.mockito.Mockito.never())
-                .settleDefiniteDispatchRejection(registered.item().decodeReservation());
+                .releaseUnsentRequestReservation(registered.item().decodeReservation());
     }
 
     private BalanceContext context(long requestId) {
