@@ -16,7 +16,7 @@ from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig, get_env_bool
 from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
 from rtp_llm.distribute.worker_info import WorkerInfo, g_worker_info
 from rtp_llm.frontend.frontend_server import FrontendServer
@@ -131,11 +131,16 @@ class FrontendApp(object):
                     detail="inference service is not ready",
                 )
 
-        async def backend_health(method, path, expected):
+        tree_required = get_env_bool("CONSTRAINT_TREE_REQUIRED")
+
+        async def backend_health(method, path, expected, port=None):
             try:
                 result = await asyncio.wait_for(
                     async_request_server(
-                        method, g_worker_info.backend_server_port, path, {}
+                        method,
+                        g_worker_info.backend_server_port if port is None else port,
+                        path,
+                        {},
                     ),
                     timeout=5,
                 )
@@ -146,6 +151,16 @@ class FrontendApp(object):
                     status_code=503, detail="inference service is not ready"
                 )
             return result
+
+        async def inference_health(method, path, expected):
+            checks = [backend_health(method, path, expected)]
+            if tree_required:
+                # backend_server_port serves Python liveness, not the C++ CSR
+                # readiness check. server_port already includes this FE's rank.
+                engine_port = WorkerInfo.http_port_offset(0, g_worker_info.server_port)
+                checks.append(backend_health("get", "health", "ok", engine_port))
+            results = await asyncio.gather(*checks)
+            return results[0]
 
         @app.get("/live")
         async def live():
@@ -167,14 +182,14 @@ class FrontendApp(object):
             if self.separated_frontend:
                 await check_all_health()
                 return "ok"
-            return await backend_health("post", "health_check", "ok")
+            return await inference_health("post", "health_check", "ok")
 
         @app.get("/")
         async def health():
             if self.separated_frontend:
                 await check_all_health()
                 return {"status": "home"}
-            return await backend_health("get", "", {"status": "home"})
+            return await inference_health("get", "", {"status": "home"})
 
         @app.get("/cache_status")
         @app.post("/cache_status")
