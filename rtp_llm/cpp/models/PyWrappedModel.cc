@@ -192,11 +192,12 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         if (!normalized.defined() || normalized.is_cuda()) {
             return normalized;
         }
-        if (device_metadata) {
-            // The metadata kernel below consumes these lengths before the
-            // model's later fused-copy flush. Enqueue mixed-residency H2D now.
-            return normalized.to(torch::kCUDA, /*non_blocking=*/true);
-        }
+        // Always use the batched tensorHoldHostAndToCuda path: the
+        // non_blocking H2D copy on non-pinned host tensors is undefined
+        // behavior and bypasses the d2d_copies_ fused-copy flush, which
+        // measured 20-60% decode TPOT overhead on long-context warm
+        // requests. The device_metadata branch is kept only for the
+        // eager context_total_kv_length resolution below.
         return tensorHoldHostAndToCuda(normalized);
     };
 
@@ -264,9 +265,15 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
     if (context_batch_size > 0 && py_attn_inputs.input_lengths.is_cuda()) {
         py_attn_inputs.total_tokens = inputs.combo_tokens.defined() ? static_cast<int>(inputs.combo_tokens.numel()) : 0;
-        // The exact total is the device cumulative-length tail. Keep it there
-        // for DSpark and graph replay; legacy Python consumers resolve on demand.
-        py_attn_inputs.context_total_kv_length = -1;
+        // Resolve eagerly on the host: the deferred -1 sentinel forces a
+        // device sync (.item()) in contextTotalKvLength() when the CUDA
+        // graph runner's kv_tail fill path hits the fallback branch, adding
+        // a per-replay sync that dominated decode TPOT on warm requests.
+        int64_t prefix_sum = 0;
+        if (py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.numel() > 0) {
+            prefix_sum = py_attn_inputs.prefix_lengths.sum().item<int64_t>();
+        }
+        py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens + static_cast<int>(prefix_sum);
         py_attn_inputs.cu_seqlens              = torch::empty({0}, host_i32);
         py_attn_inputs.cu_seqlens_device       = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.cu_kv_seqlens_device    = torch::empty({batch_size + 1}, cuda_i32);
