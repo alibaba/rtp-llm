@@ -111,7 +111,7 @@ class LeakCanaryLongRunE2ETest {
                     "decode shadow inflight must settle to zero");
             assertEquals(0L, h.decodeEndpoint(0).routingView().inflightHardKv(),
                     "no orphaned hard-KV reservation");
-            assertEquals(0, h.decodeEndpoint(0).layeredAdmissionView().acceptedCount());
+            assertEquals(0, h.decodeEndpoint(0).resourceSnapshot().acceptedCount());
             assertEquals(0, h.prefillEndpoint(0).queuedRequestCount());
             assertEquals(0, h.prefillEndpoint(1).queuedRequestCount());
 

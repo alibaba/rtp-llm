@@ -1159,7 +1159,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
         for (String address : endpointRegistry.endpointAddressSnapshot(RoleType.DECODE)) {
             DecodeEndpoint endpoint = (DecodeEndpoint) endpointRegistry.get(RoleType.DECODE, address);
-            DecodeEndpoint.LayeredAdmissionView view = endpoint.layeredAdmissionView();
+            DecodeEndpoint.LayeredAdmissionView view = endpoint.resourceSnapshot();
             assertTrue(view.reserved().isEmpty(), address + " retained Decode reservations");
             assertTrue(view.confirmed().isEmpty(), address + " retained Decode ownership");
             assertEquals(0, view.activeDispatchPermits(), address + " retained Decode delivery permits");

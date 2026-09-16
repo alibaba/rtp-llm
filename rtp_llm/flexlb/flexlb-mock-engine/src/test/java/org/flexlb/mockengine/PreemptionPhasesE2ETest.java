@@ -86,11 +86,11 @@ class PreemptionPhasesE2ETest {
             h.setDecodeKvCapacity(0, 255, 256);
             CompletableFuture<Response> low = h.scheduler.submit(h.context(201, 30));
             AutoTpmE2EHarness.await(
-                    () -> decodeEp.layeredAdmissionView().reserved().containsKey(201L),
+                    () -> decodeEp.resourceSnapshot().reserved().containsKey(201L),
                     5_000,
                     "low-priority request must publish its Decode reservation");
             assertFalse(low.isDone());
-            assertTrue(decodeEp.layeredAdmissionView().reserved().containsKey(201L));
+            assertTrue(decodeEp.resourceSnapshot().reserved().containsKey(201L));
             // victim 仍由 Master 排队持有，因此走本地 queued eviction，无需 Engine Cancel。
             long hardKvBefore = decodeEp.routingView().inflightHardKv();
             assertTrue(hardKvBefore > 0);
@@ -104,8 +104,8 @@ class PreemptionPhasesE2ETest {
 
             // 账目正确：victim 影子预留释放，高优恰好占据一份
             assertFalse(high.isDone(), "high-priority request should sit in the queue after eviction");
-            assertFalse(decodeEp.layeredAdmissionView().reserved().containsKey(201L));
-            assertTrue(decodeEp.layeredAdmissionView().reserved().containsKey(202L));
+            assertFalse(decodeEp.resourceSnapshot().reserved().containsKey(201L));
+            assertTrue(decodeEp.resourceSnapshot().reserved().containsKey(202L));
             assertEquals(1, decodeEp.getInflightCount());
             assertEquals(hardKvBefore, decodeEp.routingView().inflightHardKv(),
                     "hard KV must transfer 1:1 from victim to incoming");
@@ -138,8 +138,8 @@ class PreemptionPhasesE2ETest {
                         "victim running on decode mock");
                 h.pumpDecodeOnce(0); // mock v1 equals the discovered fixture cursor
                 h.pumpDecodeOnce(0); // mock v2 publishes the canonical RUNNING owner
-                assertEquals(0, decodeEp.layeredAdmissionView().acceptedCount());
-                assertEquals(1, decodeEp.layeredAdmissionView().runningCount());
+                assertEquals(0, decodeEp.resourceSnapshot().acceptedCount());
+                assertEquals(1, decodeEp.resourceSnapshot().runningCount());
                 assertFalse(low.isDone(), "victim frontend future must still await its ACK");
 
                 // Hold subsequent traffic in the queue after the victim is canonical.
@@ -182,9 +182,9 @@ class PreemptionPhasesE2ETest {
                                 + victim.getErrorMessage());
 
                 // 顺序断言第 2 段：确认后高优才拿到容量（reserve 成功、进入队列待派发）
-                assertTrue(decodeEp.layeredAdmissionView().reserved().containsKey(302L),
+                assertTrue(decodeEp.resourceSnapshot().reserved().containsKey(302L),
                         "incoming may take the freed capacity only after confirmed release");
-                assertFalse(decodeEp.layeredAdmissionView().confirmed().stream()
+                assertFalse(decodeEp.resourceSnapshot().confirmed().stream()
                         .anyMatch(task -> task.requestId() == 301L));
                 assertFalse(high.isDone(), "high request waits in the batcher (window held open)");
                 assertEquals(1, decodeEp.getInflightCount());
@@ -224,8 +224,8 @@ class PreemptionPhasesE2ETest {
                         "victim running on decode mock");
                 h.pumpDecodeOnce(0); // consume mock v1 at the discovered fixture cursor
                 h.pumpDecodeOnce(0); // apply mock v2 and publish the canonical RUNNING owner
-                assertEquals(0, decodeEp.layeredAdmissionView().acceptedCount());
-                assertEquals(1, decodeEp.layeredAdmissionView().runningCount());
+                assertEquals(0, decodeEp.resourceSnapshot().acceptedCount());
+                assertEquals(1, decodeEp.resourceSnapshot().runningCount());
                 assertFalse(low.isDone(), "victim frontend future must still await its ACK");
                 h.fixedWindowDecision().setMaxRequests(100);
 
@@ -239,7 +239,7 @@ class PreemptionPhasesE2ETest {
                         highResp.getAdmissionRejectReason());
                 assertTrue(highResp.getErrorMessage().contains("cancel_terminal_unknown"),
                         "timeout must be explicit: " + highResp.getErrorMessage());
-                assertFalse(decodeEp.layeredAdmissionView().reserved().containsKey(312L),
+                assertFalse(decodeEp.resourceSnapshot().reserved().containsKey(312L),
                         "incoming must NOT take capacity on cancel timeout");
 
                 // victim 保持 CANCEL_REQUESTED，等 WorkerStatus 迟到确认 → 8429 late confirm
@@ -252,7 +252,7 @@ class PreemptionPhasesE2ETest {
                 h.pumpDecodeOnce(0);
 
                 // 无泄漏：确认层清空、引擎无 running、调度器 inflight 只剩尚未派发的项
-                assertFalse(decodeEp.layeredAdmissionView().confirmed().stream()
+                assertFalse(decodeEp.resourceSnapshot().confirmed().stream()
                         .anyMatch(task -> task.requestId() == 311L));
                 assertEquals(0, decodeEngine.getRunningCount());
                 assertEquals(0, decodeEp.getInflightCount());
@@ -284,11 +284,11 @@ class PreemptionPhasesE2ETest {
             // P50 占据 decode 唯一槽位
             CompletableFuture<Response> holder = h.scheduler.submit(h.context(501, 50));
             AutoTpmE2EHarness.await(
-                    () -> decodeEp.layeredAdmissionView().reserved().containsKey(501L),
+                    () -> decodeEp.resourceSnapshot().reserved().containsKey(501L),
                     5_000,
                     "equal-priority holder must publish its Decode reservation");
             assertFalse(holder.isDone());
-            assertTrue(decodeEp.layeredAdmissionView().reserved().containsKey(501L));
+            assertTrue(decodeEp.resourceSnapshot().reserved().containsKey(501L));
 
             // 同优新请求不能抢占，也不能把瞬时容量不足变成终态 8403；
             // 它保持未绑定，等待精确 Decode 容量变化。
@@ -297,7 +297,7 @@ class PreemptionPhasesE2ETest {
 
             // victim 完全不受影响
             assertFalse(holder.isDone());
-            assertTrue(decodeEp.layeredAdmissionView().reserved().containsKey(501L));
+            assertTrue(decodeEp.resourceSnapshot().reserved().containsKey(501L));
             assertEquals(1, h.prefillEndpoint(0).queuedRequestCount());
             verify(h.requestReporter, never()).reportVictim(anyInt(), anyInt(),
                     anyString(), anyString());

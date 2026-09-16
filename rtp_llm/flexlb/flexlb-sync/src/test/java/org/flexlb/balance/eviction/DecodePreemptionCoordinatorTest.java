@@ -70,8 +70,8 @@ class DecodePreemptionCoordinatorTest {
         assertTrue(result.get(1, TimeUnit.SECONDS).committed());
         verify(cancelChannel).cancel(eq(new CancelTarget("10.0.0.1", 9090)), eq(11L), anyLong());
         verify(cancelChannel).cancel(eq(new CancelTarget("10.0.0.1", 9090)), eq(12L), anyLong());
-        verify(endpoint).commitPriorityPreemption(1L);
-        verify(endpoint, never()).abortPriorityPreemption(anyLong());
+        verify(endpoint).finishPreemption(1L, DecodeEndpoint.PreemptionDecision.COMMIT);
+        verify(endpoint, never()).finishPreemption(anyLong(), eq(DecodeEndpoint.PreemptionDecision.ABORT));
     }
 
     @ParameterizedTest
@@ -103,13 +103,13 @@ class DecodePreemptionCoordinatorTest {
         assertFalse(timedOut.committed());
         assertTrue(timedOut.controlFailure());
         assertEquals("cancel_terminal_unknown", timedOut.detail());
-        verify(fixture.endpoint()).abortPriorityPreemption(1L);
+        verify(fixture.endpoint()).finishPreemption(1L, DecodeEndpoint.PreemptionDecision.ABORT);
         verify(victimClaim, never()).release();
         assertFalse(terminal.isDone(), "timing out admission must retain the victim terminal observation");
 
         terminal.complete(new VictimTerminal(11L));
         assertSame(timedOut, outcome.join());
-        verify(fixture.endpoint(), never()).commitPriorityPreemption(anyLong());
+        verify(fixture.endpoint(), never()).finishPreemption(anyLong(), eq(DecodeEndpoint.PreemptionDecision.COMMIT));
     }
 
     private static Fixture fixture() {
@@ -118,14 +118,17 @@ class DecodePreemptionCoordinatorTest {
         WorkerStatus status = mock(WorkerStatus.class);
         when(endpoint.getStatus()).thenReturn(status);
         when(status.getGenerationId()).thenReturn(9L);
-        when(endpoint.beginPriorityPreemption(
-                anyLong(), anyList(), anyLong(), anyLong(), anyLong(),
-                anyInt(), any(DecodeEndpoint.AdmissionCapacity.class)))
+        when(endpoint.beginPreemption(
+                anyLong(),
+                anyList(),
+                anyLong(),
+                anyLong(),
+                anyLong(),
+                anyInt(),
+                any(DecodeEndpoint.AdmissionCapacity.class)))
                 .thenReturn(DecodeEndpoint.PreemptionBeginResult.SUCCESS);
-        when(endpoint.markPriorityCancelInFlight(anyLong())).thenReturn(true);
-        when(endpoint.recordPriorityCancelPhase(anyLong(), anyLong(), any()))
-                .thenReturn(true);
-        when(endpoint.commitPriorityPreemption(anyLong())).thenReturn(true);
+        when(endpoint.updatePreemption(anyLong(), any(DecodeEndpoint.PreemptionUpdate.class))).thenReturn(true);
+        when(endpoint.finishPreemption(anyLong(), eq(DecodeEndpoint.PreemptionDecision.COMMIT))).thenReturn(true);
         when(requests.findCancelTarget(anyLong(), anyLong())).thenReturn(
                 Optional.of(new CancelTarget("10.0.0.1", 9090)));
         return new Fixture(requests, endpoint);

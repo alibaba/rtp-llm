@@ -102,19 +102,21 @@ class DirectAdmissionContractTest {
             assertEquals(0, fixture.prefill.getInflightBatchCount());
             assertEquals(1, fixture.decode.routingView().engineCapacityUsed());
             assertEquals(48L, fixture.decode.routingView().inflightExpectedKv());
-            assertEquals(0, fixture.decode.layeredAdmissionView().queuedCount());
+            assertEquals(0, fixture.decode.resourceSnapshot().queuedCount());
             assertEquals(1, fixture.scheduler.getInflightSize());
             assertEquals(RequestState.Phase.ACKNOWLEDGED, fixture.scheduler.getRequestState(101L, 0L).state());
             var reservation = fixture.decode.reservationHandle(101L);
             assertNotNull(reservation);
-            assertThrows(IllegalStateException.class, () -> fixture.decode.releaseReservationExact(reservation));
+            assertThrows(IllegalStateException.class, () -> fixture.decode.release(
+                    reservation,
+                    DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK));
 
             fixture.observe(fixture.prefill, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
             assertEquals(0L, fixture.prefill.observedRequestCount());
             assertEquals(48L, fixture.decode.routingView().inflightExpectedKv(),
                     "Prefill completion must retain Decode ownership until its own observation");
             fixture.observe(fixture.decode, Map.of("101", task(101L, TaskPhase.RUNNING)), Map.of());
-            assertTrue(fixture.decode.isReservationAccepted(reservation));
+            assertTrue(fixture.decode.isAcceptedByEngine(reservation));
             fixture.observe(fixture.decode, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
             assertEquals(0, fixture.decode.routingView().engineCapacityUsed());
             assertEquals(0, fixture.scheduler.getInflightSize());
@@ -128,14 +130,13 @@ class DirectAdmissionContractTest {
             DecodeEndpoint.ReservationHandle occupant;
             try (var pin = fixture.decode.tryPinGeneration()) {
                 assertNotNull(pin);
-                occupant = fixture.decode.tryReservePlacementPinned(pin, 999L, 32L, 48L, 50);
+                occupant = fixture.decode.reserve(pin, 999L, 32L, 48L, 50);
             }
             assertNotNull(occupant);
-            var acquired = fixture.decode.acquireEngineDispatchPermit(occupant,
-                    new DecodeEndpoint.AdmissionCapacity(1L, 90L));
+            var acquired = fixture.decode.acquireDispatchPermit(occupant, new DecodeEndpoint.AdmissionCapacity(1L, 90L));
             assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
             assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
-                    acquired.permit().transferToEngineLifecycle());
+                    acquired.permit().dispatch());
 
             Response response = assertTimeoutPreemptively(Duration.ofSeconds(2),
                     () -> fixture.scheduler.submit(fixture.context(102L)).get(2L, TimeUnit.SECONDS));
@@ -147,7 +148,7 @@ class DirectAdmissionContractTest {
             assertEquals(occupant, fixture.decode.reservationHandle(999L));
             assertEquals(1, fixture.decode.routingView().engineCapacityUsed());
             assertEquals(48L, fixture.decode.routingView().inflightExpectedKv());
-            assertEquals(0, fixture.decode.layeredAdmissionView().queuedCount());
+            assertEquals(0, fixture.decode.resourceSnapshot().queuedCount());
             assertEquals(0, fixture.scheduler.getInflightSize());
         }
     }
@@ -168,7 +169,7 @@ class DirectAdmissionContractTest {
                 fixture.assertItemNotBound(103L);
                 raced.set(true);
                 return acquired;
-            }).when(fixture.decode).acquireEngineDispatchPermit(any(), any());
+            }).when(fixture.decode).acquireDispatchPermit(any(), any());
 
             Response response = fixture.scheduler.submit(fixture.context(103L)).get(2L, TimeUnit.SECONDS);
 

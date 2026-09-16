@@ -447,7 +447,7 @@ class RequestLifecycleDeliveryLockContractTest {
         }
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, 208L, 1L);
-        when(decode.isReservationAccepted(reservation)).thenReturn(true);
+        when(decode.isAcceptedByEngine(reservation)).thenReturn(true);
         BalanceContext context = context(208L);
         CompletableFuture<Response> future = lifecycle.register(context);
         ScheduledRequest item = new ScheduledRequest(context, future, new Response(), null, null,

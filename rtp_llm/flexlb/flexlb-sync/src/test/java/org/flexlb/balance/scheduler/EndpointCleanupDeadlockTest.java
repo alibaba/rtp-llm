@@ -107,7 +107,7 @@ class EndpointCleanupDeadlockTest {
                 DecodeEndpoint.ReservationHandle reservation;
                 try (var pin = endpoint.tryPinGeneration()) {
                     assertNotNull(pin);
-                    reservation = endpoint.reservePinned(pin, id, 1L, 1L, 50);
+                    reservation = endpoint.reserveUnqueued(pin, id, 1L, 1L, 50);
                 }
                 assertNotNull(reservation);
                 var item = new ScheduledRequest(context, future,
@@ -126,7 +126,7 @@ class EndpointCleanupDeadlockTest {
                         slotHeld.countDown();
                         assertTrue(endpointHeld.await(5, TimeUnit.SECONDS));
                         return invocation.callRealMethod();
-                    }).when(endpoint).releaseUnsentRequestReservation(reservation);
+                    }).when(endpoint).release(reservation, DecodeEndpoint.ReleaseReason.NOT_SENT);
                 }
                 endpointOperation = kind.equals("decode-rejection")
                         ? () -> claim.complete(org.flexlb.balance.delivery.DeliveryResult.notSent(

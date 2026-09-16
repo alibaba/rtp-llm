@@ -1286,13 +1286,13 @@ class PrefillEndpointTest {
             org.mockito.Mockito.when(decodeReservation.requestId()).thenReturn(8_201L);
             DecodeEndpoint.EngineDispatchPermit permit =
                     mock(DecodeEndpoint.EngineDispatchPermit.class);
-            org.mockito.Mockito.when(decode.acquireEngineDispatchPermit(
-                            org.mockito.Mockito.any(DecodeEndpoint.ReservationHandle.class),
-                            org.mockito.Mockito.any(DecodeEndpoint.AdmissionCapacity.class)))
+            org.mockito.Mockito.when(decode.acquireDispatchPermit(
+                    org.mockito.Mockito.any(DecodeEndpoint.ReservationHandle.class),
+                    org.mockito.Mockito.any(DecodeEndpoint.AdmissionCapacity.class)))
                     .thenReturn(new DecodeEndpoint.EngineDispatchPermitAcquisition(
                             DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
                             permit));
-            org.mockito.Mockito.when(permit.transferToEngineLifecycle())
+            org.mockito.Mockito.when(permit.dispatch())
                     .thenReturn(
                             DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED);
             ScheduledRequest admitted = createScheduledRequest(

@@ -57,7 +57,7 @@ class EndpointCleanupOwnershipTest {
                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), mock(EndpointEventProjector.class));
         try (var pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
-            assertNotNull(endpoint.reservePinned(pin, id, 1L, 1L, 50));
+            assertNotNull(endpoint.reserveUnqueued(pin, id, 1L, 1L, 50));
         }
         assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
         assertEquals(1, endpoint.getInflightCount());
@@ -98,7 +98,7 @@ class EndpointCleanupOwnershipTest {
         Runnable assertOldLedger = () -> {
             assertDecodeLedger(endpoint, confirmed ? 0 : 1, confirmed ? 1 : 0,
                     confirmed ? 0L : 100L, confirmed ? 0L : 150L);
-            assertEquals(confirmed, endpoint.isReservationAccepted(oldReservation));
+            assertEquals(confirmed, endpoint.isAcceptedByEngine(oldReservation));
         };
         assertOldLedger.run();
 
@@ -112,7 +112,7 @@ class EndpointCleanupOwnershipTest {
         var replacement = result.owner();
         assertNotEquals(oldReservation.reservationToken(), replacement.reservationToken());
         assertDecodeLedger(endpoint, 1, 0, 200L, 350L);
-        endpoint.releaseReservationExact(oldReservation);
+        endpoint.release(oldReservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         assertDecodeLedger(endpoint, 1, 0, 200L, 350L);
         assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
         assertDecodeLedger(endpoint, 1, 0, 200L, 350L);
@@ -124,7 +124,7 @@ class EndpointCleanupOwnershipTest {
         assertTrue(registry.removeExactTerminalRecord(slot, Long.MAX_VALUE));
         assertEquals(1, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
         assertDecodeLedger(endpoint, 0, 0, 0L, 0L);
-        endpoint.releaseReservationExact(replacement);
+        endpoint.release(replacement, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
         assertDecodeLedger(endpoint, 0, 0, 0L, 0L);
     }
@@ -218,13 +218,13 @@ class EndpointCleanupOwnershipTest {
         registry.register(RequestLifecycleTestSupport.context(config, id));
         assertFalse(registry.removeExactTerminalRecord(original, Long.MAX_VALUE));
         assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
-        assertTrue(endpoint.isReservationAccepted(reservation));
+        assertTrue(endpoint.isAcceptedByEngine(reservation));
         assertDecodeLedger(endpoint, 0, 1, 0L, 0L);
         registry.cancelRequest(id, 0L, CancelReason.CLIENT_CANCELLED);
         assertTrue(registry.removeExactTerminalRecord(registry.requestSlot(id), Long.MAX_VALUE));
         assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
         assertDecodeLedger(endpoint, 0, 0, 0L, 0L);
-        assertFalse(endpoint.isReservationAccepted(reservation));
+        assertFalse(endpoint.isAcceptedByEngine(reservation));
         assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
         assertDecodeLedger(endpoint, 0, 0, 0L, 0L);
     }
@@ -233,7 +233,7 @@ class EndpointCleanupOwnershipTest {
             DecodeEndpoint endpoint, long id, long hardKv, long expectedKv) {
         try (var pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
-            var reservation = endpoint.reservePinned(pin, id, hardKv, expectedKv, 50);
+            var reservation = endpoint.reserveUnqueued(pin, id, hardKv, expectedKv, 50);
             assertNotNull(reservation);
             return reservation;
         }
@@ -241,7 +241,7 @@ class EndpointCleanupOwnershipTest {
 
     private static void assertDecodeLedger(DecodeEndpoint endpoint, int reserved, int confirmed,
                                           long hardKv, long expectedKv) {
-        var view = endpoint.layeredAdmissionView();
+        var view = endpoint.resourceSnapshot();
         assertEquals(reserved, endpoint.getInflightCount());
         assertEquals(reserved, view.reserved().size());
         assertEquals(confirmed, view.confirmed().size());

@@ -18,7 +18,7 @@ public record DecodeEndpointSnapshot(
         List<DecodeRequestView> running) {
 
     public static DecodeEndpointSnapshot capture(DecodeEndpoint endpoint, DecodeEndpoint.AdmissionCapacity policy) {
-        DecodeEndpoint.LayeredAdmissionView view = endpoint.layeredAdmissionView();
+        DecodeEndpoint.LayeredAdmissionView view = endpoint.resourceSnapshot();
         DecodeEndpoint.DecodeRoutingView routing = view.routing();
         List<DecodeRequestView> reserved = new ArrayList<>();
         view.reserved().forEach((requestId, entry) -> {
