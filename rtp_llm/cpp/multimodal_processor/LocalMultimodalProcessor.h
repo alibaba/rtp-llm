@@ -12,7 +12,7 @@ private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
                                                       std::string                                 ip_port    = "",
                                                       int64_t                                     request_id = 0,
-                                                      grpc::ServerContext* = nullptr) {
+                                                      grpc::ServerContext* server_context = nullptr) {
         if (mm_inputs.size() == 0) {
             return MultimodalOutput();
         } else if (!mm_process_engine_.is_none()) {
@@ -48,7 +48,13 @@ private:
                 }
 
                 auto res = mm_process_engine_.attr("mm_embedding_cpp")(
-                    urls, types, tensors, mm_preprocess_configs, request_id);
+                    urls,
+                    types,
+                    tensors,
+                    mm_preprocess_configs,
+                    request_id,
+                    dashScopeMetadata(server_context, "x-dashscope-uid"),
+                    dashScopeMetadata(server_context, "x-dashscope-service"));
                 auto mm_embedding_vec = convertPyObjectToVec(res.attr("embeddings"));
 
                 MultimodalOutput           mm_embedding_res;

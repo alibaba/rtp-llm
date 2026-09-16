@@ -847,7 +847,9 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         started, finish = threading.Event(), threading.Event()
         computations = []
 
-        def compute(mm_inputs, cache_key, entry, request_id=0):
+        def compute(
+            mm_inputs, cache_key, entry, request_id=0, user_id="", service_name=""
+        ):
             computations.append(cache_key)
             started.set()
             finish.wait(timeout=5)
@@ -883,7 +885,9 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         engine._hash_key_cache.resize(0)
         inp = self._make_input("fake://no-cache")
 
-        def compute(mm_inputs, cache_key, entry, request_id=0):
+        def compute(
+            mm_inputs, cache_key, entry, request_id=0, user_id="", service_name=""
+        ):
             entry.complete((torch.ones(2, 4), None))
 
         engine._async_compute = compute
@@ -904,6 +908,10 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         model = FakeModel(mm_part or FakeMultiModalEmbeddingInterface())
         vit_config = VitConfig()
         vit_config.use_local_preprocess = True
+        # These fake embeddings are CPU tensors; do not reserve production GPU pools.
+        vit_config.mm_cache_gpu_max_bytes = 0
+        vit_config.mm_cache_cpu_max_bytes = 1024 * 1024
+        vit_config.mm_hash_key_cache_max_bytes = 1024 * 1024
         vit_config.vit_concurrency = vit_concurrency
         vit_config.vit_max_queue_size = vit_max_queue_size
         return MMProcessEngine(
@@ -977,7 +985,9 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         max_active = 0
         completed_count = 0
 
-        def blocked_compute(mm_inputs, cache_key, entry, request_id=0):
+        def blocked_compute(
+            mm_inputs, cache_key, entry, request_id=0, user_id="", service_name=""
+        ):
             nonlocal active, max_active, completed_count
             with lock:
                 active += 1
@@ -1019,7 +1029,9 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         lock = threading.Lock()
         completed_count = 0
 
-        def blocked_compute(mm_inputs, cache_key, entry, request_id=0):
+        def blocked_compute(
+            mm_inputs, cache_key, entry, request_id=0, user_id="", service_name=""
+        ):
             nonlocal completed_count
             started.set()
             release.wait(timeout=5)
@@ -1065,7 +1077,9 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         first_done = threading.Event()
         started_urls = []
 
-        def blocked_compute(mm_inputs, cache_key, entry, request_id=0):
+        def blocked_compute(
+            mm_inputs, cache_key, entry, request_id=0, user_id="", service_name=""
+        ):
             started_urls.append(mm_inputs[0].url)
             first_started.set()
             release.wait(timeout=5)
@@ -1102,7 +1116,9 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         first_done = threading.Event()
         started_urls = []
 
-        def blocked_compute(mm_inputs, cache_key, entry, request_id=0):
+        def blocked_compute(
+            mm_inputs, cache_key, entry, request_id=0, user_id="", service_name=""
+        ):
             started_urls.append(mm_inputs[0].url)
             first_started.set()
             release.wait(timeout=5)
@@ -1159,7 +1175,9 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         result = None
         error = None
 
-        def blocked_compute(mm_inputs, cache_key, entry, request_id=0):
+        def blocked_compute(
+            mm_inputs, cache_key, entry, request_id=0, user_id="", service_name=""
+        ):
             nonlocal started_count
             with lock:
                 started_count += 1
@@ -1337,6 +1355,7 @@ class _StubGreenNetProvider(GreenNetProvider):
         self.calls = 0
         self.last_handle = None
         self.request_ids = []
+        self.user_ids = []
 
     def is_enabled(self) -> bool:
         return True
@@ -1344,6 +1363,7 @@ class _StubGreenNetProvider(GreenNetProvider):
     async def preprocess_and_submit(self, request, mm_inputs):
         self.calls += 1
         self.request_ids.append(str(request.id))
+        self.user_ids.append(request.user_id)
         if self._rewrite_suffix is not None:
             rewritten = [
                 MultimodalInput(
@@ -1378,6 +1398,10 @@ class MMProcessEngineGreenNetTest(TestCase):
         model = FakeModel(mm_part or FakeMultiModalEmbeddingInterface())
         vit_config = VitConfig()
         vit_config.use_local_preprocess = True
+        # These fake embeddings are CPU tensors; do not reserve production GPU pools.
+        vit_config.mm_cache_gpu_max_bytes = 0
+        vit_config.mm_cache_cpu_max_bytes = 1024 * 1024
+        vit_config.mm_hash_key_cache_max_bytes = 1024 * 1024
         return MMProcessEngine(
             model.mm_part,
             model.model_config,
@@ -1417,8 +1441,10 @@ class MMProcessEngineGreenNetTest(TestCase):
             [torch.empty(0)],
             [[-1, -1, -1, -1, -1, -1, -1, [], 30000]],
             request_id,
+            user_id="uid-local",
         )
 
+        self.assertEqual(provider.user_ids, ["uid-local"])
         self.assertEqual(provider.request_ids, [str(request_id)])
         self.assertEqual(
             engine._access_logger.log_query_access.call_args.args[1], request_id
@@ -1427,6 +1453,36 @@ class MMProcessEngineGreenNetTest(TestCase):
             engine._access_logger.log_success_access.call_args.args[2], request_id
         )
         engine.stop()
+
+    def test_async_requests_keep_their_own_uid(self):
+        engine = self._make_engine()
+        provider = _StubGreenNetProvider(
+            GreenNetVerdict(passed=True, code=1), delay=0.05
+        )
+        engine._greennet_provider = provider
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as callers:
+                results = [
+                    callers.submit(
+                        engine.get_embedding_result,
+                        [
+                            self._make_input(
+                                f"./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg?uid={i}"
+                            )
+                        ],
+                        request_id=100 + i,
+                        user_id=uid,
+                    )
+                    for i, uid in enumerate(("alice", "bob", ""))
+                ]
+                for result in results:
+                    self.assertTrue(result.result(timeout=10))
+            self.assertEqual(
+                dict(zip(provider.request_ids, provider.user_ids)),
+                {"100": "alice", "101": "bob", "102": ""},
+            )
+        finally:
+            engine.stop()
 
     def test_local_path_passes_when_verdict_passes(self):
         engine = self._make_engine()

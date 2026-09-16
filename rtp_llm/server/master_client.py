@@ -371,6 +371,8 @@ class MasterClient:
         """Probe hashes, then submit only missing media when routing requires them."""
         started = time.monotonic()
         unique_keys = list(dict.fromkeys(keys))
+        if input is not None:
+            input.greennet_verified_vit = None
         metadata = await self._post_vit_metadata(
             address, {"keys": unique_keys}, DEFAULT_REQUEST_TIMEOUT_SEC
         )
@@ -391,6 +393,7 @@ class MasterClient:
             )
         }
         if not missing:
+            self._record_greennet_approval(input, address, unique_keys, entries)
             return metadata
 
         from google.protobuf.json_format import MessageToDict
@@ -441,6 +444,10 @@ class MasterClient:
             },
             remaining,
             required=True,
+            user_id=normalize_request_headers(input.headers).get("x-dashscope-uid", ""),
+            service_name=normalize_request_headers(input.headers).get(
+                "x-dashscope-service", ""
+            ),
         )
         if metadata and filled.get("worker_instance") != metadata.get(
             "worker_instance"
@@ -463,9 +470,28 @@ class MasterClient:
                 ExceptionType.MM_PROCESS_ERROR, "ViT returned incomplete feature hashes"
             )
         filled["entries"] = [entries[key] for key in unique_keys]
+        self._record_greennet_approval(input, address, unique_keys, entries)
         return filled
 
-    async def _post_vit_metadata(self, address, payload, timeout_sec, required=False):
+    @staticmethod
+    def _record_greennet_approval(
+        input: GenerateInput,
+        address: RoleAddr,
+        keys: List[str],
+        entries: Dict[str, Any],
+    ) -> None:
+        if keys and all(entries[key].get("greennet_passed") is True for key in keys):
+            input.greennet_verified_vit = (address.ip, address.grpc_port, tuple(keys))
+
+    async def _post_vit_metadata(
+        self,
+        address,
+        payload,
+        timeout_sec,
+        required=False,
+        user_id: str = "",
+        service_name: str = "",
+    ):
         import aiohttp
 
         started = time.monotonic()
@@ -474,7 +500,11 @@ class MasterClient:
             async with session.post(
                 f"http://{address.ip}:{address.http_port}/mm_cache/metadata",
                 data=orjson.dumps(payload),
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    **({"X-DashScope-Uid": user_id} if user_id else {}),
+                    **({"X-DashScope-Service": service_name} if service_name else {}),
+                },
                 timeout=aiohttp.ClientTimeout(total=timeout_sec),
             ) as response:
                 # One bounded buffer avoids retaining chunks plus a joined copy.

@@ -21,6 +21,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     RpcServiceStub,
 )
 from rtp_llm.server.request_headers import (
+    dashscope_greennet_metadata,
     extract_correlation_request_id,
     extract_trace_id,
 )
@@ -585,6 +586,9 @@ class ModelRpcClient(object):
             stub = RpcServiceStub(channel)
 
             grpc_kwargs = {"timeout": effective_ms / 1000.0} if effective_ms > 0 else {}
+            greennet_metadata = dashscope_greennet_metadata(input_py.headers)
+            if greennet_metadata:
+                grpc_kwargs["metadata"] = greennet_metadata
             response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
@@ -638,6 +642,10 @@ class ModelRpcClient(object):
         inline inside mm_process_engine and surfaces the same exception through
         the normal generate stream.
 
+        Successful hash metadata includes an approval for the exact ViT/media
+        pair, so that path returns without another RPC. Keep the verdict RPC
+        for requests that did not acquire approved metadata.
+
         When greennet is disabled (open-source build or ENABLE_SAFETY_INSPECTION
         off), this returns immediately WITHOUT any RPC — so the disabled path is
         byte-identical to the pre-greennet behavior (no extra round-trip).
@@ -649,12 +657,28 @@ class ModelRpcClient(object):
         for role_addr in input_py.generate_config.role_addrs:
             if role_addr.role != RoleType.VIT:
                 continue
+            if (
+                input_py.greennet_verified_vit is not None
+                and input_py.greennet_verified_vit
+                == (
+                    role_addr.ip,
+                    role_addr.grpc_port,
+                    tuple(dict.fromkeys(multimodal_cache_keys(input_py))),
+                )
+            ):
+                # Hash acquisition already waited for inspection (or reused an
+                # approved hash). No separate ViT RPC is needed on this route.
+                continue
             vit_addr = f"{role_addr.ip}:{role_addr.grpc_port}"
             mm_inputs_pb = _make_multimodal_inputs_pb(input_pb)
             channel = await self._channel_pool.get(vit_addr)
             stub = MultimodalRpcServiceStub(channel)
             try:
-                await stub.WaitGreenNetVerdict(mm_inputs_pb, timeout=120.0)
+                await stub.WaitGreenNetVerdict(
+                    mm_inputs_pb,
+                    timeout=120.0,
+                    metadata=dashscope_greennet_metadata(input_py.headers),
+                )
             except grpc.RpcError as e:
                 error_details = ErrorDetailsPB()
                 metadata = e.trailing_metadata()

@@ -583,7 +583,10 @@ class MMWorkItem:
             and self.embedding_cache.peek(self.cache_key) is self.cache_entry
         ):
             self.hash_key_cache.put(
-                self.cache_key, self.feature_hashes or [], self.cache_entry.generation
+                self.cache_key,
+                self.feature_hashes or [],
+                self.cache_entry.generation,
+                greennet_passed=self.cache_entry.greennet_passed,
             )
 
     def fail_cache(self, error: Exception) -> None:
@@ -834,6 +837,8 @@ class MMProcessEngine:
         mm_inputs: List[MultimodalInput],
         entry: Optional[MMEmbeddingCacheEntry] = None,
         request_id: int = 0,
+        user_id: str = "",
+        service_name: str = "",
     ) -> Tuple[
         List[MultimodalInput], Optional["concurrent.futures.Future"], Optional[Any]
     ]:
@@ -853,13 +858,20 @@ class MMProcessEngine:
         (and stamps a passing verdict on ``entry`` if provided)."""
         if not self._greennet_enabled():
             if entry is not None:
-                entry.set_greennet_verdict(GreenNetVerdict(passed=True))
+                entry.set_greennet_verdict(GreenNetVerdict(passed=True), checked=False)
             return mm_inputs, None, None
 
         loop = self._ensure_greennet_loop()
         req = SimpleNamespace(
             id=str(request_id),
             model_name=getattr(self.vit_config, "model_name", "") or "",
+            user_id=user_id,
+            service_name=service_name,
+            greennet_passed=(
+                len(mm_inputs) == 1
+                and bool(mm_inputs[0].url)
+                and self._hash_key_cache.greennet_passed(mm_inputs[0].cache_key())
+            ),
         )
         handle = asyncio.run_coroutine_threadsafe(
             self._greennet_provider.preprocess_and_submit(req, mm_inputs), loop
@@ -912,17 +924,30 @@ class MMProcessEngine:
         self._greennet_loop_thread = None
 
     def _embed_with_greennet_sync(
-        self, mm_inputs: List[MultimodalInput], request_id: int = 0
+        self,
+        mm_inputs: List[MultimodalInput],
+        request_id: int = 0,
+        user_id: str = "",
+        service_name: str = "",
     ) -> MMEmbeddingRes:
         """Run one synchronous request and account for every failure boundary."""
         try:
-            return self._embed_with_greennet_sync_impl(mm_inputs, request_id=request_id)
+            return self._embed_with_greennet_sync_impl(
+                mm_inputs,
+                request_id=request_id,
+                user_id=user_id,
+                service_name=service_name,
+            )
         except Exception as error:
             self.report_vit_error(error)
             raise
 
     def _embed_with_greennet_sync_impl(
-        self, mm_inputs: List[MultimodalInput], request_id: int = 0
+        self,
+        mm_inputs: List[MultimodalInput],
+        request_id: int = 0,
+        user_id: str = "",
+        service_name: str = "",
     ) -> MMEmbeddingRes:
         """Synchronous embedding path with greennet (used by the in-process /
         cpp / rpc entrypoints). Preprocess + inspect run, ViT runs concurrently
@@ -930,7 +955,10 @@ class MMProcessEngine:
         FtRuntimeException(UNSAFE_INPUT_CONTENT) on a non-passing verdict."""
         if len(mm_inputs) != 1 or mm_inputs[0].url == "":
             rewritten, verdict_future, handle = self._begin_greennet(
-                mm_inputs, request_id=request_id
+                mm_inputs,
+                request_id=request_id,
+                user_id=user_id,
+                service_name=service_name,
             )
             work_items: List[MMWorkItem] = []
             try:
@@ -947,12 +975,18 @@ class MMProcessEngine:
                         raise RuntimeError("sync GreenNet returned no verdict")
                     if not verdict.passed:
                         raise FtRuntimeException(
-                            ExceptionType.UNSAFE_INPUT_CONTENT,
+                            (
+                                ExceptionType.UNSAFE_INPUT_CONTENT
+                                if verdict.code == 2
+                                else ExceptionType.MM_PROCESS_ERROR
+                            ),
                             verdict.message or "data inspection failed",
                         )
                 for work_item in work_items:
                     if work_item.cache_entry is not None:
-                        work_item.cache_entry.set_greennet_verdict(verdict)
+                        work_item.cache_entry.set_greennet_verdict(
+                            verdict, checked=self._greennet_enabled()
+                        )
                     if work_item.embedding_result is not None:
                         work_item.complete_cache(work_item.embedding_result, force=True)
                 return result
@@ -970,7 +1004,11 @@ class MMProcessEngine:
         try:
             if state == "miss":
                 rewritten, verdict_future, handle = self._begin_greennet(
-                    mm_inputs, entry, request_id
+                    mm_inputs,
+                    entry,
+                    request_id,
+                    user_id=user_id,
+                    service_name=service_name,
                 )
             else:
                 # The owner already ran GreenNet and owns any URL rewrite. A
@@ -995,9 +1033,14 @@ class MMProcessEngine:
                     raise RuntimeError("sync GreenNet returned no verdict")
                 if not verdict.passed:
                     raise FtRuntimeException(
-                        ExceptionType.UNSAFE_INPUT_CONTENT,
+                        (
+                            ExceptionType.UNSAFE_INPUT_CONTENT
+                            if verdict.code == 2
+                            else ExceptionType.MM_PROCESS_ERROR
+                        ),
                         verdict.message or "data inspection failed",
                     )
+                entry.set_greennet_verdict(verdict, checked=self._greennet_enabled())
                 raw_result = work_items[0].embedding_result
                 if raw_result is None:
                     raise RuntimeError("sync embedding did not produce a cache value")
@@ -1008,7 +1051,11 @@ class MMProcessEngine:
                     raise RuntimeError("cached GreenNet returned no verdict")
                 if not verdict.passed:
                     raise FtRuntimeException(
-                        ExceptionType.UNSAFE_INPUT_CONTENT,
+                        (
+                            ExceptionType.UNSAFE_INPUT_CONTENT
+                            if verdict.code == 2
+                            else ExceptionType.MM_PROCESS_ERROR
+                        ),
                         verdict.message or "data inspection failed",
                     )
             return result
@@ -1026,6 +1073,8 @@ class MMProcessEngine:
         timeout_ms: int = 60000,
         request_id: int = 0,
         cancellation_event: Optional[threading.Event] = None,
+        user_id: str = "",
+        service_name: str = "",
     ) -> GreenNetVerdict:
         """Block until every input's greennet verdict is decided; return the
         first non-passing verdict (first-failure-wins), else a passing verdict.
@@ -1038,12 +1087,19 @@ class MMProcessEngine:
             if not self._greennet_enabled():
                 return GreenNetVerdict(passed=True)
 
-            valid_inputs = [mm_input for mm_input in mm_inputs if mm_input.url != ""]
+            valid_inputs = [
+                mm_input
+                for mm_input in mm_inputs
+                if mm_input.url != ""
+                and not self._hash_key_cache.greennet_passed(mm_input.cache_key())
+            ]
             claims = self._claim_and_submit_async(
                 valid_inputs,
                 request_id=request_id,
                 queue_timeout_ms=timeout_ms,
                 cancellation_event=cancellation_event,
+                user_id=user_id,
+                service_name=service_name,
             )
             deadline = time.monotonic() + timeout_ms / 1000.0
             for _, entry in claims:
@@ -1062,7 +1118,9 @@ class MMProcessEngine:
             self.report_vit_error(error, current_entry)
             raise
 
-    def mm_embedding_rpc(self, mm_inputs: MultimodalInputsPB) -> MMEmbeddingRes:
+    def mm_embedding_rpc(
+        self, mm_inputs: MultimodalInputsPB, user_id: str = "", service_name: str = ""
+    ) -> MMEmbeddingRes:
         """Process multimodal inputs from RPC protocol buffer."""
         try:
             converted_inputs = trans_mm_input(mm_inputs)
@@ -1070,7 +1128,10 @@ class MMProcessEngine:
             self.report_vit_error(error)
             raise
         return self._embed_with_greennet_sync(
-            converted_inputs, request_id=mm_inputs.request_id
+            converted_inputs,
+            request_id=mm_inputs.request_id,
+            user_id=user_id,
+            service_name=service_name,
         )
 
     def mm_embedding_cpp(
@@ -1080,6 +1141,8 @@ class MMProcessEngine:
         tensors: List[torch.Tensor],
         mm_preprocess_configs: List[Any],
         request_id: int = 0,
+        user_id: str = "",
+        service_name: str = "",
     ) -> MMEmbeddingRes:
         """Process multimodal inputs from C++ interface."""
         try:
@@ -1094,7 +1157,9 @@ class MMProcessEngine:
         except Exception as error:
             self.report_vit_error(error)
             raise
-        res = self._embed_with_greennet_sync(mm_inputs, request_id=request_id)
+        res = self._embed_with_greennet_sync(
+            mm_inputs, request_id=request_id, user_id=user_id, service_name=service_name
+        )
         try:
             res.position_ids = [pos.cpu() for pos in res.position_ids]
         except Exception as error:
@@ -1294,7 +1359,11 @@ class MMProcessEngine:
         return MMEmbeddingRes(emb_res, pos_res, extra_res, feature_hashes)
 
     def async_submit(
-        self, mm_inputs: List[MultimodalInput], request_id: int = 0
+        self,
+        mm_inputs: List[MultimodalInput],
+        request_id: int = 0,
+        user_id: str = "",
+        service_name: str = "",
     ) -> List[str]:
         """Asynchronously submit multimodal URLs for embedding computation.
 
@@ -1304,7 +1373,12 @@ class MMProcessEngine:
         """
         try:
             self.mm_part.validate_inputs(mm_inputs)
-            claims = self._claim_and_submit_async(mm_inputs, request_id=request_id)
+            claims = self._claim_and_submit_async(
+                mm_inputs,
+                request_id=request_id,
+                user_id=user_id,
+                service_name=service_name,
+            )
             return [cache_key for cache_key, _ in claims]
         except Exception as error:
             self.report_vit_error(error)
@@ -1317,6 +1391,8 @@ class MMProcessEngine:
         request_id: int = 0,
         cancellation_event: Optional[threading.Event] = None,
         hashes_only: bool = False,
+        user_id: str = "",
+        service_name: str = "",
     ) -> List[MMEmbeddingRes]:
         """Retrieve embedding results, blocking until ready if necessary.
 
@@ -1335,6 +1411,8 @@ class MMProcessEngine:
                 request_id=request_id,
                 queue_timeout_ms=timeout_ms,
                 cancellation_event=cancellation_event,
+                user_id=user_id,
+                service_name=service_name,
             )
             deadline = time.monotonic() + timeout_ms / 1000.0
             results = []
@@ -1342,6 +1420,11 @@ class MMProcessEngine:
                 current_entry = entry
                 remaining = max(0.0, deadline - time.monotonic())
                 entry.wait_ready(timeout=remaining)
+                if self._greennet_enabled() and not entry.greennet_passed:
+                    raise FtRuntimeException(
+                        ExceptionType.MM_PROCESS_ERROR,
+                        "ViT embedding has no completed GreenNet inspection",
+                    )
                 feature_hashes = self._hash_key_cache.get(cache_key, entry.generation)
                 raw_result = None
                 if not hashes_only or feature_hashes is None:
@@ -1351,7 +1434,10 @@ class MMProcessEngine:
                 if feature_hashes is None:
                     feature_hashes = _feature_hashes_from_result(raw_result)
                     self._hash_key_cache.put(
-                        cache_key, feature_hashes, entry.generation
+                        cache_key,
+                        feature_hashes,
+                        entry.generation,
+                        greennet_passed=entry.greennet_passed,
                     )
                 if hashes_only:
                     results.append(MMEmbeddingRes([], feature_hashes=feature_hashes))
@@ -1385,6 +1471,8 @@ class MMProcessEngine:
         request_id: int = 0,
         queue_timeout_ms: Optional[int] = None,
         cancellation_event: Optional[threading.Event] = None,
+        user_id: str = "",
+        service_name: str = "",
     ) -> List[Tuple[str, MMEmbeddingCacheEntry]]:
         claims: List[Tuple[str, MMEmbeddingCacheEntry]] = []
         pending: List[Tuple[MultimodalInput, str, MMEmbeddingCacheEntry]] = []
@@ -1421,6 +1509,8 @@ class MMProcessEngine:
             pending,
             request_id=request_id,
             queue_timeout_ms=queue_timeout_ms,
+            user_id=user_id,
+            service_name=service_name,
         )
         self._raise_if_async_request_cancelled(request_id, cancellation_event)
         return claims
@@ -1612,6 +1702,8 @@ class MMProcessEngine:
         entry: MMEmbeddingCacheEntry,
         request_id: int,
         deadline: float,
+        user_id: str = "",
+        service_name: str = "",
     ) -> None:
         if time.monotonic() >= deadline:
             error = FtRuntimeException(
@@ -1620,13 +1712,22 @@ class MMProcessEngine:
             )
             self._fail_async_compute(cache_key, entry, error)
             return
-        self._async_compute(mm_inputs, cache_key, entry, request_id)
+        self._async_compute(
+            mm_inputs,
+            cache_key,
+            entry,
+            request_id,
+            user_id=user_id,
+            service_name=service_name,
+        )
 
     def _submit_async_compute_batch(
         self,
         pending: List[Tuple[MultimodalInput, str, MMEmbeddingCacheEntry]],
         request_id: int = 0,
         queue_timeout_ms: Optional[int] = None,
+        user_id: str = "",
+        service_name: str = "",
     ) -> None:
         if not pending:
             return
@@ -1671,6 +1772,8 @@ class MMProcessEngine:
                         entry,
                         request_id,
                         deadline,
+                        user_id,
+                        service_name,
                     )
                     self._async_tasks[entry].future = future
                     future.add_done_callback(
@@ -1694,6 +1797,8 @@ class MMProcessEngine:
         cache_key: str,
         entry: MMEmbeddingCacheEntry,
         request_id: int = 0,
+        user_id: str = "",
+        service_name: str = "",
     ) -> None:
         handle = None
         try:
@@ -1701,7 +1806,7 @@ class MMProcessEngine:
             # done-callback stamps entry.greennet_verdict the moment inspection
             # finishes, so WaitGreenNetVerdict unblocks independently of ViT.
             rewritten, verdict_future, handle = self._begin_greennet(
-                mm_inputs, entry, request_id
+                mm_inputs, entry, request_id, user_id=user_id, service_name=service_name
             )
             # ViT embedding runs concurrently with inspection.
             _, work_items = self._mm_embedding_impl(
@@ -1713,15 +1818,23 @@ class MMProcessEngine:
                 report_image_count=False,
                 report_vit_error=False,
             )
+            verdict = GreenNetVerdict(passed=True)
             if verdict_future is not None:
                 verdict = verdict_future.result(timeout=self._greennet_timeout_s)
                 if verdict is None:
                     raise RuntimeError("async GreenNet returned no verdict")
                 if not verdict.passed:
                     raise FtRuntimeException(
-                        ExceptionType.UNSAFE_INPUT_CONTENT,
+                        (
+                            ExceptionType.UNSAFE_INPUT_CONTENT
+                            if verdict.code == 2
+                            else ExceptionType.MM_PROCESS_ERROR
+                        ),
                         verdict.message or "data inspection failed",
                     )
+            # Future.result() can wake before its done callback stamps the
+            # entry. Publish approval synchronously before publishing hashes.
+            entry.set_greennet_verdict(verdict, checked=self._greennet_enabled())
             raw_result = work_items[0].embedding_result
             if raw_result is None:
                 raise RuntimeError("async embedding did not produce a cache value")

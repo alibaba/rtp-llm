@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import torch
 
@@ -82,6 +82,11 @@ class GenerateInput:
     )  # Batch group ID for force batch grouping, -1 means not set
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
+    # Internal receipt from ViT metadata, bound to the selected worker and media.
+    # It is not accepted from request headers/config or sent to the model RPC.
+    greennet_verified_vit: Optional[Tuple[str, int, Tuple[str, ...]]] = field(
+        default=None, init=False, repr=False
+    )
 
     class Config:
         arbitrary_types_allowed = True

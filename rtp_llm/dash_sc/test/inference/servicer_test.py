@@ -2160,20 +2160,30 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         context = MagicMock()
         context.invocation_metadata.return_value = (
             ("User_ID", "u2"),
+            ("X-DashScope-Uid", "uid-metadata"),
+            ("X-DashScope-Service", "service-metadata"),
             ("x-dashscope-apikeyid", "ak2"),
             ("authorization", "secret"),
         )
 
-        await _drain(
-            servicer.ModelStreamInfer(
-                _areq_iter([self._valid_infer_request()]), context
-            )
+        request = self._valid_infer_request()
+        request.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "x-dashscope-uid": "uid-attributes",
+                "x-dashscope-service": "service-attributes",
+            }
         )
+        await _drain(servicer.ModelStreamInfer(_areq_iter([request]), context))
 
         self.assertIsNotNone(visitor.last_generate_input)
         self.assertEqual(
             visitor.last_generate_input.headers,
-            {"user_id": "u2", "x-dashscope-apikeyid": "ak2"},
+            {
+                "user_id": "u2",
+                "x-dashscope-apikeyid": "ak2",
+                "x-dashscope-uid": "uid-metadata",
+                "x-dashscope-service": "service-metadata",
+            },
         )
 
     async def test_real_mode_uses_ds_header_attributes_for_backend_controls(

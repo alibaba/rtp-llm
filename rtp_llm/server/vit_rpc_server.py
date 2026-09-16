@@ -36,6 +36,7 @@ from rtp_llm.multimodal.multimodal_util import (
     trans_mm_input,
 )
 from rtp_llm.ops import MMPreprocessConfig, MMRdmaEncoderOp, MultimodalInput
+from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
 
@@ -185,7 +186,16 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
     def AsyncSubmitEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         try:
             converted_inputs = trans_mm_input(multimodal_inputs)
-            self.engine.async_submit(converted_inputs, multimodal_inputs.request_id)
+            self.engine.async_submit(
+                converted_inputs,
+                multimodal_inputs.request_id,
+                user_id=extract_request_headers(
+                    dict(context.invocation_metadata() or ())
+                ).get("x-dashscope-uid", ""),
+                service_name=extract_request_headers(
+                    dict(context.invocation_metadata() or ())
+                ).get("x-dashscope-service", ""),
+            )
             return EmptyPB()
         except FtRuntimeException as error:
             self.engine.report_vit_error(error)
@@ -211,6 +221,12 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 converted_inputs,
                 request_id=multimodal_inputs.request_id,
                 cancellation_event=cancellation_event,
+                user_id=extract_request_headers(
+                    dict(context.invocation_metadata() or ())
+                ).get("x-dashscope-uid", ""),
+                service_name=extract_request_headers(
+                    dict(context.invocation_metadata() or ())
+                ).get("x-dashscope-service", ""),
             )
             if verdict is None:
                 raise RuntimeError("ViT GreenNet returned no verdict")
@@ -266,6 +282,12 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 converted_inputs,
                 request_id=multimodal_inputs.request_id,
                 cancellation_event=cancellation_event,
+                user_id=extract_request_headers(
+                    dict(context.invocation_metadata() or ())
+                ).get("x-dashscope-uid", ""),
+                service_name=extract_request_headers(
+                    dict(context.invocation_metadata() or ())
+                ).get("x-dashscope-service", ""),
             )
             merged = merge_embedding_results(results)
             logging.debug(

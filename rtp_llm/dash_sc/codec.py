@@ -884,7 +884,12 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
         )
 
     request_headers: dict[str, str] = {}
-    for header_name in ("user_id", "x-dashscope-apikeyid"):
+    for header_name in (
+        "user_id",
+        "x-dashscope-uid",
+        "x-dashscope-service",
+        "x-dashscope-apikeyid",
+    ):
         value = _normalize_non_empty_str(ds_attrs.get(header_name))
         if value is not None:
             request_headers[header_name] = value

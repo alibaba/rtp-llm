@@ -170,6 +170,11 @@ class VitWorkerRequestIdTest(TestCase):
         async_context = MagicMock()
         wait_context = MagicMock()
         remote_context = MagicMock()
+        for ctx in (async_context, wait_context, remote_context):
+            ctx.invocation_metadata.return_value = (
+                ("x-dashscope-uid", "uid-worker"),
+                ("x-dashscope-service", "service-worker"),
+            )
         wait_context.add_callback.return_value = True
         remote_context.add_callback.return_value = True
 
@@ -177,12 +182,22 @@ class VitWorkerRequestIdTest(TestCase):
         servicer.WaitGreenNetVerdict(request, wait_context)
         servicer.RemoteMultimodalEmbedding(request, remote_context)
 
-        engine.async_submit.assert_called_once_with(converted, 987654321)
+        engine.async_submit.assert_called_once_with(
+            converted, 987654321, user_id="uid-worker", service_name="service-worker"
+        )
         engine.wait_greennet_verdict.assert_called_once_with(
-            converted, request_id=987654321, cancellation_event=ANY
+            converted,
+            request_id=987654321,
+            cancellation_event=ANY,
+            user_id="uid-worker",
+            service_name="service-worker",
         )
         engine.get_embedding_result.assert_called_once_with(
-            converted, request_id=987654321, cancellation_event=ANY
+            converted,
+            request_id=987654321,
+            cancellation_event=ANY,
+            user_id="uid-worker",
+            service_name="service-worker",
         )
 
         wait_context.add_callback.call_args.args[0]()

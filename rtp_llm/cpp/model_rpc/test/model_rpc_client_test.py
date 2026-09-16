@@ -123,6 +123,67 @@ class ModelRpcClientTest(TestCase):
             responses.extend(res.generate_outputs)
         return responses
 
+    def test_generate_stream_forwards_only_greennet_metadata(self):
+        from unittest.mock import AsyncMock, patch
+
+        async def run():
+            client = ModelRpcClient(["127.0.0.1:1"], {})
+            client._channel_pool.get = AsyncMock(return_value=MagicMock())
+            captured = []
+
+            class Stream:
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    raise StopAsyncIteration
+
+                def cancel(self):
+                    pass
+
+            class Stub:
+                def GenerateStreamCall(self, request, **kwargs):
+                    captured.append(kwargs)
+                    return Stream()
+
+            try:
+                with patch(
+                    "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                    return_value=Stub(),
+                ):
+                    for headers in (
+                        {
+                            "X-DashScope-Uid": "uid-backend",
+                            "X-DashScope-Service": "service-backend",
+                            "authorization": "secret",
+                        },
+                        {},
+                    ):
+                        request = GenerateInput(
+                            123,
+                            torch.tensor([1]),
+                            [],
+                            GenerateConfig(),
+                            headers=headers,
+                        )
+                        await self._run(client, request)
+                self.assertEqual(
+                    captured,
+                    [
+                        {
+                            "metadata": (
+                                ("x-dashscope-uid", "uid-backend"),
+                                ("x-dashscope-service", "service-backend"),
+                            )
+                        },
+                        {},
+                    ],
+                )
+            finally:
+                await client.close()
+
+        asyncio.run(run())
+
     def test_multimodal_rpc_request_keeps_request_id(self):
         input_pb = GenerateInputPB(request_id=987654321)
         input_pb.multimodal_inputs.add().multimodal_url = "image://test"

@@ -51,7 +51,14 @@ private:
         }
         grpc::PropagationOptions options;
         options.enable_deadline_propagation().enable_cancellation_propagation();
-        return grpc::ClientContext::FromServerContext(*server_context, options);
+        auto context = grpc::ClientContext::FromServerContext(*server_context, options);
+        for (const auto* key : {"x-dashscope-uid", "x-dashscope-service"}) {
+            const auto value = dashScopeMetadata(server_context, key);
+            if (!value.empty()) {
+                context->AddMetadata(key, value);
+            }
+        }
+        return context;
     }
 
     // Best-effort: tell the encoder it can return the slot(s) to its free list. One response may

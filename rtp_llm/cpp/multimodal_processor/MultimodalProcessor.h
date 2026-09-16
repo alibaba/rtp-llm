@@ -1,5 +1,7 @@
 #pragma once
 
+#include <grpcpp/server_context.h>
+
 #include <vector>
 #include <torch/python.h>
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
@@ -40,6 +42,15 @@ public:
 
 protected:
     py::object mm_process_engine_;
+
+    static std::string dashScopeMetadata(grpc::ServerContext* context, const char* key) {
+        if (context == nullptr) {
+            return "";
+        }
+        const auto& metadata = context->client_metadata();
+        const auto  it       = metadata.find(key);
+        return it == metadata.end() ? "" : std::string(it->second.data(), it->second.size());
+    }
 
 private:
     std::vector<std::vector<int64_t>> sep_token_ids_;

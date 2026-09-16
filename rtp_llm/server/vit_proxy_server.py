@@ -31,6 +31,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.multimodal.mm_profiler import MMProfiler
+from rtp_llm.server.request_headers import dashscope_greennet_metadata
 from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
 
 # Default per-request gRPC timeout for proxy → worker forwarding. Per-request
@@ -277,7 +278,11 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                 f"timeout: {timeout_s}s"
             )
             worker_call = stub.RemoteMultimodalEmbedding.future(
-                request, timeout=timeout_s
+                request,
+                timeout=timeout_s,
+                metadata=dashscope_greennet_metadata(
+                    dict(context.invocation_metadata() or ())
+                ),
             )
             # A cancelled prefill RPC must cancel the selected worker RPC as
             # well; otherwise the worker cannot remove its queued ViT work.
@@ -322,7 +327,13 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             timeout_s = _resolve_rpc_timeout_seconds(
                 request, self.default_rpc_timeout_seconds
             )
-            worker_call = stub.WaitGreenNetVerdict.future(request, timeout=timeout_s)
+            worker_call = stub.WaitGreenNetVerdict.future(
+                request,
+                timeout=timeout_s,
+                metadata=dashscope_greennet_metadata(
+                    dict(context.invocation_metadata() or ())
+                ),
+            )
             if not context.add_callback(worker_call.cancel):
                 worker_call.cancel()
             return worker_call.result()
@@ -391,7 +402,13 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             worker_address = self.load_balancer.get_worker()
             self.load_balancer.increment_connections(worker_address)
             stub = self.connection_pool.get_stub(worker_address)
-            return stub.AsyncSubmitEmbedding(request, timeout=5.0)
+            return stub.AsyncSubmitEmbedding(
+                request,
+                timeout=5.0,
+                metadata=dashscope_greennet_metadata(
+                    dict(context.invocation_metadata() or ())
+                ),
+            )
         except grpc.RpcError as e:
             request_failed = True
             logging.error(

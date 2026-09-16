@@ -30,6 +30,7 @@ from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.multimodal_util import trans_mm_input
 from rtp_llm.ops import RoleType
+from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer, create_rpc_server
 
 MM_CACHE_SNAPSHOT_MAX_KEYS = 100000
@@ -81,7 +82,7 @@ def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
         }
 
     @app.post("/mm_cache/metadata")
-    def cache_metadata(request: MMCacheMetadataRequest):
+    def cache_metadata(request: MMCacheMetadataRequest, raw_request: RawRequest):
         if engine is None or engine.is_proxy_mode:
             raise HTTPException(status_code=501, detail="worker-local cache required")
         if any(not key or len(key) > 4096 for key in request.keys):
@@ -93,6 +94,14 @@ def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
             metadata = hash_key_cache.metadata(request.keys, engine._embedding_cache)
         except ValueError as error:
             raise HTTPException(status_code=413, detail=str(error)) from error
+        inspection_enabled = getattr(engine, "_greennet_enabled", lambda: False)()
+        if inspection_enabled:
+            # A hash produced without inspection is not an approved cache hit.
+            for item in metadata["entries"]:
+                if not item.get("greennet_passed", False):
+                    item.update(hit=False, hash_hit=False)
+                    for field in ("feature_hashes", "split_size", "entry_generation"):
+                        item.pop(field, None)
         missing = {e["key"] for e in metadata["entries"] if not e["hash_hit"]}
         if not missing or request.inputs is None:
             return metadata
@@ -118,6 +127,12 @@ def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
                 request_id=request.request_id,
                 timeout_ms=request.timeout_ms,
                 hashes_only=True,
+                user_id=extract_request_headers(raw_request.headers).get(
+                    "x-dashscope-uid", ""
+                ),
+                service_name=extract_request_headers(raw_request.headers).get(
+                    "x-dashscope-service", ""
+                ),
             )
         except TimeoutError as error:
             raise HTTPException(
@@ -151,6 +166,7 @@ def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
                 "key": key,
                 "hit": True,
                 "hash_hit": True,
+                "greennet_passed": inspection_enabled,
                 "embedding_hit": key in tiers,
                 "embedding_tier": tiers.get(key),
                 "split_size": sizes,

@@ -247,6 +247,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             torch.empty(0),
             item.mm_preprocess_config,
         )
+        self.request.headers = {"X-DashScope-Uid": "uid-http"}
         self.request.mm_inputs = [item, second, second]
         self.request.generate_config.max_pixels = 1024
         keys = multimodal_cache_keys(self.request)
@@ -270,6 +271,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resolved[0].cache_key(), keys[1])
         self.assertEqual(resolved[0].mm_preprocess_config.max_pixels, 1024)
+        self.assertEqual(calls[1].kwargs["user_id"], "uid-http")
         self.assertTrue(calls[1].kwargs["required"])
         self.assertGreater(calls[1].args[2], 0.5)
 
@@ -476,6 +478,10 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         keys = multimodal_cache_keys(self.request)
         self.request.generate_config.mm_timeout_ms = 2000
         payloads = []
+        self.request.headers = {
+            "X-DashScope-Uid": "uid-cold-submit",
+            "X-DashScope-Service": "service-cold",
+        }
         reject = False
 
         async def handler(request):
@@ -489,6 +495,8 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
                         "entries": [{"key": keys[0], "hash_hit": False}],
                     }
                 )
+            self.assertEqual(request.headers.get("X-DashScope-Uid"), "uid-cold-submit")
+            self.assertEqual(request.headers.get("X-DashScope-Service"), "service-cold")
             if reject:
                 return web.json_response(
                     {
@@ -584,7 +592,14 @@ class MMCacheApiTest(unittest.TestCase):
         app = FastAPI()
         register_mm_cache_routes(app, engine)
         with TestClient(app) as client:
-            response = client.post("/mm_cache/metadata", json=payload)
+            response = client.post(
+                "/mm_cache/metadata",
+                json=payload,
+                headers={
+                    "x-DashScope-uID": "uid-http",
+                    "X-DashScope-Service": "service-http",
+                },
+            )
             self.assertEqual(response.status_code, 200, response.text)
             entry = response.json()["entries"][0]
             self.assertTrue(entry["hash_hit"])
@@ -596,7 +611,13 @@ class MMCacheApiTest(unittest.TestCase):
             self.assertEqual(call.args[0][0].cache_key(), key)
             self.assertEqual(
                 call.kwargs,
-                {"request_id": 321, "timeout_ms": 1234, "hashes_only": True},
+                {
+                    "request_id": 321,
+                    "timeout_ms": 1234,
+                    "hashes_only": True,
+                    "user_id": "uid-http",
+                    "service_name": "service-http",
+                },
             )
 
             engine.get_embedding_result.reset_mock()
