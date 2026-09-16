@@ -89,7 +89,7 @@ class PriorityLatencyE2ETest {
                                 + ", arrivals=" + h.engineArrivalOrder.size()
                                 + ", queued=" + h.scheduler.getQueuedRequestCount()
                                 + ", prefillWork=" + h.prefillEndpoint(0).captureRouteProjectionInputs().work()
-                                + ", decode=" + h.decodeEndpoint(0).layeredAdmissionView());
+                                + ", decode=" + h.decodeEndpoint(0).resourceSnapshot());
             }
             assertEquals(total, h.engineArrivalOrder.size(),
                     "every request must have reached the engine exactly once");

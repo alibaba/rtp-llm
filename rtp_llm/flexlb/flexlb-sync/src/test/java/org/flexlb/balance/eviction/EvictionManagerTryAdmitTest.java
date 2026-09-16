@@ -96,7 +96,7 @@ class EvictionManagerTryAdmitTest {
         var victim = new DecodeEndpoint.DecodeRequestView(901L, 30, 128L, 128L,
                 DecodeTaskPhase.ACCEPTED_NOT_RUNNING, true, 11L, false, false);
         when(endpoint.ipPort()).thenReturn("127.0.0.1:8080");
-        when(endpoint.layeredAdmissionView()).thenReturn(view);
+        when(endpoint.resourceSnapshot()).thenReturn(view);
         when(view.routing()).thenReturn(routing);
         when(view.reserved()).thenReturn(Map.of());
         when(view.confirmed()).thenReturn(List.of(victim));

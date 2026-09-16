@@ -152,23 +152,23 @@ class TwinOverloadAdmissionTest {
         for (long id = 1; id <= 9; id++) {
             try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
                 assertNotNull(pin);
-                assertNotNull(endpoint.tryReservePlacementPinned(pin, id, 128L, 256L, 50));
+                assertNotNull(endpoint.reserve(pin, id, 128L, 256L, 50));
             }
         }
         for (long id = 1; id <= 8; id++) {
             DecodeEndpoint.EngineDispatchPermitAcquisition acquisition =
-                    endpoint.acquireEngineDispatchPermit(endpoint.reservationHandle(id), new DecodeEndpoint.AdmissionCapacity(8L, 90L));
+                    endpoint.acquireDispatchPermit(endpoint.reservationHandle(id), new DecodeEndpoint.AdmissionCapacity(8L, 90L));
             assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
             assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
-                    acquisition.permit().transferToEngineLifecycle());
+                    acquisition.permit().dispatch());
         }
         assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
-                endpoint.acquireEngineDispatchPermit(endpoint.reservationHandle(9L), new DecodeEndpoint.AdmissionCapacity(8L, 90L)).status());
+                endpoint.acquireDispatchPermit(endpoint.reservationHandle(9L), new DecodeEndpoint.AdmissionCapacity(8L, 90L)).status());
 
         applyStatus(endpoint, tasks(2L, 7, 10L, TaskPhase.RUNNING),
                 tasks(1L, 1, 10L, TaskPhase.RUNNING));
         DecodeEndpoint.EngineDispatchPermitAcquisition resumed =
-                endpoint.acquireEngineDispatchPermit(endpoint.reservationHandle(9L), new DecodeEndpoint.AdmissionCapacity(8L, 90L));
+                endpoint.acquireDispatchPermit(endpoint.reservationHandle(9L), new DecodeEndpoint.AdmissionCapacity(8L, 90L));
         assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, resumed.status());
         assertTrue(resumed.permit().release());
     }

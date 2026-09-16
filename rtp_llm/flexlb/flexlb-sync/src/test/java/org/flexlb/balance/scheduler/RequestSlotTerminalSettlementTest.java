@@ -45,12 +45,12 @@ class RequestSlotTerminalSettlementTest {
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         DeferredTerminal terminal = DeferredTerminal.worker(
                 WorkerTerminalSource.PREFILL_ENDPOINT, false, 9L);
-        when(decode.reconcilePriorityVictimFinished(4L, RESERVATION))
+        when(decode.updatePreemption(4L, DecodeEndpoint.PreemptionUpdate.finished(RESERVATION)))
                 .thenReturn(false);
 
         assertFalse(RequestSlot.tryReconcileDecodeTerminal(
                 terminal, decode, 4L, RESERVATION));
-        verify(decode).reconcilePriorityVictimFinished(4L, RESERVATION);
+        verify(decode).updatePreemption(4L, DecodeEndpoint.PreemptionUpdate.finished(RESERVATION));
     }
 
     @ParameterizedTest

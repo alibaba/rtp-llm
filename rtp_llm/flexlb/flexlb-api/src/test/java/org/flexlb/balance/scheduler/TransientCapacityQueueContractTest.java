@@ -110,11 +110,9 @@ class TransientCapacityQueueContractTest {
             DecodeEndpoint.ReservationHandle settled;
             try (WorkerEndpoint.GenerationPin pin =
                          fixture.decodeEndpoint.tryPinGeneration()) {
-                settled = fixture.decodeEndpoint.tryReservePlacementPinned(
-                        pin, requestId, 128L, 136L, 50);
+                settled = fixture.decodeEndpoint.reserve(pin, requestId, 128L, 136L, 50);
             }
-            assertTrue(fixture.decodeEndpoint.releaseLocalShadowIfExact(
-                    settled));
+            assertTrue(fixture.decodeEndpoint.release(settled, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED).released());
             assertEquals(0, fixture.totalDecodeReservations());
 
             fixture.runtime.applyStatus(
@@ -495,7 +493,7 @@ class TransientCapacityQueueContractTest {
             assertEquals(1, fixture.prefillEndpoint.queuedRequestCount(),
                     "the selected route waits on its Prefill, not in global Decode selection");
             assertEquals(1,
-                    fixture.decodeEndpoint.layeredAdmissionView().queuedCount(),
+                    fixture.decodeEndpoint.resourceSnapshot().queuedCount(),
                     "placement records ownership without taking an Engine dispatch permit");
             assertEquals(List.of(), fixture.submission.requestIds());
 
@@ -525,7 +523,7 @@ class TransientCapacityQueueContractTest {
             assertTrue(fixture.metrics.totalPlacementAttempts() > 0);
             assertFalse(waiting.isDone());
             assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
-            assertEquals(0, fixture.decodeEndpoint.layeredAdmissionView().queuedCount());
+            assertEquals(0, fixture.decodeEndpoint.resourceSnapshot().queuedCount());
             assertEquals(List.of(), fixture.submission.requestIds());
             fixture.releaseCapacity();
             Response response = waiting.get(2, TimeUnit.SECONDS);
@@ -600,11 +598,11 @@ class TransientCapacityQueueContractTest {
 
             assertTrue(waiting.stream().noneMatch(CompletableFuture::isDone));
             int capacityRequests = waiting.size();
-            awaitCondition(() -> fixture.decodeEndpoint.layeredAdmissionView()
+            awaitCondition(() -> fixture.decodeEndpoint.resourceSnapshot()
                     .reserved().size() == capacityRequests
                     && fixture.prefillEndpoint.observedRequestCount() == capacityRequests, 2_000L);
             assertEquals(capacityRequests,
-                    fixture.decodeEndpoint.layeredAdmissionView().reserved().size(),
+                    fixture.decodeEndpoint.resourceSnapshot().reserved().size(),
                     () -> "batch credits must not become an extra worker request-count limit: prefill="
                             + fixture.prefillEndpoint.observedRequestCount()
                             + ", queued=" + fixture.runtime.scheduler().getQueuedRequestCount()
@@ -859,9 +857,9 @@ class TransientCapacityQueueContractTest {
             awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
             assertFalse(waiting.isDone());
             assertEquals(1, fixture.decodeEndpoint
-                    .layeredAdmissionView().reserved().size());
+                    .resourceSnapshot().reserved().size());
             assertEquals(0, spareEndpoint
-                    .layeredAdmissionView().reserved().size());
+                    .resourceSnapshot().reserved().size());
 
             fixture.runtime.applyStatus(
                     fixture.decodeStatus,
@@ -1070,7 +1068,7 @@ class TransientCapacityQueueContractTest {
 
         private int totalDecodeReservations() {
             return decodeEndpoints.stream()
-                    .mapToInt(endpoint -> endpoint.layeredAdmissionView()
+                    .mapToInt(endpoint -> endpoint.resourceSnapshot()
                             .reserved().size())
                     .sum();
         }

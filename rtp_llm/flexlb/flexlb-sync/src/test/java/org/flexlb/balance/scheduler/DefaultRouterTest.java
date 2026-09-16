@@ -127,8 +127,7 @@ class DefaultRouterTest {
         stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
         when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(ScheduledRequest.class), eq(1L)))
                 .thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED, registration));
-        when(((DecodeEndpoint) decode.endpoint).tryReservePlacementPinned(
-                eq(decode.pin), eq(7L), eq(32L), eq(48L), eq(50)))
+        when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq(7L), eq(32L), eq(48L), eq(50)))
                 .thenReturn(reservation);
         var permit = stubDecodePermit((DecodeEndpoint) decode.endpoint, reservation);
 
@@ -138,9 +137,9 @@ class DefaultRouterTest {
         assertEquals(List.of(prefill.status, decode.status),
                 response.getServerStatus());
         verify(registration).close();
-        verify(permit).transferToEngineLifecycle();
+        verify(permit).dispatch();
         verify((DecodeEndpoint) decode.endpoint, never())
-                .releaseReservationExact(reservation);
+                .release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         verify(prefill.pin).close();
         verify(decode.pin).close();
     }
@@ -160,8 +159,7 @@ class DefaultRouterTest {
         when(decodeSelector.select(DecodeBinding.capture(context), "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
         stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
-        when(((DecodeEndpoint) decode.endpoint).tryReservePlacementPinned(
-                eq(decode.pin), eq(8L), eq(32L), eq(48L), eq(50)))
+        when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq(8L), eq(32L), eq(48L), eq(50)))
                 .thenReturn(reservation);
         stubDecodePermit((DecodeEndpoint) decode.endpoint, reservation);
         when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(ScheduledRequest.class), eq(1L)))
@@ -170,7 +168,7 @@ class DefaultRouterTest {
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
                 scheduler(router, context).submit(context).join().getCode());
         verify(prefillSelector).select(context, RoleType.PREFILL, null);
-        verify((DecodeEndpoint) decode.endpoint).releaseReservationExact(reservation);
+        verify((DecodeEndpoint) decode.endpoint).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         verify(prefill.pin).close();
         verify(decode.pin).close();
     }
@@ -225,10 +223,9 @@ class DefaultRouterTest {
             when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(ScheduledRequest.class), eq(1L)))
                     .thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED,
                             mock(PrefillState.RouteReservation.class)));
-            when(((DecodeEndpoint) decode.endpoint).tryReservePlacementPinned(
-                    eq(decode.pin), eq(9L), eq(32L), eq(48L), eq(50))).thenReturn(reservation);
+            when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq(9L), eq(32L), eq(48L), eq(50))).thenReturn(reservation);
             stubDecodePermit((DecodeEndpoint) decode.endpoint, reservation);
-            when(((DecodeEndpoint) decode.endpoint).isReservationAccepted(reservation)).thenReturn(true);
+            when(((DecodeEndpoint) decode.endpoint).isAcceptedByEngine(reservation)).thenReturn(true);
 
             assertTrue(scheduler(router(), context).submit(context).get(2L, TimeUnit.SECONDS).isSuccess());
             assertTrue(context.getFuture().get(2L, TimeUnit.SECONDS).isSuccess());
@@ -242,7 +239,7 @@ class DefaultRouterTest {
                     + context.getConfig().getRequestLifecycle().getRequest().getTimeoutMs());
             assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(9L, 0L).state());
             assertEquals(0, requests.liveRequestCount());
-            verify((DecodeEndpoint) decode.endpoint).expireReservationExact(reservation);
+            verify((DecodeEndpoint) decode.endpoint).release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED);
             verify((PrefillEndpoint) prefill.endpoint).expireCommittedItem(any(ScheduledRequest.class));
         } finally {
             requests.closeAdmissionAndAwaitMutations();
@@ -307,9 +304,9 @@ class DefaultRouterTest {
         var selectedDecode = selection(RoleType.DECODE, 701L, "10.0.0.2", 8080, "g1");
         var decode = (DecodeEndpoint) selectedDecode.endpoint();
         var reservation = new DecodeEndpoint.ReservationHandle(1L, 701L, 1L);
-        when(decode.tryReservePlacementPinned(any(), anyLong(), anyLong(), anyLong(), anyInt()))
+        when(decode.reserve(any(), anyLong(), anyLong(), anyLong(), anyInt()))
                 .thenReturn(reservation);
-        when(decode.acquireEngineDispatchPermit(reservation, frozen.capacity())).thenReturn(
+        when(decode.acquireDispatchPermit(reservation, frozen.capacity())).thenReturn(
                 new DecodeEndpoint.EngineDispatchPermitAcquisition(
                         DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL, null));
 
@@ -342,15 +339,12 @@ class DefaultRouterTest {
             assertFalse(delivery.accepted());
             assertTrue(delivery.boundary().unavailable());
             assertFalse(delivery.boundary().availability().isAvailable());
-            verify(decode).isEngineDispatchPermitAvailable(701L, frozen.capacity());
-            verify(decode).acquireEngineDispatchPermit(reservation, frozen.capacity());
-            verify(decode).tryReservePlacementPinned(any(), eq(701L),
-                    eq(hardKv), eq(expectedKv),
-                    eq(73));
-            verify(decode, never()).tryReservePlacementPinned(
-                    any(), anyLong(), anyLong(), anyLong(), anyInt(), any());
+            verify(decode).shouldRetryDispatch(701L, frozen.capacity());
+            verify(decode).acquireDispatchPermit(reservation, frozen.capacity());
+            verify(decode).reserve(any(), eq(701L), eq(hardKv), eq(expectedKv), eq(73));
+            verify(decode, never()).reserve(any(), anyLong(), anyLong(), anyLong(), anyInt(), any());
         }
-        verify(decode).releaseReservationExact(reservation);
+        verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
     }
 
     private static void stubPrefillCommit(PrefillEndpoint prefill) {
@@ -369,10 +363,10 @@ class DefaultRouterTest {
     private static DecodeEndpoint.EngineDispatchPermit stubDecodePermit(
             DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
         var permit = mock(DecodeEndpoint.EngineDispatchPermit.class);
-        when(endpoint.acquireEngineDispatchPermit(eq(reservation), any()))
+        when(endpoint.acquireDispatchPermit(eq(reservation), any()))
                 .thenReturn(new DecodeEndpoint.EngineDispatchPermitAcquisition(
                         DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, permit));
-        when(permit.transferToEngineLifecycle())
+        when(permit.dispatch())
                 .thenReturn(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED);
         return permit;
     }

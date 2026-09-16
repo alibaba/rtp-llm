@@ -133,7 +133,7 @@ class RequestAdmissionExpirationRaceTest {
             assertEquals(clientCancellation ? RequestState.Phase.CANCELLED : RequestState.Phase.FAILED,
                     registry.getRequestState(requestId, 0L).state());
             assertEquals(0, registry.liveRequestCount());
-            verify(decode, times(1)).expireReservationExact(reservation);
+            verify(decode, times(1)).release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED);
             verify(prefill, times(1)).expireCommittedItem(item);
         } finally {
             if (registry.closeAdmissionAndAwaitMutations()) {

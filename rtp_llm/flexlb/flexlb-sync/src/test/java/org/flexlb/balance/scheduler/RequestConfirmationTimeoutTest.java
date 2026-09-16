@@ -74,12 +74,12 @@ class RequestConfirmationTimeoutTest {
             var capacity = new DecodeEndpoint.AdmissionCapacity(1L, 90L);
             DecodeEndpoint.ReservationHandle reservation;
             try (var pin = decode.tryPinGeneration()) {
-                reservation = decode.tryReservePlacementPinned(pin, REQUEST_ID, 16L, 32L, 50, capacity);
+                reservation = decode.reserve(pin, REQUEST_ID, 16L, 32L, 50, capacity);
                 assertNotNull(reservation);
-                var acquired = decode.acquireEngineDispatchPermit(reservation, capacity);
+                var acquired = decode.acquireDispatchPermit(reservation, capacity);
                 assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
                 assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
-                        acquired.permit().transferToEngineLifecycle());
+                        acquired.permit().dispatch());
             }
             var context = RequestLifecycleTestSupport.context(config, REQUEST_ID);
             var future = requests.register(context);
@@ -142,12 +142,12 @@ class RequestConfirmationTimeoutTest {
 
             // Local expiration restores admission capacity without an Engine Cancel channel.
             try (var pin = decode.tryPinGeneration()) {
-                var next = decode.tryReservePlacementPinned(pin, 102L, 16L, 32L, 50, capacity);
+                var next = decode.reserve(pin, 102L, 16L, 32L, 50, capacity);
                 assertNotNull(next);
-                var acquired = decode.acquireEngineDispatchPermit(next, capacity);
+                var acquired = decode.acquireDispatchPermit(next, capacity);
                 assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
                 assertTrue(acquired.permit().release());
-                decode.releaseReservationExact(next);
+                decode.release(next, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             }
             requests.processPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
             requests.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(reservation));

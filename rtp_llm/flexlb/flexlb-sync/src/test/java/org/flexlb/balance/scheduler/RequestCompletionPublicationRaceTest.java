@@ -89,8 +89,8 @@ class RequestCompletionPublicationRaceTest {
                 assertFalse(Thread.holdsLock(slot));
                 cleanupEntered.countDown();
                 await(resumeCleanup);
-                return true;
-            }).when(decode).expireReservationExact(reservation);
+                return DecodeEndpoint.ReservationReleaseResult.RELEASED;
+            }).when(decode).release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED);
             CompletableFuture<Void> callback = future.thenAccept(response ->
                     assertFalse(Thread.holdsLock(slot), "frontend callbacks must not hold the slot lock"));
 
@@ -119,7 +119,7 @@ class RequestCompletionPublicationRaceTest {
             assertFalse(expired.isSuccess());
             assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), expired.getCode());
             assertEquals(RequestState.Phase.TIMED_OUT, slot.snapshot().state());
-            verify(decode).expireReservationExact(reservation);
+            verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED);
             verify(prefill).expireCommittedItem(item);
         } finally {
             resumeReporting.countDown();

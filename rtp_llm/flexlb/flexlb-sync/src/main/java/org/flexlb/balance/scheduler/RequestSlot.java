@@ -695,7 +695,7 @@ public final class RequestSlot {
                 if (exact.decodeEp() == null || exact.decodeReservation() == null) {
                     decodeDone = true;
                 } else if (expired) {
-                    exact.decodeEp().expireReservationExact(exact.decodeReservation());
+                    exact.decodeEp().release(exact.decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
                     decodeDone = true;
                 } else {
                     decodeDone = exact.decodeEp().settleFailedRequest(exact.decodeReservation(), source);
@@ -1314,7 +1314,7 @@ public final class RequestSlot {
             case WAITING_ENGINE -> throw new IllegalStateException("delivery already observed");
         }
         // Reconcile the exact reservation in this decision. Engine acceptance overrides the prediction.
-        if (item.decodeEp() != null && item.decodeEp().isReservationAccepted(item.decodeReservation())) {
+        if (item.decodeEp() != null && item.decodeEp().isAcceptedByEngine(item.decodeReservation())) {
             return applyDecodeStatusLocked(item.decodeEp(),
                     DecodeEndpoint.WorkerStatusFact.accepted(item.decodeReservation()), nowMs).obsoleteDeadline();
         }
@@ -1602,8 +1602,7 @@ public final class RequestSlot {
         }
         DecodeEndpoint decode = expected.decodeEp();
         if (decode == null
-                || decode.reconcilePriorityVictimActive(
-                        exact.attemptToken(), expected.decodeReservation())) {
+                || decode.updatePreemption(exact.attemptToken(), DecodeEndpoint.PreemptionUpdate.active(expected.decodeReservation()))) {
             detachPreemptionOwner(exact);
         }
         return RequestEffect.NONE;
@@ -1652,8 +1651,7 @@ public final class RequestSlot {
                 || exact.isFinished()
                 || decode == null
                 || expected.decodeReservation() == null
-                || !decode.settlePriorityCanceled(
-                        exact.attemptToken(), expected.decodeReservation())
+                || !decode.updatePreemption(exact.attemptToken(), DecodeEndpoint.PreemptionUpdate.canceled(expected.decodeReservation()))
                 || !ownsResourceTracking()
                 || preemption != exact
                 || !exact.tryFinish()) {
@@ -1768,9 +1766,7 @@ public final class RequestSlot {
         ScheduledRequest active = activeItem();
         DecodeEndpoint decode = active == null ? null : active.decodeEp();
         boolean activeWon = decode == null
-                || decode.reconcilePriorityVictimActive(
-                        exact.attemptToken(),
-                        active.decodeReservation());
+                || decode.updatePreemption(exact.attemptToken(), DecodeEndpoint.PreemptionUpdate.active(active.decodeReservation()));
         if (!activeWon) {
             return RequestEffect.NONE;
         }
@@ -1794,8 +1790,7 @@ public final class RequestSlot {
         if (decode == null || terminal.decodeTerminalAlreadyApplied()) {
             return true;
         }
-        return decode.reconcilePriorityVictimFinished(
-                attemptToken, reservation);
+        return decode.updatePreemption(attemptToken, DecodeEndpoint.PreemptionUpdate.finished(reservation));
     }
 
     private boolean detachPreemptionOwner(PreemptionRegistration exact) {
@@ -1878,14 +1873,14 @@ public final class RequestSlot {
             // Expiry ends exact local tracking even when delivery is uncertain or Engine-owned.
             failure = RequestTerminalCleanup.runTerminalLeaf(failure,
                     exact.decodeEp() == null ? null
-                            : () -> exact.decodeEp().expireReservationExact(exact.decodeReservation()));
+                            : () -> exact.decodeEp().release(exact.decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED));
             failure = RequestTerminalCleanup.runTerminalLeaf(failure,
                     exact.prefillEp() == null ? null : () -> exact.prefillEp().expireCommittedItem(exact));
         } else {
             // A projection may lag endpoint ownership. Never roll back an Engine/protocol owner.
             failure = RequestTerminalCleanup.runTerminalLeaf(failure,
                     exact.decodeEp() == null ? null
-                            : () -> exact.decodeEp().releaseLocalShadowIfExact(exact.decodeReservation()));
+                            : () -> exact.decodeEp().release(exact.decodeReservation(), DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
             boolean releasePrefill = event != null && switch (event.kind()) {
                 case DECODE_GENERATION_RETIRED, PRIORITY -> true;
                 case WORKER -> event.workerSource() != WorkerTerminalSource.PREFILL_ENDPOINT

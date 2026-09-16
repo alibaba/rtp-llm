@@ -141,7 +141,7 @@ class DecodeEndpointTest {
         assertEquals(1, endpoint.routingView().engineLoad());
 
         // Commit req 1's pre-delivery permit → back to engine load 2.
-        assertEquals(TRANSFERRED, acquirePermit(1L).transferToEngineLifecycle());
+        assertEquals(TRANSFERRED, acquirePermit(1L).dispatch());
         assertEquals(2, endpoint.routingView().engineLoad());
 
         // release req 2 (was queued) → inflight=2, queued=0
@@ -196,8 +196,8 @@ class DecodeEndpointTest {
         reserve(1L, 100, 100);
         markQueued(1L);
         DecodeEndpoint.EngineDispatchPermit permit = acquirePermit(1L);
-        assertEquals(TRANSFERRED, permit.transferToEngineLifecycle());
-        assertEquals(TRANSFERRED, permit.transferToEngineLifecycle());
+        assertEquals(TRANSFERRED, permit.dispatch());
+        assertEquals(TRANSFERRED, permit.dispatch());
         assertEquals(1, endpoint.routingView().engineLoad());
     }
 
@@ -234,14 +234,14 @@ class DecodeEndpointTest {
         assertEquals(3, endpoint.getInflightCount());
         assertEquals(0, endpoint.routingView().engineLoad());
         assertEquals(3, endpoint.routingView().totalLoad());
-        assertEquals(3, endpoint.layeredAdmissionView().queuedCount());
+        assertEquals(3, endpoint.resourceSnapshot().queuedCount());
 
         Thread.sleep(20);
         int evicted = endpoint.evictExpiredRequests(5, requestId -> false);
 
         assertEquals(3, evicted);
         assertEquals(0, endpoint.getInflightCount());
-        assertTrue(endpoint.layeredAdmissionView().queuedCount() == 0);
+        assertTrue(endpoint.resourceSnapshot().queuedCount() == 0);
         assertEquals(0, endpoint.routingView().engineLoad());
         assertEquals(0, endpoint.routingView().totalLoad());
         assertEquals(0, endpoint.routingView().inflightHardKv());
@@ -251,10 +251,12 @@ class DecodeEndpointTest {
 
     /** Directly mutate the private counter to simulate drift. */
     private void setQueuedPhaseCount(int value) throws Exception {
-        java.lang.reflect.Field f = DecodeEndpoint.class.getDeclaredField("queuedPhaseCount");
+        java.lang.reflect.Field owner = DecodeEndpoint.class.getDeclaredField("state");
+        owner.setAccessible(true);
+        java.lang.reflect.Field f = DecodeState.class.getDeclaredField("queuedPhaseCount");
         f.setAccessible(true);
         java.util.concurrent.atomic.AtomicInteger counter =
-                (java.util.concurrent.atomic.AtomicInteger) f.get(endpoint);
+                (java.util.concurrent.atomic.AtomicInteger) f.get(owner.get(endpoint));
         counter.set(value);
     }
 
@@ -273,8 +275,7 @@ class DecodeEndpointTest {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
             DecodeEndpoint.ReservationHandle reservation =
-                    endpoint.reservePinned(
-                            pin, requestId, hardKv, expectedKv, 0);
+                    endpoint.reserveUnqueued(pin, requestId, hardKv, expectedKv, 0);
             reservations.put(requestId, reservation);
             return reservation;
         }
@@ -284,14 +285,14 @@ class DecodeEndpointTest {
         DecodeEndpoint.ReservationHandle reservation =
                 reservations.get(requestId);
         if (reservation != null) {
-            endpoint.releaseReservationExact(reservation);
+            endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         }
     }
 
     private void markQueued(long requestId) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
-            assertTrue(endpoint.markQueuedExact(pin, reservations.get(requestId)));
+            assertTrue(endpoint.markQueued(pin, reservations.get(requestId)));
         }
     }
 
@@ -303,7 +304,7 @@ class DecodeEndpointTest {
 
     private DecodeEndpoint.EngineDispatchPermit acquirePermit(long requestId) {
         DecodeEndpoint.EngineDispatchPermitAcquisition acquisition =
-                endpoint.acquireEngineDispatchPermit(reservations.get(requestId), new DecodeEndpoint.AdmissionCapacity(0, 100L));
+                endpoint.acquireDispatchPermit(reservations.get(requestId), new DecodeEndpoint.AdmissionCapacity(0, 100L));
         assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
                 acquisition.status());
         assertNotNull(acquisition.permit());

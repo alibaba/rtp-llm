@@ -171,8 +171,7 @@ public final class DeliveryStrategyTestSupport {
             Mockito.when(prefill.reserveBatch(
                             Mockito.any(), Mockito.anyLong(), Mockito.anyInt()))
                     .thenAnswer(invocation -> reserveBatch());
-            Mockito.when(decode.acquireEngineDispatchPermit(
-                            Mockito.any(), Mockito.any()))
+            Mockito.when(decode.acquireDispatchPermit(Mockito.any(), Mockito.any()))
                     .thenAnswer(invocation -> acquirePermit(
                             ((DecodeEndpoint.ReservationHandle) invocation.getArgument(0)).requestId()));
         }
@@ -254,7 +253,7 @@ public final class DeliveryStrategyTestSupport {
             ScheduledRequest item = itemsByRequestId.get(requestId);
             DecodeEndpoint.EngineDispatchPermit permit = Mockito.mock(
                     DecodeEndpoint.EngineDispatchPermit.class);
-            Mockito.when(permit.transferToEngineLifecycle()).thenReturn(
+            Mockito.when(permit.dispatch()).thenReturn(
                     DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED);
             if (item != null) {
                 permits.put(item, permit);
