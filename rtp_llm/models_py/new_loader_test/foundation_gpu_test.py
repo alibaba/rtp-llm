@@ -58,6 +58,54 @@ register_model("foundation_gpu_alias_model")(_GpuAliasModel)
 
 
 class FoundationGpuTest(unittest.TestCase):
+    def test_mla_runtime_mixin_forwards_graph_selection_mode(self):
+        from rtp_llm.config.cuda_graph import (
+            GenerationPrefillCudaGraphUnsupportedBackend,
+        )
+        from rtp_llm.models_py.new_models.deepseek_v3.language import (
+            MlaRuntimeLayoutMixin,
+        )
+        from rtp_llm.ops.compute_ops import PyAttentionInputs
+
+        class RoutingModel(MlaRuntimeLayoutMixin, GptModelBase):
+            pass
+
+        model = RoutingModel(
+            types.SimpleNamespace(num_layers=1, vocab_size=8),
+            types.SimpleNamespace(),
+        )
+        model._mla_kernel_layout = object()
+        inputs = types.SimpleNamespace(attention_inputs=PyAttentionInputs())
+        for use_mla in (False, True):
+            model.use_mla = use_mla
+            for mode in (None, "decode_graph", "generation_prefill_graph"):
+                with self.subTest(use_mla=use_mla, mode=mode), mock.patch(
+                    "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl"
+                ) as factory:
+                    result = model.prepare_fmha_impl(
+                        inputs,
+                        is_cuda_graph=mode is not None,
+                        cuda_graph_selection_mode=mode,
+                    )
+                    factory.assert_called_once()
+                    self.assertIs(result, factory.return_value)
+                    self.assertEqual(
+                        factory.call_args.kwargs["cuda_graph_selection_mode"], mode
+                    )
+                    # Preserve the typed capability refusal so C++ can fall
+                    # back, rather than turning it into a signature TypeError.
+                    factory.side_effect = GenerationPrefillCudaGraphUnsupportedBackend(
+                        "unsupported backend"
+                    )
+                    with self.assertRaises(
+                        GenerationPrefillCudaGraphUnsupportedBackend
+                    ):
+                        model.prepare_fmha_impl(
+                            inputs,
+                            is_cuda_graph=True,
+                            cuda_graph_selection_mode="generation_prefill_graph",
+                        )
+
     def test_aux_hidden_capture_defaults_off_for_lightweight_config(self):
         for optional_fields in (
             {},
