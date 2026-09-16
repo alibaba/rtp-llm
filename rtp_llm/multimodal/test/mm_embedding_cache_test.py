@@ -53,15 +53,17 @@ class EmbeddingCapacityTest(unittest.TestCase):
         position = torch.ones(2, dtype=torch.int64)
         extra = torch.ones(8)
         _, entry = cache.try_acquire("view")
-        # Two small, distinct views share and retain the 400-byte batch.
+        # Pool insertion compacts views instead of retaining the 400-byte batch.
         result = ([batch[:2].view(1, 2), batch[10:12].view(1, 2)], position, extra)
         entry.complete(result)
-        self.assertEqual(cache.stats()["resident_bytes"], 400 + 16 + 32)
+        self.assertEqual(cache.stats()["resident_bytes"], 8 + 8 + 16 + 32)
         self.assertEqual(cache.stats()["resident_tokens"], 2)
         cache.remove("view")
         self.assertEqual(cache.stats()["resident_bytes"], 0)
         # Evicting the index entry does not invalidate a waiting request.
-        self.assertIs(entry.wait(), result)
+        actual = entry.wait()
+        self.assertEqual(actual[0][0].tolist(), [[1.0, 1.0]])
+        self.assertEqual(actual[0][1].tolist(), [[1.0, 1.0]])
 
     def test_oversized_result_bypasses_cache_without_flushing_small_results(self):
         cache = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=32)
@@ -105,7 +107,9 @@ class EmbeddingCapacityTest(unittest.TestCase):
         self.assertTrue(all(claimed is entry for _, claimed in claims))
         result = torch.ones(4)
         entry.complete(result)
-        self.assertTrue(all(claimed.wait() is result for _, claimed in claims))
+        self.assertTrue(
+            all(torch.equal(claimed.wait(), result) for _, claimed in claims)
+        )
 
         def complete(i):
             _, current = cache.try_acquire(str(i))
@@ -127,6 +131,41 @@ class EmbeddingCapacityTest(unittest.TestCase):
         new.complete(torch.ones(2))
         self.assertIs(cache.peek("key"), new)
         self.assertEqual(cache.stats()["resident_bytes"], 8)
+
+    def test_cpu_pool_reuses_one_arena_without_mutating_returned_values(self):
+        cache = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=32)
+        arena_ptr = cache._cpu_pool._storage.data_ptr()
+        _, first = cache.try_acquire("first")
+        first.complete(torch.arange(8, dtype=torch.float32))
+        held = first.wait()
+        cache.remove("first")
+
+        _, second = cache.try_acquire("second")
+        second.complete(torch.full((8,), 9.0))
+        self.assertEqual(cache._cpu_pool._storage.data_ptr(), arena_ptr)
+        self.assertEqual(held.tolist(), list(map(float, range(8))))
+        self.assertEqual(second.wait().tolist(), [9.0] * 8)
+        stats = cache.stats()
+        self.assertEqual(stats["cpu_pool_capacity_bytes"], 32)
+        self.assertEqual(stats["cpu_pool_used_bytes"], 32)
+
+    def test_cpu_pool_evicts_lru_to_coalesce_fragmented_space(self):
+        cache = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=32)
+        entries = {}
+        for key in ("a", "b", "c", "d"):
+            _, entry = cache.try_acquire(key)
+            entry.complete(torch.ones(2))
+            entries[key] = entry
+        cache.remove("b")
+        cache.remove("d")
+
+        _, large = cache.try_acquire("large")
+        large.complete(torch.arange(4, dtype=torch.float32))
+        self.assertIsNone(cache.peek("a"))
+        self.assertIs(cache.peek("c"), entries["c"])
+        self.assertIs(cache.peek("large"), large)
+        self.assertEqual(large.wait().tolist(), [0.0, 1.0, 2.0, 3.0])
+        self.assertEqual(cache.stats()["cpu_pool_used_bytes"], 24)
 
 
 @unittest.skipUnless(
@@ -180,7 +219,8 @@ class EmbeddingGpuCpuTest(unittest.TestCase):
         self.add(cache, 2, count=128)
         self.assertEqual(entry.result[0][0].device.type, "cpu")
         self.assertIs(entry.result[0][0], entry.result[0][1])
-        self.assertIs(entry.result[1], position)
+        self.assertIsNot(entry.result[1], position)
+        self.assertTrue(torch.equal(entry.result[1], position))
         actual = entry.wait()
         self.assertEqual(entry.generation, generation)
         for expected, got in (
@@ -216,7 +256,7 @@ class EmbeddingGpuCpuTest(unittest.TestCase):
         self.assertEqual(cache.stats()["cpu_resident_bytes"], 0)
         self.assertEqual(first.wait().device.type, "cuda")
 
-    def test_concurrent_cpu_hit_copies_once(self):
+    def test_concurrent_cpu_hits_promote_once_and_return_independent_values(self):
         cache = MMEmbeddingCache(gpu_max_bytes=32, cpu_max_bytes=64)
         entry = self.add(cache, 1)
         self.add(cache, 2)
@@ -229,7 +269,8 @@ class EmbeddingGpuCpuTest(unittest.TestCase):
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(read, range(8)))
-        self.assertTrue(all(value is results[0] for value in results))
+        self.assertTrue(all(value.tolist() == [1.0] * 8 for value in results))
+        self.assertEqual(len({value.data_ptr() for value in results}), len(results))
         self.assertEqual(cache.stats()["promotion"], 1)
         self.assertEqual(entry.tier, "gpu")
         self.assertEqual(results[0].tolist(), [1.0] * 8)
@@ -262,7 +303,7 @@ class EmbeddingGpuCpuTest(unittest.TestCase):
         self.add(cache, 2)
         generation = entry.generation
         with patch(
-            "rtp_llm.multimodal.mm_embedding_cache._copy_result_to_devices",
+            "rtp_llm.multimodal.mm_embedding_cache._copy_pooled_result_to_devices",
             side_effect=torch.OutOfMemoryError("test H2D allocation"),
         ):
             with self.assertRaises(torch.OutOfMemoryError):
@@ -274,11 +315,23 @@ class EmbeddingGpuCpuTest(unittest.TestCase):
         self.assertEqual(entry.tier, "gpu")
 
     def test_spill_failure_does_not_fail_completed_computation(self):
+        from rtp_llm.multimodal.mm_embedding_cache import _pool_result
+
         cache = MMEmbeddingCache(gpu_max_bytes=32, cpu_max_bytes=64)
         a = self.add(cache, 1)
+
+        calls = 0
+
+        def fail_first(result, devices, gpu_pool, cpu_pool):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise MemoryError("test host allocation")
+            return _pool_result(result, devices, gpu_pool, cpu_pool)
+
         with patch(
-            "rtp_llm.multimodal.mm_embedding_cache._copy_result_to_devices",
-            side_effect=MemoryError("test host allocation"),
+            "rtp_llm.multimodal.mm_embedding_cache._pool_result",
+            side_effect=fail_first,
         ):
             b = self.add(cache, 2)
         self.assertIsNone(cache.peek("1"))
@@ -288,23 +341,21 @@ class EmbeddingGpuCpuTest(unittest.TestCase):
         self.assertEqual(cache.stats()["transfer_error"], 1)
 
     def test_metadata_and_hot_reads_do_not_wait_for_an_unrelated_spill(self):
-        from rtp_llm.multimodal.mm_embedding_cache import _copy_result_to_devices
+        from rtp_llm.multimodal.mm_embedding_cache import _pool_result
 
         cache = MMEmbeddingCache(gpu_max_bytes=64, cpu_max_bytes=64)
         a = self.add(cache, 1)
         b = self.add(cache, 2)
         entered, release = threading.Event(), threading.Event()
 
-        def copy(result, devices):
+        def copy(result, devices, gpu_pool, cpu_pool):
             entered.set()
             if not release.wait(timeout=5):
                 raise TimeoutError("test did not release spill")
-            return _copy_result_to_devices(result, devices)
+            return _pool_result(result, devices, gpu_pool, cpu_pool)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            with patch(
-                "rtp_llm.multimodal.mm_embedding_cache._copy_result_to_devices", copy
-            ):
+            with patch("rtp_llm.multimodal.mm_embedding_cache._pool_result", copy):
                 inserting = pool.submit(self.add, cache, 3)
                 try:
                     self.assertTrue(entered.wait(timeout=5))
@@ -381,6 +432,26 @@ class EmbeddingGpuCpuTest(unittest.TestCase):
 
 
 class HashCapacityTest(unittest.TestCase):
+    def test_approval_follows_hash_lifetime_and_replacement(self):
+        hashes = MMHashKeyCache(max_bytes=8192)
+        embeddings = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=32)
+        _, entry = embeddings.try_acquire("a")
+        entry.complete(torch.ones(2))
+        hashes.put("a", [torch.tensor([1, 2])], entry.generation, greennet_passed=True)
+        embeddings.clear()
+        item = hashes.metadata(["a"], embeddings)["entries"][0]
+        self.assertTrue(item["greennet_passed"])
+        self.assertFalse(item["embedding_hit"])
+        self.assertTrue(hashes.greennet_passed("a"))
+        hashes.put("a", [torch.tensor([3])], "new-uninspected")
+        self.assertFalse(hashes.greennet_passed("a"))
+        hashes.put("a", [torch.tensor([4])], "approved", greennet_passed=True)
+        hashes.resize(0)
+        self.assertFalse(hashes.greennet_passed("a"))
+        self.assertFalse(
+            hashes.metadata(["a"], embeddings)["entries"][0]["greennet_passed"]
+        )
+
     def test_capacity_accounts_for_hash_length_and_python_metadata(self):
         cache = MMHashKeyCache(max_bytes=5120)
         for i in range(3):
@@ -435,6 +506,20 @@ class HashCapacityTest(unittest.TestCase):
         self.assertEqual(hashes[0].dtype, torch.int32)
         self.assertEqual(hashes[0].device.type, "cpu")
         self.assertIsNone(cache.get("a", "g2"))
+
+    def test_hash_pool_reuse_cannot_overwrite_a_returned_hash(self):
+        cache = MMHashKeyCache(max_bytes=8192)
+        arena_ptr = cache._pool._storage.data_ptr()
+        cache.put("a", [torch.tensor([1, 2, 3])], "g1")
+        held = cache.get("a", "g1")[0]
+        cache.clear()
+        cache.put("b", [torch.tensor([7, 8, 9])], "g2")
+        self.assertEqual(cache._pool._storage.data_ptr(), arena_ptr)
+        self.assertEqual(held.tolist(), [1, 2, 3])
+        self.assertEqual(cache.get("b", "g2")[0].tolist(), [7, 8, 9])
+        self.assertLessEqual(
+            cache.stats()["pool_used_bytes"], cache.stats()["pool_capacity_bytes"]
+        )
 
     def test_oversized_update_drops_stale_generation_only(self):
         cache = MMHashKeyCache(max_bytes=4096)

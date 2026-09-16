@@ -1187,8 +1187,8 @@ class MMProcessEngine:
                 self.report_vit_error(e)
             for work_item in work_items:
                 work_item.fail_cache(e)
-            torch.cuda.empty_cache()
             gc.collect()
+            torch.cuda.empty_cache()
             self._access_logger.log_exception_access(mm_inputs, e, request_id)
             raise
         finally:
