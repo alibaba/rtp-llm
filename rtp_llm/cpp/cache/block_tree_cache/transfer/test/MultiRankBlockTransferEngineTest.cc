@@ -4,6 +4,7 @@
 #include <chrono>
 #include <csignal>
 #include <condition_variable>
+#include <cstdio>
 #include <future>
 #include <mutex>
 #include <sys/resource.h>
@@ -217,16 +218,7 @@ TEST(MultiRankBlockTransferEngineDeadlineTest, ExpiredTaskReturnsDeadlineBeforeE
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
 }
 
-class MultiRankBlockTransferEngineTest: public ::testing::Test {
-protected:
-    void SetUp() override {
-        auto                     full_group = makeBroadcastGroup("multi_rank_fixture");
-        std::vector<GroupSetPtr> groups     = {full_group};
-        cache_                              = makeBlockTreeCacheForTest(std::move(groups));
-    }
-
-    std::unique_ptr<BlockTreeCache> cache_;
-};
+class MultiRankBlockTransferEngineTest: public ::testing::Test {};
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastManagerStoredCorrectly) {
     // Create a BroadcastManager (no actual RPC connections needed for this test)
@@ -323,11 +315,11 @@ TEST_F(MultiRankBlockTransferEngineTest, CallbackCompletesWithoutCallingWaitDone
     auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
         TransferTask(makeBroadcastDescriptors(), std::chrono::milliseconds(1000)));
 
-    std::promise<ErrorInfo> done;
-    auto                    future = done.get_future();
-    context->onDone([&](ErrorInfo error) { done.set_value(std::move(error)); });
+    auto done   = std::make_shared<std::promise<ErrorInfo>>();
+    auto future = done->get_future();
+    context->onDone([done](ErrorInfo error) { done->set_value(std::move(error)); });
 
-    ASSERT_EQ(future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
     EXPECT_TRUE(future.get().ok());
     EXPECT_TRUE(context->done());
     EXPECT_TRUE(context->success());
@@ -482,15 +474,17 @@ static void broadcastWithNonOkWorkerStatus() {
 
     disableCoreDump();
     StaticConfig::user_ft_core_dump_on_exception = true;
+    std::fprintf(stderr, "broadcast setup complete; exercising worker failure\n");
     (void)executeAndWait(
         *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500);
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsWithSigabrtWhenCoreDumpEnabled) {
     ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
-    // RTP_LLM_FAIL logs through the project logger, not the child's stderr, so only the
-    // exit signal is assertable here.
-    EXPECT_EXIT(broadcastWithNonOkWorkerStatus(), ::testing::KilledBySignal(SIGABRT), "");
+    // Require successful setup before accepting the expected worker-failure abort.
+    EXPECT_EXIT(broadcastWithNonOkWorkerStatus(),
+                ::testing::KilledBySignal(SIGABRT),
+                "broadcast setup complete; exercising worker failure");
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceResource) {

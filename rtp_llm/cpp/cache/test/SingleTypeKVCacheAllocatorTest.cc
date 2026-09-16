@@ -156,7 +156,7 @@ BlockIdxType seedSingleTypeLowerTier(BlockTreeCache& cache, Tier source_tier, Ca
         cache.tree()->insertNode(CacheKeysType{key}, resources, /*collect_path=*/false, /*is_resident=*/false);
     EXPECT_EQ(insert_result.inserted_nodes.size(), 1u);
     group->releaseSingleBlock(source_tier, source_block, BlockTreeRefType::CACHE);
-    return source_block;
+    return insert_result.inserted_nodes.size() == 1u ? source_block : NULL_BLOCK_IDX;
 }
 
 CacheConfig createSingleTypeTestConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {
