@@ -134,7 +134,7 @@ public:
     bool hasActiveConnectors() const;
     bool hasP2PConnector() const;
     int64_t prefillRequestDeadline(const std::string& unique_key, int64_t timeout_ms);
-    void              notifySideChannelReady(const std::string&                           unique_key,
+    void              publishPrefillPayload(const std::string&                           unique_key,
                                              int64_t                                      deadline_ms,
                                              P2PConnectorResourceEntry::SideChannelData&& data);
     bool writeP2PLayer(size_t                                model_id,

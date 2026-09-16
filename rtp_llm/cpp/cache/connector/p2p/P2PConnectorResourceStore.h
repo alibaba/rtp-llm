@@ -83,19 +83,19 @@ public:
                                                                     int64_t               request_deadline_ms,
                                                                     std::function<bool()> is_cancelled = nullptr);
 
-    // Notify side-channel data ready (called by prefill when first token / SP data is produced)
-    void notifySideChannelReady(const std::string&                           unique_key,
+    // Publish locally computed first-token / SP data for the Prefill StartLoad handler.
+    void publishPrefillPayload(const std::string&                           unique_key,
                                 int64_t                                      deadline_ms,
                                 P2PConnectorResourceEntry::SideChannelData&& data);
 
-    // Wait for side-channel data ready (called by P2PConnector when filling response)
-    bool waitSideChannelReady(const std::string&    unique_key,
+    // Wait on Prefill for local computation to publish the response payload.
+    bool waitPrefillPayloadReady(const std::string&    unique_key,
                               int64_t               deadline_ms,
                               std::function<bool()> is_cancelled = nullptr);
 
-    // Try to consume side-channel data from the request state (returns true if data was found and moved)
-    bool consumeSideChannelData(const std::string& unique_key, P2PConnectorResourceEntry::SideChannelData& out_data);
-    void clearSideChannelData(const std::string& unique_key);
+    // Move the local payload out so the Prefill handler can serialize it for Decode.
+    bool takePrefillPayload(const std::string& unique_key, P2PConnectorResourceEntry::SideChannelData& out_data);
+    void clearPrefillPayload(const std::string& unique_key);
 
 private:
     void checkTimeout();

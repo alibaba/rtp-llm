@@ -195,7 +195,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         if (rc.decode_entrance) {
             reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
 
-            // Notify P2P side-channel data ready so that waitAndFillResponse can proceed.
+            // Publish local Prefill output for the StartLoad handler to return to Decode.
             if (rc.cache_manager && rc.cache_manager->hasP2PConnector()) {
                 P2PConnectorResourceEntry::SideChannelData side_data;
                 auto                                       tokens = currentExecuteTokens(0);
@@ -233,7 +233,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
                     side_data.position_ids.assign(pos_cpu.data_ptr<int32_t>(),
                                                   pos_cpu.data_ptr<int32_t>() + pos_cpu.numel());
                 }
-                rc.cache_manager->notifySideChannelReady(uniqueKey(), deadlineMs(), std::move(side_data));
+                rc.cache_manager->publishPrefillPayload(uniqueKey(), deadlineMs(), std::move(side_data));
             }
             // DP inversion prefill has already produced the only token it is responsible for.
             // Mark it finished here so the state machine can release resources and persist

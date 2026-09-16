@@ -76,11 +76,12 @@ private:
                                       std::function<bool()>                       is_cancelled,
                                       std::shared_ptr<P2PConnectorResourceEntry>& resource_entry);
 
-    void waitAndFillResponse(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
+    // Wait for local Prefill output, then include it in the StartLoad response to Decode.
+    void waitPrefillPayloadAndFillResponse(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
                              P2PConnectorStartLoadResponsePB&                  response,
                              std::function<bool()>                             is_cancelled = nullptr);
 
-    grpc::Status fillResponseWithStreamInfo(const P2PConnectorResourceEntry::SideChannelData& data,
+    grpc::Status fillStartLoadResponsePayload(const P2PConnectorResourceEntry::SideChannelData& data,
                                             P2PConnectorStartLoadResponsePB&                  response);
 
 private:

@@ -154,7 +154,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         || transfer_deadline_ms <= 0 || transfer_deadline_ms > request_deadline_ms) {
         if (!unique_key.empty() && request_deadline_ms > 0) {
             stream_store_->markTerminal(unique_key, request_deadline_ms);
-            stream_store_->clearSideChannelData(unique_key);
+            stream_store_->clearPrefillPayload(unique_key);
         }
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
         response.set_error_message("invalid StartLoad deadlines");
@@ -163,7 +163,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     if (now_ms >= transfer_deadline_ms) {
         if (!unique_key.empty()) {
             stream_store_->markTerminal(unique_key, request_deadline_ms);
-            stream_store_->clearSideChannelData(unique_key);
+            stream_store_->clearPrefillPayload(unique_key);
         }
         response.set_error_code(transErrorCodeToRPC(ErrorCode::GENERATE_TIMEOUT));
         response.set_error_message("transfer deadline expired before handleRead");
@@ -183,7 +183,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
                                 unique_key.c_str(),
                                 plan_error.ToString().c_str());
             stream_store_->markTerminal(unique_key, request_deadline_ms);
-            stream_store_->clearSideChannelData(unique_key);
+            stream_store_->clearPrefillPayload(unique_key);
             response.set_error_code(transErrorCodeToRPC(plan_error.code()));
             response.set_error_message(plan_error.ToString());
             return;
@@ -260,7 +260,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         // Otherwise a late first-token notification can recreate the entry
         // with the request-level deadline after this handler returns.
         stream_store_->markTerminal(unique_key, request_deadline_ms);
-        stream_store_->clearSideChannelData(unique_key);
+        stream_store_->clearPrefillPayload(unique_key);
         response.set_error_code(transErrorCodeToRPC(error_info.code()));
         response.set_error_message(error_info.ToString());
         return;
@@ -270,12 +270,12 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     // in the complete log; demote to DEBUG to reduce log volume.
     RTP_LLM_LOG_DEBUG(
         "[PD-DIAG] handleRead sendKVCache done, unique_key=%s, send_cost_us=%ld", unique_key.c_str(), send_cost_us);
-    waitAndFillResponse(resource_entry, response, is_cancelled);
-    // waitAndFillResponse clears the currently visible payload. Mark terminal
+    waitPrefillPayloadAndFillResponse(resource_entry, response, is_cancelled);
+    // waitPrefillPayloadAndFillResponse clears the currently visible payload. Mark terminal
     // and clear once more to close the race with a notification arriving
     // between its final clear and this handler returning.
     stream_store_->markTerminal(unique_key, request_deadline_ms);
-    stream_store_->clearSideChannelData(unique_key);
+    stream_store_->clearPrefillPayload(unique_key);
     RTP_LLM_LOG_DEBUG("[PD-DIAG] handleRead complete, unique_key=%s, request_id=%ld, "
                      "total_cost_us=%ld, wait_resource_us=%ld, send_us=%ld",
                      unique_key.c_str(),
@@ -285,31 +285,31 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
                      send_cost_us);
 }
 
-void P2PConnectorPrefill::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
+void P2PConnectorPrefill::waitPrefillPayloadAndFillResponse(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
                                               P2PConnectorStartLoadResponsePB&                  response,
                                               std::function<bool()>                             is_cancelled) {
     const auto& unique_key = resource_entry->unique_key;
-    const bool ready = stream_store_->waitSideChannelReady(unique_key, resource_entry->deadline_ms, is_cancelled);
+    const bool ready = stream_store_->waitPrefillPayloadReady(unique_key, resource_entry->deadline_ms, is_cancelled);
     P2PConnectorResourceEntry::SideChannelData data;
-    if (!ready || !stream_store_->consumeSideChannelData(unique_key, data)) {
-        stream_store_->clearSideChannelData(unique_key);
+    if (!ready || !stream_store_->takePrefillPayload(unique_key, data)) {
+        stream_store_->clearPrefillPayload(unique_key);
         response.set_error_code(transErrorCodeToRPC(
             is_cancelled && is_cancelled() ? ErrorCode::CANCELLED : ErrorCode::GENERATE_TIMEOUT));
         response.set_error_message("side-channel wait cancelled or expired");
         return;
     }
-    grpc::Status fill_status = fillResponseWithStreamInfo(data, response);
+    grpc::Status fill_status = fillStartLoadResponsePayload(data, response);
     if (!fill_status.ok()) {
-        RTP_LLM_LOG_WARNING("waitAndFillResponse failed, unique_key: %s, error: %s",
+        RTP_LLM_LOG_WARNING("waitPrefillPayloadAndFillResponse failed, unique_key: %s, error: %s",
                             resource_entry->unique_key.c_str(),
                             fill_status.error_message().c_str());
-        stream_store_->clearSideChannelData(unique_key);
+        stream_store_->clearPrefillPayload(unique_key);
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
-        response.set_error_message("fillResponseWithStreamInfo failed: " + fill_status.error_message());
+        response.set_error_message("fillStartLoadResponsePayload failed: " + fill_status.error_message());
         return;
     }
 
-    stream_store_->clearSideChannelData(unique_key);
+    stream_store_->clearPrefillPayload(unique_key);
     response.set_error_code(ErrorCodePB::NONE_ERROR);
 }
 
@@ -435,7 +435,7 @@ grpc::Status P2PConnectorPrefill::waitForResourceEntry(
     return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "resource wait transfer deadline exceeded");
 }
 
-grpc::Status P2PConnectorPrefill::fillResponseWithStreamInfo(const P2PConnectorResourceEntry::SideChannelData& data,
+grpc::Status P2PConnectorPrefill::fillStartLoadResponsePayload(const P2PConnectorResourceEntry::SideChannelData& data,
                                                              P2PConnectorStartLoadResponsePB& response) {
     try {
         // Clear only the payload so each TensorPB is filled exactly once, including on reuse.

@@ -380,36 +380,36 @@ TEST_F(P2PConnectorResourceStoreTest, SideChannelTimeout_AutoRemoval) {
     P2PConnectorResourceEntry::SideChannelData side_data;
     side_data.has_first_token = true;
     side_data.first_token_id  = 42;
-    stream_store_->notifySideChannelReady(unique_key, deadline_ms, std::move(side_data));
+    stream_store_->publishPrefillPayload(unique_key, deadline_ms, std::move(side_data));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
     P2PConnectorResourceEntry::SideChannelData consumed_data;
-    EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+    EXPECT_FALSE(stream_store_->takePrefillPayload(unique_key, consumed_data));
 }
 
-TEST_F(P2PConnectorResourceStoreTest, ClearSideChannelData_RemovesIndependentEntry) {
+TEST_F(P2PConnectorResourceStoreTest, ClearPrefillPayload_RemovesIndependentEntry) {
     const std::string unique_key  = "test_side_channel_clear";
     const int64_t     deadline_ms = getDeadlineMs(5000);
 
     P2PConnectorResourceEntry::SideChannelData side_data;
     side_data.has_first_token = true;
     side_data.first_token_id  = 7;
-    stream_store_->notifySideChannelReady(unique_key, deadline_ms, std::move(side_data));
-    stream_store_->clearSideChannelData(unique_key);
+    stream_store_->publishPrefillPayload(unique_key, deadline_ms, std::move(side_data));
+    stream_store_->clearPrefillPayload(unique_key);
 
     P2PConnectorResourceEntry::SideChannelData consumed_data;
-    EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+    EXPECT_FALSE(stream_store_->takePrefillPayload(unique_key, consumed_data));
 }
 
 // Regression: 5/25 .199 prefill produced 50 "side-channel timeout" WARNs at
 // 22:08-22:14 that all traced back to a cancel burst at 21:08 — handleRead
 // cancelled the keys, but the engine still produced first-tokens shortly
-// after and called notifySideChannelReady, which wrote to side_channel_data_map_
+// after and called publishPrefillPayload, which wrote to side_channel_data_map_
 // with no consumer. Those entries sat for a full 1h business deadline before
-// checkTimeout reaped them. After the fix, notifySideChannelReady checks
+// checkTimeout reaped them. After the fix, publishPrefillPayload checks
 // cancelled_keys_ and skips the write so nothing leaks into the map.
-TEST_F(P2PConnectorResourceStoreTest, NotifySideChannelReady_SkipsWriteIfKeyAlreadyCancelled) {
+TEST_F(P2PConnectorResourceStoreTest, PublishPrefillPayload_SkipsWriteIfKeyAlreadyCancelled) {
     const int64_t deadline_ms = currentTimeMs() + 5000;
     const std::string unique_key = "test_notify_after_cancel_skips_write";
 
@@ -418,28 +418,28 @@ TEST_F(P2PConnectorResourceStoreTest, NotifySideChannelReady_SkipsWriteIfKeyAlre
     P2PConnectorResourceEntry::SideChannelData side_data;
     side_data.has_first_token = true;
     side_data.first_token_id  = 42;
-    stream_store_->notifySideChannelReady(unique_key, currentTimeMs() + 5000, std::move(side_data));
+    stream_store_->publishPrefillPayload(unique_key, currentTimeMs() + 5000, std::move(side_data));
 
     P2PConnectorResourceEntry::SideChannelData consumed;
-    EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed))
+    EXPECT_FALSE(stream_store_->takePrefillPayload(unique_key, consumed))
         << "Side-channel entry should not be written when key is already cancelled, "
         << "otherwise it leaks into side_channel_data_map_ and produces a 1h-delayed "
         << "timeout WARN at checkTimeout() (see 5/25 .199 incident).";
 }
 
-// Counter-check: when the key was never cancelled, notifySideChannelReady
+// Counter-check: when the key was never cancelled, publishPrefillPayload
 // still writes normally (otherwise the cancellation check has overshot).
-TEST_F(P2PConnectorResourceStoreTest, NotifySideChannelReady_WritesNormallyWhenNotCancelled) {
+TEST_F(P2PConnectorResourceStoreTest, PublishPrefillPayload_WritesNormallyWhenNotCancelled) {
     const int64_t deadline_ms = currentTimeMs() + 5000;
     const std::string unique_key = "test_notify_without_cancel_writes_normally";
 
     P2PConnectorResourceEntry::SideChannelData side_data;
     side_data.has_first_token = true;
     side_data.first_token_id  = 99;
-    stream_store_->notifySideChannelReady(unique_key, deadline_ms, std::move(side_data));
+    stream_store_->publishPrefillPayload(unique_key, deadline_ms, std::move(side_data));
 
     P2PConnectorResourceEntry::SideChannelData consumed;
-    ASSERT_TRUE(stream_store_->consumeSideChannelData(unique_key, consumed));
+    ASSERT_TRUE(stream_store_->takePrefillPayload(unique_key, consumed));
     EXPECT_TRUE(consumed.has_first_token);
     EXPECT_EQ(consumed.first_token_id, 99);
 }
@@ -458,12 +458,12 @@ TEST_F(P2PConnectorResourceStoreTest, StolenEntry_SideChannelUsesTransferDeadlin
     P2PConnectorResourceEntry::SideChannelData side_data;
     side_data.has_first_token = true;
     side_data.first_token_id  = 88;
-    stream_store_->notifySideChannelReady(unique_key, deadline_ms, std::move(side_data));
+    stream_store_->publishPrefillPayload(unique_key, deadline_ms, std::move(side_data));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
     P2PConnectorResourceEntry::SideChannelData consumed_data;
-    EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+    EXPECT_FALSE(stream_store_->takePrefillPayload(unique_key, consumed_data));
 }
 
 TEST_F(P2PConnectorResourceStoreTest, StolenEntry_TerminalRejectsLateSideChannel) {
@@ -480,10 +480,10 @@ TEST_F(P2PConnectorResourceStoreTest, StolenEntry_TerminalRejectsLateSideChannel
     P2PConnectorResourceEntry::SideChannelData side_data;
     side_data.has_first_token = true;
     side_data.first_token_id  = 89;
-    stream_store_->notifySideChannelReady(unique_key, deadline_ms, std::move(side_data));
+    stream_store_->publishPrefillPayload(unique_key, deadline_ms, std::move(side_data));
 
     P2PConnectorResourceEntry::SideChannelData consumed_data;
-    EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+    EXPECT_FALSE(stream_store_->takePrefillPayload(unique_key, consumed_data));
 }
 
 // ==================== markCancelled 测试 ====================
@@ -593,8 +593,8 @@ TEST_F(P2PConnectorResourceStoreTest, ExpiredLoadRejectsLateResourceAndSideChann
     auto meta = createMockMeta("late_load", 5002, request_deadline_ms);
     EXPECT_FALSE(stream_store_->addResource(meta, createMockKVCacheResource()));
     P2PConnectorResourceEntry::SideChannelData data;
-    stream_store_->notifySideChannelReady("late_load", request_deadline_ms, std::move(data));
-    EXPECT_FALSE(stream_store_->consumeSideChannelData("late_load", data));
+    stream_store_->publishPrefillPayload("late_load", request_deadline_ms, std::move(data));
+    EXPECT_FALSE(stream_store_->takePrefillPayload("late_load", data));
     EXPECT_EQ(stream_store_->waitAndStealResource("late_load", currentTimeMs() + 1000, request_deadline_ms), nullptr);
 }
 
@@ -607,8 +607,8 @@ TEST_F(P2PConnectorResourceStoreTest, DuplicateStartLoadCannotExtendSideChannelD
     EXPECT_EQ(stream_store_->waitAndStealResource("duplicate_load", request_deadline_ms, request_deadline_ms), nullptr);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     P2PConnectorResourceEntry::SideChannelData data;
-    stream_store_->notifySideChannelReady("duplicate_load", request_deadline_ms, std::move(data));
-    EXPECT_FALSE(stream_store_->consumeSideChannelData("duplicate_load", data));
+    stream_store_->publishPrefillPayload("duplicate_load", request_deadline_ms, std::move(data));
+    EXPECT_FALSE(stream_store_->takePrefillPayload("duplicate_load", data));
 }
 
 TEST_F(P2PConnectorResourceStoreTest, MissingOrInfiniteDeadlineDoesNotCreateResource) {

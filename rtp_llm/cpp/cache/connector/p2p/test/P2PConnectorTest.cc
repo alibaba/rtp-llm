@@ -405,7 +405,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenSchedulerHandleReadFailed
     EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
 }
 
-// 测试: waitSideChannelReady 超时（first token not found），返回 INTERNAL 错误
+// 测试: waitPrefillPayloadReady 超时（first token not found），返回 INTERNAL 错误
 TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenWaitSideChannelTimeout) {
     // 1. 添加有效的 resource entry
     std::string unique_key  = "test_wait_side_channel_timeout";
@@ -428,7 +428,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenWaitSideChannelTimeout) {
     P2PConnectorStartLoadResponsePB response;
     connector_->handleRead(request, response);
 
-    // 4. 由于没有调用 notifySideChannelReady，waitSideChannelReady 会超时
+    // 4. 由于没有调用 publishPrefillPayload，waitPrefillPayloadReady 会超时
     EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
 }
 
@@ -647,13 +647,13 @@ TEST_F(P2PConnectorTest, CancelBeforeHandleReadRejectsLateRequest) {
     EXPECT_EQ(handle_response.p2p_response().error_code(), transErrorCodeToRPC(ErrorCode::GENERATE_TIMEOUT));
 }
 
-// 测试: 成功场景，使用 notifySideChannelReady 机制，返回 OK, 验证 response 中包含了所有字段
+// 测试: 成功场景，使用 publishPrefillPayload 机制，返回 OK, 验证 response 中包含了所有字段
 // 注意：这个测试验证了 side-channel 机制的基本流程
 // 1. asyncRead 注册 entry 到 stream_store
-// 2. notifySideChannelReady 设置 side-channel data
-// 3. handleRead -> waitAndStealResource -> waitAndFillResponse
-// 4. waitAndFillResponse 消费已发布的 payload 并填充响应
-TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
+// 2. publishPrefillPayload 设置 side-channel data
+// 3. handleRead -> waitAndStealResource -> waitPrefillPayloadAndFillResponse
+// 4. waitPrefillPayloadAndFillResponse 消费已发布的 payload 并填充响应
+TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithPublishedPrefillPayload) {
     // 1. 创建有效的 resource entry
     std::string unique_key  = "test_notify_side_channel_success";
     int64_t     request_id  = 5001;
@@ -669,8 +669,8 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
         server->service()->setP2PResponseSuccess(true);
     }
 
-    // 3. 在调用 handleRead 之前，先调用 notifySideChannelReady
-    //    payload 保存在请求状态中，waitAndFillResponse 会直接消费。
+    // 3. 在调用 handleRead 之前，先调用 publishPrefillPayload
+    //    payload 保存在请求状态中，waitPrefillPayloadAndFillResponse 会直接消费。
     P2PConnectorResourceEntry::SideChannelData data;
     data.has_first_token  = true;
     data.first_token_id   = 12345;
@@ -684,7 +684,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     data.propose_probs    = torch::tensor({0.25f, 0.75f});
     data.propose_hidden   = torch::tensor({1.0f, 2.0f});
 
-    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, std::move(data));
+    connector_->streamStore()->publishPrefillPayload(unique_key, deadline_ms, std::move(data));
 
     // 4. 创建 request 并调用 handleRead
     //    使用 num_workers = 1 简化测试
@@ -720,7 +720,7 @@ TEST_F(P2PConnectorTest, HandleRead_HoldsRank0RequestResourceUntilAllRanksReturn
     P2PConnectorResourceEntry::SideChannelData data;
     data.has_first_token = true;
     data.first_token_id  = 12345;
-    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, std::move(data));
+    connector_->streamStore()->publishPrefillPayload(unique_key, deadline_ms, std::move(data));
 
     tp_broadcast_servers_[0]->service()->setSleepMillis(0);
     tp_broadcast_servers_[1]->service()->setSleepMillis(300);
@@ -763,7 +763,7 @@ TEST_F(P2PConnectorTest, HandleRead_TimeoutReleasesPrefillResourceAfterCancelBro
     P2PConnectorResourceEntry::SideChannelData data;
     data.has_first_token = true;
     data.first_token_id  = 12345;
-    connector_->streamStore()->notifySideChannelReady(unique_key, request_deadline_ms, std::move(data));
+    connector_->streamStore()->publishPrefillPayload(unique_key, request_deadline_ms, std::move(data));
     for (auto& server : tp_broadcast_servers_) {
         server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::HANDLE_READ, 300);
         server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::CANCEL_HANDLE_READ, 0);
@@ -815,7 +815,7 @@ TEST_F(P2PConnectorTest, HandleRead_NoTransferSkipsDataTransferAndReturnsSideCha
     P2PConnectorResourceEntry::SideChannelData data;
     data.has_first_token = true;
     data.first_token_id  = 34567;
-    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, std::move(data));
+    connector_->streamStore()->publishPrefillPayload(unique_key, deadline_ms, std::move(data));
 
     for (auto& server : tp_broadcast_servers_) {
         server->service()->resetCallCounts();
@@ -839,7 +839,7 @@ TEST_F(P2PConnectorTest, HandleRead_NoTransferSkipsDataTransferAndReturnsSideCha
     }
 }
 
-TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WhenNotifySideChannelAfterSteal) {
+TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WhenPrefillPayloadPublishedAfterSteal) {
     std::string unique_key  = "test_notify_side_channel_after_steal";
     int64_t     request_id  = 5011;
     int64_t     timeout_ms  = 5000;
@@ -878,7 +878,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WhenNotifySideChannelAfterSteal) {
     data.total_reuse_len  = 12;
     data.local_reuse_len  = 4;
     data.remote_reuse_len = 8;
-    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, std::move(data));
+    connector_->streamStore()->publishPrefillPayload(unique_key, deadline_ms, std::move(data));
 
     auto status = handle_read_future.wait_for(std::chrono::seconds(2));
     ASSERT_EQ(status, std::future_status::ready);
@@ -908,7 +908,7 @@ TEST_F(P2PConnectorTest, HandleRead_PreservesZeroFirstToken) {
     P2PConnectorResourceEntry::SideChannelData data;
     data.has_first_token = true;
     data.first_token_id  = 0;
-    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, std::move(data));
+    connector_->streamStore()->publishPrefillPayload(unique_key, deadline_ms, std::move(data));
 
     auto request = createValidStartLoadRequest(unique_key, deadline_ms, 1);
 
