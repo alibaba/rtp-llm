@@ -122,3 +122,59 @@ old worktree's native libraries and call that an integration test.
    capability/binding, performance, decode, PD, cancellation/drain and fault tests.
 6. Publication needs explicit owner approval. This source integration itself does
    not authorize a push to either official or fork remotes.
+
+## Bounded unified smoke qualification (2026-09-16 UTC)
+
+Host artifacts use `20260917` (Asia/Shanghai, UTC+8). **Runtime revision
+`0e2e9b632a4701924a864f6bc901011630221c1f` passed the two profiles below.**
+This is development smoke qualification, not full CI or production acceptance.
+
+| Validated profile | Evidence / exact scope |
+|---|---|
+| CEP4PP2 baseline | PP2/CP4/EP4, 8 GPUs, 32K input, chunk4096, split22/21, overlap2, PDFUSION, FP8 KV/BF16, pages256/128, bundled DeepGEMM, numerical candidates OFF. Two warmups + two ordered8-prompt passes:18/18 completed;16/16 measured screening IDs exact. Final warm server TTFT mean1576.826ms (range1569.103–1590.107), not a vLLM-parity or speedup claim. |
+| DP4EP4 DSpark decode through real PD | Four CP4EP4 producer GPUs + four DP4EP4 decoder GPUs; PP-off; DSpark gamma3; decode graphs1/2/4/8; both sides FP8 KV/BF16/pages256/128. Original4-query smoke passes unchanged comparer/goldens. First2 produce exact Paris answer,9tokens each with `pd_sep=true`; final2 request1token and intentionally finish on prefill, with2048cached input tokens on the repeat. |
+
+The second profile is **not** an8-GPU CEP producer plus4-GPU decoder: that
+combined topology needs12GPUs and has not been measured here. The original
+one-token cases have `skip_choices`/`skip_usage`; they are cache/transport smoke,
+not a new semantic golden or long-decode quality test.
+
+### Required decode integration details
+
+- Use SM120's NCCL/FusedMoE EP strategy: `--use_deepep_moe 0` and
+  `--use_deepep_low_latency 0`. Do not disable EP4 to evade a startup failure.
+- With the pinned provider and256/128 cache geometry, explicitly set
+  `DSV4_SM120_PACK_DECODE_SLOTS=1` on **decode only**. It supplies the native
+  sparse-decode64-entry page ABI without changing the PD wire/cache geometry.
+  This is not a source default change or permission to enable other native flags.
+- PREFILL DSpark uses its pruned commit-only weights and rejects PROPOSE;
+  DECODE retains full proposals. The warmup flag crosses native C++ `setenv`,
+  so its Python consumer reads native `getenv`, not a stale `os.environ` snapshot.
+- Remote producer CP metadata must not enable local CP execution on TP1 DECODE.
+- CP target-forward mutates input geometry: saved draft inputs must own cloned
+  storage before asynchronous H2D, not merely keep the original pinned storage
+  alive. The old race was reproduced with a paused DMA and regression-tested.
+- Always use absolute `LOG_PATH`. Also **unset** `RTP_LLM_LOG_TPSYNC` to disable
+  it: assigning `0` still enables the C++ getenv-presence guard.
+- The internal manual smoke recipe needs its separately supplied BUILD patch;
+  the public source commit does not implicitly update the parent submodule pin.
+
+Selected tests:47 C++ (9ModelData+38PP),89 Python attention/decode/cache,
+32 DSpark contract,42 warmup/strategy,5 decode-page adapter hardware tests,
+plus the unified CPU policy/scale checks. Counts are suite-local, not a claim
+that every repository test ran. All failed model/fixture attempts are retained.
+
+**Remaining gates:** held-out numerical repeatability/acc011/acc022; cold-first-use
+readiness and latency; cancellation, fault recovery and graceful shutdown;
+long/concurrent decode and performance acceptance. A newly introduced random
+native-attention-vs-FP32 probe failed its4e-2 envelope (max absolute0.09765625).
+That failure is not waived: the passing adapter test establishes bitwise equality
+to the same native kernel on independently reblocked legal pages, not native
+precision acceptance. Post-TERM peer-loss errors also remain unqualified.
+
+Machine evidence: `~/rtp_cp2pp4/UNIFIED_OVERNIGHT_RETURN_20260917.md` and
+`investigations/unified_overnight_20260917/`. Final-chunk stage0/rank0 and
+stage1/rank4 Chrome traces are in `~/rtp-cep4ep4pp2-32k-unified-traces.tar.gz`.
+They were captured on `a40db533e`, in separate launches, and are **not** a
+simultaneous two-stage or full-request timeline. The later final-source smoke
+revalidates CEP after the decode repairs; it does not relabel those old traces.
