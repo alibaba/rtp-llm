@@ -22,6 +22,7 @@ import org.junit.jupiter.params.provider.EnumSource;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
+import static org.mockito.ArgumentMatchers.eq;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -221,8 +222,8 @@ class RequestInactivityTest {
             assertSame(item, slot.activeItem());
             assertFalse(slot.snapshot().state().isTerminal());
         }
-        verify(decode, never()).releaseReservationExact(any());
-        verify(decode, never()).expireReservationExact(any());
+        verify(decode, never()).release(any(), eq(DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK));
+        verify(decode, never()).release(any(), eq(DecodeEndpoint.ReleaseReason.EXPIRED));
         verify(prefill, never()).expireCommittedItem(any());
         verify(prefill, never()).releaseCommittedItem(any());
     }
@@ -238,7 +239,7 @@ class RequestInactivityTest {
         synchronized (slot) {
             assertFalse(slot.isLiveGeneration());
         }
-        verify(decode, times(1)).expireReservationExact(item.decodeReservation());
+        verify(decode, times(1)).release(item.decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
         verify(prefill, times(1)).expireCommittedItem(item);
     }
 

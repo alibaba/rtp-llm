@@ -480,7 +480,7 @@ class DecodeSelectorTest {
         reserveQueued(endpoint, 2L, 400, 700, 50);
 
         Assertions.assertTrue(endpoint.routingView().realKvUsed()
-                > new DecodeEndpoint.AdmissionCapacity(0L, 90L).kvBudget(endpoint.realKvTotal()));
+                > new DecodeEndpoint.AdmissionCapacity(0L, 90L).kvBudget(endpoint.routingView().totalKv()));
         Assertions.assertEquals(0L, endpoint.routingView().engineFacingKvUsed());
 
         DecodeSelector strategy = new DecodeSelector(
@@ -497,7 +497,7 @@ class DecodeSelectorTest {
         ServerStatus fifoResult = fifoSelection.serverStatus();
         Assertions.assertTrue(fifoResult.isSuccess());
         Assertions.assertEquals(request.getRequestId(), fifoResult.getRequestId());
-        Assertions.assertFalse(endpoint.layeredAdmissionView().isQueued(3L),
+        Assertions.assertFalse(endpoint.resourceSnapshot().isQueued(3L),
                 "selection must not mutate Decode reservation ownership");
         fifoSelection.close();
 
@@ -511,7 +511,7 @@ class DecodeSelectorTest {
                 strategy.select(DecodeBinding.capture(context), null);
         Assertions.assertEquals(
                 PlacementResult.Status.SUCCESS, priorityPlacement.status());
-        Assertions.assertFalse(endpoint.layeredAdmissionView().isQueued(4L),
+        Assertions.assertFalse(endpoint.resourceSnapshot().isQueued(4L),
                 "priority planning must leave capacity acquisition to commit");
         priorityPlacement.value().close();
     }
@@ -556,7 +556,7 @@ class DecodeSelectorTest {
                 counts.merge(selected.serverStatus().getServerIp(), 1, Integer::sum);
                 Assertions.assertFalse(decodeEndpoint(registry,
                         selected.serverStatus().getServerIp() + ":8080")
-                        .layeredAdmissionView().isQueued(requestId), "selection cannot claim capacity");
+                        .resourceSnapshot().isQueued(requestId), "selection cannot claim capacity");
             }
         }
         Assertions.assertEquals(Map.of("127.0.0.1", 5, "127.0.0.2", 5), counts);
@@ -694,8 +694,7 @@ class DecodeSelectorTest {
             long expectedKvTokens,
             int priority) {
         try (var pin = endpoint.tryPinGeneration()) {
-            endpoint.tryReservePlacementPinned(
-                    pin, requestId, kvTokens, expectedKvTokens, priority);
+            endpoint.reserve(pin, requestId, kvTokens, expectedKvTokens, priority);
         }
     }
 
@@ -713,8 +712,7 @@ class DecodeSelectorTest {
             long expectedKvTokens,
             int priority) {
         try (var pin = endpoint.tryPinGeneration()) {
-            endpoint.reservePinned(
-                    pin, requestId, kvTokens, expectedKvTokens, priority);
+            endpoint.reserveUnqueued(pin, requestId, kvTokens, expectedKvTokens, priority);
         }
     }
 

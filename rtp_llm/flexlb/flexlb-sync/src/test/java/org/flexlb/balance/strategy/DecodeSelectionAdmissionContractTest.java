@@ -56,18 +56,23 @@ class DecodeSelectionAdmissionContractTest {
                     fixture.assertSelectionHasNoReservation(requestId, queuedUsage, freeUsage);
                     try (WorkerEndpoint.GenerationPin pin = selected.takeGenerationPin()) {
                         DecodeEndpoint endpoint = (DecodeEndpoint) pin.endpoint();
-                        DecodeEndpoint.ReservationHandle reservation = endpoint.tryReservePlacementPinned(pin, request.requestId(), request.hardKvTokens(),
-                                request.expectedKvTokens(), request.priority(), request.capacity());
+                        DecodeEndpoint.ReservationHandle reservation = endpoint.reserve(
+                                pin,
+                                request.requestId(),
+                                request.hardKvTokens(),
+                                request.expectedKvTokens(),
+                                request.priority(),
+                                request.capacity());
                         assertNotNull(reservation, "the selected endpoint must pass the same placement gate");
                         try {
                             assertEquals(requestId, reservation.requestId());
-                            assertTrue(endpoint.layeredAdmissionView().isQueued(requestId));
-                            var reserved = endpoint.layeredAdmissionView().reserved().get(requestId);
+                            assertTrue(endpoint.resourceSnapshot().isQueued(requestId));
+                            var reserved = endpoint.resourceSnapshot().reserved().get(requestId);
                             assertEquals(70, reserved.priority());
                             assertEquals(PROMPT_TOKENS, reserved.kvTokens());
                             assertEquals(EXPECTED_TOKENS, reserved.expectedKvTokens());
                         } finally {
-                            endpoint.releaseReservationExact(reservation);
+                            endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
                         }
                     }
                 }
@@ -152,8 +157,8 @@ class DecodeSelectionAdmissionContractTest {
             long expectedKv = dimension == CapacityDimension.EXPECTED_KV ? 400L : 0L;
             try (WorkerEndpoint.GenerationPin pin = queued.tryPinGeneration()) {
                 assertNotNull(pin);
-                assertNotNull(queued.tryReservePlacementPinned(pin, 1L, 0L, expectedKv, 50));
-                assertNotNull(queued.tryReservePlacementPinned(pin, 2L, 0L, expectedKv, 50));
+                assertNotNull(queued.reserve(pin, 1L, 0L, expectedKv, 50));
+                assertNotNull(queued.reserve(pin, 2L, 0L, expectedKv, 50));
             }
         }
 
@@ -185,8 +190,8 @@ class DecodeSelectionAdmissionContractTest {
                 DecodeEndpoint.CapacityUsage queuedUsage, DecodeEndpoint.CapacityUsage freeUsage) {
             assertEquals(queuedUsage, queued.routingView().placementUsage());
             assertEquals(freeUsage, free.routingView().placementUsage());
-            assertFalse(queued.layeredAdmissionView().isQueued(requestId));
-            assertFalse(free.layeredAdmissionView().isQueued(requestId));
+            assertFalse(queued.resourceSnapshot().isQueued(requestId));
+            assertFalse(free.resourceSnapshot().isQueued(requestId));
         }
 
         @Override

@@ -266,8 +266,7 @@ class RequestRegistryTest {
         lifecycle.cancelRequest(602L, 0L, CancelReason.DEADLINE_EXCEEDED);
         assertEquals(RequestState.Phase.TIMED_OUT,
                 lifecycle.getRequestState(602L, 0L).state());
-        verify(registered.item().decodeEp()).releaseLocalShadowIfExact(
-                registered.item().decodeReservation());
+        verify(registered.item().decodeEp()).release(registered.item().decodeReservation(), DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
     }
 
     @Test
@@ -350,7 +349,7 @@ class RequestRegistryTest {
 
         assertEquals(RequestState.Phase.ACKNOWLEDGED, lifecycle.getRequestState(705L, 23L).state());
         org.mockito.Mockito.verify(registered.item().decodeEp(), org.mockito.Mockito.never())
-                .releaseUnsentRequestReservation(registered.item().decodeReservation());
+                .release(registered.item().decodeReservation(), DecodeEndpoint.ReleaseReason.NOT_SENT);
     }
 
     private BalanceContext context(long requestId) {

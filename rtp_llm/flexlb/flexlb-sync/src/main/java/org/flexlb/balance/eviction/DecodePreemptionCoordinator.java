@@ -150,18 +150,21 @@ public final class DecodePreemptionCoordinator {
             }
 
             DecodeEndpoint.PreemptionBeginResult begin =
-                    command.endpoint().beginPriorityPreemption(
-                            token, victimReservations,
-                            command.incomingRequestId(), command.incomingKvTokens(),
+                    command.endpoint().beginPreemption(
+                            token,
+                            victimReservations,
+                            command.incomingRequestId(),
+                            command.incomingKvTokens(),
                             command.incomingExpectedKvTokens(),
-                            command.incomingPriority(), command.capacity());
+                            command.incomingPriority(),
+                            command.capacity());
             if (begin != DecodeEndpoint.PreemptionBeginResult.SUCCESS) {
                 return CompletableFuture.completedFuture(capability.abort(
                         begin == DecodeEndpoint.PreemptionBeginResult.ENDPOINT_RETIRED,
                         "begin_" + begin.name().toLowerCase()));
             }
             capability.endpointBegun();
-            if (!command.endpoint().markPriorityCancelInFlight(token)) {
+            if (!command.endpoint().updatePreemption(token, DecodeEndpoint.PreemptionUpdate.cancelSending())) {
                 return CompletableFuture.completedFuture(capability.abort(
                         true,
                         "endpoint_cancel_linearization_failed"));
@@ -250,9 +253,9 @@ public final class DecodePreemptionCoordinator {
             switch (outcome) {
                 case ACCEPTED -> {
                     boolean transitioned =
-                            command.endpoint().recordPriorityCancelPhase(
-                                    capability.token, victim.requestId(),
-                                    PreemptionCancelPhase.CANCEL_REQUESTED)
+                            command.endpoint().updatePreemption(
+                                    capability.token,
+                                    DecodeEndpoint.PreemptionUpdate.cancelReply(victim.requestId(), PreemptionCancelPhase.CANCEL_REQUESTED))
                             && owned.claim().applyPhase(PreemptionCancelPhase.CANCEL_REQUESTED);
                     if (transitioned) {
                         capability.transferred(owned);
@@ -264,9 +267,9 @@ public final class DecodePreemptionCoordinator {
                     }
                 }
                 case NOT_FOUND -> {
-                    command.endpoint().recordPriorityCancelPhase(
-                            capability.token, victim.requestId(),
-                            PreemptionCancelPhase.NOT_FOUND_STALE);
+                    command.endpoint().updatePreemption(
+                            capability.token,
+                            DecodeEndpoint.PreemptionUpdate.cancelReply(victim.requestId(), PreemptionCancelPhase.NOT_FOUND_STALE));
                     owned.claim().applyPhase(PreemptionCancelPhase.NOT_FOUND_STALE);
                     capability.transferred(owned);
                     if (!capability.isTerminal(owned)) {
@@ -331,8 +334,9 @@ public final class DecodePreemptionCoordinator {
         // Endpoint accounting remains the resource-owning CAS. The remaining
         // transitions are exact-token followers, but no WorkerStatus future
         // is required for this stronger proof.
-        boolean endpointSettled = command.endpoint().settlePriorityRequestFenced(
-                capability.token, reservation(command.endpoint(), victim));
+        boolean endpointSettled = command.endpoint().updatePreemption(
+                capability.token,
+                DecodeEndpoint.PreemptionUpdate.fenced(reservation(command.endpoint(), victim)));
         boolean inflightSettled = endpointSettled
                 && owned.claim().completePreemption(command.detail());
         boolean attemptSettled = inflightSettled
@@ -545,9 +549,9 @@ public final class DecodePreemptionCoordinator {
             if (!shouldTransferUnknown(owned)) {
                 return;
             }
-            command.endpoint().recordPriorityCancelPhase(
-                    token, owned.requestId(),
-                    PreemptionCancelPhase.CANCEL_UNKNOWN);
+            command.endpoint().updatePreemption(
+                    token,
+                    DecodeEndpoint.PreemptionUpdate.cancelReply(owned.requestId(), PreemptionCancelPhase.CANCEL_UNKNOWN));
             owned.claim().applyPhase(PreemptionCancelPhase.CANCEL_UNKNOWN);
             transferred(owned);
         }
@@ -560,8 +564,7 @@ public final class DecodePreemptionCoordinator {
         private PreemptionResult finish(boolean hasNotFound) {
             if (allVictimsTerminal()
                     && command.admissionOpen().getAsBoolean()
-                    && command.endpoint().commitPriorityPreemption(
-                            token)) {
+                    && command.endpoint().finishPreemption(token, DecodeEndpoint.PreemptionDecision.COMMIT)) {
                 markCommitted();
                 return new PreemptionResult(
                         true, false, "committed");
@@ -607,8 +610,7 @@ public final class DecodePreemptionCoordinator {
             }
             if (endpointBegun) {
                 try {
-                    command.endpoint().abortPriorityPreemption(
-                            token);
+                    command.endpoint().finishPreemption(token, DecodeEndpoint.PreemptionDecision.ABORT);
                 } catch (RuntimeException | Error failure) {
                     recordCleanupFailure("endpoint_abort", failure);
                 }

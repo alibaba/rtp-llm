@@ -195,19 +195,26 @@ public final class RouteAdmission implements AutoCloseable {
         requireProvisional();
         if (decodeEndpoint() == null || decodeBinding.reservation() != null) { return true; }
         DecodeEndpoint.ReservationHandle reservation = switch (decodeBinding.mode()) {
-            case IMMEDIATE, WAIT_AT_DISPATCH -> decodeEndpoint().tryReservePlacementPinned(
-                    decodePin(), requestId, decodeBinding.hardKvTokens(), decodeBinding.expectedKvTokens(),
+            case IMMEDIATE, WAIT_AT_DISPATCH -> decodeEndpoint().reserve(
+                    decodePin(),
+                    requestId,
+                    decodeBinding.hardKvTokens(),
+                    decodeBinding.expectedKvTokens(),
                     decodeBinding.priority());
-            case PREEMPT_AT_PLACEMENT -> decodeEndpoint().tryReservePlacementPinned(
-                    decodePin(), requestId, decodeBinding.hardKvTokens(), decodeBinding.expectedKvTokens(),
-                    decodeBinding.priority(), decodeBinding.capacity());
+            case PREEMPT_AT_PLACEMENT -> decodeEndpoint().reserve(
+                    decodePin(),
+                    requestId,
+                    decodeBinding.hardKvTokens(),
+                    decodeBinding.expectedKvTokens(),
+                    decodeBinding.priority(),
+                    decodeBinding.capacity());
         };
         if (reservation == null) { return false; }
         try {
             decodeBinding = decodeBinding.bind(decodeStatus(), decodeEndpoint(), reservation);
             return true;
         } catch (RuntimeException | Error failure) {
-            decodeEndpoint().releaseReservationExact(reservation);
+            decodeEndpoint().release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             throw failure;
         }
     }
@@ -216,19 +223,19 @@ public final class RouteAdmission implements AutoCloseable {
         requireProvisional();
         if (endpoint == null || endpoint != decodeEndpoint() || reservation == null || reservation.requestId() != requestId
                 || decodeBinding.reservation() != null) {
-            if (endpoint != null && reservation != null) { endpoint.releaseReservationExact(reservation); }
+            if (endpoint != null && reservation != null) { endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK); }
             return false;
         }
         try {
             endpoint.requirePinnedGeneration(decodePin());
-            if (!endpoint.markQueuedExact(decodePin(), reservation)) {
-                endpoint.releaseReservationExact(reservation);
+            if (!endpoint.markQueued(decodePin(), reservation)) {
+                endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
                 return false;
             }
             decodeBinding = decodeBinding.bind(decodeStatus(), decodeEndpoint(), reservation);
             return true;
         } catch (RuntimeException | Error failure) {
-            endpoint.releaseReservationExact(reservation);
+            endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             throw failure;
         }
     }
@@ -357,7 +364,9 @@ public final class RouteAdmission implements AutoCloseable {
         if (ownership != Ownership.PROVISIONAL) { return; }
         ownership = Ownership.CLOSED;
         try {
-            if (decodeBinding.reservation() != null) { decodeEndpoint().releaseReservationExact(decodeBinding.reservation()); }
+            if (decodeBinding.reservation() != null) { decodeEndpoint().release(
+                    decodeBinding.reservation(),
+                    DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK); }
         } finally {
             closePins();
         }

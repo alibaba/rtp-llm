@@ -63,7 +63,7 @@ final class PrefillAdmissionResources {
         }
         DecodeEndpoint.EngineDispatchPermitAcquisition acquisition;
         try {
-            acquisition = decode.acquireEngineDispatchPermit(binding.reservation(), binding.capacity());
+            acquisition = decode.acquireDispatchPermit(binding.reservation(), binding.capacity());
         } catch (RuntimeException | Error failure) {
             return failed(failure);
         }
@@ -317,7 +317,7 @@ final class PrefillAdmissionResources {
                 return true;
             }
             DecodeEndpoint.EngineDispatchPermitTransferStatus transfer =
-                    member.decode.transferToEngineLifecycle();
+                    member.decode.dispatch();
             return switch (transfer) {
                 case TRANSFERRED -> {
                     member.ownership = MemberOwnership.ENDPOINT_OWNED;
@@ -366,8 +366,7 @@ final class PrefillAdmissionResources {
 
         @Override
         public boolean isAvailable() {
-            return binding.endpoint().isEngineDispatchPermitAvailable(
-                    binding.requestId(), binding.capacity());
+            return binding.endpoint().shouldRetryDispatch(binding.requestId(), binding.capacity());
         }
 
         @Override

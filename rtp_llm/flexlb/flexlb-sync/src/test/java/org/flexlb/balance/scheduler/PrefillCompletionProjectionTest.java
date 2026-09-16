@@ -68,12 +68,12 @@ class PrefillCompletionProjectionTest {
             DecodeEndpoint.ReservationHandle reservation;
             var capacity = new DecodeEndpoint.AdmissionCapacity(10L, 90L);
             try (var pin = decode.tryPinGeneration()) {
-                reservation = decode.tryReservePlacementPinned(pin, 101L, 16L, 32L, 50, capacity);
+                reservation = decode.reserve(pin, 101L, 16L, 32L, 50, capacity);
                 assertNotNull(reservation);
-                var acquisition = decode.acquireEngineDispatchPermit(reservation, capacity);
+                var acquisition = decode.acquireDispatchPermit(reservation, capacity);
                 assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
                 assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
-                        acquisition.permit().transferToEngineLifecycle());
+                        acquisition.permit().dispatch());
             }
             var context = RequestLifecycleTestSupport.context(config, 101L);
             var future = requests.register(context);
@@ -128,12 +128,12 @@ class PrefillCompletionProjectionTest {
             assertTrue(capacity.evaluate(decode.routingView().dispatchUsage(), 16L, 32L).fits(),
                     "a suspected lost request must not isolate a worker with available capacity");
             try (var pin = decode.tryPinGeneration()) {
-                var waiting = decode.tryReservePlacementPinned(pin, 102L, 16L, 32L, 50, capacity);
+                var waiting = decode.reserve(pin, 102L, 16L, 32L, 50, capacity);
                 assertNotNull(waiting);
-                var acquisition = decode.acquireEngineDispatchPermit(waiting, capacity);
+                var acquisition = decode.acquireDispatchPermit(waiting, capacity);
                 assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
                 assertTrue(acquisition.permit().release());
-                decode.releaseReservationExact(waiting);
+                decode.release(waiting, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             }
 
             applyStatus(prefill, status(4L, Map.of(), Map.of("101", task)));
