@@ -31,8 +31,7 @@ import java.util.function.Supplier;
 @Component
 public final class WorkerDirectory implements WorkerStatusProvider {
 
-    private final Map<RoleType, ConcurrentHashMap<String, WorkerStatus>>
-            statusesByRole = new EnumMap<>(RoleType.class);
+    private final Map<RoleType, ConcurrentHashMap<String, WorkerStatus>> statusesByRole = new EnumMap<>(RoleType.class);
     private final EndpointRegistry endpointRegistry;
 
     public WorkerDirectory(EndpointRegistry endpointRegistry) {
