@@ -1124,10 +1124,37 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&               
                                              int                                 read_num) {
     std::vector<CopyInfoPerKey> copy_infos;
     bool                        success = true;
+    const auto acquire_backing = [this, &success](const MemoryDiskBlockCache::CacheItem& item) {
+        if (item.backing_type == CacheBackingType::MEMORY) {
+            auto source_pool = memoryPoolFor(blockKindFromComplete(item.is_complete));
+            if (!source_pool) {
+                RTP_LLM_LOG_WARNING("build copy plan for read failed, missing memory pool, cache key: %ld",
+                                    item.cache_key);
+                success = false;
+                return false;
+            }
+            referenceBlocksInPool(source_pool, {item.block_index}, /*cache_ref=*/false);
+        } else {
+            auto disk_pool = diskPoolFor(blockKindFromComplete(item.is_complete));
+            if (!disk_pool || !disk_pool->validSlot(item.disk_slot)) {
+                RTP_LLM_LOG_WARNING(
+                    "build copy plan for read failed, missing disk pool or invalid slot, cache key: %ld", item.cache_key);
+                success = false;
+                return false;
+            }
+            disk_pool->requestReference(item.disk_slot);
+        }
+        return true;
+    };
 
     for (int i = start_index; i < start_index + read_num; ++i) {
         const auto cache_key    = cache_keys.at(i);
-        const auto match_result = block_cache_->matchAndMarkInFlight(static_cast<CacheKeyType>(cache_key));
+        // Match and pin under one index lock so removal cannot recycle the backing between them.
+        const auto match_result =
+            block_cache_->matchAndMarkInFlight(static_cast<CacheKeyType>(cache_key), acquire_backing);
+        if (!success) {
+            break;
+        }
         if (match_result.backing_type == CacheBackingType::MEMORY && isNullBlockIdx(match_result.matched_index)) {
             RTP_LLM_LOG_WARNING("build copy plan for read failed, cache key not found, cache key: %ld", cache_key);
             success = false;
@@ -1138,26 +1165,6 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&               
             success = false;
             break;
         }
-        // 每次都加引用的原因是为了确保match到的block不会被释放(避免在写时malloc如果cache满弹出该block)
-        if (match_result.backing_type == CacheBackingType::MEMORY) {
-            auto source_pool = memoryPoolFor(blockKindFromComplete(match_result.is_complete));
-            if (!source_pool) {
-                RTP_LLM_LOG_WARNING("build copy plan for read failed, missing memory pool, cache key: %ld", cache_key);
-                success = false;
-                break;
-            }
-            referenceBlocksInPool(source_pool, {match_result.matched_index}, /*cache_ref=*/false);
-        } else {
-            auto disk_pool = diskPoolFor(blockKindFromComplete(match_result.is_complete));
-            if (!disk_pool || !disk_pool->validSlot(match_result.disk_slot)) {
-                RTP_LLM_LOG_WARNING(
-                    "build copy plan for read failed, missing disk pool or invalid slot, cache key: %ld", cache_key);
-                success = false;
-                break;
-            }
-            disk_pool->requestReference(match_result.disk_slot);
-        }
-
         CopyInfoPerKey copy_info;
         copy_info.cache_key    = cache_key;
         copy_info.backing_type = match_result.backing_type;
@@ -1572,6 +1579,15 @@ KVCacheMemoryConnector::createCopyPlan(const std::vector<CopyInfoPerKey>& copy_i
     plan->direction  = direction;
     auto deleter     = [this](CopyPlan* plan) {
         for (const auto& copy_info : plan->copy_infos) {
+            if (plan->direction == CopyDirection::H2D && copy_info.kind != CacheBlockKind::COMPRESSED_KV
+                && copy_info.kind != CacheBlockKind::STATE_SWA_KV) {
+                // Release index bookkeeping before the block/slot can be recycled for another entry.
+                block_cache_->releaseInFlight(copy_info.cache_key,
+                                              copy_info.backing_type,
+                                              copy_info.mem_block,
+                                              copy_info.disk_slot,
+                                              copy_info.is_complete);
+            }
             if (!copy_info.request_released) {
                 if (copy_info.kind == CacheBlockKind::COMPRESSED_KV || copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
                     releasePrefixRequestBacking(copy_info);
@@ -1594,9 +1610,6 @@ KVCacheMemoryConnector::createCopyPlan(const std::vector<CopyInfoPerKey>& copy_i
                     if (retired_item.has_value()) {
                         releasePrefixCacheBacking(*retired_item);
                     }
-                } else {
-                    block_cache_->releaseInFlight(
-                        copy_info.cache_key, copy_info.backing_type, copy_info.mem_block, copy_info.disk_slot);
                 }
             }
         }

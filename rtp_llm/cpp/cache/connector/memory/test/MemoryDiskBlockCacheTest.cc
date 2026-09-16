@@ -1,5 +1,9 @@
 #include "gtest/gtest.h"
 
+#include <atomic>
+#include <chrono>
+#include <future>
+
 #include "rtp_llm/cpp/cache/connector/memory/MemoryDiskBlockCache.h"
 
 namespace rtp_llm::test {
@@ -49,7 +53,7 @@ TEST(MemoryDiskBlockCacheTest, RemoveIfMatchDistinguishesCompleteAndIncompletePo
         MemoryDiskBlockCache cache;
         auto old_item = backing == CacheBackingType::MEMORY ? memoryItem(1, 10, false) : diskItem(1, 10, false);
         ASSERT_TRUE(cache.putCommitted(old_item).first);
-        ASSERT_FALSE(cache.matchAndMarkInFlight(1).is_complete);
+        ASSERT_FALSE(cache.matchAndMarkInFlight(1, [](const auto&) { return true; }).is_complete);
         ASSERT_TRUE(cache.removeIfMatch(1, backing, old_item.block_index, old_item.disk_slot, false));
 
         // A new entry in the other pool can have the same index while an old read is still finishing.
@@ -135,7 +139,7 @@ TEST(MemoryDiskBlockCacheTest, PartialToCompleteDoesNotReplaceInFlightItem) {
     MemoryDiskBlockCache cache;
     ASSERT_TRUE(cache.putCommitted(memoryItem(1, 10, false)).first);
 
-    auto in_flight = cache.matchAndMarkInFlight(1);
+    auto in_flight = cache.matchAndMarkInFlight(1, [](const auto&) { return true; });
     EXPECT_EQ(in_flight.backing_type, CacheBackingType::MEMORY);
     EXPECT_EQ(in_flight.matched_index, 10);
 
@@ -159,7 +163,7 @@ TEST(MemoryDiskBlockCacheTest, InFlightEntryIsNotEvictable) {
     ASSERT_TRUE(evicted.has_value());
     EXPECT_EQ(evicted->cache_key, 2);
 
-    cache.releaseInFlight(1, CacheBackingType::MEMORY, 10, -1);
+    cache.releaseInFlight(1, CacheBackingType::MEMORY, 10, -1, true);
     evicted = cache.popOldestEvictable();
     ASSERT_TRUE(evicted.has_value());
     EXPECT_EQ(evicted->cache_key, 1);
@@ -170,7 +174,7 @@ TEST(MemoryDiskBlockCacheTest, MatchAndMarkInFlightPreventsEviction) {
     ASSERT_TRUE(cache.putCommitted(memoryItem(1, 10)).first);
     ASSERT_TRUE(cache.putCommitted(diskItem(2, 20)).first);
 
-    auto match = cache.matchAndMarkInFlight(1);
+    auto match = cache.matchAndMarkInFlight(1, [](const auto&) { return true; });
     EXPECT_EQ(match.backing_type, CacheBackingType::MEMORY);
     EXPECT_EQ(match.matched_index, 10);
 
@@ -178,7 +182,7 @@ TEST(MemoryDiskBlockCacheTest, MatchAndMarkInFlightPreventsEviction) {
     ASSERT_TRUE(evicted.has_value());
     EXPECT_EQ(evicted->cache_key, 2);
 
-    cache.releaseInFlight(1, CacheBackingType::MEMORY, 10, -1);
+    cache.releaseInFlight(1, CacheBackingType::MEMORY, 10, -1, true);
     evicted = cache.popOldestEvictable();
     ASSERT_TRUE(evicted.has_value());
     EXPECT_EQ(evicted->cache_key, 1);
@@ -192,6 +196,112 @@ TEST(MemoryDiskBlockCacheTest, RemoveIfMatchChecksBackingAndSlot) {
     auto removed = cache.removeIfMatch(2, CacheBackingType::DISK, NULL_BLOCK_IDX, 20);
     ASSERT_TRUE(removed.has_value());
     EXPECT_FALSE(cache.contains(2));
+}
+
+TEST(MemoryDiskBlockCacheTest, RemovalCannotRecycleBackingBeforeReaderAcquiresReference) {
+    for (auto backing : {CacheBackingType::MEMORY, CacheBackingType::DISK}) {
+        SCOPED_TRACE(static_cast<int>(backing));
+        MemoryDiskBlockCache cache;
+        const auto item = backing == CacheBackingType::MEMORY ? memoryItem(1, 42) : diskItem(1, 42);
+        ASSERT_TRUE(cache.putCommitted(item).first);
+
+        // One cache reference, then reader A's request reference.
+        std::atomic<int> references{1};
+        std::atomic<int> contents{11};
+        cache.matchAndMarkInFlight(1, [&](const auto&) {
+            ++references;
+            return true;
+        });
+        std::promise<void> pin_entered;
+        std::promise<void> allow_pin;
+        auto pin_ready = pin_entered.get_future();
+        auto pin_allowed = allow_pin.get_future();
+        auto reader_b = std::async(std::launch::async, [&] {
+            return cache.matchAndMarkInFlight(1, [&](const auto&) {
+                pin_entered.set_value();
+                pin_allowed.wait();  // Stop B in the old match-to-reference window.
+                ++references;
+                return true;
+            });
+        });
+        pin_ready.wait();
+        std::promise<void> removal_started;
+        auto removing = removal_started.get_future();
+        auto finish_a = std::async(std::launch::async, [&] {
+            removal_started.set_value();
+            const auto removed = cache.removeIfMatch(1, backing, item.block_index, item.disk_slot, true);
+            if (!removed) {
+                return std::make_pair(false, false);
+            }
+            cache.releaseInFlight(1, backing, item.block_index, item.disk_slot, true);
+            references -= 2;  // Drop the cache reference and A's request reference.
+            int expected = 0;
+            const bool reused = references.compare_exchange_strong(expected, 1);
+            if (reused) {
+                contents = 22;  // Writer C reuses block/slot 42 for another key.
+            }
+            return std::make_pair(true, reused);
+        });
+        removing.wait();
+        EXPECT_EQ(finish_a.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+        allow_pin.set_value();
+        const auto match = reader_b.get();
+        const auto [removed, reused] = finish_a.get();
+        EXPECT_TRUE(removed);
+        EXPECT_FALSE(reused);
+        EXPECT_EQ(match.backing_type, backing);
+        EXPECT_EQ(match.matched_index, item.block_index);
+        EXPECT_EQ(match.disk_slot, item.disk_slot);
+        EXPECT_EQ(contents.load(), 11);
+        EXPECT_FALSE(cache.contains(1));  // Invalidation/removal remains immediate after pinning.
+        EXPECT_EQ(references.load(), 1);
+
+        cache.releaseInFlight(1, backing, item.block_index, item.disk_slot, true);
+        --references;
+        int expected = 0;
+        EXPECT_TRUE(references.compare_exchange_strong(expected, 1));
+    }
+}
+
+TEST(MemoryDiskBlockCacheTest, FailedBackingAcquisitionDoesNotLeaveInFlightReference) {
+    for (auto backing : {CacheBackingType::MEMORY, CacheBackingType::DISK}) {
+        MemoryDiskBlockCache cache;
+        const auto item = backing == CacheBackingType::MEMORY ? memoryItem(1, 42) : diskItem(1, 42);
+        ASSERT_TRUE(cache.putCommitted(item).first);
+        bool called = false;
+        const auto match = cache.matchAndMarkInFlight(1, [&](const auto&) {
+            called = true;
+            return false;
+        });
+        EXPECT_TRUE(called);
+        EXPECT_TRUE(isNullBlockIdx(match.matched_index));
+        EXPECT_EQ(match.disk_slot, -1);
+        auto evicted = cache.popOldestEvictable();
+        ASSERT_TRUE(evicted.has_value());
+        EXPECT_EQ(evicted->cache_key, 1);
+        cache.matchAndMarkInFlight(1, [](const auto&) {
+            ADD_FAILURE() << "A cache miss must not acquire a backing reference";
+            return true;
+        });
+    }
+}
+
+TEST(MemoryDiskBlockCacheTest, OldReadReleaseDoesNotUnpinReplacementInAnotherPool) {
+    for (auto backing : {CacheBackingType::MEMORY, CacheBackingType::DISK}) {
+        MemoryDiskBlockCache cache;
+        auto item = backing == CacheBackingType::MEMORY ? memoryItem(1, 42, false) : diskItem(1, 42, false);
+        ASSERT_TRUE(cache.putCommitted(item).first);
+        cache.matchAndMarkInFlight(1, [](const auto&) { return true; });
+        ASSERT_TRUE(cache.removeIfMatch(1, backing, item.block_index, item.disk_slot, false));
+        item.is_complete = true;
+        ASSERT_TRUE(cache.putCommitted(item).first);
+        cache.matchAndMarkInFlight(1, [](const auto&) { return true; });
+
+        cache.releaseInFlight(1, backing, item.block_index, item.disk_slot, false);
+        EXPECT_FALSE(cache.popOldestEvictable().has_value());
+        cache.releaseInFlight(1, backing, item.block_index, item.disk_slot, true);
+        EXPECT_TRUE(cache.popOldestEvictable().has_value());
+    }
 }
 
 }  // namespace rtp_llm::test

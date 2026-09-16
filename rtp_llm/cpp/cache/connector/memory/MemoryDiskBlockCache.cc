@@ -24,11 +24,12 @@ MemoryDiskBlockCache::MatchResult MemoryDiskBlockCache::match(CacheKeyType cache
     return {item.backing_type, item.block_index, item.disk_slot, item.block_size, item.is_complete};
 }
 
-MemoryDiskBlockCache::MatchResult MemoryDiskBlockCache::matchAndMarkInFlight(CacheKeyType cache_key) {
+MemoryDiskBlockCache::MatchResult MemoryDiskBlockCache::matchAndMarkInFlight(
+    CacheKeyType cache_key, const std::function<bool(const CacheItem&)>& acquire_backing) {
     RTP_LLM_PROFILE_FUNCTION();
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto                                it = items_.find(cache_key);
-    if (it == items_.end()) {
+    if (it == items_.end() || !acquire_backing(it->second)) {
         return {};
     }
     touchLocked(it->second);
@@ -222,10 +223,11 @@ bool MemoryDiskBlockCache::markInFlight(CacheKeyType     cache_key,
 void MemoryDiskBlockCache::releaseInFlight(CacheKeyType     cache_key,
                                            CacheBackingType backing_type,
                                            BlockIdxType     block_index,
-                                           int32_t          disk_slot) {
+                                           int32_t          disk_slot,
+                                           bool             is_complete) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto                                it = items_.find(cache_key);
-    if (it == items_.end() || it->second.backing_type != backing_type) {
+    if (it == items_.end() || it->second.backing_type != backing_type || it->second.is_complete != is_complete) {
         return;
     }
     if (backing_type == CacheBackingType::MEMORY && it->second.block_index != block_index) {
