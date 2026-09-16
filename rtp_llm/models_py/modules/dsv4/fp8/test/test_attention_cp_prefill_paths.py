@@ -511,5 +511,54 @@ class AttentionRawQMergeWorkspaceTest(unittest.TestCase):
         self.assertEqual(q_gather_calls, ["q"])
 
 
+
+class AttentionCacheOwnershipProbeTest(unittest.TestCase):
+    def _layer(self, cache):
+        layer = AttentionFP8.__new__(AttentionFP8)
+        torch.nn.Module.__init__(layer)
+        layer.layer_id = 22
+        layer.cache_layer_id = 3
+        layer._kv_cache = cache
+        return layer
+
+    def test_owned_group_uses_model_local_enumeration(self):
+        group = SimpleNamespace(tag="swa_kv")
+        enum = MagicMock(return_value=[group])
+        layer = self._layer(SimpleNamespace(get_layer_cache_groups=enum))
+        self.assertIs(layer._probe_layer_cache("swa_kv"), group)
+        enum.assert_called_once_with(3)
+
+    def test_absent_tag_does_not_call_asserting_lookup(self):
+        direct = MagicMock(side_effect=AssertionError("must not probe an unowned tag"))
+        layer = self._layer(SimpleNamespace(
+            get_layer_cache_groups=lambda local: [SimpleNamespace(tag="swa_kv")],
+            get_layer_cache=direct,
+        ))
+        self.assertIsNone(layer._probe_layer_cache("hca_kv"))
+        direct.assert_not_called()
+
+    def test_invalid_local_layer_keeps_contextual_error(self):
+        layer = self._layer(SimpleNamespace(
+            layer_count=2,
+            get_layer_cache_groups=MagicMock(side_effect=RuntimeError("Invalid layer index: 3")),
+        ))
+        with self.assertRaisesRegex(RuntimeError, "global layer_id=22.*cache_layer_id=3.*model-local"):
+            layer._probe_layer_cache("swa_kv")
+
+    def test_enumeration_backend_failure_is_not_missing_pool(self):
+        layer = self._layer(SimpleNamespace(
+            get_layer_cache_groups=MagicMock(side_effect=RuntimeError("corrupt backing storage")),
+        ))
+        with self.assertRaisesRegex(RuntimeError, "corrupt backing storage"):
+            layer._probe_layer_cache("swa_kv")
+
+    def test_legacy_lookup_remains_supported(self):
+        group = object()
+        getter = MagicMock(return_value=group)
+        layer = self._layer(SimpleNamespace(get_layer_cache=getter))
+        self.assertIs(layer._probe_layer_cache("swa_kv"), group)
+        getter.assert_called_once_with(3, "swa_kv")
+
+
 if __name__ == "__main__":
     unittest.main()

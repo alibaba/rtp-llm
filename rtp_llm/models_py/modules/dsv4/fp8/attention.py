@@ -1290,19 +1290,21 @@ class AttentionFP8(nn.Module):
         self._cp_ctx = cp_ctx
 
     def _probe_layer_cache(self, attn_type: str):
-        """Return this layer's ``LayerKVCache`` for ``attn_type``, or ``None``
-        when the layer does not own that tag.
+        """Return the model-local owned cache group, or None for an absent tag.
 
-        ``build_paged_pool_specs`` sweeps every cache tag across every layer,
-        so C++ raising "layer=X does not own tag=Y" is an expected skip and
-        the caller must treat it as "no pool here". An out-of-range layer id
-        is a different thing entirely and must NOT be swallowed: under PP the
-        cache layout is projected to this stage and indexed model-locally
-        (``OpDefs.h`` KVCache contract), so a global id reaching a cache lookup
-        would otherwise degrade into a silent "pool not allocated" and yield
-        plausible-looking wrong output instead of an error.
+        Enumerate the native ownership table instead of probing every global
+        tag: get_layer_cache raises/logs a C++ assertion for non-owned tags.
+        Invalid local indices and real backend failures must still fail closed.
+        Legacy lightweight cache adapters without enumeration retain their
+        previous lookup contract.
         """
+        enumerate_groups = getattr(self._kv_cache, "get_layer_cache_groups", None)
         try:
+            if enumerate_groups is not None:
+                for group in enumerate_groups(self.cache_layer_id):
+                    if group.tag == attn_type:
+                        return group
+                return None
             return self._kv_cache.get_layer_cache(self.cache_layer_id, attn_type)
         except RuntimeError as exc:
             if "Invalid layer index" in str(exc):
@@ -1312,6 +1314,8 @@ class AttentionFP8(nn.Module):
                     f"of range for this stage's {self._kv_cache.layer_count}-layer "
                     f"model-local layout. KV cache indices must be model-local."
                 ) from exc
+            if enumerate_groups is not None:
+                raise
             return None
 
     def _pool_view(self, attn_type: str) -> Optional[torch.Tensor]:
