@@ -511,6 +511,24 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
     selected_resource->initGroups(config_.topologyPtr());
 
+    if (is_connector && cp_slot_mapper_ && cp_slot_mapper_->isSharded() && cache_keys == resource_keys) {
+        // Logical keys and per-group CP-local slots are different namespaces.
+        // Preserve both, and snapshot each table so later stream mutations cannot
+        // change the block references released by the connector's deleter.
+        for (int group_id = 0; group_id < kvcache_resource.groupNums(); ++group_id) {
+            const auto&      blocks = kvcache_resource.blocks(group_id);
+            BlockIndicesType valid_blocks;
+            for (auto block : blocks) {
+                if (!isNullBlockIdx(block)) {
+                    valid_blocks.push_back(block);
+                }
+            }
+            kv_cache_groups_[static_cast<size_t>(group_id)]->reference(valid_blocks);
+            selected_resource->mutableBlockIds(group_id).assign(blocks);
+        }
+        return selected_resource;
+    }
+
     CacheKeysType                 selected_keys;
     BlockDependenciesType         selected_dependencies;
     std::vector<BlockIndicesType> selected_blocks(static_cast<size_t>(kvcache_resource.groupNums()));
