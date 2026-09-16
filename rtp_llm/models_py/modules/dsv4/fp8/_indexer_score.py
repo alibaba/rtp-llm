@@ -30,8 +30,6 @@ from typing import Optional
 
 import torch
 
-_BAND_BOUNDS_CT = [0]  # S4 engagement proof (DSV4_DIAG, first 3 fires)
-
 # DeepGEMM JIT writes ``kernel.cu`` under ``$HOME/.deep_gemm/tmp/<id>/``
 # and shells out to NVCC; if ``HOME`` is unset (bazel test sandbox does
 # not propagate it by default) ``os.path.expanduser("~")`` returns ``~``
@@ -59,15 +57,6 @@ except ImportError:
     _deep_gemm = None
     _HAS_DEEP_GEMM = False
     _HAS_DEEP_GEMM_MQA = False
-
-# M5-B (Sep 7): the SM120 bf16 fallback below predates nv_dev DeepGEMM's
-# sm120_fp8_mqa_logits (built at DeepGEMM/build/lib...). DSV4_INDEXER_FP8_DEEPGEMM=1
-# lets cap-12 devices call deep_gemm.fp8_mqa_logits on the FP8 operands directly
-# instead of dequanting to bf16 and re-running the triton kernel. Offline race
-# (bench/p2_m5b_fp8_score.py): 6.6x at the 32K shape, rel-diff p50 0.0005 /
-# max 0.36%, Jaccard@512 p50 1.0 (min 0.988). Requires the launcher PYTHONPATH
-# shadow (RF wheel bundles an OLD deep_gemm without the SM120 kernel).
-_FP8_DEEPGEMM_ON_SM120 = os.environ.get("DSV4_INDEXER_FP8_DEEPGEMM", "0") == "1"
 
 
 def has_fp8_paged_mqa_logits() -> bool:
@@ -177,116 +166,6 @@ def fp8_mqa_indexer_score(
     ``cu_seqlen_ke[m]`` are left untouched; the topk-with-causal-mask path
     in :class:`Indexer.forward` re-applies its own ``q_pos`` causal cap.
     """
-    if (
-        q_fp8.is_cuda
-        and torch.cuda.get_device_capability(q_fp8.device)[0] == 12
-        and not _FP8_DEEPGEMM_ON_SM120
-    ):
-        from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
-            v4_indexer_score,
-        )
-        M_rows = q_fp8.shape[0]
-        N_cols = k_quant.shape[0]
-        banded = (
-            os.environ.get("DSV4_INDEXER_BANDED", "0") == "1"
-            and M_rows > 0
-            and N_cols > 0
-        )
-        if banded:
-            # L3 causal-band fix (Sep 3): the dense SM120 fallback scores the
-            # FULL [M, N] axis even though row m only ever reads columns
-            # [ks[m], ke[m]) (the vendored topk never touches out-of-window
-            # entries and clean_logits re-masks anyway). Prefill rows ascend
-            # with position, so ke grows monotonically down the chunk: split
-            # rows into bands and score each against only its column range.
-            # Microbench (bench/indexer_score_microbench.py): dense scaling is
-            # exactly quadratic (x4.0 per ISL doubling; 20.7 ms @32K shape)
-            # and band_frac = 0.5 → ~2x saving at 32K, growing with ISL.
-            band_rows = int(os.environ.get("DSV4_INDEXER_BAND_ROWS", "1024"))
-            q_bf16 = q_fp8.to(torch.bfloat16).unsqueeze(0).contiguous()
-            k_bf16 = (k_quant.float() * k_scale.float()[:, None]).to(
-                torch.bfloat16
-            ).unsqueeze(0).contiguous()
-            w_f32 = w_fold.float().unsqueeze(0).contiguous()
-            # ONE small DtoH per call (S4 fix, Sep 3): band bounds are
-            # reduced on-device per band, and only [nb, 2] int32 crosses to
-            # the host (~64 B). The previous form copied the FULL
-            # cu_seqlen_ke/ks arrays as int64 (2 x 64 KiB at 32K ISL — the
-            # per-layer 65536-B DtoH class in every trace since q2prof) plus
-            # the int64-widening elementwise kernels, only to take per-band
-            # max/min on the host. Values are identical (max/min over the
-            # same rows; the partial tail band is reduced on its real
-            # slice), so the scored region is unchanged.
-            n_bands = (M_rows + band_rows - 1) // band_rows
-            n_full = M_rows // band_rows
-            ke_parts, ks_parts = [], []
-            if n_full:
-                ke_parts.append(
-                    cu_seqlen_ke[: n_full * band_rows]
-                    .view(n_full, band_rows)
-                    .max(dim=1)
-                    .values
-                )
-                ks_parts.append(
-                    cu_seqlen_ks[: n_full * band_rows]
-                    .view(n_full, band_rows)
-                    .min(dim=1)
-                    .values
-                )
-            rem = M_rows - n_full * band_rows
-            if rem:
-                ke_parts.append(cu_seqlen_ke[n_full * band_rows :].max().view(1))
-                ks_parts.append(cu_seqlen_ks[n_full * band_rows :].min().view(1))
-            band_bounds = torch.stack(
-                [torch.cat(ke_parts), torch.cat(ks_parts)], dim=1
-            ).to("cpu", torch.int64)
-            ke_host_b = band_bounds[:, 0].tolist()
-            ks_host_b = band_bounds[:, 1].tolist()
-            if os.environ.get("DSV4_DIAG") and _BAND_BOUNDS_CT[0] < 3:
-                _BAND_BOUNDS_CT[0] += 1
-                import sys
-                print("[S4-BAND] rank=%d M=%d bands=%d packed_dtoh_bytes=%d" % (
-                    torch.distributed.get_rank()
-                    if torch.distributed.is_initialized() else -1,
-                    M_rows, n_bands,
-                    band_bounds.numel() * band_bounds.element_size()),
-                    file=sys.stderr, flush=True)
-            out = torch.empty(
-                (M_rows, N_cols), dtype=torch.float32, device=q_fp8.device)
-            for b_i, r0 in enumerate(range(0, M_rows, band_rows)):
-                r1 = min(r0 + band_rows, M_rows)
-                ke_max = min(int(ke_host_b[b_i]), N_cols)
-                ks_min = max(int(ks_host_b[b_i]), 0)
-                if ke_max <= ks_min:
-                    continue
-                sub = v4_indexer_score(
-                    q_bf16[:, r0:r1].contiguous(),
-                    k_bf16[:, ks_min:ke_max].contiguous(),
-                    w_f32[:, r0:r1].contiguous(),
-                ).squeeze(0)
-                out[r0:r1, ks_min:ke_max] = sub
-            if clean_logits:
-                positions = torch.arange(N_cols, device=q_fp8.device).unsqueeze(0)
-                valid = (positions >= cu_seqlen_ks.long().unsqueeze(1)) & (
-                    positions < cu_seqlen_ke.long().unsqueeze(1)
-                )
-                out.masked_fill_(~valid, float("-inf"))
-            return out
-        q_bf16 = q_fp8.to(torch.bfloat16).unsqueeze(0).contiguous()
-        k_bf16 = (k_quant.float() * k_scale.float()[:, None]).to(
-            torch.bfloat16
-        ).unsqueeze(0).contiguous()
-        out = v4_indexer_score(
-            q_bf16, k_bf16, w_fold.float().unsqueeze(0).contiguous()
-        ).squeeze(0)
-        rows, cols = out.shape
-        if clean_logits:
-            positions = torch.arange(cols, device=q_fp8.device).unsqueeze(0)
-            valid = (positions >= cu_seqlen_ks.long().unsqueeze(1)) & (
-                positions < cu_seqlen_ke.long().unsqueeze(1)
-            )
-            out.masked_fill_(~valid, float("-inf"))
-        return out
     assert _HAS_DEEP_GEMM_MQA, "deep_gemm.fp8_mqa_logits not available"
     assert q_fp8.dtype == torch.float8_e4m3fn and q_fp8.dim() == 3
     assert q_fp8.shape[-1] == INDEXER_HEAD_DIM
