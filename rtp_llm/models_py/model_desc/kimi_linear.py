@@ -713,7 +713,7 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
             use_beta_sigmoid_in_kernel=qkv is not None,
-            decode_low_warps=self.decode_low_warps and not is_target_verify,
+            decode_low_warps=self.decode_low_warps,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,

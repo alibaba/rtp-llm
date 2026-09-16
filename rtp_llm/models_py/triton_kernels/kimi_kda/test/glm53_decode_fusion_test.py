@@ -4,6 +4,7 @@ import unittest
 from itertools import product
 
 import torch
+
 from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_update
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
 from rtp_llm.models_py.triton_kernels.kimi_kda import fused_recurrent_kda
@@ -161,6 +162,114 @@ class Glm53DecodeFusionTest(unittest.TestCase):
             old = RmsNormGated(weight, eps=1e-6, activation="sigmoid")(x, gate)
             new = kimi_kda_rms_norm_sigmoid_gate(x, gate, weight, 1e-6)
             torch.testing.assert_close(new, old, rtol=0, atol=0)
+
+    def test_verify_low_warps_graph_checkpoints_and_remapping(self):
+        """Preserve all MTP checkpoints, including rollback and page boundaries."""
+        torch.manual_seed(9305)
+        heads, dim, tokens = 64, 128, 4
+        for batch in (1, 2, 4, 8, 16, 32, 48, 64):
+            with self.subTest(batch=batch):
+                pages = batch * (tokens + 1) + 1
+                state_size = heads * dim * dim
+                # Include BF16 convolution history in each physical page's pitch.
+                storage = (
+                    torch.randn(
+                        pages, state_size + 3 * 3 * heads * dim // 2, device="cuda"
+                    )
+                    * 0.03
+                )
+                a, b = storage.clone(), storage.clone()
+                states = [
+                    x[:, :state_size].view(pages, heads, dim, dim) for x in (a, b)
+                ]
+                lengths_cpu = torch.tensor(
+                    [128, 129, 130, 131073] * ((batch + 3) // 4), dtype=torch.int32
+                )[:batch]
+                table_cpu = torch.zeros(batch, 1030, dtype=torch.int32)
+                for n in range(batch):
+                    start = (int(lengths_cpu[n]) - 2) // 128
+                    end = (int(lengths_cpu[n]) - 1) // 128 + tokens
+                    ids = torch.randperm(tokens + 1) + 1 + n * (tokens + 1)
+                    table_cpu[n, start:end] = ids[: end - start]
+                if batch > 1:
+                    table_cpu[-1].zero_()
+                table = table_cpu.cuda()
+                q, k, v, g = [
+                    torch.randn(
+                        batch, tokens, heads, dim, device="cuda", dtype=torch.bfloat16
+                    )
+                    * 0.2
+                    for _ in range(4)
+                ]
+                beta = (
+                    torch.randn(
+                        batch, tokens, heads, device="cuda", dtype=torch.bfloat16
+                    )
+                    .float()
+                    .sigmoid()
+                )
+                args = dict(
+                    q=q,
+                    k=k,
+                    v=v,
+                    g=g,
+                    beta=beta,
+                    A_log=torch.randn(heads, device="cuda") * 0.1,
+                    dt_bias=torch.randn(heads * dim, device="cuda") * 0.1,
+                    use_qk_l2norm_in_kernel=True,
+                    use_gate_in_kernel=True,
+                    lower_bound=-5.0,
+                    block_map=table,
+                    seq_size_per_block=128,
+                    sequence_lengths=lengths_cpu.cuda(),
+                )
+                for _ in range(3):
+                    for state, enabled in zip(states, (False, True)):
+                        fused_recurrent_kda(
+                            **args, initial_state=state, decode_low_warps=enabled
+                        )
+                graphs, outputs = [], []
+                for state, enabled in zip(states, (False, True)):
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        output, _ = fused_recurrent_kda(
+                            **args, initial_state=state, decode_low_warps=enabled
+                        )
+                    graphs.append(graph)
+                    outputs.append(output)
+                a.copy_(storage)
+                b.copy_(storage)
+                for step in range(16):
+                    # Select a different previously accepted checkpoint per row.
+                    # Device metadata changes while the captured graph stays fixed.
+                    if step:
+                        for n in range(batch - int(batch > 1)):
+                            read = (int(lengths_cpu[n]) - 2) // 128
+                            write = (int(lengths_cpu[n]) - 1) // 128
+                            accepted = (step + n) % tokens
+                            selected = int(table_cpu[n, write + accepted])
+                            remaining = [
+                                x
+                                for x in range(1 + n * 5, 1 + (n + 1) * 5)
+                                if x != selected
+                            ]
+                            ids = [selected, *remaining]
+                            table_cpu[n, read : write + tokens] = torch.tensor(
+                                ids[: write + tokens - read], dtype=torch.int32
+                            )
+                        table.copy_(table_cpu)
+                    for graph in graphs:
+                        graph.replay()
+                    torch.testing.assert_close(
+                        outputs[1], outputs[0], rtol=1 / 128, atol=1e-5
+                    )
+                    torch.testing.assert_close(b, a, rtol=3e-5, atol=3e-6)
+                    if batch > 1:
+                        self.assertEqual(int(torch.count_nonzero(outputs[1][-1])), 0)
+                torch.testing.assert_close(b[0], storage[0], rtol=0, atol=0)
+                torch.testing.assert_close(
+                    b[:, state_size:], storage[:, state_size:], rtol=0, atol=0
+                )
 
 
 if __name__ == "__main__":

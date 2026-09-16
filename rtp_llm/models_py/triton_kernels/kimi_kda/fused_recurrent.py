@@ -8,6 +8,7 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
+
 from rtp_llm.models_py.triton_kernels.fla.op import exp, softplus
 
 logger = logging.getLogger(__name__)
@@ -262,16 +263,22 @@ def fused_recurrent_kda_fwd(
     if (
         decode_low_warps
         and block_map is not None
-        and T == 1
-        and 16 <= N <= 64
+        and (
+            (T == 1 and 16 <= N <= 64)
+            or (T == 4 and cu_seqlens is None and 1 <= N <= 64)
+        )
         and H == HV == 64
         and K == V == 128
         and not state_v_first
         and initial_state is not None
         and initial_state.dtype == torch.float32
-        and torch.cuda.get_device_capability(q.device) in ((10, 0), (10, 3))
     ):
-        BV, num_warps = 16, 1
+        capability = torch.cuda.get_device_capability(q.device)
+        # Keep the K reduction inside one warp. The four-token MTP verify
+        # path otherwise pays for cross-warp reductions on every checkpoint.
+        # SM103 retains its existing single-token tuning until verify is measured.
+        if capability == (10, 0) or (T == 1 and capability == (10, 3)):
+            BV, num_warps = 16, 1
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
 

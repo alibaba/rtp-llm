@@ -13,6 +13,7 @@ kernel. They do not certify full-model quality or the FP8-to-FP4 MoE path.
 import unittest
 
 import torch
+
 from rtp_llm.models_py.triton_kernels.kimi_kda import fused_recurrent_kda
 from rtp_llm.models_py.triton_kernels.kimi_kda.rms_norm_gate import (
     kimi_kda_rms_norm_sigmoid_gate,
@@ -36,6 +37,75 @@ def reference_step(q, k, v, raw_g, raw_beta, a_log, dt_bias, state):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class Glm53ReferenceNumericsTest(unittest.TestCase):
+    def test_four_token_verify_checkpoints_against_reference(self):
+        torch.manual_seed(530903)
+        batch, tokens, heads, dim = 16, 4, 64, 128
+        table = torch.arange(
+            1, 1 + batch * (tokens + 1), device="cuda", dtype=torch.int32
+        ).view(batch, tokens + 1)
+        state = (
+            torch.randn(1 + batch * (tokens + 1), heads, dim, dim, device="cuda") * 0.02
+        )
+        reference_state = state[table[:, 0].long()].clone()
+        lengths = torch.full((batch,), 129, dtype=torch.int32, device="cuda")
+        a_log = torch.linspace(-3, 2, heads, device="cuda")
+        bias = torch.linspace(-3, 3, heads * dim, device="cuda").view(heads, dim)
+        for step in range(8):
+            q, k, v, g = [
+                torch.randn(batch, tokens, heads, dim, device="cuda").bfloat16() * 0.3
+                for _ in range(4)
+            ]
+            raw_beta = (torch.randn(batch, tokens, heads, device="cuda") * 8).bfloat16()
+            q[0].zero_()
+            k[1].zero_()
+            output, _ = fused_recurrent_kda(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=raw_beta.float().sigmoid(),
+                A_log=a_log,
+                dt_bias=bias.flatten(),
+                initial_state=state,
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                lower_bound=-5.0,
+                block_map=table,
+                seq_size_per_block=128,
+                sequence_lengths=lengths,
+                decode_low_warps=True,
+            )
+            checkpoints = []
+            for token in range(tokens):
+                expected, reference_state = reference_step(
+                    q[:, token],
+                    k[:, token],
+                    v[:, token],
+                    g[:, token],
+                    raw_beta[:, token],
+                    a_log,
+                    bias,
+                    reference_state,
+                )
+                checkpoints.append(reference_state)
+                with self.subTest(step=step, token=token):
+                    torch.testing.assert_close(
+                        output[:, token],
+                        expected.bfloat16(),
+                        rtol=1 / 128,
+                        atol=2e-5,
+                    )
+                    torch.testing.assert_close(
+                        state[table[:, token + 1].long()],
+                        reference_state,
+                        rtol=3e-5,
+                        atol=3e-6,
+                    )
+            accepted = (torch.arange(batch, device="cuda") + step) % tokens
+            rows = torch.arange(batch, device="cuda")
+            table[:, 0] = table[rows, accepted + 1]
+            reference_state = torch.stack(checkpoints, dim=1)[rows, accepted]
+
     def test_fp32_gated_norm_single_output_rounding(self):
         torch.manual_seed(530901)
         for batch in (1, 7, 48, 64):
@@ -58,9 +128,8 @@ class Glm53ReferenceNumericsTest(unittest.TestCase):
                     )
                     # Extra intermediate BF16 rounds are not the reference.
                     relative_l2 = (
-                        (output.float() - reference.float()).norm()
-                        / reference.float().norm()
-                    )
+                        output.float() - reference.float()
+                    ).norm() / reference.float().norm()
                     self.assertLess(relative_l2.item(), 1e-4)
 
     def test_fp32_state_and_gate_with_reordered_pages(self):
