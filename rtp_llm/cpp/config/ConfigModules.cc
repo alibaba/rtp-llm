@@ -352,8 +352,7 @@ std::string CacheStoreConfig::to_string() const {
         << "p2p_rdma_staging_block_count: " << p2p_rdma_staging_block_count << "\n"
         << "p2p_rdma_staging_block_size_bytes: " << p2p_rdma_staging_block_size_bytes << "\n"
         << "p2p_writeback_enable: " << p2p_writeback_enable << "\n"
-        << "p2p_writeback_timeout_ms: " << p2p_writeback_timeout_ms << "\n"
-        << "p2p_writeback_max_inflight: " << p2p_writeback_max_inflight << "\n";
+        << "p2p_writeback_timeout_ms: " << p2p_writeback_timeout_ms << "\n";
     return oss.str();
 }
 

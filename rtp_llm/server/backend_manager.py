@@ -2,6 +2,7 @@ import gc
 import logging
 import threading
 import time
+from datetime import timedelta
 from typing import Any, Dict, Optional, Union
 
 from pydantic import BaseModel
@@ -206,6 +207,7 @@ class BackendManager(object):
                     if self._shutdown_ready_event is not None:
                         self.engine.request_stop()
                         self._shutdown_ready_event.set()
+                    self._stop_writeback()
                     self.engine.stop()
             finally:
                 try:
@@ -217,6 +219,30 @@ class BackendManager(object):
                 finally:
                     self._stopping = False
                     self._stopped = True
+
+    def _stop_writeback(self) -> None:
+        if not self.py_env_configs.cache_store_config.p2p_writeback_enable:
+            return
+        self.engine.stop_writeback()
+        pc = self.py_env_configs.parallelism_config
+        if pc.world_size <= 1:
+            return
+
+        # TCPStore is independent of the model collectives, which may still be exiting.
+        store = self._distributed_server.store
+        drained_keys = [
+            f"shutdown_writeback_drained_{rank}" for rank in range(pc.world_size)
+        ]
+        observed_keys = [
+            f"shutdown_writeback_observed_{rank}" for rank in range(pc.world_size)
+        ]
+        timeout = timedelta(days=36500)
+        store.set(drained_keys[pc.world_rank], "1")
+        store.wait(drained_keys, timeout)
+        store.set(observed_keys[pc.world_rank], "1")
+        # The TCPStore owner must stay alive until every peer has observed the drain.
+        if pc.world_rank == 0:
+            store.wait(observed_keys, timeout)
 
     def ready(self):
         if isinstance(self.engine, BaseEngine):

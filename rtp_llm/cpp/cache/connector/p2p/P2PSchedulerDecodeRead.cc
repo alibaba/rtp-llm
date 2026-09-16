@@ -12,12 +12,6 @@
 #include <optional>
 
 namespace rtp_llm {
-namespace {
-// Keep kickoff bounded: connection acquisition/reconnection may block, while
-// completion polling remains isolated on P2PConnectorAsyncReadContextChecker.
-constexpr size_t kAsyncReadThreadCount = 4;
-constexpr size_t kAsyncReadQueueSize   = 1024;
-}  // namespace
 
 P2PSchedulerDecodeRead::P2PSchedulerDecodeRead(
     P2PConnectorSchedulerConfig                config,
@@ -27,8 +21,7 @@ P2PSchedulerDecodeRead::P2PSchedulerDecodeRead(
 
 P2PSchedulerDecodeRead::~P2PSchedulerDecodeRead() {
     if (async_read_pool_) {
-        async_read_pool_->stop(autil::ThreadPool::STOP_AFTER_QUEUE_EMPTY);
-        async_read_pool_->join();
+        async_read_pool_->stop();
         async_read_pool_.reset();
     }
     if (checker_) {
@@ -40,7 +33,7 @@ bool P2PSchedulerDecodeRead::init(const std::string& process_id) {
     server_caller_ = std::make_shared<DecodeLoadHelper>(config_.worker_addrs);
 
     auto async_read_pool = std::make_shared<autil::LockFreeThreadPool>(
-        kAsyncReadThreadCount, kAsyncReadQueueSize, nullptr, "P2PAsyncReadKickoff");
+        kP2PDecodeKickoffThreadCount, kP2PDecodeKickoffQueueSize, nullptr, "P2PAsyncReadKickoff");
     if (!async_read_pool->start()) {
         RTP_LLM_LOG_ERROR("P2PSchedulerDecodeRead init failed: async read pool start failed");
         return false;

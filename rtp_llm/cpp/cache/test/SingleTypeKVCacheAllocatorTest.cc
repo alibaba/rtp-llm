@@ -265,6 +265,149 @@ protected:
     std::shared_ptr<TestSingleTypeKVCacheAllocator> allocator_;
 };
 
+TEST_F(SingleTypeKVCacheAllocatorTest, ExternalAllocationOwnsExactlyTheOriginalReference) {
+    allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(createSingleTypeTestConfig(2, 10, 4));
+    ASSERT_TRUE(allocator_->init());
+    ASSERT_TRUE(seedCompleteBlockTreePath(allocator_, {11}).success);
+    ASSERT_TRUE(allocator_->probeExternalInsert({11, 22, 33}, 1).error.ok());
+    const auto pool  = allocator_->blockTreeCacheOwner()->groupSets().front()->devicePools().front();
+    const auto free  = allocator_->freeBlocksNum();
+    auto       owner = allocator_->mallocForExternalInsert({11, 22, 33}, 1);
+    ASSERT_NE(owner, nullptr);
+    ASSERT_EQ(owner->blocks(0).size(), 3u);
+    EXPECT_EQ(owner->blocks(0)[0], NULL_BLOCK_IDX);
+    const auto first = owner->blocks(0)[1];
+    const auto last  = owner->blocks(0)[2];
+    EXPECT_EQ(pool->refCount(first), 1u);
+    EXPECT_EQ(pool->refCount(last), 1u);
+    EXPECT_EQ(allocator_->freeBlocksNum(), free - 2);
+    owner.reset();
+    EXPECT_FALSE(pool->isAllocated(first));
+    EXPECT_FALSE(pool->isAllocated(last));
+    EXPECT_EQ(allocator_->freeBlocksNum(), free);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, ExternalProbeIsPureAndDuplicatePublicationReleasesUnusedBlocks) {
+    allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(createSingleTypeTestConfig(2, 12, 4));
+    ASSERT_TRUE(allocator_->init());
+    ASSERT_TRUE(seedCompleteBlockTreePath(allocator_, {11}).success);
+    const auto cache       = allocator_->blockTreeCacheOwner();
+    const auto pool        = cache->groupSets().front()->devicePools().front();
+    const auto prefix      = cache->tree()->findNode({11}).front()->group_set_resources.front().device_blocks.front();
+    const auto prefix_refs = pool->refCount(prefix);
+    const auto free        = allocator_->freeBlocksNum();
+    for (int i = 0; i < 3; ++i) {
+        const auto probe = allocator_->probeExternalInsert({11, 22, 33}, 1);
+        ASSERT_TRUE(probe.error.ok()) << probe.error.ToString();
+        EXPECT_EQ(probe.matched_device_blocks, 1u);
+    }
+    EXPECT_EQ(pool->refCount(prefix), prefix_refs);
+    EXPECT_EQ(allocator_->freeBlocksNum(), free);
+    auto owner = allocator_->mallocForExternalInsert({11, 22, 33}, 1);
+    ASSERT_NE(owner, nullptr);
+    ASSERT_TRUE(allocator_->probeExternalInsert({11, 22, 33}, 1).error.ok());
+    auto duplicate = allocator_->mallocForExternalInsert({11, 22, 33}, 1);
+    ASSERT_NE(duplicate, nullptr);
+    const auto published = owner->blocks(0)[1];
+    const auto result    = allocator_->insertExternalBlocks(*owner, 1, currentTimeMs() + 5000);
+    ASSERT_TRUE(result.error.ok()) << result.error.ToString();
+    EXPECT_EQ(result.adopted_block_indices, std::vector<size_t>({1, 2}));
+    EXPECT_EQ(pool->refCount(published), 2u);
+    owner.reset();
+    EXPECT_EQ(pool->refCount(published), 1u);
+    const auto unused = duplicate->blocks(0)[1];
+    const auto again  = allocator_->insertExternalBlocks(*duplicate, 1, currentTimeMs() + 5000);
+    EXPECT_TRUE(again.error.ok()) << again.error.ToString();
+    EXPECT_TRUE(again.adopted_block_indices.empty());
+    duplicate.reset();
+    EXPECT_FALSE(pool->isAllocated(unused));
+    EXPECT_EQ(pool->refCount(published), 1u);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, ExternalInsertRejectsInvalidTailWithoutPublishingEarlierBlocks) {
+    allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(createSingleTypeTestConfig(2, 10, 4));
+    ASSERT_TRUE(allocator_->init());
+    ASSERT_TRUE(seedCompleteBlockTreePath(allocator_, {11}).success);
+    ASSERT_TRUE(allocator_->probeExternalInsert({11, 22, 33}, 1).error.ok());
+    auto owner = allocator_->mallocForExternalInsert({11, 22, 33}, 1);
+    ASSERT_NE(owner, nullptr);
+    KVCacheResource invalid;
+    invalid.initGroups(allocator_->config_.topologyPtr());
+    invalid.setCacheKeys(owner->cacheKeys());
+    invalid.mutableBlockIds(0).assign({NULL_BLOCK_IDX, owner->blocks(0)[1], NULL_BLOCK_IDX});
+    EXPECT_TRUE(allocator_->insertExternalBlocks(invalid, 1, currentTimeMs() + 5000).error.hasError());
+    EXPECT_EQ(allocator_->blockTreeCacheOwner()->tree()->findNode({11, 22, 33}).size(), 1u);
+    EXPECT_TRUE(allocator_->insertExternalBlocks(*owner, 1, currentTimeMs() - 1).error.hasError());
+    EXPECT_EQ(allocator_->blockTreeCacheOwner()->tree()->findNode({11, 22, 33}).size(), 1u);
+    EXPECT_GE(allocator_->blockTreeCacheOwner()->evictForGroup(0, 1), 1);
+    const auto lost = allocator_->insertExternalBlocks(*owner, 1, currentTimeMs() + 5000);
+    EXPECT_TRUE(lost.error.hasError());
+    EXPECT_EQ(lost.error.ToString(), "prefix_evicted_or_demoted");
+    EXPECT_TRUE(allocator_->blockTreeCacheOwner()->tree()->findNode({11, 22, 33}).empty());
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, ExternalInsertRejectsHostSuffixWithoutLoadingOrPublishing) {
+    allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(createSingleTypeTestConfig(2, 10, 4));
+    auto config = makeSingleTypeTieredConfig(Tier::HOST, "");
+    allocator_->setBlockTreeCacheConfigForTest(config);
+    ASSERT_TRUE(allocator_->init());
+    const auto cache = allocator_->blockTreeCacheOwner();
+    const auto free  = allocator_->freeBlocksNum();
+    ASSERT_TRUE(allocator_->probeExternalInsert({11, 22}, 0).error.ok());
+    auto owner = allocator_->mallocForExternalInsert({11, 22}, 0);
+    ASSERT_NE(owner, nullptr);
+    const auto host = seedSingleTypeLowerTier(*cache, Tier::HOST, 11);
+    ASSERT_NE(host, NULL_BLOCK_IDX);
+    const auto free_before_probe = allocator_->freeBlocksNum();
+    const auto probe             = allocator_->probeExternalInsert({11, 22}, 0);
+    EXPECT_TRUE(probe.error.hasError());
+    EXPECT_EQ(probe.error.ToString(), "existing_suffix_conflict");
+    EXPECT_EQ(allocator_->freeBlocksNum(), free_before_probe);
+    const auto result = allocator_->insertExternalBlocks(*owner, 0, currentTimeMs() + 5000);
+    EXPECT_TRUE(result.error.hasError());
+    EXPECT_EQ(cache->tree()->findNode({11, 22}).size(), 1u);
+    const auto& resource = cache->tree()->findNode({11}).front()->group_set_resources.front();
+    EXPECT_EQ(resource.host_block, host);
+    EXPECT_TRUE(resource.device_blocks.empty());
+    EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+    owner.reset();
+    EXPECT_EQ(allocator_->freeBlocksNum(), free);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, ExternalAllocationUsesNormalCacheEviction) {
+    allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(createSingleTypeTestConfig(2, 4, 4));
+    ASSERT_TRUE(allocator_->init());
+    block_tree_cache_test::BlockTreeCacheTestPeer::setTierWatermarkForTest(
+        *allocator_->blockTreeCacheOwner(), Tier::DEVICE, 0.0);
+    ASSERT_TRUE(seedCompleteBlockTreePath(allocator_, {11, 22, 33}).success);
+    EXPECT_EQ(allocator_->freeBlocksNum(), 0u);
+    ASSERT_TRUE(allocator_->probeExternalInsert({44, 55}, 0).error.ok());
+    auto owner = allocator_->mallocForExternalInsert({44, 55}, 0);
+    ASSERT_NE(owner, nullptr);
+    EXPECT_EQ(owner->blocks(0).size(), 2u);
+    EXPECT_LE(allocator_->blockTreeCacheOwner()->tree()->findNode({11, 22, 33}).size(), 1u);
+    owner.reset();
+    EXPECT_GE(allocator_->freeBlocksNum(), 2u);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, ExternalInsertRechecksBusySuffixBeforePublishingNewTail) {
+    allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(createSingleTypeTestConfig(2, 10, 4));
+    ASSERT_TRUE(allocator_->init());
+    ASSERT_TRUE(seedCompleteBlockTreePath(allocator_, {11}).success);
+    ASSERT_TRUE(allocator_->probeExternalInsert({11, 22, 33}, 1).error.ok());
+    auto owner = allocator_->mallocForExternalInsert({11, 22, 33}, 1);
+    ASSERT_NE(owner, nullptr);
+    ASSERT_TRUE(seedCompleteBlockTreePath(allocator_, {11, 22}).success);
+    const auto cache      = allocator_->blockTreeCacheOwner();
+    auto&      suffix     = cache->tree()->findNode({11, 22}).back()->group_set_resources.front();
+    suffix.transfer_state = GroupSetTransferState::DEMOTING;
+    EXPECT_EQ(allocator_->probeExternalInsert({11, 22, 33}, 1).error.ToString(), "existing_suffix_conflict");
+    const auto result = allocator_->insertExternalBlocks(*owner, 1, currentTimeMs() + 5000);
+    EXPECT_EQ(result.error.ToString(), "existing_suffix_conflict");
+    EXPECT_EQ(cache->tree()->findNode({11, 22, 33}).size(), 2u);
+    suffix.transfer_state = GroupSetTransferState::IDLE;
+}
+
 // Test init
 TEST_F(SingleTypeKVCacheAllocatorTest, ConstructorAndInit) {
     auto config = createSingleTypeTestConfig();

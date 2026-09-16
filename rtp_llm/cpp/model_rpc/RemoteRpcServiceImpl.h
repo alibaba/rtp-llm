@@ -78,6 +78,15 @@ public:
         return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
     }
 
+    grpc::Status StartWrite(grpc::ServerContext*                   context,
+                            const P2PConnectorStartWriteRequestPB* request,
+                            P2PConnectorStartWriteResponsePB*      response) override {
+        if (prefill_server_new2_) {
+            return prefill_server_new2_->StartWrite(context, request, response);
+        }
+        return grpc::Status(grpc::StatusCode::INTERNAL, "server does not implement StartWrite");
+    }
+
     grpc::Status GetPeerInfo(grpc::ServerContext*        context,
                              const GetPeerInfoRequestPB* request,
                              GetPeerInfoResponsePB*      response) override {

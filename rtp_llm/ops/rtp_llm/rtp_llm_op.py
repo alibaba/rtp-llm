@@ -42,3 +42,6 @@ class RtpLLMOp:
 
     def request_stop(self):
         self.ft_op.request_stop()  # type: ignore
+
+    def stop_writeback(self):
+        self.ft_op.stop_writeback()  # type: ignore

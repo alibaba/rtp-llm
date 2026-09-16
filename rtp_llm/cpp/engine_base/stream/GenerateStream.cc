@@ -863,6 +863,9 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   torch::Tensor(),
                   update_info.update_remote_generate,
                   update_info.force_update_info});
+    if (update_info.kv_ready_token_count >= 0) {
+        writeback_kv_ready_token_count_ = std::min(update_info.kv_ready_token_count, seqLength() - 1);
+    }
 }
 
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
@@ -902,6 +905,9 @@ void GenerateStream::updateWithoutLock(const StreamUpdateInfo& update_info) {
 
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
+    if (update_info.kv_ready_token_count >= 0) {
+        writeback_kv_ready_token_count_ = std::min(update_info.kv_ready_token_count, seqLength() - 1);
+    }
 
     // checkFinished() 已将本轮 updateOutput 中上报的 GenerateDone/Error 事件应用到状态上，
     // 即使 moveToNext() 还未被调度器轮询，这里也能拿到与事件一致的"已完成"判断。

@@ -133,6 +133,13 @@ public:
                                    int64_t                   transfer_deadline_ms,
                                    int64_t                   control_timeout_ms);
 
+    std::shared_ptr<TpBroadcastResult> controlWriteAsync(const std::string&        unique_key,
+                                                         P2PConnectorBroadcastType type,
+                                                         P2PWriteOperationPB       operation,
+                                                         int64_t                   transfer_deadline_ms,
+                                                         int64_t                   control_timeout_ms);
+    static WriteStatusResult           writeStatus(const std::shared_ptr<TpBroadcastResult>& result);
+
 private:
     std::shared_ptr<TpBroadcastResult> broadcastRpc(const std::vector<FunctionRequestPB>& requests, int64_t timeout_ms);
     std::shared_ptr<TpBroadcastResult> broadcastRpcAndWait(const std::vector<FunctionRequestPB>& requests,

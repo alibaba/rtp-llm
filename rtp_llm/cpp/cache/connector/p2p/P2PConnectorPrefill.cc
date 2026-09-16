@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/connector/p2p/PrefillResultStore.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillWrite.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerPrefillRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerPrefillWrite.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/RouteCodec.h"
@@ -26,12 +27,20 @@ namespace rtp_llm {
 
 P2PConnectorPrefill::P2PConnectorPrefill(P2PConnectorConfig                          config,
                                          const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
-                                         const kmonitor::MetricsReporterPtr&         metrics_reporter):
+                                         const kmonitor::MetricsReporterPtr&         metrics_reporter,
+                                         std::shared_ptr<KVCacheAllocator>           allocator):
     config_(std::move(config)),
     layer_block_converter_(layer_block_converter),
-    metrics_reporter_(metrics_reporter) {}
+    metrics_reporter_(metrics_reporter),
+    allocator_(std::move(allocator)) {}
 
 P2PConnectorPrefill::~P2PConnectorPrefill() = default;
+
+void P2PConnectorPrefill::stopWriteback() {
+    if (write_scheduler_) {
+        write_scheduler_->stop();
+    }
+}
 
 bool P2PConnectorPrefill::init() {
     if (config_.tp_rank == 0) {
@@ -41,8 +50,15 @@ bool P2PConnectorPrefill::init() {
             RTP_LLM_LOG_ERROR("prefill connector init failed: tp_broadcast_client init failed");
             return false;
         }
-        scheduler_ = std::make_unique<P2PSchedulerPrefillRead>(
+        read_scheduler_ = std::make_unique<P2PSchedulerPrefillRead>(
             config_.scheduler_config, metrics_reporter_, tp_broadcast_client_);
+        if (config_.p2p_writeback_enable && allocator_) {
+            write_scheduler_ = std::make_unique<P2PSchedulerPrefillWrite>(
+                config_.scheduler_config, allocator_, metrics_reporter_, tp_broadcast_client_);
+            if (!write_scheduler_->init()) {
+                return false;
+            }
+        }
     }
 
     auto [sender, receiver] =
@@ -51,9 +67,9 @@ bool P2PConnectorPrefill::init() {
         RTP_LLM_LOG_ERROR("prefill connector init failed: transfer backend init failed");
         return false;
     }
-    worker_ = std::make_shared<P2PWorkerPrefillRead>(
+    read_worker_ = std::make_shared<P2PWorkerPrefillRead>(
         config_.worker_config, layer_block_converter_, metrics_reporter_, sender);
-    if (!worker_->init(10 * 1000)) {
+    if (!read_worker_->init(10 * 1000)) {
         RTP_LLM_LOG_ERROR("prefill connector init failed: worker init failed");
         return false;
     }
@@ -87,7 +103,7 @@ bool P2PConnectorPrefill::init() {
         return results->beginTransfer(key, deadline_ms);
     });
     stream_store_->setOnRequestReleased(
-        [computed_buffers = worker_->getComputedBuffersStore(),
+        [computed_buffers = read_worker_->getComputedBuffersStore(),
          results = result_store_](const std::string& unique_key, int64_t request_id, int64_t request_deadline_ms) {
             results->seal(unique_key, request_deadline_ms);
             if (computed_buffers && request_id >= 0) {
@@ -112,6 +128,18 @@ std::shared_ptr<AsyncContext> P2PConnectorPrefill::registerResource(const KVCach
         return nullptr;
     }
     return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
+}
+
+void P2PConnectorPrefill::processWrite(const P2PConnectorStartWriteRequestPB& request,
+                                       P2PConnectorStartWriteResponsePB&      response,
+                                       std::function<bool()>                  is_cancelled) {
+    if (write_scheduler_) {
+        write_scheduler_->handleWrite(request, response, std::move(is_cancelled));
+    } else {
+        response.Clear();
+        response.set_error_code(transErrorCodeToRPC(ErrorCode::INVALID_PARAMS));
+        response.set_error_message("Prefill writeback scheduler unavailable");
+    }
 }
 
 bool P2PConnectorPrefill::processWritePerRank(const P2PConnectorBroadcastTpRequestPB& request,
@@ -191,7 +219,7 @@ bool P2PConnectorPrefill::processWritePerRank(const P2PConnectorBroadcastTpReque
 
 std::shared_ptr<AsyncContext> P2PConnectorPrefill::asyncWriteByLayer(
     int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) {
-    if (!worker_ || !layer_context) {
+    if (!read_worker_ || !layer_context) {
         RTP_LLM_LOG_WARNING("asyncWriteByLayer failed, worker or layer context is null, layer_id=%d", layer_id);
         return nullptr;
     }
@@ -202,7 +230,7 @@ std::shared_ptr<AsyncContext> P2PConnectorPrefill::asyncWriteByLayer(
                             layer_context->requestId());
         return nullptr;
     }
-    if (!worker_->writeByLayer(layer_id,
+    if (!read_worker_->writeByLayer(layer_id,
                                resource,
                                layer_context->requestId(),
                                layer_context->attentionEvent(),
@@ -221,20 +249,20 @@ bool P2PConnectorPrefill::writeByLayerTag(int                                   
                                           int64_t                               request_id,
                                           const std::shared_ptr<c10::Event>& event,
                                           int64_t                               deadline_ms) {
-    if (!worker_ || !resource) {
+    if (!read_worker_ || !resource) {
         RTP_LLM_LOG_WARNING("writeByLayerTag failed, worker or resource is null, request_id=%ld layer_id=%d tag=%s",
                             request_id,
                             layer_id,
                             tag.c_str());
         return false;
     }
-    return worker_->writeByLayerTag(layer_id, tag, resource, request_id, event, deadline_ms);
+    return read_worker_->writeByLayerTag(layer_id, tag, resource, request_id, event, deadline_ms);
 }
 
 void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& request,
                                       P2PConnectorStartLoadResponsePB&      response,
                                       std::function<bool()>                 is_cancelled) {
-    if (scheduler_ == nullptr) {
+    if (read_scheduler_ == nullptr) {
         RTP_LLM_LOG_WARNING("handleRead failed, scheduler not initialized (only tp_rank 0 has scheduler)");
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
         response.set_error_message("scheduler not initialized");
@@ -311,7 +339,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     // when the gRPC client disconnects — bypassing the CANCEL_HANDLE_READ
     // broadcast RPC hop. Remote workers (other TP ranks) still receive
     // the broadcast; this only accelerates rank-0's own worker.
-    auto direct_cancel = [is_cancelled, worker = worker_, unique_key]() -> bool {
+    auto direct_cancel = [is_cancelled, worker = read_worker_, unique_key]() -> bool {
         if (is_cancelled && is_cancelled()) {
             worker->cancelSend(unique_key);
             return true;
@@ -319,7 +347,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         return false;
     };
     auto      send_start_us = currentTimeUs();
-    ErrorInfo error_info = scheduler_->sendKVCache(resource_entry->kv_cache_resource,
+    ErrorInfo error_info = read_scheduler_->sendKVCache(resource_entry->kv_cache_resource,
                                                    unique_key,
                                                    request_id,
                                                    decode_transfer_servers,
@@ -405,7 +433,7 @@ bool P2PConnectorPrefill::processReadPerRank(int64_t                            
         worker_plan.routes.push_back(std::move(worker_route));
     }
 
-    ErrorInfo error_info = worker_->sendKVCache(
+    ErrorInfo error_info = read_worker_->sendKVCache(
         request_id, unique_key, deadline_ms, worker_plan, p2p_request.request_deadline_ms());
     release_local_prefill_resource();
     if (error_info.hasError()) {
@@ -425,7 +453,7 @@ bool P2PConnectorPrefill::processNoTransferPerRank(
     int64_t                                 deadline_ms,
     const P2PConnectorBroadcastTpRequestPB& p2p_request,
     FunctionResponsePB&                     response) {
-    worker_->completeNoTransfer(request_id, deadline_ms, p2p_request.request_deadline_ms());
+    read_worker_->completeNoTransfer(request_id, deadline_ms, p2p_request.request_deadline_ms());
     if (config_.tp_rank != 0) {
         stream_store_->markTerminal(
             unique_key,
@@ -436,7 +464,7 @@ bool P2PConnectorPrefill::processNoTransferPerRank(
 }
 
 bool P2PConnectorPrefill::cancelProcessReadPerRank(const std::string& unique_key, FunctionResponsePB& response) {
-    bool ret = worker_->cancelSend(unique_key);
+    bool ret = read_worker_->cancelSend(unique_key);
     P2PConnector::setP2PResponse(response);
     return ret;
 }

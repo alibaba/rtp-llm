@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorDecode.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWriteWorkerUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeWrite.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <utility>
@@ -11,14 +12,28 @@ namespace rtp_llm {
 
 P2PConnector::P2PConnector(P2PConnectorConfig                          config,
                            const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
-                           const kmonitor::MetricsReporterPtr&         metrics_reporter):
-    config_(std::move(config)), layer_block_converter_(layer_block_converter), metrics_reporter_(metrics_reporter) {}
+                           const kmonitor::MetricsReporterPtr&         metrics_reporter,
+                           std::shared_ptr<KVCacheAllocator>           allocator):
+    config_(std::move(config)),
+    layer_block_converter_(layer_block_converter),
+    metrics_reporter_(metrics_reporter),
+    allocator_(std::move(allocator)) {}
 
 P2PConnector::~P2PConnector() = default;
 
+void P2PConnector::stopWriteback() {
+    if (decode_) {
+        decode_->stopWriteback();
+    }
+    if (prefill_) {
+        prefill_->stopWriteback();
+    }
+}
+
 bool P2PConnector::init() {
     if (config_.role_type == RoleType::PREFILL) {
-        prefill_ = std::make_unique<P2PConnectorPrefill>(config_, layer_block_converter_, metrics_reporter_);
+        prefill_ =
+            std::make_unique<P2PConnectorPrefill>(config_, layer_block_converter_, metrics_reporter_, allocator_);
         if (!prefill_->init()) {
             RTP_LLM_LOG_ERROR("init failed: prefill connector init failed");
             return false;
@@ -64,6 +79,34 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr& 
 void P2PConnector::cancelRead(const std::shared_ptr<AsyncContext>& context) {
     if (decode_) {
         decode_->cancelRead(context);
+    }
+}
+
+std::shared_ptr<AsyncContext> P2PConnector::asyncWrite(KVCacheResourcePtr      resource,
+                                                       std::vector<int>        token_ids,
+                                                       int                     input_length,
+                                                       size_t                  kv_ready_token_count,
+                                                       Meta::P2PRoutingContext routing) {
+    return decode_ ? decode_->write(
+               std::move(resource), std::move(token_ids), input_length, kv_ready_token_count, std::move(routing)) :
+                     nullptr;
+}
+
+void P2PConnector::cancelWrite(const std::shared_ptr<AsyncContext>& context) {
+    if (auto write = std::dynamic_pointer_cast<P2PConnectorAsyncWriteContext>(context)) {
+        write->cancel();
+    }
+}
+
+void P2PConnector::handleWrite(const P2PConnectorStartWriteRequestPB& request,
+                               P2PConnectorStartWriteResponsePB&      response,
+                               std::function<bool()>                  is_cancelled) {
+    if (prefill_) {
+        prefill_->processWrite(request, response, std::move(is_cancelled));
+    } else {
+        response.Clear();
+        response.set_error_code(transErrorCodeToRPC(ErrorCode::INVALID_PARAMS));
+        response.set_error_message("Prefill connector is not initialized");
     }
 }
 

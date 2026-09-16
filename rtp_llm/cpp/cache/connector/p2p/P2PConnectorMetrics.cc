@@ -3,6 +3,13 @@
 namespace rtp_llm {
 
 bool P2PConnectorMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(writeback_qps_metric, "rtp_llm_p2p_writeback_qps");
+    REGISTER_QPS_MUTABLE_METRIC(writeback_skipped_qps_metric, "rtp_llm_p2p_writeback_skipped_qps");
+    REGISTER_QPS_MUTABLE_METRIC(writeback_failed_qps_metric, "rtp_llm_p2p_writeback_failed_qps");
+    REGISTER_QPS_MUTABLE_METRIC(writeback_no_transfer_qps_metric, "rtp_llm_p2p_writeback_no_transfer_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(writeback_cost_time_us_metric, "rtp_llm_p2p_writeback_cost_time_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(writeback_hold_time_us_metric, "rtp_llm_p2p_writeback_hold_time_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(writeback_planned_bytes_metric, "rtp_llm_p2p_writeback_planned_bytes");
     // decode schedule metrics
     REGISTER_QPS_MUTABLE_METRIC(decode_schedule_qps_metric, "rtp_llm_p2p_connector_decode_schedule_qps");
     REGISTER_QPS_MUTABLE_METRIC(decode_schedule_failed_qps_metric, "rtp_llm_p2p_connector_decode_schedule_failed_qps");
@@ -71,6 +78,32 @@ bool P2PConnectorMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(cache_write_op_failure_qps_metric, "rtp_llm_p2p_connector_cache_write_op_failure_qps");
 
     return true;
+}
+
+void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, WriteSchedulerMetricsCollector* collector) {
+    kmonitor::MetricsTags write_tags = tags ? *tags : kmonitor::MetricsTags{};
+    write_tags.AddTag("side", collector->prefill ? "prefill" : "decode");
+    write_tags.AddTag("submitted", collector->submitted ? "true" : "false");
+    const auto& message = collector->error.ToString();
+    const auto  reason  = message == "existing_suffix_conflict" || message == "prefix_evicted_or_demoted" ?
+                              message :
+                              ErrorCodeToString(collector->error.code());
+    write_tags.AddTag("reason", collector->skip_reason ? collector->skip_reason : reason);
+    tags = &write_tags;
+    if (collector->skip_reason) {
+        REPORT_MUTABLE_QPS(writeback_skipped_qps_metric);
+        return;
+    }
+    REPORT_MUTABLE_QPS(writeback_qps_metric);
+    if (collector->error.hasError()) {
+        REPORT_MUTABLE_QPS(writeback_failed_qps_metric);
+    }
+    if (collector->no_transfer && collector->error.ok()) {
+        REPORT_MUTABLE_QPS(writeback_no_transfer_qps_metric);
+    }
+    REPORT_MUTABLE_METRIC(writeback_cost_time_us_metric, collector->total_cost_time_us);
+    REPORT_MUTABLE_METRIC(writeback_hold_time_us_metric, collector->hold_time_us);
+    REPORT_MUTABLE_METRIC(writeback_planned_bytes_metric, collector->planned_bytes);
 }
 
 void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, DecodeSchedulerMetricsCollector* collector) {

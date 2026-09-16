@@ -2,10 +2,23 @@
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
 class P2PConnectorMetrics;
+
+class WriteSchedulerMetricsCollector {
+public:
+    bool      prefill{false};
+    bool      submitted{false};
+    bool      no_transfer{false};
+    const char* skip_reason{nullptr};
+    ErrorInfo error;
+    int64_t   total_cost_time_us{0};
+    int64_t   hold_time_us{0};
+    int64_t   planned_bytes{0};
+};
 
 class DecodeSchedulerMetricsCollector final {
 public:
@@ -114,6 +127,7 @@ public:
 
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, WriteSchedulerMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, DecodeSchedulerMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, DecodeWorkerMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, DecodeSchedulerStatusMetricsCollector* collector);
@@ -126,6 +140,14 @@ public:
     void report(const kmonitor::MetricsTags* tags, CacheWriteOpFailureMetricsCollector* collector);
 
 private:
+    kmonitor::MutableMetric* writeback_qps_metric             = nullptr;
+    kmonitor::MutableMetric* writeback_skipped_qps_metric     = nullptr;
+    kmonitor::MutableMetric* writeback_failed_qps_metric      = nullptr;
+    kmonitor::MutableMetric* writeback_no_transfer_qps_metric = nullptr;
+    kmonitor::MutableMetric* writeback_cost_time_us_metric    = nullptr;
+    kmonitor::MutableMetric* writeback_hold_time_us_metric    = nullptr;
+    kmonitor::MutableMetric* writeback_planned_bytes_metric   = nullptr;
+
     // decode schedule metrics
     kmonitor::MutableMetric* decode_schedule_qps_metric          = nullptr;
     kmonitor::MutableMetric* decode_schedule_failed_qps_metric   = nullptr;

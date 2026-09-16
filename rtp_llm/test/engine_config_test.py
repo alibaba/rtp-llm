@@ -204,7 +204,7 @@ class EngineConfigTest(TestCase):
         config.cache_store_tcp_anet_rpc_thread_num = 7
         config.cache_store_tcp_anet_rpc_queue_num = 123
         state = config.__getstate__()
-        self.assertEqual(len(state), 32)
+        self.assertEqual(len(state), 31)
 
         # Legacy state before the three p2p deadline fields and three worker
         # queue fields were added: first 18 fields + TCP anet thread/queue.
@@ -255,12 +255,17 @@ class EngineConfigTest(TestCase):
         config = CacheStoreConfig()
         config.p2p_writeback_enable = True
         config.p2p_writeback_timeout_ms = 1234
-        config.p2p_writeback_max_inflight = 2
 
         restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(len(config.__getstate__()), 31)
         self.assertTrue(restored.p2p_writeback_enable)
         self.assertEqual(restored.p2p_writeback_timeout_ms, 1234)
-        self.assertEqual(restored.p2p_writeback_max_inflight, 2)
+
+        legacy_state = config.__getstate__() + (4,)
+        legacy_restored = CacheStoreConfig.__new__(CacheStoreConfig)
+        legacy_restored.__setstate__(legacy_state)
+        self.assertTrue(legacy_restored.p2p_writeback_enable)
+        self.assertEqual(legacy_restored.p2p_writeback_timeout_ms, 1234)
 
     def test_cache_store_config_legacy_pickle_defaults_writeback_off(self):
         config = CacheStoreConfig()
@@ -280,7 +285,6 @@ class EngineConfigTest(TestCase):
                 self.assertEqual(restored.thread_count, 7)
                 self.assertFalse(restored.p2p_writeback_enable)
                 self.assertEqual(restored.p2p_writeback_timeout_ms, 5000)
-                self.assertEqual(restored.p2p_writeback_max_inflight, 4)
 
 
 class SetupPdSepConfigTest(TestCase):
@@ -375,11 +379,10 @@ class CacheStoreGroupArgsBindingTest(TestCase):
         environment = {
             "P2P_WRITEBACK_ENABLE": "true",
             "P2P_WRITEBACK_TIMEOUT_MS": "1234",
-            "P2P_WRITEBACK_MAX_INFLIGHT": "2",
         }
         cases = [
-            ({}, [], (False, 5000, 4)),
-            (environment, [], (True, 1234, 2)),
+            ({}, [], (False, 5000)),
+            (environment, [], (True, 1234)),
             (
                 environment,
                 [
@@ -387,10 +390,8 @@ class CacheStoreGroupArgsBindingTest(TestCase):
                     "false",
                     "--p2p_writeback_timeout_ms",
                     "2345",
-                    "--p2p_writeback_max_inflight",
-                    "3",
                 ],
-                (False, 2345, 3),
+                (False, 2345),
             ),
         ]
         for env, args, expected in cases:
@@ -407,7 +408,6 @@ class CacheStoreGroupArgsBindingTest(TestCase):
                     (
                         config.p2p_writeback_enable,
                         config.p2p_writeback_timeout_ms,
-                        config.p2p_writeback_max_inflight,
                     ),
                     expected,
                 )

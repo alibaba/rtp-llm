@@ -17,6 +17,8 @@ namespace rtp_llm {
 
 class CPSlotMapper;
 class BlockTreeCache;
+struct ExternalInsertProbe;
+struct ExternalInsertResult;
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;
 class KVCacheGroup;
 using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;
@@ -93,6 +95,10 @@ public:
                                     int                            target_batch_size) const;
 
     MallocResult malloc(const MallocInfo& malloc_info);
+    ExternalInsertProbe  probeExternalInsert(const CacheKeysType& cache_keys, size_t prompt_blocks) const;
+    // Allocation and publication require a successful probe on the same allocator with unchanged configuration.
+    KVCacheResourcePtr   mallocForExternalInsert(const CacheKeysType& cache_keys, size_t start_block);
+    ExternalInsertResult insertExternalBlocks(const KVCacheResource& resource, size_t start_block, int64_t deadline_ms);
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
     virtual void blockCopy(int src_block_index, int dest_block_index);
     virtual void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);

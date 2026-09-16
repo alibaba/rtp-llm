@@ -667,6 +667,7 @@ message P2PConnectorStartWriteResponsePB {
     int32 accepted_start_block = 3;
     int32 accepted_block_count = 4;
     repeated string prefill_worker_transfer_addrs = 5;
+    uint64 plan_digest = 6;
 }
 
 message P2PConnectorStartLoadRequestPB {

@@ -283,6 +283,28 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     EXPECT_NEAR(0.731058, softmax_probs.data_ptr<float>()[1], 0.0001);
 }
 
+TEST_F(NormalBatchStreamProcessorTest, WritebackReadinessExcludesSampledToken) {
+    ModelConfig model;
+    model.max_seq_len = 64;
+    model.vocab_size = 4;
+    model.num_layers = 2;
+    CacheConfig cache;
+    initFullCacheConfig(cache, model.num_layers);
+    auto input = std::make_shared<GenerateInput>();
+    input->input_ids = hostIntBuffer({1, 2});
+    input->generate_config = std::make_shared<GenerateConfig>();
+    auto stream = std::make_shared<NormalGenerateStream>(
+        input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+    stream->generate_status_->status = StreamState::RUNNING;
+    NormalBatchStreamProcessor processor(model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, false);
+    StreamGroups streams({stream});
+    MergedOutput output;
+    output.sampler_output.token_ids = torch::tensor({1, 2, 3}, torch::kInt32).reshape({1, 3});
+    ASSERT_TRUE(processor.dispatch(streams, output).ok());
+    EXPECT_EQ(stream->seqLength(), 3);
+    EXPECT_EQ(stream->writebackKVReadyTokenCount(), 2);
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     ResourceContext resource_context;
     ModelConfig     model_config;

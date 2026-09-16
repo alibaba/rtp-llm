@@ -221,7 +221,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                     all_hidden_states,
                     true,
                     false,
-                    prompt_logits_output});
+                    prompt_logits_output,
+                    stream->seqLength()});
 }
 
 }  // namespace rtp_llm

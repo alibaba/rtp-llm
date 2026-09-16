@@ -4,11 +4,15 @@
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferBackendConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace rtp_llm {
+
+constexpr size_t kP2PDecodeKickoffThreadCount = 4;
+constexpr size_t kP2PDecodeKickoffQueueSize   = 1024;
 
 inline int64_t getP2PTransferListenPort(int64_t cache_store_listen_port) {
     // Reuse the reserved per-worker slot right after cache_store_listen_port.
@@ -30,6 +34,7 @@ struct P2PConnectorSchedulerConfig {
     // CacheStoreConfig::p2p_max_transfer_deadline_ms for rationale.
     int64_t                     p2p_max_transfer_deadline_ms = 300 * 1000;
     int64_t                     p2p_cancelled_keys_ttl_ms    = 3600 * 1000;
+    int64_t                     p2p_writeback_timeout_ms     = 5000;
     std::shared_ptr<const CacheTopology> topology;
     int                                  cp_rank = 0;
     int                                  cp_size = 1;
@@ -57,6 +62,7 @@ struct P2PConnectorSchedulerConfig {
         config.p2p_prefill_resource_hold_ms    = cache_store_config.p2p_prefill_resource_hold_ms;
         config.p2p_max_transfer_deadline_ms    = cache_store_config.p2p_max_transfer_deadline_ms;
         config.p2p_cancelled_keys_ttl_ms       = cache_store_config.p2p_cancelled_keys_ttl_ms;
+        config.p2p_writeback_timeout_ms        = cache_store_config.p2p_writeback_timeout_ms;
         return config;
     }
 };

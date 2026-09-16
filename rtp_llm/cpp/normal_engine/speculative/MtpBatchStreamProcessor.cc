@@ -527,6 +527,7 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         }
 
         spec_update_infos.push_back({new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        spec_update_infos.back().kv_ready_token_count = stream->seqLength();
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -569,6 +570,8 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
                                      -1,
                                      std::move(last_hidden_states),
                                      std::move(propose_all_probs)});
+
+        spec_update_infos.back().kv_ready_token_count = stream->seqLength() + accept_len[batch_idx_out] - 1;
 
         token_offset += accept_len[batch_idx_out];
         batch_idx_in += cur_batch_size;

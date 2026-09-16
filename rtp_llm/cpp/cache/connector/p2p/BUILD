@@ -63,6 +63,7 @@ cc_library(
     ],
     deps = [
         "//rtp_llm/cpp/metrics:metrics",
+        "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/utils:time_util",
     ]
 )
@@ -72,6 +73,7 @@ cc_library(
     srcs = [
         "P2PBroadcastClient.cc",
         "DecodeLoadHelper.cc",
+        "DecodeWriteHelper.cc",
         "ComputedLayerCacheBuffer.cc",
         "P2PConnectorResourceStore.cc",
         "PrefillResultStore.cc",
@@ -80,6 +82,7 @@ cc_library(
     hdrs = [
         "P2PBroadcastClient.h",
         "DecodeLoadHelper.h",
+        "DecodeWriteHelper.h",
         "ComputedLayerCacheBuffer.h",
         "P2PConnectorResourceStore.h",
         "P2PRequestDeadline.h",
@@ -97,6 +100,7 @@ cc_library(
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/utils:deferred_completion_queue_drainer",
+        "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan_glue",
         "//rtp_llm/cpp/utils:grpc_address_util",
         "//rtp_llm/cpp/utils:time_util",
         "@havenask//aios/autil:thread",
@@ -110,6 +114,8 @@ cc_library(
         "P2PConnectorAsyncContext.cc",
         "P2PSchedulerPrefillRead.cc",
         "P2PSchedulerDecodeRead.cc",
+        "P2PSchedulerDecodeWrite.cc",
+        "P2PSchedulerPrefillWrite.cc",
         "P2PWorkerPrefillRead.cc",
         "P2PWorkerDecodeRead.cc",
         "P2PWorkerDecodeWrite.cc",
@@ -129,6 +135,8 @@ cc_library(
         "P2PConnectorPrefill.h",
         "P2PSchedulerPrefillRead.h",
         "P2PSchedulerDecodeRead.h",
+        "P2PSchedulerDecodeWrite.h",
+        "P2PSchedulerPrefillWrite.h",
         "P2PWorkerPrefillRead.h",
         "P2PWorkerDecodeRead.h",
         "P2PWorkerDecodeWrite.h",
@@ -147,6 +155,9 @@ cc_library(
         "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan",
         "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan_glue",
         "//rtp_llm/cpp/cache:cache_async_context",
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache",
+        "//rtp_llm/cpp/utils:grpc_address_util",
         "//rtp_llm/cpp/cache/connector:connector_base",
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/utils:core_utils",

@@ -39,6 +39,7 @@ struct StreamUpdateInfo {
     bool                force_update_info      = false;
     // prompt scoring
     std::optional<PromptLogitsOutput> prompt_logits;
+    int kv_ready_token_count = -1;
 };
 
 struct StreamSpecUpdateInfo {
@@ -51,6 +52,7 @@ struct StreamSpecUpdateInfo {
 
     bool update_remote_generate = true;
     bool force_update_info      = false;
+    int  kv_ready_token_count   = -1;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -129,6 +131,9 @@ public:
     void         update(const StreamUpdateInfo& update_info);
     void         updateWithoutLock(const StreamUpdateInfo& update_info);
     void         specUpdate(const StreamSpecUpdateInfo& update_info);
+    int          writebackKVReadyTokenCount() const {
+        return writeback_kv_ready_token_count_;
+    }
     bool         updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
     virtual size_t scoreLen() const {
@@ -669,6 +674,7 @@ protected:
 
     // prefill TP size queried from prefill server (used for asymmetric TP)
     int prefill_tp_size_ = -1;
+    int writeback_kv_ready_token_count_ = 0;
     // Effective Prefill KV-cache CP size; independent from TP size.
     int prefill_cp_size_ = -1;
 };

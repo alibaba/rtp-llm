@@ -19,6 +19,8 @@ class P2PBroadcastClient;
 class P2PConnectorResourceStore;
 class PrefillResultStore;
 class P2PSchedulerPrefillRead;
+class P2PSchedulerPrefillWrite;
+class KVCacheAllocator;
 class LayerBlockConverter;
 class P2PWorkerPrefillRead;
 class P2PWorkerPrefillWrite;
@@ -28,10 +30,12 @@ class P2PConnectorPrefill {
 public:
     P2PConnectorPrefill(P2PConnectorConfig                          config,
                         const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
-                        const kmonitor::MetricsReporterPtr&         metrics_reporter);
+                        const kmonitor::MetricsReporterPtr&         metrics_reporter,
+                        std::shared_ptr<KVCacheAllocator>           allocator = nullptr);
     ~P2PConnectorPrefill();
 
     bool init();
+    void stopWriteback();
 
     std::shared_ptr<AsyncContext> registerResource(const KVCacheResourcePtr&    resource,
                                                    const std::shared_ptr<Meta>& meta);
@@ -45,6 +49,10 @@ public:
                          int64_t                               request_id,
                          const std::shared_ptr<c10::Event>& event,
                          int64_t                               deadline_ms);
+
+    void processWrite(const P2PConnectorStartWriteRequestPB& request,
+                      P2PConnectorStartWriteResponsePB&      response,
+                      std::function<bool()>                  is_cancelled = nullptr);
 
     void processRead(const P2PConnectorStartLoadRequestPB& request,
                      P2PConnectorStartLoadResponsePB&      response,
@@ -88,11 +96,13 @@ private:
     std::shared_ptr<LayerBlockConverter>           layer_block_converter_;
     kmonitor::MetricsReporterPtr                   metrics_reporter_;
     std::shared_ptr<P2PBroadcastClient>            tp_broadcast_client_;
-    std::unique_ptr<P2PSchedulerPrefillRead>       scheduler_;
-    std::shared_ptr<P2PWorkerPrefillRead>          worker_;
+    std::unique_ptr<P2PSchedulerPrefillRead>       read_scheduler_;
+    std::shared_ptr<P2PWorkerPrefillRead>          read_worker_;
     std::shared_ptr<P2PConnectorResourceStore>    stream_store_;
     std::shared_ptr<PrefillResultStore>            result_store_;
     std::unique_ptr<P2PWorkerPrefillWrite>         write_worker_;
+    std::shared_ptr<KVCacheAllocator>              allocator_;
+    std::unique_ptr<P2PSchedulerPrefillWrite>      write_scheduler_;
 };
 
 }  // namespace rtp_llm

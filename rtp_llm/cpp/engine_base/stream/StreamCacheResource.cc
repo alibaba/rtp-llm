@@ -322,6 +322,15 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier};
                 resource_context_.cache_manager->insertIntoCache(insert_info);
+                if (target_tier == Tier::DEVICE && !stream_->isFakeStream() && !stream_->hasNumBeams()) {
+                    MetaImpl meta(false, false, "");
+                    meta.fillRoutingContext(stream_);
+                    resource_context_.cache_manager->asyncWriteBack(batch_kv_cache_resource_,
+                                                                     stream_->completeTokenIdsPtr(),
+                                                                     stream_->inputLength(),
+                                                                     stream_->writebackKVReadyTokenCount(),
+                                                                     meta);
+                }
             }
         } else {
             RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, NOT storing cache, reuseCache=%d, hasError=%d, status=%s",

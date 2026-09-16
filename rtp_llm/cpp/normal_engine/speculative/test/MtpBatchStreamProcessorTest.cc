@@ -130,6 +130,8 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
 
     checkOutput(stream1, {2, 1}, {1, 2}, {0.2, 0.1, 0.3, 0.5}, {0.3, 0.4});
     checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {1.7, 1.8});
+    EXPECT_EQ(stream1->writebackKVReadyTokenCount(), 1);
+    EXPECT_EQ(stream2->writebackKVReadyTokenCount(), 2);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
@@ -182,6 +184,56 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
+    EXPECT_EQ(stream1->writebackKVReadyTokenCount(), 5);
+    EXPECT_EQ(stream2->writebackKVReadyTokenCount(), 2);
+}
+
+TEST_F(MtpBatchStreamProcessorTest, WritebackReadinessClampsAfterMidBatchStop) {
+    ModelConfig model_config;
+    model_config.max_seq_len                  = 64;
+    model_config.vocab_size                   = 128;
+    model_config.attn_config.tokens_per_block = 1;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.gen_num_per_cycle = 4;
+    const auto cache_config    = makeProcessorCacheConfig();
+    ResourceContext resources;
+    resources.cache_manager = std::make_shared<KVCacheManager>(cache_config);
+
+    const std::vector<int> prompt{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    auto stopped = createContextStream(model_config, RuntimeConfig{}, resources, prompt, 1);
+    stopped->generate_input_->generate_config->stop_words_list = {{13, 14}};
+    auto normal = createContextStream(model_config, RuntimeConfig{}, resources, prompt, 1);
+    normal->generate_input_->generate_config->stop_words_list = {{13, 14}};
+    auto continuing = createContextStream(model_config, RuntimeConfig{}, resources, prompt, 1);
+    model_config.special_tokens.eos_token_id = 14;
+    auto eos = createContextStream(model_config, RuntimeConfig{}, resources, prompt, 1);
+
+    speculative::SpeculativeSamplerOutput accepted;
+    accepted.accept_len = {5, 5, 5};
+    accepted.accept_tokens = {torch::tensor({{13, 14, 15, 16, 17}}, torch::kInt32),
+                              torch::tensor({{13, 14, 15, 16, 17}}, torch::kInt32),
+                              torch::tensor({{13, 14, 15, 16, 17}}, torch::kInt32)};
+    MergedOutput draft_output;
+    draft_output.model_output.all_hidden_states = torch::zeros({15, 2}, torch::kFloat32);
+    draft_output.sampler_output.token_ids       = torch::zeros({3, 1}, torch::kInt64);
+    draft_output.sampler_output.all_probs       = torch::zeros({3, 128}, torch::kFloat32);
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, sp_config, false);
+    ASSERT_TRUE(processor.dispatchDecode(StreamGroups({stopped, continuing, eos}), accepted, draft_output).ok());
+    StreamUpdateInfo normal_update{accepted.accept_tokens.front(), 5};
+    normal_update.kv_ready_token_count = 16;
+    normal->update(normal_update);
+
+    for (const auto& stream : {stopped, eos, normal}) {
+        ASSERT_FALSE(stream->hasError());
+        EXPECT_TRUE(stream->generate_status_->checkFinished());
+        EXPECT_EQ(stream->seqLength(), 14);
+        EXPECT_EQ(stream->writebackKVReadyTokenCount(), 13);
+        EXPECT_EQ(stream->getCompleteTokenIds()->completeTokenIdsVec(0).back(), 14);
+    }
+    EXPECT_FALSE(continuing->generate_status_->checkFinished());
+    EXPECT_EQ(continuing->seqLength(), 17);
+    EXPECT_EQ(continuing->writebackKVReadyTokenCount(), 16);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {

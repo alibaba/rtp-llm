@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorLayerContext.h"
+#include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include <c10/core/Event.h>
@@ -16,11 +17,11 @@
 
 namespace rtp_llm {
 
-class Meta;
 class P2PConnectorPrefill;
 class P2PConnectorDecode;
 class P2PConnectorResourceStore;
 class PrefillResultStore;
+class KVCacheAllocator;
 struct WriteTaskStatus;
 
 /**
@@ -36,11 +37,13 @@ class P2PConnector {
 public:
     P2PConnector(P2PConnectorConfig                          config,
                  const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
-                 const kmonitor::MetricsReporterPtr&         metrics_reporter);
+                 const kmonitor::MetricsReporterPtr&         metrics_reporter,
+                 std::shared_ptr<KVCacheAllocator>           allocator = nullptr);
     ~P2PConnector();
 
 public:
     bool init();
+    void stopWriteback();
 
     // Expose the Prefill resource store for integration and testing.
     std::shared_ptr<P2PConnectorResourceStore> streamStore() const;
@@ -63,6 +66,16 @@ public:
                          int64_t                               deadline_ms);
 
 public:
+    std::shared_ptr<AsyncContext> asyncWrite(KVCacheResourcePtr      resource,
+                                             std::vector<int>        token_ids,
+                                             int                     input_length,
+                                             size_t                  kv_ready_token_count,
+                                             Meta::P2PRoutingContext routing);
+    void                          cancelWrite(const std::shared_ptr<AsyncContext>& context);
+    void                          handleWrite(const P2PConnectorStartWriteRequestPB& request,
+                                              P2PConnectorStartWriteResponsePB&      response,
+                                              std::function<bool()>                  is_cancelled = nullptr);
+
     void handleRead(const P2PConnectorStartLoadRequestPB& request,
                     P2PConnectorStartLoadResponsePB&      response,
                     std::function<bool()>                 is_cancelled = nullptr);
@@ -77,6 +90,7 @@ private:
     const P2PConnectorConfig             config_;
     std::shared_ptr<LayerBlockConverter> layer_block_converter_;
     kmonitor::MetricsReporterPtr         metrics_reporter_;
+    std::shared_ptr<KVCacheAllocator>    allocator_;
 
     std::unique_ptr<P2PConnectorPrefill> prefill_;
     std::unique_ptr<P2PConnectorDecode>  decode_;

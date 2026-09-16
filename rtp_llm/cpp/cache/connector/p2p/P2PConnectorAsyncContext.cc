@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <algorithm>
+#include <exception>
 #include <functional>
 #include <limits>
 
@@ -482,6 +483,333 @@ void P2PConnectorAsyncReadContextChecker::checkOnce() {
         collector->check_once_cost_time_us = currentTimeUs() - start_time_us;
         collector->inflight_context_count  = inflight_after;
         metrics_reporter_->report<P2PConnectorMetrics, DecodeSchedulerStatusMetricsCollector>(nullptr, collector.get());
+    }
+}
+
+P2PConnectorAsyncWriteContext::P2PConnectorAsyncWriteContext(KVCacheResourcePtr                  resource,
+                                                             std::string                         unique_key,
+                                                             int64_t                             deadline_ms,
+                                                             P2PConnectorBroadcastType           type,
+                                                             std::shared_ptr<P2PBroadcastClient> client,
+                                                             int64_t                             control_timeout_ms,
+                                                             Settle                              settle,
+                                                             std::function<void()>               on_released,
+                                                             kmonitor::MetricsReporterPtr        metrics_reporter):
+    resource_(std::move(resource)),
+    unique_key_(std::move(unique_key)),
+    deadline_ms_(deadline_ms),
+    type_(type),
+    client_(std::move(client)),
+    control_timeout_ms_(control_timeout_ms),
+    settle_(std::move(settle)),
+    on_released_(std::move(on_released)),
+    metrics_reporter_(std::move(metrics_reporter)) {
+    metrics_.prefill = type_ == HANDLE_WRITE;
+}
+
+void P2PConnectorAsyncWriteContext::setPlannedBytes(int64_t bytes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    metrics_.planned_bytes = bytes;
+}
+
+void P2PConnectorAsyncWriteContext::waitDone() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [this]() { return done_; });
+}
+
+bool P2PConnectorAsyncWriteContext::done() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return done_;
+}
+
+bool P2PConnectorAsyncWriteContext::success() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return done_ && error_.ok();
+}
+
+ErrorInfo P2PConnectorAsyncWriteContext::errorInfo() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return error_;
+}
+
+bool P2PConnectorAsyncWriteContext::beginKickoff() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (kickoff_started_ || released_) {
+        return false;
+    }
+    if (cancelled_ || currentTimeMs() >= deadline_ms_) {
+        finishLocked(ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback expired or cancelled before start"));
+        return false;
+    }
+    kickoff_started_ = true;
+    return true;
+}
+
+void P2PConnectorAsyncWriteContext::setCallResults(std::shared_ptr<P2PBroadcastClient::Result> result) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    start_result_      = std::move(result);
+    calls_ready_       = true;
+    metrics_.submitted = true;
+    if (!start_result_) {
+        registration_done_ = true;
+        cancelled_         = true;
+        error_ = ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "writeback START broadcast failed");
+    }
+}
+
+void P2PConnectorAsyncWriteContext::finishLocked(const ErrorInfo& error) {
+    if (released_) {
+        return;
+    }
+    if (error_.ok()) {
+        error_ = error;
+    }
+    done_     = true;
+    released_ = true;
+    if (on_released_) {
+        on_released_();
+        on_released_ = {};
+    }
+    settle_ = {};
+    resource_.reset();
+    if (metrics_reporter_) {
+        metrics_.error              = error_;
+        metrics_.no_transfer        = !calls_ready_ && error_.ok();
+        metrics_.total_cost_time_us = currentTimeUs() - start_time_us_;
+        metrics_.hold_time_us       = metrics_.total_cost_time_us;
+        metrics_reporter_->report<P2PConnectorMetrics, WriteSchedulerMetricsCollector>(nullptr, &metrics_);
+    }
+    start_result_.reset();
+    control_result_.reset();
+    cv_.notify_all();
+}
+
+void P2PConnectorAsyncWriteContext::finishWithoutTransfer(const ErrorInfo& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!calls_ready_) {
+        finishLocked(error.ok() && currentTimeMs() >= deadline_ms_ ?
+                         ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback expired before completion") :
+                         error);
+    }
+}
+
+void P2PConnectorAsyncWriteContext::cancel() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (released_) {
+        return;
+    }
+    cancelled_ = true;
+    if (error_.ok()) {
+        error_ = ErrorInfo(ErrorCode::CANCELLED, "writeback cancelled");
+    }
+    done_ = true;
+    cv_.notify_all();
+    if (!kickoff_started_) {
+        finishLocked(error_);
+    }
+}
+
+bool P2PConnectorAsyncWriteContext::registrationSucceeded() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return registration_done_ && registration_success_ && !cancelled_;
+}
+
+bool P2PConnectorAsyncWriteContext::registrationDone() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return registration_done_;
+}
+
+bool P2PConnectorAsyncWriteContext::resourceHoldPending() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !released_;
+}
+
+void P2PConnectorAsyncWriteContext::checkDone(const std::shared_ptr<autil::ThreadPool>& control_pool) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (released_) {
+        return;
+    }
+    if (currentTimeMs() >= deadline_ms_) {
+        cancelled_ = true;
+        if (error_.ok()) {
+            error_ = ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback transfer deadline exceeded");
+        }
+    }
+    if (cancelled_) {
+        done_ = true;
+        cv_.notify_all();
+        if (!kickoff_started_) {
+            finishLocked(error_);
+            return;
+        }
+    }
+    if (!calls_ready_) {
+        return;
+    }
+    if (!registration_done_ && start_result_) {
+        start_result_->checkDone();
+        if (start_result_->done()) {
+            registration_done_    = true;
+            registration_success_ = start_result_->success();
+            if (!registration_success_) {
+                cancelled_ = true;
+                if (error_.ok()) {
+                    error_ = ErrorInfo(start_result_->errorCode(), start_result_->errorMessage());
+                }
+            }
+        }
+    }
+    if (!registration_done_ && !cancelled_) {
+        return;
+    }
+    if (!control_result_) {
+        if (control_submitting_) {
+            return;
+        }
+        control_submitting_ = true;
+        const auto operation = cancelled_ ? WRITE_CANCEL : WRITE_QUERY;
+        auto submit = [self = shared_from_this(), operation]() {
+            std::shared_ptr<P2PBroadcastClient::TpBroadcastResult> result;
+            try {
+                result = self->client_->controlWriteAsync(self->unique_key_, self->type_, operation,
+                                                          self->deadline_ms_, self->control_timeout_ms_);
+            } catch (...) {
+                // An unavailable control path never proves that borrowed buffers are no longer in use.
+            }
+            std::lock_guard<std::mutex> guard(self->mutex_);
+            self->control_result_ = std::move(result);
+            self->control_submitting_ = false;
+        };
+        lock.unlock();
+        if (!control_pool) {
+            submit();
+        } else if (control_pool->pushTask(std::move(submit), false, false) != autil::ThreadPoolBase::ERROR_NONE) {
+            lock.lock();
+            control_submitting_ = false;
+        }
+        return;
+    }
+    if (!control_result_->waitDone(1)) {
+        return;
+    }
+    const auto status = P2PBroadcastClient::writeStatus(control_result_);
+    control_result_.reset();
+    for (const auto& rank : status.ranks) {
+        if (rank.error_code() != ErrorCodePB::NONE_ERROR
+            || (rank.has_lease_status() && rank.lease_status().stopped() && !rank.write_success())) {
+            cancelled_ = true;
+            if (error_.ok()) {
+                error_ = ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "writeback worker failed");
+            }
+            done_ = true;
+            cv_.notify_all();
+            break;
+        }
+    }
+    if (!status.allStopped()) {
+        return;
+    }
+    ErrorInfo result = error_;
+    if (result.ok() && (!status.allSucceeded() || !registration_success_)) {
+        result = ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "writeback transfer failed");
+    }
+    if (result.ok() && currentTimeMs() >= deadline_ms_) {
+        result = ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback expired before settle");
+    }
+    if (result.ok() && settle_) {
+        try {
+            result = settle_(resource_);
+        } catch (const std::exception& e) {
+            result = ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, e.what());
+        } catch (...) {
+            result = ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "writeback settle failed");
+        }
+    }
+    finishLocked(result);
+}
+
+P2PConnectorAsyncWriteContextChecker::~P2PConnectorAsyncWriteContextChecker() {
+    stop();
+}
+
+bool P2PConnectorAsyncWriteContextChecker::init(int interval_ms) {
+    if (interval_ms <= 0 || thread_) {
+        return false;
+    }
+    interval_ms_ = interval_ms;
+    control_pool_ = std::make_shared<autil::ThreadPool>(4, 1024, nullptr, "P2PWriteControl");
+    if (!control_pool_->start()) {
+        return false;
+    }
+    thread_ =
+        autil::LoopThread::createLoopThread([this]() { checkOnce(); }, int64_t(interval_ms) * 1000, "P2PWriteChecker");
+    return thread_ != nullptr;
+}
+
+bool P2PConnectorAsyncWriteContextChecker::addContext(
+    const std::shared_ptr<P2PConnectorAsyncWriteContext>& context) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (stopping_ || !context) {
+        return false;
+    }
+    const auto it = contexts_.find(context->uniqueKey());
+    if (it != contexts_.end() && !it->second->resourceHoldPending()) {
+        contexts_.erase(it);
+    }
+    return contexts_.emplace(context->uniqueKey(), context).second;
+}
+
+void P2PConnectorAsyncWriteContextChecker::cancelAll() {
+    std::vector<std::shared_ptr<P2PConnectorAsyncWriteContext>> contexts;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stopping_ = true;
+        for (const auto& [key, context] : contexts_) {
+            contexts.push_back(context);
+        }
+    }
+    for (const auto& context : contexts) {
+        context->cancel();
+    }
+}
+
+void P2PConnectorAsyncWriteContextChecker::stop() {
+    cancelAll();
+    if (thread_) {
+        thread_->stop();
+        thread_.reset();
+    }
+    while (inflightContextCount() != 0) {
+        checkOnce();
+        std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
+    }
+    if (control_pool_) {
+        control_pool_->stop(autil::ThreadPoolBase::STOP_AFTER_QUEUE_EMPTY);
+    }
+}
+
+size_t P2PConnectorAsyncWriteContextChecker::inflightContextCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return contexts_.size();
+}
+
+void P2PConnectorAsyncWriteContextChecker::checkOnce() {
+    std::vector<std::shared_ptr<P2PConnectorAsyncWriteContext>> contexts;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& [key, context] : contexts_) {
+            contexts.push_back(context);
+        }
+    }
+    for (const auto& context : contexts) {
+        context->checkDone(control_pool_);
+        if (!context->resourceHoldPending()) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto                  it = contexts_.find(context->uniqueKey());
+            if (it != contexts_.end() && it->second == context) {
+                contexts_.erase(it);
+            }
+        }
     }
 }
 

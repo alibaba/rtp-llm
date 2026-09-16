@@ -122,6 +122,16 @@ TEST(PrefillRpcServerNew2Test, StartLoadRejectsMissingEngine) {
     EXPECT_EQ(status.error_message(), "engine is null");
 }
 
+TEST(PrefillRpcServerNew2Test, StartWriteRejectsMissingEngine) {
+    PrefillRpcServerNew2             server;
+    grpc::ServerContext              context;
+    P2PConnectorStartWriteRequestPB  request;
+    P2PConnectorStartWriteResponsePB response;
+    const auto                       status = server.StartWrite(&context, &request, &response);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+    EXPECT_EQ(status.error_message(), "cache manager is unavailable");
+}
+
 TEST(PrefillRpcServerNew2Test, GenerateStreamCallRejectsPdRequestWithoutUniqueKey) {
     PrefillRpcServerNew2 server;
     grpc::ServerContext  context;

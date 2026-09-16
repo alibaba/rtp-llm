@@ -25,6 +25,7 @@ public:
               py::object mm_process_engine);
     void stop();
     void requestStop();
+    void stopWriteback();
     void
     startHttpServer(py::object model_weights_loader, py::object world_info, py::object tokenizer, py::object render);
     void pause();

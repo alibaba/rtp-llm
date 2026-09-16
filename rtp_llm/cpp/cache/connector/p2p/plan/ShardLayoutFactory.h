@@ -3,7 +3,9 @@
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayout.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -89,6 +91,59 @@ public:
             tags.push_back(group.tag);
         }
         return tags;
+    }
+
+    static ErrorInfo validateWritebackLayout(const CacheTopology&     topology,
+                                             const ParallelismConfig& pc,
+                                             int                      peer_tp_size) {
+        if (pc.tp_size <= 0 || peer_tp_size != pc.tp_size || pc.prefill_cp_config.is_enabled()
+            || pc.prefill_cp_config.kv_cache_sharded || topology.groups().empty()) {
+            return ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback requires symmetric TP and disabled CP");
+        }
+        const auto block_size = topology.groups().front().seq_size_per_block;
+        for (const auto& group : topology.groups()) {
+            if (!group.spec || group.layer_ids.empty() || block_size == 0 || group.seq_size_per_block != block_size
+                || group.policy.group_type != CacheGroupType::FULL || !group.policy.enable_prefix_reuse
+                || group.policy.active_tail_blocks != 0
+                || group.policy.memory_placement != CacheMemoryPlacement::DEVICE) {
+                return ErrorInfo(ErrorCode::INVALID_PARAMS,
+                                 "writeback currently requires reusable DEVICE FULL groups with a common block size");
+            }
+        }
+        return ErrorInfo::OkStatus();
+    }
+
+    static uint64_t writebackLayoutDigest(const CacheTopology& topology, int tp_size) {
+        uint64_t digest = 14695981039346656037ULL;
+        const auto mix = [&](uint64_t value) {
+            for (int i = 0; i < 8; ++i) {
+                digest ^= (value >> (i * 8)) & 0xff;
+                digest *= 1099511628211ULL;
+            }
+        };
+        const auto mix_string = [&](const std::string& value) {
+            mix(value.size());
+            for (const unsigned char byte : value) {
+                mix(byte);
+            }
+        };
+        mix(1);
+        mix(tp_size);
+        mix(topology.groups().size());
+        for (const auto& group : topology.groups()) {
+            mix_string(group.tag);
+            mix_string(group.spec ? group.spec->fingerprint() : "");
+            mix(group.seq_size_per_block);
+            mix(group.kernel_seq_size_per_block);
+            mix(group.local_kv_head_num);
+            mix(group.kv_block_stride_bytes);
+            mix(group.kv_scale_stride_bytes);
+            mix(group.layer_ids.size());
+            for (const int layer : group.layer_ids) {
+                mix(layer);
+            }
+        }
+        return digest;
     }
 };
 

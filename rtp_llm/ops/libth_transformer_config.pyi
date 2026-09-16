@@ -206,7 +206,6 @@ class CacheStoreConfig:
     p2p_rdma_staging_block_size_bytes: int
     p2p_writeback_enable: bool
     p2p_writeback_timeout_ms: int
-    p2p_writeback_max_inflight: int
 
     def __getstate__(self) -> tuple:
         ...

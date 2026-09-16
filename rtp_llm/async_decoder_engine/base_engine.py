@@ -29,6 +29,9 @@ class BaseEngine:
             f"{type(self).__name__} does not implement nonblocking stop"
         )
 
+    def stop_writeback(self) -> None:
+        """Drain background writeback while keeping worker RPCs available."""
+
     @abstractmethod
     def _stop(self) -> None:
         raise NotImplementedError()

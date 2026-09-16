@@ -101,3 +101,7 @@ class LanguageCppEngine(BaseEngine):
     @override
     def request_stop(self) -> None:
         self.rtp_llm_op_.request_stop()
+
+    @override
+    def stop_writeback(self) -> None:
+        self.rtp_llm_op_.stop_writeback()

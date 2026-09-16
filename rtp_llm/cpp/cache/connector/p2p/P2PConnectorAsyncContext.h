@@ -8,9 +8,12 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "autil/LoopThread.h"
+#include "autil/ThreadPool.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -215,6 +218,91 @@ private:
     std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> async_contexts_;
     autil::LoopThreadPtr                                       check_done_thread_;
     size_t                                                     lease_poll_cursor_{0};
+};
+
+class P2PConnectorAsyncWriteContext: public AsyncContext,
+                                    public std::enable_shared_from_this<P2PConnectorAsyncWriteContext> {
+public:
+    using Settle = std::function<ErrorInfo(const KVCacheResourcePtr&)>;
+
+    P2PConnectorAsyncWriteContext(KVCacheResourcePtr                  resource,
+                                  std::string                         unique_key,
+                                  int64_t                             deadline_ms,
+                                  P2PConnectorBroadcastType           type,
+                                  std::shared_ptr<P2PBroadcastClient> client,
+                                  int64_t                             control_timeout_ms,
+                                  Settle                              settle           = {},
+                                  std::function<void()>               on_released      = {},
+                                  kmonitor::MetricsReporterPtr        metrics_reporter = nullptr);
+
+    void               waitDone() override;
+    bool               done() const override;
+    bool               success() const override;
+    ErrorInfo          errorInfo() const override;
+    bool               beginKickoff();
+    void               setCallResults(std::shared_ptr<P2PBroadcastClient::Result> result);
+    void               finishWithoutTransfer(const ErrorInfo& error = ErrorInfo::OkStatus());
+    void               cancel();
+    void               checkDone(const std::shared_ptr<autil::ThreadPool>& control_pool = nullptr);
+    bool               registrationSucceeded() const;
+    bool               registrationDone() const;
+    bool               resourceHoldPending() const;
+    KVCacheResourcePtr resource() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return resource_;
+    }
+    void               setPlannedBytes(int64_t bytes);
+    const std::string& uniqueKey() const {
+        return unique_key_;
+    }
+
+private:
+    void finishLocked(const ErrorInfo& error);
+
+    KVCacheResourcePtr                                     resource_;
+    const std::string                                      unique_key_;
+    const int64_t                                          deadline_ms_;
+    const P2PConnectorBroadcastType                        type_;
+    std::shared_ptr<P2PBroadcastClient>                    client_;
+    const int64_t                                          control_timeout_ms_;
+    Settle                                                 settle_;
+    std::function<void()>                                  on_released_;
+    std::shared_ptr<P2PBroadcastClient::Result>            start_result_;
+    std::shared_ptr<P2PBroadcastClient::TpBroadcastResult> control_result_;
+    mutable std::mutex                                     mutex_;
+    std::condition_variable                                cv_;
+    bool                                                   kickoff_started_{false};
+    bool                                                   calls_ready_{false};
+    bool                                                   registration_done_{false};
+    bool                                                   registration_success_{false};
+    bool                                                   cancelled_{false};
+    bool                                                   done_{false};
+    bool                                                   released_{false};
+    bool                                                   control_submitting_{false};
+    ErrorInfo                                              error_;
+    kmonitor::MetricsReporterPtr                           metrics_reporter_;
+    WriteSchedulerMetricsCollector                         metrics_;
+    const int64_t                                          start_time_us_{currentTimeUs()};
+};
+
+class P2PConnectorAsyncWriteContextChecker {
+public:
+    ~P2PConnectorAsyncWriteContextChecker();
+    bool   init(int interval_ms);
+    bool   addContext(const std::shared_ptr<P2PConnectorAsyncWriteContext>& context);
+    void   cancelAll();
+    void   stop();
+    size_t inflightContextCount() const;
+
+private:
+    void checkOnce();
+
+    mutable std::mutex                                                    mutex_;
+    std::map<std::string, std::shared_ptr<P2PConnectorAsyncWriteContext>> contexts_;
+    autil::LoopThreadPtr                                                  thread_;
+    bool                                                                  stopping_{false};
+    int                                                                   interval_ms_{100};
+    std::shared_ptr<autil::ThreadPool> control_pool_;
 };
 
 }  // namespace rtp_llm

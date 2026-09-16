@@ -359,6 +359,7 @@ void RtpLLMOp::stop() {
                 }
             }
             RTP_LLM_LOG_INFO("Server shutdowning");
+            stopWriteback();
             grpc_server_->Shutdown();
             grpc_server_.reset();
         }
@@ -380,6 +381,17 @@ void RtpLLMOp::stop() {
 void RtpLLMOp::requestStop() {
     if (!is_server_shutdown_ && model_rpc_service_) {
         THROW_IF_STATUS_ERROR(model_rpc_service_->getEngine()->requestStop());
+    }
+}
+
+void RtpLLMOp::stopWriteback() {
+    if (model_rpc_service_) {
+        if (auto engine = model_rpc_service_->getEngine()) {
+            if (auto cache_manager = engine->getCacheManager()) {
+                pybind11::gil_scoped_release release;
+                cache_manager->stopWriteback();
+            }
+        }
     }
 }
 
@@ -415,6 +427,7 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("tokenizer"),
              py::arg("render"))
         .def("request_stop", &RtpLLMOp::requestStop)
+        .def("stop_writeback", &RtpLLMOp::stopWriteback)
         .def("stop", &RtpLLMOp::stop);
 }
 

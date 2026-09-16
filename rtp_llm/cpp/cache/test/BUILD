@@ -174,6 +174,7 @@ cc_library(
 
 cc_library(
     name = "block_tree_cache_allocator_test_helper",
+    visibility = ["//rtp_llm/cpp/cache:__subpackages__"],
     hdrs = [
         "BlockTreeCacheAllocatorTestHelper.h",
     ],

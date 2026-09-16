@@ -36,6 +36,73 @@ bool KVCacheAllocator::init() {
     return true;
 }
 
+ExternalInsertProbe KVCacheAllocator::probeExternalInsert(const CacheKeysType& cache_keys, size_t prompt_blocks) const {
+    if (!block_tree_cache_ || !block_tree_cache_->isDeviceCacheEnabled() || allocation_type_ != AllocationType::DEVICE
+        || (cp_slot_mapper_ && cp_slot_mapper_->isSharded())) {
+        return {ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert requires reusable DEVICE FULL groups"), 0};
+    }
+    const size_t block_size = seqSizePerBlock();
+    for (const auto& group : config_.topology().groups()) {
+        if (group.policy.group_type != CacheGroupType::FULL || !group.policy.enable_prefix_reuse
+            || group.policy.active_tail_blocks > 0 || group.policy.memory_placement != CacheMemoryPlacement::DEVICE
+            || group.seq_size_per_block != block_size) {
+            return {ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert requires reusable DEVICE FULL groups"), 0};
+        }
+    }
+    return block_tree_cache_->probeExternalInsert(cache_keys, prompt_blocks);
+}
+
+KVCacheResourcePtr KVCacheAllocator::mallocForExternalInsert(const CacheKeysType& cache_keys, size_t start_block) {
+    if (start_block > cache_keys.size()
+        || cache_keys.size() > static_cast<size_t>(std::numeric_limits<int>::max() / seqSizePerBlock())) {
+        return nullptr;
+    }
+    const auto         groups = cacheGroups();
+    KVCacheResourcePtr resource(new KVCacheResource, [groups](KVCacheResource* resource) {
+        for (int gid = 0; gid < resource->groupNums(); ++gid) {
+            groups[gid]->unreference(resource->blocks(gid));
+        }
+        delete resource;
+    });
+    resource->initGroups(config_.topologyPtr());
+    resource->setCacheKeys(cache_keys);
+    resource->setLastBlockAligned(true);
+    const size_t count = cache_keys.size() - start_block;
+    for (size_t gid = 0; gid < groups.size(); ++gid) {
+        auto& ids = resource->mutableBlockIds(static_cast<int>(gid));
+        if (!groups[gid]->malloc(ids, static_cast<int>(count) * seqSizePerBlock(), true)) {
+            return nullptr;
+        }
+        BlockIndicesType indexed(start_block, NULL_BLOCK_IDX);
+        indexed.insert(indexed.end(), ids.blocks().begin(), ids.blocks().end());
+        ids.assign(std::move(indexed));
+    }
+    return resource;
+}
+
+ExternalInsertResult
+KVCacheAllocator::insertExternalBlocks(const KVCacheResource& resource, size_t start_block, int64_t deadline_ms) {
+    if (start_block > resource.cacheKeys().size() || resource.groupNums() != cacheGroups().size()) {
+        return {ErrorInfo(ErrorCode::INVALID_PARAMS, "unsupported external insert resource"), {}};
+    }
+    const auto&                                groups = block_tree_cache_->groupSets();
+    std::vector<std::vector<GroupSetResource>> resources(resource.cacheKeys().size(),
+                                                         std::vector<GroupSetResource>(groups.size()));
+    for (size_t gid = 0; gid < groups.size(); ++gid) {
+        for (size_t i = start_block; i < resources.size(); ++i) {
+            auto& blocks = resources[i][gid].device_blocks;
+            for (const auto member : groups[gid]->groupIds()) {
+                const auto& source = resource.blocks(static_cast<int>(member));
+                if (source.size() <= i || source[i] <= 0) {
+                    return {ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert has missing blocks"), {}};
+                }
+                blocks.push_back(source[i]);
+            }
+        }
+    }
+    return block_tree_cache_->insertExternalBlocks(resource.cacheKeys(), start_block, resources, deadline_ms);
+}
+
 MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
     MallocResult init_result = initMallocForCommonLen(malloc_info);
     if (malloc_info.batch_kv_cache_resource != nullptr) {

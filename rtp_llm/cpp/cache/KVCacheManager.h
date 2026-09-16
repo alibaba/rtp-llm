@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/connector/p2p/PrefillResultStore.h"
+#include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -53,6 +54,13 @@ public:
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
     void         cancelP2PLoad(const std::shared_ptr<AsyncContext>& context);
     void         insertIntoCache(const InsertInfo& insert_info);
+    bool         writebackEnabled() const;
+    std::shared_ptr<AsyncContext> asyncWriteBack(const BatchKVCacheResourcePtr& resource,
+                                                const CompleteTokenIdsPtr& tokens,
+                                                int input_length,
+                                                int kv_ready_token_count,
+                                                const Meta& meta) noexcept;
+    void stopWriteback();
 
     int
     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
@@ -132,6 +140,9 @@ public:
                     std::function<bool()>                 is_cancelled = nullptr);
 
     bool hasActiveConnectors() const;
+    void handleWrite(const P2PConnectorStartWriteRequestPB& request,
+                     P2PConnectorStartWriteResponsePB&      response,
+                     std::function<bool()>                  is_cancelled = nullptr);
     bool hasP2PConnector() const;
     void
     notifySideChannelReady(const std::string& unique_key, int64_t deadline_ms, const PrefillResultStore::Data& data);

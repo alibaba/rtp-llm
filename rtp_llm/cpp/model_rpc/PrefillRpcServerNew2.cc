@@ -371,6 +371,19 @@ grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*      
     return grpc::Status::OK;
 }
 
+grpc::Status PrefillRpcServerNew2::StartWrite(grpc::ServerContext*                   context,
+                                              const P2PConnectorStartWriteRequestPB* request,
+                                              P2PConnectorStartWriteResponsePB*      response) {
+    if (context->IsCancelled()) {
+        return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
+    }
+    if (!engine_ || !engine_->getCacheManager()) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is unavailable");
+    }
+    engine_->getCacheManager()->handleWrite(*request, *response, [context]() { return context->IsCancelled(); });
+    return grpc::Status::OK;
+}
+
 ::grpc::Status PrefillRpcServerNew2::GetPeerInfo(::grpc::ServerContext*      context,
                                                  const GetPeerInfoRequestPB* request,
                                                  GetPeerInfoResponsePB*      response) {

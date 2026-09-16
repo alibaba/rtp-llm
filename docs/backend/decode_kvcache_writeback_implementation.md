@@ -9,7 +9,8 @@
 - 基线提交：`ce489746d081e7fb861fa706fc3cb2d933ac5214`。
 - 当前仓库：`/data6/renyuanming.rym/rtp-llm`。
 - 2026-09-10 先撤回 Slice 1，完成 Slice 0 的期限修复和验证后提交；随后按逐片实施的安排重新开始 **Slice 1**，本轮实现见 §6。
-- 当前包含 Slice 0 和 Slice 1 基础设施，尚未接入接收分配、插树和请求收尾触发逻辑；写回开关默认关闭。
+- 2026-09-11 在 Slice 1 提交 `69d05e3edd` 上同时实现 Slice 2/3，变更见 §7/§8，验证见 §9。
+- 当前包含 Slice 0～4。Prefill 接收与插树、Decode 异步编排及生产 FINISHED 触发已接通，写回开关默认关闭。Slice 4 的代码边界、KV 范围及验证限制见 §10。
 
 ### 1.1 五个 Slice 的职责
 
@@ -19,9 +20,9 @@
 | --- | --- | --- |
 | Slice 0：Read 路径重构 | scheduler/worker 改为 Read 命名；将首 token、复用统计和 MTP 结果拆入 `PrefillResultStore`，保留等待、取消和终态语义 | 已实现；期限交接修复后目标容器编译及 212 个单测通过，待代码审阅 |
 | Slice 1：写回基础设施 | proto、Decode Write sender、Prefill Write receiver、backend 接线、角色分发及配置 | 已实现；复用自审后 251 个 C++ 单测通过，后续空 routes 修复编译及 78 个 worker 用例通过；初版 17 个 Python 单测通过，待 review，详见 §6 |
-| Slice 2：Prefill 接收与插树 | `StartWrite` 服务入口、`P2PConnector::handleWrite` / `P2PConnectorPrefill::processWrite` 和 `P2PSchedulerPrefillWrite`；准入与范围协商、接管分配引用的 RAII 句柄、接收汇总、HOST/DISK 后缀冲突拒绝、同锁预检和插树、失败释放 | 尚未实现；由测试发起方驱动，独立验证完整接收流程 |
-| Slice 3：Decode 发起与收尾 | `P2PConnector::asyncWrite` / `P2PConnectorDecode::write`、Write caller 和 `P2PSchedulerDecodeWrite`；源块保活上下文、握手及发送、并发与超时管理、CANCEL/QUERY 和资源收尾 | 尚未实现；使用模拟 Prefill 服务验证完整发起流程，不接入请求收尾触发点 |
-| Slice 4：生产链路接通 | `KVCacheManager::asyncWriteBack` 与 `StreamCacheResource::tryReleaseKVBlock` 接线；释放原始引用前同步建立源块 hold、传给 Slice 3 上下文，确认 KV 就绪及 routing context 生命周期，连接真实两端 | 尚未实现；端到端集成、引用交接与异常路径测试、正向回归及写回 smoke |
+| Slice 2：Prefill 接收与插树 | `StartWrite` 服务入口、`P2PConnector::handleWrite` / `P2PConnectorPrefill::processWrite` 和 `P2PSchedulerPrefillWrite`；准入与范围协商、接管分配引用的 RAII 句柄、接收汇总、HOST/DISK 后缀冲突拒绝、同锁预检和插树、失败释放 | 已实现；本轮限定可复用的 DEVICE FULL groups，详见 §7 |
+| Slice 3：Decode 发起与收尾 | `P2PConnector::asyncWrite` / `P2PConnectorDecode::write`、`DecodeWriteHelper` 和 `P2PSchedulerDecodeWrite`；源块保活上下文、握手及发送、取消与超时管理、CANCEL/QUERY 和资源收尾 | 已实现；源资源和调用参数在异步边界按值持有，详见 §8 |
+| Slice 4：生产链路接通 | `KVCacheManager::asyncWriteBack` 与 `StreamCacheResource::tryReleaseKVBlock` 接线；释放原始引用前同步建立源块 hold、传给 Slice 3 上下文，确认 KV 就绪及 routing context 生命周期，连接真实两端 | 已实现，详见 §10；按本轮要求不跑 smoke |
 
 Slice 0 的目标是整理现有正向 Read 路径，为后续写回提供清晰的资源与结果存储边界。当前代码不提供 Decode 到 Prefill 的自动写回。
 
@@ -51,11 +52,11 @@ Slice 2/3 必须基于同一份协议和资源生命周期约定实现；Slice 4
 | worker 控制入口 | `cancelWrite` / `queryWriteStatus` | `cancelWrite` / `queryWriteStatus` | Slice 1 已实现，取消与查询独立于启动入口 |
 | rank0 编排入口 | `P2PConnectorDecode::write` | `P2PConnectorPrefill::processWrite` | 分别在 Slice 3 / Slice 2 实现 |
 
-当前 Decode worker 的 `write()` 执行单 rank 任务；未来 Decode connector 的 `write()` 发起整个写回流程，二者位于不同的类和调用层级。本轮统一既有方法命名，不为尚未实现的 scheduler 增加空入口。
+Decode worker 的 `write()` 执行单 rank 任务；Decode connector 的 `write()` 转发整个写回流程给 `P2PSchedulerDecodeWrite`，二者位于不同的类和调用层级。
 
 Write 沿用现有 Read 的分层：connector 把 protobuf route 转为 `P2PWorkerRoutePlan`，worker 只接收内部数据。Prefill `handleWrite(request_id, unique_key, deadline_ms, worker_plan)` 对应接收侧 `P2PWorkerDecodeRead::read(...)` 的参数形式，返回 `ErrorInfo`；Decode `write(...)` 使用相同参数形式。两侧 `cancelWrite(key, deadline)` 返回是否接受取消，`queryWriteStatus(key, status)` 返回是否找到任务，状态通过普通 C++ 结构 `WriteTaskStatus` 输出，包含 sealed、任务计数、stopped、write_success 和业务错误。
 
-接口分层对齐不改变等待语义：Read 的 `read()` 包含接收等待；Write 的 `handleWrite()` 完成接收登记即返回，`write()` 完成后台提交即返回。完成汇总和资源收尾由后续 scheduler 通过独立状态接口处理。
+接口分层对齐不改变等待语义：Read 的 `read()` 包含接收等待；Write worker 的 `handleWrite()` 完成接收登记即返回，`write()` 完成后台提交即返回。两个 Write scheduler 共用异步上下文和 checker，通过独立状态接口完成汇总和资源收尾。
 
 ## 2. Slice 0 已实现的改动
 
@@ -88,7 +89,7 @@ Write 沿用现有 Read 的分层：connector 把 protobuf route 转为 `P2PWork
 
 两个清理线程均使用现有的 `p2p_resource_store_timeout_check_interval_ms`，调用 `LoopThread` 时统一转换为微秒。ResultStore 清扫只有在等待状态改变时才唤醒等待者；重复扫描终态记录或删除已结束记录不会无条件唤醒。有限且已过期的业务 deadline 不会重新追加一小时，只有缺失或无限期限才使用原配置的 fallback TTL。
 
-`addResource` 保留原有的 Meta 入口。此前为写回预留的 `addResource(key, request_id, deadline, resource)` 重载已撤回；结果存储测试通过现有 `MockMeta` 注册资源，继续覆盖资源取消及过期时对结果等待的影响。
+Slice 0 的 `addResource` 保留原有 Meta 入口，撤回当时为写回预留的 `addResource(key, request_id, deadline, resource)` 重载；结果存储测试通过现有 `MockMeta` 注册资源，继续覆盖资源取消及过期时对结果等待的影响。Slice 2 重新引入的 Write 重载及其禁止覆盖语义见 §7.3。
 
 ### 2.4 协议与配置边界
 
@@ -332,12 +333,12 @@ docker exec --workdir /data6/renyuanming.rym/rtp-llm \
 
 R1 的物理传输停止与资源释放、R2 的 KV 就绪边界、R3 的纯探测接口及同锁发布实现、R4 的跨 rank 完成汇总，以及 R6 的混合 group 范围，属于后续写回阶段需要确认或落实的契约。Slice 1 先提供 worker 本地任务状态，跨 rank 汇总和资源持有者仍需在 Slice 2/3 落实；设计文档中的待讨论 comments 继续保留。
 
-### 5.1 Slice 2 已明确、尚未实现的两项契约
+### 5.1 Slice 0 审阅时确认的接收契约
 
 - **接收分配引用（设计 R7，本轮 comment 4）**：`mallocForExternalInsert` 返回 owning RAII 句柄，直接接管 malloc 已增加的原始引用，接收端不再调用 `incrKVCacheRef` 叠加引用。成功插树后归还分配引用，只保留树的 CACHE 引用；失败及重复结果未采纳的新块均按同一规则释放，释放前须确认没有在途传输。分配接口负责部分失败回滚。
 - **HOST/DISK 后缀冲突（设计 R8，本轮 comment 5）**：p=p_dev 不代表后缀不存在。Phase 1 对已有低层或忙碌 FULL 节点冲突放弃写回，不提供节点升级接口。准入先检查一次；settle 在树锁内完整检查前缀和全部后缀后才发布，防止普通 insert 提前停止而留下部分更新。
 
-上述两项已明确设计契约，接收分配与插树尚未实现。后续 Slice 2 必须补分配引用账本、失败回滚、HOST 后缀拒绝、传输中降级和部分发布防护测试。§4.5 的 212 个通过用例仅验证 Slice 0，不作为这两项未实现能力的验证结果。
+上述两项在 Slice 0 审阅时仅确认了契约，本轮实现见 §7，验证见 §9。§4.5 的 212 个通过用例仅验证 Slice 0，不作为接收分配与插树的验证结果。
 
 ## 6. Slice 1：写回基础设施
 
@@ -357,9 +358,9 @@ R1 的物理传输停止与资源释放、R2 的 KV 就绪边界、R3 的纯探�
 | `p2p/P2PConnectorPrefill.{h,cc}` | 开关开启时将 backend receiver 交给 Write worker；`processWritePerRank` 负责协议解析、操作分发和状态响应 |
 | `p2p/P2PConnector.cc` | 将 `WRITE` / `HANDLE_WRITE` 分发到对应角色；错误角色和关闭的 Write 路径返回失败 |
 | `p2p/P2PKeyUtil.h` | 增加 `makeWriteBackRouteLayerKey`，使用 `_wb_` 标记并包含 plan digest |
-| `config/ConfigModules.{h,cc}`、`pybind/ConfigInit.cc`、Python 类型声明和 CLI 参数 | 写回开关、超时及并发配置的声明、绑定、序列化和诊断输出 |
+| `config/ConfigModules.{h,cc}`、`pybind/ConfigInit.cc`、Python 类型声明和 CLI 参数 | 写回开关及超时配置的声明、绑定、序列化和诊断输出 |
 
-以上 C++ 路径相对 `rtp_llm/cpp/`。BUILD 和对应单测同步更新。当前只声明 `StartWrite` RPC，`RemoteRpcServiceImpl` 尚未实现处理入口，调用仍由生成的默认实现返回未实现；真实请求尚不会自动发起写回。
+以上 C++ 路径相对 `rtp_llm/cpp/`。BUILD 和对应单测同步更新。Slice 1 完成时仅声明 `StartWrite` RPC；服务入口在 Slice 2 补齐，详见 §7。真实请求的自动发起已由 Slice 4 接入，见 §10。
 
 协议解析直接放在两侧角色 connector 的 START 分支。公共响应封装集中在现有 `P2PConnector`：`setP2PResponse()` 将 `ErrorInfo` 转成 protobuf 错误码和错误信息，省略错误参数时写入成功状态；`fillWriteResponse()` 写入 lease 计数、stopped、write_success，并复用前者填写错误字段。总入口、Decode 和 Prefill 共用这些静态方法，不再各保留一份文件内实现，也不新建 RPC util。两侧保留必要的局部解析重复；worker 共用的任务状态和传输单元构建仍保留在 `P2PWriteWorkerUtil` 中。
 
@@ -427,7 +428,7 @@ backend 完成回调 -> CANCEL / QUERY -> 全部 rank stopped=true -> 允许释�
 
 #### 6.3.2 有界后台发送与排队取消
 
-Decode Write worker 在 `init()` 中创建独立 `autil::ThreadPool`，默认 4 个线程、最多 10000 个排队请求；每个请求作为一个队列任务，后台线程逐个调用其传输单元的 `sender->send()`。线程数和队列容量可由初始化参数指定，测试使用 1 个线程、1 个队列槽位验证边界；这不是 `p2p_writeback_max_inflight` 的业务准入，后者仍由 Slice 3 实现。选择 `ThreadPool` 是为了使用严格的队列容量上限及 `STOP_AFTER_QUEUE_EMPTY` 排空语义。
+Decode Write worker 在 `init()` 中创建独立 `autil::ThreadPool`，默认 4 个线程、最多 10000 个排队请求；每个请求作为一个队列任务，后台线程逐个调用其传输单元的 `sender->send()`。线程数和队列容量可由初始化参数指定，测试使用 1 个线程、1 个队列槽位验证边界。选择 `ThreadPool` 是为了使用严格的队列容量上限及 `STOP_AFTER_QUEUE_EMPTY` 排空语义。
 
 所有 transfer task 在任务组对外可见前完成登记。入队显式使用 `isBlocked=false`、`executeWhenFail=false`：队列满或线程池已停止时，取消该请求全部 PENDING task，封闭任务组并返回失败；不等待队列空位，也不在 RPC 线程回退执行发送。失败后同样通过上述控制协议确认停止。
 
@@ -439,7 +440,7 @@ Write worker 接收的是 scheduler 下发的绝对 deadline，不在收到广�
 
 deadline 到达或收到 CANCEL 后，只调用 task 的 `cancel()`。PENDING 任务可以立即结束；TRANSFERRING 任务须等待完成回调，不调用 `forceCancel()`，也不因期限到达就报告 stopped。即使超过终态 TTL，只要物理任务仍未完成，任务组也继续保留。已停止任务的描述可以提前释放，但终态状态保留到任务 deadline 加 `p2p_cancelled_keys_ttl_ms` 后再清扫，防止迟到 START 覆盖原任务。
 
-**worker 中的地址是借用地址，不持有 KV 块的分配引用或 connector hold。** 后续 scheduler/接收上下文必须持有资源直到相关 rank 报告 stopped；业务超时只停止业务等待并禁止插树，不能直接归还仍被传输访问的块。当前状态协议为 R1/R4 提供 worker 层基础，尚未实现跨 rank 完成汇总、StartWrite 返回后的 owning 上下文或 settle。
+**worker 中的地址是借用地址，不持有 KV 块的分配引用或 connector hold。** scheduler/接收上下文必须持有资源直到相关 rank 报告 stopped；业务超时只停止业务等待并禁止插树，不能直接归还仍被传输访问的块。Slice 1 状态协议提供 worker 层基础，本轮 Slice 2/3 补齐跨 rank 完成汇总、StartWrite 返回后的 owning 上下文和 settle，详见 §7/§8。
 
 ### 6.5 配置与兼容性
 
@@ -447,9 +448,8 @@ deadline 到达或收到 CANCEL 后，只调用 task 的 `cancel()`。PENDING �
 | --- | --- | --- |
 | `p2p_writeback_enable` | `false` | 控制 Write worker 创建、backend 持有和广播入口是否可用 |
 | `p2p_writeback_timeout_ms` | `5000` | 完成配置绑定和序列化，后续 Slice 2/3 接入 deadline 计算 |
-| `p2p_writeback_max_inflight` | `4` | 完成配置绑定和序列化，后续 Slice 3 接入并发准入 |
 
-三项配置均提供对应的 CLI 参数和大写环境变量。CacheStoreConfig 的 pickle 输出从 29 项扩为 32 项，并兼容原有 20、23、26、29 项状态；旧状态恢复时写回默认关闭。新增 round-trip、旧格式默认值和 CLI/环境变量优先级测试；既有 pickle 测试改为使用真实 pickle round-trip，或通过 `__new__` 创建未初始化实例后调用 `__setstate__`。
+两项配置均提供对应的 CLI 参数和大写环境变量。CacheStoreConfig 的 pickle 输出从 29 项扩为 31 项，并兼容原有 20、23、26、29 项状态以及曾包含并发字段的 32 项状态；旧状态恢复时写回默认关闭。新增 round-trip、旧格式默认值和 CLI/环境变量优先级测试；既有 pickle 测试改为使用真实 pickle round-trip，或通过 `__new__` 创建未初始化实例后调用 `__setstate__`。
 
 提前写回和 HOST 目标配置没有在本片开放，仍按后续方案范围处理。
 
@@ -559,3 +559,269 @@ Decode Write 原先会将空 routes 包装成空闭包提交发送队列，队�
 同步修正 `P2PWorkerRoute.h` 的原有注释：`layer_buffers` 在 Read Decode 接收侧以及 Write 两侧均显式提供，Read Prefill 发送侧使用逐层产出的本地投影；目的端点供 Read Prefill / Write Decode 发送侧使用；按 tag 统计 route 数量的节流用途明确为 Read Prefill。
 
 在 `renyuanming.rym_vscode` 中使用 CUDA 13、计算能力 8.9 和 96 CPU 线程，worker 单测目标、`normal_engine` 和 `model_rpc_server` 编译通过。worker 目标 **78 个用例全部通过**，含上述新增用例及既有 Read/Write、真实 RPC/TCP 回归，编译与测试共 57.307 秒。结果记录为 `.cache/decode-writeback-slice1-review-20260911/test-empty-routes-events.json`；本轮未重跑其他五个 C++ 目标、Python、smoke 或 RDMA 硬件测试。
+
+
+## 7. Slice 2：Prefill 接收与插树
+
+### 7.1 入口与支持范围
+
+调用链为 `RemoteRpcServiceImpl::StartWrite → PrefillRpcServerNew2::StartWrite → KVCacheManager::handleWrite → P2PConnector::handleWrite → P2PConnectorPrefill::processWrite → P2PSchedulerPrefillWrite::handleWrite`。业务拒绝通过响应错误码返回；缺失服务或 engine 使用 gRPC 错误。
+
+本轮采用 R6 列出的保守范围：**对称 TP、关闭 CP、DEVICE 落点、所有 group 均为可复用 FULL、相同 tokens-per-block，且没有 active-tail 裁剪**。可包含多个 FULL group；DSV4 的 FULL/SWA/LINEAR 混合配置会在分配和传输前明确拒绝。本轮没有实现混合 group 的尾部状态发布，也没有放开非对称路由。
+
+`KVCacheAllocator::probeExternalInsert()` 直接检查 allocator 的 DEVICE cache 可用性、CP 分片状态及上述 group 布局限制，读取初始化时已验证的 topology，不再单独保留能力判断函数。静态检查只在这里执行一次；scheduler 入口、后续分配和插树不再重复执行。接口前提是同一个 allocator 已成功完成 probe，且配置在本次写回期间不变；异步回调通过 shared_ptr 保持其生命周期。它不再重复检查 group 数量、空指针、编号、树中的 group 映射或 block size 正数；这些由现有 topology、allocator 和 BlockTreeCache 工厂初始化流程保证。前缀是否仍在 DEVICE 属于请求期间的动态状态，由握手 probe 和插树前持树锁的 probe 分别检查，见 §7.2、§7.4。
+
+开关仍为 `p2p_writeback_enable`。rank0 创建 Write scheduler，其他 rank 只执行 worker 请求。Prefill 的 allocator 由 `KVCacheManager` 经 connector 构造参数传入；没有 allocator 的兼容构造仍能提供既有 Read/worker 能力，但不能接受 StartWrite。
+
+### 7.2 握手与纯探测
+
+1. 检查唯一 key、deadline、TP、输入长度和有效 keys 范围；复用 `KVCacheHashUtil.h` 中的纯计算函数 `calculateCacheKeys`，从 token 序列只重算已声明的完整块范围。原 `initCacheKeys` 调用同一计算函数，并负责资源初始化。最后采样出的 token 不会自动扩充声明范围。
+2. 两个 scheduler 各自的 `planFor` 复用 `ShardLayoutFactory` 和现有 planner，方向固定为 Decode 到 Prefill。双方按本端 topology 独立计算；layout digest 覆盖 spec fingerprint、层映射、block/scale stride、块大小和 TP，避免只比较路由数量。
+3. `KVCacheAllocator::probeExternalInsert → BlockTreeCache::probeExternalInsert` 只在树锁内读取节点。它不增加引用、不登记 load ticket、不触发 HOST/DISK 加载，也不更新 LRU。已有节点的 `group_set_resources` 槽位数量由 BlockTree 创建和插入流程保证与 `groupSets()` 一致，probe 不再重复检查这一结构约束，仍逐槽位检查实际资源状态；外部待插入资源的形状校验保留。
+4. prompt 的完整块必须全部在 DEVICE。连续 DEVICE 前缀长度为 p，接受 [p,n)，k=n-p；已有 HOST/DISK、LOADING/DEMOTING 或不完整忙碌后缀整体拒绝。k=0 直接返回，不分配、不广播。
+5. k>0 时分配并注册所有接收任务；只有全部 rank 的 START 响应成功，才返回接受范围和接收端点。响应新增 `plan_digest`，供 Decode 验证；端点格式固定为 `host:port` 或 `[IPv6]:port`，端口是 P2P transfer port。
+
+### 7.3 分配引用与后台所有者
+
+`KVCacheAllocator::mallocForExternalInsert(keys,p)` 逐 group 调用既有 malloc 和驱逐流程，只分配后缀 k 块，前 p 项使用 NULL 索引占位。返回值的自定义 deleter 直接归还 malloc 产生的 REQUEST 引用；接收侧不再调用 incrKVCacheRef。任一 group 分配失败，已成功分配的 group 由同一句柄回滚。
+
+资源由 `P2PConnectorAsyncWriteContext` 直接持有，Prefill Write 不创建 ResourceStore entry，也不做单独的 key 占位。全部 worker 确认 stopped 后，上下文才释放句柄。成功插树新增 CACHE 引用后也释放 REQUEST 引用；重复 DEVICE 节点未采纳的新块没有 CACHE 引用，因此随句柄释放归还空闲池。
+
+### 7.4 完整预检与发布
+
+`KVCacheAllocator::insertExternalBlocks` 将 FULL group 资源按 group-set 成员映射成树资源矩阵，调用 `BlockTreeCache::insertExternalBlocks`。
+
+在一次树锁持有期间，先检查 deadline、前 p 块 DEVICE 状态、整条已有后缀状态，以及所有待插入块的形状、分配状态和重复物理块；全部通过后，复用 `BlockTreeStorer::storeLocked(..., DEVICE)` 完成普通插入、CACHE 引用和候选维护。禁止在逐节点插入途中才发现业务冲突。接口返回整体错误和采纳的逻辑块下标。
+
+前缀被驱逐或降级时返回 `prefix_evicted_or_demoted`；已有后缀冲突返回 `existing_suffix_conflict`。这些情况下整段零发布。完整稳定的 DEVICE 重复节点保持原值，新的后续节点仍可正常插入。
+
+## 8. Slice 3：Decode 发起与收尾
+
+### 8.1 写回入口
+
+调用链为 `P2PConnector::asyncWrite(resource, token_ids, input_length, kv_ready_token_count, routing) → P2PConnectorDecode::write → P2PSchedulerDecodeWrite::asyncWrite`。`resource` 携带本地有效 keys、块表及其 owning 引用；token_ids 和 routing 按值传入并 move 到异步任务中，input_length 与 kv_ready_token_count 在入口处固定。
+
+调用者必须在调用前建立源块 hold，并保证该资源的块表与 keys 不再变化；`kv_ready_token_count` 必须表示 KV 已计算就绪的范围。Slice 3 不从最终 token 数推测这一事实。生产侧的同步 hold、独立块表和模型输出范围记录在 Slice 4 落实，见 §10。
+
+后台计算 n=floor(kv_ready_token_count/block_size)，只使用 resource 中前 n 个 keys，复算 hash 互校后发送。例如 token 数为 16、就绪 KV 为 15、块大小为 8 时，只声明 1 块。MTP 一次接受多个 token 的情况也受同一显式就绪边界约束。
+
+### 8.2 异步编排
+
+write 返回异步上下文，握手和路由准备复用 Decode Read 的 `autil::LockFreeThreadPool` 模式，4 个线程、1024 个队列槽位。队列闭包持有上下文和按值传入的调用参数，不额外捕获 resource；排队取消可以立即释放资源。队列容量不是物理在途请求数上限。
+
+`DecodeWriteHelper` 用现有 `BroadcastManager` 发起单目标 StartWrite，复用已有 RPC pool、CompletionQueue 及延迟 drain 生命周期。成功响应必须满足 p>=prompt_blocks、p+k=n、范围非负、plan digest 一致和端点数量有效。拒绝、RPC 失败、非法响应与 k=0 都不会下发 Decode worker START。
+
+有数据需要发送时，两侧 scheduler 分别通过镜像的 `buildDecodeRankRoutes` / `buildPrefillRankRoutes` 组织路由，内部复用 planner 的 resolveKeys、LayerCacheBufferUtil 的 route 投影，以及 RouteCodec 的 sender/receiver 编码。按实际 worker rank 组织显式 layer/key/block 列表，保留空 rank，沿用 Slice 1 的 `_wb_` 任务命名空间。BroadcastClient 负责广播与状态汇总，RouteCodec 保持纯协议依赖。
+
+### 8.3 完成、取消与资源持有
+
+两侧共用新增的 `P2PConnectorAsyncWriteContext` 和 checker，放在现有 AsyncContext 文件中。状态分别记录 START 登记结果、业务完成与物理资源是否仍需持有：
+
+| 情形 | 业务结果 | 资源处理 |
+| --- | --- | --- |
+| 尚未提交 worker 的校验/握手失败 | 失败 | 直接释放本侧资源 |
+| 全命中 k=0 | 成功 | 无 worker 任务，直接释放 Decode hold |
+| 任一 worker START 失败、超时或响应缺失 | 失败 | 对所有可能接触到的 rank 发 CANCEL/QUERY，继续保活 |
+| 传输 deadline 到达或主动 cancel | 失败，禁止 Prefill 发布 | 在途任务继续保活，直到全部 stopped |
+| 全部 rank stopped 且 write_success，且未超时/取消 | 成功 | Prefill 执行一次 settle；两侧分别释放资源 |
+| 迟到完成 | 保持原失败结果 | 只执行一次释放，不能恢复为成功或再次发布 |
+
+checker 复用 Read 的“锁内取快照、锁外检查、锁内回收”结构。每个上下文最多持有一个异步控制广播；不会逐请求同步等待完整 control timeout。它按 unique key 拒绝重复上下文，并在准入前移除已经释放的同 key 记录。清理旧快照时验证对象身份，避免误删同 key 的新上下文。
+
+### 8.4 同源超时与停机边界
+
+Write deadline 在 Decode 准入时一次计算：当前时间加 `p2p_writeback_timeout_ms`，并受现有 `p2p_max_transfer_deadline_ms` 和 RPC 整数范围约束。排队、StartWrite 和 worker START 使用同一绝对 deadline，后续阶段不会重新获得完整超时预算。
+
+Prefill 探测结束后再次检查 deadline 和 RPC 取消；Decode 的无传输完成入口也直接检查 deadline。即使 checker 尚未执行，过期的 k=0 请求也不会因走快路径而返回成功。
+
+控制 RPC 的独立超时来自 `p2p_cancel_broadcast_timeout_ms`；payload 保留原传输 deadline。checker 和 worker 的清扫间隔共同来自 `p2p_resource_store_timeout_check_interval_ms`，传给 LoopThread 时转换为微秒。两项 Write 配置均直接从 CacheStoreConfig 复制到 scheduler config。
+
+**当前停机实现遵循严格保活：先停止准入、取消上下文并排空 kickoff 队列，再等待 worker stopped 后释放。若 worker 始终不可达或 backend 始终没有完成回调，stop 会持续等待，不会按 TTL 强行释放块。** Slice 4 已将 Write drain 接到 `RtpLLMOp::stop` 的 gRPC Shutdown 之前；异常永久失联时的有界进程退出策略仍需要单独 review。这与普通业务 timeout 是两个问题。
+
+### 8.5 复用与可观测性
+
+本轮新增业务文件仅为两个 scheduler 和 DecodeWriteHelper；通用生命周期放入既有 AsyncContext 文件，Write 的源块与接收块分别由两端 AsyncWriteContext 持有。ResourceStore 仅服务 Read 路径。Read 使用的 worker 地址解析移到已有 GrpcAddressUtil，Read/Write 共用，未新增 util 文件。
+
+P2PConnectorMetrics 增加 Write 完成次数、失败次数、k=0 次数、总耗时、实际 hold 时长及 planned_bytes。标签含 side、submitted 和有界 reason；HOST 后缀与前缀丢失单独区分。planned_bytes 是按接受路由计算的预期数据量，不宣称失败时已经实际传输这些字节。进入传输的上下文在物理释放时报告结果，因此 hold 时长可以超过业务 timeout。开关关闭及生产触发前的跳过统计已由 Slice 4 入口补齐，见 §10.4。
+
+设计文档 R1～R8 原始 comments 继续保留；本轮落实的行为以本节、§7 和 §10 为准。R2 的生产就绪证明、R6 的混合 group 范围和停机顺序仍是后续整体 review 的重点。
+
+## 9. Slice 2/3 验证记录
+
+测试在 `renyuanming.rym_vscode` 中使用 CUDA 13、计算能力 8.9、`--jobs=96 --local_cpu_resources=96 --local_test_jobs=1`，GPU 0、关闭测试结果缓存。`normal_engine`、`model_rpc_server` 及下表所有测试目标均编译通过。按各目标最后一轮结果统计，共执行 **456 个不同 C++ 用例，448 个通过、8 个失败**；本轮新增 **24 个用例全部通过**。
+
+| 目标 | 通过 / 总数 | 结果 |
+| --- | --- | --- |
+| P2P `components_test` | 96 / 96 | 通过，含 Read 地址解析回归 |
+| P2P `p2p_connector_scheduler_test` | 40 / 40 | 通过，含 12 个 Write scheduler 用例 |
+| P2P `p2p_connector_test` | 23 / 23 | 通过，含原有角色分发和 Read 回归 |
+| P2P `p2p_connector_worker_test` | 83 / 83 | 通过，含新增 5 个异步 Write context 用例及既有真实 RPC/TCP 用例 |
+| P2P `p2p_connector_worker_decode_lease_test` | 22 / 22 | 通过 |
+| P2P plan `route_codec_test` | 5 / 5 | 通过 |
+| BlockTree `block_tree_cache_test` | 51 / 51 | 通过 |
+| BlockTree `block_tree_test` | 32 / 32 | 通过 |
+| Cache `single_type_kv_cache_allocator_test` | 56 / 62 | 新增 6 个 External 用例全部通过，6 个原有用例失败，见下文 |
+| Model RPC `p2p_model_rpc_test` | 40 / 42 | 新增 StartWrite 缺失 engine 用例通过，2 个原有用例失败，见下文 |
+
+### 9.1 新增覆盖
+
+- Prefill：纯探测不改变引用、不触发加载；原始分配引用只持有一次；多个 FULL group 部分分配失败回滚；复用普通驱逐分配；非法尾块、过期、前缀丢失、HOST 后缀和插入前变为 DEMOTING 的后缀均拒绝且不发布新尾部；重复 DEVICE 发布后释放未采纳的新块。
+- 两侧 scheduler：TP=2 时按真实 rank 镜像生成 routes，全部 rank 完成后才插树或释放源块；全命中、非法准入、非法返回范围/plan/端点、混合 group 和 CP 拒绝；最后采样 token 和 MTP 接受边界不能扩大已就绪 KV 范围。
+- 生命周期：worker START 响应丢失、接收部分登记失败、StartWrite 响应丢失、业务超时仍在途、排队取消、状态缺失和迟到完成；无传输完成直接校验 deadline，不依赖清扫线程；发布与释放只执行一次。
+
+新增 scheduler 测试通过真实 gRPC 调用两侧测试 worker 服务，传输完成状态由测试控制；实际 TCP 数据拷贝沿用并复跑既有 worker 用例。它们尚不能替代 Slice 4 的真实生产源块交接及 FINISHED 触发集成测试。
+
+### 9.2 扩展回归的失败项
+
+分配器的原有 `BlockCopySingle`、`BlockBatchCopyVector`、`BlockBatchCopyCopiesCompleteSparseIndexerStride`、`BlockBatchCopyPointers`、`BlockBatchCopyBuffer`、`FreeBlocksNums` 失败。日志包含拷贝结果不符以及 `the provided PTX was compiled with an unsupported toolchain`，其中涉及 `batch_copy.cu:210`。新增 External 用例在同一次完整执行中全部通过。
+
+RPC 的原有 `PrefillRpcServerTest.waitStreamBeforeRunReturnsSchedulerEnqueueErrorImmediately` 和 `PrefillRpcServerTest.collectStreamOutputReturnsErrorForFailedBatchEnqueue` 在构造测试 cache manager 时失败：夹具配置 `block_num=1`，触发 DeviceBlockPool 要求 physical_block_count > 1 的断言。这两个夹具与该断言均未在本轮修改。
+
+本轮没有为上述失败修改无关实现、测试夹具或 CUDA 环境，也没有做干净基线的同环境对照。因此这里保留实际失败，不能将整套扩展回归记为通过。
+
+### 9.3 结果文件
+
+结果目录：`.cache/decode-writeback-slice23-20260911/`。
+
+- `p2p-regression-events.json`：6 个 P2P、2 个 BlockTree、1 个 RPC 测试目标及两个生产编译目标；耗时 444.800 秒，8 个测试目标通过，RPC 目标失败。
+- `final-scheduler-allocator-events.json`：最后 deadline 快路径修正后，重跑 scheduler、connector、worker、完整分配器及两个生产编译目标；耗时 87.306 秒，前 3 个测试目标通过，分配器目标失败。
+- `single-type-allocator-test.log` / `p2p-model-rpc-test.log`：上述两个完整目标的失败日志。
+
+2026-09-16 删除 Prefill Write 的 ResourceStore/key 占位后，使用相同 CUDA 和 96 线程配置重新编译并运行 `components_test`、`p2p_connector_scheduler_test`、`p2p_connector_test`，分别为 96、40、23 个用例，全部通过。本次未重复执行表中的其他目标。
+
+2026-09-16 精简 `supportsExternalInsert()` 后，在 `renyuanming.rym_vscode` 中使用相同 CUDA 和 96 线程配置编译 `th_transformer_lib`，并运行 scheduler 全部 41 个用例及分配器的 6 个 External 用例，**47 / 47 通过**，编译及测试耗时 117.806 秒。前缀被淘汰后拒绝插入、HOST/忙碌后缀冲突、期限检查和引用释放均通过；未重跑完整分配器套件。Bazel 事件与测试 XML 存于 `.cache/decode-writeback-slice4-20260916/external-insert-checks/`。
+
+同日进一步将静态能力检查集中到 allocator 的 probe，删除 scheduler、malloc 和 insert 中的重复调用。直接调用接口的单测补齐成功 probe 前提；重复发布用例改为两次接收均已分配后再依次插树，HOST 后缀用例改为 probe 通过后才出现冲突。相同容器及 96 线程配置下，`th_transformer_lib` 重新编译通过，上述 **47 / 47 用例再次通过**，耗时 132.093 秒。事件与 XML 存于 `.cache/decode-writeback-slice4-20260916/probe-only-capability/`。
+
+随后将能力检查直接合入 `probeExternalInsert()`，删除独立函数的声明与定义，检查条件和错误返回保持不变。相同配置下生产库编译通过，定向复跑 Write scheduler 13 个和分配器 External 6 个用例，**19 / 19 通过**，耗时 94.703 秒。事件与 XML 存于 `.cache/decode-writeback-slice4-20260916/inline-probe-checks/`。
+
+同日删除 `BlockTreeCache::probeExternalInsertLocked()` 中两处已有节点的 group-set 槽位数量检查，依赖 BlockTree 创建和插入流程保证的结构约束，保留资源就绪状态、前缀长度和后缀冲突判断。相同容器及 96 线程配置下，`th_transformer_lib` 编译通过，上述 **19 / 19 用例通过**，耗时 113.825 秒。事件与 XML 存于 `.cache/decode-writeback-slice4-20260916/node-slot-checks/`。
+
+`git diff --check` 通过。按本轮范围未运行 Python、smoke 或 RDMA 硬件测试；尚未提交或推送这些改动。
+
+## 10. Slice 4：生产触发与真实两端接通
+
+### 10.1 FINISHED 触发及源块交接
+
+生产调用链：`GenerateStateMachine::handleRunning → StreamCacheResource::tryReleaseKVBlock → KVCacheManager::asyncWriteBack → P2PConnector::asyncWrite → P2PSchedulerDecodeWrite::asyncWrite`。
+
+入口复用本地插树的条件：reuse 开启、FINISHED、无业务错误，且目标 tier 为 DEVICE。本轮保守跳过 fake stream、beam 和多序列；manager 再检查 Decode 角色、decode_entrance、总开关、FULL-only/CP 关闭的本端布局，以及 Prefill 地址、对称 TP 和唯一 key。异常、取消、路由缺失、没有完整 response 块均不影响原请求释放。
+
+同步部分依次执行：
+
+1. 本地 DEVICE 插树，保留原来的 CACHE 引用。
+2. 取 `min(已有完整 cache keys 数, floor(模型输出记录的 KV token 数 / block_size))`，不根据最终输出长度扩充有效范围。
+3. 调用 allocator 的 `incrKVCacheRef(source, keys, true)`，建立额外 REQUEST 引用。该接口生成独立的 BlockIds 和 keys；单独复制 shared_ptr 或浅拷贝原块表不能代替它。
+4. 复制 token 序列和 routing，将 owning handle 移交异步上下文；随后原 stream 的 free/clearBlocks 照常执行。
+
+因此，stream 引用从 3 减为 2 后，tree 和 write context 各保留一份。上下文直到物理停止才释放自己的引用。后台不捕获 stream、MetaImpl 或原 BatchKVCacheResource；修改/销毁原 stream 不会更改已提交的参数和块表。入口捕获提交异常，只记日志，不回写已经结束的请求状态。
+
+### 10.2 KV 就绪边界
+
+`StreamUpdateInfo` 和 `StreamSpecUpdateInfo` 新增 `kv_ready_token_count`，默认 -1，原有非模型输出调用不声明新的就绪范围：
+
+- 普通输出：`NormalOutputDispatcher` 记录更新前的 `seqLength()`，最后采样 token 不在本轮 forward 的 KV 中。
+- MTP prefill：记录更新前的序列长度。
+- MTP decode：记录 `更新前序列长度 + accept_len - 1`，排除最后发出的 token。
+- `GenerateStream` 在 `updateWithoutLock` / `specUpdate` 的 `updateOutput()` 返回后记录范围，按停止词、EOS 和 max token 处理后的最终 `seqLength()-1` 限制计数，防止截断后越界。未提供范围的更新不扩大记录值；初值为 0。
+
+按本轮 review 决定，移除 NormalEngine 中写回专用的每步 all-reduce、CUDA 同步及 pending/confirm 阶段。`writebackEnabled()` 仅用于 manager 的写回准入，模型输出路径直接更新 `writeback_kv_ready_token_count_`，FINISHED 收尾读取这个范围。
+
+当前实现沿用已有模型执行、输出更新和资源收尾的同步约定，不为写回新增主推理循环同步。范围记录负责排除末采样 token，不作为额外的跨 rank 完成屏障；多进程 TP 的具体执行依赖仍需后续整体 review 和集成验证。
+
+MTP 可写回范围还受已有有效 keys 限制，宁可少回传已就绪的尾部块，也不在收尾时把尚未建立的 key/块映射当成有效数据。混合 FULL/SWA/LINEAR、CP 和非对称 TP 仍不在 Phase 1 支持范围内。
+
+### 10.3 控制 RPC 与停机顺序
+
+控制广播虽然返回异步 result，但创建连接本身可能同步等待。Write checker 新增 4 线程、1024 队列槽位的 `autil::ThreadPool`，将 QUERY/CANCEL 的连接获取和提交移出 checker 线程以及 context 锁。每个 context 最多一个提交中的控制调用，队列拒绝时保留 hold 并在下一轮重试。业务 deadline 和新请求准入不会等待另一个请求的慢连接。
+
+checker 的准入只检查同 key 条目；物理完成的其他条目由正常扫描回收，避免每次新请求提交都遍历全部 context。正常 Read 的组织方式继续保留。
+
+新增 `stopWriteback` 沿 manager → connector → 对应 scheduler 转发，`RtpLLMOp::stop` 在 `grpc_server_->Shutdown()` 前调用它：停止写回准入、取消 context、排空 kickoff，保留 worker RPC 以 QUERY/CANCEL 确认物理停止，然后才关 gRPC 和 engine。停止等待期间释放 Python GIL。
+
+多进程停机由 `BackendManager` 复用现有 `DistributedServer::store`（TCPStore）协调：follower 仍先执行 `request_stop` 并发送原有 shutdown-ready 确认；随后每个 rank 调用新增的 `engine.stop_writeback()`，在 worker RPC 仍存活时停止本端写回准入并 drain。各 rank 在 store 登记完成，等待整个 world 的 drain 完成后才调用原有 `engine.stop()` 关闭 RPC。world rank0 还会等待所有 rank 已观察到完成的确认，避免 TCPStore 随其退出而提前关闭。协调不使用模型 NCCL 集合通信，也不改变原有 follower/leader 调度器停止顺序；写回关闭时跳过，单进程只做本端 drain。
+
+永久失联或 backend 永不返回时仍遵守物理保活，不以业务 deadline 或 TTL 强行释放块。store 等待沿用分布式环境的长等待约定，进程退出上限由现有 ProcessManager 的 `shutdown_timeout` 和强杀流程控制。直接绕过 BackendManager 使用 C++ stop 的调用者仍需保证其他 rank 的 RPC 存活至 drain 完成。
+
+### 10.4 指标及改动位置
+
+入口增加 `rtp_llm_p2p_writeback_skipped_qps`，固定 reason 包含 `disabled_or_unsupported`、`invalid_routing`、`invalid_snapshot`、`no_complete_suffix`、`source_blocks_missing`，不把 request/key 拼进标签。传输的最终结果和实际 hold 时长继续由 Write context 上报。
+
+| 模块 | 本轮改动 |
+| --- | --- |
+| `engine_base/stream/StreamCacheResource.cc` | FINISHED、本地 DEVICE 插树之后和 free 之前提交 |
+| `cache/KVCacheManager.{h,cc}` | 支持范围校验、有效范围截断、同步 incr 引用、快照及 stop 转发 |
+| `engine_base/stream/GenerateStream.{h,cc}` | 直接记录模型输出提供的 KV 范围 |
+| `normal_engine/NormalOutputDispatcher.cc`、`speculative/MtpBatchStreamProcessor.cc` | 从实际模型输出填写 KV 范围 |
+| `cache/connector/p2p/P2PConnector*`、两个 Write scheduler | 控制提交与 context 锁解耦、公开 stop、跳过指标 |
+| `pybind/multi_gpu_gpt/RtpLLMOp.cc` | gRPC Shutdown 前 drain 写回 |
+| `server/backend_manager.py`、`async_decoder_engine`、`ops/rtp_llm/rtp_llm_op.py` | 独立 drain 入口及全组停机协调，见 §10.3 |
+| `cache/connector/p2p/test/DecodeWritebackIntegrationTest.cc` | 真实 RPC、allocator、两个 scheduler/worker 和 TCP 集成 |
+
+### 10.5 验证记录
+
+测试环境仍为 `renyuanming.rym_vscode`，CUDA 13、计算能力 8.9、96 个 CPU 编译线程、单目标串行占用 GPU 0。新增集成测试使用真实显存及 TCP，通过 gate 暂停发送来检查原 stream 释放后的引用账本和数据正确性，不依赖模型 smoke。
+
+`normal_engine`、`model_rpc_server`、包含 `RtpLLMOp.cc` 的 `th_transformer_lib` 及下列测试目标全部编译通过。按最终结果去重，本轮执行 **314 个不同 C++ 用例，309 个通过、5 个失败**；其中新建的 **13 个用例全部通过**，另有两个已有 MTP 用例增加就绪范围断言并通过。
+
+| 目标 | 通过 / 总数 | 说明 |
+| --- | --- | --- |
+| P2P `components_test` | 96 / 96 | Read/Write 组件回归 |
+| P2P `p2p_connector_scheduler_test` | 41 / 41 | 含新增慢控制连接不阻塞准入及 deadline 用例 |
+| P2P `p2p_connector_worker_test` | 83 / 83 | 含真实 RPC/TCP 及在途取消 |
+| P2P `p2p_connector_test` | 23 / 23 | 角色分发与 Read 回归 |
+| P2P `decode_writeback_integration_test` | 11 / 11 | 本轮新增完整链路用例 |
+| Stream `generate_stream_test` | 2 / 2 | 通过 |
+| Stream `stream_cache_resource_test` | 35 / 35 | 补齐既有夹具的词表和 PD 请求配置后通过 |
+| Normal `batch_stream_processor_test` | 5 / 7 | 原有 6 个用例加新增 1 个就绪用例，按两次执行去重；2 个原有失败 |
+| MTP `mtp_batch_stream_processor_test` | 13 / 16 | 两个 dispatch 就绪断言通过；3 个采样用例失败 |
+
+11 个集成用例覆盖：真实 FINISHED 状态机触发、stream 先释放且后台独立持有、TCP 后缀字节逐块一致、下一请求复用 12 个 token、末采样 token 恰好跨块边界、缺少 KV 范围、总开关关闭、路由缺失、无完整后缀、StartWrite 失败、全命中 k=0、取消请求跳过、业务超时仍保活、RPC 存活时 drain。测试将发送暂时暂停，观察源块 tree+write 两份引用，释放发送后恢复为仅 tree 引用；超时失败不发布 Prefill 后缀。
+
+Read 回归最初有两个夹具失败：`ModelConfig.vocab_size` 未设置，默认 0 导致 token 7 被拒绝；测试 PD 首 token 输出还漏设 `pd_separation=true`。本轮只补测试前提，未修改 Read 生产语义，最终 35 个 stream 资源用例全部通过。
+
+保留的 5 个扩展失败：
+
+- `NormalBatchStreamProcessorTest.testSoftmaxProbs`：预期 0.731058，实际为 2。
+- `NormalBatchStreamProcessorTest.testLoss`：CUDA 报 `the provided PTX was compiled with an unsupported toolchain`。
+- MTP 的 `speculativeSamplerHandlesMixedBatchModes`、`speculativeSamplerHonorsDoSampleFalse`、`speculativeSamplerHandlesThreeDraftTokensPerStream`：同类 CUDA/PTX 错误，日志涉及 `CudaSampleOp.cc:467`。
+
+这些失败未通过修改采样、softmax 或 CUDA 环境绕过，也未做干净基线对照；不能将扩展测试套件整体标为通过。新增普通输出就绪用例以及 MTP prefill/decode 两个定向用例均独立通过。
+
+验证记录存放在 `.cache/decode-writeback-slice4-20260916/`：`writeback-slice4-regression.json` 记录 P2P/生产库编译与首轮回归，`writeback-slice4-focused.json` 记录定向输出验证，`writeback-slice4-tcp.json` 记录最终 11 个集成用例，`writeback-slice4-stream-final.json` 记录最终 35 个 stream 资源用例；相应最终 XML 及集成日志保存在同目录的 `bazel-testlogs/` 子树。
+
+2026-09-16 移除每步 TP/GPU 同步及 pending/confirm 阶段后，在同一容器中以 96 线程重新编译 `th_transformer_lib` 并执行 4 个定向测试目标：写回集成 11 个、普通输出边界 1 个、MTP prefill/decode 输出边界 2 个、stream 资源回归 35 个，合计 **49 / 49 通过**，编译及测试耗时 197.265 秒。缺少 KV 范围时不发起写回、末采样 token 不进入写回范围的断言均保留；本次不再断言额外 confirm 前禁止写回。此次结果独立于上表的扩展回归，未重跑那 5 个失败项。Bazel 事件和对应 XML 存于上述结果目录的 `remove-step-sync/` 子目录。
+
+2026-09-16 将纯计算重载改名为 `calculateCacheKeys`，恢复按 block 遍历及 `block_len`、`rolling_hash` 命名，原 `initCacheKeys` 保留资源初始化职责；两侧 scheduler、测试与设计文档同步名称，hash 规则不变。相同容器及 96 线程配置下，`th_transformer_lib` 编译通过；scheduler 41 / 41、stream 资源 35 / 35 通过，写回集成首轮 10 / 11 通过。唯一失败为 `FinishedStreamReleasesBeforeTcpCopyAndNextRequestReusesSuffix`：首次 TCP D2H 同步耗时约 3.35 秒，超过夹具的 3 秒写回 deadline，日志伴随 CUDA/PTX 工具链告警。未修改代码、参数或环境，单独复跑该用例通过；按最终结果去重为 87 / 87，但保留首轮超时记录，不据此认定测试波动已解决。首轮编译及测试耗时 177.836 秒，单例复跑耗时 28.671 秒；事件、XML 和相关日志存于上述结果目录的 `cache-key-readability/` 子目录。
+
+`git diff --check` 通过。按要求未运行本地 smoke；多进程 TP 集合通信、完整模型性能和 RDMA 硬件路径未验证。本轮未提交或推送代码。
+
+### 10.6 提交前 Review 修复（2026-09-16）
+
+本轮修复两个问题：
+
+1. 多进程 TP 停机时，follower 没有 Write scheduler，本端 drain 会立即返回，原流程会提前关闭 worker RPC，导致 leader 无法确认任务停止。当前通过 §10.3 的独立 drain 入口和 TCPStore 协调，确保全组 drain 完成后才允许关闭 RPC。保留原有 follower 先停止调度并确认、launcher 再通知 leader 的顺序；两个 TP 组结束时间不同时，先完成的一组也等待另一组。
+2. 移除 `p2p_writeback_max_inflight` 后，`CacheStoreConfig` 当前 pickle 状态为 31 个字段；修正旧 20 字段兼容测试中遗留的 32 字段断言。当前格式往返及旧 32 字段恢复覆盖继续保留。
+
+在 `renyuanming.rym_vscode` 中使用 `--jobs=96 --local_cpu_resources=96`，`th_transformer_lib` 和 `//:th_transformer_config` 编译通过；写回集成 **11 / 11**、scheduler **41 / 41** 通过，编译与测试合计 39.979 秒。Python 配置测试直接执行，**17 / 17** 通过。
+
+停机相关 Python 测试 **12 / 12** 通过（BackendManager 8 个、launcher 停机顺序 4 个，耗时 5.761 秒）。新增 3 个用例覆盖单进程 drain 顺序、Python 到 C++ 包装层转发，以及两进程/四进程 follower 先停与两个 TP 组交错 drain。多进程测试使用真实 `multiprocessing.spawn` 和 TCPStore，engine drain 与 RPC 关闭由测试替身控制，未执行完整模型或 NCCL 集合通信。
+
+容器直接导入停机测试缺少 `pydantic`、`setproctitle`；Bazel Python 目标又因已有的 `@pip_gpu_cuda13_torch//flash_attn` 包缺失而无法完成分析。因此上述 12 个测试通过外部 harness 隔离未执行的模型初始化及服务依赖；实际 BackendManager、engine 包装层、测试模块及 TCPStore 均从当前代码加载。不能将其表述为标准 Bazel Python 目标通过。
+
+记录目录为 `/data6/renyuanming.rym/.cache/decode-writeback-shutdown-20260916/`，包含 C++ Bazel 事件、两份测试 XML、停机 Python harness 和运行日志。本轮未运行 smoke、完整多 GPU 模型停机或 RDMA 硬件测试；未提交或推送。
+
+### 10.7 MTP 停止截断与写回范围修复（2026-09-16）
+
+原实现先保存 KV 就绪计数，随后 `updateOutput()` 才匹配停止词/EOS 并截断序列。MTP 一次接受多个 token 时，可能出现计数为 16、最终序列长度为 14，导致 manager 的 `invalid_snapshot` 拒绝整次写回。
+
+`GenerateStream::specUpdate` 和 `updateWithoutLock` 现在都在 `updateOutput()` 返回后记录范围，仍使用 `min(kv_ready_token_count, seqLength()-1)`。不改变 manager 的快照校验、末 token 排除规则和未提供范围时的行为。上述场景记录为 13；块大小为 4、prompt 为 4 个 token 时，前 12 个 token 中已有的两个完整 response 块仍能写回。
+
+新增 3 个回归用例：
+
+- `WritebackReadinessClampsAfterMidBatchStop`：真实 MTP dispatch 中同批次包含停止词、EOS 和继续生成请求；停止请求从 17 截到 14，记录为 13，继续生成请求保留 17/16。同时验证普通 update 的同类截断。
+- `SpeculativeStopWordsKeepCompletedSuffixWriteback`、`SpeculativeEosKeepsCompletedSuffixWriteback`：经过实际 specUpdate、FINISHED 收尾及 TCP 写回，确认截断后仍发送已有后缀，Prefill 最终可匹配 3 个 DEVICE 块。这两个用例关闭夹具的 PERF_TEST 模式，以免 speculative token 被清零而改变停止条件。
+
+修复前已用新增 MTP 用例复现停止词/EOS 两条分支的计数错误，实际均为 16、预期为 13。修复后在 `renyuanming.rym_vscode` 中以 CUDA 13、计算能力 8.9、96 CPU 线程编译 `th_transformer_lib` 并运行相关测试，**51 / 51 通过**：写回集成 13 个、MTP 定向 3 个、stream 资源回归 35 个，耗时 60.915 秒。MTP 其余采样用例未重跑。
+
+测试 XML 存于 `/data6/renyuanming.rym/.cache/decode-writeback-mtp-stop-20260916/`，包含修复前 MTP 复现和修复后三组结果。`git diff --check` 通过；未运行 smoke 或 RDMA 硬件测试，未提交或推送。

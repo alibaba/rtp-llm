@@ -383,10 +383,22 @@ P2PBroadcastClient::WriteStatusResult P2PBroadcastClient::controlWrite(const std
                                                                        P2PWriteOperationPB       operation,
                                                                        int64_t                   transfer_deadline_ms,
                                                                        int64_t                   control_timeout_ms) {
-    WriteStatusResult result;
+    auto result = controlWriteAsync(unique_key, type, operation, transfer_deadline_ms, control_timeout_ms);
+    if (!result || !result->waitDone(static_cast<int>(control_timeout_ms))) {
+        return {};
+    }
+    return writeStatus(result);
+}
+
+std::shared_ptr<P2PBroadcastClient::TpBroadcastResult>
+P2PBroadcastClient::controlWriteAsync(const std::string&        unique_key,
+                                      P2PConnectorBroadcastType type,
+                                      P2PWriteOperationPB       operation,
+                                      int64_t                   transfer_deadline_ms,
+                                      int64_t                   control_timeout_ms) {
     if (!tp_broadcast_manager_ || unique_key.empty() || (type != WRITE && type != HANDLE_WRITE)
         || (operation != WRITE_CANCEL && operation != WRITE_QUERY)) {
-        return result;
+        return nullptr;
     }
     std::vector<FunctionRequestPB> requests(tp_broadcast_manager_->workerNum());
     for (auto& request : requests) {
@@ -396,8 +408,13 @@ P2PBroadcastClient::WriteStatusResult P2PBroadcastClient::controlWrite(const std
         p2p->set_write_operation(operation);
         p2p->set_deadline_ms(transfer_deadline_ms);
     }
-    auto broadcast = broadcastRpcAndWait(requests, control_timeout_ms);
-    if (!broadcast) {
+    return broadcastRpc(requests, control_timeout_ms);
+}
+
+P2PBroadcastClient::WriteStatusResult
+P2PBroadcastClient::writeStatus(const std::shared_ptr<TpBroadcastResult>& broadcast) {
+    WriteStatusResult result;
+    if (!broadcast || !broadcast->done() || !broadcast->success()) {
         return result;
     }
     for (const auto& response : broadcast->responses()) {

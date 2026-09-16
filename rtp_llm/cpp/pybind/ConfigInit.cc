@@ -919,7 +919,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("p2p_rdma_staging_block_size_bytes", &CacheStoreConfig::p2p_rdma_staging_block_size_bytes)
         .def_readwrite("p2p_writeback_enable", &CacheStoreConfig::p2p_writeback_enable)
         .def_readwrite("p2p_writeback_timeout_ms", &CacheStoreConfig::p2p_writeback_timeout_ms)
-        .def_readwrite("p2p_writeback_max_inflight", &CacheStoreConfig::p2p_writeback_max_inflight)
         .def("to_string", &CacheStoreConfig::to_string)
         .def(py::pickle(
             [](const CacheStoreConfig& self) {
@@ -953,11 +952,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.p2p_rdma_staging_block_count,
                                       self.p2p_rdma_staging_block_size_bytes,
                                       self.p2p_writeback_enable,
-                                      self.p2p_writeback_timeout_ms,
-                                      self.p2p_writeback_max_inflight);
+                                      self.p2p_writeback_timeout_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 20 && t.size() != 23 && t.size() != 26 && t.size() != 29 && t.size() != 32)
+                if (t.size() != 20 && t.size() != 23 && t.size() != 26 && t.size() != 29 && t.size() != 31
+                    && t.size() != 32)
                     throw std::runtime_error("Invalid state!");
                 CacheStoreConfig c;
                 try {
@@ -997,10 +996,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.p2p_rdma_staging_block_count      = t[idx++].cast<int>();
                         c.p2p_rdma_staging_block_size_bytes = t[idx++].cast<int64_t>();
                     }
-                    if (t.size() == 32) {
-                        c.p2p_writeback_enable       = t[idx++].cast<bool>();
-                        c.p2p_writeback_timeout_ms   = t[idx++].cast<int64_t>();
-                        c.p2p_writeback_max_inflight = t[idx++].cast<int>();
+                    if (t.size() >= 31) {
+                        c.p2p_writeback_enable     = t[idx++].cast<bool>();
+                        c.p2p_writeback_timeout_ms = t[idx++].cast<int64_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("CacheStoreConfig unpickle error: ") + e.what());
