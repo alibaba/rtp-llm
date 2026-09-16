@@ -905,3 +905,64 @@ py_test(
     },
     tags = ["manual"],
 )
+
+# SM120 counterpart of v4_flash_sm120_dp4ep4_decode: CP=4 EP=4 prefill
+# timeline. Same checkpoint / SM120 block pinning / Mega-MoE-off as the
+# decode target; topology switches to TP=4 DP=1 + ALL_GATHER CP rotate
+# (the CP4 prefill pattern used by v4_flash_cp4_ep4_prefill_*).
+# Prefill only (--partial 2), no CUDA graph. profile_step is forced to 1
+# by batch_perf_impl because prefill has a single model-forward step.
+py_test(
+    name = "v4_flash_sm120_cp4ep4_prefill",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "deepseek_v4",
+        "--checkpoint_path", "/data/why492961/models/DeepSeek-V4-Flash-0731",
+        "--tokenizer_path", "/data/why492961/models/DeepSeek-V4-Flash-0731",
+        "--batch_size", "1",
+        "--input_len", "32768",
+        "--partial", "2",
+        "--decode_test_length", "2",
+        # SM120 fp8_paged_mqa_logits requires block_kv==64; the indexer pool
+        # entries_per_block = kernel_seq_size_per_block / 4, so pin kernel block
+        # to 256 (physical must be >= kernel and divisible -> seq_size 256, bpk=1).
+        "--seq_size_per_block", "256",
+        "--kernel_seq_size_per_block", "256",
+        "--max_seq_len", "32770",
+        "--tp_size", "4",
+        "--dp_size", "1",
+        "--ep_size", "4",
+        "--world_size", "4",
+        "--cp_rotate_method", "ALL_GATHER",
+        "--use_deepep_moe", "1",
+        "--use_deepep_low_latency", "0",
+        "--act_type", "BF16",
+        "--quantization", "FP8_PER_BLOCK",
+        "--fp8_kv_cache", "1",
+        "--load_method", "fastsafetensors",
+        "--concurrency_limit", "1",
+        "--enable_cuda_graph", "0",
+        "--reserver_runtime_mem_mb", "16384",
+        "--max_context_batch_size", "1",
+        "--frontend_server_count", "1",
+    ],
+    env = {
+        "WORLD_SIZE": "4",
+        "DG_JIT_CPP_STANDARD": "20",
+        "GEN_TIMELINE_SYNC": "1",
+        "PERF_PREARM_PROFILE": "1",
+        "PERF_PROFILE_NUM_STEPS": "1",
+        "PERF_PROFILE_ARM_SLEEP": "2",
+        "PERF_PROFILE_FLUSH_SLEEP": "120",
+        "DSV4_USE_MEGA_MOE": "0",
+    },
+    tags = ["manual"],
+)
