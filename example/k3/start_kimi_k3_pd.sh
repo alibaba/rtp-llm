@@ -83,8 +83,9 @@ Role-specific high-performance paths:
   ENABLE_CUDA_GRAPH                      fixed to 0 for Prefill; defaults to 1
                                          for Decode
   DECODE_CAPTURE_CONFIG                  Decode only; defaults to 1
-  KIMI_K3_DECODE_TOPOLOGY               tp8_ep8 (legacy),
+  KIMI_K3_DECODE_TOPOLOGY               legacy, tp8_ep8, tp16_ep16,
                                          dp8_ktp8_ep8, or dp16_ktp16_ep16
+  DECODE_CP_KV_CACHE_SHARDED             Decode only; defaults to 0, uses the TP group
   ENABLE_CUDA_GRAPH_DEBUG_MODE           defaults to 0
 
 Runtime, build and diagnostics:
@@ -198,9 +199,9 @@ prefill_host="${PREFILL_ENDPOINT%:*}"
 decode_host="${DECODE_ENDPOINT%:*}"
 decode_topology="${KIMI_K3_DECODE_TOPOLOGY:-legacy}"
 case "${decode_topology}" in
-    legacy | tp8_ep8 | dp8_ktp8_ep8 | dp16_ktp16_ep16) ;;
+    legacy | tp8_ep8 | tp16_ep16 | dp8_ktp8_ep8 | dp16_ktp16_ep16) ;;
     *)
-        die "KIMI_K3_DECODE_TOPOLOGY must be legacy, tp8_ep8, dp8_ktp8_ep8, or dp16_ktp16_ep16"
+        die "KIMI_K3_DECODE_TOPOLOGY must be legacy, tp8_ep8, tp16_ep16, dp8_ktp8_ep8, or dp16_ktp16_ep16"
         ;;
 esac
 cache_store_rdma_mode="${CACHE_STORE_RDMA_MODE:-0}"
@@ -289,6 +290,7 @@ enable_cuda_graph_debug_mode="${ENABLE_CUDA_GRAPH_DEBUG_MODE:-0}"
 if [[ "${role}" == "PREFILL" ]]; then
     [[ "${ENABLE_CUDA_GRAPH:-0}" == "0" ]] \
         || die "Prefill CUDA Graph is unsupported; set ENABLE_CUDA_GRAPH=0"
+    decode_cp_kv_cache_sharded=0
     enable_cuda_graph=0
     decode_capture_config=
     prefill_capture_config="${PREFILL_CAPTURE_CONFIG:-}"
@@ -296,6 +298,7 @@ if [[ "${role}" == "PREFILL" ]]; then
     default_mega_moe_tokens=$(( (KIMI_K3_PREFILL_CHUNK_TOKENS + tp_size - 1) / tp_size ))
 else
     enable_cuda_graph="${ENABLE_CUDA_GRAPH:-1}"
+    decode_cp_kv_cache_sharded="${DECODE_CP_KV_CACHE_SHARDED:-0}"
     decode_capture_config="${DECODE_CAPTURE_CONFIG:-1}"
     prefill_capture_config=
     unset KIMI_K3_PREFILL_CHUNK_TOKENS
@@ -317,6 +320,7 @@ fi
 
 for flag_name in \
     reuse_cache \
+    decode_cp_kv_cache_sharded \
     enable_cuda_graph \
     enable_cuda_graph_debug_mode; do
     flag_value="${!flag_name}"
@@ -366,6 +370,14 @@ else
             ep_size=8
             world_size=8
             local_world_size=8
+            ;;
+        tp16_ep16)
+            tp_size=16
+            dp_size=1
+            ktp_size=1
+            ep_size=16
+            world_size=16
+            local_world_size=16
             ;;
         dp8_ktp8_ep8)
             tp_size=1
@@ -558,6 +570,7 @@ echo "  world rank:      ${world_rank} (local world ${local_world_size})"
 if [[ "${role}" == "DECODE" ]]; then
     echo "  decode topology: ${decode_topology}"
     echo "  decode MLA:      ${RTP_MLA_DECODE_KERNEL:-default}"
+    echo "  Decode Page-RR:  ${decode_cp_kv_cache_sharded} (backend=a2a)"
 fi
 echo "  load method:     ${LOAD_METHOD}"
 echo "  DeepGEMM JIT:    ${deepgemm_jit_compiler}"
@@ -595,6 +608,7 @@ server_args=(
     --tp_size "${tp_size}"
     --dp_size "${dp_size}"
     --ktp_size "${ktp_size}"
+    --decode_cp_kv_cache_sharded "${decode_cp_kv_cache_sharded}"
     --ep_size "${ep_size}"
     --world_size "${world_size}"
     --world_rank "${world_rank}"

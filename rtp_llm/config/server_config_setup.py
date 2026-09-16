@@ -240,6 +240,8 @@ def set_parallelism_config(
         ), f"ep_size must be equal to 1 or tp_size * dp_size, got ep_size={parallelism_config.ep_size}, tp_size={parallelism_config.tp_size}, dp_size={parallelism_config.dp_size}"
 
     ktp_size = int(parallelism_config.ktp_size)
+    if parallelism_config.decode_cp_kv_cache_sharded:
+        assert ktp_size == 1, "Decode DCP and Projection KTP are mutually exclusive"
     assert ktp_size in (1, 8, 16), (
         f"ktp_size must be one of 1, 8, 16, got {ktp_size}"
     )
@@ -370,6 +372,13 @@ def setup_default_args(py_env_configs):
         raise ValueError(
             f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable."
         )
+
+    if py_env_configs.parallelism_config.decode_cp_kv_cache_sharded:
+        if (
+            py_env_configs.model_args.model_type != "kimi_k3"
+            or py_env_configs.role_config.role_type != RoleType.DECODE
+        ):
+            raise ValueError("Decode DCP requires MODEL_TYPE=kimi_k3 and ROLE_TYPE=DECODE")
 
     # add rocm env config, if using default value, change it to optimize version
     # 这些特殊处理仍然需要设置环境变量（因为可能被 C++ 代码读取）

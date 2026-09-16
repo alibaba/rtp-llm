@@ -396,23 +396,36 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     }
     reportPrefillCacheHitMetrics(*effective, is_first_malloc);
 
+    const bool check_cp = effective->cp_slot_mapper && effective->cp_slot_mapper->isSharded();
+    size_t expected_local_blocks = 0;
+    if (check_cp) {
+        // Use the same allocation length for the allocator and its invariant,
+        // including an async MTP upper bound not yet reflected in host tokens.
+        if (effective != &patched) {
+            patched = *effective;
+        }
+        patched.incr_seq_len_override = effective->incrSeqLen();
+        effective = &patched;
+        // FULL groups retain previously reserved blocks when the bound recedes.
+        expected_local_blocks = std::max(
+            effective->batch_kv_cache_resource->cacheResource(0).blocks().size(),
+            expectedCPShardedLocalBlocks(*effective->cp_slot_mapper,
+                                        effective->incrSeqLen(),
+                                        effective->complete_token_ids->getReserveStep()));
+    }
+
     auto result = allocator_->malloc(*effective);
 
-    // CP invariant: blocks holds this rank's local share of logical KV pages.
-    // cacheKeys can be shorter than logical blocks because an in-flight partial
-    // tail is not always cacheable, so derive the expected count from seq_len.
-    if (result.success && effective->cp_slot_mapper && effective->cp_slot_mapper->isSharded()) {
+    if (result.success && check_cp) {
         const auto& res        = effective->batch_kv_cache_resource->cacheResource(0);
         size_t      num_blocks = res.blocks().size();
-        size_t      expected   = expectedCPShardedLocalBlocks(*effective->cp_slot_mapper,
-                                                       effective->complete_token_ids->seqLength(),
-                                                       effective->complete_token_ids->getReserveStep());
-        RTP_LLM_CHECK_WITH_INFO(num_blocks == expected,
+        RTP_LLM_CHECK_WITH_INFO(num_blocks == expected_local_blocks,
                                 "CP invariant violated: blocks=%zu != expected_local_blocks=%zu "
-                                "(seq_len=%d, reserve_step=%d, cp_size=%d, block_size=%d, cacheKeys=%zu)",
+                                "(seq_len=%d, alloc_seq_len=%d, reserve_step=%d, cp_size=%d, block_size=%d, cacheKeys=%zu)",
                                 num_blocks,
-                                expected,
+                                expected_local_blocks,
                                 effective->complete_token_ids->seqLength(),
+                                effective->incrSeqLen(),
                                 effective->complete_token_ids->getReserveStep(),
                                 effective->cp_slot_mapper->cpSize(),
                                 effective->cp_slot_mapper->blockSize(),

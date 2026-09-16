@@ -188,6 +188,20 @@ class StartKimiK3PdDryRunTest(unittest.TestCase):
         self.assertIn("--local_world_size 8", output)
         self.assertIn("worker_port_block: 28188-28259", output)
 
+    def test_decode_page_rr_uses_one_tp_group(self):
+        for size in (8, 16):
+            with self.subTest(size=size):
+                output = self._dry_run(
+                    "decode", f"tp{size}_ep{size}",
+                    env_overrides={"DECODE_CP_KV_CACHE_SHARDED": "1"},
+                )
+                self.assertIn(f"TP{size}/DP1/KTP1/EP{size}", output)
+                self.assertIn("--decode_cp_kv_cache_sharded 1", output)
+                self.assertIn(f"--local_world_size {size}", output)
+                self.assertIn("Decode Page-RR:  1 (backend=a2a)", output)
+        prefill = self.run_dry_run("prefill", DECODE_CP_KV_CACHE_SHARDED="1")
+        self.assertIn("--decode_cp_kv_cache_sharded 0", prefill)
+
     def test_decode_projection_ktp16(self):
         gang = (
             "name:k3_part0,ip:10.0.0.1,port:28188;"

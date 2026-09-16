@@ -5,8 +5,10 @@
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
+#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm {
 namespace test {
@@ -232,6 +234,73 @@ TEST_F(K3CacheGeometryManagerTest, SplitPagesPreserveEagleAndMtpPhysicalPoolGeom
                 EXPECT_EQ(physical[1].data_ptr(), manager.convertIndexToAddr(1, 4).kv_addr);
             }
         }
+    }
+}
+
+TEST_F(K3CacheGeometryManagerTest, DecodePlacementAllocatesLocalFullPagesAndCommonLinearCheckpoints) {
+    struct Layout {
+        int source_shards;
+        int tp;
+        int dp;
+    };
+    for (const auto layout : {Layout{1, 8, 1}, Layout{8, 8, 1}, Layout{16, 16, 1}, Layout{16, 8, 2}}) {
+        SCOPED_TRACE(::testing::Message() << "source=" << layout.source_shards << " TP=" << layout.tp
+                                        << " DP=" << layout.dp);
+        ParallelismConfig parallelism;
+        parallelism.role_type = RoleType::DECODE;
+        parallelism.tp_size = layout.tp;
+        parallelism.dp_size = layout.dp;
+        parallelism.ep_size = parallelism.world_size = layout.tp * layout.dp;
+        parallelism.tp_rank = layout.tp - 1;
+        parallelism.dp_rank = layout.dp - 1;
+        parallelism.world_rank = parallelism.world_size - 1;
+        parallelism.decode_cp_kv_cache_sharded = true;
+        parallelism.prefill_cp_config.prefill_cp_size = layout.source_shards;
+        constexpr int page = 128;
+        const int checkpoint = page * std::max(layout.source_shards, layout.tp);
+        KVCacheConfig kv;
+        kv.test_block_num = 8;
+        kv.seq_size_per_block = kv.kernel_seq_size_per_block = page;
+        auto config = CacheConfigCreator::createBasicConfig(makeK3ModelConfig(page, false), parallelism, kv, false, 1);
+        config.finalizeBlockNums(8, RuntimeConfig{});
+        KVCacheManager manager(config, true, nullptr, kv, parallelism);
+        ASSERT_TRUE(manager.init());
+        const auto geometry = manager.getMainModelCacheLayerLayout();
+        EXPECT_EQ(geometry.local_shard_count, layout.tp);
+        EXPECT_EQ(geometry.group_seq_size_per_block, (std::vector<size_t>{page, static_cast<size_t>(checkpoint)}));
+        ASSERT_NE(manager.cpSlotMapper(), nullptr);
+        EXPECT_EQ(manager.cpSlotMapper()->cpRank(), layout.tp - 1);
+        EXPECT_EQ(manager.cpSlotMapper()->cpSize(), layout.tp);
+
+        // Cross one common checkpoint and retain a partial tail. With P16/DCP8,
+        // one KDA checkpoint spans two local FULL stripes.
+        const int length = checkpoint + 1;
+        auto tokens = std::make_shared<CompleteTokenIds>(1, 1, length + page, page);
+        auto input = std::make_shared<GenerateInput>();
+        input->input_ids = torch::arange(length, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        tokens->init(input);
+        auto resource = std::make_shared<BatchKVCacheResource>();
+        resource->resetBatchSize(1);
+        resource->initGroups(2, config.layer_num, config.layer_to_group_id);
+        MallocInfo info{resource, tokens};
+        info.reuse_cache = false;
+        const auto free_before = manager.freeBlocksNum();
+        ASSERT_TRUE(manager.malloc(info).success);
+        EXPECT_EQ(resource->blocksNum(0, 0), layout.source_shards > layout.tp ? 3u : 2u);
+        EXPECT_EQ(resource->blocksNum(0, 1), 2u);
+        manager.free(FreeInfo{resource, tokens});
+        EXPECT_EQ(manager.freeBlocksNum(), free_before);
+
+        ASSERT_TRUE(manager.malloc(info).success);
+        manager.insertIntoCache(InsertInfo{resource, tokens, false});
+        manager.free(FreeInfo{resource, tokens});
+        info.reuse_cache = true;
+        const auto reused = manager.malloc(info);
+        ASSERT_TRUE(reused.success);
+        EXPECT_EQ(reused.reuse_len, checkpoint);
+        manager.free(FreeInfo{resource, tokens});
+        EXPECT_EQ(manager.availableBlocksNum(), free_before);
     }
 }
 

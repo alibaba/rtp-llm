@@ -12,20 +12,16 @@ def bind_kimi_k3_cache_geometry(
     kv_cache: Any,
     layers: Sequence[Any],
     parallelism: ParallelismConfig,
-    *,
-    is_decode_role: bool,
 ) -> tuple[int, int]:
     """Check live layer/group mappings and return the fixed physical/checkpoint spans."""
     page_tokens = int(kv_cache.seq_size_per_block)
-    local_shards = int(parallelism.tp_size) if parallelism.kv_page_rr_enabled() else 1
-    upstream_shards = local_shards
-    if is_decode_role and int(parallelism.prefill_cp_config.prefill_cp_size) > 1:
-        upstream_shards = int(parallelism.prefill_cp_config.prefill_cp_size)
+    local_shards = int(parallelism.local_kv_page_rr_shard_count())
+    upstream_shards = int(parallelism.upstream_kv_page_rr_shard_count())
     if not 0 <= int(parallelism.tp_rank) < int(parallelism.tp_size):
         raise ValueError("Kimi K3 requires valid physical TP coordinates")
     if int(kv_cache.local_shard_count) != local_shards:
         raise ValueError("Kimi K3 manager/model local shard counts disagree")
-    checkpoint_tokens = page_tokens * upstream_shards
+    checkpoint_tokens = page_tokens * max(local_shards, upstream_shards)
     if page_tokens <= 0 or checkpoint_tokens > 2**32 - 1:
         raise ValueError("Kimi K3 has invalid or overflowing page/checkpoint spans")
     spans, kinds = kv_cache.group_seq_size_per_block, kv_cache.layer_group_types
@@ -62,17 +58,14 @@ def validate_kimi_k3_page_rr_target(
     tp_size = int(parallelism.tp_size)
     ep_size = int(parallelism.ep_size)
     local_rr = bool(parallelism.kv_page_rr_enabled())
-    upstream_shards = (
-        int(parallelism.prefill_cp_config.prefill_cp_size)
-        if is_decode_role
-        else tp_size
-    )
+    local_shards = int(parallelism.local_kv_page_rr_shard_count())
+    upstream_shards = int(parallelism.upstream_kv_page_rr_shard_count())
     supported_shards = (2, 4, 8, 16)
 
     if is_decode_role:
         equal_attention_tp = tp_size == upstream_shards and ep_size == tp_size
         replicated_owner = tp_size == 1 and ep_size in supported_shards
-        if local_rr or not (equal_attention_tp or replicated_owner):
+        if not local_rr and not (equal_attention_tp or replicated_owner):
             raise ValueError(
                 "Kimi K3 Decode role requires local PageRR disabled and either "
                 "equal attention TP or a TP1 replicated owner"
@@ -84,10 +77,10 @@ def validate_kimi_k3_page_rr_target(
             "Kimi K3 Prefill PageRR requires TP == EP and Query CP disabled"
         )
 
+    checkpoint_shards = max(local_shards, upstream_shards)
     if (
-        upstream_shards not in supported_shards
-        or checkpoint_tokens != page_tokens * upstream_shards
-    ):
+        not (is_decode_role and local_rr) and upstream_shards not in supported_shards
+    ) or checkpoint_tokens != page_tokens * checkpoint_shards:
         raise ValueError(
             "Kimi K3 PageRR role/checkpoint placement has an unsupported "
             "page/shard count or checkpoint span"

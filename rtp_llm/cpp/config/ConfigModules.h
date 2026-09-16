@@ -90,9 +90,12 @@ struct ParallelismConfig {
 
     // Context Parallel configuration
     PrefillCPConfig prefill_cp_config;
+    bool decode_cp_kv_cache_sharded = false;
 
     bool kv_page_rr_enabled() const {
-        return prefill_cp_config.kv_cache_sharded && tp_size > 1;
+        const bool sharded =
+            role_type == RoleType::DECODE ? decode_cp_kv_cache_sharded : prefill_cp_config.kv_cache_sharded;
+        return sharded && tp_size > 1;
     }
     int64_t local_kv_page_rr_shard_count() const;
     int64_t upstream_kv_page_rr_shard_count() const;

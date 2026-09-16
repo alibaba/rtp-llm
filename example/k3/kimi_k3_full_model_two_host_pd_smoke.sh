@@ -143,6 +143,8 @@ Important optional variables:
                             only for the required four-layer RDMA flow smoke.
   SMOKE_PAGE_RR             0 (default) keeps replicated Prefill cache;
                             1 enables the two-host P8 -> DP8 Page-RR profile
+  SMOKE_DECODE_PAGE_RR      1 selects one Decode TP/DCP group instead of KTP;
+                            combine with SMOKE_PAGE_RR=0/1 for P1D8/P8D8
   SMOKE_BLOCK_SIZE          physical cache page size; defaults to 4096
                             (128 when SMOKE_PAGE_RR=1)
   SMOKE_KERNEL_BLOCK_SIZE   attention kernel page size; defaults to 128
@@ -195,11 +197,14 @@ role="${1,,}"
 smoke_page_rr="${SMOKE_PAGE_RR:-0}"
 [[ "${smoke_page_rr}" == "0" || "${smoke_page_rr}" == "1" ]] \
     || die "SMOKE_PAGE_RR must be 0 or 1"
+smoke_decode_page_rr="${SMOKE_DECODE_PAGE_RR:-0}"
+[[ "${smoke_decode_page_rr}" == "0" || "${smoke_decode_page_rr}" == "1" ]] \
+    || die "SMOKE_DECODE_PAGE_RR must be 0 or 1"
 smoke_tp_size="${TP_SIZE:-${KIMI_K3_TP_SIZE:-8}}"
 smoke_ep_size="${EP_SIZE:-${KIMI_K3_EP_SIZE:-${smoke_tp_size}}}"
 [[ "${smoke_tp_size}" =~ ^[1-9][0-9]*$ && "${smoke_ep_size}" == "${smoke_tp_size}" ]] \
     || die "this K3 MegaMoE smoke requires positive TP == EP"
-if [[ "${smoke_page_rr}" == "1" && "${smoke_tp_size}" != "8" ]]; then
+if [[ "${smoke_page_rr}" == "1" && "${smoke_tp_size}" != "8" && "${smoke_decode_page_rr}" != "1" ]]; then
     die "this two-host SMOKE_PAGE_RR profile validates only Prefill TP8 -> Decode DP8"
 fi
 
@@ -341,6 +346,10 @@ fi
 smoke_chunk_tokens="${SMOKE_CHUNK_TOKENS:-65536}"
 smoke_decode_topology=dp8_ktp8_ep8
 smoke_decode_dp_size=8
+if [[ "${smoke_decode_page_rr}" == "1" ]]; then
+    smoke_decode_topology="tp${smoke_tp_size}_ep${smoke_tp_size}"
+    smoke_decode_dp_size=1
+fi
 if [[ "${smoke_page_rr}" == "1" ]]; then
     case "${smoke_block_size}:${smoke_kernel_block_size}" in
         128:128 | 256:256) ;;
@@ -603,21 +612,30 @@ verify_decode_graph_log() {
     fi
     local logs=("${service_log}" "${engine_log}" "${rank_logs[@]}")
     : >"${evidence_file}"
-    for marker in \
-        K3_PROJECTION_KTP_LAYOUT \
-        K3_PROJECTION_KTP_STEP \
-        K3_PROJECTION_KTP_GRAPH_REPLAY; do
-        grep -Eh "${marker}" "${logs[@]}" | tail -20 >>"${evidence_file}" \
-            || die "Decode log has no ${marker} evidence"
-    done
-    if [[ "${smoke_page_rr}" == "1" ]]; then
-        grep -Eh \
-            "K3_PD_PAGE_RR_FAN_IN.*source_shards=${smoke_tp_size}.*kda_partitions=[1-9][0-9]*.*status=ok" \
-            "${logs[@]}" | tail -20 >>"${evidence_file}" \
-            || die "Decode log has no valid Page-RR fan-in evidence"
+    if [[ "${smoke_decode_page_rr}" == "1" ]]; then
+        grep -Eh "\[MLA_DCP\].*backend=a2a tp=${smoke_tp_size} " "${logs[@]}" \
+            | tail -20 >>"${evidence_file}" \
+            || die "Decode log has no expected DCP backend evidence"
+        grep -Eh "K3_PAGE_RR_TARGET.*role=Decode TP=${smoke_tp_size} " "${logs[@]}" \
+            | tail -20 >>"${evidence_file}" \
+            || die "Decode log has no local Page-RR cache evidence"
     else
-        grep -Eh "K3_PD_FAN_IN" "${logs[@]}" | tail -20 >>"${evidence_file}" \
-            || die "Decode log has no K3_PD_FAN_IN evidence"
+        for marker in \
+            K3_PROJECTION_KTP_LAYOUT \
+            K3_PROJECTION_KTP_STEP \
+            K3_PROJECTION_KTP_GRAPH_REPLAY; do
+            grep -Eh "${marker}" "${logs[@]}" | tail -20 >>"${evidence_file}" \
+                || die "Decode log has no ${marker} evidence"
+        done
+        if [[ "${smoke_page_rr}" == "1" ]]; then
+            grep -Eh \
+                "K3_PD_PAGE_RR_FAN_IN.*source_shards=${smoke_tp_size}.*kda_partitions=[1-9][0-9]*.*status=ok" \
+                "${logs[@]}" | tail -20 >>"${evidence_file}" \
+                || die "Decode log has no valid Page-RR fan-in evidence"
+        else
+            grep -Eh "K3_PD_FAN_IN" "${logs[@]}" | tail -20 >>"${evidence_file}" \
+                || die "Decode log has no K3_PD_FAN_IN evidence"
+        fi
     fi
     for bucket in 1 2 4 8; do
         grep -Eh "captured batch[ _]size ${bucket}([ :]|$)" "${logs[@]}" \
@@ -629,7 +647,8 @@ verify_decode_graph_log() {
 verify_smoke_runtime_coverage() {
     [[ "${SMOKE_SUITE:-all}" == "all" ]] || return 0
     python3 "${repo_root}/example/k3/kimi_k3_smoke_runtime_evidence.py" \
-        --role "${role}" --root "${role_dir}"
+        --role "${role}" --root "${role_dir}" \
+        --decode-page-rr "${smoke_decode_page_rr}"
 }
 
 verify_fp8_log() {
@@ -672,6 +691,8 @@ verify_role_environment() {
         "${smoke_sp_model_type}" \
         "${smoke_tp_size}" \
         "${smoke_page_rr}" \
+        "${smoke_decode_page_rr}" \
+        "${smoke_decode_topology}" \
         "${smoke_proposal_tokens}" \
         "${FT_CORE_DUMP_ON_EXCEPTION}" <<'PY'
 import os
@@ -695,6 +716,8 @@ import sys
     sp_model_type,
     tp_size,
     page_rr,
+    decode_page_rr,
+    decode_topology,
     proposal_tokens,
     core_dump_on_exception,
 ) = sys.argv[1:]
@@ -731,6 +754,7 @@ expected = {
     "KIMI_K3_TP_SIZE": tp_size,
     "KIMI_K3_EP_SIZE": tp_size,
     "SMOKE_PAGE_RR": page_rr,
+    "SMOKE_DECODE_PAGE_RR": decode_page_rr,
 }
 absent = ["CUDA_LAUNCH_BLOCKING", "large_segment_size_mb", "KIMI_K3_EAGLE3_AUX_LAYER_IDS"]
 if accl_use_nics:
@@ -772,7 +796,8 @@ else:
         "NCCL_MAX_CTAS": "8",
         "ENABLE_CUDA_GRAPH": "1",
         "DECODE_CAPTURE_CONFIG": "1,2,4,8",
-        "KIMI_K3_DECODE_TOPOLOGY": "dp8_ktp8_ep8",
+        "KIMI_K3_DECODE_TOPOLOGY": decode_topology,
+        "DECODE_CP_KV_CACHE_SHARDED": decode_page_rr,
         "RTP_MLA_DECODE_KERNEL": "tokenspeed_mla",
         "MOE_STRATEGY": "mega_moe_se",
         "RTP_LLM_DEVICE_INPUT": "1",
@@ -869,6 +894,7 @@ apply_validated_common_profile() {
     export KIMI_K3_EP_SIZE="${smoke_ep_size}"
     export SMOKE_PAGE_RR="${smoke_page_rr}"
     # Discard legacy auxiliary-layer settings inherited from the shell.
+    export SMOKE_DECODE_PAGE_RR="${smoke_decode_page_rr}"
     unset KIMI_K3_EAGLE3_AUX_LAYER_IDS
     export RTP_LLM_SERVICE_ID="kimi-k3-full-pd-${SMOKE_RUN_ID}"
     # Keep TP Unix-domain sockets below Linux's 107-byte path limit even when
@@ -885,6 +911,7 @@ apply_validated_common_profile() {
 apply_validated_prefill_profile() {
     # Admit the full HTTP batch: the uneven DP stage submits 4+3+2+1 requests.
     export CONCURRENCY_LIMIT=32
+    unset DECODE_CP_KV_CACHE_SHARDED
     export MAX_SEQ_LEN=1258294
     export MAX_BATCH_TOKENS_SIZE=1258291
     export KV_CACHE_MEM_MB=42000
@@ -925,6 +952,12 @@ apply_validated_decode_profile() {
     # one common key from the DP-local maximum batch.
     export DECODE_CAPTURE_CONFIG=1,2,4,8
     export KIMI_K3_DECODE_TOPOLOGY="${smoke_decode_topology}"
+    export DECODE_CP_KV_CACHE_SHARDED="${smoke_decode_page_rr}"
+    if [[ "${smoke_decode_page_rr}" == "1" ]]; then
+        # Avoid Graph replay hangs/wrong answers with expandable-segment buffers.
+        # Keep an explicit override available for registration A/B diagnostics.
+        export NCCL_GRAPH_REGISTER="${NCCL_GRAPH_REGISTER:-0}"
+    fi
     export RTP_MLA_DECODE_KERNEL=tokenspeed_mla
     export MOE_STRATEGY=mega_moe_se
     export RTP_LLM_DEVICE_INPUT=1
@@ -1088,6 +1121,14 @@ for addr in "${decode_role_addrs[@]}"; do
     decode_role_addr_args+=(--decode-role-addr "${addr}")
 done
 
+# Page-RR Prefill checkpoints its KDA LINEAR group once per Prefill-shard
+# span, so branch reuse is only observable on that grid; replicated Prefill
+# reuses per physical page.
+smoke_reuse_unit_tokens="${smoke_block_size}"
+if [[ "${smoke_page_rr}" == "1" ]]; then
+    smoke_reuse_unit_tokens=$((smoke_block_size * smoke_tp_size))
+fi
+
 python3 -u "${case_runner}" \
     --base-url "http://127.0.0.1:${prefill_port}" \
     --decode-health-url "http://${decode_host}:${decode_port}/health" \
@@ -1098,6 +1139,7 @@ python3 -u "${case_runner}" \
     --namespace "${SMOKE_RUN_ID}" \
     --batch-size 4 \
     --block-size "${SEQ_SIZE_PER_BLOCK}" \
+    --reuse-unit-tokens "${smoke_reuse_unit_tokens}" \
     --chunk-tokens "${smoke_chunk_tokens}" \
     --max-tokens "${max_tokens}" \
     --identity-max-tokens "${identity_max_tokens}" \

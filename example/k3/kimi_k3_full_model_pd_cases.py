@@ -122,6 +122,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--block-size", type=int, default=4096)
+    parser.add_argument(
+        "--reuse-unit-tokens",
+        type=int,
+        default=0,
+        help="cache reuse granularity in tokens; 0 means one physical block. "
+        "Page-RR Prefill checkpoints its KDA LINEAR group once per Prefill-shard "
+        "span, so the branch stage must size and expect reuse on that grid.",
+    )
     parser.add_argument("--chunk-tokens", type=int, default=65536)
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--identity-max-tokens", type=int, default=256)
@@ -270,6 +278,13 @@ def make_flow_prompt(namespace: str) -> str:
 
 
 class Runner:
+    @property
+    def reuse_unit_tokens(self) -> int:
+        """Cache reuse granularity: one page, or one checkpoint span."""
+        return int(getattr(self.args, "reuse_unit_tokens", 0)) or int(
+            self.args.block_size
+        )
+
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.endpoint = args.base_url.rstrip("/") + "/v1/chat/completions"
@@ -945,8 +960,9 @@ class Runner:
         head = f"档案 {self.args.namespace}/prefix-branches。以下 x 为无关填充。\n"
         tail_a = '\n唯一有效记录：key=chosen; value=CEDAR-AMBER。只输出 JSON {"value":"CEDAR-AMBER"}，不要解释。'
         tail_b = '\n唯一有效记录：key=chosen; value=MAPLE-VIOLET。只输出 JSON {"value":"MAPLE-VIOLET"}，不要解释。'
+        unit = self.reuse_unit_tokens
         prompt_a, tokens_a = self.fit_prompt(
-            head, tail_a, self.args.block_size * 2 + 128
+            head, tail_a, unit * 2 + self.args.block_size
         )
         prompt_b = prompt_a[: -len(tail_a)] + tail_b
         tokens_b = self.tokenize(prompt_b)
@@ -955,7 +971,7 @@ class Runner:
             (i for i, pair in enumerate(zip(tokens_a, tokens_b)) if pair[0] != pair[1]),
             min(len(tokens_a), len(tokens_b)),
         )
-        common_reuse = common // self.args.block_size * self.args.block_size
+        common_reuse = common // unit * unit
         if common_reuse <= 0:
             raise SmokeFailure("branch case has no complete common cache page")
         size = max(1, len(self.decode_role_addrs))
@@ -985,18 +1001,14 @@ class Runner:
             name="prefix-A-return",
             reuse="hit",
             decode_owner_rank=(size - 1),
-            expected_reuse_len=(len(tokens_a) - 1)
-            // self.args.block_size
-            * self.args.block_size,
+            expected_reuse_len=(len(tokens_a) - 1) // unit * unit,
         )
         self.run_stage("prefix_A_return", [a_hit])
         b_hit = replace(
             b,
             name="prefix-B-hit",
             reuse="hit",
-            expected_reuse_len=(len(tokens_b) - 1)
-            // self.args.block_size
-            * self.args.block_size,
+            expected_reuse_len=(len(tokens_b) - 1) // unit * unit,
         )
         self.run_stage(
             "prefix_AB_mixed",

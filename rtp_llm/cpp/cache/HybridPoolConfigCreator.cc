@@ -284,9 +284,11 @@ void setupKimiK3CompactLinearSpans(CacheConfig& config, const ParallelismConfig&
         return;
     }
 
-    // Decode can retain a replicated local FULL-page layout while preserving the
-    // upstream Prefill page-RR checkpoint geometry for KDA LINEAR groups.
-    const size_t shard_count = static_cast<size_t>(parallelism_config.upstream_kv_page_rr_shard_count());
+    const auto local_shards = parallelism_config.local_kv_page_rr_shard_count();
+    const auto upstream_shards = parallelism_config.upstream_kv_page_rr_shard_count();
+    // A reusable KDA checkpoint must align with both source and destination stripes.
+    // When one shard count divides the other, max gives the common checkpoint interval.
+    const size_t shard_count = static_cast<size_t>(std::max(local_shards, upstream_shards));
     if (shard_count == 1) {
         return;
     }

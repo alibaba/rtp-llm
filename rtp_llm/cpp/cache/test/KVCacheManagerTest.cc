@@ -453,6 +453,81 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
     }
 }
 
+TEST_F(KVCacheManagerTest, CPMallocUsesAsyncLengthAndRetainsReservedBlocks) {
+    for (const int cp_size : {8, 16}) {
+        for (const bool independent_pools : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "cp_size=" << cp_size
+                                              << " independent_pools=" << independent_pools);
+            auto config = makeSimpleMhaCacheConfig(1, 16, 128, rtp_llm::DataType::TYPE_FP16);
+            config.group_types = {CacheGroupType::FULL};
+            config.use_independent_block_pools = independent_pools;
+            auto manager = std::make_shared<KVCacheManager>(config);
+            ASSERT_TRUE(manager->init());
+            // Exercise the real allocator without requiring a multi-rank communicator.
+            auto mapper = std::make_shared<CPSlotMapper>(0, cp_size, 128);
+            manager->cp_slot_mapper_ = mapper;
+            manager->allocator_->setCPSlotMapper(mapper);
+
+            auto resource = std::make_shared<BatchKVCacheResource>();
+            resource->resetBatchSize(1);
+            resource->initGroups(1, 1, std::vector<int>{0});
+            const int boundary = 128 * cp_size;
+            auto tokens = makeDSV4CompleteTokenIds(boundary - 1, boundary * 3, 128);
+            tokens->setReserveStep(4);
+            MallocInfo info{resource, tokens};
+            info.reuse_cache = false;
+            info.enable_device_cache = false;
+            ASSERT_TRUE(manager->malloc(info).success);
+            ASSERT_EQ(resource->blocksNum(0, 0), 2);
+
+            // The async MTP upper bound crosses a CP virtual-page boundary,
+            // while the worker has not yet updated the host token length.
+            info.incr_seq_len_override = boundary + 3;
+            ASSERT_TRUE(manager->malloc(info).success);
+            EXPECT_EQ(tokens->seqLength(), boundary - 1);
+            ASSERT_EQ(resource->blocksNum(0, 0), 3);
+            const auto reserved_blocks = resource->blocks(0, 0);
+
+            // Clearing an upper bound must not require FULL groups to shrink.
+            info.incr_seq_len_override = -1;
+            ASSERT_TRUE(manager->malloc(info).success);
+            EXPECT_EQ(resource->blocks(0, 0), reserved_blocks);
+            tokens->setSeqLength(boundary + 3);
+            ASSERT_TRUE(manager->malloc(info).success);
+            EXPECT_EQ(resource->blocks(0, 0), reserved_blocks);
+
+            info.incr_seq_len_override = boundary * 2 + 1;
+            ASSERT_TRUE(manager->malloc(info).success);
+            EXPECT_EQ(resource->blocksNum(0, 0), 4);
+        }
+    }
+}
+
+TEST_F(KVCacheManagerTest, CPMallocStillRejectsIncorrectAllocatorBlockCounts) {
+    for (const size_t returned_blocks : {1u, 3u}) {
+        auto config = makeSimpleMhaCacheConfig(1, 16, 128, rtp_llm::DataType::TYPE_FP16);
+        auto manager = std::make_shared<KVCacheManager>(config);
+        auto allocator = std::make_shared<MockKVCacheAllocator>(config);
+        manager->allocator_ = allocator;
+        manager->cp_slot_mapper_ = std::make_shared<CPSlotMapper>(0, 8, 128);
+        auto resource = std::make_shared<BatchKVCacheResource>();
+        resource->resetBatchSize(1);
+        resource->initGroups(1, 1, std::vector<int>{0});
+        resource->mutableBlockIds(0, 0).assign(BlockIndicesType{1});
+        auto tokens = makeDSV4CompleteTokenIds(1023, 2048, 128);
+        tokens->setReserveStep(4);
+        MallocInfo info{resource, tokens};
+        EXPECT_CALL(*allocator, incrMalloc(::testing::_))
+            .WillOnce(::testing::Invoke([&](const MallocInfo& allocation) {
+                EXPECT_EQ(allocation.incrSeqLen(), 1023);
+                resource->mutableBlockIds(0, 0).assign(BlockIndicesType(returned_blocks, 1));
+                return MallocResult{true, 0};
+            }));
+        // Both too few and unexpectedly many blocks must still fail the invariant.
+        EXPECT_ANY_THROW(manager->malloc(info));
+    }
+}
+
 TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/16);
     auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);

@@ -93,6 +93,12 @@ class MlaImplBase(object):
 
         return False
 
+    @classmethod
+    def support_page_rr_decode(cls) -> bool:
+        """Whether this implementation owns the Decode local Page-RR path."""
+
+        return False
+
     def forward(
         self,
         q: torch.Tensor,

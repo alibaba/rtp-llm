@@ -1492,14 +1492,15 @@ TEST_F(PdSepKVCacheReleaseTest, testK3PageRRSourceFansIntoReplicatedDecodeOwner)
     constexpr size_t  kModelId      = 96;
     constexpr size_t  kDraftModelId = 97;
 
-    for (const int source_shards : {8, 16}) {
-        SCOPED_TRACE(::testing::Message() << "source_shards=" << source_shards);
-        const int decode_dp_rank = source_shards == 8 ? 11 : 15;
+    for (const auto [source_shards, ktp_size] :
+         {std::pair{8, 8}, std::pair{16, 8}, std::pair{8, 16}, std::pair{16, 16}}) {
+        SCOPED_TRACE(::testing::Message() << "source_shards=" << source_shards << " KTP=" << ktp_size);
+        const int decode_dp_rank = ktp_size == 8 ? 7 : (source_shards == 8 ? 11 : 15);
 
         ParallelismConfig parallelism;
         parallelism.tp_size                            = 1;
-        parallelism.ktp_size                           = 16;
-        parallelism.dp_size                            = 16;
+        parallelism.ktp_size                           = ktp_size;
+        parallelism.dp_size                            = ktp_size;
         parallelism.dp_rank                            = decode_dp_rank;
         parallelism.role_type                          = RoleType::DECODE;
         parallelism.prefill_cp_config.prefill_cp_size  = source_shards;
@@ -1643,7 +1644,7 @@ TEST_F(PdSepKVCacheReleaseTest, testK3PageRRSourceFansIntoReplicatedDecodeOwner)
             expectK3BlockBytes(fixture.manager, padding_block, /*global_layer_id=*/1, 0xEE);
             expectK3BlockBytes(fixture.manager, padding_block, /*global_layer_id=*/3, 0xEE);
 
-            if (source_shards == 8) {
+            if (source_shards == 8 && ktp_size == 16) {
                 const auto saved_block = groups[0]->blocks()[5];
                 groups[0]->setAt(5, NULL_BLOCK_IDX);
                 fixture.cache_store->load_buffer_calls_.clear();
@@ -1690,6 +1691,9 @@ TEST_F(PdSepKVCacheReleaseTest, testK3PageRRSourceFansIntoReplicatedDecodeOwner)
             }
         }
 
+        if (ktp_size == 8) {
+            continue;
+        }
         {
             const auto        config = makeTinyK3PageRREagleConfig(parallelism,
                                                                    {HybridAttentionType::SLIDING_WINDOW},
@@ -1838,6 +1842,188 @@ TEST_F(PdSepKVCacheReleaseTest, testK3PageRRToReplicatedLoadsSingleGroupMtpSwaTa
                                                 /*layer_id=*/0,
                                                 KVCacheRegionName::DEFAULT)),
                   1u);
+    }
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testDcpDestinationPagesAndKdaHeadPartitions) {
+    struct Layout {
+        int source;
+        int tp;
+        int dp;
+        int pages;
+        int tp_rank;
+    };
+    constexpr int64_t request_id = 9025;
+    constexpr size_t model_id = 94;
+    for (const auto layout :
+         {Layout{1, 8, 1, 21, 7}, Layout{1, 16, 1, 21, 15}, Layout{1, 8, 2, 21, 7},
+          Layout{8, 8, 1, 21, 7}, Layout{8, 8, 2, 21, 7}, Layout{16, 16, 1, 21, 15},
+          Layout{16, 8, 1, 21, 0}, Layout{16, 8, 2, 21, 7}, Layout{32, 8, 2, 21, 7}, Layout{8, 8, 1, 1, 7}}) {
+        SCOPED_TRACE(testing::Message() << "source=" << layout.source << " TP=" << layout.tp << " DP=" << layout.dp
+                                       << " rank=" << layout.tp_rank << " pages=" << layout.pages);
+        const int rank = layout.tp_rank;
+        const int pages = layout.pages;
+        ParallelismConfig parallelism;
+        parallelism.role_type = RoleType::DECODE;
+        parallelism.tp_size = layout.tp;
+        parallelism.tp_rank = rank;
+        parallelism.dp_size = layout.dp;
+        parallelism.dp_rank = layout.dp - 1;
+        parallelism.ep_size = parallelism.world_size = layout.tp * layout.dp;
+        parallelism.world_rank = parallelism.dp_rank * layout.tp + rank;
+        parallelism.decode_cp_kv_cache_sharded = true;
+        parallelism.prefill_cp_config.prefill_cp_size = layout.source;
+        auto model = makeTinyK3ModelConfig({HybridAttentionType::LINEAR, HybridAttentionType::NONE}, 32, 4);
+        KVCacheConfig kv;
+        kv.seq_size_per_block = kv.kernel_seq_size_per_block = 128;
+        kv.test_block_num = 32;
+        SpeculativeExecutionConfig sp;
+        sp.type = SP_TYPE_MTP;
+        sp.model_type = "kimi_k3_mtp";
+        sp.gen_num_per_cycle = 1;
+        auto config = CacheConfigCreator::createSpConfig(
+            model, makeTinyK3ModelConfig({HybridAttentionType::NONE}, 32, 4),
+            parallelism, RuntimeConfig{}, kv, sp, std::nullopt, true, false);
+        ASSERT_EQ(config.group_types, (std::vector<CacheGroupType>{CacheGroupType::FULL, CacheGroupType::LINEAR,
+                                                                  CacheGroupType::FULL}));
+        K3TransferFixture fixture;
+        ASSERT_TRUE(fixture.init(config, parallelism, pages, request_id, model_id, 95, true));
+        auto& server = fixture.server;
+        auto& store = fixture.cache_store;
+        auto& manager = fixture.manager;
+        server.resource_.workers.assign(layout.tp, "decode-worker");
+        server.resource_.grpc_workers.assign(layout.tp, "decode-worker");
+        std::vector<std::string> peers;
+        for (int peer = 0; peer < (layout.source == 1 ? layout.tp : layout.source); ++peer) {
+            peers.push_back(testPeerIp(peer) + ":12345:12346");
+        }
+        CacheKeysType keys;
+        for (int page = 0; page < pages; ++page) {
+            keys.push_back(42000 + page);
+        }
+        auto groups = fixture.resource->groupBlocks();
+        const std::string request_key = "dcp-destination";
+        grpc::ServerContext rpc;
+        DecodeRpcServer::LoadKVCacheContext route(request_id, request_key, peers, keys, groups,
+                                                  0, 5000, 1, 0, &rpc, layout.source, false);
+        auto request = server.constructRemoteLoadRequestForMla(route, rank, peers);
+        EXPECT_EQ(request.dp_rank(), layout.dp - 1);
+        std::vector<std::string> selected(request.peer_addrs().begin(), request.peer_addrs().end());
+        EXPECT_EQ(selected, layout.source == 1 ? std::vector<std::string>{peers[rank]} : peers);
+        DecodeRpcServer::LoadKVCacheContext load(request_id, request_key, selected, keys, groups,
+                                                 0, 5000, 1, 0, &rpc, layout.source, false);
+        std::unordered_map<std::string, std::unordered_map<std::string, void*>> expected;
+        std::vector<std::pair<BlockInfo, uint8_t>> checks;
+        for (int gid = 0; gid < 3; ++gid) {
+            const bool linear = gid == 1;
+            const int layer = gid == 2 ? 2 : (linear ? 0 : 1);
+            const int wire_layer = gid == 2 ? 0 : layer;
+            const size_t wire_model = gid == 2 ? 95 : model_id;
+            const auto& blocks = fixture.resource->blocks(0, gid);
+            const size_t terminal = (pages - 1) / std::max(layout.tp, layout.source);
+            for (size_t local = 0; local < blocks.size(); ++local) {
+                const size_t page = linear ? pages - 1 : local * layout.tp + rank;
+                const bool selected_block = linear ? local == terminal : page < pages;
+                if (isNullBlockIdx(blocks[local])) {
+                    EXPECT_FALSE(selected_block);
+                    continue;
+                }
+                fillK3BlockBytes(manager, blocks[local], layer, 0xEE);
+                const int partitions = linear ? std::max(1, layout.source / layout.tp) : 1;
+                for (int part = 0; part < partitions; ++part) {
+                    const int peer = linear ? rank * partitions + part :
+                                             layout.source == 1 ? rank : page % layout.source;
+                    const auto buffers = manager->convertIndexToBuffer(blocks[local], layer, partitions, part);
+                    const uint8_t pattern = selected_block ? static_cast<uint8_t>(32 + peer * 4 + gid) : 0xEE;
+                    const auto base_key = makeCacheKey(wire_model, std::to_string(keys[std::min<size_t>(page, pages - 1)]),
+                                                       wire_layer, KVCacheRegionName::DEFAULT);
+                    for (size_t segment = 0; segment < buffers.size(); ++segment) {
+                        checks.emplace_back(buffers[segment], pattern);
+                        if (!selected_block) {
+                            continue;
+                        }
+                        const auto key = linear ? makeLinearCacheSegmentKey(segment, base_key) : "kv_" + base_key;
+                        expected[testPeerIp(peer)][key] = buffers[segment].addr;
+                        store->load_patterns_[testPeerIp(peer)][key] = pattern;
+                    }
+                }
+            }
+        }
+        runtimeSyncAndCheck();
+        const auto free_before = manager->freeBlocksNum();
+        BroadcastLoadResponsePB response;
+        if (layout.dp == 2) {
+            auto wrong_owner = request;
+            wrong_owner.set_dp_rank(0);
+            ASSERT_TRUE(server.RemoteLoad(&rpc, &wrong_owner, &response).ok());
+            EXPECT_TRUE(store->load_buffer_calls_.empty());
+        }
+        ASSERT_TRUE(server.RemoteLoad(&rpc, &request, &response).ok());
+        ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR);
+        for (const auto& call : store->load_buffer_calls_) {
+            std::unordered_map<std::string, void*> actual;
+            for (const auto& buffer : call.requests) {
+                for (const auto& [key, block] : buffer->getBlocks()) {
+                    EXPECT_TRUE(actual.emplace(key, block->addr.get()).second);
+                }
+            }
+            EXPECT_EQ(actual, expected[call.peer_ip]);
+        }
+        ASSERT_EQ(store->load_buffer_calls_.size(), selected.size());
+        for (const auto& [block, pattern] : checks) {
+            auto bytes = torch::from_blob(block.addr, {static_cast<int64_t>(block.size_bytes)},
+                                           torch::TensorOptions(torch::kUInt8).device(torch::kCUDA)).cpu();
+            EXPECT_TRUE(bytes.eq(pattern).all().item<bool>());
+        }
+        EXPECT_EQ(manager->freeBlocksNum(), free_before);
+        if (layout.dp == 2 && layout.source == 16) {
+            std::mutex mutex;
+            std::vector<std::function<void()>> completions;
+            std::promise<void> dispatched;
+            auto all_dispatched = dispatched.get_future();
+            bool release = false, signaled = false;
+            store->load_failure_predicate_ = [&](const std::string& peer, const std::string&) {
+                return peer == testPeerIp(14);
+            };
+            store->defer_load_callback_ = [&](CacheStoreLoadDoneCallback callback, bool ok, const std::string& peer) {
+                auto complete = [callback = std::move(callback), ok]() {
+                    callback(ok, ok ? CacheStoreErrorCode::None : CacheStoreErrorCode::LoadErrorUnknown);
+                };
+                std::unique_lock<std::mutex> lock(mutex);
+                if (release) {
+                    lock.unlock();
+                    complete();
+                } else {
+                    completions.push_back(std::move(complete));
+                    if (!signaled && peer == testPeerIp(15)) {
+                        signaled = true;
+                        dispatched.set_value();
+                    }
+                }
+            };
+            auto pending = std::async(std::launch::async, [&]() { return server.loadCache(load); });
+            EXPECT_EQ(all_dispatched.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+            EXPECT_EQ(pending.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+            EXPECT_EQ(manager->freeBlocksNum(), free_before);
+            std::vector<std::function<void()>> ready;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                release = true;
+                ready.swap(completions);
+            }
+            for (auto& complete : ready) {
+                complete();
+            }
+            EXPECT_EQ(pending.get().code(), ErrorCode::CACHE_STORE_LOAD_UNKNOWN_ERROR);
+            store->defer_load_callback_ = nullptr;
+            store->load_failure_predicate_ = nullptr;
+        }
+        manager->free(FreeInfo{fixture.resource, fixture.tokens});
+        MallocInfo retry{fixture.resource, fixture.tokens};
+        retry.reuse_cache = false;
+        ASSERT_TRUE(manager->malloc(retry).success);
+        EXPECT_EQ(manager->freeBlocksNum(), free_before);
+        manager->free(FreeInfo{fixture.resource, fixture.tokens});
     }
 }
 
@@ -2080,18 +2266,16 @@ TEST_F(PdSepKVCacheReleaseTest, testK3SupportedLayoutsTransferCanonicalMainAndMt
 
 TEST_F(PdSepKVCacheReleaseTest, testK3RemoteWorkerRejectsInvalidTopologyBeforeCallback) {
     struct Topology {
-        bool decode_page_rr;
         int  upstream_shards;
         int  request_shards;
         int  peers;
     };
-    for (const auto row : {Topology{true, 8, 8, 8}, Topology{false, 8, 8, 7}, Topology{false, 4, 8, 8}}) {
-        SCOPED_TRACE(testing::Message() << row.decode_page_rr << "/" << row.upstream_shards << "/" << row.peers);
+    for (const auto row : {Topology{8, 8, 7}, Topology{4, 8, 8}}) {
+        SCOPED_TRACE(testing::Message() << row.upstream_shards << "/" << row.peers);
         ParallelismConfig parallelism;
         parallelism.tp_size                            = 8;
         parallelism.role_type                          = RoleType::DECODE;
         parallelism.prefill_cp_config.prefill_cp_size  = row.upstream_shards;
-        parallelism.prefill_cp_config.kv_cache_sharded = row.decode_page_rr;
         auto manager = std::make_shared<KVCacheManager>(makeTinyK3PageRREagleConfig(parallelism), false, nullptr);
         EngineInitParams params;
         params.model_config_.num_layers = 2;

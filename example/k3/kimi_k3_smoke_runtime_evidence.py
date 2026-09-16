@@ -9,6 +9,21 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
+
+
+# Decode Page-RR (DCP) is KTP1, so it emits none of the Projection-KTP plan
+# events. Its runtime paths are proved by engine markers instead: every TP rank
+# builds the A2A communicator, the local cache geometry is validated once, and
+# the C++ graph runner captures the scheduled buckets per rank.
+_MLA_DCP = re.compile(r"\[MLA_DCP\] backend=(\w+) tp=(\d+) rank=(\d+)")
+_PAGE_RR_TARGET = re.compile(
+    r"\[K3_PAGE_RR_TARGET\] role=(\w+) TP=(\d+) B=(\d+) V=(\d+)"
+)
+_GRAPH_CAPTURE = re.compile(r"captured batch size (\d+):")
+_RANK_PREFIX = re.compile(r"\[RANK (\d+)\]")
+_MAIN_LOG = re.compile(r"main_(\d+)\.log")
+GRAPH_BUCKETS = (1, 2, 4, 8)
 
 
 def adjacent_unique(values):
@@ -19,7 +34,70 @@ def adjacent_unique(values):
     ]
 
 
-def _verify(events: list[dict], role: str, replay_seen: bool = False) -> dict:
+def _dcp_checks(markers: dict, replay_seen: bool, events: list[dict]) -> dict:
+    """Prove the Decode Page-RR path ran on every rank of a KTP1 topology."""
+    backends = markers.get("dcp_backends", set())
+    sizes = {tp for tp, _ in backends}
+    ranks = {rank for _, rank in backends}
+    tp = min(sizes) if sizes else None
+    checks = {
+        "dcp_backend_a2a_single_size": len(sizes) == 1,
+        "dcp_communicator_all_ranks": tp is not None and ranks == set(range(tp)),
+    }
+    targets = markers.get("page_rr_targets", set())
+    decode_targets = {
+        (tp, pages, checkpoints)
+        for role_, tp, pages, checkpoints in targets
+        if role_ == "Decode"
+    }
+    checks["page_rr_target_decode_geometry"] = (
+        all(role_ == "Decode" for role_, _, _, _ in targets)
+        and len(decode_targets) == 1
+        and all(
+            pages > 0 and checkpoints > 0 and {tp} == sizes
+            for tp, pages, checkpoints in decode_targets
+        )
+    )
+    captures = markers.get("graph_captures", set())
+    checks["graph_capture_buckets"] = all(
+        any(bucket == expected for _, bucket in captures) for expected in GRAPH_BUCKETS
+    )
+    checks["graph_capture_all_ranks"] = tp is not None and all(
+        {rank for rank, bucket in captures if bucket == expected and rank is not None}
+        == set(range(tp))
+        for expected in GRAPH_BUCKETS
+    )
+    # A KTP>1 topology must not silently satisfy a DCP round.
+    checks["projection_ktp_inactive"] = not replay_seen and not any(
+        event.get("kind") == "ktp" for event in events
+    )
+    observations = {
+        "dcp_tp": tp,
+        "dcp_ranks": sorted(ranks),
+        "page_rr_targets": sorted(
+            f"{role_}:TP{tp}:B{pages}:V{checkpoints}"
+            for role_, tp, pages, checkpoints in targets
+        ),
+        "graph_capture_ranks_per_bucket": {
+            str(expected): sorted(
+                rank for rank, bucket in captures if bucket == expected and rank is not None
+            )
+            for expected in GRAPH_BUCKETS
+        },
+        # P8 sources are replicated into the Decode pool here, so this KTP1-only
+        # marker is recorded for diagnosis without being an acceptance gate.
+        "pd_page_rr_fan_in_lines": markers.get("pd_page_rr_fan_in", 0),
+    }
+    return {"checks": checks, "observations": observations}
+
+
+def _verify(
+    events: list[dict],
+    role: str,
+    replay_seen: bool = False,
+    markers: dict | None = None,
+    decode_page_rr: bool = False,
+) -> dict:
     checks = {}
     observations = {}
     if role == "prefill":
@@ -37,6 +115,10 @@ def _verify(events: list[dict], role: str, replay_seen: bool = False) -> dict:
             checks[f"actual_padding_{padding}"] = any(
                 e["physical_tokens"] - e["logical_tokens"] == padding for e in rounds
             )
+    elif decode_page_rr:
+        report = _dcp_checks(markers or {}, replay_seen, events)
+        checks.update(report["checks"])
+        observations.update(report["observations"])
     else:
         plans = [e for e in events if e.get("kind") == "ktp"]
         # Logs may be mirrored into service.log and main_<rank>.log. Deduplicate
@@ -110,9 +192,15 @@ def _verify(events: list[dict], role: str, replay_seen: bool = False) -> dict:
     }
 
 
-def verify(events: list[dict], role: str, replay_seen: bool = False) -> dict:
+def verify(
+    events: list[dict],
+    role: str,
+    replay_seen: bool = False,
+    markers: dict | None = None,
+    decode_page_rr: bool = False,
+) -> dict:
     try:
-        return _verify(events, role, replay_seen)
+        return _verify(events, role, replay_seen, markers, decode_page_rr)
     except (KeyError, TypeError, ValueError, IndexError) as exc:
         return {
             "role": role,
@@ -125,6 +213,12 @@ def verify(events: list[dict], role: str, replay_seen: bool = False) -> dict:
 
 def collect(root: pathlib.Path):
     events, replay_seen = [], False
+    markers = {
+        "dcp_backends": set(),
+        "page_rr_targets": set(),
+        "graph_captures": set(),
+        "pd_page_rr_fan_in": 0,
+    }
     # Explicit service/rank paths avoid recursively ingesting saved evidence.
     paths = (
         list(root.glob("*.log"))
@@ -132,23 +226,59 @@ def collect(root: pathlib.Path):
         + list(root.glob("runtime/work/*/logs/engine.log"))
     )
     for path in sorted(set(paths)):
+        # Rank logs carry their rank in the filename; engine logs prefix it.
+        log_rank = _MAIN_LOG.fullmatch(path.name)
+        log_rank = int(log_rank.group(1)) if log_rank else None
         with path.open(errors="replace") as source:
             for line in source:
                 replay_seen |= "[K3_PROJECTION_KTP_GRAPH_REPLAY]" in line
                 if "[K3_SMOKE_EVENT] " in line:
                     event = json.loads(line.split("[K3_SMOKE_EVENT] ", 1)[1])
                     events.append(event)
-    return events, replay_seen
+                backend = _MLA_DCP.search(line)
+                if backend and backend.group(1) == "a2a":
+                    markers["dcp_backends"].add(
+                        (int(backend.group(2)), int(backend.group(3)))
+                    )
+                target = _PAGE_RR_TARGET.search(line)
+                if target:
+                    markers["page_rr_targets"].add(
+                        (
+                            target.group(1),
+                            int(target.group(2)),
+                            int(target.group(3)),
+                            int(target.group(4)),
+                        )
+                    )
+                capture = _GRAPH_CAPTURE.search(line)
+                if capture:
+                    rank = _RANK_PREFIX.search(line)
+                    markers["graph_captures"].add(
+                        (
+                            int(rank.group(1)) if rank else log_rank,
+                            int(capture.group(1)),
+                        )
+                    )
+                markers["pd_page_rr_fan_in"] += "[K3_PD_PAGE_RR_FAN_IN]" in line
+    return events, replay_seen, markers
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--role", choices=("prefill", "decode"), required=True)
     parser.add_argument("--root", type=pathlib.Path, required=True)
+    parser.add_argument(
+        "--decode-page-rr",
+        choices=("0", "1"),
+        default="0",
+        help="Decode runs a Page-RR (DCP) KTP1 topology instead of Projection-KTP",
+    )
     args = parser.parse_args()
     try:
-        events, replay = collect(args.root)
-        report = verify(events, args.role, replay)
+        events, replay, markers = collect(args.root)
+        report = verify(
+            events, args.role, replay, markers, args.decode_page_rr == "1"
+        )
     except (ValueError, OSError) as exc:
         report = {
             "role": args.role,

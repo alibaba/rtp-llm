@@ -1,6 +1,20 @@
 load("//bazel:arch_select.bzl", "tokenspeed_mla_test_deps")
 
 py_test(
+    name = "page_rr_mla_decode_test",
+    srcs = ["page_rr_mla_decode_test.py"],
+    deps = [
+        "//rtp_llm:apache-tvm-ffi",
+        "//rtp_llm:nvidia-cutlass-dsl",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ] + tokenspeed_mla_test_deps(),
+    tags = ["manual", "L20D"],
+    exec_properties = {"gpu": "L20D", "gpu_count": "8"},
+    timeout = "long",
+)
+
+py_test(
     name = "flashmla_forward_plan_test",
     srcs = ["flashmla_forward_plan_test.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],

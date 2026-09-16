@@ -55,8 +55,9 @@ int64_t ParallelismConfig::local_kv_page_rr_shard_count() const {
 }
 
 int64_t ParallelismConfig::upstream_kv_page_rr_shard_count() const {
-    if (role_type == RoleType::DECODE && prefill_cp_config.prefill_cp_size > 1) {
-        return prefill_cp_config.prefill_cp_size;
+    if (role_type == RoleType::DECODE) {
+        // The source layout is independent of this Decode owner's local shard count.
+        return std::max<int64_t>(1, prefill_cp_config.prefill_cp_size);
     }
     return local_kv_page_rr_shard_count();
 }
@@ -81,6 +82,7 @@ std::string ParallelismConfig::to_string() const {
         << "ffn_tp_rank: " << ffn_tp_rank << "\n"
         << "enable_sp: " << enable_sp << "\n"
         << "role_type: " << static_cast<int>(role_type) << "\n"
+        << "decode_cp_kv_cache_sharded: " << decode_cp_kv_cache_sharded << "\n"
         << "local_kv_page_rr_shard_count: " << local_kv_page_rr_shard_count() << "\n"
         << "upstream_kv_page_rr_shard_count: " << upstream_kv_page_rr_shard_count() << "\n"
         << "ffn_disaggregate_config: {\n"

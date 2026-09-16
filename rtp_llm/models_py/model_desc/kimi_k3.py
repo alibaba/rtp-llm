@@ -1145,7 +1145,6 @@ class KimiK3Model(GptModelBase):
                     self.kv_cache,
                     self.layers,
                     self.parallelism_config,
-                    is_decode_role=self._is_decode_role,
                 )
             )
 

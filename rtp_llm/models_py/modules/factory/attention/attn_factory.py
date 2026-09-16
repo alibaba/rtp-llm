@@ -52,6 +52,12 @@ def get_mla_impl(
     is_prefill = (
         attn_inputs.is_prefill and not is_target_verify and not is_mtp_draft_update
     )
+    page_rr_decode = bool(
+        not is_prefill
+        and parallelism_config is not None
+        and parallelism_config.decode_cp_kv_cache_sharded
+        and parallelism_config.kv_page_rr_enabled()
+    )
     mla_impls = PREFILL_MLA_IMPS if is_prefill else DECODE_MLA_IMPS
     page_rr_prefill = bool(
         is_prefill
@@ -59,7 +65,10 @@ def get_mla_impl(
         and parallelism_config.kv_page_rr_enabled()
     )
     for impl in mla_impls:
+        if impl.support_page_rr_decode() != page_rr_decode:
+            continue
         if attn_configs.mla_fp8_compute and impl.__name__ not in (
+            "PageRRMlaDecodeImpl",
             "TokenSpeedMlaDecodeImpl",
             "MlaFlashMLAPrefillImpl",
         ):

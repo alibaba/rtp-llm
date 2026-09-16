@@ -62,6 +62,15 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
                     "1",
                 )
 
+    def test_prefill_and_decode_page_rr_are_independent(self) -> None:
+        for prefill in ("0", "1"):
+            settings = {"SMOKE_PAGE_RR": prefill, "SMOKE_DECODE_PAGE_RR": "1"}
+            with self.subTest(prefill=prefill), mock.patch.dict(os.environ, settings, clear=True):
+                for role in ("prefill", "decode"):
+                    forwarded = driver.forwarded_optional_environment(role)
+                    for key, value in settings.items():
+                        self.assertEqual(forwarded[key], value)
+
     def test_precision_modes_and_prefix_budget_reach_both_role_commands(self) -> None:
         args = argparse.Namespace(
             prefill_repo_root="/data1/prefill",
@@ -220,6 +229,50 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
                     self.assertEqual(result.returncode, 2, result.stderr)
                     self.assertIn(message, result.stderr)
 
+    def test_decode_profile_preserves_independent_source_and_destination_layouts(self):
+        role_script = pathlib.Path(driver.__file__).with_name(
+            "kimi_k3_full_model_two_host_pd_smoke.sh"
+        )
+        source = role_script.read_text()
+        # Execute the actual profile function, without starting a service or
+        # duplicating its export logic in the test harness.
+        definition = (
+            "apply_validated_decode_profile() {"
+            + source.split("apply_validated_decode_profile() {", 1)[1].split(
+                "\n}", 1
+            )[0]
+            + "\n}"
+        )
+        for source_rr in ("0", "1"):
+            for destination_rr in ("0", "1"):
+                topology = "tp8_ep8" if destination_rr == "1" else "dp8_ktp8_ep8"
+                env = {
+                    **os.environ,
+                    "smoke_page_rr": source_rr,
+                    "smoke_decode_page_rr": destination_rr,
+                    "smoke_decode_topology": topology,
+                    "smoke_tp_size": "8",
+                    "smoke_decode_kv_cache_mem_mb": "20000",
+                    "smoke_decode_kda_pool_blocks": "32",
+                }
+                command = (
+                    definition
+                    + "\napply_validated_decode_profile\n"
+                    + "printf '%s %s %s' \"$KIMI_K3_DECODE_TOPOLOGY\" "
+                    + "\"$DECODE_CP_KV_CACHE_SHARDED\" "
+                    + "\"${PREFILL_CP_SIZE:-unset}\"\n"
+                )
+                with self.subTest(source=source_rr, destination=destination_rr):
+                    result = subprocess.run(
+                        ["bash", "-eu", "-c", command],
+                        env=env,
+                        text=True,
+                        capture_output=True,
+                        check=True,
+                    )
+                    upstream = "8" if source_rr == "1" else "unset"
+                    self.assertEqual(result.stdout, f"{topology} {destination_rr} {upstream}")
+
     def test_role_script_rejects_page_rr_tp16_before_host_validation(self):
         role_script = pathlib.Path(driver.__file__).with_name(
             "kimi_k3_full_model_two_host_pd_smoke.sh"
@@ -227,6 +280,7 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
         env = {
             **os.environ,
             "SMOKE_PAGE_RR": "1",
+            "SMOKE_DECODE_PAGE_RR": "0",
             "TP_SIZE": "16",
             "EP_SIZE": "16",
         }

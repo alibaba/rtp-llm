@@ -7,7 +7,7 @@ from rtp_llm.models_py.modules.kimi_k3.cache_geometry import (
     bind_kimi_k3_cache_geometry,
     validate_kimi_k3_page_rr_target,
 )
-from rtp_llm.ops import KvCacheDataType
+from rtp_llm.ops import KvCacheDataType, ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import CacheGroupType
 
 
@@ -23,37 +23,45 @@ class KimiK3CacheGeometryTest(unittest.TestCase):
         spans=None,
         kinds=None,
         local_shards=None,
+        dcp=False,
     ):
         if spans is None:
-            spans = (page_tokens, page_tokens * upstream_shards)
+            spans = (
+                page_tokens,
+                page_tokens * max(tp_size if dcp else 1, upstream_shards),
+            )
         cache = SimpleNamespace(
             seq_size_per_block=page_tokens,
             local_shard_count=(
-                (1 if decode else tp_size) if local_shards is None else local_shards
+                (tp_size if dcp or not decode else 1) if local_shards is None else local_shards
             ),
             group_seq_size_per_block=spans,
             layer_group_types=kinds or [CacheGroupType.FULL, CacheGroupType.LINEAR],
             get_layer_cache=lambda layer: SimpleNamespace(group_id=layer),
         )
-        parallelism = SimpleNamespace(
-            tp_size=tp_size,
-            tp_rank=0 if tp_size == 1 else 5,
-            kv_page_rr_enabled=lambda: not decode,
-            prefill_cp_config=SimpleNamespace(prefill_cp_size=upstream_shards),
-        )
+        parallelism = ParallelismConfig()
+        parallelism.tp_size = tp_size
+        parallelism.tp_rank = tp_size - 1
+        parallelism.role_type = RoleType.DECODE if decode else RoleType.PREFILL
+        parallelism.decode_cp_kv_cache_sharded = dcp
+        parallelism.prefill_cp_config.kv_cache_sharded = not decode
+        parallelism.prefill_cp_config.prefill_cp_size = upstream_shards
         return bind_kimi_k3_cache_geometry(
             cache,
             [SimpleNamespace(is_kda=False), SimpleNamespace(is_kda=True)],
             parallelism,
-            is_decode_role=decode,
         )
 
     def test_local_and_upstream_geometry_are_independent(self):
-        for decode, tp_size, upstream_shards in (
-            (False, 8, 8),
-            (True, 8, 8),
-            (True, 1, 8),
-            (True, 1, 16),
+        for decode, tp_size, upstream_shards, dcp in (
+            (False, 8, 8, False),
+            (True, 8, 8, False),
+            (True, 1, 8, False),
+            (True, 1, 16, False),
+            (True, 8, 1, True),
+            (True, 8, 8, True),
+            (True, 16, 16, True),
+            (True, 8, 16, True),
         ):
             with self.subTest(
                 decode=decode,
@@ -65,8 +73,9 @@ class KimiK3CacheGeometryTest(unittest.TestCase):
                         decode=decode,
                         tp_size=tp_size,
                         upstream_shards=upstream_shards,
+                        dcp=dcp,
                     ),
-                    (128, 128 * upstream_shards),
+                    (128, 128 * max(tp_size if dcp else 1, upstream_shards)),
                 )
 
     def test_layer_kind_and_span_must_match_model(self):
@@ -130,15 +139,13 @@ class KimiK3PageRRTargetTest(unittest.TestCase):
             upstream_shards = tp_size
         if local_page_rr is None:
             local_page_rr = not is_decode_role
-        parallelism = SimpleNamespace(
-            tp_size=tp_size,
-            ep_size=ep_size,
-            kv_page_rr_enabled=lambda: local_page_rr,
-            prefill_cp_config=SimpleNamespace(
-                prefill_cp_size=upstream_shards,
-                is_enabled=lambda: False,
-            ),
-        )
+        parallelism = ParallelismConfig()
+        parallelism.tp_size = tp_size
+        parallelism.ep_size = ep_size
+        parallelism.role_type = RoleType.DECODE if is_decode_role else RoleType.PREFILL
+        parallelism.decode_cp_kv_cache_sharded = is_decode_role and local_page_rr
+        parallelism.prefill_cp_config.kv_cache_sharded = not is_decode_role and local_page_rr
+        parallelism.prefill_cp_config.prefill_cp_size = upstream_shards
         return SimpleNamespace(
             parallelism=parallelism,
             model_config=SimpleNamespace(
@@ -160,7 +167,7 @@ class KimiK3PageRRTargetTest(unittest.TestCase):
                 linear_step=linear_step,
             ),
             page_tokens=page_tokens,
-            checkpoint_tokens=page_tokens * upstream_shards,
+            checkpoint_tokens=page_tokens * max(tp_size if local_page_rr else 1, upstream_shards),
             is_decode_role=is_decode_role,
             kda_head_dim=128,
             whole_model_query_budget_tokens=query_budget_tokens,
@@ -259,6 +266,17 @@ class KimiK3PageRRTargetTest(unittest.TestCase):
                     validate_kimi_k3_page_rr_target(**vars(target))
 
     def test_accepts_equal_tp_and_replicated_decode_geometry(self):
+        for tp_size, ep_size, source in (
+            (4, 4, 4), (8, 8, 1), (8, 8, 8), (16, 16, 16), (8, 16, 16), (32, 32, 32)
+        ):
+            with self.subTest(tp_size=tp_size, ep_size=ep_size, source=source):
+                self._validate(
+                    tp_size=tp_size,
+                    ep_size=ep_size,
+                    upstream_shards=source,
+                    local_page_rr=True,
+                    is_decode_role=True,
+                )
         self._validate(
             tp_size=8,
             ep_size=8,
@@ -314,13 +332,6 @@ class KimiK3PageRRTargetTest(unittest.TestCase):
             {"tp_size": 3, "ep_size": 3, "upstream_shards": 3},
             {"tp_size": 8, "ep_size": 16, "upstream_shards": 8},
             {"tp_size": 8, "ep_size": 8, "local_page_rr": False},
-            {
-                "tp_size": 1,
-                "ep_size": 8,
-                "upstream_shards": 8,
-                "local_page_rr": True,
-                "is_decode_role": True,
-            },
             {
                 "tp_size": 4,
                 "ep_size": 8,

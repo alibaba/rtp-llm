@@ -95,9 +95,13 @@ else:
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.tokenspeed_mla_impl import (
             TokenSpeedMlaDecodeImpl,
         )
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.page_rr_mla_decode import (
+            PageRRMlaDecodeImpl,
+        )
 
         # Prefer TokenSpeed on supported Blackwell GPUs and fall back to
         # FlashInfer when the dependency or runtime configuration is unsupported.
+        DECODE_MLA_IMPS.append(PageRRMlaDecodeImpl)
         DECODE_MLA_IMPS.append(TokenSpeedMlaDecodeImpl)
         DECODE_MLA_IMPS.append(MlaFlashInferDecodeImpl)
         PREFILL_MLA_IMPS.append(MlaFlashMLAPrefillImpl)

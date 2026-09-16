@@ -108,6 +108,14 @@ def init_parallel_group_args(
         default=False,
         help="开启后 prefill 节点的 paged KV pool（CSA_KV/HCA_KV/INDEXER_KV）按 logical block round-robin 切到各 CP rank，每卡只存 1/cp_size。需 PD 分离 + reuse cache。",
     )
+    parallel_group.add_argument(
+        "--decode_cp_kv_cache_sharded",
+        env_name="DECODE_CP_KV_CACHE_SHARDED",
+        bind_to=(parallelism_config, "decode_cp_kv_cache_sharded"),
+        type=str2bool,
+        default=False,
+        help="Shard Kimi K3 Decode MLA KV pages across the attention TP group; requires KTP_SIZE=1.",
+    )
     prefill_cp_size_bind_to = (
         (prefill_cp_config, "prefill_cp_size")
         if hasattr(prefill_cp_config, "prefill_cp_size")

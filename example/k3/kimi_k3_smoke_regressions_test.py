@@ -26,7 +26,11 @@ from example.k3.kimi_k3_full_model_pd_cases import (
     numbered_answer_pattern,
 )
 from example.k3.kimi_k3_full_model_pd_cases_test import make_args
-from example.k3.kimi_k3_smoke_runtime_evidence import collect, verify
+from example.k3.kimi_k3_smoke_runtime_evidence import (
+    GRAPH_BUCKETS,
+    collect,
+    verify,
+)
 
 
 def response_for(runner, content, *, owner=0, reuse=0, input_len=8193):
@@ -509,9 +513,71 @@ class RuntimeEvidenceTest(unittest.TestCase):
                 + "\n[K3_PROJECTION_KTP_GRAPH_REPLAY] test\n"
             )
             (root / "old-evidence.json").write_text("[K3_SMOKE_EVENT] invalid")
-            events, replay = collect(root)
+            events, replay, _ = collect(root)
             self.assertEqual(events, [event])
             self.assertTrue(replay)
+
+    def dcp_log(self, ranks=range(8), buckets=GRAPH_BUCKETS, tp=8):
+        lines = [f"[MLA_DCP] backend=a2a tp={tp} rank={rank}" for rank in ranks]
+        lines.append(f"[K3_PAGE_RR_TARGET] role=Decode TP={tp} B=128 V=64")
+        for bucket in buckets:
+            for rank in range(tp):
+                lines.append(
+                    f"[INFO] [RANK {rank}][10.0.0.1][cuda_graph_runner.cc:1095] "
+                    f"[CudaGraph Memory] captured batch size {bucket}: pool_delta=46 MiB"
+                )
+        return "\n".join(lines) + "\n"
+
+    def test_dcp_decode_evidence_needs_every_rank_and_bucket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "engine.log").write_text(self.dcp_log())
+            events, replay, markers = collect(root)
+            report = verify(events, "decode", replay, markers, True)
+            self.assertTrue(report["passed"], report)
+            self.assertEqual(report["observations"]["dcp_ranks"], list(range(8)))
+            # The DCP round must not be reportable through the KTP plan branch.
+            self.assertFalse(verify(events, "decode", replay, markers, False)["passed"])
+            for bad in (
+                self.dcp_log(ranks=range(7)),
+                self.dcp_log(buckets=(1, 2, 4)),
+                self.dcp_log(tp=4),
+            ):
+                (root / "engine.log").write_text(bad)
+                events, replay, markers = collect(root)
+                self.assertFalse(
+                    verify(events, "decode", replay, markers, True)["passed"]
+                )
+
+    def test_dcp_round_rejects_projection_ktp_markers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "engine.log").write_text(
+                self.dcp_log() + "[K3_PROJECTION_KTP_GRAPH_REPLAY] graph_key=0\n"
+            )
+            events, replay, markers = collect(root)
+            report = verify(events, "decode", replay, markers, True)
+            self.assertFalse(report["passed"])
+            self.assertFalse(report["checks"]["projection_ktp_inactive"])
+
+    def test_collect_reads_rank_from_main_log_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            log_dir = root / "runtime/logs/decode"
+            log_dir.mkdir(parents=True)
+            for rank in range(8):
+                (log_dir / f"main_{rank}.log").write_text(
+                    f"[MLA_DCP] backend=a2a tp=8 rank={rank}\n"
+                    f"[K3_PAGE_RR_TARGET] role=Decode TP=8 B=128 V=64\n"
+                    + "".join(
+                        f"captured batch size {bucket}: pool_delta=46 MiB\n"
+                        for bucket in GRAPH_BUCKETS
+                    )
+                )
+            events, replay, markers = collect(root)
+            self.assertTrue(
+                verify(events, "decode", replay, markers, True)["passed"]
+            )
 
 
 if __name__ == "__main__":
