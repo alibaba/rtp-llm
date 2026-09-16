@@ -2894,7 +2894,9 @@ bool KVCacheMemoryConnector::allocateOnePrefixBacking(CopyInfoPerKey& copy_info)
             return false;
         }
         for (const auto& evicted : evicted_items) {
-            reportEvictionLifetime(evicted.kind, evicted.backing_type, evicted.created_time_us);
+            if (evicted.backing_type == CacheBackingType::DISK) {
+                reportEvictionLifetime(evicted.kind, evicted.backing_type, evicted.created_time_us);
+            }
             reportDirectMemoryEviction(evicted.backing_type, 1);
             releasePrefixCacheBacking(evicted);
         }
@@ -2937,7 +2939,9 @@ bool KVCacheMemoryConnector::allocateOneBacking(CopyInfoPerKey& copy_info) {
             return false;
         }
         const auto target_backing = evicted->backing_type;
-        reportEvictionLifetime(kind, evicted->backing_type, evicted->created_time_us);
+        if (evicted->backing_type == CacheBackingType::DISK) {
+            reportEvictionLifetime(kind, evicted->backing_type, evicted->created_time_us);
+        }
         reportDirectMemoryEviction(evicted->backing_type, 1);
         releaseCacheBacking(*evicted);
         if (target_backing == CacheBackingType::MEMORY) {
@@ -3018,6 +3022,9 @@ void KVCacheMemoryConnector::releasePrefixRequestBacking(const CopyInfoPerKey& c
 
 void KVCacheMemoryConnector::releaseCacheBacking(const MemoryDiskBlockCache::CacheItem& item) {
     if (item.backing_type == CacheBackingType::MEMORY) {
+        // Committed entries carry a creation time; rejected insertions do not.
+        // Report at final cache release for eviction, readback, replacement and remote offload alike.
+        reportEvictionLifetime(blockKindFromComplete(item.is_complete), item.backing_type, item.created_time_us);
         auto pool = memoryPoolFor(blockKindFromComplete(item.is_complete));
         if (pool) {
             freeBlocksFromPool(pool, {item.block_index}, /*cache_free=*/true);
@@ -3032,6 +3039,8 @@ void KVCacheMemoryConnector::releaseCacheBacking(const MemoryDiskBlockCache::Cac
 
 void KVCacheMemoryConnector::releasePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item) {
     if (item.backing_type == CacheBackingType::MEMORY) {
+        // Detached/replaced entries with in-flight readers reach here only after their final reader releases them.
+        reportEvictionLifetime(item.kind, item.backing_type, item.created_time_us);
         auto pool = memoryPoolFor(item.kind);
         if (pool) {
             freeBlocksFromPool(pool, {item.block_index}, /*cache_free=*/true);
@@ -3600,7 +3609,6 @@ size_t KVCacheMemoryConnector::evictMemoryImmediately(size_t block_num) {
     }
     auto victims = block_cache_->popMemoryForImmediateEviction(block_num);
     for (const auto& item : victims) {
-        reportEvictionLifetime(blockKindFromComplete(item.is_complete), item.backing_type, item.created_time_us);
         releaseCacheBacking(item);
     }
     return victims.size();
