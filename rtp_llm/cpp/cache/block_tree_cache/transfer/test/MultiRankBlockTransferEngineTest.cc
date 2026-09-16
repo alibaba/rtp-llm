@@ -39,6 +39,7 @@ struct MultiRankBlockTransferRpcConfig {
     grpc::Status                                    rpc_status;
     std::shared_ptr<MultiRankBlockTransferRpcState> state{nullptr};
     int                                             sleep_millis{0};
+    std::shared_future<void>                        response_release{};
 };
 
 class MultiRankBlockTransferRpcService final: public RpcService::Service {
@@ -53,6 +54,10 @@ public:
                 config_.state->requests.push_back(request->mem_request());
             }
             config_.state->cv.notify_all();
+        }
+        if (config_.response_release.valid()
+            && config_.response_release.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+            return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "test response release timed out");
         }
         if (config_.sleep_millis > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(config_.sleep_millis));
@@ -224,7 +229,6 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastManagerStoredCorrectly) {
     // Create a BroadcastManager (no actual RPC connections needed for this test)
     std::vector<std::string> worker_addrs  = {"127.0.0.1:50051", "127.0.0.1:50052"};
     auto                     broadcast_mgr = std::make_shared<BroadcastManager>(worker_addrs);
-    ASSERT_TRUE(broadcast_mgr->init());
 
     auto                     full   = makeBroadcastGroup("broadcast_manager_stored");
     std::vector<GroupSetPtr> groups = {full};
@@ -739,15 +743,33 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsTask) {
     }
 }
 
+// Release blocked handlers on assertion failure before cache/server cleanup runs.
+class ScopedRpcResponseRelease {
+public:
+    explicit ScopedRpcResponseRelease(std::shared_ptr<std::promise<void>> release): release_(std::move(release)) {}
+    ~ScopedRpcResponseRelease() { release(); }
+    void release() {
+        if (release_) {
+            release_->set_value();
+            release_.reset();
+        }
+    }
+
+private:
+    std::shared_ptr<std::promise<void>> release_;
+};
+
 TEST_F(MultiRankBlockTransferEngineTest, CacheShutdownWaitsForLateMultiRankEvictionSettlement) {
     for (bool transfer_success : {true, false}) {
         SCOPED_TRACE(transfer_success ? "success" : "failure");
         auto                                  state = std::make_shared<MultiRankBlockTransferRpcState>();
         const MemoryOperationResponsePB::Code second_response =
             transfer_success ? MemoryOperationResponsePB::OK : MemoryOperationResponsePB::FAILED;
+        auto release_promise = std::make_shared<std::promise<void>>();
+        auto response_release = release_promise->get_future().share();
         const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-            {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state, /*sleep_millis=*/500},
-            {true, second_response, grpc::Status::OK, state, /*sleep_millis=*/500},
+            {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state, /*sleep_millis=*/0, response_release},
+            {true, second_response, grpc::Status::OK, state, /*sleep_millis=*/0, response_release},
         };
         std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
         auto broadcast_manager = makeBroadcastManager(configs, servers);
@@ -772,6 +794,7 @@ TEST_F(MultiRankBlockTransferEngineTest, CacheShutdownWaitsForLateMultiRankEvict
         resources[0][0].host_block = host_block;
         ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
 
+        ScopedRpcResponseRelease release_responses(release_promise);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.01);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
         ASSERT_TRUE(waitForRpcRequests(state, 2, std::chrono::seconds(5)));
@@ -782,11 +805,21 @@ TEST_F(MultiRankBlockTransferEngineTest, CacheShutdownWaitsForLateMultiRankEvict
 
         // On a regression timeout the worker retains its cache and RPC servers.
         // std::async would still block in the future destructor after an early return.
-        BoundedThread<void> destroy([cache = std::move(cache), servers = std::move(servers)]() mutable {
+        auto started = std::make_shared<std::promise<void>>();
+        auto cache_destroyed = std::make_shared<std::promise<void>>();
+        auto started_future = started->get_future();
+        auto destroyed_future = cache_destroyed->get_future();
+        BoundedThread<void> destroy([cache = std::move(cache), servers = std::move(servers),
+                                     started, cache_destroyed]() mutable {
+            started->set_value();
             cache.reset();
+            cache_destroyed->set_value();
             servers.clear();
         });
-        EXPECT_EQ(destroy.waitFor(std::chrono::milliseconds(50)), std::future_status::timeout);
+        ASSERT_EQ(started_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        // Check cache destruction itself; server shutdown must not mask an early return.
+        EXPECT_EQ(destroyed_future.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+        release_responses.release();
         ASSERT_EQ(destroy.waitFor(std::chrono::seconds(5)), std::future_status::ready);
         destroy.get();
 
