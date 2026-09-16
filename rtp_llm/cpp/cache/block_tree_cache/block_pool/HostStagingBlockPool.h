@@ -6,7 +6,6 @@
 #include <functional>
 #include <mutex>
 #include <optional>
-#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -47,9 +46,6 @@ public:
         }
 
         HostBufferView blockBuffer(size_t payload_bytes) const {
-            if (pool_ == nullptr) {
-                throw std::logic_error("host staging lease has been moved from");
-            }
             return pool_->blockBuffer(block_id_, payload_bytes);
         }
 
@@ -67,11 +63,7 @@ public:
     std::optional<HostStagingBlockBatch> tryMallocBatch(size_t count);
 
     // Fair, all-or-nothing allocation; existing async waiters are never bypassed.
-    // Invokes callback outside mutex_. A null result means expiration, cancellation,
-    // an invalid request, or allocation failure while admitting a queued waiter.
-    // Immediate allocation/enqueue can throw without consuming any blocks.
-    // Deadline limits admission; queued expiration is observed on free/cancel,
-    // not by a timer. Live waiters retain FIFO order regardless of deadline.
+    // Invokes callback outside mutex_. A null result means expiration, cancellation, or an invalid request.
     void requestBatch(size_t count, Clock::time_point deadline, BatchReadyCallback callback);
 
     // Shutdown boundary: every queued waiter is notified even if another
@@ -80,7 +72,6 @@ public:
 
 private:
     friend class HostStagingBlockLease;
-    friend struct HostStagingBlockPoolTestPeer;
 
     struct BatchWaiter {
         size_t             count{0};
@@ -93,8 +84,9 @@ private:
         std::optional<HostStagingBlockBatch> leases;
     };
 
-    HostStagingBlockBatch allocateBatchLocked(size_t count);
-    static void           dispatchReadyBatch(ReadyBatch ready);
+    HostStagingBlockBatch   allocateBatchLocked(size_t count);
+    std::vector<ReadyBatch> collectReadyBatchesLocked();
+    static void             dispatchReadyBatches(std::vector<ReadyBatch> ready_batches);
 
     void free(size_t block_id);
 
@@ -106,8 +98,6 @@ private:
     std::vector<size_t>     free_id_list_;
     std::deque<BatchWaiter> batch_waiters_;
     std::mutex              mutex_;
-    // Narrow fault-injection seam; null in production.
-    void (*before_batch_allocation_for_test_)() = nullptr;
 };
 
 }  // namespace rtp_llm

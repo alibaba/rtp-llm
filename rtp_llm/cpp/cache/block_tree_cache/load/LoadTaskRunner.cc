@@ -2,7 +2,6 @@
 
 #include <exception>
 #include <string>
-#include <stdexcept>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
@@ -22,9 +21,6 @@ LoadTaskRunner::TaskPtr LoadTaskRunner::createTask(const std::shared_ptr<LoadAsy
         const TransferDescriptor& desc = load_descs[desc_index];
         if (context->joinedLoads()[desc_index] || desc.source_tier == Tier::DEVICE) {
             continue;
-        }
-        if (desc.source_tier != Tier::HOST && desc.source_tier != Tier::DISK) {
-            throw std::invalid_argument("load task source tier must be HOST or DISK");
         }
         task_load_descs.push_back(desc);
         if (desc.source_tier == Tier::HOST) {

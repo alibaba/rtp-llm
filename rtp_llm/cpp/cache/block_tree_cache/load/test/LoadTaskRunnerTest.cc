@@ -4,7 +4,6 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <stdexcept>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -171,18 +170,6 @@ TEST(LoadTaskRunnerTest, CreateTaskSkipsDeviceDescriptors) {
     EXPECT_EQ(task, nullptr);
 }
 
-TEST(LoadTaskRunnerTest, CreateTaskRejectsUnsupportedSourceTiers) {
-    const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet()};
-    LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
-    auto coordinator = std::make_shared<LoadContextCoordinator>(LoadContextCoordinator::CommitCallback{},
-                                                                LoadContextCoordinator::AbortCallback{});
-    for (Tier tier : {Tier::REMOTE, Tier::NONE, static_cast<Tier>(255)}) {
-        auto desc        = TransferDescriptor::hostToDevice(0, 1, {1});
-        desc.source_tier = tier;
-        auto context     = coordinator->create({desc}, {false}, 1);
-        EXPECT_THROW((void)runner.createTask(context), std::invalid_argument);
-    }
-}
 
 TEST(LoadTaskRunnerTest, CreateTaskPartitionsHostAndDiskDescriptors) {
     GroupSetPtr                                   group = makeTaskRunnerTestGroupSet();

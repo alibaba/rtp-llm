@@ -1,7 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 
-#include <algorithm>
-#include <limits>
 #include <condition_variable>
 #include <exception>
 #include <mutex>
@@ -154,9 +152,6 @@ std::shared_ptr<AsyncContext> MultiRankBlockTransferEngine::execute(TransferTask
         return std::make_shared<CompletedAsyncContext>(
             ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before multi-rank submission"));
     };
-    if (task.expired()) {
-        return deadline_exceeded();
-    }
     MemoryOperationRequestPB request;
     if (!BlockTransferRequestConverter::encodeTransfer(request, task, group_sets_)) {
         if (task.expired()) {
@@ -166,10 +161,6 @@ std::shared_ptr<AsyncContext> MultiRankBlockTransferEngine::execute(TransferTask
         return std::make_shared<CompletedAsyncContext>(
             ErrorInfo(ErrorCode::INVALID_PARAMS, "failed to encode transfer batch"));
     }
-    if (!broadcast_manager_) {
-        return std::make_shared<CompletedAsyncContext>(
-            ErrorInfo(ErrorCode::INVALID_PARAMS, "multi-rank transfer requires a broadcast manager"));
-    }
     const size_t      worker_count = broadcast_manager_->workerNum();
     FunctionRequestPB function_request;
     function_request.mutable_mem_request()->CopyFrom(request);
@@ -178,8 +169,7 @@ std::shared_ptr<AsyncContext> MultiRankBlockTransferEngine::execute(TransferTask
     if (!remaining) {
         return deadline_exceeded();
     }
-    const int broadcast_timeout_ms =
-        static_cast<int>(std::min<int64_t>(remaining->count(), std::numeric_limits<int>::max()));
+    const int broadcast_timeout_ms = static_cast<int>(remaining->count());
     for (auto& rank_request : requests) {
         rank_request.mutable_mem_request()->set_timeout_ms(broadcast_timeout_ms);
     }

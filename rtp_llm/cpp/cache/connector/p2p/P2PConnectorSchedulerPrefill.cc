@@ -58,15 +58,9 @@ P2PConnectorSchedulerPrefill::sendKVCache(const KVCacheResourcePtr&             
         return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, error_msg);
     }
 
-    bool                                        deadline_exceeded = false;
-    std::shared_ptr<P2PBroadcastClient::Result> cancel_result;
-    try {
-        cancel_result = waitForBroadcastCompletion(
-            result, unique_key, request_id, deadline_ms, std::move(is_cancelled), &deadline_exceeded);
-    } catch (...) {
-        report_metric_func(false);
-        throw;  // Preserve the legacy broadcast timeout exception contract.
-    }
+    bool deadline_exceeded = false;
+    auto cancel_result     = waitForBroadcastCompletion(
+        result, unique_key, request_id, deadline_ms, std::move(is_cancelled), &deadline_exceeded);
     report_metric_func(!cancel_result && !deadline_exceeded && result->success());
 
     if (deadline_exceeded) {

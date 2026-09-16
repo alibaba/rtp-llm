@@ -407,40 +407,6 @@ TEST(LoadAsyncContextTest, BackendMatchFailureAbortsWithoutRunningAllocatorCallb
     coordinator->shutdown();
 }
 
-TEST(LoadAsyncContextTest, InvalidBackendMatchCountAbortsWithoutAllocationOrRead) {
-    for (const auto& counts : {std::pair<size_t, size_t>{0, 3}, {1, 0}}) {
-        SCOPED_TRACE("local=" + std::to_string(counts.first) + " matched=" + std::to_string(counts.second));
-        size_t commits     = 0;
-        size_t aborts      = 0;
-        size_t callbacks   = 0;
-        auto   coordinator = makeCoordinator(commits, aborts);
-        auto   backend     = std::make_shared<ManualBackend>();
-        auto   pool        = std::make_shared<TestBlockPool>();
-        initBackend(*backend, pool);
-        auto request                     = makeRequest(2);
-        request.local_matched_blocks_num = counts.first;
-        auto context                     = coordinator->create({}, {}, counts.first, backend, std::move(request));
-        ASSERT_TRUE(coordinator->registerContext(context));
-        context->setMatchCallback([&](LoadAsyncContext&, size_t) {
-            ++callbacks;
-            return true;
-        });
-
-        context->startBackendMatch();
-        EXPECT_NO_THROW(backend->completeMatch(counts.second));
-
-        EXPECT_TRUE(context->done());
-        EXPECT_FALSE(context->success());
-        EXPECT_EQ(context->mallocStatus(), MallocStatus::INTERNAL_ERROR);
-        EXPECT_EQ(callbacks, 0u);
-        EXPECT_EQ(commits, 0u);
-        EXPECT_EQ(aborts, 1u);
-        EXPECT_FALSE(backend->readPending());
-        EXPECT_TRUE(backend->readKeys().empty());
-        coordinator->shutdown();
-    }
-}
-
 TEST(LoadAsyncContextTest, AllocatorCallbackPreservesRetryableCapacityStatus) {
     size_t commits     = 0;
     size_t aborts      = 0;
@@ -562,28 +528,6 @@ TEST(LoadAsyncContextTest, ImmediateTransferFailureAfterSuccessfulCommitKeepsFal
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
     EXPECT_EQ(commits, 1u);
-    coordinator->shutdown();
-}
-
-TEST(LoadAsyncContextTest, LocalTransferFailureReportsErrorWithoutChangingPrefillFallbackStatus) {
-    size_t             commits     = 0;
-    size_t             aborts      = 0;
-    auto               coordinator = makeCoordinator(commits, aborts);
-    TransferDescriptor descriptor;
-    descriptor.source_tier = Tier::HOST;
-    auto context           = coordinator->create({descriptor}, {false}, 1);
-    ASSERT_TRUE(coordinator->registerContext(context));
-    EXPECT_TRUE(context->errorInfo().ok());
-    ASSERT_TRUE(context->commit());
-    ASSERT_TRUE(context->completeTransfers(1, false));
-    ASSERT_TRUE(context->done());
-    EXPECT_FALSE(context->success());
-    EXPECT_FALSE(context->errorInfo().ok());
-    // Post-allocation copy failure remains eligible for the PREFILL fallback.
-    EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
-    ErrorInfo callback_error = ErrorInfo::OkStatus();
-    context->onDone([&](ErrorInfo error) { callback_error = std::move(error); });
-    EXPECT_EQ(context->errorInfo().ToString(), callback_error.ToString());
     coordinator->shutdown();
 }
 

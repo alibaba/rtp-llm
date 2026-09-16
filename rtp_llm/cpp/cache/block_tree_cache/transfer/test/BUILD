@@ -125,11 +125,10 @@ cc_test(
 
 cc_test(
     name = "transfer_batch_async_context_test",
-    testonly = True,
     exec_properties = {"gpu": "A10"},
     srcs = ["TransferBatchAsyncContextTest.cc"],
     copts = test_copts,
-    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils"],
+    deps = test_deps,
 )
 
 cc_test(

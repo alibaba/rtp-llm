@@ -55,7 +55,6 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
 
     auto init_result = initMallocForCommonLen(malloc_info);
     if (malloc_info.batch_kv_cache_resource != nullptr) {
-        // Request keys retain the original block size; CP canonicalization only changes the matching copy.
         const CacheKeysType& cache_keys        = malloc_info.batch_kv_cache_resource->cacheKeys(0);
         init_result.block_aligned_input_length = static_cast<int64_t>(cache_keys.size()) * config_.seq_size_per_block;
     }

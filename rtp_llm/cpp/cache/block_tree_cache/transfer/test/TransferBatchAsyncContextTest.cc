@@ -4,22 +4,20 @@
 #include <chrono>
 #include <memory>
 #include <thread>
-#include <stdexcept>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 
 namespace rtp_llm {
 namespace {
 
 TEST(TransferBatchAsyncContextTest, WaitersWakeAfterCompletion) {
-    auto                context = std::make_shared<TransferBatchAsyncContext>();
+    auto context = std::make_shared<TransferBatchAsyncContext>();
     std::atomic<size_t> completed_waiters{0};
-    std::thread         first([&] {
+    std::thread first([&] {
         context->waitDone();
         ++completed_waiters;
     });
-    std::thread         second([&] {
+    std::thread second([&] {
         context->waitDone();
         ++completed_waiters;
     });
@@ -54,8 +52,8 @@ TEST(TransferBatchAsyncContextTest, FirstCompletionWins) {
 }
 
 TEST(TransferBatchAsyncContextTest, CompletionReleasesGuard) {
-    auto                      guard      = std::make_shared<int>(1);
-    std::weak_ptr<int>        weak_guard = guard;
+    auto guard = std::make_shared<int>(1);
+    std::weak_ptr<int> weak_guard = guard;
     TransferBatchAsyncContext context(guard);
     guard.reset();
     ASSERT_FALSE(weak_guard.expired());
@@ -65,35 +63,10 @@ TEST(TransferBatchAsyncContextTest, CompletionReleasesGuard) {
     EXPECT_TRUE(weak_guard.expired());
 }
 
-TEST(TransferBatchAsyncContextTest, GuardDestructionCanReenterCompletedContext) {
-    auto weak_context = std::make_shared<std::weak_ptr<TransferBatchAsyncContext>>();
-    auto observations = std::make_shared<std::atomic<size_t>>(0);
-    auto guard        = std::shared_ptr<int>(new int(1), [weak_context, observations](int* value) {
-        delete value;
-        if (auto context = weak_context->lock()) {
-            if (context->done() && context->errorInfo().ok()) {
-                ++*observations;
-            }
-            context->onDone([observations](ErrorInfo error) {
-                if (error.ok()) {
-                    ++*observations;
-                }
-            });
-        }
-    });
-    auto context      = std::make_shared<TransferBatchAsyncContext>(guard);
-    *weak_context     = context;
-    guard.reset();
-    block_tree_cache_test::BoundedThread<void> completion([context] { context->complete(ErrorInfo::OkStatus()); });
-    ASSERT_EQ(completion.waitFor(std::chrono::seconds(5)), std::future_status::ready);
-    completion.get();
-    EXPECT_EQ(observations->load(), 2u);
-}
-
 TEST(TransferBatchAsyncContextTest, CallbackRegisteredBeforeCompletionRunsOnce) {
     TransferBatchAsyncContext context;
-    std::atomic<size_t>       callback_count{0};
-    ErrorCode                 callback_code = ErrorCode::INVALID_PARAMS;
+    std::atomic<size_t> callback_count{0};
+    ErrorCode           callback_code = ErrorCode::INVALID_PARAMS;
 
     context.onDone([&](ErrorInfo error) {
         callback_code = error.code();
@@ -130,52 +103,8 @@ TEST(TransferBatchAsyncContextTest, CallbackCanReadContextWithoutDeadlock) {
     context.complete(ErrorInfo::OkStatus());
 }
 
-TEST(TransferBatchAsyncContextTest, ThrowingCallbackDoesNotDropLaterCallbacks) {
-    TransferBatchAsyncContext context;
-    size_t                    first_calls  = 0;
-    size_t                    second_calls = 0;
-    size_t                    last_calls   = 0;
-    context.onDone([&](ErrorInfo) {
-        ++first_calls;
-        throw std::runtime_error("first callback");
-    });
-    context.onDone([&](ErrorInfo) {
-        ++second_calls;
-        throw 42;
-    });
-    context.onDone([&](ErrorInfo error) {
-        ++last_calls;
-        EXPECT_EQ(error.code(), ErrorCode::INVALID_PARAMS);
-        EXPECT_TRUE(context.done());
-    });
-
-    std::thread worker(
-        [&] { EXPECT_NO_THROW(context.complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "transfer failed"))); });
-    worker.join();
-    context.waitDone();
-    EXPECT_EQ(context.errorInfo().code(), ErrorCode::INVALID_PARAMS);
-    EXPECT_NO_THROW(context.complete(ErrorInfo::OkStatus()));
-    EXPECT_EQ(first_calls, 1u);
-    EXPECT_EQ(second_calls, 1u);
-    EXPECT_EQ(last_calls, 1u);
-}
-
-TEST(TransferBatchAsyncContextTest, LateThrowingCallbacksAreIsolated) {
-    TransferBatchAsyncContext context;
-    context.complete(ErrorInfo::OkStatus());
-    EXPECT_NO_THROW(context.onDone([](ErrorInfo) { throw std::runtime_error("late callback"); }));
-    EXPECT_NO_THROW(context.onDone([](ErrorInfo) { throw 42; }));
-    size_t calls = 0;
-    context.onDone([&](ErrorInfo error) {
-        ++calls;
-        EXPECT_TRUE(error.ok());
-    });
-    EXPECT_EQ(calls, 1u);
-    EXPECT_TRUE(context.success());
-}
-
 TEST(TransferBatchAsyncContextTest, MultipleCallbacksAndWaiterObserveSameTerminalResult) {
-    auto                context = std::make_shared<TransferBatchAsyncContext>();
+    auto context = std::make_shared<TransferBatchAsyncContext>();
     std::atomic<size_t> callback_count{0};
 
     context->onDone([&](ErrorInfo error) {

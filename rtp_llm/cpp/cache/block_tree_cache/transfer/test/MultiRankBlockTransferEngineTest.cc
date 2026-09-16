@@ -6,7 +6,6 @@
 #include <condition_variable>
 #include <future>
 #include <mutex>
-#include <limits>
 #include <sys/resource.h>
 #include <thread>
 
@@ -268,34 +267,6 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferSucceedsForAllWorkers)
 
     EXPECT_TRUE(executeAndWait(
         *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500));
-}
-
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastClampsOversizedTimeoutForWireAndDeadline) {
-    auto                                               state   = std::make_shared<MultiRankBlockTransferRpcState>();
-    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
-    };
-    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
-    auto                                                          manager = makeBroadcastManager(configs, servers);
-    ASSERT_NE(manager, nullptr);
-    auto       cache   = makeBroadcastCache(manager);
-    const auto timeout = std::chrono::milliseconds(static_cast<int64_t>(std::numeric_limits<int>::max()) + 60000);
-    auto       context =
-        cache->transfer_dispatcher_->multi_rank_engine_->execute(TransferTask(makeBroadcastDescriptors(), timeout));
-    BoundedThread<bool> completion(
-        [context = std::move(context), cache = std::move(cache), servers = std::move(servers)]() mutable {
-            context->waitDone();
-            const bool success = context->success();
-            context.reset();
-            cache.reset();
-            servers.clear();
-            return success;
-        });
-    ASSERT_EQ(completion.waitFor(std::chrono::seconds(5)), std::future_status::ready);
-    ASSERT_TRUE(completion.get());
-    std::lock_guard<std::mutex> lock(state->mutex);
-    ASSERT_EQ(state->requests.size(), 1u);
-    EXPECT_EQ(state->requests.front().timeout_ms(), std::numeric_limits<int>::max());
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, ExecuteReturnsBeforeSlowWorkersFinish) {

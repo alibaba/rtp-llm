@@ -16,10 +16,6 @@ class MultiRankBlockTransferEngine;
 class PerRankBlockTransferEngine;
 struct BlockTreeQueueSizes;
 
-namespace block_tree_cache_test {
-class BlockTreeCacheTestPeer;
-}
-
 class BlockTransferDispatcher {
 public:
     using TransferDoneCallback = std::function<void(ErrorInfo)>;
@@ -42,8 +38,6 @@ public:
     void drainTransfers() const;
 
 private:
-    friend class block_tree_cache_test::BlockTreeCacheTestPeer;
-
     std::shared_ptr<AsyncContext> executeMultiRank(TransferTask task) const;
 
     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;

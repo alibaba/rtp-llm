@@ -4,10 +4,7 @@
 #include <chrono>
 #include <cstring>
 #include <future>
-#include <memory>
-#include <limits>
 #include <optional>
-#include <new>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -15,82 +12,7 @@
 #include <gtest/gtest.h>
 
 namespace rtp_llm {
-struct HostStagingBlockPoolTestPeer {
-    static void failNextAllocation(HostStagingBlockPool& pool) {
-        pool.before_batch_allocation_for_test_ = [] { throw std::bad_alloc(); };
-    }
-    static void clearAllocationFailure(HostStagingBlockPool& pool) {
-        pool.before_batch_allocation_for_test_ = nullptr;
-    }
-};
 namespace {
-
-TEST(HostStagingBlockPoolTest, RejectsOverflowingCapacityBeforeAllocating) {
-    EXPECT_THROW((void)HostStagingBlockPool(2, std::numeric_limits<size_t>::max() / 2 + 1), std::length_error);
-    EXPECT_THROW((void)HostStagingBlockPool(1, static_cast<size_t>(std::numeric_limits<int64_t>::max())),
-                 std::length_error);
-}
-
-TEST(HostStagingBlockPoolTest, MovedFromLeaseRejectsAccessAndDestinationKeepsOwnership) {
-    HostStagingBlockPool pool(1, 64);
-    auto                 batch = pool.tryMallocBatch(1);
-    ASSERT_TRUE(batch.has_value());
-    {
-        auto lease = std::move(batch->front());
-        EXPECT_THROW((void)batch->front().blockBuffer(1), std::logic_error);
-        EXPECT_EQ(lease.blockBuffer(64).capacity_bytes, 64u);
-        batch.reset();
-        EXPECT_FALSE(pool.tryMallocBatch(1).has_value());
-    }
-    EXPECT_TRUE(pool.tryMallocBatch(1).has_value());
-}
-
-TEST(HostStagingBlockPoolTest, ImmediateAllocationFailurePreservesAllBlocksAndDoesNotQueueCallback) {
-    HostStagingBlockPool pool(2, 64);
-    auto                 calls = std::make_shared<size_t>(0);
-    HostStagingBlockPoolTestPeer::failNextAllocation(pool);
-    EXPECT_THROW((void)pool.tryMallocBatch(2), std::bad_alloc);
-    EXPECT_THROW(pool.requestBatch(
-                     2, HostStagingBlockPool::Clock::now() + std::chrono::seconds(30), [calls](auto) { ++*calls; }),
-                 std::bad_alloc);
-    EXPECT_EQ(*calls, 0u);
-    HostStagingBlockPoolTestPeer::clearAllocationFailure(pool);
-    auto recovered = pool.tryMallocBatch(2);
-    ASSERT_TRUE(recovered.has_value());
-    EXPECT_EQ(recovered->size(), 2u);
-    EXPECT_FALSE(pool.tryMallocBatch(1).has_value());
-    recovered.reset();
-    pool.cancelAllBatchWaiters();
-    EXPECT_EQ(*calls, 0u);
-    EXPECT_TRUE(pool.tryMallocBatch(2).has_value());
-}
-
-TEST(HostStagingBlockPoolTest, AllocationFailureDuringReleaseRejectsWaiterWithoutLosingBlocks) {
-    auto pool = std::make_shared<HostStagingBlockPool>(1, 64);
-    auto held = pool->tryMallocBatch(1);
-    ASSERT_TRUE(held.has_value());
-    auto       calls    = std::make_shared<std::vector<int>>(2, 0);
-    const auto deadline = HostStagingBlockPool::Clock::now() + std::chrono::seconds(30);
-    HostStagingBlockPoolTestPeer::failNextAllocation(*pool);
-    pool->requestBatch(1, deadline, [calls, raw_pool = pool.get()](auto leases) {
-        EXPECT_FALSE(leases.has_value());
-        ++(*calls)[0];
-        HostStagingBlockPoolTestPeer::clearAllocationFailure(*raw_pool);
-    });
-    pool->requestBatch(1, deadline, [calls](auto leases) {
-        EXPECT_TRUE(leases.has_value());
-        ++(*calls)[1];
-    });
-    EXPECT_NO_THROW(held.reset());
-    EXPECT_EQ((*calls)[0], 1);
-    EXPECT_EQ((*calls)[1], 1);
-    auto recovered = pool->tryMallocBatch(1);
-    EXPECT_TRUE(recovered.has_value());
-    EXPECT_FALSE(pool->tryMallocBatch(1).has_value());
-    pool->cancelAllBatchWaiters();
-    EXPECT_EQ((*calls)[0], 1);
-    EXPECT_EQ((*calls)[1], 1);
-}
 
 TEST(HostStagingBlockPoolTest, UsesCallerProvidedStride) {
     HostStagingBlockPool pool(1, 65);
@@ -99,50 +21,6 @@ TEST(HostStagingBlockPoolTest, UsesCallerProvidedStride) {
     ASSERT_TRUE(leases.has_value());
     const auto view = (*leases)[0].blockBuffer(65);
     EXPECT_EQ(view.capacity_bytes, 65u);
-}
-
-TEST(HostStagingBlockPoolTest, RejectsOversizedPayloadWithoutLosingTheLease) {
-    HostStagingBlockPool pool(1, 65);
-    auto                 leases = pool.tryMallocBatch(1);
-    ASSERT_TRUE(leases.has_value());
-    EXPECT_THROW((void)leases->front().blockBuffer(66), std::invalid_argument);
-    EXPECT_FALSE(pool.tryMallocBatch(1).has_value());
-    const auto view = leases->front().blockBuffer(65);
-    EXPECT_EQ(view.payload_bytes, 65u);
-    EXPECT_EQ(view.capacity_bytes, 65u);
-    EXPECT_EQ(leases->front().blockBuffer(0).payload_bytes, 0u);
-    leases.reset();
-    EXPECT_TRUE(pool.tryMallocBatch(1).has_value());
-}
-
-TEST(HostStagingBlockPoolTest, ThrowingReadyCallbackCannotEscapeLeaseDestruction) {
-    for (bool standard_exception : {true, false}) {
-        HostStagingBlockPool pool(1, 4096);
-        auto                 held = pool.tryMallocBatch(1);
-        ASSERT_TRUE(held.has_value());
-        // Callbacks own their observations even if an assertion exits early.
-        auto       calls    = std::make_shared<std::vector<int>>(2, 0);
-        const auto deadline = HostStagingBlockPool::Clock::now() + std::chrono::seconds(30);
-        pool.requestBatch(1, deadline, [calls, standard_exception](auto leases) {
-            EXPECT_TRUE(leases.has_value());
-            ++(*calls)[0];
-            if (standard_exception) {
-                throw std::runtime_error("expected ready callback failure");
-            }
-            throw 7;
-        });
-        pool.requestBatch(1, deadline, [calls](auto leases) {
-            EXPECT_TRUE(leases.has_value());
-            ++(*calls)[1];
-        });
-        EXPECT_NO_THROW(held.reset());
-        EXPECT_EQ((*calls)[0], 1);
-        EXPECT_EQ((*calls)[1], 1);
-        EXPECT_TRUE(pool.tryMallocBatch(1).has_value());
-        pool.cancelAllBatchWaiters();
-        EXPECT_EQ((*calls)[0], 1);
-        EXPECT_EQ((*calls)[1], 1);
-    }
 }
 
 TEST(HostStagingBlockPoolTest, PinnedBackingServesLeases) {

@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include <memory>
 
 #include <algorithm>
 #include <array>
@@ -11,7 +10,6 @@
 #include <thread>
 
 #include "kmonitor/client/MetricsReporter.h"
-#include "kmonitor/client/MetricType.h"
 #include "kmonitor/client/core/MetricsData.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
@@ -39,50 +37,14 @@ double snapshotQps(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags&
         ADD_FAILURE() << "metric series is missing for tags=" << tags.ToString();
         return -1;
     }
-    const auto release = [metric](kmonitor::Metric* series) { EXPECT_TRUE(metric->UndeclareMetric(series)); };
-    std::unique_ptr<kmonitor::Metric, decltype(release)> series(qps_metric, release);
-    kmonitor::MetricsRecord                              record(nullptr, nullptr, 0);
-    series->Snapshot(&record, 1000);
-    series.reset();
+    kmonitor::MetricsRecord record(nullptr, nullptr, 0);
+    qps_metric->Snapshot(&record, 1000);
+    EXPECT_TRUE(metric->UndeclareMetric(qps_metric));
     if (record.Values().size() != 1) {
         ADD_FAILURE() << "unexpected metric value count=" << record.Values().size();
         return -1;
     }
-    if (record.Values().front() == nullptr) {
-        ADD_FAILURE() << "metric value is null";
-        return -1;
-    }
-    const auto& text = record.Values().front()->Value();
-    try {
-        // GAUGE snapshots encode avg_sum_max_min_count; these assertions
-        // inspect the average. QPS/counter snapshots are single scalars.
-        const size_t fields = metric->GetMetricType() == kmonitor::GAUGE ? 5 : 1;
-        size_t       begin  = 0;
-        double       value  = 0;
-        for (size_t field = 0; field < fields; ++field) {
-            const size_t end  = text.find('_', begin);
-            const bool   last = field + 1 == fields;
-            if ((end == std::string::npos) != last) {
-                throw std::invalid_argument("unexpected metric snapshot field count");
-            }
-            const auto   part   = text.substr(begin, end == std::string::npos ? end : end - begin);
-            size_t       parsed = 0;
-            const double number = std::stod(part, &parsed);
-            if (parsed != part.size()) {
-                throw std::invalid_argument("metric snapshot field has trailing characters");
-            }
-            if (field == 0) {
-                value = number;
-            }
-            if (!last) {
-                begin = end + 1;
-            }
-        }
-        return value;
-    } catch (const std::exception& error) {
-        ADD_FAILURE() << "invalid metric value: " << error.what();
-    }
-    return -1;
+    return std::stod(record.Values().front()->Value());
 }
 
 size_t metricSeriesCount(kmonitor::MutableMetric* metric) {

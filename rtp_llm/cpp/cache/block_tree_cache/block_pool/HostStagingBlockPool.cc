@@ -1,33 +1,17 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostStagingBlockPool.h"
 
 #include <exception>
-#include <algorithm>
-#include <limits>
 #include <mutex>
-#include <new>
 #include <optional>
-#include <stdexcept>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
-namespace {
-size_t checkedStagingBytes(size_t count, size_t stride) {
-    // AlignedHostMemory adds alignment bytes and passes the result to an int64 tensor dimension.
-    const size_t max_bytes =
-        std::min(std::numeric_limits<size_t>::max() - HostStagingBlockPool::kAlignment,
-                 static_cast<size_t>(std::numeric_limits<int64_t>::max()) - HostStagingBlockPool::kAlignment);
-    if (stride != 0 && count > max_bytes / stride) {
-        throw std::length_error("host staging capacity exceeds supported allocation size");
-    }
-    return count * stride;
-}
-}  // namespace
 
 HostStagingBlockPool::HostStagingBlockPool(size_t block_count, size_t stride_bytes):
     block_count_(block_count),
     stride_bytes_(stride_bytes),
-    backing_(checkedStagingBytes(block_count_, stride_bytes_), kAlignment, "host staging block pool") {
+    backing_(block_count_ * stride_bytes_, kAlignment, "host staging block pool") {
     const size_t total_bytes = block_count_ * stride_bytes_;
     free_id_list_.reserve(block_count_);
     for (size_t block_id = 0; block_id < block_count_; ++block_id) {
@@ -85,44 +69,17 @@ void HostStagingBlockPool::cancelAllBatchWaiters() noexcept {
 }
 
 void HostStagingBlockPool::free(size_t block_id) {
+    std::vector<ReadyBatch> ready_batches;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        // Valid leases return into the capacity reserved by the constructor.
         free_id_list_.push_back(block_id);
+        ready_batches = collectReadyBatchesLocked();
     }
-    while (true) {
-        ReadyBatch ready;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (batch_waiters_.empty()) {
-                return;
-            }
-            auto& waiter = batch_waiters_.front();
-            if (Clock::now() < waiter.deadline) {
-                if (free_id_list_.size() < waiter.count) {
-                    return;
-                }
-                try {
-                    // Reserve before consuming IDs or moving the waiter. After
-                    // reserve, noexcept lease moves cannot allocate or throw.
-                    ready.leases.emplace(allocateBatchLocked(waiter.count));
-                } catch (const std::bad_alloc&) {
-                    // Fail this admission with the existing null result contract.
-                    // No blocks were consumed, and later waiters still get notified.
-                }
-            }
-            ready.callback = std::move(waiter.callback);
-            batch_waiters_.pop_front();
-        }
-        dispatchReadyBatch(std::move(ready));
-    }
+    dispatchReadyBatches(std::move(ready_batches));
 }
 
 HostStagingBlockPool::HostStagingBlockBatch HostStagingBlockPool::allocateBatchLocked(size_t count) {
     HostStagingBlockBatch leases;
-    if (before_batch_allocation_for_test_ != nullptr) {
-        before_batch_allocation_for_test_();
-    }
     leases.reserve(count);
     for (size_t index = 0; index < count; ++index) {
         const size_t block_id = free_id_list_.back();
@@ -132,24 +89,33 @@ HostStagingBlockPool::HostStagingBlockBatch HostStagingBlockPool::allocateBatchL
     return leases;
 }
 
-void HostStagingBlockPool::dispatchReadyBatch(ReadyBatch ready) {
-    // Dispatch runs outside mutex_, including lease destruction after callbacks.
-    try {
+std::vector<HostStagingBlockPool::ReadyBatch> HostStagingBlockPool::collectReadyBatchesLocked() {
+    std::vector<ReadyBatch> ready_batches;
+    const auto              now = Clock::now();
+    while (!batch_waiters_.empty()) {
+        if (now >= batch_waiters_.front().deadline) {
+            BatchWaiter waiter = std::move(batch_waiters_.front());
+            batch_waiters_.pop_front();
+            ready_batches.push_back(ReadyBatch{std::move(waiter.callback), std::nullopt});
+            continue;
+        }
+        if (free_id_list_.size() < batch_waiters_.front().count) {
+            break;
+        }
+        BatchWaiter waiter = std::move(batch_waiters_.front());
+        batch_waiters_.pop_front();
+        ready_batches.push_back(ReadyBatch{std::move(waiter.callback), allocateBatchLocked(waiter.count)});
+    }
+    return ready_batches;
+}
+
+void HostStagingBlockPool::dispatchReadyBatches(std::vector<ReadyBatch> ready_batches) {
+    for (auto& ready : ready_batches) {
         ready.callback(std::move(ready.leases));
-    } catch (const std::exception& error) {
-        RTP_LLM_LOG_ERROR("staging ready callback failed: %s", error.what());
-    } catch (...) {
-        RTP_LLM_LOG_ERROR("staging ready callback failed with unknown exception");
     }
 }
 
 HostBufferView HostStagingBlockPool::blockBuffer(size_t block_id, size_t payload_bytes) const {
-    if (block_id >= block_count_) {
-        throw std::out_of_range("host staging block id is outside the pool");
-    }
-    if (payload_bytes > stride_bytes_) {
-        throw std::invalid_argument("host staging payload exceeds block capacity");
-    }
     void* base = backing_.data() + block_id * stride_bytes_;
     return HostBufferView{base, payload_bytes, stride_bytes_};
 }
