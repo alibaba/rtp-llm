@@ -271,3 +271,9 @@ py_test(
         "//rtp_llm:utils",
     ],
 )
+
+py_test(
+    name = "torch_patch_test",
+    srcs = ["torch_patch_test.py"],
+    deps = ["//rtp_llm:package_init"],
+)
