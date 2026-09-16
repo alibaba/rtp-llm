@@ -815,9 +815,11 @@ private:
 
 class RtpLLMCacheEvictionMetricsCollector final {
 public:
-    int64_t lifetime_ms                = -1;
-    int64_t evicted_block_count        = -1;
-    int64_t direct_evicted_block_count = -1;
+    bool    memory_direct_evict_qps         = false;
+    int64_t lifetime_ms                     = -1;
+    int64_t evicted_block_count             = -1;
+    int64_t direct_evicted_block_count      = -1;
+    int64_t memory_direct_evict_block_count = -1;
 };
 
 class RtpLLMCacheEvictionMetrics: public kmonitor::MetricsGroup {
@@ -826,9 +828,11 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheEvictionMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* evicted_block_lifetime_ms_metric  = nullptr;
-    kmonitor::MutableMetric* evicted_block_count_metric        = nullptr;
-    kmonitor::MutableMetric* direct_evicted_block_count_metric = nullptr;
+    kmonitor::MutableMetric* evicted_block_lifetime_ms_metric       = nullptr;
+    kmonitor::MutableMetric* evicted_block_count_metric             = nullptr;
+    kmonitor::MutableMetric* direct_evicted_block_count_metric      = nullptr;
+    kmonitor::MutableMetric* memory_direct_evict_qps_metric         = nullptr;
+    kmonitor::MutableMetric* memory_direct_evict_block_count_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

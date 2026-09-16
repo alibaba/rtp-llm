@@ -298,6 +298,7 @@ private:
     int  cpSizeForMetrics() const;
     int  cacheKeyTokensPerBlockForMetrics() const;
     void reportEvictionLifetime(CacheBlockKind kind, CacheBackingType backing_type, int64_t created_time_us);
+    void reportDirectMemoryEviction(CacheBackingType backing_type, int64_t block_count);
     void reportMetricsLoop();
 
 private:

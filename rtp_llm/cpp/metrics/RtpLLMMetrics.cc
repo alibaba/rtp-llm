@@ -474,6 +474,9 @@ bool RtpLLMCacheEvictionMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_count_metric, "rtp_llm_kv_cache_evicted_block_count");
     REGISTER_GAUGE_MUTABLE_METRIC(direct_evicted_block_count_metric,
                                   "rtp_llm_kv_cache_direct_evicted_block_count");
+    REGISTER_QPS_MUTABLE_METRIC(memory_direct_evict_qps_metric, "rtp_llm_memory_direct_evict_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(memory_direct_evict_block_count_metric,
+                                  "rtp_llm_memory_direct_evict_block_count");
     return true;
 }
 
@@ -487,6 +490,11 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*         tag
     }
     if (collector->direct_evicted_block_count >= 0) {
         REPORT_MUTABLE_METRIC(direct_evicted_block_count_metric, collector->direct_evicted_block_count);
+    }
+    REPORT_QPS(memory_direct_evict_qps);
+    if (collector->memory_direct_evict_block_count >= 0) {
+        REPORT_MUTABLE_METRIC(memory_direct_evict_block_count_metric,
+                              collector->memory_direct_evict_block_count);
     }
 }
 

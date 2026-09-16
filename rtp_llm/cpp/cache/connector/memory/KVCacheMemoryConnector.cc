@@ -2895,6 +2895,7 @@ bool KVCacheMemoryConnector::allocateOnePrefixBacking(CopyInfoPerKey& copy_info)
         }
         for (const auto& evicted : evicted_items) {
             reportEvictionLifetime(evicted.kind, evicted.backing_type, evicted.created_time_us);
+            reportDirectMemoryEviction(evicted.backing_type, 1);
             releasePrefixCacheBacking(evicted);
         }
         if (tryMallocMemoryBlock(copy_info.kind, mem_block)) {
@@ -2937,6 +2938,7 @@ bool KVCacheMemoryConnector::allocateOneBacking(CopyInfoPerKey& copy_info) {
         }
         const auto target_backing = evicted->backing_type;
         reportEvictionLifetime(kind, evicted->backing_type, evicted->created_time_us);
+        reportDirectMemoryEviction(evicted->backing_type, 1);
         releaseCacheBacking(*evicted);
         if (target_backing == CacheBackingType::MEMORY) {
             if (tryMallocMemoryBlock(kind, mem_block)) {
@@ -3598,6 +3600,7 @@ size_t KVCacheMemoryConnector::evictMemoryImmediately(size_t block_num) {
     }
     auto victims = block_cache_->popMemoryForImmediateEviction(block_num);
     for (const auto& item : victims) {
+        reportEvictionLifetime(blockKindFromComplete(item.is_complete), item.backing_type, item.created_time_us);
         releaseCacheBacking(item);
     }
     return victims.size();
@@ -3792,6 +3795,16 @@ void KVCacheMemoryConnector::reportEvictionLifetime(CacheBlockKind   kind,
     tags.AddTag("kind", cacheBlockKindName(kind));
     tags.AddTag("backing", backing_type == CacheBackingType::MEMORY ? "memory" : "disk");
     metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags, &collector);
+}
+
+void KVCacheMemoryConnector::reportDirectMemoryEviction(CacheBackingType backing_type, int64_t block_count) {
+    if (!metrics_reporter_ || backing_type != CacheBackingType::MEMORY || block_count <= 0) {
+        return;
+    }
+    RtpLLMCacheEvictionMetricsCollector collector;
+    collector.memory_direct_evict_qps         = true;
+    collector.memory_direct_evict_block_count = block_count;
+    metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(nullptr, &collector);
 }
 
 void KVCacheMemoryConnector::reportMetricsLoop() {
