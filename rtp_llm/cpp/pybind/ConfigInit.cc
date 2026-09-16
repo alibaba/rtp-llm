@@ -462,8 +462,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_dsv4_state_block_independent_eviction);
             },
             [](py::tuple t) {
-                const bool   has_disk_fields = t.size() >= 50 && py::isinstance<py::str>(t[9]);
-                const size_t min_size        = has_disk_fields ? 50u : 45u;
+                const bool   has_disk_fields = t.size() > 9 && py::isinstance<py::str>(t[9]);
+                const size_t min_size        = has_disk_fields ? 49u : 44u;
                 if (t.size() < min_size)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
@@ -521,9 +521,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.reco_put_broadcast_timeout                 = t[41 + offset].cast<int>();
                     c.reco_client_config                         = t[42 + offset].cast<std::string>();
                     c.ssm_state_dtype                            = t[43 + offset].cast<std::string>();
-                    c.dsv4_fixed_pool_blocks                     = t[44 + offset].cast<uint32_t>();
-                    const size_t expected_with_fixed_pool_memory = (has_disk_fields ? 51u : 46u);
-                    if (t.size() >= expected_with_fixed_pool_memory) {
+                    const size_t fixed_pool_start = 44 + offset;
+                    if (t.size() > fixed_pool_start) {
+                        c.dsv4_fixed_pool_blocks = t[fixed_pool_start].cast<uint32_t>();
+                    }
+                    if (t.size() > fixed_pool_start + 1) {
                         c.dsv4_fixed_pool_use_memory = t[45 + offset].cast<bool>();
                     }
                     const size_t extra_start = 46 + offset;

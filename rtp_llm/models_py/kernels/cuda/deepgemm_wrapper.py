@@ -439,9 +439,10 @@ def fp8_gemm_nt(
         output,
         c,
         compiled_dims=compiled_dims,
-        # normal gemm tmp not use ue8m0 cast default
         disable_ue8m0_cast=(
-            disable_ue8m0_cast if disable_ue8m0_cast is not None else True
+            disable_ue8m0_cast
+            if disable_ue8m0_cast is not None
+            else not is_deep_gemm_e8m0_used()
         ),
     )
 

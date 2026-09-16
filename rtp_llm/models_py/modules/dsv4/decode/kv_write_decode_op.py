@@ -80,16 +80,10 @@ def write_compressed_k_decode(
 
     Tokens with ``slot_mapping[i] == -1`` are no-ops (non-boundary positions).
 
-    CUDA-graph safe implementation: no boolean indexing, no D2H sync, no
-    data-dependent output shapes. Uses safe-redirect + delta-encode +
-    ``index_put_(accumulate=True)``:
-      * ``-1`` slots are redirected to slot 0 (any valid slot).
-      * The delta for invalid slots is zero → accumulate has no effect.
-      * For valid slots, delta = ``k_state - existing`` → after atomic add
-        the slot holds ``existing + (k_state - existing) = k_state``.
-      * If two tokens (both -1 redirected) hit slot 0, the deltas are all
-        zero → no corruption. If two valid tokens share a slot (impossible
-        by construction), the result would be wrong but this never happens.
+    Eager execution compacts valid rows and writes them with ``index_copy_``.
+    CUDA graph capture uses fixed-shape safe redirects and direct source values.
+    Both paths overwrite BF16 values exactly; neither reconstructs them through
+    floating-point subtraction and addition.
 
     Args:
         k_state: ``[T_total, head_dim]`` bf16.
@@ -101,31 +95,53 @@ def write_compressed_k_decode(
     if k_state.numel() == 0 or slot_mapping.numel() == 0:
         return
 
-    Tc = compressed_buffer.shape[1]
     slot_mapping_long = (
         slot_mapping.long() if slot_mapping.dtype != torch.long else slot_mapping
     )
     valid_mask = slot_mapping_long >= 0  # [T_total] bool — stays on device
-
-    # Redirect -1 to slot 0; invalid slots will contribute a zero delta.
-    safe_slot = torch.where(
-        valid_mask, slot_mapping_long, torch.zeros_like(slot_mapping_long)
-    )
-    b_idx = safe_slot // Tc
-    t_idx = safe_slot % Tc
-
     if k_state.dtype != compressed_buffer.dtype:
         k_state = k_state.to(compressed_buffer.dtype)
 
-    # delta-encode: valid slots → k_state - existing; invalid → 0.
-    existing = compressed_buffer[b_idx, t_idx]
-    delta = torch.where(
-        valid_mask.unsqueeze(-1),
-        k_state - existing,
-        torch.zeros_like(k_state),
+    flat_buffer = compressed_buffer.view(-1, compressed_buffer.shape[-1])
+    if k_state.is_cuda and torch.cuda.is_current_stream_capturing():
+        # Redirect invalid rows to the first valid destination and give every
+        # collision the same source bits. If all rows are invalid, preserve
+        # slot zero. This keeps index_copy_ deterministic for repeated indices.
+        token_indices = torch.arange(
+            slot_mapping_long.numel(), device=slot_mapping_long.device
+        )
+        first_valid = torch.where(
+            valid_mask,
+            token_indices,
+            torch.full_like(token_indices, slot_mapping_long.numel()),
+        ).amin()
+        source_index = first_valid.clamp(max=slot_mapping_long.numel() - 1).view(1)
+        has_valid = valid_mask.any()
+        redirect_slot = torch.where(
+            has_valid,
+            slot_mapping_long.index_select(0, source_index).squeeze(0),
+            torch.zeros((), dtype=torch.long, device=slot_mapping_long.device),
+        )
+        safe_slot = torch.where(valid_mask, slot_mapping_long, redirect_slot)
+        redirect_source = torch.where(
+            has_valid,
+            k_state.index_select(0, source_index).squeeze(0),
+            flat_buffer.index_select(0, redirect_slot.view(1)).squeeze(0),
+        )
+        source = torch.where(
+            valid_mask.unsqueeze(-1), k_state, redirect_source.unsqueeze(0)
+        )
+        flat_buffer.index_copy_(0, safe_slot, source)
+        return
+
+    valid_idx = torch.nonzero(valid_mask, as_tuple=False).flatten()
+    if valid_idx.numel() == 0:
+        return
+    flat_buffer.index_copy_(
+        0,
+        slot_mapping_long.index_select(0, valid_idx),
+        k_state.index_select(0, valid_idx),
     )
-    # atomic add — well-defined for repeated indices (slot-0 collisions add 0).
-    compressed_buffer.index_put_((b_idx, t_idx), delta, accumulate=True)
 
 
 # ---------------------------------------------------------------------------

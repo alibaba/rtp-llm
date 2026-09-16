@@ -155,6 +155,12 @@ py_library(
 )
 
 py_library(
+    name = "package_init",
+    srcs = ["__init__.py"],
+    deps = [":utils"],
+)
+
+py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
@@ -542,6 +548,7 @@ py_library(
 py_library(
     name = "rtp_llm_frontend_lib",
     deps = [
+        ":package_init",
         ":utils",
         ":eplb",
         ":ops",
