@@ -22,6 +22,7 @@ MOE_STRATEGY_CHOICES = (
     "fp4_ep_normal",
     "fp4_no_dp",
     "mega_moe",
+    "mega_moe_fp8",
     "mega_moe_se",
     "grouped_fp4",
     "local_loop",

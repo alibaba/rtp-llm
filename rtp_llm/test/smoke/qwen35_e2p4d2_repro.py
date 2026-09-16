@@ -197,6 +197,7 @@ def main():
             "REUSE_CACHE": "0",
             "OMP_NUM_THREADS": "8",
         }
+        env["MOE_STRATEGY"] = "mega_moe_fp8" if role == "PREFILL" else "auto"
         if role == "DECODE" and a.graph_diagnostic:
             env["LOG_LEVEL"] = "DEBUG"
         if role != "VIT":
@@ -221,7 +222,7 @@ def main():
             args += (
                 " --moe_strategy fp8_per_block_ep_low_latency --use_deepep_low_latency 1 --enable_cuda_graph 1 --decode_capture_config 1,2,4,8,16,32,48,64,96"
                 if role == "DECODE"
-                else " --moe_strategy fp8_per_block_ep_normal --use_deepep_low_latency 0 --enable_cuda_graph 0 --max_batch_tokens_size 40000 --max_batch_tokens_without_cache 40000"
+                else " --use_deepep_low_latency 0 --enable_cuda_graph 0 --max_batch_tokens_size 40000 --max_batch_tokens_without_cache 40000"
             )
         if role == "PREFILL":
             args = args.replace(

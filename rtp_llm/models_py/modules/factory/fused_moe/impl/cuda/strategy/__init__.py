@@ -63,3 +63,5 @@ __all__ = [
     "CudaGroupedFp4Strategy",
     "CudaLocalLoopStrategy",
 ]
+
+from .mega_moe_fp8 import CudaMegaMoeFp8Strategy
