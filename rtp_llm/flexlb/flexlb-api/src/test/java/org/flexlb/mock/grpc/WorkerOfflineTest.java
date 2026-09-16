@@ -2,6 +2,7 @@ package org.flexlb.mock.grpc;
 
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -23,21 +24,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Flow:
  * 1. Start mock prefill worker (normal config)
  * 2. Submit request → ACK succeeds (proves the gRPC link works)
- * 4. Stop the mock prefill worker's gRPC server (simulates worker crash)
- * 5. Submit a new request → gRPC call fails (connection refused / channel broken)
+ * 3. Delay the next ACK and wait until the worker receives the request
+ * 4. Stop the worker before its ACK is delivered
  * 6. Verify: the post-send outcome remains pending and inflight ownership is retained
  *
  * <p>Key mechanism:
  * <ul>
  *   <li>After {@code server.shutdown()}, the TCP port is no longer listening</li>
- *   <li>The gRPC client channel may still be "open" from the client's perspective,
- *       but the next call will fail because:</li>
- *   <li>The server sends a GOAWAY frame during graceful shutdown, and/or</li>
- *   <li>The TCP connection attempt fails with "Connection refused" (20ms timeout)</li>
+ *   <li>A request received before shutdown has an ambiguous outcome without an ACK</li>
+ *   <li>A later connection refusal proves a new request was not sent</li>
  *   <li>{@link org.flexlb.engine.grpc.EngineGrpcClient} completes the asynchronous
  *       EnqueueBatch call exceptionally and deliberately does not replay an
  *       invocation whose acceptance is ambiguous.</li>
- *   <li>The asynchronous invocation is ambiguous after it starts, so the scheduler
+ *   <li>The received invocation is ambiguous without its ACK, so the scheduler
  *       cannot safely publish failure or release ownership without Engine proof</li>
  * </ul>
  *
@@ -62,15 +61,16 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         assertTrue(ackResponse.isEnqueuedByMaster(), "Should be enqueued by master");
         int existingBatches = getPrefillEndpoint().getInflightBatchCount();
 
-        // 2. Stop the mock prefill worker's gRPC server (simulates worker crash)
-        mockPrefillWorker.stop();
-
-        // 3. Brief pause to let the gRPC client detect the connection loss
-        //    (GOAWAY processing / keepalive detection is async)
-        Thread.sleep(500);
-
-        // 4. Submit a new request — gRPC call should fail (connection refused)
+        mockPrefillWorker.setBehavior(mockPrefillWorker.getBehavior().toBuilder()
+                .enqueueDelayMs(10_000).build());
         CompletableFuture<Response> future2 = submitRequest(20002);
+        long receivedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (mockPrefillWorker.getEnqueueCount() < 2 && System.nanoTime() < receivedDeadline) {
+            Thread.sleep(10);
+        }
+        assertEquals(2, mockPrefillWorker.getEnqueueCount(),
+                "Worker must receive the request before shutdown makes its ACK ambiguous");
+        mockPrefillWorker.stop();
         assertThrows(TimeoutException.class,
                 () -> future2.get(2, TimeUnit.SECONDS));
         assertFalse(future2.isDone(),
@@ -82,5 +82,23 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         // 7. Verify: decode worker never received any enqueue request (PD-separated)
         assertEquals(0, mockDecodeWorker.getEnqueueCount(),
                 "Decode worker should not have received any request");
+    }
+
+    @Test
+    @Timeout(20)
+    void workerOffline_unsentDispatchReleasesOwnership() throws Exception {
+        Response first = submitRequest(20011).get(5, TimeUnit.SECONDS);
+        assertTrue(first.isSuccess());
+        int existingBatches = getPrefillEndpoint().getInflightBatchCount();
+        mockPrefillWorker.stop();
+        Thread.sleep(500);
+
+        Response rejected = submitRequest(20012).get(5, TimeUnit.SECONDS);
+
+        assertFalse(rejected.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), rejected.getCode());
+        assertEquals(existingBatches, getPrefillEndpoint().getInflightBatchCount());
+        assertEquals(1, mockPrefillWorker.getEnqueueCount(), "Unsent request must never reach the worker");
+        assertEquals(0, mockDecodeWorker.getEnqueueCount());
     }
 }

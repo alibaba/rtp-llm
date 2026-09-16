@@ -236,7 +236,6 @@ public abstract class FlexLBMockTestBase {
         additionalPrefillIpPorts.clear();
         additionalDecodeIpPorts.clear();
 
-
         if (mockPrefillWorker != null) {
             mockPrefillWorker.stop();
         }

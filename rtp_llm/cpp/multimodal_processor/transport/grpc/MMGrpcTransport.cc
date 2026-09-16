@@ -97,7 +97,7 @@ public:
                 endpoint, kReasonGrpcError, std::to_string(static_cast<int>(status.error_code())));
             if (status.error_code() == grpc::StatusCode::UNAVAILABLE
                 || status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
-                pool_.removeConnection(endpoint);
+                pool_.removeConnection(endpoint, connection.channel);
                 return ErrorInfo(ErrorCode::MM_REMOTE_RPC_FAILED, status.error_message());
             }
             if (auto error_info = parseMultimodalErrorMessage(status.error_message())) {
