@@ -448,11 +448,12 @@ public class DefaultBatchDispatcher {
                                 Throwable cause = unwrapCompletionFailure(ex);
                                 Logger.debug("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
                                         batchId, prefillIp, prefillGrpcPort, cause.getMessage());
-                                // Once the asynchronous RPC is invoked, no
-                                // transport status proves the server did not
-                                // accept the request. Reconcile every transport
-                                // failure through the Engine-side request-id fence.
-                                markUncertain(items, batchId, cause, observer);
+                                if (cause instanceof EngineGrpcClient.BatchNotSentException) {
+                                    failItems(items, batchId, cause, observer);
+                                } else {
+                                    // A status alone cannot prove non-delivery.
+                                    markUncertain(items, batchId, cause, observer);
+                                }
                             } else if (response == null) {
                                 markUncertain(items, batchId, new RuntimeException(
                                         "EnqueueBatch returned null response"), observer);

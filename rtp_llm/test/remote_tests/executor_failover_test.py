@@ -237,9 +237,7 @@ def test_collect_repo_runtime_files_includes_source_contracts(tmp_path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("source contract\n", encoding="utf-8")
 
-    files = remote_exec_rtp._collect_repo_runtime_files(
-        tmp_path, include_libs=False
-    )
+    files = remote_exec_rtp._collect_repo_runtime_files(tmp_path, include_libs=False)
 
     assert source_contracts.issubset(files)
 
@@ -256,9 +254,7 @@ def test_collect_repo_runtime_files_includes_nested_test_data(tmp_path):
     fixture.parent.mkdir(parents=True)
     fixture.write_text("[]\n", encoding="utf-8")
 
-    files = remote_exec_rtp._collect_repo_runtime_files(
-        tmp_path, include_libs=False
-    )
+    files = remote_exec_rtp._collect_repo_runtime_files(tmp_path, include_libs=False)
 
     assert str(fixture.relative_to(tmp_path)) in files
 
@@ -287,9 +283,7 @@ def test_collect_repo_runtime_files_includes_cutlass_groupgemm_configs(tmp_path)
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text("{}\n", encoding="utf-8")
 
-    files = remote_exec_rtp._collect_repo_runtime_files(
-        tmp_path, include_libs=False
-    )
+    files = remote_exec_rtp._collect_repo_runtime_files(tmp_path, include_libs=False)
 
     assert {str(config.relative_to(tmp_path)) for config in configs}.issubset(files)
 
@@ -309,12 +303,7 @@ def test_collect_remote_files_includes_perf_data(tmp_path):
         / "distribution.csv"
     )
     baseline = (
-        internal
-        / "rtp_llm"
-        / "test"
-        / "perf_test"
-        / "baselines"
-        / "qwen_perf.json"
+        internal / "rtp_llm" / "test" / "perf_test" / "baselines" / "qwen_perf.json"
     )
     suite.parent.mkdir(parents=True)
     data.parent.mkdir(parents=True)
@@ -479,9 +468,7 @@ def test_remote_session_rejects_non_pyut_profile():
     with pytest.raises(pytest.UsageError) as excinfo:
         remote_plugin.pytest_configure(_PluginConfig(remote_session=True))
 
-    assert "--remote-session is only supported for py-ut profiles" in str(
-        excinfo.value
-    )
+    assert "--remote-session is only supported for py-ut profiles" in str(excinfo.value)
 
 
 def test_ci_profile_count_rejects_zero_without_exact_baseline():
@@ -490,9 +477,7 @@ def test_ci_profile_count_rejects_zero_without_exact_baseline():
     config._rtp_ci_expected_count = None
 
     with pytest.raises(pytest.UsageError, match="must never pass as 0/0"):
-        ci_profile_plugin.validate_ci_profile_count(
-            config, 0, context="reported"
-        )
+        ci_profile_plugin.validate_ci_profile_count(config, 0, context="reported")
 
     ci_profile_plugin.validate_ci_profile_count(config, 17, context="reported")
 
@@ -588,16 +573,13 @@ def test_session_command_locks_total_gpu_pool_and_slices_workers(monkeypatch, tm
     assert "need 4 (limit=1024 MiB)" in shell
     assert shell.index("--query-gpu=memory.used") < shell.index("echo REMOTE_SETUP")
     assert (
-        "export GPU_COUNT=4; unset WORLD_SIZE; export GPU_COUNT_PER_WORKER=1;"
-        in shell
+        "export GPU_COUNT=4; unset WORLD_SIZE; export GPU_COUNT_PER_WORKER=1;" in shell
     )
     assert (
-        "export GPU_COUNT=4; unset WORLD_SIZE; export GPU_COUNT_PER_WORKER=2;"
-        in shell
+        "export GPU_COUNT=4; unset WORLD_SIZE; export GPU_COUNT_PER_WORKER=2;" in shell
     )
     assert (
-        "export GPU_COUNT=4; unset WORLD_SIZE; export GPU_COUNT_PER_WORKER=4;"
-        in shell
+        "export GPU_COUNT=4; unset WORLD_SIZE; export GPU_COUNT_PER_WORKER=4;" in shell
     )
 
     inner_script = shlex.split(shell)[-1]
@@ -621,29 +603,54 @@ def test_session_command_locks_total_gpu_pool_and_slices_workers(monkeypatch, tm
         "def test_skip(): pytest.skip('exercise skipped report metadata')\n"
     )
     expected_nodeids = {
-        f"test_sample.py::{name}" for name in (
-            "test_pass[1]", "test_pass[2]", "test_fail", "test_setup",
-            "test_teardown", "test_skip",
+        f"test_sample.py::{name}"
+        for name in (
+            "test_pass[1]",
+            "test_pass[2]",
+            "test_fail",
+            "test_setup",
+            "test_teardown",
+            "test_skip",
         )
     }
     for workers in (0, 2):
         report = tmp_path / f"report-{workers}.xml"
         result = subprocess.run(
             [
-                sys.executable, "-m", "pytest", "-q", "-c", os.devnull,
-                "--noconftest", f"--rootdir={tmp_path}",
-                "-p", "rtp_remote_nodeid_plugin", "-p", "xdist.plugin",
-                "-n", str(workers), f"--junitxml={report}", "test_sample.py",
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                "-c",
+                os.devnull,
+                "--noconftest",
+                f"--rootdir={tmp_path}",
+                "-p",
+                "rtp_remote_nodeid_plugin",
+                "-p",
+                "xdist.plugin",
+                "-n",
+                str(workers),
+                f"--junitxml={report}",
+                "test_sample.py",
             ],
             cwd=tmp_path,
-            env=dict(os.environ, PYTHONPATH=str(tmp_path),
-                     PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", PYTEST_ADDOPTS=""),
-            capture_output=True, text=True, timeout=60,
+            env=dict(
+                os.environ,
+                PYTHONPATH=str(tmp_path),
+                PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
+                PYTEST_ADDOPTS="",
+            ),
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         assert result.returncode == 1, result.stdout + result.stderr
         cases = list(ET.parse(report).getroot().iter("testcase"))
         assert len(cases) == 6
-        assert {remote_plugin._testcase_nodeid(case) for case in cases} == expected_nodeids
+        assert {
+            remote_plugin._testcase_nodeid(case) for case in cases
+        } == expected_nodeids
         for case in cases:
             assert len(case.findall("./properties/property[@name='nodeid']")) == 1
 
@@ -696,7 +703,8 @@ def test_amd_session_forwards_routing_profile_and_all_gpu_tiers():
     )
     plugin.timeout_policy = select_remote_timeout_policy("py_ut_amd", per_test=False)
     runtime = remote_exec_rtp.RemoteRuntimeConfig(
-        ignore_args=[], env_vars={},
+        ignore_args=[],
+        env_vars={},
         platform_properties={"gpu": "MI308X", "gpu_count": "8"},
         remote_setup_prefix="",
     )
@@ -714,7 +722,10 @@ def test_amd_session_rejects_missing_targets_despite_matching_total():
     config._rtp_ci_expected_count = 286
     config._rtp_ci_forbid_skips = True
     error = remote_plugin._validate_session_profile_result(
-        config, "py_ut_amd", tests=286, skipped=0,
+        config,
+        "py_ut_amd",
+        tests=286,
+        skipped=0,
         nodeids=[f"other.py::test_other[{i}]" for i in range(286)],
     )
     assert "AMD baseline coverage missing" in error
@@ -771,24 +782,32 @@ def test_session_command_runs_profile_isolated_paths_in_fresh_processes(monkeypa
     cleanup = shell.index("rm -f bazel-testlogs/pytest/test.xml")
     assert cleanup < isolated_start
 
+
 def test_cuda13_session_isolates_two_gpu_targets_and_rejects_empty_files(monkeypatch):
     paths = ["rtp_llm/test/single_test.py", "rtp_llm/test/distributed_test.py"]
     monkeypatch.setattr(ci_profile_plugin, "_get_pytest_ci_section", lambda root: {})
-    monkeypatch.setattr(ci_profile_plugin, "_get_profile", lambda root, name: {
-        "paths": paths,
-        "isolate_all_paths": True,
-        "isolated_gpu_counts": {paths[1]: 2},
-        "require_isolated_tests": True,
-    })
+    monkeypatch.setattr(
+        ci_profile_plugin,
+        "_get_profile",
+        lambda root, name: {
+            "paths": paths,
+            "isolate_all_paths": True,
+            "isolated_gpu_counts": {paths[1]: 2},
+            "require_isolated_tests": True,
+        },
+    )
     plugin = object.__new__(remote_plugin.RemoteREAPIPlugin)
     plugin.workers = 2
     plugin._collect_outputs = False
     plugin.config = SimpleNamespace(
         option=SimpleNamespace(markexpr="not manual", keyword=""), rootpath=Path(".")
     )
-    plugin.timeout_policy = select_remote_timeout_policy("py_ut_cuda13_arm", per_test=False)
+    plugin.timeout_policy = select_remote_timeout_policy(
+        "py_ut_cuda13_arm", per_test=False
+    )
     runtime = remote_exec_rtp.RemoteRuntimeConfig(
-        ignore_args=[], env_vars={},
+        ignore_args=[],
+        env_vars={},
         platform_properties={"gpu": "SM100_ARM_CU13", "gpu_count": "2"},
         remote_setup_prefix="",
     )
@@ -827,9 +846,7 @@ def test_timeout_policy_maps_ci_profiles():
     perf = select_remote_timeout_policy("perf-test", per_test=False)
     per_test = select_remote_timeout_policy("ut-sm9x", per_test=True)
     per_test_smoke = select_remote_timeout_policy("smoke-ppu-internal", per_test=True)
-    per_test_eval = select_remote_timeout_policy(
-        "smoke_sm100_eval_oss", per_test=True
-    )
+    per_test_eval = select_remote_timeout_policy("smoke_sm100_eval_oss", per_test=True)
     per_test_perf = select_remote_timeout_policy("perf-sm9x", per_test=True)
 
     assert (
@@ -1162,14 +1179,17 @@ def test_remote_setup_and_pytest_keep_heartbeat_alive_during_long_work(tmp_path)
     assert "PV_PID=$!" in command
     assert "pip_install_active" in command
     assert 'wait "$PV_PID"; PV_RC=$?' in command
-    assert 'OUT=$(cat logs/prepare_venv.out)' in command
+    assert "OUT=$(cat logs/prepare_venv.out)" in command
     assert "python -m _build.rocm_jit & RJ_PID=$!" in command
     assert "rocm_jit_active" in command
     assert 'wait "$RJ_PID"; RJ_RC=$?' in command
     assert 'if [ "$RJ_RC" -ne 0 ]; then exit "$RJ_RC"; fi;' in command
-    assert subprocess.run(
-        ["bash", "-n"], input=command, text=True, capture_output=True, check=False
-    ).returncode == 0
+    assert (
+        subprocess.run(
+            ["bash", "-n"], input=command, text=True, capture_output=True, check=False
+        ).returncode
+        == 0
+    )
 
     helper_rel = "internal_source/ci/prepare_rocm_deps.sh"
     helper = tmp_path / helper_rel
@@ -1228,9 +1248,7 @@ def test_dependency_install_does_not_inherit_runtime_libraries(profile_library_p
     }
     if profile_library_path:
         setup_env["LD_LIBRARY_PATH"] = profile_library_path
-    command = remote_exec_rtp.build_remote_setup_command(
-        Path("."), setup_env=setup_env
-    )
+    command = remote_exec_rtp.build_remote_setup_command(Path("."), setup_env=setup_env)
     invocation = command.split(
         "if [ -f internal_source/ci/prepare_venv.py ]; then ", 1
     )[1].split(">logs/prepare_venv.out", 1)[0]
@@ -1321,9 +1339,7 @@ def test_resolve_ci_profile_remote_env(monkeypatch):
                     "pytest_ci": {
                         "profiles": {
                             "custom_remote": {
-                                "remote_env": {
-                                    "RTP_BAZEL_CONFIG": "--config=custom"
-                                }
+                                "remote_env": {"RTP_BAZEL_CONFIG": "--config=custom"}
                             }
                         }
                     }

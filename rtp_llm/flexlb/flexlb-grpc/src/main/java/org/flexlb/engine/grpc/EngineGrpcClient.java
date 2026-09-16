@@ -4,10 +4,15 @@ import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.protobuf.MessageLite;
+import io.grpc.Attributes;
+import io.grpc.ClientStreamTracer;
 import io.grpc.ManagedChannel;
+import io.grpc.Metadata;
+import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.internal.GrpcUtil;
 import io.grpc.netty.NettyChannelBuilder;
+import io.grpc.stub.ClientCalls;
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
@@ -23,9 +28,11 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
 /**
@@ -244,8 +251,57 @@ public class EngineGrpcClient extends AbstractGrpcClient {
         // though its ACK was lost. Reconciliation is owned by the scheduler's
         // request-id cancel fence, so this client must expose the ambiguity
         // instead of issuing a second EnqueueBatch automatically.
-        return executeGrpcCallAsync(ip, port, stub -> stub.getRpcServiceFutureStub().enqueueBatch(request),
-                requestTimeoutMs, ServiceType.BATCH_ENQUEUE);
+        BatchDeliveryTracker delivery = new BatchDeliveryTracker();
+        return executeGrpcCallAsync(ip, port, wrapper -> {
+            RpcServiceGrpc.RpcServiceFutureStub stub = wrapper.getRpcServiceFutureStub();
+            return ClientCalls.futureUnaryCall(stub.getChannel().newCall(
+                    RpcServiceGrpc.getEnqueueBatchMethod(),
+                    stub.getCallOptions().withStreamTracerFactory(delivery)), request);
+        }, requestTimeoutMs, ServiceType.BATCH_ENQUEUE).handle((response, failure) -> {
+            if (failure != null) {
+                if (delivery.failedBeforeTransport(failure)) {
+                    throw new CompletionException(new BatchNotSentException(failure));
+                }
+                throw new CompletionException(failure);
+            }
+            return response;
+        });
+    }
+
+    /** An enqueue rejected before gRPC assigned any transport to the call. */
+    public static final class BatchNotSentException extends RuntimeException {
+        public BatchNotSentException(Throwable cause) {
+            super("EnqueueBatch failed before transport creation: " + cause.getMessage(), cause);
+        }
+    }
+
+    private static final class BatchDeliveryTracker extends ClientStreamTracer.Factory {
+        private final AtomicBoolean transportCreated = new AtomicBoolean();
+        private final AtomicBoolean unavailableBeforeTransport = new AtomicBoolean();
+
+        @Override
+        public ClientStreamTracer newClientStreamTracer(ClientStreamTracer.StreamInfo info, Metadata headers) {
+            return new ClientStreamTracer() {
+                @Override
+                public void streamCreated(Attributes transportAttrs, Metadata streamHeaders) {
+                    // This precedes writes. Once a transport exists, even an
+                    // unsuccessful write can be ambiguous, so retain the fence.
+                    transportCreated.set(true);
+                }
+
+                @Override
+                public void streamClosed(Status status) {
+                    if (status.getCode() == Status.Code.UNAVAILABLE && !transportCreated.get()) {
+                        unavailableBeforeTransport.set(true);
+                    }
+                }
+            };
+        }
+
+        private boolean failedBeforeTransport(Throwable failure) {
+            return Status.fromThrowable(failure).getCode() == Status.Code.UNAVAILABLE
+                    && unavailableBeforeTransport.get() && !transportCreated.get();
+        }
     }
 
     /**

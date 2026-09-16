@@ -81,7 +81,9 @@ def test_gtest_adapter_rejects_zero_skipped_wrong_or_failed_case(
     def run(args, **kwargs):
         assert args[1] == "--gtest_filter=RocmBeamSearchOpTest.simpleTest"
         library_paths = kwargs["env"]["LD_LIBRARY_PATH"].split(":")
-        assert str(Path(adapter.torch.__file__).resolve().parent / "lib") in library_paths
+        assert (
+            str(Path(adapter.torch.__file__).resolve().parent / "lib") in library_paths
+        )
         assert str(binary.parent.parent) in library_paths
         assert "/existing/rocm/lib" in library_paths
         assert kwargs["env"]["RTP_LLM_TEST_DATA_DIR"] == str(tmp_path.resolve())

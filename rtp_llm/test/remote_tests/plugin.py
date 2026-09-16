@@ -87,9 +87,7 @@ def _gpu_memory_preflight_shell(required_gpus: int) -> str:
     if not _get_bool_env(_GPU_MEMORY_PREFLIGHT_ENV, False):
         return ""
 
-    limit_mb = max(
-        0, _get_int_env(_GPU_MEMORY_LIMIT_ENV, _GPU_MEMORY_LIMIT_DEFAULT_MB)
-    )
+    limit_mb = max(0, _get_int_env(_GPU_MEMORY_LIMIT_ENV, _GPU_MEMORY_LIMIT_DEFAULT_MB))
     required_gpus = max(1, required_gpus)
     return (
         'rtp_smi=""; '
@@ -106,7 +104,7 @@ def _gpu_memory_preflight_shell(required_gpus: int) -> str:
         "END {print clean + 0}'); "
         f'if [ "${{rtp_clean_gpu_count:-0}}" -lt {required_gpus} ]; then '
         f'echo "GpuLockTimeoutError: GPU memory preflight found '
-        f'${{rtp_clean_gpu_count:-0}} clean GPU(s), need {required_gpus} '
+        f"${{rtp_clean_gpu_count:-0}} clean GPU(s), need {required_gpus} "
         f'(limit={limit_mb} MiB)" >&2; exit 1; fi; '
         "fi; fi; "
     )
@@ -312,9 +310,7 @@ def _validate_session_profile_result(
         return ""
     try:
         validate_ci_profile_count(config, tests, context="reported")
-        if ci_profile == "py_ut_amd" and not config.getoption(
-            "--rtp-ci-allow-subset"
-        ):
+        if ci_profile == "py_ut_amd" and not config.getoption("--rtp-ci-allow-subset"):
             from rtp_llm.test.amd_coverage import validate_amd_coverage
 
             validate_amd_coverage(nodeids or [])
@@ -807,9 +803,7 @@ class RemoteREAPIPlugin:
         # through the uploaded internal_source/ symlink on the worker.
         test_path = _safe_rel_to_rootdir(Path(str(item.fspath)).resolve(), self.rootdir)
         _, separator, nodeid_suffix = item.nodeid.partition("::")
-        worker_nodeid = (
-            f"{test_path}::{nodeid_suffix}" if separator else test_path
-        )
+        worker_nodeid = f"{test_path}::{nodeid_suffix}" if separator else test_path
         ignore_args = quote_args(runtime.ignore_args)
         # Forward markexpr so conftest.py doesn't deselect manual tests
         markexpr = getattr(self.config.option, "markexpr", "") or ""
@@ -1857,10 +1851,7 @@ class RemoteREAPIPlugin:
         # Do NOT let the remote worker's EXIT_CODE override a non-OK REAPI
         # response status.  A status code != 0 means the execution itself failed
         # at the REAPI layer, regardless of what the worker claims.
-        if (
-            result.response_status_code is not None
-            and result.response_status_code != 0
-        ):
+        if result.response_status_code is not None and result.response_status_code != 0:
             exit_code = result.exit_code or 1
         elif "EXIT_CODE=" in stdout:
             try:
@@ -2141,7 +2132,11 @@ class RemoteREAPIPlugin:
                             wp = wp[3:]
                         worker_ignores.append(shlex.quote(f"--ignore={wp}"))
                     profile_ignore_args = " ".join(worker_ignores) + " "
-                isolated_paths = (paths if prof.get("isolate_all_paths") else prof.get("isolated_paths")) or []
+                isolated_paths = (
+                    paths
+                    if prof.get("isolate_all_paths")
+                    else prof.get("isolated_paths")
+                ) or []
                 if isinstance(isolated_paths, list) and all(
                     isinstance(path, str) for path in isolated_paths
                 ):
@@ -2150,9 +2145,9 @@ class RemoteREAPIPlugin:
                         while worker_path.startswith("../"):
                             worker_path = worker_path[3:]
                         profile_isolated_paths.append(worker_path)
-                        profile_isolated_gpu_counts[worker_path] = (
-                            prof.get("isolated_gpu_counts", {}).get(path, 1)
-                        )
+                        profile_isolated_gpu_counts[worker_path] = prof.get(
+                            "isolated_gpu_counts", {}
+                        ).get(path, 1)
                     profile_isolated_ignore_args = " ".join(
                         shlex.quote(f"--ignore={path}")
                         for path in profile_isolated_paths
@@ -2161,12 +2156,13 @@ class RemoteREAPIPlugin:
                         profile_isolated_ignore_args += " "
                     if paths:
                         parallel_paths = [
-                            path for path in worker_paths
+                            path
+                            for path in worker_paths
                             if path not in profile_isolated_paths
                         ]
-                        profile_paths_args = " ".join(
-                            shlex.quote(path) for path in parallel_paths
-                        ) + " "
+                        profile_paths_args = (
+                            " ".join(shlex.quote(path) for path in parallel_paths) + " "
+                        )
                         if not parallel_paths:
                             phases = []
             except Exception as exc:
@@ -2268,8 +2264,12 @@ class RemoteREAPIPlugin:
         )
         for index, isolated_path in enumerate(profile_isolated_paths):
             gpu_count = profile_isolated_gpu_counts.get(isolated_path, 1)
-            isolated_mark = markexpr if require_isolated_tests or gpu_count > 1 else single_gpu_mark
-            isolated_mark_arg = f"-m {shlex.quote(isolated_mark)} " if isolated_mark else ""
+            isolated_mark = (
+                markexpr if require_isolated_tests or gpu_count > 1 else single_gpu_mark
+            )
+            isolated_mark_arg = (
+                f"-m {shlex.quote(isolated_mark)} " if isolated_mark else ""
+            )
             isolated_output = f"bazel-testlogs/pytest/test_isolated_{index}.xml"
             empty_guard = "" if require_isolated_tests else "[ $ec -ne 5 ] && "
             lines.append(
@@ -2327,8 +2327,11 @@ class RemoteREAPIPlugin:
             f"bazel-testlogs/pytest/test_{tier}gpu.xml" for tier, _, _ in phases
         ]
         merge_args = [
-            "python", "-m", "rtp_llm.test.remote_tests.junit_merge",
-            "--output", "bazel-testlogs/pytest/test.xml",
+            "python",
+            "-m",
+            "rtp_llm.test.remote_tests.junit_merge",
+            "--output",
+            "bazel-testlogs/pytest/test.xml",
         ]
         if forbid_skips:
             merge_args.append("--forbid-skips")

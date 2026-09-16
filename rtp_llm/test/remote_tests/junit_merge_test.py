@@ -6,7 +6,17 @@ import pytest
 from rtp_llm.test.remote_tests.junit_merge import merge_reports
 
 
-@pytest.mark.parametrize("bad_report", [None, "<broken", "<not-junit/>", "<testsuite tests='4'/>", "<testsuite><testcase name='skipped'><skipped/></testcase></testsuite>", "<testsuite><testcase name='failed'><failure/></testcase></testsuite>"])
+@pytest.mark.parametrize(
+    "bad_report",
+    [
+        None,
+        "<broken",
+        "<not-junit/>",
+        "<testsuite tests='4'/>",
+        "<testsuite><testcase name='skipped'><skipped/></testcase></testsuite>",
+        "<testsuite><testcase name='failed'><failure/></testcase></testsuite>",
+    ],
+)
 def test_required_report_failure_survives_successful_sibling(tmp_path, bad_report):
     good = tmp_path / "good.xml"
     good.write_text("<testsuite><testcase name='passed'/></testsuite>")
@@ -22,10 +32,17 @@ def test_required_report_failure_survives_successful_sibling(tmp_path, bad_repor
 
 def test_optional_empty_phase_does_not_hide_required_cases(tmp_path):
     good = tmp_path / "good.xml"
-    good.write_text("<testsuites><testsuite><testcase name='one'/><testcase name='two'/></testsuite></testsuites>")
+    good.write_text(
+        "<testsuites><testsuite><testcase name='one'/><testcase name='two'/></testsuite></testsuites>"
+    )
     empty = tmp_path / "empty.xml"
     empty.write_text("<testsuite tests='0'/>")
-    assert merge_reports([good, empty], tmp_path / "merged.xml", required=[good], forbid_skips=True) == 2
+    assert (
+        merge_reports(
+            [good, empty], tmp_path / "merged.xml", required=[good], forbid_skips=True
+        )
+        == 2
+    )
 
 
 def test_entirely_empty_session_fails(tmp_path):

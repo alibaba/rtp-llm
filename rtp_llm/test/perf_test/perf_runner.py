@@ -97,7 +97,9 @@ def run_perf_test(test_name: str, test_config: dict, data_dir: Path):
         ):
             grid_config = prepare_config(args, remaining)
             # Match main's explicit prefill batch-size override.
-            from rtp_llm.test.perf_test.batch_decode_test import _explicit_batch_size_list
+            from rtp_llm.test.perf_test.batch_decode_test import (
+                _explicit_batch_size_list,
+            )
 
             if args.partial == 2:
                 grid_config.batch_size_list = _explicit_batch_size_list(args) or [1]
@@ -169,9 +171,13 @@ def _validate_grid_results(result_dir, input_lengths, batch_sizes, *, is_decode)
             or not math.isfinite(value)
             or value <= 0
         ):
-            raise AssertionError(f"Invalid {phase_metric} at perf point {point}: {value}")
+            raise AssertionError(
+                f"Invalid {phase_metric} at perf point {point}: {value}"
+            )
     if actual != expected:
-        raise AssertionError(f"Missing perf measurement points: {sorted(expected - actual)}")
+        raise AssertionError(
+            f"Missing perf measurement points: {sorted(expected - actual)}"
+        )
 
 
 def _build_argv(test_name: str, test_config: dict, data_dir: Path) -> List[str]:

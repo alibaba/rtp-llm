@@ -83,18 +83,27 @@ class BuildPackagingContractTest(TestCase):
     def test_native_test_command_preserves_multiple_cpp_targets(self):
         setup_module = _load_setup_module()
         command = setup_module.BazelTest(Distribution())
-        command.test_target = "//rtp_llm/cpp/utils/test:oom //rtp_llm/cpp/cuda_graph/tests:retry"
+        command.test_target = (
+            "//rtp_llm/cpp/utils/test:oom //rtp_llm/cpp/cuda_graph/tests:retry"
+        )
         with patch.object(setup_module, "rewrite_torch_root"), patch.object(
             setup_module, "detect_build_config", return_value="cuda13"
         ), patch.object(
             setup_module, "_get_bazel_cmd_prefix", return_value=(["bazel"], [])
         ), patch.object(
-            setup_module, "_run_bazel_with_retry", return_value=SimpleNamespace(returncode=0)
+            setup_module,
+            "_run_bazel_with_retry",
+            return_value=SimpleNamespace(returncode=0),
         ) as run:
             command.run()
-        self.assertEqual(run.call_args.args[0][1:4], [
-            "test", "//rtp_llm/cpp/utils/test:oom", "//rtp_llm/cpp/cuda_graph/tests:retry"
-        ])
+        self.assertEqual(
+            run.call_args.args[0][1:4],
+            [
+                "test",
+                "//rtp_llm/cpp/utils/test:oom",
+                "//rtp_llm/cpp/cuda_graph/tests:retry",
+            ],
+        )
 
     def test_arch_select_has_unique_top_level_functions(self):
         source = (PROJECT_ROOT / "arch_config" / "arch_select.bzl").read_text(
@@ -340,9 +349,7 @@ class BuildPackagingContractTest(TestCase):
         setup_module = _load_setup_module()
 
         with patch.object(setup_module, "is_remote_enabled", return_value=True):
-            args = setup_module._with_default_remote_test_timeout(
-                ["--config=cuda12_9"]
-            )
+            args = setup_module._with_default_remote_test_timeout(["--config=cuda12_9"])
 
         self.assertEqual(args, ["--config=cuda12_9", "--test_timeout=900"])
 
@@ -360,9 +367,7 @@ class BuildPackagingContractTest(TestCase):
         setup_module = _load_setup_module()
 
         with patch.object(setup_module, "is_remote_enabled", return_value=False):
-            args = setup_module._with_default_remote_test_timeout(
-                ["--config=cuda12_9"]
-            )
+            args = setup_module._with_default_remote_test_timeout(["--config=cuda12_9"])
 
         self.assertEqual(args, ["--config=cuda12_9"])
 
@@ -445,9 +450,7 @@ class BuildPackagingContractTest(TestCase):
 
         with open(PROJECT_ROOT / "pyproject.toml", "rb") as f:
             pyproject = tomllib.load(f)
-        excluded = pyproject["tool"]["setuptools"]["exclude-package-data"][
-            "rtp_llm"
-        ]
+        excluded = pyproject["tool"]["setuptools"]["exclude-package-data"]["rtp_llm"]
         self.assertIn("libs/test/*", excluded)
 
     def test_cuda129_stages_pywrapped_model_pytest_binding(self):
@@ -472,11 +475,13 @@ class BuildPackagingContractTest(TestCase):
 
     def test_pywrapped_model_integration_test_is_native_pytest_only(self):
         build_file = PROJECT_ROOT / "rtp_llm/cpp/models/test/BUILD"
-        self.assertTrue(build_file.exists(), "source-only Bazel BUILD file is not staged")
+        self.assertTrue(
+            build_file.exists(), "source-only Bazel BUILD file is not staged"
+        )
         build_text = build_file.read_text(encoding="utf-8")
         target_block = re.search(
             r'py_test\(\s*name = "pywrapped_model_cache_store_integration_test",'
-            r'.*?\n\)',
+            r".*?\n\)",
             build_text,
             re.S,
         )
@@ -526,7 +531,9 @@ class BuildPackagingContractTest(TestCase):
 
     def test_config_pickle_test_is_h20_pytest_only(self):
         build_file = PROJECT_ROOT / "rtp_llm/cpp/pybind/BUILD"
-        self.assertTrue(build_file.exists(), "source-only Bazel BUILD file is not staged")
+        self.assertTrue(
+            build_file.exists(), "source-only Bazel BUILD file is not staged"
+        )
         build_text = build_file.read_text(encoding="utf-8")
         target_block = re.search(
             r'py_test\(\s*name = "config_pickle_test",.*?\n\)',
@@ -548,8 +555,7 @@ class BuildPackagingContractTest(TestCase):
         test_class = next(
             node
             for node in tree.body
-            if isinstance(node, ast.ClassDef)
-            and node.name == "GrammarConfigPickleTest"
+            if isinstance(node, ast.ClassDef) and node.name == "GrammarConfigPickleTest"
         )
         decorators = {ast.unparse(node) for node in test_class.decorator_list}
         self.assertIn("pytest.mark.H20", decorators)
@@ -584,7 +590,9 @@ class BuildPackagingContractTest(TestCase):
                 if isinstance(node, ast.ClassDef) and node.name == class_name
             )
             methods = {
-                node.name for node in test_class.body if isinstance(node, ast.FunctionDef)
+                node.name
+                for node in test_class.body
+                if isinstance(node, ast.FunctionDef)
             }
             self.assertIn("setUp", methods)
             self.assertNotIn("__init__", methods)
@@ -592,9 +600,7 @@ class BuildPackagingContractTest(TestCase):
     def test_rocm_stages_generation_graph_and_beam_search_bindings(self):
         setup_module = _load_setup_module()
 
-        staged = setup_module._selected_bazel_staged_outputs(
-            "rocm", ["--config=rocm"]
-        )
+        staged = setup_module._selected_bazel_staged_outputs("rocm", ["--config=rocm"])
 
         self.assertIn(
             "//rtp_llm/cpp/cuda_graph/tests:test_cuda_graph_runner",
@@ -612,19 +618,30 @@ class BuildPackagingContractTest(TestCase):
     def test_rdma_exporter_and_generated_aiter_source_are_staged(self):
         setup_module = _load_setup_module()
         entries = setup_module._selected_bazel_staged_outputs("rocm", ["--config=rocm"])
-        targets = {"//:mm_rdma_exporter", "//rtp_llm/models_py/triton_kernels:aiter_gdr_decode_padding_source"}
+        targets = {
+            "//:mm_rdma_exporter",
+            "//rtp_llm/models_py/triton_kernels:aiter_gdr_decode_padding_source",
+        }
         selected = [entry for entry in entries if entry[1] in targets]
         self.assertEqual({entry[1] for entry in selected}, targets)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "bazel-bin").mkdir()
             (root / "bazel-bin/libmm_rdma_exporter.so").write_bytes(b"exporter")
-            source = root / "bazel-bin/rtp_llm/models_py/triton_kernels/fla/_aiter_gdr_decode_padding.py"
+            source = (
+                root
+                / "bazel-bin/rtp_llm/models_py/triton_kernels/fla/_aiter_gdr_decode_padding.py"
+            )
             source.parent.mkdir(parents=True)
             source.write_text("PADDING_BACKEND = 'patched'\n")
             setup_module.stage_bazel_outputs(root, selected)
-            self.assertEqual((root / "rtp_llm/libs/libmm_rdma_exporter.so").read_bytes(), b"exporter")
-            generated = root / "rtp_llm/models_py/triton_kernels/fla/_aiter_gdr_decode_padding.py"
+            self.assertEqual(
+                (root / "rtp_llm/libs/libmm_rdma_exporter.so").read_bytes(), b"exporter"
+            )
+            generated = (
+                root
+                / "rtp_llm/models_py/triton_kernels/fla/_aiter_gdr_decode_padding.py"
+            )
             self.assertEqual(generated.read_text(), source.read_text())
 
     def test_dynamic_version_uses_release_version(self):
@@ -672,7 +689,9 @@ class BuildPackagingContractTest(TestCase):
                 if _is_local_path_reference(_requirement_url(req)):
                     offenders.append(f"{extra}: {req}")
         self.assertEqual(
-            offenders, [], f"Public platform extras must not use local paths:\n{offenders}"
+            offenders,
+            [],
+            f"Public platform extras must not use local paths:\n{offenders}",
         )
 
     def test_public_platform_extras_use_https_for_direct_wheels(self):
@@ -685,7 +704,9 @@ class BuildPackagingContractTest(TestCase):
                 if url.startswith("http://"):
                     offenders.append(f"{extra}: {req}")
         self.assertEqual(
-            offenders, [], f"Public platform extras must use https:// wheel URLs:\n{offenders}"
+            offenders,
+            [],
+            f"Public platform extras must use https:// wheel URLs:\n{offenders}",
         )
 
     def test_cuda129_rtp_kernel_pin_contains_sm120_cubins(self):
@@ -728,7 +749,9 @@ class BuildPackagingContractTest(TestCase):
         testpaths = pyproject["tool"]["pytest"]["ini_options"]["testpaths"]
         missing = [p for p in testpaths if not (PROJECT_ROOT / p).exists()]
         self.assertEqual(
-            missing, [], f"pyproject testpaths point at non-existent directories: {missing}"
+            missing,
+            [],
+            f"pyproject testpaths point at non-existent directories: {missing}",
         )
 
     def test_py_ut_amd_profile_collects_rocm_sources(self):
@@ -830,9 +853,9 @@ class BuildPackagingContractTest(TestCase):
             self.assertEqual(internal_profiles["py_ut_ppu"].get("minimum_count"), 1)
             self.assertEqual(internal_profiles["py_ut_ppu"].get("expected_count"), 23)
 
-            sm100_arm_env = internal_config["tool"]["rtp_llm"]["pytest_ci"][
-                "gpu_env"
-            ]["SM100_ARM"]
+            sm100_arm_env = internal_config["tool"]["rtp_llm"]["pytest_ci"]["gpu_env"][
+                "SM100_ARM"
+            ]
             self.assertEqual(
                 sm100_arm_env["PATH"],
                 "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -887,6 +910,7 @@ class BuildPackagingContractTest(TestCase):
                     version,
                     f"{package} must match the deterministic GB200 dependency lock",
                 )
+
     def test_rocm_unit_cases_are_routed_by_mi308x_marker(self):
         """ROCm-only cases must be deselected before running on CUDA workers."""
 
@@ -1001,8 +1025,7 @@ class BuildPackagingContractTest(TestCase):
             kwargs = {
                 keyword.arg: keyword.value.value
                 for keyword in node.keywords
-                if keyword.arg is not None
-                and isinstance(keyword.value, ast.Constant)
+                if keyword.arg is not None and isinstance(keyword.value, ast.Constant)
             }
             return kwargs.get("type") == gpu_type and (
                 count is None or kwargs.get("count") == count
@@ -1037,9 +1060,7 @@ class BuildPackagingContractTest(TestCase):
         self.assertIn("models_py.modules.hybrid.indexer", lazy_loader_text)
         self.assertIn("models_py.modules.hybrid.test.indexer_ref", lazy_loader_text)
 
-        indexer_ref_tree = parse(
-            "rtp_llm/models_py/modules/hybrid/test/indexer_ref.py"
-        )
+        indexer_ref_tree = parse("rtp_llm/models_py/modules/hybrid/test/indexer_ref.py")
         tilelang_imports = [
             node
             for node in indexer_ref_tree.body
@@ -1054,8 +1075,7 @@ class BuildPackagingContractTest(TestCase):
         mask_class = next(
             node
             for node in fp8_tree.body
-            if isinstance(node, ast.ClassDef)
-            and node.name == "_H20WithoutUE8M0Tests"
+            if isinstance(node, ast.ClassDef) and node.name == "_H20WithoutUE8M0Tests"
         )
         masked_methods = {
             target.id
@@ -1105,8 +1125,7 @@ class BuildPackagingContractTest(TestCase):
         deep_gemm_class = next(
             node
             for node in pack_tree.body
-            if isinstance(node, ast.ClassDef)
-            and node.name == "TestDeepGemmIntegration"
+            if isinstance(node, ast.ClassDef) and node.name == "TestDeepGemmIntegration"
         )
         self.assertTrue(
             any(
@@ -1165,10 +1184,7 @@ class BuildPackagingContractTest(TestCase):
             and node.name == "test_cp_tp2_matches_non_cp"
         )
         self.assertTrue(
-            any(
-                is_gpu_marker(node, "H20", count=2)
-                for node in cp_test.decorator_list
-            )
+            any(is_gpu_marker(node, "H20", count=2) for node in cp_test.decorator_list)
         )
         cp_worker_text = ast.unparse(
             next(
@@ -1181,9 +1197,7 @@ class BuildPackagingContractTest(TestCase):
             "rtp_llm.models_py.distributed.symm_mem.init_symm_mem_communicator",
             cp_worker_text,
         )
-        self.assertNotIn(
-            "collective_torch.init_symm_mem_communicator", cp_worker_text
-        )
+        self.assertNotIn("collective_torch.init_symm_mem_communicator", cp_worker_text)
 
         strategy_tree = parse(
             "rtp_llm/models_py/modules/factory/fused_moe/tests/test_cuda_strategies.py"
@@ -1196,9 +1210,7 @@ class BuildPackagingContractTest(TestCase):
         )
         self.assertNotIn("skip", decorators(w4a8_class))
 
-        xqa_tree = parse(
-            "rtp_llm/models_py/kernels/cuda/test/test_xqa_batch_decode.py"
-        )
+        xqa_tree = parse("rtp_llm/models_py/kernels/cuda/test/test_xqa_batch_decode.py")
         xqa_test = next(
             node
             for node in ast.walk(xqa_tree)
@@ -1359,8 +1371,7 @@ class BuildPackagingContractTest(TestCase):
             marker_kwargs = {
                 keyword.arg: keyword.value.value
                 for keyword in gpu_markers[0].keywords
-                if keyword.arg is not None
-                and isinstance(keyword.value, ast.Constant)
+                if keyword.arg is not None and isinstance(keyword.value, ast.Constant)
             }
             self.assertEqual(marker_kwargs.get("type"), "SM100_ARM", filename)
 
@@ -1395,9 +1406,7 @@ class BuildPackagingContractTest(TestCase):
         with open(PROJECT_ROOT / "pyproject.toml", "rb") as f:
             pyproject = tomllib.load(f)
 
-        profile = pyproject["tool"]["rtp_llm"]["pytest_ci"]["profiles"][
-            "py_ut_sm9x"
-        ]
+        profile = pyproject["tool"]["rtp_llm"]["pytest_ci"]["profiles"]["py_ut_sm9x"]
         isolated_paths = profile["isolated_paths"]
         expected = {
             "rtp_llm/models_py/bindings/cuda/test/concat_and_cache_mla/test_dpsk_bf16.py",
@@ -1523,9 +1532,9 @@ class BuildPackagingContractTest(TestCase):
         self.assertNotIn("custom_smoke_test(", utils_test_build)
         self.assertNotIn(
             "bazel",
-            (
-                PROJECT_ROOT / "rtp_llm/dash_sc/grammar_validation_smoke.py"
-            ).read_text().lower(),
+            (PROJECT_ROOT / "rtp_llm/dash_sc/grammar_validation_smoke.py")
+            .read_text()
+            .lower(),
         )
 
         frontend_paths = pyproject["tool"]["rtp_llm"]["pytest_ci"]["profiles"][
@@ -1562,9 +1571,7 @@ class BuildPackagingContractTest(TestCase):
         self.assertNotIn("DETERMINISTIC_GEMM", runner_source)
         self.assertNotIn("USE_GATHER_BATCH_SCHEDULER", runner_source)
 
-        legacy_entry_source = (
-            PROJECT_ROOT / "rtp_llm/test/smoke/entry.py"
-        ).read_text()
+        legacy_entry_source = (PROJECT_ROOT / "rtp_llm/test/smoke/entry.py").read_text()
         self.assertNotIn("USE_GATHER_BATCH_SCHEDULER", legacy_entry_source)
 
     def test_h20_full_smoke_profile_preserves_remote_jit_cache_contract(self):
@@ -1648,8 +1655,7 @@ class BuildPackagingContractTest(TestCase):
         init_func = next(
             node
             for node in tree.body
-            if isinstance(node, ast.FunctionDef)
-            and node.name == "_lazy_init_deep_gemm"
+            if isinstance(node, ast.FunctionDef) and node.name == "_lazy_init_deep_gemm"
         )
         namespace = {
             "List": list,
@@ -1750,7 +1756,9 @@ class BuildPackagingContractTest(TestCase):
         )
         stale = rocm_abis - {expected_abi}
         self.assertEqual(
-            stale, set(), f"rocm extras reference ROCm ABIs {sorted(stale)} != suffix {expected_abi}"
+            stale,
+            set(),
+            f"rocm extras reference ROCm ABIs {sorted(stale)} != suffix {expected_abi}",
         )
 
     def test_pytest_entry_points_are_packaged_with_tests(self):

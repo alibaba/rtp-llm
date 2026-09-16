@@ -34,9 +34,13 @@ def merge_reports(paths, output, *, required=(), forbid_skips=False):
     if total == 0:
         problems.append("remote session executed zero testcases")
     if problems:
-        suite = ET.SubElement(root, "testsuite", name="report-integrity", tests="1", errors="1")
+        suite = ET.SubElement(
+            root, "testsuite", name="report-integrity", tests="1", errors="1"
+        )
         case = ET.SubElement(suite, "testcase", name="complete_execution_reports")
-        ET.SubElement(case, "error", message="incomplete remote execution").text = "\n".join(problems)
+        ET.SubElement(case, "error", message="incomplete remote execution").text = (
+            "\n".join(problems)
+        )
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     ET.ElementTree(root).write(output, encoding="unicode", xml_declaration=True)
@@ -52,7 +56,9 @@ def main():
     parser.add_argument("--forbid-skips", action="store_true")
     parser.add_argument("paths", nargs="+")
     args = parser.parse_args()
-    merge_reports(args.paths, args.output, required=args.required, forbid_skips=args.forbid_skips)
+    merge_reports(
+        args.paths, args.output, required=args.required, forbid_skips=args.forbid_skips
+    )
 
 
 if __name__ == "__main__":

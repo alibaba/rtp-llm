@@ -7,7 +7,6 @@ import pytest
 
 from rtp_llm.test.perf_test.perf_runner import build_perf_params, run_perf_test
 
-
 _ROOT = Path(__file__).resolve().parent
 _PRESETS = json.loads((_ROOT / "perf_presets.json").read_text())
 PERF_TESTS = {

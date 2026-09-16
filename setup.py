@@ -12,6 +12,7 @@ Examples:
   rtp_llm-0.2.0+cu126-cp310-cp310-manylinux_2_28_x86_64.whl
   rtp_llm-0.2.0+rocm62-cp310-cp310-linux_x86_64.whl
 """
+
 import datetime
 import json
 import os
@@ -86,12 +87,16 @@ DASH_SC_PROTO_OUTPUTS = [
     f"{_DASH_SC_PROTO_DIR}/__init__.py",
 ]
 
-PROTO_OUTPUTS = [
-    "rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py",
-    "rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2_grpc.py",
-    "rtp_llm/cpp/model_rpc/proto/flexlb_schedule_service_pb2.py",
-    "rtp_llm/cpp/model_rpc/proto/flexlb_schedule_service_pb2_grpc.py",
-] + REMOTE_TESTS_PROTO_OUTPUTS + DASH_SC_PROTO_OUTPUTS
+PROTO_OUTPUTS = (
+    [
+        "rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py",
+        "rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2_grpc.py",
+        "rtp_llm/cpp/model_rpc/proto/flexlb_schedule_service_pb2.py",
+        "rtp_llm/cpp/model_rpc/proto/flexlb_schedule_service_pb2_grpc.py",
+    ]
+    + REMOTE_TESTS_PROTO_OUTPUTS
+    + DASH_SC_PROTO_OUTPUTS
+)
 
 PROTO_SOURCES = [
     "rtp_llm/cpp/model_rpc/proto/model_rpc_service.proto",
@@ -487,9 +492,7 @@ def _clean_stale_test_artifacts(project_root: Path, bazel_cmd: list) -> None:
     )
     if output_root_arg:
         output_root = Path(output_root_arg.split("=", 1)[1]).resolve()
-        for testlogs_dir in output_root.glob(
-            "*/execroot/*/bazel-out/*/testlogs"
-        ):
+        for testlogs_dir in output_root.glob("*/execroot/*/bazel-out/*/testlogs"):
             resolved = testlogs_dir.resolve()
             if resolved.is_relative_to(output_root) and resolved.is_dir():
                 print(f"Removing stale Bazel test reports: {resolved}")
@@ -746,7 +749,12 @@ _ROCM_PYTHON_BAZEL_STAGED_OUTPUTS = [
     (
         _STAGED_OUTPUT_PYTHON,
         "//rtp_llm/models_py/triton_kernels:aiter_gdr_decode_padding_source",
-        (("fla/_aiter_gdr_decode_padding.py", "models_py/triton_kernels/fla/_aiter_gdr_decode_padding.py"),),
+        (
+            (
+                "fla/_aiter_gdr_decode_padding.py",
+                "models_py/triton_kernels/fla/_aiter_gdr_decode_padding.py",
+            ),
+        ),
     ),
 ]
 
@@ -844,12 +852,17 @@ def _selected_bazel_staged_outputs(build_config: str, bazel_args: list = None) -
         staged_outputs.extend(_REMOTE_KVCM_SERVER_BAZEL_STAGED_OUTPUTS)
     overlay = _find_overlay("internal_source/pyproject_internal.toml")
     overlay_config = _read_toml_file(overlay) if overlay else {}
-    for entry in overlay_config.get("tool", {}).get("rtp-llm", {}).get("native_test_outputs", []):
+    for entry in (
+        overlay_config.get("tool", {}).get("rtp-llm", {}).get("native_test_outputs", [])
+    ):
         if build_config in entry["configs"]:
-            staged_outputs.append((
-                _STAGED_OUTPUT_TEST, entry["target"],
-                ((entry["source"], "test/" + entry["destination"]),),
-            ))
+            staged_outputs.append(
+                (
+                    _STAGED_OUTPUT_TEST,
+                    entry["target"],
+                    ((entry["source"], "test/" + entry["destination"]),),
+                )
+            )
     return staged_outputs
 
 
@@ -1197,7 +1210,10 @@ def stage_bazel_outputs(
             src = _find_bazel_output_for_target(bazel_bin, target, output_name)
             if not src:
                 print(f"    Warning: {output_name} not found for {target}")
-                if require_all_outputs or kind in (_STAGED_OUTPUT_CORE, _STAGED_OUTPUT_PYTHON):
+                if require_all_outputs or kind in (
+                    _STAGED_OUTPUT_CORE,
+                    _STAGED_OUTPUT_PYTHON,
+                ):
                     missing.append((target, output_name))
                 continue
             print(f"    {src} -> {dst}")

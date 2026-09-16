@@ -27,7 +27,6 @@ from rtp_llm.test.ci_profile_support import (
     resolve_profile_paths,
 )
 
-
 _active_profile_name: str | None = None
 _forbid_skips = False
 _skipped_reports: list[str] = []
@@ -59,10 +58,12 @@ def _get_profile(root: Path, name: str) -> Dict[str, Any]:
         )
     if name.startswith("py_ut_") and not name.startswith("py_ut_cuda13_"):
         prof = dict(prof)
-        prof["ignore_paths"] = list(dict.fromkeys(
-            list(prof.get("ignore_paths", []))
-            + list(pytest_ci.get("cuda13_only_paths", []))
-        ))
+        prof["ignore_paths"] = list(
+            dict.fromkeys(
+                list(prof.get("ignore_paths", []))
+                + list(pytest_ci.get("cuda13_only_paths", []))
+            )
+        )
     return prof
 
 
@@ -212,7 +213,11 @@ def pytest_configure(config: pytest.Config) -> None:
                 ignored.append(path)
         config.option.ignore = ignored
 
-    isolated_paths = prof.get("paths") if prof.get("isolate_all_paths") else prof.get("isolated_paths")
+    isolated_paths = (
+        prof.get("paths")
+        if prof.get("isolate_all_paths")
+        else prof.get("isolated_paths")
+    )
     if isolated_paths is not None and (
         not isinstance(isolated_paths, list)
         or not all(isinstance(p, str) for p in isolated_paths)
@@ -222,9 +227,7 @@ def pytest_configure(config: pytest.Config) -> None:
         )
     isolated_gpu_counts = prof.get("isolated_gpu_counts", {})
     if not isinstance(isolated_gpu_counts, dict) or any(
-        path not in (isolated_paths or [])
-        or not isinstance(count, int)
-        or count < 1
+        path not in (isolated_paths or []) or not isinstance(count, int) or count < 1
         for path, count in isolated_gpu_counts.items()
     ):
         raise pytest.UsageError(

@@ -15,10 +15,13 @@ from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_prefill import (
 )
 from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
 
-pytestmark = [pytest.mark.gpu(type="MI308X"), pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.version.hip is None,
-    reason="AITER FlyDSL GDN prefill requires ROCm",
-)]
+pytestmark = [
+    pytest.mark.gpu(type="MI308X"),
+    pytest.mark.skipif(
+        not torch.cuda.is_available() or torch.version.hip is None,
+        reason="AITER FlyDSL GDN prefill requires ROCm",
+    ),
+]
 
 
 def _assert_close(

@@ -26,9 +26,16 @@ _FLA = "rtp_llm/models_py/triton_kernels/fla/test/"
 _DESC = "rtp_llm/models_py/model_desc/test/"
 
 AMD_TARGETS = (
-    AmdTarget("test_aiter_flydsl_gdn_decode_rocm", _FLA + "test_aiter_flydsl_gdn_decode.py"),
-    AmdTarget("test_aiter_flydsl_gdn_prefill", _FLA + "test_aiter_flydsl_gdn_prefill.py"),
-    AmdTarget("cuda_graph_copy_kernel_test_rocm", "rtp_llm/cpp/cuda_graph/tests/cuda_graph_copy_kernel_test.py"),
+    AmdTarget(
+        "test_aiter_flydsl_gdn_decode_rocm", _FLA + "test_aiter_flydsl_gdn_decode.py"
+    ),
+    AmdTarget(
+        "test_aiter_flydsl_gdn_prefill", _FLA + "test_aiter_flydsl_gdn_prefill.py"
+    ),
+    AmdTarget(
+        "cuda_graph_copy_kernel_test_rocm",
+        "rtp_llm/cpp/cuda_graph/tests/cuda_graph_copy_kernel_test.py",
+    ),
     AmdTarget(
         "test_inline_fp8_quant", "rtp_llm/model_loader/test/test_inline_fp8_quant.py"
     ),

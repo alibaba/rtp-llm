@@ -3,17 +3,22 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy.PreparedSubmission;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -97,6 +102,48 @@ class DefaultBatchDispatcherTest {
         assertEquals(1, callback.uncertainCount.get());
         assertEquals(0, callback.failureCount.get());
         assertEquals(0, callback.successCount.get());
+    }
+
+    @Test
+    void dispatchReleasesBatchWhenTransportProvesRequestWasNotSent() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        ScheduledRequest template = createScheduledRequest(1L, 500, 200, prefillEp);
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenReturn(CompletableFuture.failedFuture(new EngineGrpcClient.BatchNotSentException(
+                        io.grpc.Status.UNAVAILABLE.asRuntimeException())));
+
+        RequestRegistry registry = new RequestRegistry(configService,
+                mock(BatchSchedulerReporter.class), mock(RequestSchedulerReporter.class),
+                mock(EngineCancelChannel.class));
+        try {
+            CompletableFuture<Response> future = registry.register(template.ctx(), 8);
+            ScheduledRequest item = new ScheduledRequest(template.ctx(), future, new Response(),
+                    template.prefill(), null, prefillEp, null, null, System.currentTimeMillis());
+            RequestLifecycleTestSupport.bind(registry,
+                    new RequestLifecycleTestSupport.Registered(item, future));
+            RequestRegistry.DeliveryClaim claim = registry.tryClaimBatchDelivery(item, 1L, () -> true);
+
+            submit(List.of(item), 1L, 100, "test_reason", (request, completion) -> {
+                registry.complete(claim, completion);
+                callback.accept(request, completion);
+            });
+
+            assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
+            assertEquals(1, callback.failureCount.get());
+            assertEquals(0, callback.uncertainCount.get());
+            assertEquals(0, callback.successCount.get());
+            assertInstanceOf(EngineGrpcClient.BatchNotSentException.class, callback.lastError);
+            assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(),
+                    future.get(5, TimeUnit.SECONDS).getCode());
+            verify(prefillEp).releaseCommittedItem(item);
+            assertEquals(0, registry.liveRequestCount());
+        } finally {
+            if (registry.closeAdmissionAndAwaitMutations()) {
+                registry.closeOutstandingAndTerminalize();
+                registry.closeExpiration();
+                registry.closePublisher();
+            }
+        }
     }
 
     @Test
