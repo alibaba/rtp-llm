@@ -80,16 +80,39 @@ class _FakeNorm:
 
 
 class _TensorContract:
-    def __init__(self, *shape: int) -> None:
+    def __init__(self, *shape: int, device: str = "cuda:0") -> None:
         self.shape = shape
         self.dtype = torch.bfloat16
         self.is_cuda = True
+        self.device = torch.device(device)
 
     def dim(self) -> int:
         return len(self.shape)
 
     def is_contiguous(self) -> bool:
         return True
+
+
+class _InputIdsContract:
+    def __init__(
+        self,
+        tokens: int,
+        *,
+        dtype: torch.dtype = torch.int32,
+        device: str = "cuda:0",
+        contiguous: bool = True,
+    ) -> None:
+        self._tokens = tokens
+        self.dtype = dtype
+        self.device = torch.device(device)
+        self.is_cuda = self.device.type == "cuda"
+        self._contiguous = contiguous
+
+    def numel(self) -> int:
+        return self._tokens
+
+    def is_contiguous(self) -> bool:
+        return self._contiguous
 
 
 def _reference_prefix(adapter, residual, input_ids):
@@ -221,6 +244,27 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
 
         self.assertIs(block._moe_front_adapter, adapter)
         adapter_cls.assert_called_once_with(block.ffn, "hc", "norm")
+
+    def test_repeated_front_attach_closes_the_previous_adapter(self) -> None:
+        old_adapter = mock.Mock()
+        new_adapter = object()
+        block = SimpleNamespace(
+            ffn=SimpleNamespace(
+                strategy_name="mega_moe_se",
+                gate=SimpleNamespace(score_func="sqrtsoftplus"),
+            ),
+            ffn_hc="hc",
+            ffn_norm="norm",
+            _moe_front_adapter=old_adapter,
+        )
+        with mock.patch(
+            "rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.mega_front.MegaMoeFrontAdapter",
+            return_value=new_adapter,
+        ):
+            Block.enable_moe_front(block, required=True)
+
+        old_adapter.close.assert_called_once_with()
+        self.assertIs(block._moe_front_adapter, new_adapter)
 
     def test_front_is_not_attached_to_non_mega_strategy(self) -> None:
         block = SimpleNamespace(
@@ -389,13 +433,11 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         adapter._graph_plans[(16, 1234)] = plan
         block = SimpleNamespace(
             _moe_front_adapter=adapter,
-            _moe_front_required=True,
         )
 
         Block.disable_moe_front(block)
 
         self.assertIsNone(block._moe_front_adapter)
-        self.assertFalse(block._moe_front_required)
         self.assertTrue(plan.closed)
 
     def test_front_support_is_bounded_by_extension_and_mega_buffer(self) -> None:
@@ -446,11 +488,25 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         adapter.gate.hash = True
         hash_residual = _TensorContract(16, 2, 4, adapter.dim)
         self.assertTrue(
-            adapter.supports(hash_residual, torch.empty(32, dtype=torch.int32))
+            adapter.supports(hash_residual, _InputIdsContract(32))
         )
         self.assertFalse(
-            adapter.supports(hash_residual, torch.empty(32, dtype=torch.int64))
+            adapter.supports(
+                hash_residual, _InputIdsContract(32, dtype=torch.int64)
+            )
         )
+        self.assertFalse(
+            adapter.supports(
+                hash_residual, _InputIdsContract(32, device="cuda:1")
+            )
+        )
+        self.assertFalse(
+            adapter.supports(hash_residual, _InputIdsContract(32, device="cpu"))
+        )
+
+        adapter.gate.hash = False
+        noncontiguous_ids = torch.empty((2, 16), dtype=torch.int64).transpose(0, 1)
+        self.assertTrue(adapter.supports(hash_residual, noncontiguous_ids))
 
     def test_validates_v3_sm103_extension_contract(self) -> None:
         geometry = {
@@ -690,7 +746,6 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             ffn_norm=mock.Mock(side_effect=lambda value: value),
             ffn=ffn,
             _moe_front_adapter=adapter,
-            _moe_front_required=False,
             _moe_front_fallback_logged=False,
         )
 
@@ -734,7 +789,7 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         ffn_hc.pre.assert_called_once()
         ffn.assert_called_once()
 
-    def test_required_front_rejects_runtime_fallback(self) -> None:
+    def test_required_attach_preserves_runtime_capacity_fallback(self) -> None:
         dim = 8
         residual = torch.ones((257, 1, 4, dim), dtype=torch.bfloat16)
         input_ids = torch.arange(257, dtype=torch.int64).view(257, 1)
@@ -747,24 +802,49 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             ),
             attn_norm=mock.Mock(side_effect=lambda value: value),
             attn=None,
-            ffn_hc=mock.Mock(),
-            ffn_norm=mock.Mock(),
-            ffn=mock.Mock(),
+            ffn_hc=SimpleNamespace(
+                pre=mock.Mock(return_value=(collapsed, object(), object())),
+                post=mock.Mock(return_value=residual),
+            ),
+            ffn_norm=mock.Mock(side_effect=lambda value: value),
+            ffn=mock.Mock(return_value=collapsed),
             _moe_front_adapter=SimpleNamespace(supports=mock.Mock(return_value=False)),
-            _moe_front_required=True,
+            _moe_front_fallback_logged=False,
         )
 
         with mock.patch(
             "rtp_llm.models_py.modules.dsv4._record_tensor.should_record_layer",
             return_value=False,
-        ), self.assertRaisesRegex(RuntimeError, "MoE-front tensor or capacity"):
-            Block.forward_decode(
+        ):
+            output = Block.forward_decode(
                 block,
                 residual,
                 SimpleNamespace(),
                 input_ids,
                 attn_fn=lambda value: value,
             )
+
+        self.assertIs(output, residual)
+        block.ffn.assert_called_once()
+
+    def test_front_records_ffn_input_before_routed_expert_launch(self) -> None:
+        adapter, _ = _fake_adapter()
+        residual = torch.ones((2, 1, 4, adapter.dim), dtype=torch.bfloat16)
+        input_ids = torch.ones((2, 1), dtype=torch.int64)
+        events = []
+
+        def launch(tokens: int, device: torch.device) -> torch.Tensor:
+            events.append("ffn_launch")
+            return torch.empty((tokens, adapter.dim), dtype=torch.bfloat16)
+
+        adapter.executor.forward_prepacked = launch
+        adapter.forward(
+            residual,
+            input_ids,
+            ffn_input_observer=lambda _value: events.append("ffn_in"),
+        )
+
+        self.assertLess(events.index("ffn_in"), events.index("ffn_launch"))
 
     def test_fallback_records_ffn_input_before_launch(self) -> None:
         dim = 8
@@ -791,7 +871,6 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             ffn_norm=mock.Mock(side_effect=lambda value: value),
             ffn=mock.Mock(side_effect=run_ffn),
             _moe_front_adapter=None,
-            _moe_front_required=False,
             _moe_front_fallback_logged=False,
         )
 

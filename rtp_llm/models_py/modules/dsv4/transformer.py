@@ -7,6 +7,7 @@ all experts on one device). Used to validate end-to-end correctness with
 mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 """
 
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
@@ -225,7 +226,12 @@ class V4Transformer(nn.Module):
                         layer.enable_moe_front(required=mode == "required")
                 except Exception:
                     for layer in self.layers:
-                        layer.disable_moe_front()
+                        try:
+                            layer.disable_moe_front()
+                        except Exception:
+                            logging.exception(
+                                "Failed to clean up DSV4 MoE front after attach error"
+                            )
                     raise
                 if not all(
                     layer._moe_front_adapter is not None for layer in self.layers
