@@ -101,6 +101,27 @@ __device__ __forceinline__ void st_release(int* ptr, int val) {
 #endif
 }
 
+// Atomically add val to *ptr with release semantics, returning the old value
+__device__ __forceinline__ int atom_add_release(int* ptr, int val) {
+  int old_val = 0;
+#if (__CUDA_ARCH__ >= 700)
+  // SM70 and newer use memory consistency qualifiers
+  // Release pattern using acq_rel fence + relaxed modifier
+  // (The fence also releases data that was weakly-written by other threads prior to the last
+  // syncthreads). The "memory" clobber keeps the compiler from moving memory accesses across
+  // the fence/atomic pair.
+  asm volatile("fence.acq_rel.gpu;\n" ::: "memory");
+  asm volatile("atom.relaxed.gpu.global.add.s32 %0, [%1], %2;\n"
+               : "=r"(old_val)
+               : "l"(ptr), "r"(val)
+               : "memory");
+#else
+  __threadfence();
+  old_val = atomicAdd(ptr, val);
+#endif
+  return old_val;
+}
+
 // Wait until the value at ptr reaches target_val using acquire semantics
 // Only thread 0 spins, then all threads synchronize
 __device__ __forceinline__ void wait_ge(int* ptr, int target_val, int thread_idx) {
@@ -159,6 +180,106 @@ __device__ __forceinline__ void AdvanceRadixGroupBarrier(RadixRowState* state, i
   wait_ge(&state->arrival_counter, target, tx);
   barrier_phase++;
   __syncthreads();
+}
+
+template <bool SINGLE_CTA, typename OrderedType>
+__device__ __forceinline__ float RadixTopKDeterministicGroupSum(
+    float block_sum, float* shared_sum, RadixRowState* state, int& barrier_phase,
+    uint32_t ctas_per_group, uint32_t cta_in_group, uint32_t iter, uint32_t tx) {
+  if constexpr (SINGLE_CTA) {
+    if (tx == 0) {
+      *shared_sum = block_sum;
+    }
+    __syncthreads();
+    return *shared_sum;
+  } else {
+    // Reuse the slot reserved for the final radix round. The following
+    // iteration starts from the next ring slot and clears this slot before it
+    // is needed again.
+    constexpr uint32_t NUM_ROUNDS = sizeof(OrderedType) * 8 / 8;
+    const uint32_t scratch_idx = (iter * NUM_ROUNDS + NUM_ROUNDS - 1) % 3;
+
+    // Read-complete barrier for the radix path: no CTA may overwrite
+    // current_hist while another CTA is still copying it to shared memory.
+    // On the k >= vocab_size path it also provides the iteration handoff.
+    AdvanceRadixGroupBarrier(state, barrier_phase, ctas_per_group, tx);
+
+    if (tx == 0) {
+      state->histogram[scratch_idx][cta_in_group] = __float_as_uint(block_sum);
+    }
+
+    // Write-complete barrier: CTA 0 may reduce only after every block sum is
+    // visible in its fixed CTA-index slot.
+    AdvanceRadixGroupBarrier(state, barrier_phase, ctas_per_group, tx);
+
+    if (tx == 0 && cta_in_group == 0) {
+      float group_sum = 0.0f;
+      for (uint32_t i = 0; i < ctas_per_group; ++i) {
+        group_sum += __uint_as_float(state->histogram[scratch_idx][i]);
+      }
+      state->sum_topk = group_sum;
+    }
+
+    // Publish barrier: every CTA observes the completed ordered reduction before
+    // any CTA advances to a later persistent iteration and reuses global state.
+    AdvanceRadixGroupBarrier(state, barrier_phase, ctas_per_group, tx);
+    return state->sum_topk;
+  }
+}
+
+/*!
+ * \brief Reset the per-group state for the next launch, performed by the LAST CTA to finish.
+ *
+ * Each CTA marks its exit on the group arrival counter; the CTA that observes the final exit
+ * knows every peer CTA has already passed its last wait_ge spin, so clearing the state cannot
+ * strand a peer. Resetting from the leading CTA instead is racy: the leading CTA can pass the
+ * final barrier, finish its tail work and zero the arrival counter while a peer CTA that has
+ * already arrived is still spinning in wait_ge waiting to observe the barrier target. That
+ * peer then spins on the zeroed counter forever, permanently wedging the stream (issue #3610,
+ * observed as sampler hangs on SM120/SM121).
+ *
+ * \param state Per-group radix row state to reset
+ * \param det_scratch Optional per-group deterministic-collect scratch to clear (nullptr if
+ *                    unused)
+ * \param barrier_phase Number of barrier phases completed by every CTA of the group
+ * \param ctas_per_group Number of CTAs participating in the group
+ * \param tx Thread index within the block
+ */
+template <uint32_t BLOCK_THREADS>
+__device__ __forceinline__ void RadixGroupResetStateLastCTA(
+    RadixRowState* state, RadixDeterministicCollectScratch* det_scratch, int barrier_phase,
+    uint32_t ctas_per_group, uint32_t tx) {
+  constexpr uint32_t RADIX = 256;
+  __shared__ int s_is_last_cta;
+  // Converge the CTA before tx0's release-ordered exit mark so the fence's cumulativity
+  // covers every thread's prior writes (the syncthreads + thread-0 fence.acq_rel.gpu idiom
+  // documented on red_release/st_release above).
+  __syncthreads();
+  if (tx == 0) {
+    const int exit_target = (barrier_phase + 1) * static_cast<int>(ctas_per_group);
+    s_is_last_cta = (atom_add_release(&state->arrival_counter, 1) + 1 == exit_target);
+  }
+  __syncthreads();
+  if (s_is_last_cta) {
+    for (uint32_t buf = 0; buf < 3; ++buf) {
+      for (uint32_t i = tx; i < RADIX; i += BLOCK_THREADS) {
+        state->histogram[buf][i] = 0;
+      }
+    }
+    if (det_scratch != nullptr) {
+      static_assert(sizeof(RadixDeterministicCollectScratch) % sizeof(uint32_t) == 0);
+      uint32_t* det_words = reinterpret_cast<uint32_t*>(det_scratch);
+      constexpr uint32_t DET_WORDS = sizeof(RadixDeterministicCollectScratch) / sizeof(uint32_t);
+      for (uint32_t i = tx; i < DET_WORDS; i += BLOCK_THREADS) {
+        det_words[i] = 0;
+      }
+    }
+    // Ensure all threads' clears complete before tx0 publishes the counter reset.
+    __syncthreads();
+    if (tx == 0) {
+      st_release(&state->arrival_counter, 0);
+    }
+  }
 }
 
 /*!
@@ -1295,26 +1416,12 @@ __global__ void __launch_bounds__(BLOCK_THREADS) RadixTopKKernel_Unified(
     }
   }
 
-  // Clear histogram buffers and reset arrival counter for next kernel launch (only for multi-CTA)
+  // Reset group state for the next launch, from the last CTA to exit (only for multi-CTA).
+  // The leading CTA must not do this: it could zero the arrival counter while a peer CTA is
+  // still spinning in its final wait_ge, wedging the stream forever (issue #3610).
   if constexpr (!SINGLE_CTA) {
-    if (cta_in_group == 0) {
-      for (uint32_t buf = 0; buf < 3; ++buf) {
-        for (uint32_t i = tx; i < RADIX; i += BLOCK_THREADS) {
-          state->histogram[buf][i] = 0;
-        }
-      }
-      if constexpr (DETERMINISTIC) {
-        static_assert(sizeof(RadixDeterministicCollectScratch) % sizeof(uint32_t) == 0);
-        uint32_t* det_words = reinterpret_cast<uint32_t*>(det_scratch);
-        constexpr uint32_t DET_WORDS = sizeof(RadixDeterministicCollectScratch) / sizeof(uint32_t);
-        for (uint32_t i = tx; i < DET_WORDS; i += BLOCK_THREADS) {
-          det_words[i] = 0;
-        }
-      }
-      if (tx == 0) {
-        st_release(&state->arrival_counter, 0);
-      }
-    }
+    RadixGroupResetStateLastCTA<BLOCK_THREADS>(state, DETERMINISTIC ? det_scratch : nullptr,
+                                               barrier_phase, ctas_per_group, tx);
   }
 
 #undef shared_output_counter
@@ -1445,20 +1552,11 @@ __global__ void __launch_bounds__(BLOCK_THREADS) RadixTopKMaskLogitsKernel_Multi
     }
   }
 
-  // Clear histogram buffers and reset arrival counter for next kernel launch (only for multi-CTA)
+  // Reset group state for the next launch, from the last CTA to exit (only for multi-CTA).
+  // The leading CTA must not do this: it could zero the arrival counter while a peer CTA is
+  // still spinning in its final wait_ge, wedging the stream forever (issue #3610).
   if constexpr (!SINGLE_CTA) {
-    // Only leading CTA clears the buffers using release semantics
-    if (cta_in_group == 0) {
-      for (uint32_t buf = 0; buf < 3; ++buf) {
-        for (uint32_t i = tx; i < RADIX; i += BLOCK_THREADS) {
-          state->histogram[buf][i] = 0;
-        }
-      }
-
-      if (tx == 0) {
-        st_release(&state->arrival_counter, 0);
-      }
-    }
+    RadixGroupResetStateLastCTA<BLOCK_THREADS>(state, nullptr, barrier_phase, ctas_per_group, tx);
   }
 }
 
@@ -1525,7 +1623,6 @@ cudaError_t RadixTopKMaskLogitsMultiCTA(DType* logits, DType* masked_logits, IdT
           RadixTopKMaskLogitsKernel_MultiCTA<BLOCK_THREADS, VEC_SIZE, false, DType, IdType>;
       FLASHINFER_CUDA_CALL(
           cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-
       dim3 nblks(total_ctas);
       dim3 nthrs(BLOCK_THREADS);
       void* args[] = {&logits,     &masked_logits,     &top_k_arr,  &top_k_val,     &vocab_size,
@@ -1635,31 +1732,9 @@ __global__ void __launch_bounds__(BLOCK_THREADS) RadixTopKRenormProbKernel_Multi
       float block_sum = BlockReduce(temp_storage).Sum(thread_sum);
       __syncthreads();
 
-      if constexpr (!SINGLE_CTA) {
-        // Multi-CTA: atomic add to global sum
-        if (tx == 0) {
-          if (cta_in_group == 0) {
-            state->sum_topk = 0.0f;  // First CTA initializes
-          }
-        }
-        // Barrier for initialization
-        AdvanceRadixGroupBarrier(state, barrier_phase, ctas_per_group, tx);
-
-        if (tx == 0 && block_sum > 0) {
-          atomicAdd(&state->sum_topk, block_sum);
-        }
-
-        // Barrier to ensure all CTAs have contributed
-        AdvanceRadixGroupBarrier(state, barrier_phase, ctas_per_group, tx);
-        normalizer = math::ptx_rcp(max(state->sum_topk, 1e-8f));
-      } else {
-        // Single-CTA: use block_sum directly
-        if (tx == 0) {
-          *shared_sum = block_sum;
-        }
-        __syncthreads();
-        normalizer = math::ptx_rcp(max(*shared_sum, 1e-8f));
-      }
+      const float group_sum = RadixTopKDeterministicGroupSum<SINGLE_CTA, OrderedType>(
+          block_sum, shared_sum, state, barrier_phase, ctas_per_group, cta_in_group, iter, tx);
+      normalizer = math::ptx_rcp(max(group_sum, 1e-8f));
 
       // Normalize and store
 #pragma unroll 2
@@ -1730,31 +1805,9 @@ __global__ void __launch_bounds__(BLOCK_THREADS) RadixTopKRenormProbKernel_Multi
     float block_sum = BlockReduce(temp_storage).Sum(thread_sum);
     __syncthreads();
 
-    if constexpr (!SINGLE_CTA) {
-      // Multi-CTA: atomic add to global sum
-      if (tx == 0) {
-        if (cta_in_group == 0) {
-          state->sum_topk = 0.0f;  // First CTA initializes
-        }
-      }
-      // Barrier for initialization
-      AdvanceRadixGroupBarrier(state, barrier_phase, ctas_per_group, tx);
-
-      if (tx == 0 && block_sum > 0) {
-        atomicAdd(&state->sum_topk, block_sum);
-      }
-
-      // Barrier to ensure all CTAs have contributed
-      AdvanceRadixGroupBarrier(state, barrier_phase, ctas_per_group, tx);
-      normalizer = math::ptx_rcp(max(state->sum_topk, 1e-8f));
-    } else {
-      // Single-CTA: use block_sum directly
-      if (tx == 0) {
-        *shared_sum = block_sum;
-      }
-      __syncthreads();
-      normalizer = math::ptx_rcp(max(*shared_sum, 1e-8f));
-    }
+    const float group_sum = RadixTopKDeterministicGroupSum<SINGLE_CTA, OrderedType>(
+        block_sum, shared_sum, state, barrier_phase, ctas_per_group, cta_in_group, iter, tx);
+    normalizer = math::ptx_rcp(max(group_sum, 1e-8f));
 
     // ========== Stage 3: Normalize elements >= pivot, set others to 0 ==========
 #pragma unroll 2
@@ -1774,20 +1827,11 @@ __global__ void __launch_bounds__(BLOCK_THREADS) RadixTopKRenormProbKernel_Multi
     }
   }
 
-  // Clear histogram buffers and reset arrival counter for next kernel launch (only for multi-CTA)
+  // Reset group state for the next launch, from the last CTA to exit (only for multi-CTA).
+  // The leading CTA must not do this: it could zero the arrival counter while a peer CTA is
+  // still spinning in its final wait_ge, wedging the stream forever (issue #3610).
   if constexpr (!SINGLE_CTA) {
-    // Only leading CTA clears the buffers using release semantics
-    if (cta_in_group == 0) {
-      for (uint32_t buf = 0; buf < 3; ++buf) {
-        for (uint32_t i = tx; i < RADIX; i += BLOCK_THREADS) {
-          state->histogram[buf][i] = 0;
-        }
-      }
-
-      if (tx == 0) {
-        st_release(&state->arrival_counter, 0);
-      }
-    }
+    RadixGroupResetStateLastCTA<BLOCK_THREADS>(state, nullptr, barrier_phase, ctas_per_group, tx);
   }
 }
 
@@ -1828,6 +1872,9 @@ cudaError_t RadixTopKRenormProbMultiCTA(DType* probs, DType* renormed_prob, IdTy
   uint32_t chunk_size = ceil_div(vocab_size, ctas_per_group);
   chunk_size = round_up(chunk_size, vec_size);
   chunk_size = std::min(chunk_size, max_chunk_elements);
+  if (ctas_per_group > RADIX_TOPK_MAX_DETERMINISTIC_CTAS_PER_GROUP) {
+    return cudaErrorInvalidConfiguration;
+  }
 
   const uint32_t smem_size = fixed_smem_aligned + chunk_size * sizeof(OrderedType);
   const bool single_cta = (ctas_per_group == 1);
@@ -1854,7 +1901,6 @@ cudaError_t RadixTopKRenormProbMultiCTA(DType* probs, DType* renormed_prob, IdTy
           RadixTopKRenormProbKernel_MultiCTA<BLOCK_THREADS, VEC_SIZE, false, DType, IdType>;
       FLASHINFER_CUDA_CALL(
           cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-
       dim3 nblks(total_ctas);
       dim3 nthrs(BLOCK_THREADS);
       void* args[] = {&probs,      &renormed_prob,     &top_k_arr,  &top_k_val,     &vocab_size,

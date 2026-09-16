@@ -265,6 +265,9 @@ DeterministicInclusiveSum(const float*                                          
     for (uint32_t i = 0; i < VEC_SIZE; ++i) {
         out_data[i] = smem_prefix_sum[threadIdx.x / 32] + thread_exclusive_prefix_sum + thread_data[i];
     }
+    // All warps must finish reading deterministic_scan before the shared
+    // block-primitive union is reused by another CUB collective.
+    __syncthreads();
 }
 
 template<uint32_t VEC_SIZE, uint32_t BLOCK_THREADS, BlockReduceAlgorithm REDUCE_ALGORITHM, typename TempStorage>

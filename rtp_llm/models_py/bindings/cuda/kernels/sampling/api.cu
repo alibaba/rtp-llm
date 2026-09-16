@@ -326,7 +326,10 @@ void top_p_renorm_probs(torch::Tensor                probs,
         return;
     }
 
-    constexpr bool deterministic  = false;
+    // MTP consumes the renormalized distribution in rejection sampling. Keep
+    // this reproducible for a fixed input/seed by using AIR's exact integer
+    // histogram accumulation instead of cross-CTA FP32 atomicAdd ordering.
+    constexpr bool deterministic  = true;
     const auto     workspace_size = air_top_p_workspace_size<deterministic, float>(batch_size, vocab_size);
     auto           workspace = torch::empty({static_cast<int64_t>(workspace_size)}, probs.options().dtype(at::kByte));
 

@@ -146,6 +146,9 @@ DeterministicInclusiveSum(const T*                                              
     for (uint32_t i = 0; i < VEC_SIZE; ++i) {
         out_data[i] = smem_prefix_sum[threadIdx.x / 32] + thread_exclusive_prefix_sum + thread_data[i];
     }
+    // All warps must finish reading deterministic_scan before the shared
+    // block-primitive union is reused by BlockAdjacentDifference.
+    __syncthreads();
 }
 
 template<uint32_t             VEC_SIZE,
@@ -448,7 +451,10 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                     &draft_probs_point_mass};
 
     DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
-        auto kernel = rejection_sampling_kernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, VEC_SIZE, false, DType, IdType>;
+        // Fixed uniforms must select the same residual token. The deterministic
+        // path uses an explicit, fixed-order inclusive scan rather than CUB's
+        // faster floating-point BlockScan implementation.
+        auto kernel = rejection_sampling_kernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, VEC_SIZE, true, DType, IdType>;
         FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
         FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
     });

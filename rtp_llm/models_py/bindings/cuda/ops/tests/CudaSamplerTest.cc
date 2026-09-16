@@ -9,6 +9,7 @@
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <iostream>
 #include <string>
@@ -145,6 +146,32 @@ void assertSamplingStatsClose(const std::string& name, const SamplingAccuracySta
     ASSERT_LT(stats.l1, 0.08) << name;
     ASSERT_LT(stats.max_abs, 0.04) << name;
     ASSERT_LT(stats.kl, 0.02) << name;
+}
+
+void assertFloatTensorBitwiseEqual(const torch::Tensor& actual,
+                                   const torch::Tensor& expected,
+                                   const char*          stage,
+                                   int                  iteration) {
+    auto actual_cpu   = actual.cpu().contiguous();
+    auto expected_cpu = expected.cpu().contiguous();
+    ASSERT_EQ(actual_cpu.scalar_type(), torch::kFloat32);
+    ASSERT_EQ(expected_cpu.scalar_type(), torch::kFloat32);
+    ASSERT_EQ(actual_cpu.numel(), expected_cpu.numel());
+
+    const auto bytes = static_cast<size_t>(actual_cpu.numel()) * sizeof(float);
+    if (std::memcmp(actual_cpu.data_ptr<float>(), expected_cpu.data_ptr<float>(), bytes) == 0) {
+        return;
+    }
+
+    const auto* actual_bits   = reinterpret_cast<const uint32_t*>(actual_cpu.data_ptr<float>());
+    const auto* expected_bits = reinterpret_cast<const uint32_t*>(expected_cpu.data_ptr<float>());
+    for (int64_t i = 0; i < actual_cpu.numel(); ++i) {
+        if (actual_bits[i] != expected_bits[i]) {
+            FAIL() << stage << " differs at iteration " << iteration << ", flat index " << i << ": 0x" << std::hex
+                   << actual_bits[i] << " vs 0x" << expected_bits[i];
+        }
+    }
+    FAIL() << stage << " differs at iteration " << iteration;
 }
 
 }  // namespace
@@ -512,6 +539,59 @@ TEST_F(CudaSamplerTest, DISABLED_compareLatestFlashinferSamplingAccuracyVsCurren
 
         assertSamplingStatsClose(c.name + "_old", old_stats);
         assertSamplingStatsClose(c.name + "_new", new_stats);
+    }
+}
+
+TEST_F(CudaSamplerTest, testQwen35LargeVocabRenormIsBitwiseStable) {
+    constexpr int64_t batch_size = 32;
+    constexpr int64_t vocab_size = 248320;
+    constexpr int32_t top_k      = 20;
+    constexpr float   top_p      = 0.95f;
+    constexpr int     repeats    = 64;
+
+    auto float_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto int_options   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    torch::manual_seed(20260916);
+    auto one_row = torch::rand({1, vocab_size}, torch::TensorOptions().dtype(torch::kFloat32));
+    one_row.div_(one_row.sum());
+    auto probs   = one_row.repeat({batch_size, 1}).to(torch::kCUDA).contiguous();
+    auto top_k_d = torch::full({batch_size}, top_k, int_options);
+    auto top_p_d = torch::full({batch_size}, top_p, float_options);
+    auto stream  = at::cuda::getCurrentCUDAStream().stream();
+
+    torch::Tensor baseline_top_k;
+    torch::Tensor baseline_top_k_top_p;
+    for (int iteration = 0; iteration < repeats; ++iteration) {
+        auto top_k_probs       = torch::empty_like(probs);
+        auto top_k_top_p_probs = torch::empty_like(probs);
+        rtp_llm::top_k_renorm_probs(probs, top_k_probs, top_k_d, 0, reinterpret_cast<int64_t>(stream));
+        rtp_llm::top_p_renorm_probs(top_k_probs, top_k_top_p_probs, top_p_d, 1.0, reinterpret_cast<int64_t>(stream));
+        ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+
+        if (iteration == 0) {
+            baseline_top_k       = top_k_probs.cpu().contiguous();
+            baseline_top_k_top_p = top_k_top_p_probs.cpu().contiguous();
+            ASSERT_TRUE(torch::isfinite(baseline_top_k).all().item<bool>());
+            ASSERT_TRUE(torch::isfinite(baseline_top_k_top_p).all().item<bool>());
+            ASSERT_TRUE(torch::allclose(baseline_top_k.sum(1), torch::ones({batch_size}), 1e-5, 1e-5));
+            ASSERT_TRUE(torch::allclose(baseline_top_k_top_p.sum(1), torch::ones({batch_size}), 1e-5, 1e-5));
+            ASSERT_EQ((baseline_top_k > 0).sum(1).min().item<int64_t>(), top_k);
+            ASSERT_EQ((baseline_top_k > 0).sum(1).max().item<int64_t>(), top_k);
+            ASSERT_GT((baseline_top_k_top_p > 0).sum(1).min().item<int64_t>(), 0);
+            ASSERT_LE((baseline_top_k_top_p > 0).sum(1).max().item<int64_t>(), top_k);
+            for (int64_t row = 1; row < batch_size; ++row) {
+                assertFloatTensorBitwiseEqual(
+                    baseline_top_k[row], baseline_top_k[0], "top-k renorm rows", static_cast<int>(row));
+                assertFloatTensorBitwiseEqual(baseline_top_k_top_p[row],
+                                              baseline_top_k_top_p[0],
+                                              "top-k/top-p renorm rows",
+                                              static_cast<int>(row));
+            }
+            continue;
+        }
+
+        assertFloatTensorBitwiseEqual(top_k_probs, baseline_top_k, "top-k renorm", iteration);
+        assertFloatTensorBitwiseEqual(top_k_top_p_probs, baseline_top_k_top_p, "top-k/top-p renorm", iteration);
     }
 }
 
