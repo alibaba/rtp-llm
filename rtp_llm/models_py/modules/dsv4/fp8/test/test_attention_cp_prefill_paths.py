@@ -87,7 +87,7 @@ def _make_dispatch_layer(compress_ratio: int, seq: list) -> AttentionFP8:
         side_effect=lambda x, p: seq.append("common") or None
     )
     layer._prefill_compute_qkv = MagicMock(  # type: ignore[assignment]
-        side_effect=lambda x, c: seq.append("qkv") or _make_qkv()
+        side_effect=lambda x, c, shared_input_quant=None: seq.append("qkv") or _make_qkv()
     )
     layer._ensure_prefill_kv_full = MagicMock(  # type: ignore[assignment]
         side_effect=lambda qkv, c: seq.append("ensure") or qkv
@@ -129,6 +129,7 @@ class AttentionCPPrefillDispatchTest(unittest.TestCase):
         compress_ratio: int,
         common: PrefillMeta,
         env_value: str,
+        shared_input_quant=None,
     ) -> list:
         seq: list = []
         layer = _make_dispatch_layer(compress_ratio, seq)
@@ -136,7 +137,15 @@ class AttentionCPPrefillDispatchTest(unittest.TestCase):
             lambda x, p: seq.append("common") or common
         )
         with patch.dict(os.environ, {"DSV4_PREFILL_CP_OVERLAP": env_value}):
-            out = layer._forward_prefill(self.x, self.positions)
+            out = layer._forward_prefill(
+                self.x, self.positions, shared_input_quant=shared_input_quant
+            )
+        layer._prefill_compute_qkv.assert_called_once()  # type: ignore[attr-defined]
+        call = layer._prefill_compute_qkv.call_args  # type: ignore[attr-defined]
+        self.assertIs(call.args[0], self.x)
+        self.assertIs(call.args[1], common)
+        self.assertEqual(set(call.kwargs), {"shared_input_quant"})
+        self.assertIs(call.kwargs["shared_input_quant"], shared_input_quant)
         self.assertEqual(tuple(out.shape), (3, 8))
         return seq
 
@@ -196,16 +205,36 @@ class AttentionCPPrefillDispatchTest(unittest.TestCase):
         self.assertEqual(seq, ["common", "qkv", "ensure", "swa_write", "hca_path"])
 
 
+    def test_dispatch_forwards_shared_input_quant_without_repacking(self) -> None:
+        shared = (torch.zeros(3, 4, dtype=torch.uint8), torch.ones(3, 1))
+        common = _make_common(cp_on=True, device=torch.device("cuda"))
+        for ratio in (0, 4, 128):
+            for overlap in ("0", "1"):
+                with self.subTest(compress_ratio=ratio, overlap=overlap):
+                    self._run_dispatch(
+                        compress_ratio=ratio,
+                        common=common,
+                        env_value=overlap,
+                        shared_input_quant=shared,
+                    )
+
+
 class AttentionSwaAsyncGatherTest(unittest.TestCase):
     def test_prefill_compute_qkv_uses_sync_current_swa_kv_full(self) -> None:
         seq: list = []
         layer = self._make_qkv_layer(seq)
         common = _make_common(cp_on=True, device=torch.device("cuda"))
 
+        def fake_kv_gather(t, ctx, *, kind, profile_name):
+            self.assertIs(ctx, common.cp_ctx)
+            self.assertEqual(kind, "kv")
+            self.assertEqual(profile_name, "dsv4.cp.all_gather.L03.swa_kv_full.varlen")
+            return t
+
         with (
-            patch.dict(os.environ, {"DSV4_PREFILL_CP_OVERLAP": "1"}),
+            patch.dict(os.environ, {"DSV4_PREFILL_CP_OVERLAP": "1", "DSV4_CP_SWA_KV_ASYNC": "0"}),
             patch.object(
-                attention_mod, "cp_all_gather_full_varlen", lambda t, *a, **k: t
+                attention_mod, "cp_all_gather_full_varlen_fp8", fake_kv_gather
             ),
             patch.object(attention_mod, "fused_rmsnorm_rope", lambda t, *a, **k: t),
         ):
@@ -243,23 +272,29 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
         layer.wq_a = FakeQuantLinear("wq_a", 6)
         layer.wkv = FakeQuantLinear("wkv", 6)
 
-        with patch.object(attention_mod, "fused_rmsnorm_rope", lambda t, *a, **k: t):
-            qkv = layer._prefill_compute_qkv(
-                torch.zeros(3, 4, dtype=torch.bfloat16),
-                common,
-            )
-
-        self.assertEqual(
-            seq,
-            [
-                "quant_wq_a",
-                "gemm_wq_a_fp8_scale",
-                "gemm_wkv_fp8_scale",
-            ],
-        )
-        self.assertIsNone(qkv.q)
-        self.assertEqual(tuple(qkv.qr.shape), (3, 6))
-        self.assertEqual(tuple(qkv.kv_full.shape), (3, 6))
+        # Exercise both architecture branches explicitly; the host GPU must not
+        # decide whether this mocked DeepGEMM contract is tested.
+        for sm12x in (False, True):
+            with (
+                self.subTest(sm12x=sm12x),
+                patch.object(torch.cuda, "is_available", return_value=True),
+                patch.object(attention_mod, "is_sm12x", return_value=sm12x),
+                patch.object(attention_mod, "fused_rmsnorm_rope", lambda t, *a, **k: t),
+            ):
+                seq.clear()
+                qkv = layer._prefill_compute_qkv(
+                    torch.zeros(3, 4, dtype=torch.bfloat16),
+                    common,
+                )
+                self.assertEqual(
+                    seq,
+                    ["lin_wq_a", "lin_wkv"] if sm12x else [
+                        "quant_wq_a", "gemm_wq_a_fp8_scale", "gemm_wkv_fp8_scale"
+                    ],
+                )
+                self.assertIsNone(qkv.q)
+                self.assertEqual(tuple(qkv.qr.shape), (3, 6))
+                self.assertEqual(tuple(qkv.kv_full.shape), (3, 2, 3) if sm12x else (3, 6))
 
     def test_materialize_prefill_q_reuses_wq_b_output_for_rope(self) -> None:
         # The deferred q_lora_b + RoPE now live in _materialize_prefill_q, which
@@ -436,8 +471,27 @@ class AttentionRawQMergeWorkspaceTest(unittest.TestCase):
                     lambda **kwargs: dequant_calls.append(kwargs),
                 )
             )
+            q_gather_calls = []
+
+            def fake_q_gather(t, ctx, *, kind):
+                self.assertIs(t, qkv.q)
+                self.assertIs(ctx, common.cp_ctx)
+                self.assertEqual(kind, "q")
+                q_gather_calls.append(kind)
+                return t
+
+            # The Q path now calls the optional FP8 gather wrapper directly.
+            # Stub that actual boundary; do not fall through into a real CP
+            # collective with this intentionally minimal fake context.
             stack.enter_context(
-                patch.object(attention_mod, "cp_all_gather_full_varlen", lambda t, c: t)
+                patch.object(attention_mod, "cp_all_gather_full_varlen_fp8", fake_q_gather)
+            )
+            stack.enter_context(
+                patch.object(
+                    attention_mod,
+                    "cp_all_gather_full_varlen",
+                    side_effect=AssertionError("cold dense-index path needs no generic gather"),
+                )
             )
             stack.enter_context(
                 patch.object(collective_torch, "all_gather", lambda t, group=None: t)
@@ -454,6 +508,7 @@ class AttentionRawQMergeWorkspaceTest(unittest.TestCase):
 
         self.assertEqual(tuple(out.shape), (1, 3, 1, 2))
         self.assertEqual(dequant_calls, [])
+        self.assertEqual(q_gather_calls, ["q"])
 
 
 if __name__ == "__main__":
