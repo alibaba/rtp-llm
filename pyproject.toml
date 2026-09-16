@@ -332,6 +332,10 @@ filterwarnings = [
 # =============================================================================
 [tool.rtp_llm.pytest_ci]
 cuda13_only_paths = [
+    "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/local_loop_cuda_test.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/grouped_moe_equivalence_test.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/mega_moe_routed_only_execution_test.py",
+    "rtp_llm/models_py/triton_kernels/moe/test/test_mega_moe_gate_pack.py",
     "rtp_llm/test/dsv4",
     "rtp_llm/models_py/modules/dsv4",
     "rtp_llm/models_py/modules/factory/fused_moe/tests/test_strategy_select.py",
@@ -363,12 +367,15 @@ forbid_skips = true
 [tool.rtp_llm.pytest_ci.profiles.py_ut_cuda13_arm]
 description = "CUDA 13 arm mainline Python targets in isolated pytest processes"
 gpu_type = "SM100_ARM_CU13"
-minimum_count = 88
+minimum_count = 99
 forbid_skips = true
 isolate_all_paths = true
 require_isolated_tests = true
 markexpr = "not manual and not smoke"
 paths = [
+    "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/local_loop_cuda_test.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/grouped_moe_equivalence_test.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/mega_moe_routed_only_execution_test.py",
     "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_moe_weight_adapter.py",
     "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_mega_moe_jit_warmup.py",
     "rtp_llm/models_py/modules/factory/fused_moe/utils/test/mega_moe_static_buf_test.py",
@@ -467,18 +474,22 @@ paths = [
     "rtp_llm/test/pytest/pytest_main_test.py",
 ]
 [tool.rtp_llm.pytest_ci.profiles.py_ut_cuda13_arm.isolated_gpu_counts]
+"rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/mega_moe_routed_only_execution_test.py" = 2
 "rtp_llm/models_py/modules/dsv4/fp8/test/test_topk_v3.py" = 2
 "rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_cp_padded_gather_distributed.py" = 2
 
 [tool.rtp_llm.pytest_ci.profiles.py_ut_cuda13_x86]
 description = "CUDA 13 x86 mainline Python targets in isolated pytest processes"
 gpu_type = "L20D_TEST"
-minimum_count = 25
+minimum_count = 36
 forbid_skips = true
 isolate_all_paths = true
 require_isolated_tests = true
 markexpr = "not manual and not smoke"
 paths = [
+    "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/local_loop_cuda_test.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/grouped_moe_equivalence_test.py",
+    "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/mega_moe_routed_only_execution_test.py",
     "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_moe_weight_adapter.py",
     "rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_mega_moe_jit_warmup.py",
     "rtp_llm/models_py/modules/factory/fused_moe/utils/test/mega_moe_static_buf_test.py",
@@ -514,6 +525,7 @@ paths = [
     "rtp_llm/models_py/modules/dsv4/fp8/test/test_fused_decode_meta_comprehensive.py",
 ]
 [tool.rtp_llm.pytest_ci.profiles.py_ut_cuda13_x86.isolated_gpu_counts]
+"rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/mega_moe_routed_only_execution_test.py" = 2
 "rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_cp_padded_gather_distributed.py" = 2
 
 [tool.rtp_llm.pytest_ci.profiles.py_ut_sm8x]
@@ -582,9 +594,9 @@ markexpr = "SM100 and not SM100_ARM and not smoke and not perf and not manual"
 description = "Python UT on AMD MI308X (py-ut-amd)"
 gpu_type = "MI308X"
 minimum_count = 1
-# 36 main-baseline Python targets, two BeamSearch cases, and three existing
-# torch_moe_ref cases. Includes all 21 GDN decode / four chunk-prefill inputs.
-expected_count = 286
+# Mainline additions plus the original ROCm boundary coverage. The NVIDIA-only
+# dispatch guard runs on H20; report-validation errors are not test cases.
+expected_count = 382
 forbid_skips = true
 remote_env = { RTP_LLM_REQUIRE_ACCELERATOR = "1" }
 paths = [
@@ -607,6 +619,7 @@ paths = [
     "rtp_llm/models_py/modules/factory/fused_moe/impl/rocm/test/",
     "rtp_llm/models_py/modules/factory/linear/impl/rocm/test/",
     "rtp_llm/models_py/model_desc/test/qwen3_next_qkvz_ba_fusion_test.py",
+    "rtp_llm/models_py/model_desc/test/qwen_gdn_graph_replay_test.py",
     "rtp_llm/models_py/distributed/test/moriep_test.py",
     "rtp_llm/models_py/triton_kernels/fla/test/test_flydsl_chunk_gdn_cache_store.py",
     "rtp_llm/utils/test/ckpt_database_test.py",

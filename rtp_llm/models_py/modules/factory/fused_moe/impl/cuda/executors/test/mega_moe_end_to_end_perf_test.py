@@ -8,6 +8,7 @@ import unittest
 from datetime import timedelta
 from statistics import median
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -208,6 +209,8 @@ def _perf_worker(rank: int, world_size: int, rendezvous_path: str) -> None:
             dist.destroy_process_group()
 
 
+@pytest.mark.manual
+@pytest.mark.gpu(type="SM100_ARM_CU13", count=2)
 class MegaMoeEndToEndPerfTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

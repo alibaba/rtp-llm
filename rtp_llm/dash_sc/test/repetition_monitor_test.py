@@ -68,14 +68,17 @@ def _fresh_native_status():
     return _native_status(None)
 
 
-def _load_bazel_packaged_native_module():
-    runfiles_root = Path(os.environ["TEST_SRCDIR"])
-    workspace = os.environ["TEST_WORKSPACE"]
+def _load_packaged_native_module():
     extension_path = (
-        runfiles_root
-        / workspace
-        / "rtp_llm/cpp/repetition/libonline_repetition_tracker.so"
+        Path(repetition_monitor.__file__).resolve().parents[1]
+        / "libs/libonline_repetition_tracker.so"
     )
+    if not extension_path.is_file() and os.environ.get("TEST_SRCDIR"):
+        extension_path = (
+            Path(os.environ["TEST_SRCDIR"])
+            / os.environ.get("TEST_WORKSPACE", "")
+            / "rtp_llm/cpp/repetition/libonline_repetition_tracker.so"
+        )
     if not extension_path.is_file():
         raise FileNotFoundError(
             f"packaged repetition tracker not found: {extension_path}"
@@ -127,7 +130,7 @@ class NativeAvailabilityTest(TestCase):
         self.assertEqual(len(logs.output), 1)
 
     def test_packaged_native_tracker_streams_across_chunks(self) -> None:
-        native, extension_path = _load_bazel_packaged_native_module()
+        native, extension_path = _load_packaged_native_module()
         self.assertEqual(Path(native.__file__), extension_path)
         self.assertEqual(native.MAX_PERIOD, MAX_OUTPUT_REPETITION_PERIOD)
 

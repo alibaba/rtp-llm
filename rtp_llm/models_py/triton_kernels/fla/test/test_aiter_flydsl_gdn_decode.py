@@ -767,6 +767,7 @@ class AiterFlydslGdnDecodeCommonTest(unittest.TestCase):
 
         self.assertIn("not validated AMD CDNA3/gfx942", reason)
 
+    @pytest.mark.gpu(type="H20")
     @unittest.skipIf(torch.version.hip is not None, "NVIDIA-only dispatch guard")
     def test_real_nvidia_device_rejects_aiter_dispatch(self):
         valid = _make_decode_inputs()

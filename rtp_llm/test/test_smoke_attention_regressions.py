@@ -234,7 +234,9 @@ def test_paged_cuda_graph_plan_matches_padded_query_buffer():
     )
 
     assert "self.is_causal = attn_configs.is_causal" in init_source
-    assert "causal=self.is_causal" in prepare_source
+    plan_source = ast.unparse(_find_method(paged_op, "_plan_prefill_wrapper"))
+    assert "self._plan_prefill_wrapper(qo_indptr)" in prepare_source
+    assert "causal=self.is_causal" in plan_source
     assert "qo_indptr = self.qo_indptr" in prepare_source
     assert "offsets + attn_inputs.input_lengths" not in prepare_source
 

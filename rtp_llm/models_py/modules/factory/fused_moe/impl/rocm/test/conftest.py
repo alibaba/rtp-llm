@@ -16,6 +16,7 @@ if not _aiter_available:
     # directory must NOT be named rocm_*/deepep_*/moriep_* or it will be silently
     # ignored when aiter is unavailable.
     collect_ignore_glob = [
+        "test_generic_moe_allreduce.py",
         "rocm_*_test.py",
         "deepep_*_test.py",
         "moriep_*_test.py",

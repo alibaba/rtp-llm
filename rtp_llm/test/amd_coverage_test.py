@@ -22,10 +22,10 @@ def _baseline_nodeids():
     ]
 
 
-@pytest.mark.parametrize("missing", range(49))
+@pytest.mark.parametrize("missing", range(50))
 def test_missing_baseline_target_cannot_be_replaced_by_unrelated_cases(missing):
     nodeids = _baseline_nodeids()
-    assert len(nodeids) == 49  # 38 original identities plus 11 mainline additions.
+    assert len(nodeids) == 50  # 38 original identities plus 12 mainline additions.
     validate_amd_coverage(nodeids)
     nodeids.pop(missing)
     nodeids.extend(f"other.py::test_other[{i}]" for i in range(300))
@@ -45,6 +45,43 @@ def test_amd_route_preserves_multicard_requirements(target):
     route_amd_items([item])
     assert markers[0].kwargs == {"type": "MI308X", "count": target.gpu_count}
     assert markers[1].kwargs == {"type": "H20"}
+
+
+def test_mainline_graph_replay_target_receives_four_gpus():
+    target = next(t for t in AMD_TARGETS if t.name == "test_trt_allreduce_graph_replay")
+    assert target.gpu_count == 4
+
+
+def test_nvidia_dispatch_guard_keeps_cuda_route():
+    nodeid = (
+        "rtp_llm/models_py/triton_kernels/fla/test/test_aiter_flydsl_gdn_decode.py"
+        "::AiterFlydslGdnDecodeCommonTest::test_real_nvidia_device_rejects_aiter_dispatch"
+    )
+    markers = [pytest.mark.gpu(type="H20")]
+    item = SimpleNamespace(
+        nodeid=nodeid,
+        add_marker=lambda marker, append: markers.insert(0, marker),
+    )
+    route_amd_items([item])
+    assert len(markers) == 1
+    assert markers[0].kwargs == {"type": "H20"}
+    assert not any(target.matches(nodeid) for target in AMD_TARGETS)
+
+
+def test_isolated_native_binding_inherits_torch_and_existing_library_paths(monkeypatch):
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location(
+        "pywrapped_adapter",
+        root / "rtp_llm/cpp/models/test/pywrapped_model_cache_store_integration_test.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/existing/rocm/lib")
+    paths = module._native_test_env()["LD_LIBRARY_PATH"].split(":")
+    assert str(Path(module.torch.__file__).resolve().parent / "lib") in paths
+    assert str(root / "rtp_llm/libs") in paths
+    assert str(root / "rtp_llm/libs/test") in paths
+    assert "/existing/rocm/lib" in paths
 
 
 @pytest.mark.parametrize(

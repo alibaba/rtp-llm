@@ -1,12 +1,10 @@
 """ROCm Qwen replay contracts, independent of NVIDIA-only model imports."""
 
-import importlib.util
-import sys
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
 import torch
 
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
@@ -133,17 +131,11 @@ class QwenGdnGraphReplayTest(unittest.TestCase):
             get_typemeta,
         )
 
-        relative = Path("rtp_llm/cpp/cuda_graph/tests/libtest_cuda_graph_runner.so")
-        root = Path(__file__).resolve().parents[4]
-        library = root / relative
-        if not library.exists():
-            library = root / "bazel-bin" / relative
-        spec = importlib.util.spec_from_file_location(
-            "libtest_cuda_graph_runner", library
+        from rtp_llm.cpp.cuda_graph.tests.cuda_graph_test_runner import (
+            load_cuda_graph_test_binding,
         )
-        extension = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = extension
-        spec.loader.exec_module(extension)
+
+        extension = load_cuda_graph_test_binding()
 
         class Model:
             def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
@@ -307,6 +299,7 @@ class QwenGdnGraphReplayTest(unittest.TestCase):
             self.assertTrue(_is_cuda_graph_forward(inputs, impls))
             self.assertFalse(_is_cuda_graph_forward(inputs, {"full": full}))
 
+    @pytest.mark.gpu(type="MI308X")
     @unittest.skipUnless(torch.version.hip is not None, "requires ROCm")
     def test_model_callback_with_real_flydsl_graph_replay(self):
         from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_decode import (

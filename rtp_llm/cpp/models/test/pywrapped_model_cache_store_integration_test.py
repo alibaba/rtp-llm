@@ -66,12 +66,25 @@ def _load_native_test_binding() -> None:
     run_dirty_generation_prefill_capture_scenario = extension.run_dirty_generation_prefill_capture_scenario
 
 
+def _native_test_env():
+    env = dict(os.environ)
+    library_dirs = [
+        str(Path(torch.__file__).resolve().parent / "lib"),
+        str(_TEST_LIB_DIR.parent),
+        str(_TEST_LIB_DIR),
+    ]
+    if env.get("LD_LIBRARY_PATH"):
+        library_dirs.append(env["LD_LIBRARY_PATH"])
+    env["LD_LIBRARY_PATH"] = os.pathsep.join(library_dirs)
+    return env
+
+
 def _isolated_graph_test(method):
     @wraps(method)
     def run(self):
         if _IN_NATIVE_GRAPH_TEST:
             return method(self)
-        env = dict(os.environ)
+        env = _native_test_env()
         env.update(
             ENABLE_CUDA_GRAPH_DEBUG_MODE="1",
             NOT_USE_DEFAULT_STREAM="1",
@@ -109,6 +122,7 @@ def _run_native_scenario_isolated(scenario: str) -> dict:
         capture_output=True,
         text=True,
         timeout=120,
+        env=_native_test_env(),
     )
     payload_lines = [
         line[len(_RESULT_PREFIX) :]

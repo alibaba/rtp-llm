@@ -781,6 +781,7 @@ class BuildPackagingContractTest(TestCase):
             "rtp_llm/models_py/modules/factory/fused_moe/impl/rocm/test/",
             "rtp_llm/models_py/modules/factory/linear/impl/rocm/test/",
             "rtp_llm/models_py/model_desc/test/qwen3_next_qkvz_ba_fusion_test.py",
+            "rtp_llm/models_py/model_desc/test/qwen_gdn_graph_replay_test.py",
             "rtp_llm/models_py/distributed/test/moriep_test.py",
             "rtp_llm/models_py/triton_kernels/fla/test/test_flydsl_chunk_gdn_cache_store.py",
             "rtp_llm/utils/test/ckpt_database_test.py",
@@ -829,7 +830,7 @@ class BuildPackagingContractTest(TestCase):
             "py_ut_sm9x": 416,
             "py_ut_sm100": 3,
             "py_ut_sm100_arm": 104,
-            "py_ut_amd": 286,
+            "py_ut_amd": 382,
             "py_ut_frontend": 71,
         }.items():
             self.assertEqual(profiles[name].get("expected_count"), expected_count)

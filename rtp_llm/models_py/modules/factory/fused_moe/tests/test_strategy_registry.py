@@ -106,13 +106,19 @@ class StrategyRegistryDiagnosticsTest(unittest.TestCase):
         self.assertIn("MOE_STRATEGY='requested'", str(cm.exception))
 
     def test_explicit_strategy_selects_only_its_registered_backend(self):
+        class RequestedStrategy(MagicMock):
+            pass
+
+        class FallbackStrategy(MagicMock):
+            pass
+
         registry = StrategyRegistry()
-        requested = MagicMock()
+        requested = RequestedStrategy()
         requested.strategy_name = "requested"
         requested.supported_moe_quant_method = None
         requested.can_handle.return_value = True
         requested.get_attributes.return_value.calculate_priority.return_value = 1
-        fallback = MagicMock()
+        fallback = FallbackStrategy()
         fallback.strategy_name = "fallback"
         fallback.supported_moe_quant_method = None
         fallback.can_handle.return_value = True

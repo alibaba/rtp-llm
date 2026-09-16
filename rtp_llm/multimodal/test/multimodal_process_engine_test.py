@@ -530,7 +530,7 @@ class FtRuntimeExceptionSerializationTest(TestCase):
                 error = FtRuntimeException(
                     ExceptionType.MM_DOWNLOAD_FAILED,
                     "Failed to download multimodal content",
-                    reason,
+                    admission_reject_reason=reason,
                 )
 
                 restored = pickle.loads(pickle.dumps(error))

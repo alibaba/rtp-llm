@@ -944,6 +944,16 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._call_update(stub, inputs)
 
+    def test_replay_query_length_above_capture_capacity_raises(self):
+        stub = self._make_stub(batch_size=2)
+        stub.fmha_params.graph_query_length = 4
+        stub.fmha_params.graph_token_q_capacity = 8
+        inputs = self._make_attn_inputs(
+            [5, 0], prefix_lengths=torch.tensor([100, 100], dtype=torch.int32)
+        )
+        with self.assertRaisesRegex(ValueError, "query length exceeds capture capacity"):
+            self._call_update(stub, inputs)
+
     def test_replay_capacity_raises(self):
         for attr, capacity, lengths, prefix, error in (
             ("graph_query_length", 4, [5, 0], [100, 100], "query length"),
@@ -1038,6 +1048,24 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
             observed_pad_query,
         )
 
+    def test_cuda_graph_prepares_only_selected_backend_workspace(self):
+        for input_lengths, expected_backend in (([4, 1], "triton"), ([5, 1], "batch")):
+            with self.subTest(expected_backend=expected_backend):
+                impl, batch_impl, triton_impl, batch_params, triton_params, _ = (
+                    self._make_impl_with_mocked_prepare(input_lengths, True)
+                )
+                self.assertEqual(impl.backend, expected_backend)
+                if expected_backend == "triton":
+                    triton_impl.prepare.assert_called_once_with(impl.attn_inputs)
+                    batch_impl.prepare.assert_not_called()
+                    self.assertIs(impl.triton_fmha_params, triton_params)
+                    self.assertIsNone(impl.fmha_params)
+                else:
+                    batch_impl.prepare.assert_called_once_with(impl.attn_inputs)
+                    triton_impl.prepare.assert_not_called()
+                    self.assertIs(impl.fmha_params, batch_params)
+                    self.assertIsNone(impl.triton_fmha_params)
+
     def test_cuda_graph_supports_triton_and_batch_backends(self):
         for input_lengths, expected_backend in (
             ([4, 1], "triton"),
@@ -1091,7 +1119,7 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         flags.use_asm_pa = False
 
         self.assertTrue(
-            attn_factory._is_fmha_impl_disabled("AiterPrefillImplTriton", flags)
+            attn_factory._is_fmha_impl_disabled_legacy(AiterPrefillImplTriton, flags)
         )
         impl, *_ = self._make_impl_with_mocked_prepare(
             [0, 0, 0, 0, 64],
@@ -1108,12 +1136,12 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         flags.use_asm_pa = True
         flags.use_triton_pa = False
         self.assertTrue(
-            attn_factory._is_fmha_impl_disabled("AiterPrefillImplTriton", flags)
+            attn_factory._is_fmha_impl_disabled_legacy(AiterPrefillImplTriton, flags)
         )
 
         flags.use_triton_pa = True
         self.assertFalse(
-            attn_factory._is_fmha_impl_disabled("AiterPrefillImplTriton", flags)
+            attn_factory._is_fmha_impl_disabled_legacy(AiterPrefillImplTriton, flags)
         )
 
     def test_generation_prefill_cuda_graph_capability_rejects_unsupported_attention_modes(
@@ -2237,6 +2265,45 @@ class TestCompactGatherReshape(unittest.TestCase):
         # Compact buffer has all referenced blocks + 1 trailing dummy zero-block
         # for CK speculative prefetch safety (no dedup since torch.unique removed).
         self.assertEqual(k_compact.shape[0], orig_indices.numel() + 1)
+
+    def test_kv_cache_dtype_controls_compact_mode(self):
+        from types import SimpleNamespace
+
+        for dtype, torch_dtype, compact in (
+            (KvCacheDataType.BASE, torch.float16, True),
+            (KvCacheDataType.FP8, torch.float8_e4m3fn, False),
+        ):
+            with self.subTest(dtype=dtype):
+                op = self._make_op(kv_cache_dtype=dtype)
+                self.assertEqual(op.kv_cache_torch_dtype, torch_dtype)
+                query = torch.zeros(4, 8, 128, dtype=torch.float16)
+                cache = SimpleNamespace(
+                    kv_cache_base=torch.zeros(2, 2, 4, 16, 128).to(torch_dtype)
+                )
+                block_table = torch.zeros(1, 1, dtype=torch.int32)
+                params = SimpleNamespace(
+                    cu_seqlens_q=torch.tensor([0, 4], dtype=torch.int32),
+                    prefill_seqlen_k_int32=torch.tensor([4], dtype=torch.int32),
+                    max_seqlen_q=4,
+                    max_seqlen_k=4,
+                    token_q_num=4,
+                    compact_block_table=block_table,
+                    sanitized_block_table=block_table,
+                    block_indices=block_table.flatten(),
+                    k_compact_buf=None,
+                    v_compact_buf=None,
+                )
+                with patch.object(
+                    op, "_gather_and_reshape_kv_compact", return_value=(query, query)
+                ) as gather, patch.object(
+                    op, "_reshape_kv_cache_vectorized", return_value=(query, query)
+                ) as reshape, patch(
+                    "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter.aiter.mha_batch_prefill_func",
+                    return_value=query,
+                ):
+                    op._forward_paged(query, cache, params)
+                self.assertEqual(gather.call_count, int(compact))
+                self.assertEqual(reshape.call_count, int(not compact))
 
     def test_kv_cache_dtype_preserves_linear_contract(self):
         for kv_cache_dtype, expected_torch_dtype in (
@@ -3370,6 +3437,64 @@ class TestVLayoutContract(unittest.TestCase):
         flags = FMHAConfig()
         flags.use_aiter_pa, flags.use_asm_pa, flags.use_triton_pa = aiter, asm, triton
         return flags
+
+    def test_invalid_geometry(self):
+        for head, page, dtype, error in (
+            (100, 32, KvCacheDataType.BASE, "V geometry"),
+            (128, 8, KvCacheDataType.FP8, "width=16"),
+            (128, 12, KvCacheDataType.BASE, "V geometry"),
+        ):
+            config, inputs = self._make_case(head, page)
+            config.kv_cache_dtype = dtype
+            with self.subTest(head=head, page=page, dtype=dtype):
+                with self.assertRaisesRegex(ValueError, error):
+                    validate_v_layout(config, inputs, FMHAConfig())
+
+    def test_factory_rejects_layout_mismatch(self):
+        config, inputs = self._make_case(256, 16)
+        inputs.is_prefill = False
+        flags = self._decode_flags(aiter=True, asm=True, triton=False)
+        with self.assertRaisesRegex(ValueError, "layout mismatch"):
+            attn_factory.get_fmha_impl(config, None, inputs, fmha_config=flags)
+
+    def test_layout_mismatch_accepted_when_page_equals_width(self):
+        config, inputs = self._make_case(256, 8)
+        inputs.is_prefill = False
+        validate_v_layout(
+            config, inputs, self._decode_flags(aiter=False, asm=True, triton=False)
+        )
+
+    def test_fp8_no_asm_requires_page_equals_width(self):
+        config, inputs = self._make_case(128, 32)
+        config.kv_cache_dtype, inputs.is_prefill = KvCacheDataType.FP8, False
+        flags = self._decode_flags(aiter=True, asm=False, triton=False)
+        with self.assertRaisesRegex(ValueError, "layout mismatch"):
+            validate_v_layout(config, inputs, flags)
+        config.kernel_tokens_per_block = 16
+        validate_v_layout(config, inputs, flags)
+
+    def test_constructor_fallback_is_strict_only_with_layout_validator(self):
+        class BrokenImpl:
+            accepts_fmha_config = False
+            support = support_parallelism_config = staticmethod(lambda *_: True)
+
+            def __init__(self, *_):
+                raise RuntimeError("constructor failed")
+
+        class WorkingImpl(BrokenImpl):
+            def __init__(self, *_):
+                pass
+
+        config, inputs = self._make_case(128, 16)
+        inputs.is_prefill = False
+        with patch.object(attn_factory, "DECODE_MHA_IMPS", [BrokenImpl, WorkingImpl]):
+            config.need_rope_kv_cache = False
+            with self.assertLogs(level="WARNING"):
+                impl = attn_factory.get_fmha_impl(config, None, inputs)
+            self.assertIsInstance(impl, WorkingImpl)
+            config.need_rope_kv_cache = True
+            with self.assertRaisesRegex(RuntimeError, "constructor failed"):
+                attn_factory.get_fmha_impl(config, None, inputs)
 
     def test_backend_flag_layout_contract(self):
         for head, page, dtype, flags, error in (

@@ -12,10 +12,15 @@ class AmdTarget(NamedTuple):
     path: str
     gpu_count: int = 1
     case: str = ""
+    excluded_cases: tuple[str, ...] = ()
 
     def matches(self, nodeid: str) -> bool:
         path, _, case = nodeid.replace("\\", "/").partition("::")
-        return path.endswith(self.path) and self.case in case
+        return (
+            path.endswith(self.path)
+            and self.case in case
+            and not any(excluded in case for excluded in self.excluded_cases)
+        )
 
 
 _BASE = "rtp_llm/models_py/modules/base/rocm/test/"
@@ -27,7 +32,8 @@ _DESC = "rtp_llm/models_py/model_desc/test/"
 
 AMD_TARGETS = (
     AmdTarget(
-        "test_aiter_flydsl_gdn_decode_rocm", _FLA + "test_aiter_flydsl_gdn_decode.py"
+        "test_aiter_flydsl_gdn_decode_rocm", _FLA + "test_aiter_flydsl_gdn_decode.py",
+        excluded_cases=("test_real_nvidia_device_rejects_aiter_dispatch",),
     ),
     AmdTarget(
         "test_aiter_flydsl_gdn_prefill", _FLA + "test_aiter_flydsl_gdn_prefill.py"
@@ -57,7 +63,7 @@ AMD_TARGETS = (
     AmdTarget(
         "test_trt_allreduce_graph_replay",
         _BASE + "test_trt_allreduce_graph_replay.py",
-        2,
+        4,
     ),
     AmdTarget("test_unified_allreduce_tp", _BASE + "test_unified_allreduce_tp.py", 2),
     AmdTarget("rocm_layer_norm_test", _BASE + "rocm_layer_norm_test.py"),
@@ -115,6 +121,11 @@ AMD_TARGETS = (
     ),
     AmdTarget(
         "generic_moe_allreduce_test_rocm", _DESC + "generic_moe_allreduce_test.py"
+    ),
+    AmdTarget(
+        "qwen_gdn_graph_replay_test_rocm",
+        _DESC + "qwen_gdn_graph_replay_test.py",
+        excluded_cases=("test_real_cpp_runner_calls_model_validator_on_every_replay",),
     ),
 ) + tuple(
     AmdTarget(

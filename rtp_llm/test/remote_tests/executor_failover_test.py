@@ -259,6 +259,16 @@ def test_collect_repo_runtime_files_includes_nested_test_data(tmp_path):
     assert str(fixture.relative_to(tmp_path)) in files
 
 
+def test_collect_repo_runtime_files_includes_perf_presets(tmp_path):
+    fixture = tmp_path / "rtp_llm/test/perf_test/perf_presets.json"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text("{}\n", encoding="utf-8")
+
+    files = remote_exec_rtp._collect_repo_runtime_files(tmp_path, include_libs=False)
+
+    assert str(fixture.relative_to(tmp_path)) in files
+
+
 def test_collect_repo_runtime_files_includes_cutlass_groupgemm_configs(tmp_path):
     configs = [
         tmp_path

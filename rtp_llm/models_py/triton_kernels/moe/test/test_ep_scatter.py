@@ -17,6 +17,7 @@ import math
 import os
 import unittest
 
+import pytest
 import torch
 import triton
 import triton.language as tl
@@ -193,6 +194,7 @@ class TestEpScatter1PoisonRegression(unittest.TestCase):
             running += c
         return ref
 
+    @pytest.mark.manual
     @unittest.skipUnless(
         os.environ.get("RTP_LLM_EP_SCATTER_POISON_DIAG"),
         "poison diagnostic is opt-in: set RTP_LLM_EP_SCATTER_POISON_DIAG=1",

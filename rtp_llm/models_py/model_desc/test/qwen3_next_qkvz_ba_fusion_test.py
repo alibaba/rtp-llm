@@ -15,6 +15,7 @@ import pytest
 import torch
 
 
+@pytest.mark.gpu(type="H20")
 class TestQwen3NextQkvzBaFusion(unittest.TestCase):
     """Validates fusion correctness against the 2-GEMM baseline."""
 

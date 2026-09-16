@@ -630,6 +630,7 @@ def _collect_repo_runtime_files(
             str(p.relative_to(rootdir)) for p in rootdir.glob(pattern) if p.is_file()
         )
     for pattern in (
+        "rtp_llm/test/perf_test/*.json",
         "rtp_llm/**/testdata/**/*",
         "rtp_llm/**/test/testdata/**/*",
         "rtp_llm/**/test/data/**/*",
