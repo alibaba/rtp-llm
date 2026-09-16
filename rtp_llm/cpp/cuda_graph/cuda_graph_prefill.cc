@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_prefill_utils.h"
+#include <limits>
 #include <optional>
 
 namespace rtp_llm {
@@ -98,15 +100,27 @@ void CudaGraphRunner::capturePrefill() {
 }
 
 std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
-    // MTP draft prefill: capture at multiples of num_tokens_per_bs_
+    // MTP draft prefill uses the same sparse batch buckets as decode. Each
+    // draft-prefill batch contributes gen_num_per_cycle + 1 tokens.
     if (isMtpDraftPrefillCudaGraph()) {
-        std::vector<int> result;
-        for (int i = 1; i <= max_bs_; ++i) {
-            result.push_back(i * num_tokens_per_bs_);
-        }
+        RTP_LLM_CHECK_WITH_INFO(max_bs_ > 0, "MTP draft prefill CUDA graph max_bs must be positive");
+        RTP_LLM_CHECK_WITH_INFO(max_bs_ <= static_cast<size_t>(std::numeric_limits<int>::max()),
+                                "MTP draft prefill CUDA graph max_bs exceeds INT_MAX: %zu",
+                                max_bs_);
+        RTP_LLM_CHECK_WITH_INFO(num_tokens_per_bs_ > 0,
+                                "MTP draft prefill CUDA graph num_tokens_per_bs must be positive");
+        RTP_LLM_CHECK_WITH_INFO(
+            max_bs_ <= static_cast<size_t>(std::numeric_limits<int>::max() / num_tokens_per_bs_),
+            "MTP draft prefill CUDA graph token capacity overflows int: max_bs=%zu, num_tokens_per_bs=%d",
+            max_bs_,
+            num_tokens_per_bs_);
+        const auto decode_batch_sizes = getDecodeBatchSizesToCapture();
+        auto       result             = buildMtpDraftPrefillCaptureSequenceLengths(
+            decode_batch_sizes, max_bs_, num_tokens_per_bs_);
+        RTP_LLM_CHECK_WITH_INFO(!result.empty(), "MTP draft prefill CUDA graph capture range cannot be empty");
         RTP_LLM_LOG_INFO(
-            "Draft model prefill: capture seq_lens at %d intervals, %zu total (max_bs=%d, num_tokens_per_bs=%d)",
-            num_tokens_per_bs_,
+            "Draft model prefill: capture %zu sparse seq_lens from decode batch buckets (max_bs=%d, "
+            "num_tokens_per_bs=%d)",
             result.size(),
             max_bs_,
             num_tokens_per_bs_);

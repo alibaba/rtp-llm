@@ -12,6 +12,16 @@ cc_test(
     exec_properties = {'gpu':'A10'},
 )
 
+cc_test(
+    name = "cuda_graph_prefill_capture_range_test",
+    srcs = ["cuda_graph_prefill_capture_range_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_prefill_utils",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "test_cuda_graph_runner_libs",
     srcs = [
