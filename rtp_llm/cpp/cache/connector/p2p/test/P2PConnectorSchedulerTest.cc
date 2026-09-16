@@ -1399,24 +1399,53 @@ TEST(P2PReadNotificationTest, BusyControlJobDoesNotDelayDeadline) {
 
 TEST(P2PReadNotificationTest, MetricsWaitForAllBroadcastRanksAndKeepStartLoadIndependent) {
     using Broadcast = P2PBroadcastClient::TpBroadcastResult;
-    auto a          = std::make_shared<Broadcast::WorkerRpcContext>();
-    auto b          = std::make_shared<Broadcast::WorkerRpcContext>();
-    auto rpc        = std::make_shared<Broadcast>(std::vector<std::shared_ptr<Broadcast::WorkerRpcContext>>{a, b});
-    auto broadcast  = std::make_shared<P2PBroadcastClient::Result>("metrics", rpc);
-    auto server     = std::make_shared<DecodeLoadHelper::Result>();
-    server->response.mutable_payload()->set_has_first_generate_token(true);
-    auto collector = std::make_shared<DecodeSchedulerMetricsCollector>(nullptr);
-    auto context   = std::make_shared<P2PConnectorAsyncReadContext>(nullptr, "metrics", collector, 1000);
-    context->setCallResults(broadcast, server);
-    EXPECT_EQ(collector->tp_sync_cost_time_us.load(), -1);
-    EXPECT_EQ(collector->server_call_cost_time_us.load(), -1);
-    rpc->complete(0, true);
-    EXPECT_EQ(collector->tp_sync_cost_time_us.load(), -1);
-    server->complete(true);
-    EXPECT_GE(collector->server_call_cost_time_us.load(), 0);
-    EXPECT_EQ(collector->tp_sync_cost_time_us.load(), -1);
-    rpc->complete(1, true);
-    EXPECT_GE(collector->tp_sync_cost_time_us.load(), 0);
+    // Exercise both kickoff/checker registration orders without thread timing.
+    for (bool notification_first : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "notification_first=" << notification_first);
+        auto a         = std::make_shared<Broadcast::WorkerRpcContext>();
+        auto b         = std::make_shared<Broadcast::WorkerRpcContext>();
+        auto rpc       = std::make_shared<Broadcast>(std::vector<std::shared_ptr<Broadcast::WorkerRpcContext>>{a, b});
+        auto broadcast = std::make_shared<P2PBroadcastClient::Result>("metrics", rpc);
+        auto server    = std::make_shared<DecodeLoadHelper::Result>();
+        server->response.mutable_payload()->set_has_first_generate_token(true);
+        auto collector    = std::make_shared<DecodeSchedulerMetricsCollector>(nullptr);
+        auto context      = std::make_shared<P2PConnectorAsyncReadContext>(nullptr, "metrics", collector, 1000);
+        auto notification = std::make_shared<P2PNotification>();
+        if (notification_first) {
+            context->setNotification(notification);
+        }
+        context->setCallResults(broadcast, server);
+        if (!notification_first) {
+            context->setNotification(notification);
+        }
+
+        EXPECT_EQ(collector->tp_sync_cost_time_us.load(), -1);
+        EXPECT_EQ(collector->server_call_cost_time_us.load(), -1);
+        auto generation = notification->generation();
+        rpc->complete(0, true);
+        EXPECT_GT(notification->generation(), generation);
+        EXPECT_EQ(collector->tp_sync_cost_time_us.load(), -1);
+        EXPECT_EQ(collector->server_call_cost_time_us.load(), -1);
+        generation = notification->generation();
+        server->complete(true);
+        EXPECT_GT(notification->generation(), generation);
+        EXPECT_GE(collector->server_call_cost_time_us.load(), 0);
+        EXPECT_EQ(collector->tp_sync_cost_time_us.load(), -1);
+        generation = notification->generation();
+        rpc->complete(1, true);
+        EXPECT_GT(notification->generation(), generation);
+        EXPECT_GE(collector->tp_sync_cost_time_us.load(), 0);
+
+        // Already-completed results must notify a newly registered checker
+        // without changing their recorded durations.
+        const auto server_cost = collector->server_call_cost_time_us.load();
+        const auto read_cost   = collector->tp_sync_cost_time_us.load();
+        auto late_notification = std::make_shared<P2PNotification>();
+        context->setNotification(late_notification);
+        EXPECT_GT(late_notification->generation(), 0u);
+        EXPECT_EQ(collector->server_call_cost_time_us.load(), server_cost);
+        EXPECT_EQ(collector->tp_sync_cost_time_us.load(), read_cost);
+    }
 }
 
 TEST(P2PReadNotificationTest, NoTransferDoesNotEmitReadBroadcastDuration) {

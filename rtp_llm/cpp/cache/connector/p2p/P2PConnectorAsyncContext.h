@@ -159,6 +159,7 @@ private:
     void              applyMergedReadOutcome(const MergedReadOutcome& outcome);
     void              beginLeaseHold();
     std::function<void()> completionCallback() const;
+    void                  registerReadCompletionCallbacksLocked();
     void                  notify() const;
 
     const KVCacheResourcePtr                               resource_;

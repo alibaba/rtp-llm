@@ -52,25 +52,7 @@ bool P2PConnectorAsyncReadContext::setCallResults(
         tp_sync_result_     = tp_sync_result;
         server_call_result_ = server_call_result;
         kickoff_state_      = KickoffState::CALLS_READY;
-        const auto notify_done = completionCallback();
-        tp_sync_result_->setDoneCallback([notify_done,
-                                          collector   = collector_,
-                                          no_transfer = no_transfer_,
-                                          weak_result = std::weak_ptr<P2PBroadcastClient::Result>(tp_sync_result_)] {
-            if (auto result = weak_result.lock(); result && collector && !no_transfer && result->done()) {
-                collector->tp_sync_cost_time_us = result->totalCostTimeUs();
-            }
-            notify_done();
-        });
-        server_call_result_->setDoneCallback(
-            [notify_done,
-             collector   = collector_,
-             weak_result = std::weak_ptr<DecodeLoadHelper::Result>(server_call_result_)] {
-                if (auto result = weak_result.lock(); result && collector) {
-                    collector->server_call_cost_time_us = result->totalCostTimeUs();
-                }
-                notify_done();
-            });
+        registerReadCompletionCallbacksLocked();
     }
     calls_ready_.store(true, std::memory_order_release);
     notify();
@@ -492,14 +474,37 @@ void P2PConnectorAsyncReadContext::setNotification(const std::shared_ptr<P2PNoti
     std::lock_guard<std::mutex> lock(state_mutex_);
     // Registration and setCallResults serialize. Already-completed RPCs notify
     // inline, closing both completion-before-registration orderings.
-    if (tp_sync_result_) {
-        tp_sync_result_->setDoneCallback(completionCallback());
-    }
-    if (server_call_result_) {
-        server_call_result_->setDoneCallback(completionCallback());
-    }
+    registerReadCompletionCallbacksLocked();
     if (cancel_result_) {
         cancel_result_->setDoneCallback(completionCallback());
+    }
+}
+
+void P2PConnectorAsyncReadContext::registerReadCompletionCallbacksLocked() {
+    // Both registration orders must preserve timing and notification together.
+    // Callers hold state_mutex_; callbacks keep only weak references to RPC results.
+    const auto notify_done = completionCallback();
+    if (tp_sync_result_) {
+        tp_sync_result_->setDoneCallback([notify_done,
+                                          collector   = collector_,
+                                          no_transfer = no_transfer_,
+                                          weak_result = std::weak_ptr<P2PBroadcastClient::Result>(tp_sync_result_)] {
+            if (auto result = weak_result.lock(); result && collector && !no_transfer && result->done()) {
+                collector->tp_sync_cost_time_us = result->totalCostTimeUs();
+            }
+            notify_done();
+        });
+    }
+    if (server_call_result_) {
+        server_call_result_->setDoneCallback(
+            [notify_done,
+             collector   = collector_,
+             weak_result = std::weak_ptr<DecodeLoadHelper::Result>(server_call_result_)] {
+                if (auto result = weak_result.lock(); result && collector) {
+                    collector->server_call_cost_time_us = result->totalCostTimeUs();
+                }
+                notify_done();
+            });
     }
 }
 
