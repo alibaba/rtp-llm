@@ -325,25 +325,8 @@ PrefillServerCaller::getPrefillPeerInfo(const std::string& ip, uint32_t port, in
     }
     info.cp_size = response.cp_size();
 
-    for (const auto& dp_addr : response.dp_grpc_addrs()) {
-        info.dp_addrs.push_back(dp_addr);
-    }
-    if (info.dp_addrs.empty()) {
-        return ErrorInfo(ErrorCode::INVALID_PARAMS, "GetPeerInfo peer=" + addr + " empty DP address list");
-    }
-
-    RTP_LLM_LOG_INFO("getPrefillPeerInfo: prefill %s tp_size=%d, cp_size=%d, dp_addrs=[%s]",
-                      addr.c_str(),
-                      info.tp_size,
-                      info.cp_size,
-                      [&]() {
-                          std::string s;
-                          for (size_t i = 0; i < info.dp_addrs.size(); ++i) {
-                              if (i > 0) s += ", ";
-                              s += info.dp_addrs[i];
-                          }
-                          return s;
-                      }().c_str());
+    RTP_LLM_LOG_INFO("getPrefillPeerInfo: prefill %s tp_size=%d, cp_size=%d",
+                     addr.c_str(), info.tp_size, info.cp_size);
 
     return std::move(info);
 }

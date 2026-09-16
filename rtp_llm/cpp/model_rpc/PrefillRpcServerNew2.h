@@ -70,18 +70,12 @@ private:
 
     void               hangDiagTick();
     static const char* stepName(int step);
-    static bool        parseP2PWorkerGrpcAddr(const std::string& entry, std::string* grpc_addr);
 
     mutable std::mutex                                            onflight_trackers_mutex_;
     std::unordered_map<int64_t, std::shared_ptr<OnflightTracker>> onflight_trackers_;
     autil::LoopThreadPtr                                          hang_diag_thread_;
     int64_t                                                       hang_diag_warn_threshold_ms_{60 * 1000};
 
-    // Pre-computed gRPC addresses for all DP groups (tp_rank=0 entry points).
-    // Built once during init() from p2p_worker_addrs.
-    // Format: "host:grpc_port" or "[IPv6]:grpc_port".
-    std::vector<std::string> dp_grpc_addrs_;
-    ErrorInfo                peer_info_error_;
 };
 
 }  // namespace rtp_llm

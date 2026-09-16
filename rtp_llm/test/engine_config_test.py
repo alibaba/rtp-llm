@@ -66,7 +66,6 @@ class EngineConfigTest(TestCase):
                 "127.0.0.2:13010",
             ],
         )
-        self.assertEqual(runtime_config.p2p_worker_addrs, [])
 
     def test_update_worker_addrs_uses_p2p_format_for_decode_entrance(self):
         runtime_config = RuntimeConfig()
@@ -90,13 +89,6 @@ class EngineConfigTest(TestCase):
             [
                 "127.0.0.1:13000",
                 "127.0.0.2:13010",
-            ],
-        )
-        self.assertEqual(
-            runtime_config.p2p_worker_addrs,
-            [
-                "127.0.0.1:12001:13000",
-                "127.0.0.2:12011:13010",
             ],
         )
 

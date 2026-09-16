@@ -1,7 +1,5 @@
 #pragma once
 
-#include <cstddef>
-
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillServerCaller.h"
@@ -19,8 +17,6 @@ DecodeEntranceKeys buildDecodeEntranceKeys(const GenerateInputPB& request,
                                            int64_t                current_time_us);
 
 GenerateInputPB makeDecodeEntranceHandoffRequest(const GenerateInputPB& request, const std::string& handoff_unique_key);
-
-size_t selectDecodeEntranceDpIndex(size_t dp_count, int64_t handoff_id);
 
 class DecodeRpcServerNew2: public RemoteRpcServer {
 public:
@@ -51,7 +47,6 @@ private:
 
 private:
     std::atomic<int64_t>                 unique_key_id_{0};
-    std::atomic<int64_t>                 batch_dp_id_{0};
     std::shared_ptr<PrefillServerCaller> prefill_server_caller_;
 };
 

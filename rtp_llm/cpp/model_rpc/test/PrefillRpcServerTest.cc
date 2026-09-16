@@ -113,25 +113,6 @@ TEST_F(PrefillRpcServerTest, collectStreamOutputReturnsErrorForFailedBatchEnqueu
     ASSERT_EQ(err.code(), stream->statusInfo().code());
 }
 
-TEST_F(PrefillRpcServerTest, GetPeerInfoRejectsMissingDpAddrsWithoutInferringRankOffsets) {
-    PrefillRpcServerNew2 server;
-    server.maga_init_params_.parallelism_config.tp_size = 4;
-    server.maga_init_params_.parallelism_config.dp_size = 2;
-    server.maga_init_params_.parallelism_config.tp_rank = 2;
-    server.maga_init_params_.parallelism_config.dp_rank = 1;
-    server.maga_init_params_.pd_sep_config.worker_port_offset = 8;
-    server.dp_grpc_addrs_.clear();
-
-    grpc::ServerContext  context;
-    GetPeerInfoRequestPB request;
-    GetPeerInfoResponsePB response;
-
-    auto status = server.GetPeerInfo(&context, &request, &response);
-    ASSERT_FALSE(status.ok());
-    EXPECT_NE(status.error_message().find("address_count=0"), std::string::npos);
-    EXPECT_EQ(response.dp_grpc_addrs_size(), 0);
-}
-
 TEST_F(PrefillRpcServerTest, New2OnflightScopeTracksStepAndCleansOnReturn) {
     PrefillRpcServerNew2 server;
 

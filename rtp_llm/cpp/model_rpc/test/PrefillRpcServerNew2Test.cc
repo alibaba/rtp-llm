@@ -7,72 +7,33 @@
 
 namespace rtp_llm {
 
-TEST(PrefillRpcServerNew2Test, ParseP2PWorkerGrpcAddrSupportsIpv4HostAndBracketIpv6) {
-    std::string grpc_addr;
-
-    ASSERT_TRUE(PrefillRpcServerNew2::parseP2PWorkerGrpcAddr("127.0.0.1:8000:9000", &grpc_addr));
-    EXPECT_EQ(grpc_addr, "127.0.0.1:9000");
-
-    ASSERT_TRUE(PrefillRpcServerNew2::parseP2PWorkerGrpcAddr("prefill-0.service:8001:9001", &grpc_addr));
-    EXPECT_EQ(grpc_addr, "prefill-0.service:9001");
-
-    ASSERT_TRUE(PrefillRpcServerNew2::parseP2PWorkerGrpcAddr("[::1]:8002:9002", &grpc_addr));
-    EXPECT_EQ(grpc_addr, "[::1]:9002");
-
-    ASSERT_TRUE(PrefillRpcServerNew2::parseP2PWorkerGrpcAddr("fe80::1:8003:9003", &grpc_addr));
-    EXPECT_EQ(grpc_addr, "[fe80::1]:9003");
-}
-
-TEST(PrefillRpcServerNew2Test, ParseP2PWorkerGrpcAddrRejectsMalformedAddressOrPort) {
-    std::string grpc_addr;
-
-    EXPECT_FALSE(PrefillRpcServerNew2::parseP2PWorkerGrpcAddr("", &grpc_addr));
-    EXPECT_FALSE(PrefillRpcServerNew2::parseP2PWorkerGrpcAddr("127.0.0.1:8000", &grpc_addr));
-    EXPECT_FALSE(PrefillRpcServerNew2::parseP2PWorkerGrpcAddr("fe80::1", &grpc_addr));
-    EXPECT_FALSE(PrefillRpcServerNew2::parseP2PWorkerGrpcAddr("[::1]8000:9000", &grpc_addr));
-    EXPECT_FALSE(PrefillRpcServerNew2::parseP2PWorkerGrpcAddr("127.0.0.1:0:9000", &grpc_addr));
-    EXPECT_FALSE(PrefillRpcServerNew2::parseP2PWorkerGrpcAddr("127.0.0.1:8000:65536", &grpc_addr));
-    EXPECT_FALSE(PrefillRpcServerNew2::parseP2PWorkerGrpcAddr("127.0.0.1:8000:not-a-port", &grpc_addr));
-}
-
-TEST(PrefillRpcServerNew2Test, GetPeerInfoUsesPrecomputedDpGrpcAddrs) {
+TEST(PrefillRpcServerNew2Test, GetPeerInfoReturnsOnlySelectedPeerLayoutWithoutWorkerAddresses) {
     PrefillRpcServerNew2 server;
-    server.maga_init_params_.parallelism_config.tp_size = 2;
-    server.maga_init_params_.parallelism_config.dp_size = 2;
-    server.maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded = true;
-    server.dp_grpc_addrs_ = {"10.0.0.1:9000", "[::1]:9002"};
-
-    grpc::ServerContext  context;
-    GetPeerInfoRequestPB request;
-    GetPeerInfoResponsePB response;
-
-    auto status = server.GetPeerInfo(&context, &request, &response);
-    ASSERT_TRUE(status.ok());
-    EXPECT_EQ(response.tp_size(), 2);
-    EXPECT_EQ(response.cp_size(), 2);
-    EXPECT_EQ(response.dp_size(), 2);
-    ASSERT_EQ(response.dp_grpc_addrs_size(), 2);
-    EXPECT_EQ(response.dp_grpc_addrs(0), "10.0.0.1:9000");
-    EXPECT_EQ(response.dp_grpc_addrs(1), "[::1]:9002");
+    auto& pc = server.maga_init_params_.parallelism_config;
+    pc.tp_size = 4;
+    pc.dp_size = 3;
+    pc.dp_rank = 2;
+    // No worker address list is needed to report the selected endpoint's layout.
+    for (bool sharded : {false, true}) {
+        pc.prefill_cp_config.kv_cache_sharded = sharded;
+        grpc::ServerContext   context;
+        GetPeerInfoRequestPB  request;
+        GetPeerInfoResponsePB response;
+        ASSERT_TRUE(server.GetPeerInfo(&context, &request, &response).ok());
+        EXPECT_EQ(response.tp_size(), 4);
+        EXPECT_EQ(response.cp_size(), sharded ? 4 : 1);
+    }
 }
 
-TEST(PrefillRpcServerNew2Test, GetPeerInfoRejectsMissingDpAddresses) {
+TEST(PrefillRpcServerNew2Test, GetPeerInfoRejectsInvalidTpSize) {
     PrefillRpcServerNew2 server;
-    server.maga_init_params_.parallelism_config.tp_size = 4;
-    server.maga_init_params_.parallelism_config.dp_size = 3;
-    server.maga_init_params_.parallelism_config.tp_rank = 0;
-    server.maga_init_params_.parallelism_config.dp_rank = 0;
-    server.maga_init_params_.pd_sep_config.worker_port_offset = 40000;
-    server.dp_grpc_addrs_.clear();
-
-    grpc::ServerContext  context;
-    GetPeerInfoRequestPB request;
+    server.maga_init_params_.parallelism_config.tp_size = 0;
+    grpc::ServerContext   context;
+    GetPeerInfoRequestPB  request;
     GetPeerInfoResponsePB response;
-
-    auto status = server.GetPeerInfo(&context, &request, &response);
+    const auto status = server.GetPeerInfo(&context, &request, &response);
     ASSERT_FALSE(status.ok());
-    EXPECT_NE(status.error_message().find("address_count=0"), std::string::npos);
-    EXPECT_NE(status.error_message().find("dp_size=3"), std::string::npos);
+    EXPECT_NE(status.error_message().find("invalid tp_size=0"), std::string::npos);
 }
 
 TEST(PrefillRpcServerNew2Test, OnflightScopeTracksStepAndCleansOnReturn) {
@@ -147,18 +108,4 @@ TEST(PrefillRpcServerNew2Test, GenerateStreamCallRejectsPdRequestWithoutUniqueKe
     EXPECT_EQ(status.error_message(), "decode_entrance handoff requires non-empty unique_key");
 }
 
-}  // namespace rtp_llm
-
-namespace rtp_llm {
-TEST(PrefillRpcServerNew2Test, GetPeerInfoPreservesAddressConfigurationFirstCause) {
-    PrefillRpcServerNew2 server;
-    server.peer_info_error_ =
-        ErrorInfo(ErrorCode::INVALID_PARAMS, "GetPeerInfo malformed p2p_worker_addrs entry=host:invalid index=2");
-    grpc::ServerContext   context;
-    GetPeerInfoRequestPB  request;
-    GetPeerInfoResponsePB response;
-    const auto            status = server.GetPeerInfo(&context, &request, &response);
-    ASSERT_FALSE(status.ok());
-    EXPECT_EQ(status.error_message(), server.peer_info_error_.ToString());
-}
 }  // namespace rtp_llm

@@ -650,7 +650,7 @@ message P2PConnectorBroadcastTpRequestPB {
     uint64 plan_digest = 12;
 }
 
-// GetPeerInfo: Decode calls this on Prefill to exchange TP size before recv registration
+// GetPeerInfo: Decode queries the selected Prefill for its TP/CP layout before recv registration.
 message GetPeerInfoRequestPB {
     string requester_ip = 1;
     int32  requester_tp_size = 2;
@@ -658,8 +658,8 @@ message GetPeerInfoRequestPB {
 
 message GetPeerInfoResponsePB {
     int32  tp_size                = 1;
-    int32  dp_size                = 2;
-    repeated string dp_grpc_addrs = 3;
+    reserved 2, 3;
+    reserved "dp_size", "dp_grpc_addrs";
     // Effective KV-cache context-parallel size. This is 1 when TP is enabled
     // but Prefill CP KV-cache sharding is disabled.
     int32  cp_size                = 4;

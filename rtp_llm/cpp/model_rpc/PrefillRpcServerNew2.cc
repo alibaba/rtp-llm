@@ -3,35 +3,10 @@
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServerNew2.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
-#include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
-#include <cerrno>
-#include <cstdlib>
 #include <utility>
 
 namespace rtp_llm {
-
-namespace {
-
-bool parsePort(const std::string& port_text, int64_t* port) {
-    if (!port || port_text.empty()) {
-        return false;
-    }
-    char* end   = nullptr;
-    errno       = 0;
-    auto value  = std::strtoll(port_text.c_str(), &end, 10);
-    const bool parsed_all = end == port_text.c_str() + port_text.size();
-    if (errno != 0 || !parsed_all) {
-        return false;
-    }
-    if (value < 1 || value > 65535) {
-        return false;
-    }
-    *port = value;
-    return true;
-}
-
-}  // namespace
 
 PrefillRpcServerNew2::~PrefillRpcServerNew2() {
     if (hang_diag_thread_) {
@@ -52,57 +27,6 @@ const char* PrefillRpcServerNew2::stepName(int step) {
             return "after-pollStream";
     }
     return "unknown";
-}
-
-bool PrefillRpcServerNew2::parseP2PWorkerGrpcAddr(const std::string& entry, std::string* grpc_addr) {
-    if (!grpc_addr) {
-        return false;
-    }
-    grpc_addr->clear();
-    if (entry.empty()) {
-        return false;
-    }
-
-    std::string host;
-    std::string p2p_port_text;
-    std::string grpc_port_text;
-    if (entry.front() == '[') {
-        const auto close_pos = entry.find(']');
-        if (close_pos == std::string::npos || close_pos + 1 >= entry.size() || entry[close_pos + 1] != ':') {
-            return false;
-        }
-        const auto p2p_port_begin = close_pos + 2;
-        const auto p2p_port_end   = entry.find(':', p2p_port_begin);
-        if (p2p_port_end == std::string::npos || p2p_port_end + 1 >= entry.size()) {
-            return false;
-        }
-        host           = entry.substr(1, close_pos - 1);
-        p2p_port_text  = entry.substr(p2p_port_begin, p2p_port_end - p2p_port_begin);
-        grpc_port_text = entry.substr(p2p_port_end + 1);
-    } else {
-        const auto grpc_col = entry.rfind(':');
-        const auto p2p_col  = (grpc_col == std::string::npos || grpc_col == 0)
-                                  ? std::string::npos
-                                  : entry.rfind(':', grpc_col - 1);
-        if (p2p_col == std::string::npos || p2p_col == 0 || p2p_col + 1 >= grpc_col
-            || grpc_col + 1 >= entry.size()) {
-            return false;
-        }
-        host           = entry.substr(0, p2p_col);
-        p2p_port_text  = entry.substr(p2p_col + 1, grpc_col - p2p_col - 1);
-        grpc_port_text = entry.substr(grpc_col + 1);
-        if (host.find(':') != std::string::npos && host.find('.') != std::string::npos) {
-            return false;
-        }
-    }
-
-    int64_t p2p_port  = 0;
-    int64_t grpc_port = 0;
-    if (host.empty() || !parsePort(p2p_port_text, &p2p_port) || !parsePort(grpc_port_text, &grpc_port)) {
-        return false;
-    }
-    *grpc_addr = formatGrpcHostPort(host, grpc_port);
-    return !grpc_addr->empty();
 }
 
 PrefillRpcServerNew2::OnflightScope::OnflightScope(PrefillRpcServerNew2* owner, int64_t request_id):
@@ -156,60 +80,6 @@ grpc::Status PrefillRpcServerNew2::init(const EngineInitParams&                 
     if (!ret.ok()) {
         RTP_LLM_LOG_ERROR("prefill rpc server new2 init failed, err: %s", ret.error_message().c_str());
         return ret;
-    }
-
-    // Pre-compute dp_grpc_addrs_ from p2p_worker_addrs.
-    // Supported formats: "host:p2p_port:grpc_port", "[IPv6]:p2p_port:grpc_port",
-    // and bare "IPv6:p2p_port:grpc_port".
-    // For each DP group, the tp_rank=0 entry lives at index dp_rank * tp_size.
-    {
-        const auto& pc    = maga_init_params_.parallelism_config;
-        const auto& addrs = maga_init_params_.runtime_config.p2p_worker_addrs;
-        dp_grpc_addrs_.clear();
-        peer_info_error_ = ErrorInfo::OkStatus();
-        if (!addrs.empty() && pc.tp_size > 0 && pc.dp_size > 0) {
-            for (int64_t dp = 0; dp < pc.dp_size; ++dp) {
-                size_t idx = static_cast<size_t>(dp * pc.tp_size);
-                if (idx >= addrs.size()) {
-                    RTP_LLM_LOG_WARNING("PrefillRpcServerNew2::init: p2p_worker_addrs has %zu entries "
-                                        "but need index %zu for dp_rank=%ld (tp_size=%ld, dp_size=%ld)",
-                                        addrs.size(), idx, dp, pc.tp_size, pc.dp_size);
-                    peer_info_error_ =
-                        ErrorInfo(ErrorCode::INVALID_PARAMS,
-                                  "GetPeerInfo invalid p2p_worker_addrs: dp=" + std::to_string(dp) + " index="
-                                      + std::to_string(idx) + " entries=" + std::to_string(addrs.size()) + " tp_size="
-                                      + std::to_string(pc.tp_size) + " dp_size=" + std::to_string(pc.dp_size));
-                    dp_grpc_addrs_.clear();
-                    break;
-                }
-                const auto& entry = addrs[idx];
-                std::string grpc_addr;
-                if (!parseP2PWorkerGrpcAddr(entry, &grpc_addr)) {
-                    RTP_LLM_LOG_WARNING("PrefillRpcServerNew2::init: malformed p2p_worker_addrs[%zu]='%s', "
-                                        "expected host:p2p_port:grpc_port or [IPv6]:p2p_port:grpc_port",
-                                        idx, entry.c_str());
-                    peer_info_error_ = ErrorInfo(
-                        ErrorCode::INVALID_PARAMS,
-                        "GetPeerInfo malformed p2p_worker_addrs entry=" + entry + " dp=" + std::to_string(dp)
-                            + " index=" + std::to_string(idx) + " entries=" + std::to_string(addrs.size())
-                            + " tp_size=" + std::to_string(pc.tp_size) + " dp_size=" + std::to_string(pc.dp_size));
-                    dp_grpc_addrs_.clear();
-                    break;
-                }
-                dp_grpc_addrs_.push_back(std::move(grpc_addr));
-            }
-            std::string addrs_str;
-            for (size_t i = 0; i < dp_grpc_addrs_.size(); ++i) {
-                if (i > 0)
-                    addrs_str += ", ";
-                addrs_str += dp_grpc_addrs_[i];
-            }
-            RTP_LLM_LOG_INFO("PrefillRpcServerNew2::init: built dp_grpc_addrs_ from p2p_worker_addrs: [%s]",
-                             addrs_str.c_str());
-        } else {
-            RTP_LLM_LOG_INFO("PrefillRpcServerNew2::init: p2p_worker_addrs empty or parallelism not set, "
-                             "GetPeerInfo will reject requests until valid DP addresses are configured");
-        }
     }
 
     auto kvcache_manager = engine_->getCacheManager();
@@ -445,36 +315,13 @@ grpc::Status PrefillRpcServerNew2::BatchGenerateCall(grpc::ServerContext*       
                                                  const GetPeerInfoRequestPB* request,
                                                  GetPeerInfoResponsePB*      response) {
     const auto& pc = maga_init_params_.parallelism_config;
-    if (peer_info_error_.hasError()) {
-        return grpcStatusFromErrorInfo(peer_info_error_);
-    }
-    if (pc.tp_size <= 0 || pc.dp_size <= 0 || dp_grpc_addrs_.size() != static_cast<size_t>(pc.dp_size)) {
+    if (pc.tp_size <= 0) {
         return grpcStatusFromErrorInfo(
-            ErrorInfo(ErrorCode::INVALID_PARAMS,
-                      "GetPeerInfo invalid p2p_worker_addrs: address_count=" + std::to_string(dp_grpc_addrs_.size())
-                          + " tp_size=" + std::to_string(pc.tp_size) + " dp_size=" + std::to_string(pc.dp_size)));
+            ErrorInfo(ErrorCode::INVALID_PARAMS, "GetPeerInfo invalid tp_size=" + std::to_string(pc.tp_size)));
     }
     response->set_tp_size(static_cast<int32_t>(pc.tp_size));
-    response->set_dp_size(static_cast<int32_t>(pc.dp_size));
     response->set_cp_size(static_cast<int32_t>(pc.prefill_cp_config.kv_cache_sharded ? pc.tp_size : 1));
-
-    for (const auto& addr : dp_grpc_addrs_) {
-        response->add_dp_grpc_addrs(addr);
-    }
-
-    RTP_LLM_LOG_INFO("GetPeerInfo: tp_size=%ld, cp_size=%d, dp_size=%ld, dp_addrs=[%s]",
-                     pc.tp_size,
-                     response->cp_size(),
-                     pc.dp_size,
-                     [&]() {
-                         std::string s;
-                         for (int i = 0; i < response->dp_grpc_addrs_size(); ++i) {
-                             if (i > 0)
-                                 s += ", ";
-                             s += response->dp_grpc_addrs(i);
-                         }
-                         return s;
-                     }().c_str());
+    RTP_LLM_LOG_INFO("GetPeerInfo: tp_size=%ld, cp_size=%d", pc.tp_size, response->cp_size());
     return grpc::Status::OK;
 }
 

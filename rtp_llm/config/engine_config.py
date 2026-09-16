@@ -304,7 +304,6 @@ def update_worker_addrs(
         )
         return
     worker_addrs = []
-    p2p_worker_addrs = []
     worker_grpc_addrs = []
     p2p_transfer_ports_by_ip = {}
     local_rank = parallelism_config.local_rank
@@ -326,8 +325,6 @@ def update_worker_addrs(
                 )
             p2p_transfer_ports.add(p2p_transfer_port)
         p2p_worker_addr = f"{member.ip}:{p2p_transfer_port}:{member.rpc_server_port}"
-        if decode_entrance:
-            p2p_worker_addrs.append(p2p_worker_addr)
         if (
             int(
                 (member.world_rank / parallelism_config.tp_size)
@@ -354,7 +351,6 @@ def update_worker_addrs(
             )
     runtime_config.worker_grpc_addrs = worker_grpc_addrs
     runtime_config.worker_addrs = worker_addrs
-    runtime_config.p2p_worker_addrs = p2p_worker_addrs if decode_entrance else []
 
 
 def _valid_tcp_port(port: int) -> bool:

@@ -537,7 +537,6 @@ std::shared_ptr<PayloadEngine> makePayloadEngine(
     runtime.worker_grpc_addrs                           = {endpoint.address()};
     runtime.worker_addrs                                = {endpoint.host + ":" + std::to_string(transfer_port) + ":"
                                                            + std::to_string(endpoint.grpc_port)};
-    runtime.p2p_worker_addrs                            = runtime.worker_addrs;
     return std::make_shared<PayloadEngine>(config, runtime, pd);
 }
 
@@ -821,7 +820,6 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
             kLayers, kBlocks, kTokensPerBlock, hello.dtype == 1 ? DataType::TYPE_INT8 : DataType::TYPE_FP16, 2, 16);
         auto engine     = makePayloadEngine(config, RoleType::PREFILL, endpoint, hello.rdma, hello.load_timeout_ms);
         prefill.engine_ = engine;
-        prefill.dp_grpc_addrs_ = {endpoint.address()};
         engine->fault          = static_cast<Fault>(hello.fault);
         engine->start();
         const auto report = [&] {

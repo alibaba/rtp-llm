@@ -1159,6 +1159,53 @@ TEST(PlannerReplicaBalance, MultipleDecodeDpRequestsBalanceFullMlaTransfers) {
     }
 }
 
+TEST(PlannerReplicaBalance, SameHostDecodeDpsDisperseFullMlaRequestsWithIndependentCounters) {
+    constexpr int kDecodeDpCount = 8;
+    const std::vector<size_t> expected_keys{0, 1, 2, 3, 4, 5, 6};
+    for (int prefill_ranks : {2, 4, 8}) {
+        const auto src = mlaLayout(prefill_ranks);
+        for (int request = 0; request < 32; ++request) {
+            std::vector<size_t> transferred_bytes(prefill_ranks, 0);
+            for (int dp = 0; dp < kDecodeDpCount; ++dp) {
+                auto dst = mlaLayout(1);
+                dst.pc.dp_size = kDecodeDpCount;
+                dst.pc.dp_rank = dp;
+                // Same IP and independent counters starting at the same value.
+                // Distinct arrival times supply distinct ip_counter_time handoff keys.
+                const auto key = "10.0.0.1_" + std::to_string(request) + "_"
+                                 + std::to_string(1700000000000000LL + request * 100 + dp);
+                const auto offset = KVCacheTransferPlanner::sourceReplicaOffset(key, prefill_ranks);
+                const auto on_decode = KVCacheTransferPlanner::plan(
+                    ShardLayoutFactory::peerOf(dst, prefill_ranks, false, RoleType::PREFILL),
+                    dst, {kFullTag}, offset);
+                const auto on_prefill = KVCacheTransferPlanner::plan(
+                    src, ShardLayoutFactory::peerOf(src, 1, false, RoleType::DECODE), {kFullTag}, offset);
+                ASSERT_TRUE(on_decode.ok()) << on_decode.error.ToString();
+                ASSERT_TRUE(on_prefill.ok()) << on_prefill.error.ToString();
+                EXPECT_EQ(on_decode.plan.digest(), on_prefill.plan.digest());
+                ASSERT_EQ(on_decode.plan.routes.size(), 1u);
+                const auto& route = on_decode.plan.routes.front();
+                ASSERT_GE(route.src_rank, 0);
+                ASSERT_LT(route.src_rank, prefill_ranks);
+                EXPECT_EQ(route.dst_rank, 0);
+                EXPECT_EQ(KVCacheTransferPlanner::resolveKeys(route.src_keys, expected_keys.size()), expected_keys);
+                EXPECT_EQ(route.src_bytes, kMlaBlockBytes);
+                EXPECT_EQ(route.dst_bytes, kMlaBlockBytes);
+                expectNoHeadPartitioning(on_decode.plan);
+                expectNoSlicing(on_decode.plan);
+                transferred_bytes[route.src_rank] += expected_keys.size() * route.src_bytes;
+            }
+            // This corpus varies the final timestamp digit across 0..7, which
+            // evenly spans the power-of-two replica counts. Arbitrary keys may collide.
+            for (int rank = 0; rank < prefill_ranks; ++rank) {
+                EXPECT_EQ(transferred_bytes[rank],
+                          kDecodeDpCount / prefill_ranks * expected_keys.size() * kMlaBlockBytes)
+                    << "request=" << request << " source_rank=" << rank;
+            }
+        }
+    }
+}
+
 TEST(PlannerReplicaBalance, EveryOffsetBalancesFullMlaWithoutDroppingDecodeRanks) {
     for (int prefill_ranks : {1, 2, 3, 4, 8}) {
         for (int decode_ranks : {1, 2, 3, 4, 8}) {

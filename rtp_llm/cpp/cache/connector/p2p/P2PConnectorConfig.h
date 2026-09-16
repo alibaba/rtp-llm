@@ -20,7 +20,6 @@ struct P2PConnectorSchedulerConfig {
     int64_t load_cache_timeout_ms = 5000;
     std::vector<std::string> worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
-    std::vector<std::string> p2p_worker_addrs;
     int64_t                  p2p_lease_query_timeout_ms                   = 20 * 1000;
     int                      p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
@@ -45,7 +44,6 @@ struct P2PConnectorSchedulerConfig {
         config.load_cache_timeout_ms                  = pd_sep_config.load_cache_timeout_ms;
         config.worker_grpc_addrs                      = runtime_config.worker_grpc_addrs;
         config.worker_addrs                           = runtime_config.worker_addrs;
-        config.p2p_worker_addrs                       = runtime_config.p2p_worker_addrs;
         config.p2p_lease_query_timeout_ms = cache_store_config.p2p_lease_query_timeout_ms;
         config.p2p_resource_store_timeout_check_interval_ms =
             cache_store_config.p2p_resource_store_timeout_check_interval_ms;

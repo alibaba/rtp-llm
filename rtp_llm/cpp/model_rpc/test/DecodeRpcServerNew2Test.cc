@@ -83,14 +83,6 @@ TEST(DecodeRpcServerNew2Test, DecodeEntranceHandoffUsesInternalKeyAndPreservesBu
     EXPECT_NE(first_handoff_request.generate_config().unique_key(), second_handoff_request.generate_config().unique_key());
 }
 
-TEST(DecodeRpcServerNew2Test, SelectDecodeEntranceDpIndexUsesHandoffSequence) {
-    EXPECT_EQ(selectDecodeEntranceDpIndex(3, 0), 0);
-    EXPECT_EQ(selectDecodeEntranceDpIndex(3, 1), 1);
-    EXPECT_EQ(selectDecodeEntranceDpIndex(3, 2), 2);
-    EXPECT_EQ(selectDecodeEntranceDpIndex(3, 3), 0);
-    EXPECT_EQ(selectDecodeEntranceDpIndex(0, 10), 0);
-}
-
 TEST(DecodeRpcServerNew2Test, ParsePrefillDpAddrSupportsIpv4HostAndBracketIpv6) {
     std::string ip;
     uint32_t    port = 0;

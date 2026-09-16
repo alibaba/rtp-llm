@@ -123,7 +123,6 @@ public:
     std::atomic<int>         batch_calls{0};
     std::atomic<int>         completed_calls{0};
     BatchGenerateInputPB     received;
-    std::vector<std::string> dp_addrs;
     bool                     change_topology = false;
     bool                     fail_peer       = false;
     bool                     wrong_count     = false;
@@ -135,11 +134,6 @@ public:
             return grpc::Status(grpc::StatusCode::UNAVAILABLE, "peer unavailable");
         response->set_tp_size(change_topology && call > 1 ? 4 : 2);
         response->set_cp_size(1);
-        if (dp_addrs.empty())
-            response->add_dp_grpc_addrs("127.0.0.1:" + std::to_string(port));
-        else
-            for (const auto& address : dp_addrs)
-                response->add_dp_grpc_addrs(address);
         return grpc::Status::OK;
     }
     grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
@@ -279,24 +273,73 @@ TEST_F(PDBatchRpcTest, OneRpcAndOneEnqueuePerSidePreserveIdentityKeysAndOutputOr
     EXPECT_TRUE(prefill.meta_->getEngineScheduleInfo(0).running_task_info_list.empty());
 }
 
-TEST_F(PDBatchRpcTest, FixedSizeBatchesRotateDpAsAWholeAndNeverCachePeerInfo) {
+TEST_F(PDBatchRpcTest, BatchesPreserveFrontendSelectionAndNeverCachePeerInfo) {
     BatchRpcHarness second(&prefill);
     ASSERT_NE(second.server, nullptr);
-    prefill_rpc->service.dp_addrs = {prefill_rpc->address(), second.address()};
-    auto                   batch  = request();
-    grpc::ServerContext    context;
-    BatchGenerateOutputsPB response;
-    ASSERT_TRUE(decode.BatchGenerateCall(&context, &batch, &response).ok());
-    ASSERT_TRUE(decode.BatchGenerateCall(&context, &batch, &response).ok());
-    EXPECT_EQ(prefill_rpc->service.peer_calls, 4);
-    EXPECT_EQ(prefill_rpc->service.batch_calls, 1);
-    EXPECT_EQ(second.service.batch_calls, 1);
-    ASSERT_EQ(decode_engine->made.size(), 4);
-    for (int i = 2; i < 4; ++i) {
-        const auto& roles = decode_engine->made[i]->generateConfig()->role_addrs;
-        ASSERT_FALSE(roles.empty());
-        EXPECT_EQ(roles[0].grpc_port, second.service.port);
+    auto batch = request();
+    // Cover both an explicit role and the role inherited from the first item.
+    batch.mutable_inputs(0)->mutable_generate_config()->mutable_role_addrs(0)->set_http_port(9000);
+    for (int i = 0; i < 2; ++i) {
+        grpc::ServerContext    context;
+        BatchGenerateOutputsPB response;
+        ASSERT_TRUE(decode.BatchGenerateCall(&context, &batch, &response).ok());
+        ASSERT_TRUE(waitUntil([&] { return prefill_rpc->service.completed_calls == i + 1; }));
     }
+    EXPECT_EQ(prefill_rpc->service.peer_calls, 4);
+    EXPECT_EQ(prefill_rpc->service.batch_calls, 2);
+    EXPECT_EQ(second.service.peer_calls, 0);
+    EXPECT_EQ(second.service.batch_calls, 0);
+    ASSERT_EQ(decode_engine->made.size(), 4);
+    for (const auto& stream : decode_engine->made) {
+        const auto& roles = stream->generateConfig()->role_addrs;
+        ASSERT_EQ(roles.size(), 1);
+        EXPECT_EQ(roles[0].ip, "127.0.0.1");
+        EXPECT_EQ(roles[0].grpc_port, prefill_rpc->service.port);
+        EXPECT_EQ(roles[0].http_port, 9000);
+    }
+    ASSERT_EQ(prefill_rpc->service.received.inputs_size(), 2);
+    for (const auto& item : prefill_rpc->service.received.inputs()) {
+        ASSERT_EQ(item.generate_config().role_addrs_size(), 1);
+        EXPECT_EQ(item.generate_config().role_addrs(0).SerializeAsString(),
+                  batch.inputs(0).generate_config().role_addrs(0).SerializeAsString());
+    }
+    EXPECT_EQ(batch.inputs(1).generate_config().role_addrs_size(), 0);
+}
+
+TEST_F(PDBatchRpcTest, SingleStartupFailureDoesNotRerouteFrontendSelection) {
+    BatchRpcHarness second(&prefill);
+    ASSERT_NE(second.server, nullptr);
+    std::vector<GenerateInputPB> attempted;
+    // Fail at RPC creation so the real Decode entry and caller run without model execution.
+    decode.prefill_server_caller_->async_reader_factory_ =
+        [&](const std::shared_ptr<RpcService::Stub>&,
+            grpc::ClientContext*,
+            const GenerateInputPB& request,
+            grpc::CompletionQueue*) {
+            attempted.push_back(request);
+            return std::unique_ptr<grpc::ClientAsyncReader<GenerateOutputsPB>>();
+        };
+    auto item = request().inputs(0);
+    item.mutable_generate_config()->mutable_role_addrs(0)->set_http_port(9000);
+    for (int i = 0; i < 2; ++i) {
+        grpc::ServerContext context;
+        auto status = decode.GenerateStreamCall(&context, &item, nullptr);
+        ASSERT_FALSE(status.ok());
+        const auto error = errorInfoFromGrpcStatus(status);
+        EXPECT_EQ(error.code(), ErrorCode::RPC_FINISH_FAILED);
+        EXPECT_NE(error.ToString().find("peer=" + prefill_rpc->address()), std::string::npos);
+        EXPECT_EQ(error.ToString().find("peer=" + second.address()), std::string::npos);
+        ASSERT_EQ(attempted.size(), i + 1);
+        EXPECT_EQ(attempted.back().generate_config().role_addrs(0).SerializeAsString(),
+                  item.generate_config().role_addrs(0).SerializeAsString());
+    }
+    EXPECT_EQ(prefill_rpc->service.peer_calls, 2);
+    EXPECT_EQ(second.service.peer_calls, 0);
+    ASSERT_EQ(decode_engine->made.size(), 2);
+    for (const auto& stream : decode_engine->made) {
+        EXPECT_EQ(stream->generateConfig()->role_addrs[0].grpc_port, prefill_rpc->service.port);
+    }
+    EXPECT_EQ(item.generate_config().unique_key(), "business-key");
 }
 
 TEST(PDBatchEntryTest, EmptyBatchSucceedsWithoutEngineOrCaller) {

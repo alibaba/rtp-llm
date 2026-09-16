@@ -18,9 +18,8 @@ class PrefillServerCallerTest;
 }
 
 struct PrefillPeerInfo {
-    int                      tp_size = -1;
-    int                      cp_size = -1;
-    std::vector<std::string> dp_addrs;
+    int tp_size = -1;
+    int cp_size = -1;
 };
 
 class PrefillServerCaller {
