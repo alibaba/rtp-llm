@@ -147,7 +147,13 @@ def _selected_local_rows(pool, table, wanted, entries, entry_bytes, rank):
                 BLOCK_ROWS=block_rows,
                 BLOCK_BYTES=1 << (entry_bytes - 1).bit_length(),
             )
-            _check(status == 0, message)
+            # The async assert is the measured optimum (P0-2 GB200 A/B): the
+            # synchronous _check forced an NCCL drain per tile. The env remains
+            # only as a diagnostic override.
+            if os.environ.get("DSV41_CP_GATHER_CHECK_ASYNC", "1") == "1":
+                torch._assert_async((status == 0).all(), message)
+            else:
+                _check(status == 0, message)
         return local
 
     logical = wanted.clamp_min(0).long() // entries
@@ -224,6 +230,7 @@ class V41CPAttentionContext(V41AttentionContext):
         }
         self._pair_initials = {}
         self._gather_plans = {}
+        self._swa_index_plans = {}
         self.max_receive_bytes = 0
         self.max_gather_live_bytes = 0
         self.gather_count = 0
@@ -1018,8 +1025,59 @@ class V41CPAttentionContext(V41AttentionContext):
             query_positions = self._rank_positions[
                 query_owner : query_owner + 1, first:last
             ]
-        offsets = torch.arange(1 - SWA_WINDOW, 1, device=self.query_device)
-        wanted = (query_positions[:, :, None] + offsets).reshape(-1)
+        # SWA query indices depend on request-scoped state and tile bounds, never
+        # on the layer; per-tile reuse across layers is bitwise identical and on
+        # by default, the env remaining only as a diagnostic override.
+        plan_key = (first, last, query_owner)
+        cache_indices = os.environ.get("DSV41_SWA_INDEX_CACHE", "1") == "1"
+        plan = self._swa_index_plans.get(plan_key) if cache_indices else None
+        if plan is None:
+            offsets = torch.arange(1 - SWA_WINDOW, 1, device=self.query_device)
+            wanted = (query_positions[:, :, None] + offsets).reshape(-1)
+            active = (
+                (query_positions[:, :, None] >= 0)
+                .expand(-1, -1, SWA_WINDOW)
+                .reshape(-1)
+            )
+            valid = active & (wanted >= self.replay_floor) & (wanted >= 0)
+            current = valid & (wanted >= self.start)
+            restore_index = (wanted - self.start).clamp(0, self.end - self.start - 1)
+            source = self._restore.index_select(0, restore_index)
+            owners = torch.where(current, source // self.local_count, 0)
+            local_indices = source % self.local_count
+            past = valid & ~current
+            ring_index = wanted % spec.entries
+            plan = [
+                (
+                    offsets,
+                    wanted,
+                    active,
+                    valid,
+                    current,
+                    restore_index,
+                    source,
+                    owners,
+                    local_indices,
+                    past,
+                    ring_index,
+                ),
+                {},
+            ]
+            if cache_indices:
+                self._swa_index_plans[plan_key] = plan
+        (
+            offsets,
+            wanted,
+            active,
+            valid,
+            current,
+            restore_index,
+            source,
+            owners,
+            local_indices,
+            past,
+            ring_index,
+        ) = plan[0]
         output_bytes = count * SWA_WINDOW * 528
         page_bytes = (count + 1) * spec.page_stride_bytes
         # The fixed-shape past/current selection briefly owns three input tiles.
@@ -1033,18 +1091,7 @@ class V41CPAttentionContext(V41AttentionContext):
                 output_bytes + 2 * page_bytes,
             ),
         )
-        active = (
-            (query_positions[:, :, None] >= 0).expand(-1, -1, SWA_WINDOW).reshape(-1)
-        )
-        valid = active & (wanted >= self.replay_floor) & (wanted >= 0)
-        current = valid & (wanted >= self.start)
-        source = self._restore.index_select(
-            0, (wanted - self.start).clamp(0, self.end - self.start - 1)
-        )
-        owners = torch.where(current, source // self.local_count, 0)
-        local_indices = source % self.local_count
         local = encoded.index_select(0, local_indices)
-        past = valid & ~current
         if self.replay_floor < self.start:
             _check(
                 ~past | (wanted >= initial.valid_starts[0]),
@@ -1056,7 +1103,7 @@ class V41CPAttentionContext(V41AttentionContext):
                 ].view(-1, 528)
                 local = torch.where(
                     past[:, None],
-                    old.index_select(0, wanted % initial.pages.entries_per_page),
+                    old.index_select(0, ring_index),
                     local,
                 )
         local.masked_fill_((~valid | (owners != self.cp.cp_rank))[:, None], 0)
@@ -1074,27 +1121,52 @@ class V41CPAttentionContext(V41AttentionContext):
             if self.cp.cp_rank != query_owner:
                 values.zero_()
         del local, wanted, active, valid, current, source, owners, local_indices, past
-        positions = self._rank_positions[self.cp.cp_rank, first:last]
         values = values.view(count, SWA_WINDOW, 528)
         if query_rows is not None:
             if query_rows.numel() == 0:
                 return None
             values = values.index_select(0, query_rows)
-            positions = positions.index_select(0, query_rows)
             count = query_rows.numel()
-        pages = _swa_query_pages(values, positions, spec, self.replay_floor)
-        page_ids = torch.arange(
-            1, count + 1, dtype=torch.int32, device=self.query_device
-        )
-        binding = SwaBinding(
-            pages,
-            page_ids,
-            torch.where(
+        final = plan[1].get(count) if cache_indices else None
+        if final is None:
+            positions = self._rank_positions[self.cp.cp_rank, first:last]
+            if query_rows is not None:
+                positions = positions.index_select(0, query_rows)
+            page_ids = torch.arange(
+                1, count + 1, dtype=torch.int32, device=self.query_device
+            )
+            valid_starts = torch.where(
                 positions >= 0,
                 (positions - SWA_WINDOW + 1).clamp_min(self.replay_floor),
                 0,
-            ).to(torch.int32),
-            (positions + 1).clamp_min(0).to(torch.int32),
+            ).to(torch.int32)
+            valid_ends = (positions + 1).clamp_min(0).to(torch.int32)
+            if cache_indices:
+                page_indices = _swa_query_page_indices(
+                    positions, spec, self.replay_floor
+                )
+                plan[1][count] = (
+                    positions,
+                    page_ids,
+                    valid_starts,
+                    valid_ends,
+                    page_indices,
+                )
+                pages = _swa_query_pages(
+                    values, positions, spec, self.replay_floor, indices=page_indices
+                )
+            else:
+                pages = _swa_query_pages(values, positions, spec, self.replay_floor)
+        else:
+            positions, page_ids, valid_starts, valid_ends, page_indices = final
+            pages = _swa_query_pages(
+                values, positions, spec, self.replay_floor, indices=page_indices
+            )
+        binding = SwaBinding(
+            pages,
+            page_ids,
+            valid_starts,
+            valid_ends,
         )
         lease = self.lease(spec.slot, (values, pages.data), layer)
         self.release(lease, layer)
@@ -1453,12 +1525,10 @@ def begin_cp_request(
     return context
 
 
-def _swa_query_pages(values, positions, spec, replay_floor):
-    count, _, row_bytes = values.shape
-    columns = torch.arange(spec.entries, device=values.device)
+def _swa_query_page_indices(positions, spec, replay_floor):
+    columns = torch.arange(spec.entries, device=positions.device)
     distance = (positions[:, None] - columns[None, :]) % spec.entries
     source_rows = (SWA_WINDOW - 1 - distance).clamp_min(0)
-    packed = values.gather(1, source_rows[:, :, None].expand(-1, -1, row_bytes))
     tokens = positions[:, None] - distance
     valid = (
         (positions[:, None] >= 0)
@@ -1466,6 +1536,15 @@ def _swa_query_pages(values, positions, spec, replay_floor):
         & (tokens >= replay_floor)
         & (tokens >= 0)
     )
+    return columns, distance, source_rows, tokens, valid
+
+
+def _swa_query_pages(values, positions, spec, replay_floor, indices=None):
+    count, _, row_bytes = values.shape
+    if indices is None:
+        indices = _swa_query_page_indices(positions, spec, replay_floor)
+    columns, distance, source_rows, tokens, valid = indices
+    packed = values.gather(1, source_rows[:, :, None].expand(-1, -1, row_bytes))
     packed.masked_fill_(~valid[:, :, None], 0)
     storage = torch.zeros(
         (count + 1, spec.page_stride_bytes), dtype=torch.uint8, device=values.device

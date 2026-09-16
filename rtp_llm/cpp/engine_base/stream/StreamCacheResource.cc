@@ -833,7 +833,7 @@ std::shared_ptr<DSV41ExecutionContext> StreamCacheResource::createDsv41Execution
     const int64_t unit = config.seq_size_per_block * swa->cp_size;
     const int64_t end = stream_->inputLength();
     const int64_t prefix = reuseCache() && enableMemoryCache() && config.layer_all_num == 43 ?
-                               stream_->generateInput()->v41_inputs->alignedCheckpointEnd(end, unit) : 0;
+                               stream_->generateInput()->v41_inputs->protectedCheckpointEnd(end, unit) : 0;
     state->requireProtectedPrefix(prefix, end);
     auto context = std::make_shared<DSV41ExecutionContext>();
     context->request_id = stream_->streamId();

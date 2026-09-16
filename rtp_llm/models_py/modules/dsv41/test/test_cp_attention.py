@@ -495,6 +495,175 @@ def _swa_read_batches(rank, device):
     return observations
 
 
+@torch.inference_mode()
+def _swa_index_cache_reads(rank, device):
+    """DSV41_SWA_INDEX_CACHE reuse across layers must be bitwise identical."""
+    layout = CacheLayout(cp_size=8, speculative_tokens=0, draft_enabled=False)
+    slot = RegionSlot(CacheRegion.SWA, 0)
+    spec = next(page for page in layout.pages if page.slot == slot)
+    lengths, starts, floor, salt = (1000,), (1024,), 1010, 5
+    cp = _metadata(lengths, starts, rank, device)
+    pools = {
+        slot: torch.full(
+            (40, spec.prefill_shard_bytes), 211, dtype=torch.uint8, device=device
+        )
+    }
+    tables = {
+        slot: torch.tensor(
+            [[rank + 2, rank + 10, rank + 18, rank + 26]],
+            dtype=torch.int32,
+            device=device,
+        )
+    }
+    context = _byte_context(cp, layout, pools, tables, 0, floor)
+    half = (lengths[0] + 15) // 16
+    offsets = list(range(rank * half, (rank + 1) * half))
+    offsets += list(range((15 - rank) * half, (16 - rank) * half))
+    positions = [
+        starts[0] + offset if offset < lengths[0] else -1 for offset in offsets
+    ]
+    restored_bytes = bytearray(spec.page_stride_bytes)
+    for token in range(max(floor, context.start - spec.entries), context.start):
+        first = (token % spec.entries) * 528
+        restored_bytes[first : first + 528] = _encoded_bytes(token, salt)
+    previous = (context.start - 1) // layout.reuse_unit
+    page = int(tables[slot][0, previous])
+    shard_first, shard_last = spec.swa_byte_slice(rank)
+    pools[slot][page].copy_(
+        torch.frombuffer(restored_bytes, dtype=torch.uint8)[shard_first:shard_last].to(
+            device
+        )
+    )
+    initial = context.restore_swa(0)
+    encoded = (
+        torch.frombuffer(
+            bytearray().join(
+                (
+                    _encoded_bytes(position, salt)
+                    if position >= 0
+                    else bytes([247]) * 528
+                )
+                for position in positions
+            ),
+            dtype=torch.uint8,
+        )
+        .view(-1, 528)
+        .to(device)
+    )
+    empty = torch.tensor([], dtype=torch.int64, device=device)
+    # The cache is the default: with the env removed, the first read builds and
+    # caches the plan and its output matches the ground truth bitwise.
+    with patch.dict(os.environ):
+        os.environ.pop("DSV41_SWA_INDEX_CACHE", None)
+        default_result = context.swa_queries(0, 0, 32, initial, encoded)
+        assert len(context._swa_index_plans) == 1
+    _equal(
+        default_result.pages.data.cpu(),
+        _expected_swa_pages(positions[:32], spec, floor, salt),
+        "default-enabled SWA index cache ground-truth ring bytes",
+    )
+    for layer in (0, 1):
+        for first in range(0, len(positions), 32):
+            last = min(first + 32, len(positions))
+            queries = positions[first:last]
+            real_queries = [position for position in queries if position >= 0]
+            query_rows = context.query_row_indices(first, last)
+            results = {}
+            for enabled in ("0", "1"):
+                with patch.dict(os.environ, {"DSV41_SWA_INDEX_CACHE": enabled}):
+                    results[enabled] = (
+                        context.swa_queries(layer, first, last, initial, encoded),
+                        context.swa_queries(
+                            layer,
+                            first,
+                            last,
+                            initial,
+                            encoded,
+                            query_rows=query_rows,
+                        ),
+                        context.swa_queries(
+                            layer,
+                            first,
+                            last,
+                            initial,
+                            encoded,
+                            query_rows=empty,
+                        ),
+                    )
+            plain_ref, compact_ref, drained_ref = results["0"]
+            plain_cached, compact_cached, drained_cached = results["1"]
+            assert drained_ref is None and drained_cached is None
+            for actual, expected, label in (
+                (plain_cached, plain_ref, "plain"),
+                (compact_cached, compact_ref, "compact"),
+            ):
+                _equal(
+                    actual.pages.data,
+                    expected.pages.data,
+                    f"layer {layer} tile {first} cached {label} ring bytes",
+                )
+                _equal(actual.page_ids, expected.page_ids, f"cached {label} page IDs")
+                _equal(
+                    actual.valid_starts,
+                    expected.valid_starts,
+                    f"cached {label} valid starts",
+                )
+                _equal(
+                    actual.valid_ends,
+                    expected.valid_ends,
+                    f"cached {label} valid ends",
+                )
+            _equal(
+                plain_ref.pages.data.cpu(),
+                _expected_swa_pages(queries, spec, floor, salt),
+                f"layer {layer} tile {first} ground-truth ring bytes",
+            )
+            _equal(
+                plain_ref.page_ids.cpu(),
+                torch.arange(1, len(queries) + 1, dtype=torch.int32),
+                "plain page IDs",
+            )
+            _equal(
+                plain_ref.valid_starts.cpu(),
+                torch.tensor(
+                    [max(floor, pos - 127) if pos >= 0 else 0 for pos in queries],
+                    dtype=torch.int32,
+                ),
+                "plain valid starts",
+            )
+            _equal(
+                plain_ref.valid_ends.cpu(),
+                torch.tensor([max(0, pos + 1) for pos in queries], dtype=torch.int32),
+                "plain valid ends",
+            )
+            if query_rows is None:
+                _equal(
+                    compact_cached.pages.data,
+                    plain_cached.pages.data,
+                    "all-real tile compact read matches plain",
+                )
+            else:
+                _equal(
+                    compact_ref.pages.data.cpu(),
+                    _expected_swa_pages(real_queries, spec, floor, salt),
+                    "compact ground-truth ring bytes",
+                )
+            del results, plain_ref, compact_ref, plain_cached, compact_cached
+    tiles = (len(positions) + 31) // 32
+    assert len(context._swa_index_plans) == tiles
+    assert all(plan[1] for plan in context._swa_index_plans.values())
+    del initial, encoded, context
+    _encoded_bytes.cache_clear()
+    return [
+        dict(
+            tiles=tiles,
+            plans=tiles,
+            valid_rows=sum(position >= 0 for position in positions),
+            layers_compared=(0, 1),
+        )
+    ]
+
+
 def _selected_transport_context(rank, device, slot, count=33, start=1046000):
     layout = CacheLayout(cp_size=8, speculative_tokens=0, draft_enabled=False)
     spec = next(page for page in layout.pages if page.slot == slot)
@@ -770,6 +939,7 @@ def _run_rank():
     collective_torch._initialized = True
     torch.backends.cuda.matmul.allow_tf32 = False
     swa_reads = _swa_read_batches(rank, device)
+    swa_index_cache = _swa_index_cache_reads(rank, device)
     selected_reads = _selected_query_transport(rank, device)
     pair_checkpoints = _pair_checkpoint_restore(rank, device)
     layout = CacheLayout(cp_size=8, speculative_tokens=0, draft_enabled=False)
@@ -977,6 +1147,7 @@ def _run_rank():
         cases=records,
         pair_checkpoints=pair_checkpoints,
         swa_reads=swa_reads,
+        swa_index_cache=swa_index_cache,
         selected_reads=selected_reads,
         rejected_read_queries=rejected_batches,
     )

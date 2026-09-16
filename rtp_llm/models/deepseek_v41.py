@@ -4,7 +4,7 @@ import os
 
 import torch
 
-from rtp_llm.config.dsv41_config import V41Config
+from rtp_llm.config.dsv41_config import REGISTERED_V41_REVISION, V41Config
 from rtp_llm.config.dsv41_weights import (
     V41TensorSpec,
     build_v41_manifest,
@@ -246,10 +246,8 @@ class DeepSeekV41(DeepSeekV2):
         t = parsed.text
         config = V41ModelConfig()
         config.dsv41_config = parsed
-        revision = os.environ.get("DSV41_HF_REVISION", "")
-        if revision and (
-            len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision)
-        ):
+        revision = os.environ.get("DSV41_HF_REVISION") or REGISTERED_V41_REVISION
+        if len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
             raise ValueError("DSV41_HF_REVISION must identify the immutable checkpoint")
         mode = os.environ.get("DSV41_REPLAY_MODE", "full")
         if mode not in ("full", "bounded_checkpoint_v1"):
@@ -355,13 +353,15 @@ class DeepSeekV41(DeepSeekV2):
 
         if self.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_REMOTE:
             raise NotImplementedError("V4.1 prepared-image remote ViT is not connected")
-        max_tokens = int(os.environ["DSV41_MAX_TOKENS_PER_RANK"])
+        max_tokens = int(os.environ.get("DSV41_MAX_TOKENS_PER_RANK", "2048"))
         if max_tokens <= 0:
             raise ValueError("DSV41_MAX_TOKENS_PER_RANK must be positive")
         lookup = SharedEngramLookup.from_checkpoint(
             self.model_config.ckpt_path,
-            os.environ["DSV41_ENGRAM_STORE_ROOT"],
-            os.environ["DSV41_HF_REVISION"],
+            os.environ.get(
+                "DSV41_ENGRAM_STORE_ROOT", "/dev/shm/rtp_llm_dsv41_engram"
+            ),
+            self.model_config.dsv41_model_revision,
             device=self._get_device_str(),
         )
         try:

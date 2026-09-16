@@ -24,6 +24,10 @@ struct V41RequestInputs {
     torch::Tensor              image_mask;   // CPU bool [canonical tokens], including all three delimiters.
     std::vector<V41ImageInput> images;
 
+    // Requests at or below the 16K single-chunk scale publish no intermediate
+    // protected checkpoint; bounded CED checkpoints apply to longer contexts.
+    static constexpr int64_t kSingleChunkMaxPromptTokens = 16384;
+
     int64_t alignedCheckpointEnd(int64_t prompt_end, int64_t reuse_unit) const {
         RTP_LLM_CHECK_WITH_INFO(prompt_end >= 0 && prompt_end <= token_types.numel() && reuse_unit > 0,
                                 "invalid V4.1 checkpoint selection boundary");
@@ -35,6 +39,10 @@ struct V41RequestInputs {
         }
         validateChunk(0, end);
         return end;
+    }
+
+    int64_t protectedCheckpointEnd(int64_t prompt_end, int64_t reuse_unit) const {
+        return prompt_end <= kSingleChunkMaxPromptTokens ? 0 : alignedCheckpointEnd(prompt_end, reuse_unit);
     }
 
     void validateChunk(int64_t begin, int64_t end) const {

@@ -130,7 +130,7 @@ class DeepSeekV41DSpark(DeepSeekV41):
             self.parallelism_config,
             self.weight,
             kv_cache_config=self.kv_cache_config,
-            max_tokens_per_rank=int(os.environ["DSV41_MAX_TOKENS_PER_RANK"]),
+            max_tokens_per_rank=int(os.environ.get("DSV41_MAX_TOKENS_PER_RANK", "2048")),
             max_generate_batch_size=self.max_generate_batch_size,
             fmha_config=self.fmha_config,
             py_hw_kernel_config=self.hw_kernel_config,

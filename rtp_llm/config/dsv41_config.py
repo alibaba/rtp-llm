@@ -1,5 +1,9 @@
 """Validated metadata for the DeepSeek-V4.1-Flash release checkpoint."""
 
+# Registered immutable revision of the V4.1-Flash checkpoint. Launch resolves
+# it by default; DSV41_HF_REVISION / --revision stays an optional override.
+REGISTERED_V41_REVISION = "2bc89ac599031fa673cab993f1df02fc4a98c673"
+
 import copy
 import json
 from dataclasses import dataclass
