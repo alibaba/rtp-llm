@@ -167,6 +167,9 @@ FLEXLB_PV_LOG="${FLEXLB_PV_LOG:-off}"
 JFR_FILE="${JFR_FILE:-${RUN_DIR}/flexlb_profile.jfr}"
 JFR_DURATION="${JFR_DURATION:-300s}"
 MASTER_METRIC_WHITELIST="flexlb_app_cache_,flexlb_app_flexlb_batcher_queue_size,flexlb_app_flexlb_inflight_max_age_ms,flexlb_app_flexlb_inflight_ttl,flexlb_app_engine_balancing_master_dispatch_reason_total,flexlb_app_engine_balancing_master_batch_size,flexlb_auto_tpm_request_count,flexlb_app_engine_balancing_master_all_qps,flexlb_app_flexlb_scheduler_inflight_size,flexlb_app_flexlb_inflight_batch_count,flexlb_app_flexlb_inflight_request_count,flexlb_auto_tpm_decode_reserved_count,flexlb_auto_tpm_decode_running_count"
+BIZ_NAME="${BIZ_NAME:-flexlb_eval}"
+DEPLOYMENT_NAME="${DEPLOYMENT_NAME:-test}"
+ZONE_NAME="${ZONE_NAME:-master}"
 
 # Benchmark workload values below are examples, not Java defaults. Override with
 # FLEXLB_CONFIG or PROCESS_CONFIG_FILE to size tokens and request lifetimes.
@@ -978,6 +981,9 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
   if [[ -n "${FLEXLB_START_CMD:-}" ]]; then
     env "${FLEXLB_ENV_ARGS[@]}" "${PROCESS_ENV_ARGS[@]}" \
       "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
+      "BIZ_NAME=${BIZ_NAME}" \
+      "DEPLOYMENT_NAME=${DEPLOYMENT_NAME}" \
+      "ZONE_NAME=${ZONE_NAME}" \
       bash -lc "${FLEXLB_START_CMD}" >"${RUN_DIR}/flexlb.log" 2>&1 &
   else
     if [[ ! -f "${FLEXLB_JAR}" ]]; then
@@ -991,6 +997,9 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
     fi
     env "${FLEXLB_ENV_ARGS[@]}" "${PROCESS_ENV_ARGS[@]}" \
       "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
+      "BIZ_NAME=${BIZ_NAME}" \
+      "DEPLOYMENT_NAME=${DEPLOYMENT_NAME}" \
+      "ZONE_NAME=${ZONE_NAME}" \
       java -XX:StartFlightRecording=filename=${JFR_FILE},settings=profile,duration=${JFR_DURATION},disk=true,maxsize=256m,dumponexit=true "${JAVA_HEAP_OPTS[@]}" "${JAVA_MODULE_OPTS[@]}" "${JVM_SYSTEM_PROPS[@]}" -jar "${FLEXLB_JAR}" \
       --server.port="${FLEXLB_HTTP_PORT}" \
       --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \

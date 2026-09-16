@@ -27,10 +27,12 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.flexlb.constant.DeploymentIdentityConstants.HIPPO_ROLE;
 import static org.flexlb.constant.DeploymentIdentityConstants.SPECTRUM_APPLICATION_NAME;
 import static org.flexlb.constant.DeploymentIdentityConstants.SPECTRUM_DEPLOYMENT_NAME;
 import static org.flexlb.constant.DeploymentIdentityConstants.SPECTRUM_WORKSPACE_ID;
+import static org.flexlb.constant.DeploymentIdentityConstants.WHALE_BIZ_NAME;
+import static org.flexlb.constant.DeploymentIdentityConstants.WHALE_DEPLOYMENT_NAME;
+import static org.flexlb.constant.DeploymentIdentityConstants.WHALE_ZONE_NAME;
 import static org.flexlb.constant.NacosConfigConstants.NACOS_SERVER_ADDR;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -173,7 +175,8 @@ class UniConfigConfigSourceTest {
 
     @Test
     void disabledSourceDoesNotRequireSpectrumOrContactAgent() throws Exception {
-        source = new EnvironmentVariables("FLEXLB_UNICONF_ENABLE", "false", HIPPO_ROLE, "legacy-flexlb")
+        source = new EnvironmentVariables("FLEXLB_UNICONF_ENABLE", "false",
+                WHALE_BIZ_NAME, "dash_pd", WHALE_DEPLOYMENT_NAME, "test-deployment", WHALE_ZONE_NAME, "master")
                 .set("UNICONF_ENABLE", "true")
                 .remove(SPECTRUM_WORKSPACE_ID)
                 .remove(SPECTRUM_APPLICATION_NAME)
@@ -190,7 +193,8 @@ class UniConfigConfigSourceTest {
 
     @Test
     void enabledSourceRequiresSpectrumIdentity() {
-        EnvironmentVariables environment = new EnvironmentVariables("FLEXLB_UNICONF_ENABLE", "true", HIPPO_ROLE, "legacy-flexlb")
+        EnvironmentVariables environment = new EnvironmentVariables("FLEXLB_UNICONF_ENABLE", "true",
+                WHALE_BIZ_NAME, "dash_pd", WHALE_DEPLOYMENT_NAME, "test-deployment", WHALE_ZONE_NAME, "master")
                 .remove(SPECTRUM_WORKSPACE_ID)
                 .remove(SPECTRUM_APPLICATION_NAME)
                 .remove(SPECTRUM_DEPLOYMENT_NAME);

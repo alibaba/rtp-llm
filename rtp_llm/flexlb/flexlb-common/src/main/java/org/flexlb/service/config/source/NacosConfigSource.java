@@ -70,8 +70,12 @@ final class NacosConfigSource implements ConfigSource {
             if (client == null) {
                 client = createClient(config);
             }
-            listener = createListener();
             configContent = client.getConfig(config.getDataId(), config.getGroup(), CONFIG_READ_TIMEOUT_MS);
+            if (StringUtils.isBlank(configContent)) {
+                throw new IllegalStateException("Nacos configuration is missing or blank: dataId=" + config.getDataId()
+                        + ", group=" + config.getGroup() + ", namespace=" + config.getNamespace());
+            }
+            listener = createListener();
             client.addListener(config.getDataId(), config.getGroup(), listener);
             ConfigService.register(this);
         } catch (Exception e) {

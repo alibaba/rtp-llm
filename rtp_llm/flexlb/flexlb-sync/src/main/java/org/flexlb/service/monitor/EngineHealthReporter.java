@@ -375,11 +375,7 @@ public class EngineHealthReporter {
                 if (serverStatus.getRole() != null) {
                     FlexMetricTags serverSelectionTags = FlexMetricTags.of(
                             "role", serverStatus.getRole().name(),
-<<<<<<< HEAD
-=======
-                            "strategy", strategyName(ctx, serverStatus.getRole()),
                             "reason", selectionReason(ctx, serverStatus.getRole()),
->>>>>>> c893453df9 (feat: add select reson in detail metrics)
                             "engineIp", serverStatus.getMetricIpPort(),
                             "success", String.valueOf(isSuccess),
                             "code", String.valueOf(code)
@@ -390,47 +386,12 @@ public class EngineHealthReporter {
         }
     }
 
-<<<<<<< HEAD
-=======
-    private String selectionReason(BalanceContext context, RoleType roleType) {
+    private static String selectionReason(
+            BalanceContext context, RoleType roleType) {
         String selectionReason = context.selectionReason(roleType);
         return selectionReason == null ? "UNKNOWN" : selectionReason;
     }
 
-    private String strategyName(BalanceContext context, RoleType roleType) {
-        if (context.getConfig() == null || roleType == null) {
-            return "UNKNOWN";
-        }
-        if (roleType == RoleType.PREFILL || roleType == RoleType.PDFUSION) {
-            RoutingConfig.CandidateChoiceConfig candidateChoice = context.getConfig()
-                    .getRouter().getRoles().getPrefill().getCandidateChoice();
-            return candidateChoice == null || candidateChoice.getType() == null
-                    ? "UNKNOWN" : candidateChoice.getType().name();
-        }
-        if (roleType == RoleType.DECODE) {
-            return "DECODE_COST";
-        }
-        return context.getConfig().getScheduler().getType().name();
-    }
-
-    public void reportRequestPayload(BalanceContext ctx) {
-        if (ctx == null) {
-            return;
-        }
-        FlexMetricTags metricTags = FlexMetricTags.of(
-                "success", String.valueOf(ctx.isSuccess()));
-        if (ctx.getInputIdsCount() != null) {
-            monitor.report(REQUEST_INPUT_IDS_COUNT, metricTags, ctx.getInputIdsCount());
-        }
-        if (ctx.getRequestMessageBytes() != null) {
-            monitor.report(REQUEST_MESSAGE_BYTES, metricTags, ctx.getRequestMessageBytes());
-        }
-        if (ctx.getRequestBodyBytes() != null) {
-            monitor.report(REQUEST_BODY_BYTES, metricTags, ctx.getRequestBodyBytes());
-        }
-    }
-
->>>>>>> c893453df9 (feat: add select reson in detail metrics)
     public void reportMasterNode(String master) {
         monitor.report(ZK_MASTER_NODE, FlexMetricTags.of("masterNode", master), 1.0);
     }

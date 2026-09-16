@@ -78,7 +78,10 @@ warmup 未完成 → 404 "warm not finish"；否则 200 "success"。
 ```
 
 一致性组件在 Bean 初始化时取得配置，因此 Nacos 可以保存和替换这部分字段，但当前进程
-是否启用一致性及 ZooKeeper 客户端参数在重启后生效。选举路径使用 `HIPPO_ROLE`；端口取
+是否启用一致性及 ZooKeeper 客户端参数在重启后生效。选举路径和主节点变更通知使用
+`DeploymentIdentity`：Spectrum 三元组齐全时为 `spectrum:<workspace>:<application>:<deployment>`；
+Spectrum 三元组不完整时使用完整的 `BIZ_NAME:DEPLOYMENT_NAME:ZONE_NAME` 对应值的冒号拼接。
+两组三元组均不完整时启动失败。端口取
 Spring `server.port`，再回退 JVM `-Dserver.port` 和默认 7001（假定所有副本同端口）。
 
 ### ZookeeperMasterElectService

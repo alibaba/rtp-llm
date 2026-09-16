@@ -48,7 +48,7 @@ final class UniConfigConfigSource implements ConfigSource {
                     + "SPECTRUM_WORKSPACE_ID, SPECTRUM_APPLICATION_NAME and SPECTRUM_DEPLOYMENT_NAME");
         }
         configUri = URI.create("http://127.0.0.1:18080/v2/configs/modelstudio.spectrum.deployment."
-                + deploymentIdentity.getWorkspaceId() + "." + deploymentIdentity.getDeploymentName()
+                + deploymentIdentity.getSpectrumWorkspaceId() + "." + deploymentIdentity.getSpectrumDeploymentName()
                 + ".runtime.meta");
     }
 
