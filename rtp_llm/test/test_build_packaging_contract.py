@@ -830,7 +830,7 @@ class BuildPackagingContractTest(TestCase):
             "py_ut_sm100": 3,
             "py_ut_sm100_arm": 104,
             "py_ut_amd": 286,
-            "py_ut_frontend": 63,
+            "py_ut_frontend": 71,
         }.items():
             self.assertEqual(profiles[name].get("expected_count"), expected_count)
             self.assertTrue(

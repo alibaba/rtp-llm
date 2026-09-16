@@ -618,7 +618,8 @@ markexpr = "MI308X and not smoke and not perf and not manual"
 description = "Frontend Python UT (py-ut-frontend)"
 gpu_type = "A10"
 minimum_count = 1
-expected_count = 63
+# Original 63 cases plus eight allocator-dump endpoint/guard cases from mainline.
+expected_count = 71
 forbid_skips = true
 paths = [
     "rtp_llm/frontend/test",
