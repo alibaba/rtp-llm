@@ -152,7 +152,7 @@ class RequestInactivityTest {
         assertLiveAndCharged();
 
         synchronized (slot) {
-            assertEquals(CancelReason.CLIENT_CANCELLED, slot.requireCancellationFirstCause());
+            assertEquals(CancelReason.CLIENT_CANCELLED, RequestLifecycleTestSupport.<CancelReason>inspect(slot, "requireCancellationFirstCauseLocked"));
         }
         registry.expireInactiveRequest(slot, registeredAtMs + TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.CANCELLED);
@@ -166,21 +166,21 @@ class RequestInactivityTest {
         long lateStatusAt = registeredAtMs + 2L * TIMEOUT_MS;
         synchronized (slot) {
             RequestSlot.EngineObservation observation = switch (source) {
-                case PREFILL_ENDPOINT -> slot.applyPrefillStatusLocked(mock(PrefillEndpoint.class), RoleType.PREFILL,
+                case PREFILL_ENDPOINT -> org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyPrefillStatusLocked", mock(PrefillEndpoint.class), RoleType.PREFILL,
                         PrefillState.WorkerStatusFact.active(item), lateStatusAt);
-                case PREFILL_ITEM -> slot.applyPrefillStatusLocked(prefill, RoleType.PREFILL,
+                case PREFILL_ITEM -> org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyPrefillStatusLocked", prefill, RoleType.PREFILL,
                         PrefillState.WorkerStatusFact.active(new ScheduledRequest(item.ctx(), item.future(),
                                 item.routeResponse(), item.prefill(), null, prefill, decode,
                                 item.decodeReservation(), registeredAtMs)), lateStatusAt);
-                case DECODE_ENDPOINT -> slot.applyDecodeStatusLocked(mock(DecodeEndpoint.class),
+                case DECODE_ENDPOINT -> org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", mock(DecodeEndpoint.class),
                         DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()), lateStatusAt);
-                case DECODE_GENERATION -> slot.applyDecodeStatusLocked(decode, DecodeEndpoint.WorkerStatusFact.active(
+                case DECODE_GENERATION -> org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", decode, DecodeEndpoint.WorkerStatusFact.active(
                         new DecodeEndpoint.ReservationHandle(2L, REQUEST_ID, 1L)), lateStatusAt);
-                case DECODE_RESERVATION -> slot.applyDecodeStatusLocked(decode, DecodeEndpoint.WorkerStatusFact.active(
+                case DECODE_RESERVATION -> org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", decode, DecodeEndpoint.WorkerStatusFact.active(
                         new DecodeEndpoint.ReservationHandle(1L, REQUEST_ID, 2L)), lateStatusAt);
             };
             assertSame(RequestSlot.EngineObservation.STALE, observation);
-            assertTrue(slot.requestInactive(lateStatusAt));
+            assertTrue(RequestLifecycleTestSupport.<Boolean>inspect(slot, "requestInactiveLocked", lateStatusAt));
         }
         registry.expireInactiveRequest(slot, lateStatusAt);
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
@@ -191,7 +191,7 @@ class RequestInactivityTest {
     void statusBeforeCancellationCheckInvalidatesTheEarlierExpirationDecision(RoleType source) {
         long originalDeadline = registeredAtMs + TIMEOUT_MS;
         synchronized (slot) {
-            assertTrue(slot.requestInactive(originalDeadline), "the timer's earlier observation is expired");
+            assertTrue(RequestLifecycleTestSupport.<Boolean>inspect(slot, "requestInactiveLocked", originalDeadline), "the timer's earlier observation is expired");
         }
 
         observeActive(source, originalDeadline - 1L);
@@ -199,18 +199,18 @@ class RequestInactivityTest {
 
         assertLiveAndCharged();
         synchronized (slot) {
-            assertFalse(slot.requestInactive(originalDeadline));
-            assertTrue(slot.requestInactive(originalDeadline - 1L + TIMEOUT_MS));
+            assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(slot, "requestInactiveLocked", originalDeadline));
+            assertTrue(RequestLifecycleTestSupport.<Boolean>inspect(slot, "requestInactiveLocked", originalDeadline - 1L + TIMEOUT_MS));
         }
     }
 
     private void observeActive(RoleType source, long nowMs) {
         synchronized (slot) {
             if (source == RoleType.PREFILL) {
-                slot.applyPrefillStatusLocked(prefill, RoleType.PREFILL,
+                org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyPrefillStatusLocked", prefill, RoleType.PREFILL,
                         PrefillState.WorkerStatusFact.active(item), nowMs);
             } else {
-                slot.applyDecodeStatusLocked(decode,
+                org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", decode,
                         DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()), nowMs);
             }
         }
