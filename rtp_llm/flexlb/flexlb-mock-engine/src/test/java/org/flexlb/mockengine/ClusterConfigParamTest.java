@@ -39,6 +39,19 @@ class ClusterConfigParamTest {
         return args;
     }
 
+    @Test
+    void fetchIsRequiredByDefaultAndShortcutIsExplicit() {
+        var strict = JavaMockEngineCluster.Config.parse(baseArgs());
+        assertEquals(false, strict.autoFetch);
+        assertEquals(600_000L, strict.fetchAttachTimeoutMs);
+        var automatic = JavaMockEngineCluster.Config.parse(with(baseArgs(),
+                "--auto-fetch", "true", "--fetch-attach-timeout-ms", "25"));
+        assertTrue(automatic.autoFetch);
+        assertEquals(25L, automatic.fetchAttachTimeoutMs);
+        assertThrows(IllegalArgumentException.class, () -> JavaMockEngineCluster.Config.parse(
+                with(baseArgs(), "--fetch-attach-timeout-ms", "0")));
+    }
+
     // ──────────── Single-role validation relaxation ────────────
 
     @Test
@@ -91,9 +104,9 @@ class ClusterConfigParamTest {
                 "decode pool defaults to the smaller heterogeneous capacity");
         assertEquals(4_194_304L, config.decodeTotalKvTokens);
         assertEquals(0, config.prefillCacheBlocks,
-                "prefill-cache-blocks defaults to 0 (derive from token capacity)");
+                "prefill-kv-pool-blocks defaults to 0 (derive from token capacity)");
         assertEquals(0, config.decodeCacheBlocks,
-                "decode-cache-blocks defaults to 0 (derive from token capacity)");
+                "decode-kv-pool-blocks defaults to 0 (derive from token capacity)");
         assertEquals(0, config.blockSize, "block-size defaults to 0 (keep perf-file value)");
         assertEquals(JavaMockEngineCluster.DEFAULT_DECODE_MAX_CONCURRENCY,
                 config.decodeMaxConcurrency);
@@ -124,8 +137,8 @@ class ClusterConfigParamTest {
                 with(baseArgs(),
                         "--prefill-total-kv-tokens", "2000000",
                         "--decode-total-kv-tokens", "1000000",
-                        "--prefill-cache-blocks", "64",
-                        "--decode-cache-blocks", "32"));
+                        "--prefill-kv-pool-blocks", "64",
+                        "--decode-kv-pool-blocks", "32"));
         assertEquals(2_000_000L, config.prefillTotalKvTokens,
                 "--prefill-total-kv-tokens overrides only the prefill pool");
         assertEquals(1_000_000L, config.decodeTotalKvTokens,
@@ -133,9 +146,31 @@ class ClusterConfigParamTest {
         assertEquals(JavaMockEngineCluster.DEFAULT_TOTAL_KV_TOKENS, config.totalKvTokens,
                 "the legacy uniform field stays untouched by per-role flags");
         assertEquals(64, config.prefillCacheBlocks,
-                "legacy --prefill-cache-blocks now overrides the pool block count");
+                "--prefill-kv-pool-blocks overrides the prefill pool block count");
         assertEquals(32, config.decodeCacheBlocks,
-                "legacy --decode-cache-blocks now overrides the pool block count");
+                "--decode-kv-pool-blocks overrides the decode pool block count");
+    }
+
+    @Test
+    void parseKvPoolBlocksNewNamesOverridePool() {
+        JavaMockEngineCluster.Config config = JavaMockEngineCluster.Config.parse(
+                with(baseArgs(),
+                        "--prefill-kv-pool-blocks", "64",
+                        "--decode-kv-pool-blocks", "32"));
+        assertEquals(64, config.prefillCacheBlocks,
+                "--prefill-kv-pool-blocks sizes the prefill pool block count");
+        assertEquals(32, config.decodeCacheBlocks,
+                "--decode-kv-pool-blocks sizes the decode pool block count");
+    }
+
+    @Test
+    void parseRejectsRetiredCacheBlocksNames() {
+        // The pre-v2 names were removed outright: passing either one is an
+        // unknown argument and must fail fast instead of silently aliasing.
+        assertThrows(IllegalArgumentException.class, () -> JavaMockEngineCluster.Config.parse(
+                with(baseArgs(), "--prefill-cache-blocks", "99")));
+        assertThrows(IllegalArgumentException.class, () -> JavaMockEngineCluster.Config.parse(
+                with(baseArgs(), "--decode-cache-blocks", "77")));
     }
 
     @Test

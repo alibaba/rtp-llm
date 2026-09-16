@@ -1,0 +1,2302 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: status_protocol
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms: 10000
+    request_timeout_ms: 30000
+execution:
+  timeout_s: 600
+  stage_timeout_s: 120
+  cleanup_timeout_s: 120
+variants:
+- id: inflight_ttl_cleanup
+  profiles:
+  - batch-window
+  environment:
+    n_prefill: 2
+    n_decode: 2
+    discovery: discovery_file
+    perf_preset: fault_env
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms:
+        omit: true
+  program: inflight_ttl_cleanup
+- id: prefill_suppress_all
+  profiles:
+  - batch-window
+  program: prefill_suppress_all
+- id: prefill_suppress_finished
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  program: prefill_suppress_finished
+- id: decode_suppress_finished
+  profiles:
+  - batch-window
+  program: decode_suppress_finished
+- id: no_respond
+  profiles:
+  - batch-window
+  program: no_respond
+- id: version_regress
+  profiles:
+  - batch-window
+  program: version_regress
+- id: unknown_rid_finished
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  program: unknown_rid_finished
+- id: unknown_rid_running
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  program: unknown_rid_running
+- id: unknown_batchid
+  profiles:
+  - batch-window
+  program: unknown_batchid
+- id: special_ids
+  profiles:
+  - batch-window
+  program: special_ids
+- id: unbatched_single_request
+  profiles:
+  - batch-window
+  program: unbatched_single_request
+- id: foreign_batchid
+  profiles:
+  - batch-window
+  program: foreign_batchid
+- id: duplicate_finished
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  program: duplicate_finished
+- id: cursor_regress
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  program: cursor_regress
+- id: finished_then_running
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  program: finished_then_running
+- id: zombie_completed_running
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  program: zombie_completed_running
+- id: zombie_fake_running
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  program: zombie_fake_running
+- id: decode_before_prefill
+  profiles:
+  - batch-window
+  program: decode_before_prefill
+  metadata:
+    findings:
+    - decode_terminal_retires_prefill_promptly.contract
+- id: decode_running_before_prefill
+  profiles:
+  - batch-window
+  program: decode_running_before_prefill
+- id: decode_waiting_before_prefill
+  profiles:
+  - batch-window
+  program: decode_waiting_before_prefill
+- id: fetch_error
+  profiles:
+  - batch-window
+  environment:
+    n_prefill: 2
+    n_decode: 2
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms: 60000
+      request_timeout_ms: 30000
+  program: fetch_error
+- id: debug_snapshot
+  profiles:
+  - batch-window
+  environment:
+    debug_enabled: true
+    n_decode: 4
+    config_overrides:
+      ordering: fifo
+      queue_timeout_ms: 60000
+  program: debug_snapshot
+  metadata:
+    requires:
+    - enqueue_batch
+- id: normal_no_fetch
+  profiles:
+  - batch-window
+  environment:
+    debug_enabled: true
+    n_decode: 4
+    config_overrides:
+      ordering: fifo
+      queue_timeout_ms: 60000
+  program: normal_no_fetch
+  metadata:
+    requires:
+    - enqueue_batch
+metadata:
+  description: Explicit status protocol boundary programs; old whole-case expected_fail is narrowed to
+    reviewed checks only.
+  category: status
+  tags:
+  - protocol
+  - migration
+parameters:
+  inflight_ttl_cleanup:
+    setup_timeout_s: 180
+    slow_prefill:
+      prefill_fixed_ms: 10000
+      restore_prefill_fixed_ms: 100
+    silent:
+      count: 6
+      concurrency: 1
+      input_len: 2048
+      output_len: 10
+      consume: deferred
+    metrics_ready_timeout_s: 195
+    metrics_ready:
+      duration_s: 180
+      interval_s: 2
+    ttl_before_timeout_s: 30
+    ttl_before:
+      duration_s: 0
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    p_suppress:
+      fault: status_suppress_rids
+      config: {}
+      enabled: true
+      role: prefill
+      rids: all
+    d_suppress:
+      fault: status_suppress_rids
+      config: {}
+      enabled: true
+      role: decode
+      rids: all
+    silent_dispatch_timeout_s: 190
+    accepted_window_timeout_s: 30
+    accepted_window:
+      duration_s: 15
+      interval_s: 0.5
+      until:
+        metric: prefill_accepted
+        op: ge
+        value: 6
+    six_prefill_accepted:
+      metric: prefill_accepted
+      op: ge
+      expected: 6
+      aggregate: last
+    active_at_twelve_seconds_timeout_s: 30
+    active_at_twelve_seconds:
+      duration_s: 12
+    ledger_nonempty_after_twelve:
+      metric: scheduler
+      op: ge
+      expected: 1
+      aggregate: last
+    ttl_drain_timeout_s: 110
+    ttl_drain:
+      duration_s: 95
+      interval_s: 2
+      until:
+        metric: scheduler
+        op: eq
+        value: 0
+    scheduler_ttl_drain:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    ttl_event_window_timeout_s: 120
+    ttl_event_window:
+      duration_s: 105
+      until:
+        metric: ttl_scheduler
+        op: ge
+        value: 6
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    six_ttl_eviction_events:
+      metric: ttl_scheduler
+      op: ge
+      expected: 6
+      aggregate: last
+    p_clear:
+      fault: status_suppress_rids
+      config: {}
+      enabled: false
+      role: prefill
+      rids: all
+    d_clear:
+      fault: status_suppress_rids
+      config: {}
+      enabled: false
+      role: decode
+      rids: all
+    recovery:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    recovery_dispatch_timeout_s: 75
+    recovery_wait_timeout_s: 75
+    recovery_success:
+      success_min: 1
+      failure_max: 0
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  prefill_suppress_all:
+    setup_timeout_s: 180
+    metrics_ready_timeout_s: 195
+    metrics_ready:
+      duration_s: 180
+      interval_s: 2
+    ttl_before_timeout_s: 30
+    ttl_before:
+      duration_s: 0
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    traffic:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      stream_timeout_s: 45
+      expected_rpc_statuses:
+      - DEADLINE_EXCEEDED
+    on_0:
+      fault: status_suppress_running
+      config: {}
+      enabled: true
+      role: prefill
+    on_1:
+      fault: status_suppress_finished
+      config: {}
+      enabled: true
+      role: prefill
+    traffic_dispatch_timeout_s: 75
+    traffic_wait_timeout_s: 75
+    legal_request_terminals:
+      timeout_or_success: true
+    scheduler_window_timeout_s: 110
+    scheduler_window:
+      duration_s: 95
+      until:
+        metric: scheduler
+        op: eq
+        value: 0
+    scheduler_retires:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    prefill_window_timeout_s: 110
+    prefill_window:
+      duration_s: 95
+      until:
+        metric: prefill_batches
+        op: eq
+        value: 0
+    prefill_retires:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    ttl_channel_after_timeout_s: 30
+    ttl_channel_after:
+      duration_s: 0
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    scheduler_ttl_channel_reachable:
+      metric: ttl_scheduler
+      op: ge
+      expected: 0
+      aggregate: last
+    prefill_ttl_channel_reachable:
+      metric: ttl_prefill
+      op: ge
+      expected: 0
+      aggregate: last
+    off_0:
+      fault: status_suppress_running
+      config: {}
+      enabled: false
+      role: prefill
+    off_1:
+      fault: status_suppress_finished
+      config: {}
+      enabled: false
+      role: prefill
+    final_owners_timeout_s: 30
+    final_owners:
+      duration_s: 0
+    final_scheduler_zero:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    final_prefill_batches_zero:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    recovery:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    recovery_dispatch_timeout_s: 75
+    recovery_wait_timeout_s: 75
+    recovery_success:
+      success_min: 1
+      failure_max: 0
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  prefill_suppress_finished:
+    setup_timeout_s: 180
+    traffic:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      stream_timeout_s: 20
+      expected_rpc_statuses:
+      - DEADLINE_EXCEEDED
+    on_0:
+      fault: status_suppress_finished
+      config: {}
+      enabled: true
+      role: prefill
+    traffic_dispatch_timeout_s: 75
+    traffic_wait_timeout_s: 75
+    legal_request_terminals:
+      timeout_or_success: true
+    off_0:
+      fault: status_suppress_finished
+      config: {}
+      enabled: false
+      role: prefill
+    after_clear_timeout_s: 110
+    after_clear:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    after_clear_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    after_clear_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    after_clear_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  decode_suppress_finished:
+    setup_timeout_s: 180
+    traffic:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      stream_timeout_s: 45
+      expected_rpc_statuses:
+      - DEADLINE_EXCEEDED
+    on_0:
+      fault: status_suppress_finished
+      config: {}
+      enabled: true
+      role: decode
+    traffic_dispatch_timeout_s: 75
+    traffic_wait_timeout_s: 75
+    legal_request_terminals:
+      timeout_or_success: true
+    p_finished_window_timeout_s: 35
+    p_finished_window:
+      duration_s: 20
+      until:
+        metric: prefill_batches
+        op: eq
+        value: 0
+    prefill_finishes_independently:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    off_0:
+      fault: status_suppress_finished
+      config: {}
+      enabled: false
+      role: decode
+    decode_recovery_window_timeout_s: 135
+    decode_recovery_window:
+      duration_s: 120
+      until:
+        metric: decode_total_load
+        op: eq
+        value: 0
+    decode_retires_after_clear:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  no_respond:
+    setup_timeout_s: 180
+    slow_prefill:
+      prefill_fixed_ms: 3000
+      restore_prefill_fixed_ms: 100
+    live:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+    live_dispatch_timeout_s: 75
+    metrics_ready_timeout_s: 195
+    metrics_ready:
+      duration_s: 180
+      interval_s: 2
+    ttl_before_timeout_s: 30
+    ttl_before:
+      duration_s: 0
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    retire_on:
+      fault: status_no_respond
+      config: {}
+      enabled: true
+      role: prefill
+    some_retired_window_timeout_s: 45
+    some_retired_window:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: le
+        value: 1
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    at_least_one_prefill_retired:
+      metric: alive_prefill
+      op: le
+      expected: 1
+      aggregate: last
+    all_retired_window_timeout_s: 45
+    all_retired_window:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: eq
+        value: 0
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    all_prefill_retired:
+      metric: alive_prefill
+      op: eq
+      expected: 0
+      aggregate: last
+    retired_ledger_window_timeout_s: 110
+    retired_ledger_window:
+      duration_s: 95
+      until:
+        metric: scheduler
+        op: eq
+        value: 0
+    retired_ledger_drained:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    ttl_channel_after_timeout_s: 30
+    ttl_channel_after:
+      duration_s: 0
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    scheduler_ttl_channel_reachable:
+      metric: ttl_scheduler
+      op: ge
+      expected: 0
+      aggregate: last
+    retire_off:
+      fault: status_no_respond
+      config: {}
+      enabled: false
+      role: prefill
+    final_scheduler_timeout_s: 30
+    final_scheduler:
+      duration_s: 0
+    final_scheduler_zero:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    topology_recovery_timeout_s: 45
+    topology_recovery:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: ge
+        value: 2
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    topology_recovers:
+      metric: alive_prefill
+      op: ge
+      expected: 2
+      aggregate: last
+    reconnect_window_timeout_s: 30
+    reconnect_window:
+      duration_s: 2
+    recovery:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    recovery_dispatch_timeout_s: 75
+    recovery_wait_timeout_s: 75
+    recovery_success:
+      success_min: 1
+      failure_max: 0
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  version_regress:
+    setup_timeout_s: 180
+    slow_prefill:
+      prefill_fixed_ms: 3000
+      restore_prefill_fixed_ms: 100
+    live:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+    live_dispatch_timeout_s: 75
+    metrics_ready_timeout_s: 195
+    metrics_ready:
+      duration_s: 180
+      interval_s: 2
+    ttl_before_timeout_s: 30
+    ttl_before:
+      duration_s: 0
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    retire_on:
+      fault: status_version_regress
+      config: {}
+      enabled: true
+      role: prefill
+    some_retired_window_timeout_s: 45
+    some_retired_window:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: le
+        value: 1
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    at_least_one_prefill_retired:
+      metric: alive_prefill
+      op: le
+      expected: 1
+      aggregate: last
+    retired_ledger_window_timeout_s: 110
+    retired_ledger_window:
+      duration_s: 95
+      until:
+        metric: scheduler
+        op: eq
+        value: 0
+    retired_ledger_drained:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    ttl_channel_after_timeout_s: 30
+    ttl_channel_after:
+      duration_s: 0
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    scheduler_ttl_channel_reachable:
+      metric: ttl_scheduler
+      op: ge
+      expected: 0
+      aggregate: last
+    retire_off:
+      fault: status_version_regress
+      config: {}
+      enabled: false
+      role: prefill
+    final_scheduler_timeout_s: 30
+    final_scheduler:
+      duration_s: 0
+    final_scheduler_zero:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    topology_recovery_timeout_s: 45
+    topology_recovery:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: ge
+        value: 2
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  unknown_rid_finished:
+    setup_timeout_s: 180
+    clean_baseline_timeout_s: 35
+    clean_baseline:
+      duration_s: 20
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    clean_baseline_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    clean_baseline_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    clean_baseline_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    ghost:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    ghost_on:
+      fault: status_fake_task
+      config:
+        phase: finished
+      enabled: true
+      role: prefill
+      selection: first
+      rids: all
+    ghost_window_timeout_s: 30
+    ghost_window:
+      duration_s: 3
+    ghost_off:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+    unknown_terminal_ignored_after_clear_timeout_s: 30
+    unknown_terminal_ignored_after_clear:
+      duration_s: 0
+    unknown_terminal_ignored:
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  unknown_rid_running:
+    setup_timeout_s: 180
+    clean_baseline_timeout_s: 35
+    clean_baseline:
+      duration_s: 20
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    clean_baseline_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    clean_baseline_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    clean_baseline_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    ghost:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    ghost_on:
+      fault: status_fake_task
+      config:
+        phase: RUNNING
+      enabled: true
+      role: prefill
+      selection: first
+      rids: all
+    ghost_window_timeout_s: 30
+    ghost_window:
+      duration_s: 3
+    ghost_off:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+    unknown_active_clear_window_timeout_s: 110
+    unknown_active_clear_window:
+      duration_s: 95
+      until:
+        metric: scheduler
+        op: eq
+        value: 0
+    unknown_active_retires_after_clear:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  unknown_batchid:
+    setup_timeout_s: 180
+    slow_prefill:
+      prefill_fixed_ms: 3000
+      restore_prefill_fixed_ms: 100
+    baseline_request:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    baseline_request_dispatch_timeout_s: 75
+    baseline_request_wait_timeout_s: 75
+    baseline_request_success:
+      success_min: 1
+      failure_max: 0
+    real:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+    real_dispatch_timeout_s: 75
+    legacy_effective_batch_zero:
+      fault: status_fake_task
+      config:
+        phase: finished
+        batch_id: 0
+      enabled: true
+      role: prefill
+      selection: landing
+      rids: all
+    real_wait_timeout_s: 75
+    real_request_unaffected:
+      success_min: 1
+      failure_max: 0
+    fake_clear:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+    after_clear_timeout_s: 110
+    after_clear:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    after_clear_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    after_clear_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    after_clear_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  special_ids:
+    setup_timeout_s: 180
+    slow_prefill:
+      prefill_fixed_ms: 3000
+      restore_prefill_fixed_ms: 100
+    clean_baseline_timeout_s: 35
+    clean_baseline:
+      duration_s: 20
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    clean_baseline_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    clean_baseline_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    clean_baseline_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    negative_rid_on:
+      fault: status_fake_task
+      config:
+        rid: -1
+        phase: finished
+        error_code: 8500
+      enabled: true
+      role: prefill
+      selection: first
+    negative_rid_window_timeout_s: 30
+    negative_rid_window:
+      duration_s: 3
+    negative_rid_clear:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+    negative_rid_ignored_after_clear_timeout_s: 30
+    negative_rid_ignored_after_clear:
+      duration_s: 0
+    negative_rid_ignored:
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+    zero_rid_channel_probe:
+      fault: status_fake_task
+      config:
+        rid: 0
+        phase: finished
+      enabled: true
+      role: prefill
+      selection: first
+      expected_http:
+      - 200
+      - 400
+    zero_rid_clear:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+    zero_real:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+    zero_dispatch_timeout_s: 75
+    zero_batch_on:
+      fault: status_fake_task
+      config:
+        phase: finished
+        batch_id: 0
+        error_code: 8500
+      enabled: true
+      role: prefill
+      selection: landing
+      rids: all
+    zero_wait_timeout_s: 75
+    zero_batch_unaffected:
+      success_min: 1
+      failure_max: 0
+    zero_clear:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+    negative_real:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+    negative_dispatch_timeout_s: 75
+    negative_batch_on:
+      fault: status_fake_task
+      config:
+        phase: finished
+        batch_id: -1
+        error_code: 8500
+      enabled: true
+      role: prefill
+      selection: landing
+      rids: all
+    negative_wait_timeout_s: 75
+    negative_batch_unaffected:
+      success_min: 1
+      failure_max: 0
+    negative_clear:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+    after_clear_timeout_s: 110
+    after_clear:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    after_clear_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    after_clear_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    after_clear_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  unbatched_single_request:
+    setup_timeout_s: 180
+    clean_baseline_timeout_s: 35
+    clean_baseline:
+      duration_s: 20
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    clean_baseline_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    clean_baseline_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    clean_baseline_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    omitted_running:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    omitted_running_before_timeout_s: 30
+    omitted_running_before:
+      duration_s: 0
+    omitted_running_on:
+      fault: status_fake_task
+      config:
+        phase: RUNNING
+      enabled: true
+      role: prefill
+      selection: first
+      rids: all
+    omitted_running_window_timeout_s: 30
+    omitted_running_window:
+      duration_s: 3
+    omitted_running_off:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+    omitted_running_ignored_after_clear_timeout_s: 30
+    omitted_running_ignored_after_clear:
+      duration_s: 0
+    omitted_running_ignored:
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+    omitted_finished:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    omitted_finished_before_timeout_s: 30
+    omitted_finished_before:
+      duration_s: 0
+    omitted_finished_on:
+      fault: status_fake_task
+      config:
+        phase: finished
+        error_code: 8500
+      enabled: true
+      role: prefill
+      selection: first
+      rids: all
+    omitted_finished_window_timeout_s: 30
+    omitted_finished_window:
+      duration_s: 3
+    omitted_finished_off:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+    omitted_finished_ignored_after_clear_timeout_s: 30
+    omitted_finished_ignored_after_clear:
+      duration_s: 0
+    omitted_finished_ignored:
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+    zero_running:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    zero_running_before_timeout_s: 30
+    zero_running_before:
+      duration_s: 0
+    zero_running_on:
+      fault: status_fake_task
+      config:
+        phase: RUNNING
+        batch_id: 0
+      enabled: true
+      role: prefill
+      selection: first
+      rids: all
+    zero_running_window_timeout_s: 30
+    zero_running_window:
+      duration_s: 3
+    zero_running_off:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+    zero_running_ignored_after_clear_timeout_s: 30
+    zero_running_ignored_after_clear:
+      duration_s: 0
+    zero_running_ignored:
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+    zero_finished:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    zero_finished_before_timeout_s: 30
+    zero_finished_before:
+      duration_s: 0
+    zero_finished_on:
+      fault: status_fake_task
+      config:
+        phase: finished
+        batch_id: 0
+        error_code: 8500
+      enabled: true
+      role: prefill
+      selection: first
+      rids: all
+    zero_finished_window_timeout_s: 30
+    zero_finished_window:
+      duration_s: 3
+    zero_finished_off:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+    zero_finished_ignored_after_clear_timeout_s: 30
+    zero_finished_ignored_after_clear:
+      duration_s: 0
+    zero_finished_ignored:
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+    after_clear_timeout_s: 35
+    after_clear:
+      duration_s: 20
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    after_clear_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    after_clear_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    after_clear_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  foreign_batchid:
+    setup_timeout_s: 180
+    clean_baseline_timeout_s: 35
+    clean_baseline:
+      duration_s: 20
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    clean_baseline_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    clean_baseline_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    clean_baseline_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    ghost:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    foreign_on:
+      fault: status_fake_task
+      config:
+        phase: finished
+        batch_id: 10000000
+        error_code: 8500
+      enabled: true
+      role: prefill
+      selection: all
+      rids: all
+    foreign_ghost_window_timeout_s: 30
+    foreign_ghost_window:
+      duration_s: 3
+    foreign_terminal_ignored:
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+    real_traffic:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    real_traffic_dispatch_timeout_s: 75
+    real_traffic_wait_timeout_s: 75
+    real_traffic_success:
+      success_min: 4
+      failure_max: 0
+    foreign_off:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+    after_foreign_timeout_s: 45
+    after_foreign:
+      duration_s: 30
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    after_foreign_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    after_foreign_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    after_foreign_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  duplicate_finished:
+    setup_timeout_s: 180
+    duplicate_on:
+      fault: status_duplicate_finished
+      config: {}
+      enabled: true
+      role: prefill
+    traffic:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    traffic_dispatch_timeout_s: 75
+    traffic_wait_timeout_s: 75
+    traffic_success:
+      success_min: 4
+      failure_max: 0
+    initial_drain_timeout_s: 110
+    initial_drain:
+      duration_s: 95
+      until:
+        metric: scheduler
+        op: eq
+        value: 0
+    duplicate_replay_window_timeout_s: 30
+    duplicate_replay_window:
+      duration_s: 5
+    duplicate_off:
+      fault: status_duplicate_finished
+      config: {}
+      enabled: false
+      role: prefill
+    terminal_replay_is_idempotent:
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+    after_clear_timeout_s: 45
+    after_clear:
+      duration_s: 30
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    after_clear_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    after_clear_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    after_clear_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  cursor_regress:
+    setup_timeout_s: 180
+    history:
+      count: 3
+      concurrency: 3
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    history_dispatch_timeout_s: 75
+    history_wait_timeout_s: 75
+    history_success:
+      success_min: 3
+      failure_max: 0
+    clean_baseline_timeout_s: 45
+    clean_baseline:
+      duration_s: 30
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    clean_baseline_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    clean_baseline_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    clean_baseline_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    cursor_on:
+      fault: status_cursor_regress
+      config:
+        n: 3
+      enabled: true
+      role: prefill
+    replay_before_timeout_s: 30
+    replay_before:
+      duration_s: 0
+    replay_window_timeout_s: 30
+    replay_window:
+      duration_s: 5
+    cursor_off:
+      fault: status_cursor_regress
+      config: {}
+      enabled: false
+      role: prefill
+    cursor_replay_is_idempotent:
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+    after_replay_timeout_s: 35
+    after_replay:
+      duration_s: 20
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    after_replay_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    after_replay_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    after_replay_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    recovery:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    recovery_dispatch_timeout_s: 75
+    recovery_wait_timeout_s: 75
+    recovery_success:
+      success_min: 1
+      failure_max: 0
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  finished_then_running:
+    setup_timeout_s: 180
+    settled:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    settled_dispatch_timeout_s: 75
+    settled_wait_timeout_s: 75
+    settled_success:
+      success_min: 1
+      failure_max: 0
+    clean_baseline_timeout_s: 35
+    clean_baseline:
+      duration_s: 20
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    clean_baseline_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    clean_baseline_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    clean_baseline_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    terminal_replay:
+      fault: status_fake_task
+      config:
+        phase: finished
+      enabled: true
+      role: prefill
+      selection: first
+      rids: all
+    terminal_window_timeout_s: 30
+    terminal_window:
+      duration_s: 2
+    terminal_off:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+    active_replay:
+      fault: status_fake_task
+      config:
+        phase: RUNNING
+      enabled: true
+      role: prefill
+      selection: first
+      rids: all
+    active_window_timeout_s: 30
+    active_window:
+      duration_s: 5
+    active_off:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+    terminal_cannot_resurrect:
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+    after_replay_timeout_s: 35
+    after_replay:
+      duration_s: 20
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    after_replay_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    after_replay_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    after_replay_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  zombie_completed_running:
+    setup_timeout_s: 180
+    decode_zombie_on:
+      fault: status_zombie_running
+      config: {}
+      enabled: true
+      role: decode
+    traffic:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    traffic_dispatch_timeout_s: 75
+    traffic_wait_timeout_s: 75
+    traffic_success:
+      success_min: 4
+      failure_max: 0
+    zombie_window_timeout_s: 30
+    zombie_window:
+      duration_s: 10
+    decode_zombie_off:
+      fault: status_zombie_running
+      config: {}
+      enabled: false
+      role: decode
+    after_zombie_timeout_s: 110
+    after_zombie:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    after_zombie_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    after_zombie_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    after_zombie_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    decode_load_zero:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  zombie_fake_running:
+    setup_timeout_s: 180
+    clean_baseline_timeout_s: 35
+    clean_baseline:
+      duration_s: 20
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    clean_baseline_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    clean_baseline_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    clean_baseline_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    ghosts:
+      count: 3
+      concurrency: 3
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    ghosts_on:
+      fault: status_fake_task
+      config:
+        phase: RUNNING
+      enabled: true
+      role: prefill
+      selection: first
+      rids: all
+    active_ghost_window_timeout_s: 75
+    active_ghost_window:
+      duration_s: 60
+      interval_s: 5
+    resident_growth_bounded:
+      metric: scheduler
+      op: le
+      expected: 3
+      aggregate: last
+    master_healthy_during_active:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+    ghosts_clear:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+    clear_retirement_window_timeout_s: 110
+    clear_retirement_window:
+      duration_s: 95
+      until:
+        metric: scheduler
+        op: eq
+        value: 0
+    ghosts_retire_after_clear:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  decode_before_prefill:
+    setup_timeout_s: 180
+    traffic:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    p_terminals_off:
+      fault: status_suppress_rids
+      config: {}
+      enabled: true
+      role: prefill
+      rids: all
+    traffic_dispatch_timeout_s: 75
+    traffic_wait_timeout_s: 75
+    decode_completes_requests:
+      success_min: 4
+      failure_max: 0
+    event_driven_window_timeout_s: 30
+    event_driven_window:
+      duration_s: 10
+      until:
+        metric: prefill_batches
+        op: eq
+        value: 0
+    decode_terminal_retires_prefill_promptly:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    fallback_retirement_window_timeout_s: 110
+    fallback_retirement_window:
+      duration_s: 95
+      until:
+        metric: prefill_batches
+        op: eq
+        value: 0
+    p_terminal_restore:
+      fault: status_suppress_rids
+      config: {}
+      enabled: false
+      role: prefill
+      rids: all
+    prefill_after_clear_timeout_s: 30
+    prefill_after_clear:
+      duration_s: 0
+    prefill_zero_after_clear:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    recovery:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    recovery_dispatch_timeout_s: 75
+    recovery_wait_timeout_s: 75
+    recovery_success:
+      success_min: 1
+      failure_max: 0
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  decode_running_before_prefill:
+    setup_timeout_s: 180
+    traffic:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+    p_suppress:
+      fault: status_suppress_rids
+      config: {}
+      enabled: true
+      role: prefill
+      rids: all
+    d_finished_suppress:
+      fault: status_suppress_finished
+      config: {}
+      enabled: true
+      role: decode
+    traffic_dispatch_timeout_s: 75
+    nonempty_window_timeout_s: 30
+    nonempty_window:
+      duration_s: 15
+      until:
+        metric: prefill_batches
+        op: ge
+        value: 1
+    batch_really_dispatched:
+      metric: prefill_batches
+      op: ge
+      expected: 1
+      aggregate: last
+    intermediate_hold_window_timeout_s: 30
+    intermediate_hold_window:
+      duration_s: 10
+    intermediate_cannot_retire_prefill:
+      metric: prefill_batches
+      op: ge
+      expected: 1
+      aggregate: last
+    intermediate_cannot_retire_scheduler:
+      metric: scheduler
+      op: ge
+      expected: 1
+      aggregate: last
+    p_clear:
+      fault: status_suppress_rids
+      config: {}
+      enabled: false
+      role: prefill
+      rids: all
+    d_finished_clear:
+      fault: status_suppress_finished
+      config: {}
+      enabled: false
+      role: decode
+    after_clear_timeout_s: 110
+    after_clear:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    after_clear_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    after_clear_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    after_clear_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  decode_waiting_before_prefill:
+    setup_timeout_s: 180
+    traffic:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+    p_suppress:
+      fault: status_suppress_rids
+      config: {}
+      enabled: true
+      role: prefill
+      rids: all
+    d_suppress:
+      fault: status_suppress_rids
+      config: {}
+      enabled: true
+      role: decode
+      rids: all
+    d_waiting_on:
+      fault: status_fake_task
+      config:
+        phase: RECEIVED
+      enabled: true
+      role: decode
+      selection: all
+      rids: all
+    traffic_dispatch_timeout_s: 75
+    nonempty_window_timeout_s: 30
+    nonempty_window:
+      duration_s: 15
+      until:
+        metric: prefill_batches
+        op: ge
+        value: 1
+    batch_really_dispatched:
+      metric: prefill_batches
+      op: ge
+      expected: 1
+      aggregate: last
+    intermediate_hold_window_timeout_s: 30
+    intermediate_hold_window:
+      duration_s: 10
+    intermediate_cannot_retire_prefill:
+      metric: prefill_batches
+      op: ge
+      expected: 1
+      aggregate: last
+    intermediate_cannot_retire_scheduler:
+      metric: scheduler
+      op: ge
+      expected: 1
+      aggregate: last
+    p_clear:
+      fault: status_suppress_rids
+      config: {}
+      enabled: false
+      role: prefill
+      rids: all
+    d_clear:
+      fault: status_suppress_rids
+      config: {}
+      enabled: false
+      role: decode
+      rids: all
+    d_waiting_clear:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: decode
+    after_clear_timeout_s: 110
+    after_clear:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    after_clear_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    after_clear_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    after_clear_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  fetch_error:
+    setup_timeout_s: 180
+    faulted:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      expected_rpc_statuses:
+      - UNKNOWN
+      - INTERNAL
+    fetch_fault_on:
+      fault: fetch_error
+      config: {}
+      enabled: true
+      role: prefill
+    faulted_dispatch_timeout_s: 75
+    faulted_wait_timeout_s: 75
+    fetch_fault_surfaces:
+      failure_min: 1
+      failure_max: 1
+    fetch_fault_off:
+      fault: fetch_error
+      config: {}
+      enabled: false
+      role: prefill
+    fresh_request:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    fresh_request_dispatch_timeout_s: 75
+    fresh_request_wait_timeout_s: 75
+    fresh_request_success:
+      success_min: 1
+      failure_max: 0
+    after_fetch_error_timeout_s: 110
+    after_fetch_error:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    after_fetch_error_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    after_fetch_error_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    after_fetch_error_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    engine_after_fetch_timeout_s: 30
+    engine_after_fetch:
+      duration_s: 0
+    prefill_engine_drained:
+      metric: prefill_engine_inflight
+      op: eq
+      expected: 0
+      aggregate: last
+    recovery:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    recovery_dispatch_timeout_s: 75
+    recovery_wait_timeout_s: 75
+    recovery_success:
+      success_min: 1
+      failure_max: 0
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  debug_snapshot:
+    setup_timeout_s: 180
+    debug_before_timeout_s: 30
+    debug_before:
+      include:
+      - inflight
+      - mock
+      - debug
+      duration_s: 0
+    completed:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    completed_dispatch_timeout_s: 75
+    completed_wait_timeout_s: 75
+    completed_success:
+      success_min: 1
+      failure_max: 0
+    tombstone_window_timeout_s: 30
+    tombstone_window:
+      include:
+      - inflight
+      - mock
+      - debug
+      duration_s: 15
+      until:
+        metric: scheduler_tombstones
+        op: eq
+        value: 1
+    resource_free_queryable_tombstone:
+      metric: scheduler_tombstones
+      op: eq
+      expected: 1
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  normal_no_fetch:
+    setup_timeout_s: 180
+    fresh_baseline_timeout_s: 30
+    fresh_baseline:
+      include:
+      - inflight
+      - mock
+      - debug
+      duration_s: 0
+    fresh_accepted_zero:
+      metric: accepted
+      op: eq
+      expected: 0
+      aggregate: last
+    fresh_fetch_zero:
+      metric: fetch_rpc
+      op: eq
+      expected: 0
+      aggregate: last
+    unfetched:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+    schedule_only_timeout_s: 75
+    prefill_completion_window_timeout_s: 35
+    prefill_completion_window:
+      include:
+      - inflight
+      - mock
+      - debug
+      duration_s: 20
+      until:
+        metric: cohort_prefill_completed
+        op: eq
+        value: 1
+    prefill_completed:
+      metric: cohort_prefill_completed
+      op: eq
+      expected: 1
+      aggregate: last
+    master_enqueued:
+      metric: cohort_enqueued
+      op: eq
+      expected: 1
+      aggregate: all
+    completion_window_no_fetch:
+      metric: fetch_rpc
+      op: eq
+      expected: 0
+      aggregate: all
+    post_completion_window_timeout_s: 30
+    post_completion_window:
+      include:
+      - inflight
+      - mock
+      - debug
+      duration_s: 2
+    prefill_stays_completed:
+      metric: cohort_prefill_completed
+      op: eq
+      expected: 1
+      aggregate: all
+    post_completion_no_fetch:
+      metric: fetch_rpc
+      op: eq
+      expected: 0
+      aggregate: all
+    client_never_fetches:
+      metric: cohort_fetch_invocations
+      op: eq
+      expected: 0
+      aggregate: all
+    one_prefill_acceptance:
+      metric: prefill_accepted
+      op: eq
+      expected: 1
+      aggregate: last
+    separate_recovery:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    separate_recovery_dispatch_timeout_s: 75
+    separate_recovery_wait_timeout_s: 75
+    separate_recovery_success:
+      success_min: 1
+      failure_max: 0
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last

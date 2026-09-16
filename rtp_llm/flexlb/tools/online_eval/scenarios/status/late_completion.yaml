@@ -1,0 +1,47 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: late_completion
+profiles:
+- single-batch
+environment:
+  backend: java_mock
+  n_prefill: 1
+  n_decode: 1
+  mock_auto_fetch: false
+  config_overrides:
+    request_timeout_ms: 120000
+execution:
+  timeout_s: 300
+  stage_timeout_s: 90
+  cleanup_timeout_s: 120
+parameters:
+  after_missing:
+    setup_timeout_s: 180
+    late_terminal_timeout_s: 90
+  missing_rounds: 1
+  delay_ms: 300
+  clean_window_s: 30
+variants:
+- id: after_missing
+  profiles:
+  - single-batch
+  program: after_missing
+metadata:
+  category: status
+  tags:
+  - protocol
+  - regression
+  description: Late terminal delivery must retire scheduler ownership after an incomplete status report.
+parameter_schema:
+  missing_rounds:
+    minimum: 1
+    maximum: 10
+    integer: true
+  delay_ms:
+    minimum: 1
+    maximum: 10000
+    integer: true
+  clean_window_s:
+    minimum: 30
+    maximum: 30
+    integer: true

@@ -94,6 +94,7 @@ class DynamicEngineScaleTest {
     private DynamicEngineManager engineManager;
     private DiscoveryFileStore discoveryFileStore;
     private Path discoveryFile;
+    private JavaMockEngineCluster.Config clusterConfig;
 
     @AfterEach
     void tearDown() throws InterruptedException {
@@ -133,6 +134,37 @@ class DynamicEngineScaleTest {
     // ════════════════════════════════════════════════════════════════
     //  Tests
     // ════════════════════════════════════════════════════════════════
+
+    @Test
+    void whaleBundleCanScaleAndNewEngineReceivesMetricHooks() throws Exception {
+        startCluster(model("10", 1), 1, 1);
+        clusterConfig.whale = true;
+        clusterConfig.whaleBundle = true;
+        var initialized = new AtomicInteger();
+        clusterConfig.engineInitializer = service -> initialized.incrementAndGet();
+        var added = engineManager.addEngine("decode", null);
+        assertEquals(1, initialized.get());
+        assertTrue(Files.readString(discoveryFile).contains(":" + (added.grpcPort() - 1)));
+        // The actual one-engine-per-pod mode remains platform-managed.
+        clusterConfig.whaleBundle = false;
+        org.junit.jupiter.api.Assertions.assertThrows(DynamicEngineManager.EngineOperationException.class,
+                () -> engineManager.addEngine("decode", null));
+    }
+
+    @Test
+    void newAndReplacementEnginesUseStartupPerformance() throws Exception {
+        int basePort = startCluster(model("10", 1.0), 1, 1);
+        postOk("/set_perf", "{\"engine\":\"decode-0\",\"decode_scale\":9}");
+        assertEquals(9L, services.get(basePort + 1).getPerformance().decodeMs(1, 1));
+        JsonNode added = postOk("/add_engine", "{\"role\":\"decode\"}");
+        int addedPort = added.path("port").asInt();
+        assertEquals(1L, services.get(addedPort).getPerformance().decodeMs(1, 1));
+        postOk("/set_perf", "{\"port\":" + addedPort + ",\"decode_scale\":4}");
+        assertEquals(9L, services.get(basePort + 1).getPerformance().decodeMs(1, 1));
+        postOk("/remove_engine", "{\"port\":" + addedPort + "}");
+        JsonNode replacement = postOk("/add_engine", "{\"role\":\"decode\"}");
+        assertEquals(1L, services.get(replacement.path("port").asInt()).getPerformance().decodeMs(1, 1));
+    }
 
     @Test
     void addEngineExposesNewGrpcPortSnapshotAndDiscoveryEntry() throws Exception {
@@ -578,6 +610,7 @@ class DynamicEngineScaleTest {
         serversByPort = new ConcurrentHashMap<>();
         JavaMockEngineCluster.ClusterStats stats = new JavaMockEngineCluster.ClusterStats();
         JavaMockEngineCluster.Config config = new JavaMockEngineCluster.Config();
+        clusterConfig = config;
         config.host = "127.0.0.1";
         // This suite pins discovery-file contents with literal 127.0.0.1
         // addresses; disable the unique-IP advertisement so the assertions

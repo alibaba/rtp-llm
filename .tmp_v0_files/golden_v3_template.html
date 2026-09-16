@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>黄金点摸测 · SLO 口径重构 — golden-sweep 20260911 · v3</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+:root{
+  --bg:#0b0f0d; --panel:#121915; --panel2:#0f1512; --edge:#1e2b25; --edge2:#28393081;
+  --ink:#e4f0e9; --dim:#8ea599; --faint:#5b6e64;
+  --hot:#3ddc97; --cool:#5db8d9; --warn:#ff7a59; --amber:#ffb454; --gold:#e8c468;
+  --grid:rgba(212,240,229,.06);
+  --mono:'IBM Plex Mono','JetBrains Mono',ui-monospace,monospace;
+  --sans:'IBM Plex Mono','PingFang SC','Hiragino Sans GB','Microsoft YaHei',monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg) ;
+  background-image:
+    repeating-linear-gradient(0deg,transparent 0 47px,var(--grid) 47px 48px),
+    repeating-linear-gradient(90deg,transparent 0 47px,var(--grid) 47px 48px),
+    radial-gradient(1200px 500px at 85% -10%,rgba(61,220,151,.05),transparent 60%),
+    radial-gradient(900px 420px at 0% 110%,rgba(93,184,217,.04),transparent 60%);
+  color:var(--ink); font-family:var(--sans); font-size:13px; line-height:1.55;
+  -webkit-font-smoothing:antialiased; padding:34px 40px 0;
+}
+.wrap{max-width:1360px;margin:0 auto}
+/* ---------- header ---------- */
+header{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;
+  border-bottom:1px solid var(--edge);padding-bottom:18px;margin-bottom:22px;position:relative}
+header::after{content:'';position:absolute;left:0;bottom:-1px;width:120px;height:3px;background:var(--hot)}
+.hgroup .eyebrow{font-size:10px;letter-spacing:.34em;color:var(--hot);text-transform:uppercase;margin-bottom:7px}
+h1{font-size:26px;font-weight:600;letter-spacing:.02em;line-height:1.2}
+h1 .thin{color:var(--dim);font-weight:400}
+.hmeta{font-size:11px;color:var(--faint);margin-top:9px;letter-spacing:.04em}
+.hmeta b{color:var(--dim);font-weight:500}
+.hbadge{text-align:right;font-size:10px;color:var(--faint);letter-spacing:.14em;line-height:1.9;white-space:nowrap}
+.hbadge .big{display:block;font-family:var(--mono);font-size:15px;color:var(--amber);letter-spacing:.06em}
+/* ---------- KPI ---------- */
+.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:26px}
+.kpi{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--edge);
+  padding:14px 15px 12px;position:relative;overflow:hidden;
+  opacity:0;animation:rise .55s cubic-bezier(.2,.7,.3,1) forwards}
+.kpi:nth-child(1){animation-delay:.05s}.kpi:nth-child(2){animation-delay:.13s}
+.kpi:nth-child(3){animation-delay:.21s}.kpi:nth-child(4){animation-delay:.29s}
+.kpi:nth-child(5){animation-delay:.37s}
+.kpi::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:var(--kc,var(--hot));opacity:.85}
+.kpi .lab{font-size:10px;letter-spacing:.22em;color:var(--faint);text-transform:uppercase;margin-bottom:8px}
+.kpi .val{font-family:var(--mono);font-size:23px;font-weight:600;color:var(--kc,var(--hot));line-height:1.1;letter-spacing:-.01em}
+.kpi .val small{font-size:12px;color:var(--dim);font-weight:400}
+.kpi .sub{font-size:10.5px;color:var(--dim);margin-top:7px;font-family:var(--mono);letter-spacing:.01em}
+.kpi.warnk{--kc:var(--warn)} .kpi.amberk{--kc:var(--amber)} .kpi.goldk{--kc:var(--gold)} .kpi.coolk{--kc:var(--cool)}
+/* ---------- panel grid ---------- */
+.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}
+.panel{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--edge);
+  padding:16px 18px 14px;position:relative;min-width:0;
+  opacity:0;animation:rise .6s cubic-bezier(.2,.7,.3,1) forwards}
+.panel:nth-of-type(1){animation-delay:.30s}.panel:nth-of-type(2){animation-delay:.38s}
+.panel:nth-of-type(3){animation-delay:.46s}.panel:nth-of-type(4){animation-delay:.54s}
+.panel:nth-of-type(5){animation-delay:.62s}.panel:nth-of-type(6){animation-delay:.70s}
+.panel:nth-of-type(7){animation-delay:.78s}.panel:nth-of-type(8){animation-delay:.86s}
+.panel:nth-of-type(9){animation-delay:.94s}.panel:nth-of-type(10){animation-delay:1.02s}
+.p12{grid-column:span 12}.p7{grid-column:span 7}.p5{grid-column:span 5}
+.phead{display:flex;align-items:baseline;gap:10px;margin-bottom:4px;flex-wrap:wrap}
+.pnum{font-family:var(--mono);font-size:11px;color:var(--bg);background:var(--hot);padding:1px 7px;font-weight:700;letter-spacing:.08em}
+.ptitle{font-size:15px;font-weight:600;letter-spacing:.03em}
+.pnote{width:100%;font-size:10.5px;color:var(--faint);font-family:var(--mono);letter-spacing:.02em;margin-bottom:10px}
+.cbox{position:relative;height:340px}
+.cbox.tall{height:400px}.cbox.short{height:300px}
+/* ---------- 面板内双栏（X1/X3 复用 · minmax(0,) 防溢出）---------- */
+.x1grid{display:grid;grid-template-columns:minmax(0,1.62fr) minmax(0,1fr);gap:20px;align-items:start}
+.subgrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+.x1col{min-width:0}
+.x1sub{font-size:11px;color:var(--dim);font-family:var(--mono);letter-spacing:.03em;margin-bottom:8px}
+.tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.tblwrap>table{min-width:640px}
+/* ---------- HTML legend ---------- */
+.hlegend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:10.5px;color:var(--dim);font-family:var(--mono);margin-top:10px}
+.hlegend .it{display:inline-flex;align-items:center;gap:6px}
+.sw{width:16px;height:3px;border-radius:1px;display:inline-block}
+.sw.line-hot{background:var(--hot)} .sw.line-cool{background:var(--cool)}
+.sw.line-warn{background:var(--warn)} .sw.line-gold{background:var(--gold)}
+.sw.line-dim{background:#5b6e64}
+.sw.band{height:8px;background:rgba(61,220,151,.18);border:1px solid rgba(61,220,151,.4)}
+.sw.bandc{height:8px;background:rgba(93,184,217,.18);border:1px solid rgba(93,184,217,.4)}
+.sw.bar-warn{height:9px;width:10px;background:rgba(255,122,89,.8);border:1px solid var(--warn)}
+.sw.bar-hot{height:9px;width:10px;background:rgba(61,220,151,.8);border:1px solid var(--hot)}
+.pt{width:8px;height:8px;display:inline-block}
+.pt.c{border-radius:50%;background:var(--hot)} .pt.t{background:var(--hot);clip-path:polygon(50% 0,100% 100%,0 100%)}
+.pt.r{background:var(--cool)}
+.capscale{display:flex;gap:10px;flex-wrap:wrap;font-size:10px;font-family:var(--mono);color:var(--dim);margin-top:10px}
+.capscale .ci{display:inline-flex;align-items:center;gap:5px}
+.capscale .dot{width:9px;height:9px;border-radius:50%}
+.capscale .tri{width:9px;height:9px;clip-path:polygon(50% 0,100% 100%,0 100%)}
+/* ---------- tables ---------- */
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--faint);font-weight:500;
+  text-align:left;padding:7px 10px;border-bottom:1px solid var(--edge)}
+td{padding:8px 10px;border-bottom:1px solid var(--edge2);color:var(--ink);vertical-align:top}
+tr:last-child td{border-bottom:none}
+tbody tr:hover td{background:rgba(61,220,151,.035)}
+tr.total td{border-top:1px solid var(--edge);color:var(--hot);font-weight:600}
+tr.sechead td{border-top:1px solid var(--edge);background:rgba(232,196,104,.05);color:var(--gold);
+  font-size:10.5px;letter-spacing:.14em;font-family:var(--mono);padding:6px 10px}
+td.mono,.mono{font-family:var(--mono)}
+td.dim,.dim{color:var(--dim)} td.ok{color:var(--hot)}
+td .vmain{display:block;font-family:var(--mono);font-size:12px;line-height:1.35}
+td .vmain+.vmain{margin-top:5px;padding-top:4px;border-top:1px dashed var(--edge)}
+td .vsub{display:block;font-size:9.5px;color:var(--dim);font-family:var(--mono);margin-top:2px;letter-spacing:.01em}
+td .srcref{display:block;font-size:9px;color:var(--faint);font-family:var(--mono);letter-spacing:.05em;margin-top:3px}
+.tag{font-size:9.5px;font-family:var(--mono);letter-spacing:.1em;padding:1px 7px;border:1px solid;border-radius:2px}
+.tag.hard{color:var(--warn);border-color:rgba(255,122,89,.45);background:rgba(255,122,89,.07)}
+.tag.soft{color:var(--cool);border-color:rgba(93,184,217,.45);background:rgba(93,184,217,.07)}
+.tag.comp{color:var(--amber);border-color:rgba(255,180,84,.45);background:rgba(255,180,84,.07)}
+.tag.okc{color:var(--hot);border-color:rgba(61,220,151,.45);background:rgba(61,220,151,.07)}
+/* ---------- footer ---------- */
+footer{margin-top:26px;border-top:1px solid var(--edge);padding:18px 0 30px;
+  display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);gap:26px;
+  opacity:0;animation:rise .6s 1.1s cubic-bezier(.2,.7,.3,1) forwards}
+footer h4{font-size:10px;letter-spacing:.26em;color:var(--faint);text-transform:uppercase;margin-bottom:9px}
+footer ul{list-style:none}
+footer li{font-size:10.5px;color:var(--dim);font-family:var(--mono);padding:2.5px 0;letter-spacing:.01em}
+footer li b{color:var(--ink);font-weight:500}
+footer .src li{word-break:break-all}
+footer .src .path{color:var(--cool)}
+@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion: reduce){
+  .kpi,.panel,footer{animation:none;opacity:1}
+}
+@media (max-width:1080px){
+  body{padding:20px 16px 0}
+  .kpis{grid-template-columns:repeat(2,1fr)}
+  .p7,.p5{grid-column:span 12}
+  .x1grid,.subgrid{grid-template-columns:minmax(0,1fr)}
+  footer{grid-template-columns:minmax(0,1fr)}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="hgroup">
+    <div class="eyebrow">cache-affinity guardrail · golden sweep · v3 · SLO 口径重构</div>
+    <h1>黄金点摸测 <span class="thin">· SLO 违约口径重构报告</span></h1>
+    <div class="hmeta">
+      <b>cap 7 档 × seed 3 = 21 格（3 QPS 低压）+ v1/v0 三臂（154 QPS 高压）</b>
+      · 有害判定 = SLO 违约（SLO = prefill_ms × @@MCAL@@，M 由黄金点 cap250 P95 数据校准）
+      · 旧口径 delta&gt;100ms 废弃，仅留对照
+    </div>
+  </div>
+  <div class="hbadge">
+    <span class="big">GOLDEN&nbsp;SWEEP&nbsp;V3&nbsp;·&nbsp;SLO</span>
+    20260911 · run 20260911_101402 @ host111<br>
+    codex/cache-affinity-guardrail-v0 @ 0d1a6bf84a
+  </div>
+</header>
+
+<section class="kpis">
+  <div class="kpi goldk">
+    <div class="lab">M_cal（P95 数据校准）</div>
+    <div class="val">@@MCAL@@</div>
+    <div class="sub">r = TTFT/prefill · cap250 pooled n=@@NPOOLED@@ · P99 @@MCAL99@@ · 固定档 1.5/2.0/3.0 全误判</div>
+  </div>
+  <div class="kpi warnk">
+    <div class="lab">v1 高压反转（核心）</div>
+    <div class="val">hi @@V1HINEW@@</div>
+    <div class="sub">SLO 违约三臂最少 · TTFT p95 @@V1HITTFT@@ms 最低 · zero @@V1ZERONEW@@ 最多</div>
+  </div>
+  <div class="kpi amberk">
+    <div class="lab">旧口径判反实锤</div>
+    <div class="val">@@V1HIOLD@@ <small>→</small> @@V1HINEW@@</div>
+    <div class="sub">hi 旧判「最有害」· 新口径违约最少、延迟最低 —— 方向完全判反</div>
+  </div>
+  <div class="kpi coolk">
+    <div class="lab">低压档判别力</div>
+    <div class="val">无</div>
+    <div class="sub">TTFT 全档 ~@@TTFTFLAT@@ms 持平 · cap≤250 违约 ~5%（校准 tautology）· cap≥500 降至 ~1%</div>
+  </div>
+  <div class="kpi">
+    <div class="lab">join 覆盖率</div>
+    <div class="val">@@JOINGOLDEN@@</div>
+    <div class="sub">golden 21 格全量 · v1/v0 每臂 @@JOINV1@@ · 缺口 0</div>
+  </div>
+</section>
+
+<main class="grid">
+
+  <section class="panel p12">
+    <div class="phead"><span class="pnum">P1&prime;</span><span class="ptitle">相变重判 — 旧口径阶梯跳变 vs 新口径违约下降</span></div>
+    <div class="pnote">口径：旧 = delta&gt;100ms 请求占比（cap 250→500 从 @@PHOLDLO@@ 尖锐跳至 @@PHOLDHI@@）· 新 = SLO 违约率 M_cal(P95)（同区间 @@PHNEWLO@@ → @@PHNEWHI@@ 反而下降，hot 命中升 1.17×）· 结论：旧「相变」是 100ms 阈值伪影，非系统行为突变</div>
+    <div class="cbox tall"><canvas id="c11"></canvas></div>
+    <div class="hlegend">
+      <span class="it"><span class="sw line-warn"></span>旧口径有害占比（delta&gt;100ms）</span>
+      <span class="it"><span class="sw line-hot"></span>新口径 SLO 违约率（M_cal P95）</span>
+      <span class="it"><span class="sw line-cool"></span>bg 命中率（右轴）</span>
+    </div>
+  </section>
+
+  <section class="panel p7">
+    <div class="phead"><span class="pnum" style="background:var(--warn)">X3</span><span class="ptitle">v1 高压三臂反转 — 旧口径判反实锤（核心面板）</span></div>
+    <div class="pnote">口径：154 QPS 高压 · n=@@JOINV1@@/臂 · 旧 = delta&gt;100ms 占比 · 新 = SLO 违约率（同一 M_cal P95）· 吞吐/命中三臂几乎相同（±0.2%）→ hi 延迟单方面胜出</div>
+    <div class="subgrid">
+      <div class="x1col">
+        <div class="x1sub">旧「有害」占比 vs 新 SLO 违约率（%）— 方向相反</div>
+        <div class="cbox short"><canvas id="c8"></canvas></div>
+        <div class="hlegend">
+          <span class="it"><span class="sw bar-warn"></span>旧 delta&gt;100ms</span>
+          <span class="it"><span class="sw bar-hot"></span>新 SLO 违约（M_cal P95）</span>
+        </div>
+      </div>
+      <div class="x1col">
+        <div class="x1sub">客户端 TTFT p95（ms）× 亲和归因违约（%）</div>
+        <div class="cbox short"><canvas id="c9"></canvas></div>
+        <div class="hlegend">
+          <span class="it"><span class="pt c" style="background:var(--hot);border-radius:0"></span>TTFT p95 柱（hi 最低）</span>
+          <span class="it"><span class="sw line-gold"></span>归因违约率（反事实近似）</span>
+        </div>
+      </div>
+    </div>
+    <div class="pnote" style="margin-top:9px">反转解读：hi 臂为等缓存 delta 大（旧口径据此判「最有害」@@V1HIOLD@@），但实测 TTFT p95 @@V1HITTFT@@ms 三臂最低、SLO 违约 @@V1HINEW@@ 三臂最少；zero 臂 delta 恒 0（旧口径「最干净」）却违约 @@V1ZERONEW@@ 最多。旧口径把「预测空间让步」误当「实测伤害」。</div>
+  </section>
+
+  <section class="panel p5">
+    <div class="phead"><span class="pnum" style="background:var(--gold)">X2</span><span class="ptitle">M 倍率校准 — 为什么必须数据校准</span></div>
+    <div class="pnote">口径：r = 客户端 TTFT / prefill_ms · 黄金点 cap250 三 seed pooled n=@@NPOOLED@@ · TTFT(~579ms) 含 schedule/batcher 等待(~350ms)，prefill(~220ms) 仅 FORMULA 纯执行估计，故 M_cal≈2.6 而非 ~1</div>
+    <div class="cbox"><canvas id="c7"></canvas></div>
+    <div class="hlegend">
+      <span class="it"><span class="sw bar-hot"></span>r 分布直方图（请求数/bin）</span>
+      <span class="it"><span class="sw line-gold"></span>固定档 M 在黄金点的违约率（右轴）</span>
+      <span class="it"><span class="sw line-warn"></span>P95 = @@MCAL@@（M_cal 主口径）</span>
+    </div>
+    <div class="pnote" style="margin-top:7px">固定档误判：M=1.5 / 2.0 把健康黄金点判成 @@M15@@ / @@M20@@ 违约（假阳性），M=3.0 违约 @@M30@@（全漏，假阴性）——只有校准值让基线违约率 ≈5%（P95 定义的 tautology）。</div>
+  </section>
+
+  <section class="panel p7">
+    <div class="phead"><span class="pnum" style="background:var(--cool)">X4</span><span class="ptitle">新旧口径一致性 — 系统性背离散点</span></div>
+    <div class="pnote">口径：x = 旧 delta&gt;100ms 占比 · y = 新 SLO 违约率（M_cal P95）· ● = golden 21 格按 cap 聚合（7 档，色标同 cap）· ▲ = v1 高压三臂 · 若两口径一致点应沿对角带分布，实际旧高≠新高（golden cap≥500 旧 33.3% 新 ~1%；v1 hi 旧 18.8% 新 29.9% 但为三臂最低）</div>
+    <div class="cbox"><canvas id="c10"></canvas></div>
+    <div class="capscale" id="capscale10"></div>
+  </section>
+
+  <section class="panel p5">
+    <div class="phead"><span class="pnum">P3</span><span class="ptitle">TTFT p95 全档平坦 — H1 门限带内</span></div>
+    <div class="pnote">口径：sustain p95 · H1 带黄金点档 ±1% · 低压档 SLO 口径同样无判别力：TTFT 全档 @@TTFTFLAT@@ms 持平（seed CV ≤ 0.17%），违约率差异仅来自 M 校准 tautology</div>
+    <div class="cbox"><canvas id="c3"></canvas></div>
+    <div class="hlegend">
+      <span class="it"><span class="sw line-gold"></span>p95 mean</span>
+      <span class="it"><span class="sw band" style="background:rgba(232,196,104,.16);border-color:rgba(232,196,104,.4)"></span>±σ（seed 间）</span>
+      <span class="it"><span class="pt c" style="background:var(--gold)"></span>21 格 seed 点</span>
+      <span class="it"><span class="sw line-dim"></span>H1 门限 ±1%</span>
+    </div>
+  </section>
+
+  <section class="panel p7">
+    <div class="phead"><span class="pnum">P2</span><span class="ptitle">seed 间分布 — hot_hit × 驱逐年龄（mean ± σ）</span></div>
+    <div class="pnote">口径：n=3 seed / 档 · 带 = ±σ · 细线 = 单 seed · ev_age = prefill-0 引擎驱逐年龄均值（s）· 数据与 v2 相同（口径重构不影响命中/驱逐观测）</div>
+    <div class="cbox"><canvas id="c2"></canvas></div>
+    <div class="hlegend">
+      <span class="it"><span class="sw line-hot"></span>hot_hit mean（左轴）</span>
+      <span class="it"><span class="sw line-cool"></span>ev_age mean（右轴）</span>
+      <span class="it"><span class="sw band"></span>hot ±σ</span>
+      <span class="it"><span class="sw bandc"></span>ev ±σ</span>
+      <span class="it"><span class="pt c"></span>s1</span>
+      <span class="it"><span class="pt t"></span>s2</span>
+      <span class="it"><span class="pt r"></span>s3</span>
+    </div>
+  </section>
+
+  <section class="panel p5">
+    <div class="phead"><span class="pnum">P5</span><span class="ptitle">驱逐健康带 — prefill-0 驱逐年龄 vs cap</span></div>
+    <div class="pnote">口径：mean ± σ（n=3）· 细线 = 单 seed · 健康带 200–300s · cap≥500 稳定 251s 带内 · cap≤250 波动 190–507s · 数据与 v2 相同</div>
+    <div class="cbox"><canvas id="c5"></canvas></div>
+    <div class="hlegend">
+      <span class="it"><span class="sw line-cool"></span>ev_age mean</span>
+      <span class="it"><span class="sw bandc"></span>±σ</span>
+      <span class="it"><span class="pt c" style="background:var(--cool)"></span>s1</span>
+      <span class="it"><span class="pt t"></span>s2</span>
+      <span class="it"><span class="pt r"></span>s3</span>
+    </div>
+  </section>
+
+  <section class="panel p12">
+    <div class="phead"><span class="pnum" style="background:var(--cool)">T3</span><span class="ptitle">四指标组合 verdict — SLO 违约 × 归因 × 吞吐 × 命中</span></div>
+    <div class="pnote">verdict 规则：HARMFUL = SLO 违约率 &gt; 基线 seed 分布 P95 ∧ 非(吞吐比≥1 ∨ hot命中比≥1 ∨ bg命中比≥1)；超基线但有补偿项 = compensated；否则 OK · golden 基线 = cap250（违约 P95 门限 @@BASEP95@@）· v1 基线 = zero 臂（regime 内对照）· 跨 regime 不做比值</div>
+    <div class="tblwrap">
+    <table>
+      <thead><tr><th>档位 / 臂</th><th>SLO 违约率（M_cal P95）</th><th>归因违约（近似反事实）</th><th>吞吐比</th><th>hot 命中比</th><th>bg 命中比</th><th>verdict</th></tr></thead>
+      <tbody>
+@@T3ROWS@@
+      </tbody>
+    </table>
+    </div>
+    <div class="pnote" style="margin-top:9px">表注：golden 21 格 verdict 无一格 HARMFUL（@@NOCOUNT@@/21 格 harmful_verdict=False）· cap0 与 cap250 各有 seed 违约率贴基线 P95 门限（tautology 邻域抖动），由 bg/吞吐补偿 · v1 三臂绝对违约排序 hi @@V1HINEW@@ &lt; finite @@V1FINNEW@@ &lt; zero @@V1ZERONEW@@，但 verdict 是「相对 zero 臂基线 + 补偿」判定：hi 违约超 zero 基线 seed P95 而吞吐比 @@V1HITPS@@≥1 补偿成立 → compensated，非 HARMFUL。归因违约（hi @@V1HIATTR@@）说明其违约中约四成可归因亲和让步，仍是三臂中延迟最优臂。</div>
+  </section>
+
+  <section class="panel p7">
+    <div class="phead"><span class="pnum">T1</span><span class="ptitle">两层门禁取值 — S1 有害判定已切换 SLO 口径</span></div>
+    <div class="pnote">口径：H = 结果层硬门禁 · S = 过程层软门禁 · S1 旧「有害占比 ≤2%」废弃（阈值伪影，见 P1&prime;/X3）· M 按 regime 由黄金点数据校准，禁硬编码</div>
+    <div class="tblwrap">
+    <table>
+      <thead><tr><th>编号</th><th>指标</th><th>层级</th><th>阈值</th><th>摸测依据</th></tr></thead>
+      <tbody>
+@@T1ROWS@@
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <section class="panel p5">
+    <div class="phead"><span class="pnum">T2</span><span class="ptitle">构造有效性 — trace / 对账 / 拒绝</span></div>
+    <div class="pnote">口径：同 seed 跨 cap 档 trace 完全一致 · valid = execution / construction</div>
+    <div class="tblwrap">
+    <table>
+      <thead><tr><th>seed</th><th>trace SHA256</th><th>格数</th><th>issued/planned</th><th>拒绝</th><th>valid</th></tr></thead>
+      <tbody><tr><td class="mono">s1</td><td class="mono dim">6be443a6b28ff9e7…</td><td class="mono">7</td><td class="mono">18900 / 18900</td><td class="mono ok">0</td><td class="mono ok">7/7 · 7/7</td></tr>
+<tr><td class="mono">s2</td><td class="mono dim">5955258313afdfd0…</td><td class="mono">7</td><td class="mono">18900 / 18900</td><td class="mono ok">0</td><td class="mono ok">7/7 · 7/7</td></tr>
+<tr><td class="mono">s3</td><td class="mono dim">db3b1a102d08b49a…</td><td class="mono">7</td><td class="mono">18900 / 18900</td><td class="mono ok">0</td><td class="mono ok">7/7 · 7/7</td></tr>
+<tr class="total"><td>合计</td><td class="dim">3 个 SHA 两两不同</td><td class="mono">21</td><td class="mono">@@JOINGOLDEN@@ / @@JOINGOLDEN@@</td><td class="mono ok">0</td><td class="mono ok">21/21 · 21/21</td></tr></tbody>
+    </table>
+    </div>
+  </section>
+
+  <section class="panel p12">
+    <div class="phead"><span class="pnum" style="background:var(--amber)">X1</span><span class="ptitle">三方对照 — 线上 V8 ∞ · 旧版 os30 · 黄金点 250（有害行双口径并列）</span></div>
+    <div class="pnote">口径：行 = 指标 · 列 = 三方 · 每格数值下标来源缩写（全称见页脚）· 三方来自不同实验窗与负载档：线上 V8 = 75min 生产观测（matched 76min）· v1-hi = 154QPS 高压实测 · 摸测 = 3QPS 低压画像 · 本表为「形态距离参照」，非严格 A/B · 有害行自 v3 起双口径并列（旧 delta / 新 SLO 违约）</div>
+    <div class="x1grid">
+      <div class="x1col">
+        <div class="tblwrap">
+        <table>
+          <thead><tr><th style="width:19%">指标</th><th style="width:31%">线上 V8（cap=1e8 无限）</th><th style="width:26%">旧版 os30</th><th style="width:24%">黄金点（cap=250）</th></tr></thead>
+          <tbody>
+@@ROWS@@
+          </tbody>
+        </table>
+        </div>
+        <div class="pnote" style="margin-top:9px">表注：线上 V8 有害两值 = 同算法（cap=1e8）不同负载档，实验条件差异如实并列 · 新口径 SLO 违约率跨 regime 用同一 M_cal 可比（绝对值），比值不可跨 · 驱逐寿命「带内 251s」为 cap≥500 档形态 · N/A = 口径不存在或不可比，不硬凑</div>
+      </div>
+      <div class="x1col">
+        <div class="x1sub">差距可视化 — 有害判定双口径并列（%）</div>
+        <div class="cbox short" style="height:290px"><canvas id="c6"></canvas></div>
+        <div class="hlegend">
+          <span class="it"><span class="sw bar-warn"></span>旧 delta&gt;100ms</span>
+          <span class="it"><span class="sw bar-hot"></span>新 SLO 违约（M_cal P95）</span>
+        </div>
+        <div class="pnote" style="margin-top:7px">同一 cap=1e8 算法：高压 v1-hi 旧 @@X1V1OLD@@ → 新 @@X1V1NEW@@（违约三臂最少）；低压摸测旧 @@X1INFOLD@@ → 新 @@X1INFNEW@@（校准 tautology 邻域）；黄金点两口径均干净</div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="cal">
+    <h4>口径注记（v3 · SLO 重构）</h4>
+    <ul>
+      <li><b>SLO 定义</b>：SLO_i = prefill_ms_i(选中候选) × M（主口径）· 敏感性 SLO'_i = score_ms_i × M'（M'_cal P95 = @@MPcal@@，score 已含预测等待故 M'≈1）· 违约 = 客户端实测 TTFT &gt; SLO</li>
+      <li><b>M 校准</b>：M_cal(P95) = @@MCAL@@、P99 = @@MCAL99@@，由黄金点 cap250 三 seed r = TTFT/prefill 分布校准（pooled n=@@NPOOLED@@）· 阈值从健康数据推导，禁硬编码 · 固定档 1.5/2.0 在黄金点误判 @@M15@@/@@M20@@ 违约、3.0 全漏（@@M30@@）</li>
+      <li><b>M_cal 校准点 tautology</b>：cap250 自身违约率必然 ≈5%（P95 定义）——低压 golden 的绝对违约率无判别意义，只有相对 cap250 基线的比较有意义</li>
+      <li><b>跨 regime 纪律</b>：golden = 3 QPS 低压（tps≈8318）· v1/v0 = 154 QPS 高压（tps≈462729）· 四指标比值只在同 regime 内算（golden vs cap250 基线、v1 三臂 vs zero 臂）· 跨 regime 只比绝对违约率（同一 M_cal），不做比值</li>
+      <li><b>归因违约的反事实是近似</b>：「actual − delta ≤ SLO」隐含预测空间 delta 1:1 转化为实测延迟；并列比例式对照口径 actual×(min_score/sel_score)≤SLO，两口径接近（v1 hi @@V1HIATTR@@ vs @@V1HIATTR2@@）说明近似稳健</li>
+      <li><b>join 覆盖率</b>：golden @@JOINGOLDEN@@/@@JOINGOLDEN@@（21 格全量）· v1 每臂 @@JOINV1@@/@@JOINV1@@ · v0 同 · missing/null/no_prefill 全 0 · 规格所称 v1 29260/臂为误估，实测 16230/臂如实报告</li>
+      <li><b>旧口径（废弃，仅对照）</b>：delta&gt;100ms = score_selected − min_score_ms 超阈占比 · 在高压数据上方向判反（X3）、在相变区间制造伪影（P1&prime;）</li>
+      <li><b>三方对照（X1）</b>：线上 V8 = 0_32k_v8（ESTIMATED_TTFT + cacheAffinity cap=1e8）· os30 = SHORTEST_TTFT（无 cacheAffinity）· cap = maxExtraTtftMs · seed = 跨族起始相位</li>
+      <li><b>来源缩写</b>：[SLO] slo-analysis.json（客户端 TTFT 口径逐请求重算）· [v1-hi] guardrail-v1 hi 臂 cap=1e8 · [摸测] golden-sweep matrix.json · [线上观测] cause-investigation + online-affinity（76min）· [部署] alignment-v3 deployments.json</li>
+    </ul>
+  </div>
+  <div class="src">
+    <h4>数据溯源</h4>
+    <ul>
+      <li class="path">/Users/wangziyi/code/codex-cache-v5/guardrail-v0-outer/github-opensource/results/golden-sweep-20260911/slo-analysis.json（v3 核心：M 校准 + 21 格 SLO + v1/v0 三臂 + 新旧对照 + verdict）</li>
+      <li class="path">同目录 RUN-slo.md（口径定义与近似声明）· matrix.json（21 格全字段）· per-metric-distributions.json · golden-candidates.json</li>
+      <li class="path">/tmp/slo-golden/trace_cap*_s*.jsonl + ttft_cap*_s*.jsonl（golden 逐请求 staging，flexlb_read 只读补拉自 run 20260911_101402 @host111 · X2 直方图由此重算）</li>
+      <li class="path">/Users/wangziyi/code/codex-cache-balance-run/results/guardrail-v1-20260910/v1-comparison.json（X1 · hi 臂有害 20.85% 旧口径 · bg 0.3274）+ arm_*_r160/（v1 逐请求）</li>
+      <li class="path">/Users/wangziyi/code/codex-cache-balance-run/results/cause-investigation/summary.json · mechanism-v4/online-affinity-summary.json · alignment-v3/deployments.json（X1 线上观测与部署配置）</li>
+      <li>v3 整体重生成 @@TS@@ CST · 复用 v2 排版体系（栅格/卡片/深色仪器风/minmax 防撑破）· 数字全部由生成器从上述 JSON + staging 重算+断言后注入 · v2 报告保留不动</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script id="report-data" type="application/json">@@DATA@@</script>
+<script>
+@@JS@@
+</script>
+</body>
+</html>

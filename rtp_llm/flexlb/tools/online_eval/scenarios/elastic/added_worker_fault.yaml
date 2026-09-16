@@ -1,0 +1,226 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: elastic_added_worker_fault
+profiles:
+- batch-window
+- single-batch
+- single-nonbatch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  discovery: discovery_file
+  perf_preset: fault_env
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms:
+      omit: true
+execution:
+  timeout_s: 400
+  stage_timeout_s: 40
+  cleanup_timeout_s: 120
+variants:
+- id: default
+  profiles:
+  - batch-window
+  program: default
+- id: single_batch
+  profiles:
+  - single-batch
+  program: single_batch
+- id: single_nonbatch
+  profiles:
+  - single-nonbatch
+  program: single_nonbatch
+- id: window_nonbatch
+  profiles:
+  - window-nonbatch
+  program: window_nonbatch
+metadata:
+  description: A newly added worker serves traffic, stops, and serves fresh traffic after restart.
+  category: elastic
+  requires:
+  - queue
+  estimated_duration_s: 100
+parameters:
+  default:
+    setup_timeout_s: 180
+    add:
+      role: prefill
+    added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    first_traffic_timeout_s: 60
+    first_traffic:
+      window_s: 15
+      method: FetchResponse
+    stop:
+      operation: stop
+    stopped_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 2
+      present: true
+    survivor_request:
+      input_len: 2048
+      output_len: 2
+      count: 1
+      block_keys:
+      - 7
+      schedule_timeout_s: 30
+      stream_timeout_s: 10
+    survivor_completed:
+      op: eq
+      expected: true
+    survivor_no_errors:
+      op: eq
+      expected: 0
+    restart:
+      operation: start
+    restored_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    resumed_traffic_timeout_s: 65
+    resumed_traffic:
+      window_s: 20
+      method: FetchResponse
+  single_batch:
+    setup_timeout_s: 180
+    add:
+      role: prefill
+    added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    first_traffic_timeout_s: 60
+    first_traffic:
+      window_s: 15
+      method: FetchResponse
+    stop:
+      operation: stop
+    stopped_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 2
+      present: true
+    survivor_request:
+      input_len: 2048
+      output_len: 2
+      count: 1
+      block_keys:
+      - 7
+      schedule_timeout_s: 30
+      stream_timeout_s: 10
+    survivor_completed:
+      op: eq
+      expected: true
+    survivor_no_errors:
+      op: eq
+      expected: 0
+    restart:
+      operation: start
+    restored_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    resumed_traffic_timeout_s: 65
+    resumed_traffic:
+      window_s: 20
+      method: FetchResponse
+  single_nonbatch:
+    setup_timeout_s: 180
+    add:
+      role: prefill
+    added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    first_traffic_timeout_s: 60
+    first_traffic:
+      window_s: 15
+      method: GenerateStreamCall
+    stop:
+      operation: stop
+    stopped_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 2
+      present: true
+    survivor_request:
+      input_len: 2048
+      output_len: 2
+      count: 1
+      block_keys:
+      - 7
+      schedule_timeout_s: 30
+      stream_timeout_s: 10
+    survivor_completed:
+      op: eq
+      expected: true
+    survivor_no_errors:
+      op: eq
+      expected: 0
+    restart:
+      operation: start
+    restored_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    resumed_traffic_timeout_s: 65
+    resumed_traffic:
+      window_s: 20
+      method: GenerateStreamCall
+  window_nonbatch:
+    setup_timeout_s: 180
+    add:
+      role: prefill
+    added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    first_traffic_timeout_s: 60
+    first_traffic:
+      window_s: 15
+      method: GenerateStreamCall
+    stop:
+      operation: stop
+    stopped_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 2
+      present: true
+    survivor_request:
+      input_len: 2048
+      output_len: 2
+      count: 1
+      block_keys:
+      - 7
+      schedule_timeout_s: 30
+      stream_timeout_s: 10
+    survivor_completed:
+      op: eq
+      expected: true
+    survivor_no_errors:
+      op: eq
+      expected: 0
+    restart:
+      operation: start
+    restored_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    resumed_traffic_timeout_s: 65
+    resumed_traffic:
+      window_s: 20
+      method: GenerateStreamCall

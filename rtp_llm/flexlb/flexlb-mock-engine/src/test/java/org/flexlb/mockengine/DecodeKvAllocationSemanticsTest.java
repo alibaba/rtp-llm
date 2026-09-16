@@ -1,7 +1,14 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
+import io.grpc.Server;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
+import io.grpc.netty.NettyServerBuilder;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -32,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * Decode KV allocation semantics (production-aligned 20260903, Zola C++
@@ -368,6 +376,58 @@ class DecodeKvAllocationSemanticsTest {
                 "no front-load without reserve_step");
         assertFalse(decode.isLeakDetected(), "no leak on the speculative D");
         assertFalse(decode0.isLeakDetected(), "no leak on the plain D");
+    }
+
+    @Test
+    void directCapacityErrorsSurviveGrpcSerialization() throws Exception {
+        MockPerformanceModel model = performanceModel(tempDir, "100", 1.0, 1.0);
+        JavaMockEngineCluster.FastRpcService prefill = newPrefillService(model, 5);
+        JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 1);
+        Server server = NettyServerBuilder.forPort(0).addService(prefill).build().start();
+        ManagedChannel channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort())
+                .usePlaintext().build();
+        try {
+            var stub = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS);
+            StatusRuntimeException pError = assertThrows(StatusRuntimeException.class,
+                    () -> stub.generateStreamCall(inputWithDecode(900L, 6 * SPB,
+                            decode.getGrpcPort(), 1)).hasNext());
+            assertEquals(Status.Code.RESOURCE_EXHAUSTED, pError.getStatus().getCode());
+            assertEquals("LACK_MEM: insufficient KV cache blocks (need=6, avail=5, spb=1024)",
+                    pError.getStatus().getDescription());
+            assertCapacityTrailer(pError, 602);
+            StatusRuntimeException dError = assertThrows(StatusRuntimeException.class,
+                    () -> stub.generateStreamCall(inputWithDecode(901L, SPB,
+                            decode.getGrpcPort(), 1)).hasNext());
+            assertEquals(Status.Code.RESOURCE_EXHAUSTED, dError.getStatus().getCode());
+            assertEquals("LACK_MEM (602, master-surface 8211): decode-side KV allocation "
+                    + "rejected by D engine port=" + decode.getGrpcPort()
+                    + " after its ALLOCATE retry window (need=1 blocks, avail=1024 tokens, spb=1024)",
+                    dError.getStatus().getDescription());
+            assertCapacityTrailer(dError, 8211);
+            assertEquals(5L * SPB, prefill.getAvailableKvTokens());
+            assertEquals(1L * SPB, decode.getAvailableKvTokens());
+            prefill.setStopped(true);
+            StatusRuntimeException stopped = assertThrows(StatusRuntimeException.class,
+                    () -> stub.generateStreamCall(inputWithDecode(902L, SPB,
+                            decode.getGrpcPort(), 1)).hasNext());
+            assertEquals(Status.Code.UNAVAILABLE, stopped.getStatus().getCode());
+            assertEquals("engine stopped", stopped.getStatus().getDescription());
+            assertNull(stopped.getTrailers().get(io.grpc.Metadata.Key.of(
+                    "grpc-status-details-bin", io.grpc.Metadata.BINARY_BYTE_MARSHALLER)));
+        } finally {
+            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+            server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    private static void assertCapacityTrailer(StatusRuntimeException error, int code) throws Exception {
+        assertNotNull(error.getTrailers());
+        byte[] bytes = error.getTrailers().get(io.grpc.Metadata.Key.of(
+                "grpc-status-details-bin", io.grpc.Metadata.BINARY_BYTE_MARSHALLER));
+        assertNotNull(bytes, "typed error must survive the real Netty gRPC transport");
+        var details = EngineRpcService.ErrorDetailsPB.parseFrom(bytes);
+        assertEquals(code, details.getErrorCode());
+        assertEquals(error.getStatus().getDescription(), details.getErrorMessage());
     }
 
     // ────────────────── helpers ──────────────────

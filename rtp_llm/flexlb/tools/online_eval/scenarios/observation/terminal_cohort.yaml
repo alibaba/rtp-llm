@@ -1,0 +1,51 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: observed_terminal_cohort
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+execution:
+  timeout_s: 300
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: deferred
+  profiles:
+  - batch-window
+  - single-batch
+  program: deferred
+metadata:
+  description: Preserve terminal-window client records and independent mock source snapshots.
+  category: status
+  tags:
+  - smoke
+  - observation
+parameters:
+  deferred:
+    setup_timeout_s: 180
+    baseline:
+      sources:
+      - engine_snapshot
+      - engine_requests
+    submit:
+      count: 2
+      output_len: 2
+      consume: deferred
+    observing:
+      mode: start
+      sources:
+      - client_records
+      - engine_snapshot
+      - engine_requests
+      max_duration_s: 30
+      interval_s: 0.2
+      cohort: terminal_in_window
+    frozen:
+      mode: stop
+    completed:
+      op: eq
+      expected: true
+    no_errors:
+      op: eq
+      expected: 0

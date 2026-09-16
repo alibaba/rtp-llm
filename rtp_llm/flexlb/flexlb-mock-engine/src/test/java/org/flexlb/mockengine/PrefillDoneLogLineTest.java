@@ -132,6 +132,9 @@ class PrefillDoneLogLineTest {
             responseQueues.put(rids[i], queues[i]);
         }
 
+        // This instrumentation probe owns response queues directly; use the
+        // explicit no-client shortcut to publish the completion into them.
+        prefill.setAutoFetch(true);
         long beforeMs = System.currentTimeMillis();
         PrintStream originalOut = System.out;
         ByteArrayOutputStream captured = new ByteArrayOutputStream();

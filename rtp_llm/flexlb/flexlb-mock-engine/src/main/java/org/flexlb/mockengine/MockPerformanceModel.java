@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
 final class MockPerformanceModel {
@@ -147,6 +148,9 @@ final class MockPerformanceModel {
             + "sum(computeTokens / 1024.) + 0.0542737877321807 * max(batchSize - 24, 0) * sum(computeTokens / 1024.))))";
 
     private volatile int blockSize;
+    private MockEosModel eosModel;
+    private volatile MockEosModel runtimeEosModel;
+    boolean nativeTokenCacheKeys;
     private final double sleepScale;
     private final double prefillScale;
     // Floor (ms) for the final post-scale prefill sleep from JSON "prefill.min_ms".
@@ -171,6 +175,9 @@ final class MockPerformanceModel {
     private final int maxBatchTokens;
     private final int maxBatchRequests;
     private final PrefillTimeFormula prefillFormula;
+    private record RuntimePrefill(String expression, PrefillTimeFormula formula) {}
+    private volatile RuntimePrefill runtimePrefill;
+    private String configuredPrefillExpression = "";
     // Decode step-latency sources, exactly one active per model:
     //   - explicit step_ms_by_batch curve (decodePoints non-empty; legacy
     //     declared channel, kept for suites that price steps themselves), or
@@ -188,6 +195,10 @@ final class MockPerformanceModel {
     // default DEFAULT_DECODE_RESERVE_STEP = 0 = disabled): see the constant's
     // javadoc for the production speculative-decode anchor.
     private final int decodeReserveStep;
+    boolean decodeReuseCache = true;
+    boolean prefillGpuPrefixTree = true;
+    boolean decodeGpuPrefixTree = true;
+    Double decodeReserveBlockRatio; // Explicit percentage; null preserves legacy case rounding.
     private final double decodeScale;
     // Opt-in accepted-layer visibility window, JSON
     // "decode.report_queued_as_kv_allocated" (default false = current
@@ -199,6 +210,46 @@ final class MockPerformanceModel {
     // waiting queue) is unconditional and needs no switch.
     private final boolean reportQueuedAsKvAllocated;
     private volatile double jitterPct;
+    // Opt-in, bounded residual noise. Keep the legacy percentage jitter for old suites.
+    private NoiseSpec prefillNoise = NoiseSpec.DISABLED;
+    private NoiseSpec decodeNoise = NoiseSpec.DISABLED;
+
+    record NoiseSpec(double baseStdMs, double variancePerUnitMs2,
+                     double maxStdMs, double maxAbsMs) {
+        static final NoiseSpec DISABLED = new NoiseSpec(0, 0, 0, 0);
+
+        static NoiseSpec read(JsonNode node, String path) {
+            if (node.isMissingNode() || node.isNull()) return DISABLED;
+            if (!node.isObject()) throw new IllegalStateException(path + " must be an object");
+            double base = number(node, "base_std_ms", path);
+            double slope = number(node, "variance_per_unit_ms2", path);
+            double stdCap = number(node, "max_std_ms", path);
+            double absCap = number(node, "max_abs_ms", path);
+            if ((base > 0 || slope > 0) && (stdCap <= 0 || absCap <= 0))
+                throw new IllegalStateException(path + " requires positive max_std_ms and max_abs_ms");
+            return new NoiseSpec(base, slope, stdCap, absCap);
+        }
+
+        private static double number(JsonNode node, String key, String path) {
+            JsonNode value = node.path(key);
+            if (value.isMissingNode()) return 0;
+            double number = value.asDouble(Double.NaN);
+            if (!value.isNumber() || !Double.isFinite(number) || number < 0)
+                throw new IllegalStateException(path + "." + key + " must be finite and nonnegative");
+            return number;
+        }
+
+        double stdMs(double units) {
+            return Math.min(maxStdMs, Math.sqrt(baseStdMs * baseStdMs
+                    + variancePerUnitMs2 * Math.max(0, units)));
+        }
+
+        double sampleMs(double units) {
+            if (maxAbsMs == 0) return 0;
+            double z = Math.max(-3, Math.min(3, ThreadLocalRandom.current().nextGaussian()));
+            return Math.max(-maxAbsMs, Math.min(maxAbsMs, z * stdMs(units)));
+        }
+    }
     // Explicit performance-JSON "prefill.fixed_ms": a declared flat prefill
     // for duration-blind suites (chaos/elastic). Null = not declared ->
     // formula-driven. This is an explicit configuration channel, NOT the
@@ -215,6 +266,9 @@ final class MockPerformanceModel {
     // the override value follows the same semantics as the JSON field
     // (0 = unbounded, > 0 = cap on queued prefill batches).
     private volatile Integer overrideMaxWaitingPrefillBatches;
+    private MockPrefillBatchPolicy prefillBatchPolicy;
+
+    MockPrefillBatchPolicy prefillBatchPolicy() { return prefillBatchPolicy; }
 
     private MockPerformanceModel(int blockSize,
                                  double sleepScale,
@@ -254,6 +308,35 @@ final class MockPerformanceModel {
         this.jitterPct = jitterPct;
     }
 
+    /** Give each engine its own mutable controls, including dynamically added engines. */
+    MockPerformanceModel forEngine() {
+        MockPerformanceModel copy = new MockPerformanceModel(
+                blockSize, sleepScale, prefillScale, prefillMinMs, configuredFixedPrefillMs,
+                maxWaitingPrefillBatches, directBatchSizeMax, maxBatchTokens, maxBatchRequests,
+                prefillFormula, List.copyOf(decodePoints), stepBaseMs, stepPerRunningMs,
+                tokensPerStep, decodeReserveStep, decodeScale, reportQueuedAsKvAllocated, jitterPct);
+        // Explicit overrides installed before startup are part of that engine's initial settings.
+        copy.eosModel = eosModel;
+        copy.runtimeEosModel = runtimeEosModel;
+        copy.decodeReuseCache = decodeReuseCache;
+        copy.prefillGpuPrefixTree = prefillGpuPrefixTree;
+        copy.decodeGpuPrefixTree = decodeGpuPrefixTree;
+        copy.memoryCacheBlocks = memoryCacheBlocks;
+        copy.memoryCopyLifecycle = memoryCopyLifecycle;
+        copy.decodeReserveBlockRatio = decodeReserveBlockRatio;
+        copy.prefillBatchPolicy = prefillBatchPolicy;
+        copy.nativeTokenCacheKeys = nativeTokenCacheKeys;
+        copy.overrideFixedPrefillMs = overrideFixedPrefillMs;
+        copy.runtimePrefill = runtimePrefill;
+        copy.prefillNoise = prefillNoise;
+        copy.decodeNoise = decodeNoise;
+        copy.configuredPrefillExpression = configuredPrefillExpression;
+        copy.overrideDecodeStepMs = overrideDecodeStepMs;
+        copy.overrideDecodeScale = overrideDecodeScale;
+        copy.overrideMaxWaitingPrefillBatches = overrideMaxWaitingPrefillBatches;
+        return copy;
+    }
+
     static MockPerformanceModel load(String performanceFile, String masterConfigFile) throws IOException {
         JsonNode performance = MAPPER.readTree(Path.of(performanceFile).toFile());
         int blockSize = performance.path("block_size").asInt(1024);
@@ -275,7 +358,8 @@ final class MockPerformanceModel {
         int maxBatchRequests = prefill.path("max_batch_requests")
                 .asInt(DEFAULT_MAX_BATCH_REQUESTS);
 
-        PrefillTimeFormula formula = PrefillTimeFormula.parse(loadPrefillExpression(masterConfigFile));
+        String prefillExpression = loadPrefillExpression(masterConfigFile);
+        PrefillTimeFormula formula = PrefillTimeFormula.parse(prefillExpression);
 
         JsonNode decode = performance.path("decode");
         // per_token_ms is REMOVED (task #69, wrong-version-deleted-clean rule):
@@ -329,13 +413,57 @@ final class MockPerformanceModel {
                     + "': decode.reserve_step must be >= 0 (got " + decodeReserveStep + ")");
         }
         double jitterPct = performance.path("jitter_pct").asDouble(0.0);
-        return new MockPerformanceModel(blockSize, sleepScale, prefillScale,
+        NoiseSpec prefillNoise = NoiseSpec.read(prefill.path("noise"), "prefill.noise");
+        NoiseSpec decodeNoise = NoiseSpec.read(decode.path("noise"), "decode.noise");
+        if (jitterPct > 0 && (prefillNoise.maxAbsMs() > 0 || decodeNoise.maxAbsMs() > 0))
+            throw new IllegalStateException("jitter_pct and role noise are mutually exclusive");
+        MockPerformanceModel model = new MockPerformanceModel(blockSize, sleepScale, prefillScale,
                 prefillMinMs, prefillFixedMs, maxWaitingPrefillBatches, directBatchSizeMax,
                 maxBatchTokens, maxBatchRequests, formula,
                 List.copyOf(points), stepBaseMs, stepPerRunningMs, tokensPerStep,
                 decodeReserveStep,
                 decode.path("scale").asDouble(1.0),
                 reportQueuedAsKvAllocated, jitterPct);
+        model.prefillNoise = prefillNoise;
+        model.decodeNoise = decodeNoise;
+        for (var role : List.of(prefill, decode)) {
+            if (role.has("enable_gpu_prefix_tree") && !role.get("enable_gpu_prefix_tree").isBoolean())
+                throw new IllegalStateException("enable_gpu_prefix_tree must be boolean");
+        }
+        model.configuredPrefillExpression = prefillExpression;
+        model.prefillGpuPrefixTree = prefill.path("enable_gpu_prefix_tree").asBoolean(true);
+        model.decodeGpuPrefixTree = decode.path("enable_gpu_prefix_tree").asBoolean(true);
+        if (decode.has("reuse_cache")) {
+            if (!decode.get("reuse_cache").isBoolean()) {
+                throw new IllegalStateException("decode.reuse_cache must be boolean");
+            }
+            model.decodeReuseCache = decode.get("reuse_cache").booleanValue();
+        }
+        if (decode.has("reserve_block_ratio")) {
+            JsonNode ratio = decode.get("reserve_block_ratio");
+            double value = ratio.asDouble(Double.NaN);
+            if (!ratio.isNumber() || !Double.isFinite(value) || value < 0 || value > 50) {
+                throw new IllegalStateException("decode.reserve_block_ratio must be a percentage in [0, 50]");
+            }
+            model.decodeReserveBlockRatio = value;
+        }
+        JsonNode memory = prefill.path("memory_cache");
+        if (memory.has("enabled") && !memory.get("enabled").isBoolean())
+            throw new IllegalStateException("prefill.memory_cache.enabled must be boolean");
+        if (memory.path("enabled").asBoolean(false)) {
+            JsonNode blocks = memory.path("capacity_blocks");
+            if (!blocks.isIntegralNumber() || !blocks.canConvertToInt() || blocks.asInt() <= 0)
+                throw new IllegalStateException("prefill.memory_cache.capacity_blocks must be a positive integer");
+            model.memoryCacheBlocks = blocks.asInt();
+            // Legacy read/write latency settings are ignored: copies are instantaneous.
+            if (memory.has("copy_lifecycle") && !memory.get("copy_lifecycle").isBoolean())
+                throw new IllegalStateException("prefill.memory_cache.copy_lifecycle must be boolean");
+            model.memoryCopyLifecycle = memory.path("copy_lifecycle").asBoolean(false);
+
+        }
+        model.eosModel = MockEosModel.load(decode.path("eos"));
+        model.prefillBatchPolicy = MockPrefillBatchPolicy.load(prefill.path("fifo"));
+        return model;
     }
 
     /**
@@ -383,6 +511,8 @@ final class MockPerformanceModel {
     RequestShape shape(EngineRpcService.GenerateInputPB input, MockLruBlockCache cache) {
         int inputLen = input.getTokenIdsCount();
         int outputLen = Math.max(1, input.getGenerateConfig().getMaxNewTokens());
+        boolean explicitOutputLength = false;
+        boolean explicitCacheKeys = false;
         List<Long> blockKeys = new ArrayList<>();
         String uniqueKey = input.getGenerateConfig().getUniqueKey();
         if (uniqueKey.startsWith("flexlb_eval:")) {
@@ -393,11 +523,24 @@ final class MockPerformanceModel {
                 JsonNode meta = MAPPER.readTree(uniqueKey);
                 inputLen = meta.path("input_len").asInt(inputLen);
                 outputLen = meta.path("output_len").asInt(outputLen);
+                explicitOutputLength = meta.has("output_len");
+                explicitCacheKeys = meta.has("block_cache_keys");
                 for (JsonNode key : meta.path("block_cache_keys")) {
                     blockKeys.add(key.bigIntegerValue().longValue());
                 }
             } catch (IOException ignored) {
                 // Fall back to protobuf lengths when metadata is absent or malformed.
+            }
+        }
+        boolean nativeKeys = nativeTokenCacheKeys && !explicitCacheKeys && inputLen == input.getTokenIdsCount();
+        if (nativeKeys) {
+            // HashUtil.h / KVCacheHashUtil.cc: signed rolling Jenkins hash.
+            // Publish only complete blocks; partial blocks are not reusable.
+            long hash = 0;
+            for (int i = 0; i < inputLen; i++) {
+                hash ^= (long) input.getTokenIds(i) + 0x9e3779b97f4a7c15L
+                        + (hash << 12) + (hash >> 32);
+                if ((i + 1) % blockSize == 0) blockKeys.add(hash);
             }
         }
         // hitBlocks carries the RAW prefix-match run length (key count) — the
@@ -409,20 +552,34 @@ final class MockPerformanceModel {
         int hitBlocks = cache.prefixHitBlocks(blockKeys);
         long hitTokens = (long) hitBlocks * blockSize;
         hitTokens = Math.min(hitTokens, inputLen);
-        return new RequestShape(input, inputLen, Math.max(1, outputLen), List.copyOf(blockKeys),
-                hitTokens, hitBlocks);
+        MockEosModel activeEos = runtimeEosModel;
+        outputLen = (activeEos == null ? eosModel : activeEos)
+                .outputLength(input, Math.max(1, outputLen), explicitOutputLength);
+        return new RequestShape(input, inputLen, outputLen, List.copyOf(blockKeys),
+                hitTokens, hitBlocks, nativeKeys);
+    }
+
+    void setEosModel(MockEosModel model) {
+        runtimeEosModel = java.util.Objects.requireNonNull(model);
+    }
+
+    Map<String, Object> outputLengthState() {
+        MockEosModel active = runtimeEosModel;
+        return Map.of("eos", (active == null ? eosModel : active).configuration(),
+                "runtime_override", active != null);
     }
 
     long prefillMs(List<RequestShape> requests) {
+        RuntimePrefill runtime = runtimePrefill;
         if (requests.isEmpty()) {
             return 0;
         }
         double latency;
-        if (overrideFixedPrefillMs != null) {
+        if (runtime == null && overrideFixedPrefillMs != null) {
             // Runtime override (Python /set_perf prefill_fixed_ms): explicit
             // test-time control, length-blind by design.
             latency = overrideFixedPrefillMs;
-        } else if (configuredFixedPrefillMs != null) {
+        } else if (runtime == null && configuredFixedPrefillMs != null) {
             // Explicit performance-JSON "prefill.fixed_ms": the declared flat
             // prefill for duration-blind suites. Declared explicitly, so it
             // wins over the formula (priority: runtime > JSON > formula).
@@ -430,7 +587,7 @@ final class MockPerformanceModel {
         } else {
             // The only prefill source: the expression resolved in
             // loadPrefillExpression (explicit FORMULA or the production fit).
-            double[] batchVars = new double[5];
+            double[] batchVars = new double[10];
             batchVars[0] = requests.size();
             List<double[]> itemVars = new ArrayList<>(requests.size());
             for (RequestShape request : requests) {
@@ -441,12 +598,45 @@ final class MockPerformanceModel {
                 vars[3] = Math.max(0, request.inputLen - request.hitTokens);
                 vars[4] = request.hitTokens > 0 ? 1 : 0;
                 itemVars.add(vars);
+                // PrefillTimeFormula batch variables occupy slots 5..9.
+                batchVars[5] += vars[1];
+                batchVars[6] += vars[2];
+                batchVars[7] += vars[3];
+                batchVars[8] = Math.max(batchVars[8], vars[1]);
+                batchVars[9] = Math.max(batchVars[9], vars[3]);
             }
-            latency = prefillFormula.evaluate(batchVars, itemVars);
+            latency = (runtime == null ? prefillFormula : runtime.formula()).evaluate(batchVars, itemVars);
         }
-        long result = scaledMs(latency * prefillScale);
+        double computeKTokens = requests.stream()
+                .mapToDouble(r -> Math.max(0, r.inputLen - r.hitTokens)).sum() / 1024.0;
+        long result = scaledMs(latency * (runtime == null ? prefillScale : 1.0),
+                prefillNoise, computeKTokens);
         // Clamp on the final (post-scale) value: min_ms is the actual-sleep floor.
         return prefillMinMs != null ? Math.max(result, Math.round(prefillMinMs)) : result;
+    }
+
+    static PrefillTimeFormula validatePrefillExpression(String expression) {
+        if (expression == null || expression.isBlank() || expression.length() > 32768)
+            throw new IllegalArgumentException("expression must contain 1..32768 characters");
+        PrefillTimeFormula formula = PrefillTimeFormula.parse(expression);
+        for (double[] values : List.of(new double[]{1, 512, 0, 512, 0, 512, 0, 512, 512, 512},
+                new double[]{1, 512, 512, 0, 1, 512, 512, 0, 512, 0}, new double[]{1, 0, 0, 0, 0, 0, 0, 0, 0, 0})) {
+            double result = formula.evaluateAsDouble(values, List.of(values));
+            if (!Double.isFinite(result) || result < 0)
+                throw new IllegalArgumentException("formula must return finite nonnegative milliseconds");
+        }
+        return formula;
+    }
+
+    void setPrefillExpression(String expression) {
+        runtimePrefill = new RuntimePrefill(expression, validatePrefillExpression(expression));
+    }
+
+    Map<String, Object> prefillExpressionState() {
+        RuntimePrefill runtime = runtimePrefill;
+        return Map.of("runtime_override", runtime != null,
+                "expression", runtime == null ? configuredPrefillExpression : runtime.expression(),
+                "scale", runtime == null ? prefillScale : 1.0);
     }
 
     void setOverrideFixedPrefillMs(Double ms) {
@@ -530,7 +720,12 @@ final class MockPerformanceModel {
      * (MTP fold), each step priced by {@link #decodeStepDelayMs}.
      */
     long decodeMs(int outputLen, int activeBatchSize) {
-        return scaledMs(decodeSteps(outputLen) * stepMs(activeBatchSize) * effectiveDecodeScale());
+        int steps = decodeSteps(outputLen);
+        if (decodeNoise.maxAbsMs() == 0)
+            return scaledMs(steps * stepMs(activeBatchSize) * effectiveDecodeScale());
+        long duration = 0;
+        for (int i = 0; i < steps; i++) duration += decodeStepDelayMs(activeBatchSize);
+        return duration;
     }
 
     /**
@@ -592,7 +787,8 @@ final class MockPerformanceModel {
      * loop needs on top of the step duration.
      */
     long decodeStepDelayMs(int activeBatchSize) {
-        return scaledMs(stepMs(activeBatchSize) * effectiveDecodeScale());
+        return scaledMs(stepMs(activeBatchSize) * effectiveDecodeScale(),
+                decodeNoise, Math.max(1, activeBatchSize));
     }
 
     private double interpolateStepMs(int activeBatchSize) {
@@ -616,11 +812,16 @@ final class MockPerformanceModel {
     }
 
     private long scaledMs(double latencyMs) {
+        return scaledMs(latencyMs, NoiseSpec.DISABLED, 0);
+    }
+
+    private long scaledMs(double latencyMs, NoiseSpec noise, double units) {
         double scaled = Math.max(0.0, latencyMs) * sleepScale;
         if (jitterPct > 0) {
             double factor = 1.0 + ThreadLocalRandom.current().nextDouble(-jitterPct, jitterPct);
             scaled = scaled * factor;
         }
+        scaled += noise.sampleMs(units);
         return Math.max(1L, Math.round(scaled));
     }
 
@@ -628,12 +829,19 @@ final class MockPerformanceModel {
         return blockSize;
     }
 
+    int memoryCacheBlocks;
+    boolean memoryCopyLifecycle;
+
     record RequestShape(EngineRpcService.GenerateInputPB input,
                         int inputLen,
                         int outputLen,
                         List<Long> blockKeys,
                         long hitTokens,
-                        int hitBlocks) {
+                        int hitBlocks, boolean nativeKeys, int memoryHitBlocks) {
+        RequestShape(EngineRpcService.GenerateInputPB input, int inputLen, int outputLen,
+                     List<Long> blockKeys, long hitTokens, int hitBlocks, boolean nativeKeys) {
+            this(input, inputLen, outputLen, blockKeys, hitTokens, hitBlocks, nativeKeys, 0);
+        }
     }
 
     private record DecodePoint(int batchSize, double stepMs) {

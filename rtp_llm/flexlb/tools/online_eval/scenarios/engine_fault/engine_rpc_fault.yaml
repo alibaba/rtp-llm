@@ -1,0 +1,189 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: engine_rpc_fault
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  perf_preset: default
+execution:
+  timeout_s: 300
+  stage_timeout_s: 30
+  cleanup_timeout_s: 120
+variants:
+- id: enqueue_delay_batch
+  profiles:
+  - batch-window
+  - single-batch
+  execution:
+    timeout_s: 600
+  program: enqueue_delay_batch
+  metadata:
+    requires:
+    - enqueue_batch
+- id: generate_delay_batch
+  profiles:
+  - batch-window
+  - single-batch
+  execution:
+    timeout_s: 600
+  program: generate_delay_batch
+  metadata:
+    requires:
+    - enqueue_batch
+- id: generate_delay_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  execution:
+    timeout_s: 600
+  program: generate_delay_nonbatch
+  metadata:
+    requires: []
+- id: enqueue_error
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  execution:
+    timeout_s: 420
+  program: enqueue_error
+metadata:
+  description: Explicit request baselines, controlled RPC faults, consumer-complete outcomes, recovery
+    and applicable scheduler-owner cleanup.
+  category: engine_fault
+parameters:
+  enqueue_delay_batch:
+    setup_timeout_s: 180
+    baseline_timeout_s: 125
+    baseline:
+      mode: request_total
+      input_len: 2048
+      output_len: 10
+    baseline_ready:
+      op: eq
+      expected: true
+    inject:
+      targets:
+      - prefill-0
+      - prefill-1
+      type: enqueue_delay
+      options:
+        delay_ms: 1500
+    delayed_timeout_s: 125
+    delayed:
+      mode: request_total
+      input_len: 2048
+      output_len: 10
+    recovery_timeout_s: 125
+    recovery:
+      mode: request_total
+      input_len: 2048
+      output_len: 10
+    latency:
+      metric: request_total
+      min_delta_s: 1.2
+      recovery_slack_s: 1.0
+    owner_clean_timeout_s: 10
+  generate_delay_batch:
+    setup_timeout_s: 180
+    baseline_timeout_s: 125
+    baseline:
+      mode: stream_ttft
+      input_len: 2048
+      output_len: 10
+    baseline_ready:
+      op: eq
+      expected: true
+    inject:
+      targets:
+      - prefill-0
+      - prefill-1
+      type: generate_delay
+      options:
+        delay_ms: 1500
+    delayed_timeout_s: 125
+    delayed:
+      mode: stream_ttft
+      input_len: 2048
+      output_len: 10
+    recovery_timeout_s: 125
+    recovery:
+      mode: stream_ttft
+      input_len: 2048
+      output_len: 10
+    latency:
+      metric: stream_ttft
+      min_delta_s: 1.2
+      recovery_slack_s: 1.0
+    owner_clean_timeout_s: 10
+  generate_delay_nonbatch:
+    setup_timeout_s: 180
+    baseline_timeout_s: 125
+    baseline:
+      mode: stream_ttft
+      input_len: 2048
+      output_len: 10
+    baseline_ready:
+      op: eq
+      expected: true
+    inject:
+      targets:
+      - prefill-0
+      - prefill-1
+      type: generate_delay
+      options:
+        delay_ms: 1500
+    delayed_timeout_s: 125
+    delayed:
+      mode: stream_ttft
+      input_len: 2048
+      output_len: 10
+    recovery_timeout_s: 125
+    recovery:
+      mode: stream_ttft
+      input_len: 2048
+      output_len: 10
+    latency:
+      metric: stream_ttft
+      min_delta_s: 1.2
+      recovery_slack_s: 1.0
+  enqueue_error:
+    setup_timeout_s: 180
+    inject:
+      targets:
+      - prefill-0
+      - prefill-1
+      type: enqueue_error
+      options: {}
+    probe_timeout_s: 45
+    probe:
+      input_len: 2048
+      output_len: 10
+      schedule_timeout_s: 30
+      stream_timeout_s: 10
+      expected_rpc_statuses:
+      - UNKNOWN
+      - INTERNAL
+      - UNAVAILABLE
+      - DEADLINE_EXCEEDED
+      require_error_detail: true
+    recovery_settle:
+      seconds: 3
+    recovery:
+      count: 1
+      input_len: 2048
+      output_len: 2
+      schedule_timeout_s: 30
+      stream_timeout_s: 30
+    recovery_terminal_timeout_s: 30
+    recovery_success:
+      op: eq
+      expected: true
+    owner_clean_timeout_s: 95

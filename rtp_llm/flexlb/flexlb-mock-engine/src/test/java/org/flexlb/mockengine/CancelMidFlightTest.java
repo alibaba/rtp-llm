@@ -12,7 +12,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -61,7 +61,7 @@ class CancelMidFlightTest {
             inputs[i] = inputWithDecode(i + 1, 10, decodePort);
         }
         EngineRpcService.EnqueueBatchResponsePB response =
-                enqueue(prefillServices.get(0), batch(7000, slot(0, inputs)));
+                enqueueAndFetch(prefillServices.get(0), batch(7000, slot(0, inputs)));
 
         // Error count should be 0 (no fault injection)
         assertEquals(0, response.getErrorsCount(),

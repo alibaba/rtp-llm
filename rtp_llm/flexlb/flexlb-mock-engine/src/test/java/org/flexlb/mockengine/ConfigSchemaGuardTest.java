@@ -8,7 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 class ConfigSchemaGuardTest {
 
     private static final String[] MASTERS = {
-            "../tools/online_eval/data/config/master_fixed_window.json",
+            "src/test/resources/master-config-stress-na130.json",
     };
 
     private static final String[] PERFORMANCES = {

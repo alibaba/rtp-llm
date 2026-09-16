@@ -197,8 +197,10 @@ class CodeReviewFixTest {
                 "decode runningTasks should be empty — request must not be forwarded");
         assertEquals(0, decode.getActiveKvTokens(),
                 "decode activeKvTokens should be 0 — request must not be forwarded");
-        assertEquals(0, decode.getAcceptedCount(),
-                "decode acceptedCount should be 0 — request must not be forwarded");
+        assertEquals(1, decode.getAcceptedCount(),
+                "Decode was allocated before Prefill, then cancelled without execution");
+        assertEquals(0, decode.getActiveDecodeCount());
+        assertEquals(0, decode.getCompletedCount());
 
         // Prefill engine should also be clean.
         assertEquals(0, prefill.getInflightCount(),

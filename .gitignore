@@ -83,3 +83,9 @@ docs/index/dist/
 
 # Local analysis reports
 *_analysis_report.md
+
+# Deployment-specific Whale mock calibration and master documents stay external.
+/rtp_llm/flexlb/tools/whale_mock/glm53-calibration.json
+/rtp_llm/flexlb/tools/whale_mock/glm53-inner-calibration.json
+/rtp_llm/flexlb/tools/whale_mock/glm53-inner-master.json
+/rtp_llm/flexlb/tools/whale_mock/legacy-master.json

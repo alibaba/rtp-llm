@@ -109,6 +109,23 @@ class MultiFrameStreamTtftTest {
         assertTtftStrictlyBeforeE2e(stream);
     }
 
+    @Test
+    @Timeout(30)
+    void decodeStepReportsTpotWithoutCountingPrefillToken() throws Exception {
+        startCluster("10", 50.0);
+        var events = new java.util.concurrent.CopyOnWriteArrayList<Map<String, Number>>();
+        var reporter = decode.getClass().getDeclaredField("eventMetricReporter");
+        reporter.setAccessible(true);
+        reporter.set(decode, (java.util.function.Consumer<Map<String, Number>>) events::add);
+        CollectedStream stream = generate(prefill, inputWithDecode(998, 10, decode.getGrpcPort()), 10000);
+        assertNull(stream.error.get());
+        var accepted = events.stream().filter(e -> e.containsKey("rtp_llm_sp_total_accepted_token_num")).toList();
+        assertTrue(!accepted.isEmpty());
+        // Fixture output is 8 tokens, of which P produces one.
+        assertEquals(7, accepted.stream().mapToInt(e -> e.get("rtp_llm_sp_total_accepted_token_num").intValue()).sum());
+        assertTrue(accepted.stream().allMatch(e -> e.get("rtp_llm_sp_estimate_tpot_us").doubleValue() == 50000.0));
+    }
+
     // ==================== timeout semantics ====================
 
     @Test
@@ -138,17 +155,17 @@ class MultiFrameStreamTtftTest {
 
     @Test
     @Timeout(30)
-    void fetchResponseZeroFramesTimesOutWithCleanCompletion() throws Exception {
+    void unknownFetchReturnsNotFoundWithoutCreatingContext() throws Exception {
         startCluster("100", 50.0);
         prefill.setResponsePollTimeoutMs(150);
         decode.setResponsePollTimeoutMs(150);
 
-        // requestId 4 was never enqueued: an empty queue, a short poll timeout,
-        // and the stream must still complete cleanly with zero frames (the
-        // empty_response contract the load client relies on).
+        // Real Fetch takes an existing deferred context once; an unknown ID
+        // fails immediately rather than allocating an orphan response queue.
         CollectedStream stream = fetch(prefill, 4, 10_000);
 
-        assertNull(stream.error.get(), "zero-frame timeout must complete, not error");
+        assertEquals(io.grpc.Status.Code.NOT_FOUND,
+                io.grpc.Status.fromThrowable(stream.error.get()).getCode());
         assertEquals(0, stream.frames.size(), "no frame may be delivered for an unknown request");
     }
 

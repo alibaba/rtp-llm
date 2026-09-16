@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.input;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
@@ -133,7 +133,7 @@ class InflightLeakTest {
             int decodePort = decodeServices.get(i % 2).getGrpcPort();
             EngineRpcService.GenerateInputPB input = inputWithDecode(i + 1, 10, decodePort);
             EngineRpcService.EnqueueBatchResponsePB response =
-                    enqueue(prefill, batch(3000 + i, slot(0, input)));
+                    enqueueAndFetch(prefill, batch(3000 + i, slot(0, input)));
             totalErrors += response.getErrorsCount();
         }
 
@@ -206,7 +206,7 @@ class InflightLeakTest {
         for (int i = 0; i < n; i++) {
             inputs[i] = input(i + 1, 10);
         }
-        enqueue(prefill, batch(5000, slot(0, inputs)));
+        enqueueAndFetch(prefill, batch(5000, slot(0, inputs)));
 
         // Wait for requests to be in-flight
         cluster.awaitInflight(prefill, 1, 1_000);
@@ -256,7 +256,7 @@ class InflightLeakTest {
         // Path A: enqueueBatch → schedulePrefillCompletion → prefill done
         //         → startDecode → decode.scheduleDecodeCompletion
         EngineRpcService.GenerateInputPB inputA = inputWithDecode(requestId, 10, decodePort);
-        enqueue(prefill, batch(7000, slot(0, inputA)));
+        enqueueAndFetch(prefill, batch(7000, slot(0, inputA)));
 
         // Path B: generateStreamCall on the decode engine with the SAME requestId
         //         → decode.scheduleDecodeCompletion (immediate)

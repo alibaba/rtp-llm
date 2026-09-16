@@ -48,6 +48,16 @@
     </dependencies>
 
     <profiles>
+        <!-- Test-only bundle: local engine discovery plus real monitoring. -->
+        <profile>
+            <id>whale-bundle</id>
+            <dependencies>
+                <dependency>
+                    <groupId>org.flexlb</groupId>
+                    <artifactId>kmonitor</artifactId>
+                </dependency>
+            </dependencies>
+        </profile>
         <!-- Internal profile - automatically activated when internal dependencies exists -->
         <profile>
             <id>internal</id>

@@ -27,7 +27,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -288,7 +288,7 @@ class EngineCrashRecoveryTest {
             int decodePort = decodeEngines.get(i % decodeEngines.size()).getGrpcPort();
             inputs[i] = inputWithDecode(startRequestId + i, 10, decodePort);
         }
-        enqueue(prefill, batch(batchId, slot(0, inputs)));
+        enqueueAndFetch(prefill, batch(batchId, slot(0, inputs)));
     }
 
     // ──────────── HTTP helpers ────────────

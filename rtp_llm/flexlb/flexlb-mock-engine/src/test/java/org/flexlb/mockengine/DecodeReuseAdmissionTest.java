@@ -111,16 +111,16 @@ class DecodeReuseAdmissionTest {
     @Test
     void acquireWithReuseGatesOnNetDemandNotTotalDemand() {
         MockLruBlockCache cache = new MockLruBlockCache(10, 0.0);
-        // One in-flight request pins 5 blocks: held=5, available=5, free=0.
-        assertNotNull(cache.acquire(5, List.of(100L, 101L, 102L, 103L, 104L)));
-        // The remaining 5 blocks park a 5-key prefix in the LRU.
-        assertTrue(cache.admit(List.of(1L, 2L, 3L, 4L, 5L)));
+        // Five blocks are ALREADY pinned by another request. A second
+        // request can share those physical blocks and allocate one new block:
+        // totalDemand=6 > available=5, but netNew=1 fits without oversubscription.
+        List<Long> prefix = List.of(1L, 2L, 3L, 4L, 5L);
+        var first = cache.acquire(5, prefix);
+        assertNotNull(first);
+        first = cache.retainComputed(first, prefix);
         assertEquals(5, cache.availableBlocks());
+        assertEquals(5, cache.freeBlocks());
 
-        // totalDemand=6 with all 5 LRU keys hit → netNew=1 ≤ 5 → admits. The
-        // OLD total-demand gate (need ≤ available) would compare 6 > 5 and
-        // reject — overstating decode pool pressure exactly the way the
-        // production net-demand gate does not.
         MockLruBlockCache.BlockLease lease =
                 cache.acquireWithReuse(6, List.of(1L, 2L, 3L, 4L, 5L, 6L));
         assertNotNull(lease,
@@ -132,6 +132,16 @@ class DecodeReuseAdmissionTest {
         // rejects — the two calibers genuinely differ.
         assertNull(cache.acquire(6, List.of(1L, 2L, 3L, 4L, 5L, 6L)),
                 "prefill-side acquire keeps its total-demand gate");
+
+        // The old fixture used five unrelated held blocks plus five idle hits.
+        // Pinning those hits and allocating one more would consume eleven of ten.
+        MockLruBlockCache unshared = new MockLruBlockCache(10, 0.0);
+        assertNotNull(unshared.acquire(5, List.of()));
+        unshared.admit(prefix);
+        assertNull(unshared.acquireWithReuse(6, prefix));
+        assertEquals(0, unshared.freeBlocks());
+        assertEquals(5, unshared.heldBlocks());
+        assertEquals(0, unshared.referencedKeyBlocks(), "failed allocation rolls back its pins");
     }
 
     @Test
@@ -158,10 +168,13 @@ class DecodeReuseAdmissionTest {
     }
 
     @Test
-    void prefixMatchReadRefreshesLruRecency() {
+    void prefixMatchReadRefreshesLeafRecency() {
         MockLruBlockCache cache = new MockLruBlockCache(3, 0.0);
-        assertTrue(cache.admit(List.of(1L, 2L, 3L)));
-        // Access order after insertion: 1 (eldest), 2, 3.
+        // Three independent one-block prefixes, hence three eligible leaves.
+        assertTrue(cache.admit(List.of(1L)));
+        assertTrue(cache.admit(List.of(2L)));
+        assertTrue(cache.admit(List.of(3L)));
+        // Leaf access order after insertion: 1 (eldest), 2, 3.
 
         // READ key 1 through the prefix-match path — the read itself must
         // refresh its recency (order becomes 2, 3, 1).
@@ -199,23 +212,18 @@ class DecodeReuseAdmissionTest {
         assertEquals(Set.of(401L, 402L), cache.snapshotKeys(),
                 "hash keys beyond the token demand still park when the pool has room");
 
-        // Genuine over-subscription: a 3-block pool with 2 parked keys and 1
-        // held block cannot index 4 new keys at once — the ELDEST pure-LRU
-        // entries are the victims (1, 2, then the just-parked 7), keeping
-        // the pool at capacity, never above.
+        // A 3-block pool cannot retain both the old two-block chain and the
+        // new four-block chain. Whole-chain rounding removes both; no suffix
+        // fragments are kept merely to fill the pool exactly.
         MockLruBlockCache tiny = new MockLruBlockCache(3, 0.0);
         assertTrue(tiny.admit(List.of(1L, 2L)));
         MockLruBlockCache.BlockLease over = tiny.acquireWithReuse(1, List.of(7L));
         assertNotNull(over);
         assertEquals(1, tiny.heldBlocks());
         assertTrue(tiny.admit(over, List.of(7L, 8L, 9L, 10L)));
-        assertEquals(3, tiny.snapshotKeys().size(),
-                "the pool must stay at capacity, never above");
-        assertTrue(tiny.snapshotKeys().containsAll(List.of(8L, 9L, 10L)),
-                "the eldest entries (1, 2, then 7) are the eviction victims");
-        assertFalse(tiny.snapshotKeys().contains(1L));
-        assertFalse(tiny.snapshotKeys().contains(2L));
-        assertFalse(tiny.snapshotKeys().contains(7L));
+        assertTrue(tiny.snapshotKeys().isEmpty());
+        assertEquals(6, tiny.evictions());
+        assertEquals(3, tiny.freeBlocks());
     }
 
     // ─────────────── engine level: hand-off re-match against the OWN LRU ───────────────

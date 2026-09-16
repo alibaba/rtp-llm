@@ -1,0 +1,14 @@
+kind: timeline
+title: Decode scale-out under continuing background load
+align: {stage: add_decode, edge: start}
+events:
+- {stage: prepared, edge: end, label: Preparation confirmed}
+- {stage: formal, edge: end, label: Formal flow started}
+- {stage: add_decode, edge: start, label: Decode added}
+- {stage: new_decode_serving, edge: end, label: New Decode serving}
+- {stage: formal_drain, edge: end, label: Formal flow drained}
+panels:
+- title: Successful request counts by send-second
+  metrics: [statistics/1/per_second/success]
+- title: End-to-end latency per send-second
+  metrics: [statistics/1/per_second/e2e_p95]

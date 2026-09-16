@@ -306,7 +306,7 @@ class LegacyKeysIgnoredTest(unittest.TestCase):
     def tearDownClass(cls):
         cls._tmp.cleanup()
 
-    def test_arrivals_rebuilt_from_prometheus_not_legacy_counters(self):
+    def test_arrivals_rebuilt_from_prometheus_not_expected_counters(self):
         # The legacy rows (100 -> 250) must NOT win: the G3 prometheus
         # timeline (0 -> 15 -> 40 ...) is the sole source, so the output
         # matches the G3-derived expectations exactly.
@@ -320,7 +320,7 @@ class LegacyKeysIgnoredTest(unittest.TestCase):
             rows,
         )
 
-    def test_inflight_rebuilt_from_gauges_not_legacy_snapshots(self):
+    def test_inflight_rebuilt_from_gauges_not_expected_snapshots(self):
         # The legacy snapshot (scheduler=9, prefill_batches=2, ...) must
         # NOT win: the G3 gauge sums (identical to the sole-source test
         # above) are the only series produced.

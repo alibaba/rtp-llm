@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -74,7 +74,7 @@ class MatrixSweepTest {
                     inputs[j] = inputWithDecode(startRequestId + j, 10, decodePort);
                 }
                 EngineRpcService.EnqueueBatchResponsePB response =
-                        enqueue(prefillServices.get(i), batch(1000 + i, slot(0, inputs)));
+                        enqueueAndFetch(prefillServices.get(i), batch(1000 + i, slot(0, inputs)));
                 totalErrors += response.getErrorsCount();
             }
 

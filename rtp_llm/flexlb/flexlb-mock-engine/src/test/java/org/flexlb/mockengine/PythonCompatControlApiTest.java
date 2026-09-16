@@ -19,7 +19,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.flexlb.mockengine.MockEngineTestSupport.unary;
@@ -131,6 +131,24 @@ class PythonCompatControlApiTest {
     // ════════════════════════════════════════════════════════════════
 
     @Test
+    void prefillFormulaUpdateIsScopedAndInvalidUpdatePreservesState() throws Exception {
+        startCluster(model("100", 1.0), 2, 1);
+        httpPost("/prefill_formula", "{\"engine\":\"prefill-0\",\"expression\":\"200 + sum(computeTokens)\"}");
+        JsonNode state = MAPPER.readTree(httpGet("/prefill_formula")).path("engines");
+        assertEquals("200 + sum(computeTokens)", state.path("prefill-0").path("expression").asText());
+        assertEquals("100", state.path("prefill-1").path("expression").asText());
+        assertFalse(state.has("decode-0"));
+        assertEquals(400, httpPostResponse("/prefill_formula", "{\"expression\":\"bad_function(1)\"}").statusCode());
+        assertEquals("200 + sum(computeTokens)", MAPPER.readTree(httpGet("/prefill_formula"))
+                .path("engines").path("prefill-0").path("expression").asText());
+        assertEquals(400, httpPostResponse("/prefill_formula", "{\"engine\":\"decode-0\",\"expression\":\"200\"}").statusCode());
+        httpPost("/prefill_formula", "{\"expression\":\"300\"}");
+        state = MAPPER.readTree(httpGet("/prefill_formula")).path("engines");
+        assertEquals("300", state.path("prefill-0").path("expression").asText());
+        assertEquals("300", state.path("prefill-1").path("expression").asText());
+    }
+
+    @Test
     void engineNameAddressingForInjectAndStopEngine() throws Exception {
         startCluster(model("10", 0.1), 2, 1);
 
@@ -228,6 +246,23 @@ class PythonCompatControlApiTest {
     // ════════════════════════════════════════════════════════════════
 
     @Test
+    void topologyViewOmitsUnboundedHistoryAndRetainsEngineIdentity() throws Exception {
+        startCluster(model("10", 0.1), 1, 2);
+        JsonNode topology = MAPPER.readTree(httpGet("/snapshot?view=topology"));
+        assertEquals(3, topology.get("engines").size());
+        JsonNode engine = topology.get("engines").get(0);
+        assertEquals("prefill-0", engine.get("name").asText());
+        assertEquals("prefill", engine.get("role").asText());
+        assertTrue(engine.has("grpc_addr"));
+        assertTrue(engine.has("http_addr"));
+        assertFalse(engine.get("engine_incarnation").asText().isEmpty());
+        assertFalse(engine.has("request_lifecycle"));
+        assertEquals(5, engine.size());
+        assertTrue(MAPPER.readTree(httpGet("/snapshot")).get("engines").get(0)
+                .has("request_lifecycle"));
+    }
+
+    @Test
     void snapshotHasPythonSchemaAndFields() throws Exception {
         startCluster(model("10", 0.1), 1, 2);
 
@@ -290,7 +325,7 @@ class PythonCompatControlApiTest {
         startCluster(model("10", 0.1), 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
 
-        enqueue(prefill, batch(5000, slot(0,
+        enqueueAndFetch(prefill, batch(5000, slot(0,
                 inputWithDecode(9001, 10, decodeServices.get(0).getGrpcPort()))));
 
         JsonNode requests = MAPPER.readTree(httpGet("/requests"));
@@ -350,6 +385,32 @@ class PythonCompatControlApiTest {
     // ════════════════════════════════════════════════════════════════
 
     @Test
+    void setPerfChangesOnlyTheAddressedEngine() throws Exception {
+        MockPerformanceModel initial = model("10", 1.0);
+        startCluster(initial, 2, 2);
+        MockPerformanceModel first = prefillServices.get(0).getPerformance();
+        MockPerformanceModel second = prefillServices.get(1).getPerformance();
+        MockPerformanceModel.RequestShape shape = first.shape(
+                inputWithDecode(1, 10, decodeServices.get(0).getGrpcPort()), new MockLruBlockCache(16));
+        int initialCap = initial.maxWaitingPrefillBatches();
+
+        httpPost("/set_perf", "{\"engine\":\"prefill-0\",\"prefill_fixed_ms\":50,\"max_waiting_batches\":3}");
+        httpPost("/set_perf", "{\"engine\":\"decode-0\",\"decode_scale\":7}");
+        assertEquals(50L, first.prefillMs(List.of(shape)));
+        assertEquals(3, first.maxWaitingPrefillBatches());
+        assertEquals(10L, second.prefillMs(List.of(shape)));
+        assertEquals(initialCap, second.maxWaitingPrefillBatches());
+        assertEquals(7L, decodeServices.get(0).getPerformance().decodeMs(1, 1));
+        assertEquals(1L, decodeServices.get(1).getPerformance().decodeMs(1, 1));
+        assertEquals(10L, initial.prefillMs(List.of(shape)), "startup template stays unchanged");
+        assertEquals(initialCap, initial.maxWaitingPrefillBatches());
+
+        httpPost("/set_perf", "{\"engine\":\"prefill-1\",\"prefill_fixed_ms\":500}");
+        assertEquals(50L, first.prefillMs(List.of(shape)), "later writes to a sibling stay isolated");
+        assertEquals(500L, second.prefillMs(List.of(shape)));
+    }
+
+    @Test
     void maxPrefillConcurrencyLanesRunInParallel() throws Exception {
         // sleep_scale=1.0, formula "200" -> each prefill batch takes ~200ms.
         startCluster(model("200", 1.0), 1, 1);
@@ -360,7 +421,7 @@ class PythonCompatControlApiTest {
 
         long startNanos = System.nanoTime();
         for (int i = 0; i < 3; i++) {
-            enqueue(prefill, batch(6000 + i, slot(0,
+            enqueueAndFetch(prefill, batch(6000 + i, slot(0,
                     inputWithDecode(9100 + i, 10, decode.getGrpcPort()))));
         }
         awaitCompleted(decode, 3, 10_000);
@@ -407,13 +468,13 @@ class PythonCompatControlApiTest {
 
         httpPost("/set_queue_depth", "{\"engine\":\"prefill-0\",\"queue_depth\":1}");
 
-        EngineRpcService.EnqueueBatchResponsePB first = enqueue(prefill, batch(7000, slot(0,
+        EngineRpcService.EnqueueBatchResponsePB first = enqueueAndFetch(prefill, batch(7000, slot(0,
                 inputWithDecode(9200, 10, decodeServices.get(0).getGrpcPort()))));
         assertEquals(1, first.getSuccessesCount());
 
         // Second enqueue while the first is still pending -> rejected (Java semantics;
         // Python only fakes the queue depth display — divergence deferred to Phase 5).
-        EngineRpcService.EnqueueBatchResponsePB second = enqueue(prefill, batch(7001, slot(0,
+        EngineRpcService.EnqueueBatchResponsePB second = enqueueAndFetch(prefill, batch(7001, slot(0,
                 inputWithDecode(9201, 10, decodeServices.get(0).getGrpcPort()))));
         assertEquals(0, second.getSuccessesCount());
         assertEquals(1, second.getErrorsCount());
@@ -422,7 +483,7 @@ class PythonCompatControlApiTest {
 
         // Clearing the limit restores acceptance.
         httpPost("/set_queue_depth", "{\"engine\":\"prefill-0\",\"queue_depth\":0}");
-        EngineRpcService.EnqueueBatchResponsePB third = enqueue(prefill, batch(7002, slot(0,
+        EngineRpcService.EnqueueBatchResponsePB third = enqueueAndFetch(prefill, batch(7002, slot(0,
                 inputWithDecode(9202, 10, decodeServices.get(0).getGrpcPort()))));
         assertEquals(1, third.getSuccessesCount());
     }
@@ -435,7 +496,7 @@ class PythonCompatControlApiTest {
     void metricsDefaultModeContainsPythonNames() throws Exception {
         startCluster(model("10", 0.1), 2, 2);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
-        enqueue(prefill, batch(8000, slot(0,
+        enqueueAndFetch(prefill, batch(8000, slot(0,
                 inputWithDecode(9300, 10, decodeServices.get(0).getGrpcPort()),
                 inputWithDecode(9301, 10, decodeServices.get(1).getGrpcPort()))));
         awaitCompleted(decodeServices.get(0), 1, 10_000);
@@ -464,7 +525,7 @@ class PythonCompatControlApiTest {
     void metricsPerEngineModeUsesEngineLabels() throws Exception {
         startCluster(model("10", 0.1), 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
-        enqueue(prefill, batch(8100, slot(0,
+        enqueueAndFetch(prefill, batch(8100, slot(0,
                 inputWithDecode(9400, 10, decodeServices.get(0).getGrpcPort()))));
         awaitCompleted(decodeServices.get(0), 1, 10_000);
 
@@ -490,7 +551,7 @@ class PythonCompatControlApiTest {
         startCluster(model("10", 0.1), 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
 
-        enqueue(prefill, batch(9000, slot(0,
+        enqueueAndFetch(prefill, batch(9000, slot(0,
                 inputWithDecode(9500, 10, decodeServices.get(0).getGrpcPort()),
                 inputWithDecode(9501, 10, decodeServices.get(0).getGrpcPort()))));
 

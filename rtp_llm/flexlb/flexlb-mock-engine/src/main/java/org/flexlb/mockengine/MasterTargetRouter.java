@@ -91,6 +91,25 @@ final class MasterTargetRouter {
         }
     }
 
+    /** Observed transport attempt; timestamps use one monotonic elapsed interval. */
+    static final class ScheduleAttempt {
+        final String target;
+        final long startedEpochMs;
+        final long endedEpochMs;
+        final String status;
+        final Integer responseCode;
+
+        ScheduleAttempt(String target, long startedEpochMs, long startedNanos,
+                String status, Integer responseCode) {
+            this.target = target;
+            this.startedEpochMs = startedEpochMs;
+            this.endedEpochMs = startedEpochMs
+                    + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
+            this.status = status;
+            this.responseCode = responseCode;
+        }
+    }
+
     /** Terminal outcome of one failover-aware Schedule call. */
     static final class ScheduleOutcome {
         /** Master response, or null when no target produced one. */
@@ -102,14 +121,17 @@ final class MasterTargetRouter {
         final ErrorKind errorKind;
         /** Transport-layer exception of the last UNAVAILABLE attempt (null otherwise). */
         final Exception failure;
+        final List<ScheduleAttempt> attempts;
 
         ScheduleOutcome(FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
-                String lastTarget, boolean failover, ErrorKind errorKind, Exception failure) {
+                String lastTarget, boolean failover, ErrorKind errorKind, Exception failure,
+                List<ScheduleAttempt> attempts) {
             this.response = response;
             this.lastTarget = lastTarget;
             this.failover = failover;
             this.errorKind = errorKind;
             this.failure = failure;
+            this.attempts = List.copyOf(attempts);
         }
     }
 
@@ -190,11 +212,14 @@ final class MasterTargetRouter {
     ScheduleOutcome schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request, long timeoutMs) {
         int start = sticky;
         Exception lastFailure = null;
+        List<ScheduleAttempt> attempts = new ArrayList<>();
         for (int attempt = 0; attempt < pools.size(); attempt++) {
             int idx = Math.floorMod(start + attempt, pools.size());
             TargetPool pool = pools.get(idx);
             FlexlbServiceGrpc.FlexlbServiceBlockingStub stub = pool.nextStub()
                     .withDeadlineAfter(timeoutMs, TimeUnit.MILLISECONDS);
+            long startedEpochMs = System.currentTimeMillis();
+            long startedNanos = System.nanoTime();
             try {
                 FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = stub.schedule(request);
                 // Any response (code 200 or business error) proves the target
@@ -203,9 +228,13 @@ final class MasterTargetRouter {
                 // practice (idx == sticky) — it only moves when transport
                 // failover delivered us to another target first.
                 sticky = idx;
-                return new ScheduleOutcome(response, pool.target, attempt > 0, ErrorKind.NONE, null);
+                attempts.add(new ScheduleAttempt(pool.target, startedEpochMs, startedNanos,
+                        "OK", response.getCode()));
+                return new ScheduleOutcome(response, pool.target, attempt > 0, ErrorKind.NONE, null, attempts);
             } catch (StatusRuntimeException e) {
                 Status.Code code = e.getStatus().getCode();
+                attempts.add(new ScheduleAttempt(pool.target, startedEpochMs, startedNanos,
+                        code.name(), null));
                 if (code == Status.Code.UNAVAILABLE) {
                     // Event ① (transport-layer unreachable): same-request retry
                     // on the next target — never wait for ZK, never probe.
@@ -216,10 +245,12 @@ final class MasterTargetRouter {
                 // this request — no retry, no switch, no direct fallback.
                 ErrorKind kind = code == Status.Code.DEADLINE_EXCEEDED
                         ? ErrorKind.DEADLINE : ErrorKind.BUSINESS;
-                return new ScheduleOutcome(null, pool.target, attempt > 0, kind, e);
+                return new ScheduleOutcome(null, pool.target, attempt > 0, kind, e, attempts);
             } catch (RuntimeException e) {
+                attempts.add(new ScheduleAttempt(pool.target, startedEpochMs, startedNanos,
+                        "EXCEPTION", null));
                 // Non-gRPC failure: conservative — only UNAVAILABLE retries.
-                return new ScheduleOutcome(null, pool.target, attempt > 0, ErrorKind.BUSINESS, e);
+                return new ScheduleOutcome(null, pool.target, attempt > 0, ErrorKind.BUSINESS, e, attempts);
             }
         }
         // Every target answered UNAVAILABLE: double connection failure. The
@@ -229,7 +260,7 @@ final class MasterTargetRouter {
         // case-test assertions).
         int lastIdx = Math.floorMod(start + pools.size() - 1, pools.size());
         return new ScheduleOutcome(null, pools.get(lastIdx).target, pools.size() > 1,
-                ErrorKind.TRANSPORT, lastFailure);
+                ErrorKind.TRANSPORT, lastFailure, attempts);
     }
 
     /** Shuts down every target pool's channels (no-op for test-constructed pools). */

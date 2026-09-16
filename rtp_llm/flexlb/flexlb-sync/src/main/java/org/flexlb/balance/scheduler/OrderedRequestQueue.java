@@ -61,6 +61,29 @@ final class OrderedRequestQueue {
         return size;
     }
 
+    /** Read-only traversal in queue order; caller holds the coordinator lock. */
+    void debugVisit(Predicate<GlobalQueueEntry> visitor) {
+        if (!priorityOrdering) {
+            for (GlobalQueueEntry entry = fifo.head; entry != null; entry = entry.next) {
+                if (!visitor.test(entry)) {
+                    return;
+                }
+            }
+            return;
+        }
+        for (int priority = PRIORITY_LEVELS - 1; priority >= 0; priority--) {
+            Bucket bucket = priorityBuckets[priority];
+            if (bucket == null) {
+                continue;
+            }
+            for (GlobalQueueEntry entry = bucket.head; entry != null; entry = entry.next) {
+                if (!visitor.test(entry)) {
+                    return;
+                }
+            }
+        }
+    }
+
     /** Continue an ordered scan, counting every examined entry against the budget. */
     List<GlobalQueueEntry> scanForPlanningCandidates(
             int candidateLimit, int scanBudget, Predicate<GlobalQueueEntry> eligible) {

@@ -159,7 +159,7 @@ class StreamCancelAutonomousTest {
 
         try (ClientStream stream = ClientStream.generateStream(
                 prefillPort(), MockEngineTestSupport.inputWithDecode(rid, 16, decodePort()))) {
-            awaitCondition(() -> decode.getRunningCount() >= 1, 2_000,
+            awaitCondition(() -> decode.getActiveDecodeCount() >= 1, 2_000,
                     "decode should run the request after the P->D hand-off");
 
             stream.breakStream();
@@ -201,41 +201,30 @@ class StreamCancelAutonomousTest {
         JavaMockEngineCluster.FastRpcService decode = services.get(decodePort());
         long rid = 7003L;
 
-        try (ClientStream generateStream = ClientStream.generateStream(
-                prefillPort(), MockEngineTestSupport.inputWithDecode(rid, 16, decodePort()))) {
-            awaitCondition(() -> decode.getRunningCount() >= 1, 2_000,
-                    "decode should run the request after the P->D hand-off");
-
-            try (ClientStream fetch = ClientStream.fetchResponse(prefillPort(),
-                    EngineRpcService.FetchRequestPB.newBuilder()
-                            .setRequestId(rid)
-                            .build())) {
-                // Wait until the fetch RPC actually reached the engine's
-                // handler (listener armed), then break ONLY the fetch stream.
-                awaitCondition(() -> rpcCount(prefill, "fetch_response") >= 1, 2_000,
-                        "fetchResponse should reach the engine handler");
-                Thread.sleep(100); // handler registration completes after the counter
-                fetch.breakStream();
-            }
-
+        // A real BATCH client receives Enqueue ACK, then opens its sole
+        // Fetch stream. NON_BATCH GenerateStream cannot be followed by Fetch.
+        var ack = MockEngineTestSupport.enqueue(prefill,
+                MockEngineTestSupport.batch(7003, MockEngineTestSupport.slot(0,
+                        MockEngineTestSupport.inputWithDecode(rid, 16, decodePort()))));
+        assertEquals(1, ack.getSuccessesCount());
+        try (ClientStream fetch = ClientStream.fetchResponse(prefillPort(),
+                EngineRpcService.FetchRequestPB.newBuilder().setRequestId(rid).build())) {
+            awaitCondition(() -> decode.getActiveDecodeCount() >= 1, 2_000,
+                    "Fetch must have advanced the prepared Decode into execution");
+            fetch.breakStream();
             awaitCondition(() -> decode.getCancelledCount() == 1, 1_000,
                     "decode should be cancelled by the broken fetch stream");
             assertEquals(0, decode.getRunningCount());
             assertEquals(0, decode.getActiveKvTokens());
             assertEquals(0, prefill.getCancelledCount());
-            assertEquals(1, countCancelTerminals(prefill, rid),
-                    "prefill must publish the propagated typed terminal");
+            assertEquals(1, countCancelTerminals(prefill, rid));
             assertEquals(1, countCancelTerminals(decode, rid));
-            assertEquals(1, clientGoneCensus(),
-                    "only the broken fetch stream may count as client-gone");
+            assertEquals(1, clientGoneCensus());
         }
-        // The still-alive GenerateStream receives the CANCELLED error frame
-        // and closes normally (terminal frame semantics) — no explosion, and
-        // its own context close at channel shutdown must stay a no-op.
         awaitCondition(() -> decode.getInflightCount() == 0 && prefill.getInflightCount() == 0,
                 1_000, "both engines must quiesce");
         assertEquals(1, clientGoneCensus(),
-                "closing the sibling stream after cleanup must not re-count");
+                "closing the already-cancelled Fetch must not re-count");
     }
 
     @Test
@@ -250,7 +239,7 @@ class StreamCancelAutonomousTest {
 
         try (ClientStream stream = ClientStream.generateStream(
                 decodePort(), MockEngineTestSupport.input(rid, 16))) {
-            awaitCondition(() -> decode.getRunningCount() >= 1, 2_000,
+            awaitCondition(() -> decode.getActiveDecodeCount() >= 1, 2_000,
                     "decode should run the direct request");
 
             stream.breakStream();
@@ -282,7 +271,7 @@ class StreamCancelAutonomousTest {
         long ridA = 7005L;
         try (ClientStream stream = ClientStream.generateStream(
                 decodePort(), MockEngineTestSupport.input(ridA, 16))) {
-            awaitCondition(() -> decode.getRunningCount() >= 1, 2_000,
+            awaitCondition(() -> decode.getActiveDecodeCount() >= 1, 2_000,
                     "decode should run the request (order A leg)");
             stream.breakStream();
             awaitCondition(() -> decode.getCancelledCount() == 1, 1_000,
@@ -306,7 +295,7 @@ class StreamCancelAutonomousTest {
         long ridB = 7006L;
         try (ClientStream stream = ClientStream.generateStream(
                 decodePort(), MockEngineTestSupport.input(ridB, 16))) {
-            awaitCondition(() -> decode.getRunningCount() >= 1, 2_000,
+            awaitCondition(() -> decode.getActiveDecodeCount() >= 1, 2_000,
                     "decode should run the request (order B leg)");
             assertNotNull(decode.cancel(ridB),
                     "explicit cancel should claim the terminal (request running)");

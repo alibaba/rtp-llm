@@ -7,6 +7,8 @@ import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.debug.DebugPage;
+import org.flexlb.debug.DebugQuery;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -29,6 +31,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private final EndpointEventProjector endpointEvents;
     private final PlacementAvailability placementAvailability;
     private final Set<Runnable> engineDispatchCapacityListeners = ConcurrentHashMap.newKeySet();
+
+    public DebugPage debugSnapshot(DebugQuery query) {
+        return state.debugSnapshot(query);
+    }
 
     // Construction
 

@@ -20,7 +20,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.httpGet;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithBlockKeys;
 import static org.flexlb.mockengine.MockEngineTestSupport.performanceModel;
@@ -111,7 +111,7 @@ class CacheKeyHitMetricsTest {
 
         // Round 1 (cold): 0 hits over 3 requested keys. Completion parks the
         // keys in the engine LRU.
-        assertEquals(0, enqueue(prefill, batch(1, slot(0,
+        assertEquals(0, enqueueAndFetch(prefill, batch(1, slot(0,
                 inputWithBlockKeys(7L, 3 * SPB, keys)))).getErrorsCount());
         awaitPrefillQuiescence(prefill, 1);
         Map<String, Map<Integer, Long>> cold =
@@ -125,7 +125,7 @@ class CacheKeyHitMetricsTest {
 
         // Round 2 (warm): the parked keys all match — 3 more hits over 3 more
         // requested keys (cumulative 3/6).
-        assertEquals(0, enqueue(prefill, batch(2, slot(0,
+        assertEquals(0, enqueueAndFetch(prefill, batch(2, slot(0,
                 inputWithBlockKeys(8L, 3 * SPB, keys)))).getErrorsCount());
         awaitPrefillQuiescence(prefill, 2);
         Map<String, Map<Integer, Long>> warm =
@@ -139,7 +139,7 @@ class CacheKeyHitMetricsTest {
 
         // Round 3 (partial prefix): [k1,k2,k9] — k1,k2 hit, the k9 miss
         // truncates the run (cumulative 5/9, the key-level hit rate 5/9).
-        assertEquals(0, enqueue(prefill, batch(3, slot(0,
+        assertEquals(0, enqueueAndFetch(prefill, batch(3, slot(0,
                 inputWithBlockKeys(9L, 3 * SPB, List.of(1L, 2L, 90L))))).getErrorsCount());
         awaitPrefillQuiescence(prefill, 3);
         Map<String, Map<Integer, Long>> partial =
@@ -188,7 +188,7 @@ class CacheKeyHitMetricsTest {
         JavaMockEngineCluster.FastRpcService prefill = newPrefillService(model, 100);
         int prefillPort = prefill.getGrpcPort();
 
-        assertEquals(0, enqueue(prefill, batch(1, slot(0,
+        assertEquals(0, enqueueAndFetch(prefill, batch(1, slot(0,
                 inputWithBlockKeys(11L, 2 * SPB, List.of())))).getErrorsCount());
         awaitPrefillQuiescence(prefill, 1);
         Map<String, Map<Integer, Long>> perEngine =

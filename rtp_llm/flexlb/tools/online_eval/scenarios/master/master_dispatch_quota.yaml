@@ -1,0 +1,89 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: master_dispatch_quota
+profiles:
+- batch-window
+- single-batch
+environment:
+  backend: java_mock
+  n_prefill: 1
+  n_decode: 1
+  master_layout: single
+  discovery: discovery_file
+  perf_preset: fault_env
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms:
+      omit: true
+    max_inflight_per_prefill_worker: 1
+execution:
+  timeout_s: 540
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: single_prefill_ttl
+  program: single_prefill_ttl
+metadata:
+  description: Fill one batch quota, stop its prefill, observe blocked traffic and independent scheduler
+    TTL cleanup, then recover.
+  category: master
+  requires:
+  - enqueue_batch
+parameters:
+  single_prefill_ttl:
+    setup_timeout_s: 180
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 10000
+    fill:
+      count: 4
+      output_len: 10
+      consume: deferred
+    all_fill_admitted:
+      count: 4
+    quota_held_timeout_s: 15
+    quota_held:
+      op: ge
+      value: 1
+    stop:
+      operation: stop
+      targets:
+      - prefill-0
+    eviction_begin:
+      wait_s: 3
+    blocked:
+      count: 10
+      concurrency: 10
+      request_timeout_s: 12
+      sample_topology: false
+    block_verdict:
+      op: le
+      expected: 0.5
+    ttl_empty_timeout_s: 95
+    ttl_empty:
+      op: eq
+      value: 0
+    start:
+      operation: start
+      targets:
+      - prefill-0
+    normal_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 100
+    ready_timeout_s: 30
+    settle:
+      wait_s: 2
+    recovery_timeout_s: 330
+    recovery:
+      count: 20
+      concurrency: 1
+      request_timeout_s: 15
+    recovered:
+      op: ge
+      expected: 0.9

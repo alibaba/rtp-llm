@@ -63,6 +63,7 @@ py_library(
         ":repetition_monitor",
         ":xgrammar_core_dump_control",
         "//rtp_llm/server:server",
+        "//rtp_llm/flexlb/tools/whale_mock:schedule_only",
         ":grpcio",
         ":jsonschema",
         ":xgrammar",

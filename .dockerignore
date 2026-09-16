@@ -2,6 +2,10 @@ docker
 .dockerignore
 .gitlab
 .gitlab-ci.yml
+/rtp_llm/flexlb/tools/whale_mock/glm53-calibration.json
+/rtp_llm/flexlb/tools/whale_mock/glm53-inner-calibration.json
+/rtp_llm/flexlb/tools/whale_mock/glm53-inner-master.json
+/rtp_llm/flexlb/tools/whale_mock/legacy-master.json
 
 *build*
 ./models

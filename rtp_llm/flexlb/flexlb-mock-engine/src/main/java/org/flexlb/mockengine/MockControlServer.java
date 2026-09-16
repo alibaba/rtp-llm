@@ -85,7 +85,10 @@ final class MockControlServer {
         httpServer.createContext("/clear_inject", this::handleClearInject);
         httpServer.createContext("/health", this::handleHealth);
         httpServer.createContext("/requests", this::handleRequests);
+        httpServer.createContext("/cache_diagnostics", this::handleCacheDiagnostics);
         httpServer.createContext("/set_perf", this::handleSetPerf);
+        httpServer.createContext("/prefill_formula", this::handlePrefillFormula);
+        httpServer.createContext("/output_length", this::handleOutputLength);
         httpServer.createContext("/set_kv_pressure", this::handleSetKvPressure);
         httpServer.createContext("/set_queue_depth", this::handleSetQueueDepth);
         httpServer.createContext("/cache_evict", this::handleCacheEvict);
@@ -214,10 +217,11 @@ final class MockControlServer {
             sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
             return;
         }
+        boolean topologyOnly = "view=topology".equals(exchange.getRequestURI().getQuery());
         // Python cluster.snapshot() shape: {"engines": [...]}
         List<Map<String, Object>> engines = new ArrayList<>();
         for (JavaMockEngineCluster.FastRpcService service : orderedServices()) {
-            engines.add(service.getSnapshot());
+            engines.add(topologyOnly ? service.getTopologySnapshot() : service.getSnapshot());
         }
         Map<String, Object> response = new LinkedHashMap<>();
         // Sampling timestamp for cross-source alignment with client epoch_ms
@@ -245,6 +249,20 @@ final class MockControlServer {
                     case "enqueue_delay" -> builder.enqueueDelayMs(enabled ? body.path("delay_ms").asLong(0) : 0);
                     case "generate_delay" -> builder.generateDelayMs(enabled ? body.path("delay_ms").asLong(0) : 0);
                     // ── Status-report fault family (getWorkerStatus output layer) ──
+                    case "status_missing_rounds", "status_completion_delay" -> {
+                        if (!body.path("rid").isIntegralNumber() || body.path("rid").asLong() <= 0) {
+                            throw new ApiException(400, "status delivery fault requires positive rid");
+                        }
+                        String field = type.equals("status_missing_rounds") ? "rounds" : "delay_ms";
+                        if (enabled && (!body.path(field).isIntegralNumber()
+                                || body.path(field).asLong() < 0
+                                || body.path(field).asLong() > (field.equals("rounds") ? 1000 : 60000))) {
+                            throw new ApiException(400, "invalid " + field);
+                        }
+                        service.configureStatusDelivery(body.path("rid").asLong(),
+                                field.equals("rounds") ? (enabled ? body.path(field).asInt() : 0) : -1,
+                                field.equals("delay_ms") ? (enabled ? body.path(field).asLong() : 0) : -1);
+                    }
                     case "status_suppress_finished" -> builder.statusSuppressFinished(enabled);
                     case "status_suppress_running" -> builder.statusSuppressRunning(enabled);
                     case "status_suppress_rids" -> builder.statusSuppressRids(
@@ -355,7 +373,47 @@ final class MockControlServer {
         response.put("status", "ok");
         response.put("healthy", healthy == total);
         response.put("engines", total);
-        sendJson(exchange, 200, response);
+        boolean whale = services.values().stream().anyMatch(JavaMockEngineCluster.FastRpcService::isWhaleRemote);
+        boolean ready = total == 1 && services.values().stream()
+                .allMatch(s -> !s.isStopped() && !s.isShuttingDown());
+        if (whale) response.put("status", ready ? "ok" : "unavailable");
+        sendJson(exchange, whale && !ready ? 503 : 200, response);
+    }
+
+    private volatile MockCacheDiagnostics cacheDiagnostics;
+
+    private synchronized void handleCacheDiagnostics(HttpExchange exchange) throws IOException {
+        if ("POST".equals(exchange.getRequestMethod())) {
+            try {
+                JsonNode body = MAPPER.readTree(exchange.getRequestBody());
+                if (body == null) throw new IllegalArgumentException("JSON body required");
+                String action = body.path("action").asText("start");
+                if (action.equals("stop")) {
+                    if (cacheDiagnostics != null) cacheDiagnostics.stop();
+                    services.values().forEach(s -> s.cacheDiagnostics = null);
+                } else if (action.equals("start")) {
+                    if (cacheDiagnostics != null && cacheDiagnostics.active()) {
+                        sendJson(exchange, 409, Map.of("error", "diagnostic capture already active"));
+                        return;
+                    }
+                    MockCacheDiagnostics diag = new MockCacheDiagnostics(
+                            body.path("seconds").asInt(120), body.path("max_keys").asInt(4_000_000),
+                            body.path("sample_every").asInt(100), System::currentTimeMillis);
+                    for (var service : services.values()) {
+                        if (service.isDiagnosticPrefill()) diag.completed(service.getEngineName(), service.diagnosticResidentKeys());
+                    }
+                    cacheDiagnostics = diag;
+                    services.values().forEach(s -> s.cacheDiagnostics = s.isDiagnosticPrefill() ? diag : null);
+                } else throw new IllegalArgumentException("action must be start or stop");
+            } catch (IllegalArgumentException error) {
+                sendJson(exchange, 400, Map.of("error", error.getMessage()));
+                return;
+            }
+        } else if (!"GET".equals(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
+            return;
+        }
+        sendJson(exchange, 200, cacheDiagnostics == null ? Map.of("active", false) : cacheDiagnostics.snapshot());
     }
 
     private void handleRequests(HttpExchange exchange) throws IOException {
@@ -372,9 +430,85 @@ final class MockControlServer {
         sendJson(exchange, 200, response);
     }
 
+    private synchronized void handlePrefillFormula(HttpExchange exchange) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod()) && !"POST".equals(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
+            return;
+        }
+        try {
+            var targets = orderedServices().stream().filter(s -> s.isDiagnosticPrefill()).toList();
+            if ("POST".equals(exchange.getRequestMethod())) {
+                byte[] bytes = exchange.getRequestBody().readNBytes(65537);
+                if (bytes.length > 65536) throw new IllegalArgumentException("body too large");
+                JsonNode body = MAPPER.readTree(bytes);
+                if (body == null || !body.isObject() || !body.path("expression").isTextual())
+                    throw new IllegalArgumentException("expression string required");
+                if (body.has("engine")) {
+                    String engine = body.path("engine").asText();
+                    targets = targets.stream().filter(s -> s.getEngineName().equals(engine)).toList();
+                }
+                if (targets.isEmpty()) throw new IllegalArgumentException("no matching prefill engine");
+                String expression = body.path("expression").asText();
+                MockPerformanceModel.validatePrefillExpression(expression);
+                for (var service : targets) service.getPerformance().setPrefillExpression(expression);
+            }
+            Map<String, Object> states = new LinkedHashMap<>();
+            for (var service : targets)
+                states.put(service.getEngineName(), service.getPerformance().prefillExpressionState());
+            sendJson(exchange, 200, Map.of("engines", states, "scope", "mock execution only; subsequent batches; volatile until restart"));
+        } catch (IllegalArgumentException | com.fasterxml.jackson.core.JsonProcessingException error) {
+            sendJson(exchange, 400, Map.of("error", String.valueOf(error.getMessage())));
+        }
+    }
+
+    private synchronized void handleOutputLength(HttpExchange exchange) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod()) && !"POST".equals(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
+            return;
+        }
+        try {
+            // P selects output length too; updating only D would miss bundled PD requests.
+            var targets = orderedServices();
+            if ("POST".equals(exchange.getRequestMethod())) {
+                byte[] bytes = exchange.getRequestBody().readNBytes(65537);
+                if (bytes.length > 65536) throw new IllegalArgumentException("body too large");
+                JsonNode body = MAPPER.readTree(bytes);
+                if (body == null || !body.isObject()) throw new IllegalArgumentException("JSON object required");
+                body.fieldNames().forEachRemaining(key -> {
+                    if (!key.equals("eos") && !key.equals("engine"))
+                        throw new IllegalArgumentException("unknown field: " + key);
+                });
+                if (body.has("engine")) {
+                    if (!body.path("engine").isTextual()) throw new IllegalArgumentException("engine string required");
+                    String engine = body.path("engine").asText();
+                    targets = targets.stream().filter(s -> s.getEngineName().equals(engine)).toList();
+                }
+                if (targets.isEmpty()) throw new IllegalArgumentException("no matching engine");
+                // Validate completely before mutating any engine; immutable model is safely published.
+                MockEosModel model = MockEosModel.fromControl(body.get("eos"));
+                for (var service : targets) service.getPerformance().setEosModel(model);
+            }
+            Map<String, Object> states = new LinkedHashMap<>();
+            for (var service : targets)
+                states.put(service.getEngineName(), service.getPerformance().outputLengthState());
+            sendJson(exchange, 200, Map.of("engines", states,
+                    "scope", "new request shapes only; existing targets unchanged; volatile until restart"));
+        } catch (IllegalArgumentException | com.fasterxml.jackson.core.JsonProcessingException error) {
+            sendJson(exchange, 400, Map.of("error", String.valueOf(error.getMessage())));
+        }
+    }
+
     private void handleSetPerf(HttpExchange exchange) throws IOException {
         handleServicePost(exchange, (body, service) -> {
             MockPerformanceModel perf = service.getPerformance();
+            if (body.has("cache_retention_blocks")) {
+                JsonNode value = body.get("cache_retention_blocks");
+                if (!value.isIntegralNumber() || !value.canConvertToInt()
+                        || value.asInt() < 0 || value.asInt() > service.getCacheBlocks()) {
+                    throw new ApiException(400, "cache_retention_blocks outside physical pool");
+                }
+                service.setCacheRetentionBlocks(value.asInt());
+            }
             // Python fields (_http_set_perf):
             if (body.has("prefill_fixed_ms")) {
                 perf.setOverrideFixedPrefillMs(body.get("prefill_fixed_ms").asDouble());
@@ -453,7 +587,7 @@ final class MockControlServer {
      * MockLruBlockCache. Idempotent: keys not present are a no-op. When the
      * key set changes the engine's cacheVersion is bumped, so the master's
      * next cache-status poll re-pulls the key set and its global key→holder
-     * index converges on the eviction (the flexlb_ft KV family's sync
+     * index converges on the eviction (the flexlb_test_framework KV family's sync
      * premise). Response: {status, engine, port, changed, cache_version}.
      */
     private void handleCacheEvict(HttpExchange exchange) throws IOException {
@@ -794,7 +928,7 @@ final class MockControlServer {
             // the snapshot so this scrape reads exactly its own token sums
             // (window = scrape interval; the G1 poller is 1s -> tokens/s).
             service.drainTpsWindows();
-            snaps.add(service.getSnapshot());
+            snaps.add(service.getMetricsSnapshot());
         }
 
         StringBuilder sb = new StringBuilder();
@@ -823,6 +957,9 @@ final class MockControlServer {
      */
     private static void appendMetricsMeta(StringBuilder sb) {
         String[][] meta = {
+                {"mock_context_compute_tokens_total", "cumulative computed input tokens", "counter"},
+                {"mock_context_tokens_total", "cumulative input tokens including hits", "counter"},
+                {"mock_generate_tokens_total", "cumulative output tokens of completed requests", "counter"},
                 {"mock_engine_up", "1 if engine is running, 0 if stopped", "gauge"},
                 {"mock_engine_running", "current running requests", "gauge"},
                 {"mock_engine_waiting", "current waiting requests", "gauge"},
@@ -915,6 +1052,9 @@ final class MockControlServer {
             // Production-caliber TPS (PD-split roles: prefill engines carry
             // the context series, decode engines the generate series; the
             // off-role series stay 0 so every engine reports the full set).
+            for (String name : List.of("context_compute_tokens_total", "context_tokens_total", "generate_tokens_total")) {
+                sb.append(String.format("mock_%s{%s} %s%n", name, labels, snap.get(name)));
+            }
             sb.append(String.format("rtp_llm_context_tps{%s} %s%n", labels, snap.get("context_tps")));
             sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %s%n", labels, snap.get("context_tps_with_cache")));
             sb.append(String.format("rtp_llm_generate_tps{%s} %s%n", labels, snap.get("generate_tps")));
@@ -970,6 +1110,9 @@ final class MockControlServer {
             // engines; each engine's off-role series are 0 by design, so the
             // prefill bucket carries the context pair and the decode bucket
             // the generate series).
+            for (String name : List.of("context_compute_tokens_total", "context_tokens_total", "generate_tokens_total")) {
+                sb.append(String.format("mock_%s{%s} %d%n", name, label, sumLong(group, name)));
+            }
             sb.append(String.format("rtp_llm_context_tps{%s} %d%n", label, sumLong(group, "context_tps")));
             sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %d%n", label, sumLong(group, "context_tps_with_cache")));
             sb.append(String.format("rtp_llm_generate_tps{%s} %d%n", label, sumLong(group, "generate_tps")));
