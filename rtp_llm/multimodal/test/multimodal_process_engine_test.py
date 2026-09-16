@@ -839,6 +839,132 @@ class VitErrorReportingTest(TestCase):
 
 
 class AsyncSubmitGetEmbeddingTest(TestCase):
+    def test_cache_free_hash_wait_does_not_block_next_compute(self):
+        """A slow result consumer must not occupy the sole compute worker."""
+        engine = self._make_engine(FakeEmbeddingLengthInterface(), vit_concurrency=1)
+        engine._embedding_cache.resize(0, 0)
+        engine._hash_key_cache.resize(0)
+        first = self._make_input("fake://first")
+        second = self._make_input("fake://second")
+        hashing, release, second_done = (
+            threading.Event(),
+            threading.Event(),
+            threading.Event(),
+        )
+        original_compute = engine._async_compute
+        hash_threads = []
+
+        def compute(mm_inputs, *args, **kwargs):
+            try:
+                return original_compute(mm_inputs, *args, **kwargs)
+            finally:
+                if mm_inputs[0].url == second.url:
+                    second_done.set()
+
+        def hash_result(result):
+            hash_threads.append(threading.current_thread().name)
+            hashing.set()
+            if not release.wait(timeout=5):
+                raise TimeoutError("test consumer was not released")
+            return [torch.arange(result[0].shape[0], dtype=torch.int32)]
+
+        pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="result-consumer"
+        )
+        try:
+            with patch.object(engine, "_async_compute", side_effect=compute), patch(
+                "rtp_llm.multimodal.mm_process_engine._feature_hashes_from_result",
+                side_effect=hash_result,
+            ) as hash_op:
+                future = pool.submit(engine.get_embedding_result, [first])
+                self.assertTrue(hashing.wait(timeout=2))
+                engine.async_submit([second])
+                self.assertTrue(second_done.wait(timeout=2))
+                self.assertFalse(future.done())
+                self.assertEqual(hash_op.call_count, 1)
+                self.assertTrue(hash_threads[0].startswith("result-consumer"))
+                release.set()
+                actual = future.result(timeout=2)[0]
+                self.assertEqual(
+                    actual.feature_hashes[0].tolist(), list(range(len(first.url)))
+                )
+        finally:
+            release.set()
+            pool.shutdown(wait=True)
+            engine.stop()
+
+    def test_cache_free_result_orders_hash_after_producing_stream(self):
+        for hashes_only in (False, True):
+            with self.subTest(hashes_only=hashes_only):
+                engine = self._make_engine(FakeEmbeddingLengthInterface())
+                engine._embedding_cache.resize(0, 0)
+                engine._hash_key_cache.resize(0)
+                inp = self._make_input("fake://event")
+                order = []
+                producer = MagicMock()
+                consumer = MagicMock()
+                caller = threading.current_thread()
+
+                def depend_on_gpu(stream):
+                    self.assertIs(threading.current_thread(), caller)
+                    order.append("producer-dependency")
+
+                def wait_for_gpu():
+                    self.assertIs(threading.current_thread(), caller)
+                    self.assertEqual(order, ["producer-dependency", "hash"])
+                    order.append("gpu-ready")
+
+                def hash_result(result):
+                    self.assertEqual(order, ["producer-dependency"])
+                    self.assertIs(threading.current_thread(), caller)
+                    order.append("hash")
+                    return [torch.arange(len(inp.url), dtype=torch.int32)]
+
+                producer.synchronize.side_effect = wait_for_gpu
+                consumer.wait_stream.side_effect = depend_on_gpu
+                try:
+                    with patch(
+                        "rtp_llm.multimodal.mm_process_engine._current_cuda_streams",
+                        return_value=[producer],
+                    ) as record, patch(
+                        "torch.cuda.current_stream", return_value=consumer
+                    ), patch(
+                        "rtp_llm.multimodal.mm_process_engine._feature_hashes_from_result",
+                        side_effect=hash_result,
+                    ) as hash_op:
+                        result = engine.get_embedding_result(
+                            [inp], hashes_only=hashes_only
+                        )[0]
+                    record.assert_called_once()
+                    hash_op.assert_called_once()
+                    self.assertEqual(
+                        order, ["producer-dependency", "hash", "gpu-ready"]
+                    )
+                    self.assertEqual(len(result.embeddings), 0 if hashes_only else 1)
+                    self.assertEqual(
+                        result.feature_hashes[0].tolist(), list(range(len(inp.url)))
+                    )
+                finally:
+                    engine.stop()
+
+    def test_cache_free_sync_interface_still_returns_hashes(self):
+        engine = self._make_engine(FakeEmbeddingLengthInterface())
+        engine._embedding_cache.resize(0, 0)
+        engine._hash_key_cache.resize(0)
+        inp = self._make_input("fake://sync")
+        try:
+            result = engine.mm_embedding_impl([inp])
+            from rtp_llm.ops import get_multimodal_feature_hash
+
+            self.assertTrue(
+                torch.equal(
+                    result.feature_hashes[0],
+                    get_multimodal_feature_hash(result.embeddings[0]),
+                )
+            )
+        finally:
+            engine.stop()
+
     def test_hashes_only_waits_on_shared_submit_and_does_not_read_cached_embeddings(
         self,
     ):
@@ -1394,6 +1520,26 @@ class _UrlRecordingEmbedding(FakeMultiModalEmbeddingInterface):
 
 
 class MMProcessEngineGreenNetTest(TestCase):
+    def test_cache_free_rejection_never_publishes_hashes(self):
+        engine = self._make_engine(FakeEmbeddingLengthInterface())
+        engine._embedding_cache.resize(0, 0)
+        engine._hash_key_cache.resize(0)
+        engine._greennet_provider = _StubGreenNetProvider(
+            GreenNetVerdict(passed=False, code=2, message="blocked")
+        )
+        try:
+            with patch(
+                "rtp_llm.multimodal.mm_process_engine._feature_hashes_from_result"
+            ) as hash_op:
+                with self.assertRaises(FtRuntimeException) as raised:
+                    engine.get_embedding_result([self._make_input("fake://rejected")])
+                self.assertEqual(
+                    raised.exception.exception_type, ExceptionType.UNSAFE_INPUT_CONTENT
+                )
+                hash_op.assert_not_called()
+        finally:
+            engine.stop()
+
     def _make_engine(self, mm_part=None):
         model = FakeModel(mm_part or FakeMultiModalEmbeddingInterface())
         vit_config = VitConfig()

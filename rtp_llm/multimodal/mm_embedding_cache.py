@@ -198,6 +198,14 @@ class _PoolReservation:
             pass
 
 
+def _current_cuda_streams(value: Any) -> List[Any]:
+    devices = set()
+    _map_tensors(value, lambda tensor: devices.add(tensor.device))
+    return [
+        torch.cuda.current_stream(device) for device in devices if device.type == "cuda"
+    ]
+
+
 def _record_cuda_events(value: Any) -> List[Any]:
     devices = set()
     _map_tensors(value, lambda tensor: devices.add(tensor.device))
@@ -515,6 +523,7 @@ class MMEmbeddingCacheEntry:
         self.original_devices: Any = None
         self.offloaded = False
         self.ready_events: List[Any] = []
+        self.producer_streams: List[Any] = []
         self.pool_owners: List[_PoolReservation] = []
         self.storage_lock = threading.Lock()
         self._greennet_event = threading.Event()
@@ -529,7 +538,9 @@ class MMEmbeddingCacheEntry:
             self._error_reported = True
             return True
 
-    def wait(self, timeout: Optional[float] = None) -> Any:
+    def wait(
+        self, timeout: Optional[float] = None, *, wait_on_current_stream: bool = False
+    ) -> Any:
         deadline = None if timeout is None else time.monotonic() + timeout
         self.wait_ready(timeout)
         if self._on_read is not None:
@@ -537,6 +548,16 @@ class MMEmbeddingCacheEntry:
                 None if deadline is None else max(0.0, deadline - time.monotonic())
             )
             return self._on_read(self, remaining)
+        # Cache-free async entries publish GPU work without synchronizing the
+        # scheduler. The consumer waits on the producer's streams before using
+        # the result, including when its own current stream is different.
+        for producer in self.producer_streams:
+            if wait_on_current_stream:
+                consumer = torch.cuda.current_stream(producer.device)
+                if consumer != producer:
+                    consumer.wait_stream(producer)
+            else:
+                producer.synchronize()
         return self.result
 
     def wait_ready(self, timeout: Optional[float] = None) -> None:

@@ -5,7 +5,34 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCache, MMHashKeyCache
+from rtp_llm.multimodal.mm_embedding_cache import (
+    MMEmbeddingCache,
+    MMEmbeddingCacheEntry,
+    MMHashKeyCache,
+    _current_cuda_streams,
+)
+
+
+class UncachedEntryReadinessTest(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_wait_observes_output_from_another_stream(self):
+        for stream_ordered in (False, True):
+            with self.subTest(stream_ordered=stream_ordered):
+                entry = MMEmbeddingCacheEntry()
+                producer = torch.cuda.Stream()
+                consumer = torch.cuda.Stream()
+                with torch.cuda.stream(producer):
+                    result = torch.full((128, 128), 7.0, device="cuda")
+                    entry.producer_streams = _current_cuda_streams(result)
+                entry.complete(result)
+                with torch.cuda.stream(consumer):
+                    actual = entry.wait(wait_on_current_stream=stream_ordered)
+                    self.assertTrue(
+                        torch.equal(actual.cpu(), torch.full((128, 128), 7.0))
+                    )
+                    self.assertTrue(
+                        all(stream.query() for stream in entry.producer_streams)
+                    )
 
 
 class EmbeddingCapacityTest(unittest.TestCase):

@@ -27,6 +27,7 @@ from rtp_llm.multimodal.mm_embedding_cache import (
     MMEmbeddingCache,
     MMEmbeddingCacheEntry,
     MMHashKeyCache,
+    _current_cuda_streams,
 )
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 from rtp_llm.multimodal.mm_scheduler import MMScheduler
@@ -498,6 +499,7 @@ class MMWorkItem:
         cache_claim: Optional[Tuple[str, MMEmbeddingCacheEntry, str]] = None,
         defer_cache_complete: bool = False,
         hash_key_cache: Optional[MMHashKeyCache] = None,
+        defer_feature_hashes: bool = False,
     ):
         if not mm_inputs:
             raise ValueError("No mm_input for work item")
@@ -524,6 +526,10 @@ class MMWorkItem:
         self.cache_entry: Optional[MMEmbeddingCacheEntry] = None
         self.cache_state: Optional[str] = None
         self.defer_cache_complete = defer_cache_complete
+        # Only cache-free async producers defer hashes to get_embedding_result.
+        # None distinguishes uncaptured producing streams from CPU-only output.
+        self.defer_feature_hashes = defer_feature_hashes
+        self.embedding_producer_streams: Optional[List[Any]] = None
 
         if cache_claim is not None:
             if not self.need_check_cache:
@@ -566,7 +572,12 @@ class MMWorkItem:
         return self.embedding_result is None and not self.waiting_for_cache
 
     def complete_cache(self, result: Any, force: bool = False) -> None:
-        if self.feature_hashes is None:
+        if self.defer_feature_hashes:
+            if self.embedding_producer_streams is None:
+                # Capture on the scheduler thread without synchronizing it.
+                # Consumers using the same streams need no extra CUDA events.
+                self.embedding_producer_streams = _current_cuda_streams(result)
+        elif self.feature_hashes is None:
             self.feature_hashes = _feature_hashes_from_result(result)
         if (
             (self.defer_cache_complete and not force)
@@ -575,11 +586,14 @@ class MMWorkItem:
             or self.cache_entry is None
         ):
             return
+        if self.defer_feature_hashes:
+            self.cache_entry.producer_streams = self.embedding_producer_streams or []
         self.embedding_cache.complete(
             self.cache_key, self.cache_entry, result, self.feature_hashes
         )
         if (
-            self.hash_key_cache is not None
+            self.feature_hashes is not None
+            and self.hash_key_cache is not None
             and self.embedding_cache.peek(self.cache_key) is self.cache_entry
         ):
             self.hash_key_cache.put(
@@ -1183,6 +1197,7 @@ class MMProcessEngine:
         report_embedding_length: bool = True,
         report_image_count: bool = True,
         report_vit_error: bool = True,
+        defer_feature_hashes: bool = False,
     ) -> Tuple[MMEmbeddingRes, List[MMWorkItem]]:
         """Internal implementation that also exposes canonical work-item values.
 
@@ -1215,6 +1230,7 @@ class MMProcessEngine:
                             mm_inputs,
                             cache_claim=cache_claim,
                             defer_cache_complete=defer_cache_complete,
+                            defer_feature_hashes=defer_feature_hashes,
                         )
                         self._wait_for_preprocessing(work_items)
 
@@ -1229,9 +1245,13 @@ class MMProcessEngine:
                             )
 
                     with torch.profiler.record_function("postprocess"):
-                        hashes = [
-                            h for wi in work_items for h in wi.feature_hashes or []
-                        ]
+                        hashes = (
+                            None
+                            if defer_feature_hashes
+                            else [
+                                h for wi in work_items for h in wi.feature_hashes or []
+                            ]
+                        )
                         result = MMEmbeddingRes(
                             emb_res, pos_res, extra_input_res, hashes
                         )
@@ -1265,6 +1285,7 @@ class MMProcessEngine:
         mm_inputs: List[MultimodalInput],
         cache_claim: Optional[Tuple[str, MMEmbeddingCacheEntry, str]] = None,
         defer_cache_complete: bool = False,
+        defer_feature_hashes: bool = False,
     ) -> List[MMWorkItem]:
         """Create work items and submit preprocessing tasks."""
         if cache_claim is not None and len(mm_inputs) != 1:
@@ -1285,6 +1306,7 @@ class MMProcessEngine:
                 hash_key_cache=self._hash_key_cache,
                 cache_claim=cache_claim if index == 0 else None,
                 defer_cache_complete=defer_cache_complete,
+                defer_feature_hashes=defer_feature_hashes,
             )
             work_items.append(work_item)
             self.preprocess_executor.submit(work_item)
@@ -1339,7 +1361,7 @@ class MMProcessEngine:
                 wi.feature_hashes = self._hash_key_cache.get(
                     wi.cache_key, wi.cache_entry.generation
                 )
-            if wi.feature_hashes is None:
+            if wi.feature_hashes is None and not wi.defer_feature_hashes:
                 wi.complete_cache(result)
             emb_res.extend(maybe_tensor_to_list(result[0], ndim_threshold=2))
             pos_res.extend(maybe_tensor_to_list(result[1], ndim_threshold=2))
@@ -1429,10 +1451,29 @@ class MMProcessEngine:
                 raw_result = None
                 if not hashes_only or feature_hashes is None:
                     raw_result = entry.wait(
-                        timeout=max(0.0, deadline - time.monotonic())
+                        timeout=max(0.0, deadline - time.monotonic()),
+                        # The hash op synchronizes its stream before returning
+                        # CPU hashes. Queue producer dependencies on that stream
+                        # instead of blocking this CPU thread before the hash.
+                        wait_on_current_stream=feature_hashes is None,
                     )
                 if feature_hashes is None:
                     feature_hashes = _feature_hashes_from_result(raw_result)
+                    # Hashing waits for primary embeddings. Also finish any
+                    # opaque outputs produced on other devices before export.
+                    hashed_devices = {
+                        embedding.device
+                        for embedding in maybe_tensor_to_list(
+                            raw_result[0], ndim_threshold=2
+                        )
+                        if isinstance(embedding, torch.Tensor)
+                        and embedding.is_cuda
+                        and embedding.ndim > 0
+                        and embedding.numel() > 0
+                    }
+                    for producer in entry.producer_streams:
+                        if producer.device not in hashed_devices:
+                            producer.synchronize()
                     self._hash_key_cache.put(
                         cache_key,
                         feature_hashes,
@@ -1817,6 +1858,16 @@ class MMProcessEngine:
                 report_embedding_length=False,
                 report_image_count=False,
                 report_vit_error=False,
+                # No routing metadata is retained when both caches are off.
+                # get_embedding_result orders the hash after its producer and
+                # computes the response hashes once, outside compute admission.
+                defer_feature_hashes=(
+                    not self._embedding_cache.enabled
+                    and not self._hash_key_cache.enabled
+                    # A cache entry claimed before a resize keeps its original
+                    # completion/transfer callbacks and must use their path.
+                    and entry._on_read is None
+                ),
             )
             verdict = GreenNetVerdict(passed=True)
             if verdict_future is not None:
