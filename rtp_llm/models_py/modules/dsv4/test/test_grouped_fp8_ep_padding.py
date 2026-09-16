@@ -187,9 +187,41 @@ class GroupedFP8EPPaddingTest(unittest.TestCase):
         pad.assert_not_called()
         gather.assert_not_called()
 
-    def test_ll_zero_batch_fallback_is_not_changed(self):
-        _, _, pads = self.exchange(self.strategy(ll=True, decode=True), self.inputs(0), 0)
-        self.assertEqual(pads, 0)
+    def test_ll_mixed_zero_and_nonzero_ranks_share_the_same_exchange(self):
+        for rank, n in enumerate((0, 1, 2, 0)):
+            with self.subTest(rank=rank, rows=n):
+                strategy = self.strategy(rank=rank, ll=True, decode=True)
+                inputs = self.inputs(n, rank=rank)
+                buffer = object()
+
+                def local(x, weights, indices, passed_buffer, max_tokens):
+                    self.assertIs(passed_buffer, buffer)
+                    self.assertEqual(max_tokens, 16)
+                    if n == 0:
+                        self.assertEqual(tuple(x.shape), (1, 128))
+                        self.assertTrue(bool((x == 0).all()))
+                        self.assertTrue(bool((weights == 0).all()))
+                        self.assertTrue(bool((indices == -1).all()))
+                    else:
+                        self.assertIs(x, inputs[0])
+                        self.assertIs(weights, inputs[1])
+                        self.assertIs(indices, inputs[2])
+                    return torch.full((x.shape[0], 128), 7, dtype=torch.bfloat16)
+
+                with mock.patch.object(grouped_fp8, "_ll_buffer", return_value=(buffer, 16)), \
+                        mock.patch.object(strategy, "_local_experts_ll", side_effect=local) as dispatched, \
+                        mock.patch.object(strategy, "_assert_uniform_token_count") as check, \
+                        mock.patch.object(grouped_fp8, "_all_gather_cat") as gather, \
+                        mock.patch.object(dist, "reduce_scatter_tensor") as scatter:
+                    output = strategy(*inputs)
+                dispatched.assert_called_once()
+                check.assert_called_once_with(max(n, 1), self.group, inputs[0].device)
+                gather.assert_not_called()
+                scatter.assert_not_called()
+                self.assertEqual(tuple(output.shape), (n, 128))
+                torch.testing.assert_close(
+                    output, torch.full((n, 128), 7, dtype=torch.float32), rtol=0, atol=0
+                )
 
     def test_ll_capacity_error_is_not_replaced_by_padding(self):
         strategy = self.strategy(ll=True)

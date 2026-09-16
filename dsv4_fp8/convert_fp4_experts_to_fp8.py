@@ -120,6 +120,11 @@ def is_expert_scale(name, spec):
     )
 
 
+def exact_match_fraction(equal):
+    # Count in int64: a float32 mean can round a single mismatch to 1.0.
+    return int(equal.sum(dtype=torch.int64)) / equal.numel()
+
+
 def convert_expert(weight_bytes, scale_bytes, n, k_packed, device, verify=True):
     """FP4 (I8 nibbles + group-32 UE8M0) -> FP8 (e4m3 + 128x128 UE8M0).
 
@@ -167,7 +172,7 @@ def convert_expert(weight_bytes, scale_bytes, n, k_packed, device, verify=True):
         recon = quant.float() * torch.exp2(block_exp.float()).repeat_interleave(
             FP8_BLOCK, 0
         ).repeat_interleave(FP8_BLOCK, 1)
-        exact_fraction = float((recon == dequant).float().mean())
+        exact_fraction = exact_match_fraction(recon == dequant)
         denom = dequant.abs().clamp_min(1e-30)
         max_rel_err = float(((recon - dequant).abs() / denom).max())
         # The block dynamic range is what decides exactness (see the module

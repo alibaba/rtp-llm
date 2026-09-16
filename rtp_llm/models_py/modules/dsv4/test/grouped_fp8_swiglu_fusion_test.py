@@ -183,6 +183,19 @@ class GroupedFP8FusedSwigluEquivalenceTest(unittest.TestCase):
             with self.subTest(E=E, T=T, inter=inter):
                 self._check(E=E, T=T, inter=inter, limit=7.0, seed=20260816 + T)
 
+    def test_clamp_limit_rounded_to_bf16_like_eager_path(self):
+        E, T, inter = 1, 64, 256
+        gate_up = torch.empty((E, T, 2 * inter), device=self.device, dtype=torch.bfloat16)
+        gate_up[..., :inter] = 8.0
+        gate_up[..., inter:] = 7.0
+        q_fused, s_fused = _silu_mul_quant_fp32scale(gate_up, inter, 7.1)
+        q_eager, s_eager = _reference(gate_up.reshape(E * T, 2 * inter), inter, 7.1)
+        torch.testing.assert_close(q_fused.float(), q_eager.float(), rtol=0, atol=0)
+        self.assertLessEqual(
+            int((s_fused.contiguous().view(torch.int32) - s_eager.contiguous().view(torch.int32)).abs().max()),
+            1,
+        )
+
     def test_without_clamp(self):
         """``HAS_CLAMP=False`` is a different compiled kernel."""
         for E, T, inter in ((1, 96, 256), (4, 24, 256)):

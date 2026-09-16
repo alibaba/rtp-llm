@@ -59,9 +59,9 @@ SCORING_FUNC_SOFTMAX = 0
 SCORING_FUNC_SIGMOID = 1
 SCORING_FUNC_SQRT_SOFTPLUS = 2  # DeepSeek-V4
 
-# Routed-expert storage. The released checkpoint is FP4 and carries no such key;
+# Routed-expert storage. The released checkpoint declares "fp4";
 # dsv4_fp8/convert_fp4_experts_to_fp8.py stamps "fp8" after rewriting the expert
-# tensors. FP4 stays the default so an unconverted checkpoint is unaffected.
+# tensors. FP4 remains the default for checkpoints without this field.
 EXPERT_DTYPE_FP4 = "fp4"
 EXPERT_DTYPE_FP8 = "fp8"
 EXPERT_DTYPES: Tuple[str, ...] = (EXPERT_DTYPE_FP4, EXPERT_DTYPE_FP8)

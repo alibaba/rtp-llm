@@ -112,6 +112,12 @@ class ConvertExpertTest(unittest.TestCase):
         result = self._convert(_uniform_codes(), _flat_exponents())
         self.assertEqual(len(result), 5)
 
+    def test_single_mismatch_in_large_tensor_is_not_rounded_to_exact(self):
+        matches = torch.ones((1 << 25,), dtype=torch.bool)
+        matches[-1] = False
+        self.assertLess(conv.exact_match_fraction(matches), 1.0)
+        self.assertEqual(conv.exact_match_fraction(matches[:128]), 1.0)
+
     def test_output_byte_lengths_match_the_declared_shapes(self):
         weight_out, scale_out, _exact, _rel, _span = self._convert(
             _uniform_codes(), _flat_exponents()
