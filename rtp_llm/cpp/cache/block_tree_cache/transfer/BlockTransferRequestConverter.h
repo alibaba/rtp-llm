@@ -14,6 +14,7 @@ public:
                                const TransferTask&             task,
                                const std::vector<GroupSetPtr>& group_sets);
 
+    // Replaces descriptors on success; leaves it empty on failure.
     static bool decodeTransfer(const MemoryOperationRequestPB&  request,
                                std::vector<TransferDescriptor>& descriptors,
                                const std::vector<GroupSetPtr>&  group_sets);

@@ -7,6 +7,7 @@
 #include <stdexcept>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 
 namespace rtp_llm {
 namespace {
@@ -62,6 +63,31 @@ TEST(TransferBatchAsyncContextTest, CompletionReleasesGuard) {
     context.complete(ErrorInfo::OkStatus());
 
     EXPECT_TRUE(weak_guard.expired());
+}
+
+TEST(TransferBatchAsyncContextTest, GuardDestructionCanReenterCompletedContext) {
+    auto weak_context = std::make_shared<std::weak_ptr<TransferBatchAsyncContext>>();
+    auto observations = std::make_shared<std::atomic<size_t>>(0);
+    auto guard        = std::shared_ptr<int>(new int(1), [weak_context, observations](int* value) {
+        delete value;
+        if (auto context = weak_context->lock()) {
+            if (context->done() && context->errorInfo().ok()) {
+                ++*observations;
+            }
+            context->onDone([observations](ErrorInfo error) {
+                if (error.ok()) {
+                    ++*observations;
+                }
+            });
+        }
+    });
+    auto context      = std::make_shared<TransferBatchAsyncContext>(guard);
+    *weak_context     = context;
+    guard.reset();
+    block_tree_cache_test::BoundedThread<void> completion([context] { context->complete(ErrorInfo::OkStatus()); });
+    ASSERT_EQ(completion.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    completion.get();
+    EXPECT_EQ(observations->load(), 2u);
 }
 
 TEST(TransferBatchAsyncContextTest, CallbackRegisteredBeforeCompletionRunsOnce) {

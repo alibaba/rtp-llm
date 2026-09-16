@@ -60,16 +60,19 @@ ErrorInfo TransferBatchAsyncContext::errorInfo() const {
 
 void TransferBatchAsyncContext::complete(ErrorInfo error) {
     std::vector<DoneCallback> callbacks;
+    std::shared_ptr<void>     completion_guard;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (done_) {
             return;
         }
-        error_ = std::move(error);
-        done_  = true;
-        completion_guard_.reset();
+        error_           = std::move(error);
+        done_            = true;
+        completion_guard = std::move(completion_guard_);
         callbacks.swap(callbacks_);
     }
+    // Guard destruction may re-enter this context; never run it under mutex_.
+    completion_guard.reset();
     done_cv_.notify_all();
     for (auto& callback : callbacks) {
         invokeDoneCallback(callback, error_);

@@ -45,6 +45,26 @@ TEST(HostStagingBlockPoolTest, MovedFromLeaseRejectsAccessAndDestinationKeepsOwn
     EXPECT_TRUE(pool.tryMallocBatch(1).has_value());
 }
 
+TEST(HostStagingBlockPoolTest, ImmediateAllocationFailurePreservesAllBlocksAndDoesNotQueueCallback) {
+    HostStagingBlockPool pool(2, 64);
+    auto                 calls = std::make_shared<size_t>(0);
+    HostStagingBlockPoolTestPeer::failNextAllocation(pool);
+    EXPECT_THROW((void)pool.tryMallocBatch(2), std::bad_alloc);
+    EXPECT_THROW(pool.requestBatch(
+                     2, HostStagingBlockPool::Clock::now() + std::chrono::seconds(30), [calls](auto) { ++*calls; }),
+                 std::bad_alloc);
+    EXPECT_EQ(*calls, 0u);
+    HostStagingBlockPoolTestPeer::clearAllocationFailure(pool);
+    auto recovered = pool.tryMallocBatch(2);
+    ASSERT_TRUE(recovered.has_value());
+    EXPECT_EQ(recovered->size(), 2u);
+    EXPECT_FALSE(pool.tryMallocBatch(1).has_value());
+    recovered.reset();
+    pool.cancelAllBatchWaiters();
+    EXPECT_EQ(*calls, 0u);
+    EXPECT_TRUE(pool.tryMallocBatch(2).has_value());
+}
+
 TEST(HostStagingBlockPoolTest, AllocationFailureDuringReleaseRejectsWaiterWithoutLosingBlocks) {
     auto pool = std::make_shared<HostStagingBlockPool>(1, 64);
     auto held = pool->tryMallocBatch(1);

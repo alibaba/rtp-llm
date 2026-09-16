@@ -69,6 +69,9 @@ public:
     // Fair, all-or-nothing allocation; existing async waiters are never bypassed.
     // Invokes callback outside mutex_. A null result means expiration, cancellation,
     // an invalid request, or allocation failure while admitting a queued waiter.
+    // Immediate allocation/enqueue can throw without consuming any blocks.
+    // Deadline limits admission; queued expiration is observed on free/cancel,
+    // not by a timer. Live waiters retain FIFO order regardless of deadline.
     void requestBatch(size_t count, Clock::time_point deadline, BatchReadyCallback callback);
 
     // Shutdown boundary: every queued waiter is notified even if another

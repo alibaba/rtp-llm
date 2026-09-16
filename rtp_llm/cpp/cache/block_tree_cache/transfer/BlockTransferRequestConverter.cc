@@ -52,11 +52,16 @@ bool BlockTransferRequestConverter::decodeDeviceBlocks(const CopyItem&          
     if (!validDeviceMembers(group_set)) {
         return false;
     }
-    const auto&                              device_pools = group_set.devicePools();
-    const auto&                              group_ids    = group_set.groupIds();
+    const auto& device_pools = group_set.devicePools();
+    const auto& group_ids    = group_set.groupIds();
+    if (static_cast<size_t>(item.group_blocks_size()) != group_ids.size()) {
+        return false;
+    }
     std::unordered_map<size_t, BlockIdxType> blocks_by_group_id;
     for (const auto& group_block : item.group_blocks()) {
-        blocks_by_group_id.emplace(static_cast<size_t>(group_block.group_id()), group_block.block_id());
+        if (!blocks_by_group_id.emplace(static_cast<size_t>(group_block.group_id()), group_block.block_id()).second) {
+            return false;
+        }
     }
     blocks.reserve(group_ids.size());
     for (size_t i = 0; i < group_ids.size(); ++i) {
@@ -123,10 +128,13 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
 bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestPB&  request,
                                                    std::vector<TransferDescriptor>& descriptors,
                                                    const std::vector<GroupSetPtr>&  group_sets) {
+    descriptors.clear();
     if (request.copy_items_size() == 0) {
         return false;
     }
 
+    std::vector<TransferDescriptor> decoded;
+    decoded.reserve(static_cast<size_t>(request.copy_items_size()));
     for (const CopyItem& item : request.copy_items()) {
         const size_t group_set_id = item.group_set_id();
         if (group_set_id >= group_sets.size() || !group_sets[group_set_id]) {
@@ -196,8 +204,9 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
             default:
                 return false;
         }
-        descriptors.push_back(std::move(descriptor));
+        decoded.push_back(std::move(descriptor));
     }
+    descriptors = std::move(decoded);
     return true;
 }
 

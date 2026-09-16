@@ -382,6 +382,54 @@ TEST(BlockTransferRequestConverterTest, DecodeRequiresOnlyPoolsUsedByTheDirectio
     }
 }
 
+TEST(BlockTransferRequestConverterTest, DecodePublishesOnlyCompleteReplacement) {
+    MemoryOperationRequestPB valid;
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
+        valid, makeTransferTask({TransferDescriptor::deviceToHost(0, {1}, 2)}), groupSets()));
+    const auto                      stale = TransferDescriptor::hostToDisk(4, 3, 4);
+    std::vector<TransferDescriptor> output{stale};
+    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(valid, output, groupSets()));
+    ASSERT_EQ(output.size(), 1u);
+    EXPECT_EQ(output.front().group_set_id, 0u);
+    EXPECT_EQ(output.front().source_tier, Tier::DEVICE);
+    EXPECT_EQ(output.front().source_blocks, (std::vector<BlockIdxType>{1}));
+
+    MemoryOperationRequestPB partial = valid;
+    partial.add_copy_items()->CopyFrom(valid.copy_items(0));
+    partial.mutable_copy_items(1)->set_group_set_id(groupSets().size());
+    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(partial, output, groupSets()));
+    EXPECT_TRUE(output.empty());
+
+    output.push_back(stale);
+    MemoryOperationRequestPB empty;
+    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(empty, output, groupSets()));
+    EXPECT_TRUE(output.empty());
+    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(valid, output, groupSets()));
+    EXPECT_EQ(output.size(), 1u);
+}
+
+TEST(BlockTransferRequestConverterTest, DecodeRejectsAdditionalDeviceMembers) {
+    const std::vector<TransferDescriptor> descriptors = {
+        TransferDescriptor::deviceToHost(2, {11, 12}, 21),
+        TransferDescriptor::hostToDevice(2, 21, {11, 12}),
+        TransferDescriptor::deviceToDisk(2, {11, 12}, 21),
+        TransferDescriptor::diskToDevice(2, 21, {11, 12}),
+    };
+    for (const auto& descriptor : descriptors) {
+        MemoryOperationRequestPB valid;
+        ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(valid, makeTransferTask({descriptor}), groupSets()));
+        for (const int extra_group_id : {3, 99}) {
+            MemoryOperationRequestPB extra = valid;
+            auto*                    block = extra.mutable_copy_items(0)->add_group_blocks();
+            block->set_group_id(extra_group_id);
+            block->set_block_id(13);
+            std::vector<TransferDescriptor> output;
+            EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(extra, output, groupSets()));
+            EXPECT_TRUE(output.empty());
+        }
+    }
+}
+
 TEST(BlockTransferRequestConverterTest, DecodeRejectsEmptyRequest) {
     MemoryOperationRequestPB        request;
     std::vector<TransferDescriptor> descriptors;
