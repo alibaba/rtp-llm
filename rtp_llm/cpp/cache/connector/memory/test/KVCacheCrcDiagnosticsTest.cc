@@ -213,10 +213,11 @@ protected:
         return result;
     }
 
-    void dump(CrcBlockCopyResult          result,
-              const std::vector<uint8_t>& cpu,
-              size_t                      bytes,
-              const std::vector<uint8_t>* inherited = nullptr) {
+    void dump(CrcBlockCopyResult                   result,
+              const std::vector<uint8_t>&          cpu,
+              size_t                               bytes,
+              const std::vector<uint8_t>*          inherited = nullptr,
+              const std::vector<CrcBlockCopyTile>& tiles     = {}) {
         ASSERT_TRUE(connector_->reserveCrcDump());
         connector_->dumpCrcFailure(request_,
                                    0,
@@ -224,7 +225,8 @@ protected:
                                    std::move(result),
                                    cpu.data(),
                                    bytes,
-                                   inherited ? inherited->data() : nullptr);
+                                   inherited ? inherited->data() : nullptr,
+                                   tiles);
     }
 
     fs::path dumpDirectory() {
@@ -262,7 +264,10 @@ TEST_F(KVCacheCrcDiagnosticsTest, DumpCompletesBeforeBackingReuse) {
     const auto           original = cpu;
     std::vector<uint8_t> gpu(cpu.begin(), cpu.begin() + payload_.size());
     auto                 result = sourceFailure(cpu, gpu);
-    dump(std::move(result), cpu, payload_.size());
+    request_.add_copy_items()->set_mem_block(18);
+    const std::vector<CrcBlockCopyTile> tiles{{gpu.data(), 0, 4, true},
+                                              {cpu.data() + 4, 4, payload_.size() - 4, false}};
+    dump(std::move(result), cpu, payload_.size(), nullptr, tiles);
     std::fill(cpu.begin(), cpu.end(), 0);
     EXPECT_EQ(read("cpu.bin"), original);
     EXPECT_EQ(read("gpu_staging.bin"), gpu);
@@ -274,6 +279,18 @@ TEST_F(KVCacheCrcDiagnosticsTest, DumpCompletesBeforeBackingReuse) {
     EXPECT_EQ(info["storage_bytes"], std::to_string(original.size()));
     EXPECT_EQ(info["truncated"], "false");
     EXPECT_FALSE(info["temporal_limit"].empty());
+    EXPECT_EQ(info["copy_request"], request_.DebugString());
+    EXPECT_EQ(info["copy_item_index"], "0");
+    EXPECT_EQ(info["tile_count"], "2");
+    EXPECT_EQ(info["tile_copy_stage"], "scatter_not_started");
+    EXPECT_EQ(info["tile_0_address"], std::to_string(reinterpret_cast<uintptr_t>(tiles[0].address)));
+    EXPECT_EQ(info["tile_0_offset"], "0");
+    EXPECT_EQ(info["tile_0_bytes"], "4");
+    EXPECT_EQ(info["tile_0_is_cuda"], "true");
+    EXPECT_EQ(info["tile_1_address"], std::to_string(reinterpret_cast<uintptr_t>(tiles[1].address)));
+    EXPECT_EQ(info["tile_1_offset"], "4");
+    EXPECT_EQ(info["tile_1_bytes"], std::to_string(payload_.size() - 4));
+    EXPECT_EQ(info["tile_1_is_cuda"], "false");
 }
 
 TEST_F(KVCacheCrcDiagnosticsTest, ValidCpuAndDifferentGpuDoesNotClaimTransferCausality) {
@@ -436,7 +453,7 @@ TEST_F(KVCacheCrcDiagnosticsTest, FullBlockBeyondEightMiBIncludesTailAndFooter) 
 
 TEST_F(KVCacheCrcDiagnosticsTest, OversizedFullDumpRejectedBeforeDereferencingBacking) {
     EXPECT_THROW(connector_->dumpCrcFailure(
-                     request_, 0, CacheBlockKind::COMPLETE, {}, nullptr, 2ULL * 1024 * 1024 * 1024, nullptr),
+                     request_, 0, CacheBlockKind::COMPLETE, {}, nullptr, 2ULL * 1024 * 1024 * 1024, nullptr, {}),
                  std::length_error);
     EXPECT_TRUE(fs::is_empty(path_));
 }

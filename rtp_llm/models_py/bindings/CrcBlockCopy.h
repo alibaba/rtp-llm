@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace rtp_llm {
@@ -33,6 +34,7 @@ struct CrcBlockCopyResult {
     uint32_t actual_crc{0};
     // Failure-only observations; these do not add a stored checksum or a GPU buffer.
     FailureStage                  failure_stage{FailureStage::INPUT};
+    std::string                   error_message;
     std::optional<CrcBlockFooter> checked_footer;
     std::optional<CrcBlockFooter> staging_footer;
     bool                          gpu_crc_observed{false};
@@ -62,7 +64,9 @@ public:
 
     // gather queues all pool copies on this workspace's stream. store seals the
     // CRC, performs D2H and waits for completion. Inheritance first uses load.
-    void gather(size_t payload_bytes, const std::vector<CrcBlockCopyTile>& tiles, bool preserve_payload = false);
+    // Execution methods return INPUT on invalid arguments instead of throwing.
+    CrcBlockCopyResult
+    gather(size_t payload_bytes, const std::vector<CrcBlockCopyTile>& tiles, bool preserve_payload = false);
     CrcBlockCopyResult store(void*                        host_block,
                              size_t                       payload_bytes,
                              bool                         host_is_pinned  = true,
@@ -74,7 +78,7 @@ public:
                                        size_t                       payload_bytes,
                                        bool                         host_is_pinned  = true,
                                        const std::function<bool()>& capture_failure = {});
-    void               scatter(size_t payload_bytes, const std::vector<CrcBlockCopyTile>& tiles);
+    CrcBlockCopyResult scatter(size_t payload_bytes, const std::vector<CrcBlockCopyTile>& tiles);
 
 private:
     struct Impl;

@@ -148,6 +148,9 @@ KVCacheMemoryConnector::~KVCacheMemoryConnector() {
 }
 
 bool KVCacheMemoryConnector::init() {
+    RTP_LLM_CHECK_WITH_INFO(!cache_config_.use_opaque_kv_cache_store || cache_config_.linear_step == 1,
+                            "DeepSeek V4 memory/disk cache requires linear_step=1, got %d",
+                            cache_config_.linear_step);
     const auto memory_cache_sync_timeout_ms = kv_cache_config_.memory_cache_sync_timeout_ms;
     RTP_LLM_CHECK_WITH_INFO(memory_cache_sync_timeout_ms > 0,
                             "init failed, sync timeout is invalid, sync timeout: %ld ms",

@@ -76,6 +76,8 @@ public:
     bool restoreMemoryCacheBacking();
 
 private:
+    struct CrcCopySlot;
+
     struct LayerRegionSlot {
         int               layer_id{-1};
         KVCacheRegionName region_name{KVCacheRegionName::DEFAULT};
@@ -161,14 +163,39 @@ private:
     void                                 initCrcCopy();
     MemoryOperationResponsePB::ErrorCode copyCacheWithCrc(const MemoryOperationRequestPB&     request,
                                                           const std::vector<LayerRegionSlot>& slots);
+    MemoryOperationResponsePB::ErrorCode copyH2DItemWithCrc(const MemoryOperationRequestPB&      request,
+                                                            int                                  item_index,
+                                                            CacheBlockKind                       kind,
+                                                            size_t                               payload_bytes,
+                                                            const std::vector<CrcBlockCopyTile>& tiles,
+                                                            CrcCopySlot&                         workspace_slot);
+    MemoryOperationResponsePB::ErrorCode copyD2HItemWithCrc(const MemoryOperationRequestPB&      request,
+                                                            int                                  item_index,
+                                                            CacheBlockKind                       kind,
+                                                            size_t                               payload_bytes,
+                                                            const std::vector<CrcBlockCopyTile>& tiles,
+                                                            CrcCopySlot&                         workspace_slot);
+    MemoryOperationResponsePB::ErrorCode rejectCrcCopy(const MemoryOperationRequestPB&      request,
+                                                       const char*                          message,
+                                                       MemoryOperationResponsePB::ErrorCode error) const;
+    MemoryOperationResponsePB::ErrorCode handleCrcFailure(const MemoryOperationRequestPB&      request,
+                                                          int                                  item_index,
+                                                          CacheBlockKind                       kind,
+                                                          CrcBlockCopyResult                   result,
+                                                          const void*                          block_data,
+                                                          size_t                               payload_bytes,
+                                                          const void*                          merge_source_data,
+                                                          bool                                 dump_reserved,
+                                                          const std::vector<CrcBlockCopyTile>& tiles);
     bool                                 reserveCrcDump();
-    void                                 dumpCrcFailure(const MemoryOperationRequestPB& request,
-                                                        int                             item_index,
-                                                        CacheBlockKind                  kind,
-                                                        CrcBlockCopyResult              result,
-                                                        const void*                     host,
-                                                        size_t                          bytes,
-                                                        const void*                     inherited);
+    void                                 dumpCrcFailure(const MemoryOperationRequestPB&      request,
+                                                        int                                  item_index,
+                                                        CacheBlockKind                       kind,
+                                                        CrcBlockCopyResult                   result,
+                                                        const void*                          host,
+                                                        size_t                               bytes,
+                                                        const void*                          inherited,
+                                                        const std::vector<CrcBlockCopyTile>& tiles);
     void reportCopyError(MemoryOperationResponsePB::ErrorCode error, CopyDirection direction);
     bool validateCopyItemBacking(const MemoryOperationRequestPB::CopyItem& item) const;
 
@@ -317,6 +344,8 @@ private:
     static constexpr size_t                                 kCopyThreadCount = 8;
     struct CrcCopySlot {
         std::unique_ptr<CrcBlockCopy> copy;
+        torch::Tensor                 disk_read_buffer;
+        torch::Tensor                 disk_write_buffer;
         bool                          busy{false};
     };
     std::mutex               crc_mutex_;

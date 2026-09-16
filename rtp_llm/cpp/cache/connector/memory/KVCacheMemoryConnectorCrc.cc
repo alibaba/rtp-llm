@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -76,10 +75,26 @@ void KVCacheMemoryConnector::initCrcCopy() {
         mix(slot.group_id);
         mix(slot.stride_bytes);
     }
+    const size_t disk_buffer_bytes    = maxDiskSlotStrideBytes();
+    auto         allocate_disk_buffer = [disk_buffer_bytes] {
+        constexpr size_t alignment = 4096;
+
+        const auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true);
+        auto       buffer  = torch::empty({static_cast<int64_t>(disk_buffer_bytes + alignment - 1)}, options);
+        const auto address = reinterpret_cast<uintptr_t>(buffer.data_ptr());
+        const auto offset  = (alignment - address % alignment) % alignment;
+        // Keep ownership through the view while aligning its address for direct disk I/O.
+        return buffer.narrow(0, static_cast<int64_t>(offset), static_cast<int64_t>(disk_buffer_bytes));
+    };
     crc_copy_slots_.reserve(kCopyThreadCount);
     for (size_t i = 0; i < kCopyThreadCount; ++i) {
         CrcCopySlot slot;
         slot.copy = std::make_unique<CrcBlockCopy>(sizes, slots.size() * 2);
+        if (disk_buffer_bytes) {
+            // Preserve the merge source for dumps even after writing the candidate output.
+            slot.disk_read_buffer  = allocate_disk_buffer();
+            slot.disk_write_buffer = allocate_disk_buffer();
+        }
         crc_copy_slots_.push_back(std::move(slot));
     }
     RTP_LLM_LOG_INFO("memory cache block CRC enabled: workspaces=%zu max_payload=%zu layout=%lu dump_path=%s",
@@ -107,20 +122,11 @@ KVCacheMemoryConnector::copyCacheWithCrc(const MemoryOperationRequestPB&     req
                                          const std::vector<LayerRegionSlot>& slots) {
     using Response       = MemoryOperationResponsePB;
     const bool to_device = request.copy_direction() == MemoryOperationRequestPB::H2D;
-    auto       reject    = [&](const char* message, Response::ErrorCode error = Response::INVALID_REQUEST) {
-        RTP_LLM_LOG_ERROR("memory cache copy rejected: rank=%ld direction=%d items=%d error=%s detail=%s",
-                          parallelism_config_.world_rank,
-                          static_cast<int>(request.copy_direction()),
-                          request.copy_items_size(),
-                          Response::ErrorCode_Name(error).c_str(),
-                          message);
-        return error;
-    };
 
     if (!request.copy_items_size()
         || (request.copy_direction() != MemoryOperationRequestPB::H2D
             && request.copy_direction() != MemoryOperationRequestPB::D2H)) {
-        return reject("invalid CRC copy request");
+        return rejectCrcCopy(request, "invalid CRC copy request", Response::INVALID_REQUEST);
     }
     size_t slot_index = 0;
     {
@@ -131,27 +137,27 @@ KVCacheMemoryConnector::copyCacheWithCrc(const MemoryOperationRequestPB&     req
                        crc_copy_slots_.begin(), crc_copy_slots_.end(), [](const auto& slot) { return !slot.busy; });
         });
         if (stop_.load()) {
-            return reject("CRC connector stopping", Response::COPY_FAILED);
+            return rejectCrcCopy(request, "CRC connector stopping", Response::COPY_FAILED);
         }
         if (crc_copy_slots_.empty())
-            return reject("CRC workspace not initialized", Response::COPY_FAILED);
+            return rejectCrcCopy(request, "CRC workspace not initialized", Response::COPY_FAILED);
         while (crc_copy_slots_[slot_index].busy)
             ++slot_index;
         crc_copy_slots_[slot_index].busy = true;
     }
-    auto release = [this, slot_index](CrcBlockCopy*) {
+    auto release = [this, slot_index](CrcCopySlot*) {
         {
             std::lock_guard<std::mutex> lock(crc_mutex_);
             crc_copy_slots_[slot_index].busy = false;
         }
         crc_cv_.notify_one();
     };
-    std::unique_ptr<CrcBlockCopy, decltype(release)> workspace(crc_copy_slots_[slot_index].copy.get(), release);
+    std::unique_ptr<CrcCopySlot, decltype(release)> workspace_slot(&crc_copy_slots_[slot_index], release);
 
     for (int item_index = 0; item_index < request.copy_items_size(); ++item_index) {
         const auto& item = request.copy_items(item_index);
         if (!validateCopyItemBacking(item) || item.gpu_blocks_size() != slots.size()) {
-            return reject("invalid CRC backing");
+            return rejectCrcCopy(request, "invalid CRC backing", Response::INVALID_REQUEST);
         }
         const bool prefix = item.cache_block_kind() == MemoryOperationRequestPB::COMPRESSED_KV
                             || item.cache_block_kind() == MemoryOperationRequestPB::STATE_SWA_KV;
@@ -161,7 +167,7 @@ KVCacheMemoryConnector::copyCacheWithCrc(const MemoryOperationRequestPB&     req
                                    blockKindFromComplete(item.is_complete());
         std::vector<CrcBlockCopyTile> tiles;
         tiles.reserve(slots.size() * 2);
-        size_t bytes = 0;
+        size_t payload_bytes = 0;
         for (size_t index = 0; index < slots.size(); ++index) {
             const auto& slot = slots[index];
             if (prefix ? kindForSlot(slot) != kind : (!item.is_complete() && !isFullOnlySlot(slot)))
@@ -171,125 +177,232 @@ KVCacheMemoryConnector::copyCacheWithCrc(const MemoryOperationRequestPB&     req
                 size_t within = 0;
                 for (const auto& buffer : allocator_->convertIndexToBuffer(slot.layer_id, slot.region_name, block)) {
                     if (!buffer.addr || !buffer.size_bytes || within + buffer.size_bytes > slot.stride_bytes) {
-                        return reject("invalid CRC layer buffer");
+                        return rejectCrcCopy(request, "invalid CRC layer buffer", Response::INVALID_REQUEST);
                     }
-                    tiles.push_back({buffer.addr, bytes + within, buffer.size_bytes, buffer.is_cuda});
+                    tiles.push_back({buffer.addr, payload_bytes + within, buffer.size_bytes, buffer.is_cuda});
                     within += buffer.size_bytes;
                 }
             }
-            bytes += slot.stride_bytes;
+            payload_bytes += slot.stride_bytes;
         }
-        auto                                        memory_pool = memoryPoolFor(kind);
-        auto                                        disk_pool   = diskPoolFor(kind);
-        std::unique_ptr<void, decltype(&std::free)> disk_target(nullptr, &std::free), disk_source(nullptr, &std::free);
-        auto                                        backing_error = Response::COPY_FAILED;
-        auto                                        backing       = [&](bool source) -> void* {
-            const bool disk =
-                (source ? item.src_backing_type() : item.backing_type()) == MemoryOperationRequestPB::DISK;
-            if (disk) {
-                if (!disk_pool || disk_pool->blockSizeBytes() != CrcBlockCopy::storageBytes(bytes))
-                    return nullptr;
-                auto& storage = source ? disk_source : disk_target;
-                void* pointer = nullptr;
-                if (posix_memalign(&pointer, 4096, disk_pool->slotStrideBytes()) != 0)
-                    return nullptr;
-                storage.reset(pointer);
-                std::memset(pointer, 0, disk_pool->slotStrideBytes());
-                const int disk_slot = source ? item.src_disk_slot() : item.disk_slot();
-                if (!disk_pool->validSlot(disk_slot))
-                    return nullptr;
-                if ((source || to_device) && !disk_pool->read(disk_slot, pointer, disk_pool->slotStrideBytes())) {
-                    backing_error = Response::IO_FAILED;
-                    return nullptr;
-                }
-                return pointer;
-            }
-            if (!memory_pool)
-                return nullptr;
-            const auto buffers = memory_pool->convertIndexToBuffer(0, source ? item.src_mem_block() : item.mem_block());
-            if (buffers.size() != 1 || !buffers[0].addr || buffers[0].is_cuda
-                || buffers[0].size_bytes < CrcBlockCopy::storageBytes(bytes))
-                return nullptr;
-            return buffers[0].addr;
-        };
-        void*      host = backing(false);
-        const bool has_source =
-            !to_device
-            && (item.src_mem_block_presence_case() == MemoryOperationRequestPB::CopyItem::kSrcMemBlock
-                || item.src_disk_slot_presence_case() == MemoryOperationRequestPB::CopyItem::kSrcDiskSlot);
-        void* inherited = has_source ? backing(true) : nullptr;
-        if (!host || (has_source && !inherited)) {
-            return reject("CRC backing read/allocation failed", backing_error);
-        }
-        const bool host_pinned = item.backing_type() != MemoryOperationRequestPB::DISK && memory_pool
-                                 && memory_pool->where() == MemoryType::MEMORY_CPU_PINNED;
-        const bool source_pinned = item.src_backing_type() != MemoryOperationRequestPB::DISK && memory_pool
-                                   && memory_pool->where() == MemoryType::MEMORY_CPU_PINNED;
-        bool                        dump_reserved   = false;
-        const std::function<bool()> capture_failure = [&] {
-            dump_reserved = fullCrcDumpFits(bytes) && reserveCrcDump();
-            return dump_reserved;
-        };
-        CrcBlockCopyResult result;
-        try {
-            if (to_device) {
-                result = workspace->loadAndValidate(host, bytes, host_pinned, capture_failure);
-                if (result.success)
-                    workspace->scatter(bytes, tiles);
-            } else {
-                if (inherited)
-                    result = workspace->loadAndValidate(inherited, bytes, source_pinned, capture_failure);
-                if (!inherited || result.success) {
-                    workspace->gather(bytes, tiles, inherited != nullptr);
-                    result = workspace->store(host, bytes, host_pinned, capture_failure);
-                }
-            }
-        } catch (const std::invalid_argument& error) {
-            return reject(error.what());
-        }
-        if (!result.success) {
-            const auto error = result.failure_stage == CrcBlockCopyResult::FailureStage::SOURCE_CRC ?
-                                   Response::CRC_MISMATCH :
-                                   Response::CRC_COMPUTE_FAILED;
-            RTP_LLM_LOG_ERROR("memory cache CRC rejected: item=%d mem_block=%d kind=%s rank=%ld "
-                              "expected=%u actual=%u gpu_status=%u",
-                              item_index,
-                              item.mem_block(),
-                              cacheBlockKindName(kind),
-                              parallelism_config_.world_rank,
-                              result.expected_crc,
-                              result.actual_crc,
-                              result.gpu_crc_status);
-            if (dump_reserved) {
-                try {
-                    dumpCrcFailure(request, item_index, kind, std::move(result), host, bytes, inherited);
-                } catch (const std::exception& error) {
-                    RTP_LLM_LOG_ERROR(
-                        "CRC dump failed: rank=%ld error=%s", parallelism_config_.world_rank, error.what());
-                }
-            } else {
-                RTP_LLM_LOG_WARNING("CRC dump dropped: rank=%ld bytes=%zu reason=%s",
-                                    parallelism_config_.world_rank,
-                                    bytes,
-                                    fullCrcDumpFits(bytes) ? "rate_limit" : "full_block_exceeds_quota");
-            }
+        const auto error = to_device ?
+                               copyH2DItemWithCrc(request, item_index, kind, payload_bytes, tiles, *workspace_slot) :
+                               copyD2HItemWithCrc(request, item_index, kind, payload_bytes, tiles, *workspace_slot);
+        if (error != Response::NONE)
             return error;
-        }
-        if (!to_device && item.backing_type() == MemoryOperationRequestPB::DISK
-            && !disk_pool->write(item.disk_slot(), host, disk_pool->slotStrideBytes())) {
-            return reject("CRC disk write failed", Response::IO_FAILED);
-        }
     }
     return Response::NONE;
 }
 
-void KVCacheMemoryConnector::dumpCrcFailure(const MemoryOperationRequestPB& request,
-                                            int                             item_index,
-                                            CacheBlockKind                  kind,
-                                            CrcBlockCopyResult              result,
-                                            const void*                     host,
-                                            size_t                          bytes,
-                                            const void*                     inherited) {
+MemoryOperationResponsePB::ErrorCode
+KVCacheMemoryConnector::copyH2DItemWithCrc(const MemoryOperationRequestPB&      request,
+                                           int                                  item_index,
+                                           CacheBlockKind                       kind,
+                                           size_t                               payload_bytes,
+                                           const std::vector<CrcBlockCopyTile>& tiles,
+                                           CrcCopySlot&                         workspace_slot) {
+    using Response = MemoryOperationResponsePB;
+
+    const auto&  item             = request.copy_items(item_index);
+    const size_t storage_bytes    = CrcBlockCopy::storageBytes(payload_bytes);
+    auto&        workspace        = *workspace_slot.copy;
+    const void*  source_data      = nullptr;
+    bool         source_is_pinned = false;
+
+    if (item.backing_type() == MemoryOperationRequestPB::MEMORY) {
+        auto memory_pool = memoryPoolFor(kind);
+        if (!memory_pool)
+            return rejectCrcCopy(request, "CRC H2D memory pool missing", Response::COPY_FAILED);
+        const auto buffers = memory_pool->convertIndexToBuffer(0, item.mem_block());
+        if (buffers.size() != 1 || !buffers[0].addr || buffers[0].is_cuda || buffers[0].size_bytes < storage_bytes)
+            return rejectCrcCopy(request, "invalid CRC H2D memory buffer", Response::COPY_FAILED);
+        source_data      = buffers[0].addr;
+        source_is_pinned = memory_pool->where() == MemoryType::MEMORY_CPU_PINNED;
+    } else {
+        auto disk_pool = diskPoolFor(kind);
+        if (!disk_pool || disk_pool->blockSizeBytes() != storage_bytes || !disk_pool->validSlot(item.disk_slot()))
+            return rejectCrcCopy(request, "invalid CRC H2D disk slot or block size", Response::COPY_FAILED);
+        void* buffer = workspace_slot.disk_read_buffer.data_ptr();
+        if (!disk_pool->read(item.disk_slot(), buffer, disk_pool->slotStrideBytes()))
+            return rejectCrcCopy(request, "CRC disk read failed", Response::IO_FAILED);
+        source_data      = buffer;
+        source_is_pinned = true;
+    }
+
+    bool                        dump_reserved   = false;
+    const std::function<bool()> capture_failure = [&] {
+        dump_reserved = fullCrcDumpFits(payload_bytes) && reserveCrcDump();
+        return dump_reserved;
+    };
+    auto result = workspace.loadAndValidate(source_data, payload_bytes, source_is_pinned, capture_failure);
+    if (result.success)
+        result = workspace.scatter(payload_bytes, tiles);
+    if (!result.success)
+        return handleCrcFailure(
+            request, item_index, kind, std::move(result), source_data, payload_bytes, nullptr, dump_reserved, tiles);
+    return Response::NONE;
+}
+
+MemoryOperationResponsePB::ErrorCode
+KVCacheMemoryConnector::copyD2HItemWithCrc(const MemoryOperationRequestPB&      request,
+                                           int                                  item_index,
+                                           CacheBlockKind                       kind,
+                                           size_t                               payload_bytes,
+                                           const std::vector<CrcBlockCopyTile>& tiles,
+                                           CrcCopySlot&                         workspace_slot) {
+    using Response = MemoryOperationResponsePB;
+
+    const auto&  item                  = request.copy_items(item_index);
+    const size_t storage_bytes         = CrcBlockCopy::storageBytes(payload_bytes);
+    auto&        workspace             = *workspace_slot.copy;
+    auto         memory_pool           = memoryPoolFor(kind);
+    auto         disk_pool             = diskPoolFor(kind);
+    void*        destination_data      = nullptr;
+    bool         destination_is_pinned = false;
+
+    if (item.backing_type() == MemoryOperationRequestPB::MEMORY) {
+        if (!memory_pool)
+            return rejectCrcCopy(request, "CRC D2H memory pool missing", Response::COPY_FAILED);
+        const auto buffers = memory_pool->convertIndexToBuffer(0, item.mem_block());
+        if (buffers.size() != 1 || !buffers[0].addr || buffers[0].is_cuda || buffers[0].size_bytes < storage_bytes)
+            return rejectCrcCopy(request, "invalid CRC D2H memory buffer", Response::COPY_FAILED);
+        destination_data      = buffers[0].addr;
+        destination_is_pinned = memory_pool->where() == MemoryType::MEMORY_CPU_PINNED;
+    } else {
+        if (!disk_pool || disk_pool->blockSizeBytes() != storage_bytes || !disk_pool->validSlot(item.disk_slot()))
+            return rejectCrcCopy(request, "invalid CRC D2H disk slot or block size", Response::COPY_FAILED);
+        destination_data      = workspace_slot.disk_write_buffer.data_ptr();
+        destination_is_pinned = true;
+        std::memset(destination_data, 0, disk_pool->slotStrideBytes());
+    }
+
+    const bool has_merge_source =
+        item.src_mem_block_presence_case() == MemoryOperationRequestPB::CopyItem::kSrcMemBlock
+        || item.src_disk_slot_presence_case() == MemoryOperationRequestPB::CopyItem::kSrcDiskSlot;
+    const void* merge_source_data      = nullptr;
+    bool        merge_source_is_pinned = false;
+    if (has_merge_source) {
+        if (item.src_backing_type() == MemoryOperationRequestPB::MEMORY) {
+            if (!memory_pool)
+                return rejectCrcCopy(request, "CRC merge source memory pool missing", Response::COPY_FAILED);
+            const auto buffers = memory_pool->convertIndexToBuffer(0, item.src_mem_block());
+            if (buffers.size() != 1 || !buffers[0].addr || buffers[0].is_cuda || buffers[0].size_bytes < storage_bytes)
+                return rejectCrcCopy(request, "invalid CRC merge source memory buffer", Response::COPY_FAILED);
+            merge_source_data      = buffers[0].addr;
+            merge_source_is_pinned = memory_pool->where() == MemoryType::MEMORY_CPU_PINNED;
+        } else {
+            if (!disk_pool || disk_pool->blockSizeBytes() != storage_bytes
+                || !disk_pool->validSlot(item.src_disk_slot()))
+                return rejectCrcCopy(
+                    request, "invalid CRC merge source disk slot or block size", Response::COPY_FAILED);
+            void* buffer = workspace_slot.disk_read_buffer.data_ptr();
+            if (!disk_pool->read(item.src_disk_slot(), buffer, disk_pool->slotStrideBytes()))
+                return rejectCrcCopy(request, "CRC merge source disk read failed", Response::IO_FAILED);
+            merge_source_data      = buffer;
+            merge_source_is_pinned = true;
+        }
+    }
+
+    bool                        dump_reserved   = false;
+    const std::function<bool()> capture_failure = [&] {
+        dump_reserved = fullCrcDumpFits(payload_bytes) && reserveCrcDump();
+        return dump_reserved;
+    };
+    // Validate inherited bytes before overlaying this request's GPU regions.
+    if (has_merge_source) {
+        auto result =
+            workspace.loadAndValidate(merge_source_data, payload_bytes, merge_source_is_pinned, capture_failure);
+        if (!result.success)
+            return handleCrcFailure(request,
+                                    item_index,
+                                    kind,
+                                    std::move(result),
+                                    destination_data,
+                                    payload_bytes,
+                                    merge_source_data,
+                                    dump_reserved,
+                                    tiles);
+    }
+    auto result = workspace.gather(payload_bytes, tiles, has_merge_source);
+    if (result.success)
+        result = workspace.store(destination_data, payload_bytes, destination_is_pinned, capture_failure);
+    if (!result.success)
+        return handleCrcFailure(request,
+                                item_index,
+                                kind,
+                                std::move(result),
+                                destination_data,
+                                payload_bytes,
+                                merge_source_data,
+                                dump_reserved,
+                                tiles);
+    if (item.backing_type() == MemoryOperationRequestPB::DISK
+        && !disk_pool->write(item.disk_slot(), destination_data, disk_pool->slotStrideBytes()))
+        return rejectCrcCopy(request, "CRC disk write failed", Response::IO_FAILED);
+    return Response::NONE;
+}
+
+MemoryOperationResponsePB::ErrorCode KVCacheMemoryConnector::rejectCrcCopy(
+    const MemoryOperationRequestPB& request, const char* message, MemoryOperationResponsePB::ErrorCode error) const {
+    RTP_LLM_LOG_ERROR("memory cache copy rejected: rank=%ld direction=%d items=%d error=%s detail=%s",
+                      parallelism_config_.world_rank,
+                      static_cast<int>(request.copy_direction()),
+                      request.copy_items_size(),
+                      MemoryOperationResponsePB::ErrorCode_Name(error).c_str(),
+                      message);
+    return error;
+}
+
+MemoryOperationResponsePB::ErrorCode
+KVCacheMemoryConnector::handleCrcFailure(const MemoryOperationRequestPB&      request,
+                                         int                                  item_index,
+                                         CacheBlockKind                       kind,
+                                         CrcBlockCopyResult                   result,
+                                         const void*                          block_data,
+                                         size_t                               payload_bytes,
+                                         const void*                          merge_source_data,
+                                         bool                                 dump_reserved,
+                                         const std::vector<CrcBlockCopyTile>& tiles) {
+    using Response = MemoryOperationResponsePB;
+    if (result.failure_stage == CrcBlockCopyResult::FailureStage::INPUT)
+        return rejectCrcCopy(request, result.error_message.c_str(), Response::INVALID_REQUEST);
+    const auto error = result.failure_stage == CrcBlockCopyResult::FailureStage::SOURCE_CRC ?
+                           Response::CRC_MISMATCH :
+                           Response::CRC_COMPUTE_FAILED;
+    RTP_LLM_LOG_ERROR("memory cache CRC rejected: item=%d mem_block=%d kind=%s rank=%ld "
+                      "expected=%u actual=%u gpu_status=%u",
+                      item_index,
+                      request.copy_items(item_index).mem_block(),
+                      cacheBlockKindName(kind),
+                      parallelism_config_.world_rank,
+                      result.expected_crc,
+                      result.actual_crc,
+                      result.gpu_crc_status);
+    if (dump_reserved) {
+        try {
+            // Finish the dump before the workspace slot and its disk buffers can be reused.
+            dumpCrcFailure(
+                request, item_index, kind, std::move(result), block_data, payload_bytes, merge_source_data, tiles);
+        } catch (const std::exception& exception) {
+            RTP_LLM_LOG_ERROR("CRC dump failed: rank=%ld error=%s", parallelism_config_.world_rank, exception.what());
+        }
+    } else {
+        RTP_LLM_LOG_WARNING("CRC dump dropped: rank=%ld bytes=%zu reason=%s",
+                            parallelism_config_.world_rank,
+                            payload_bytes,
+                            fullCrcDumpFits(payload_bytes) ? "rate_limit" : "full_block_exceeds_quota");
+    }
+    return error;
+}
+
+void KVCacheMemoryConnector::dumpCrcFailure(const MemoryOperationRequestPB&      request,
+                                            int                                  item_index,
+                                            CacheBlockKind                       kind,
+                                            CrcBlockCopyResult                   result,
+                                            const void*                          host,
+                                            size_t                               bytes,
+                                            const void*                          inherited,
+                                            const std::vector<CrcBlockCopyTile>& tiles) {
     // Serialize rotation and file writes for this rank's dump directory.
     std::lock_guard<std::mutex> lock(crc_dump_mutex_);
     if (!fullCrcDumpFits(bytes))
@@ -299,7 +412,7 @@ void KVCacheMemoryConnector::dumpCrcFailure(const MemoryOperationRequestPB& requ
     const void*  source    = inherited ? inherited : host;
     const size_t captured  = CrcBlockCopy::storageBytes(bytes);
     // Finish the dump before replying to rank 0, while CopyPlan owns the source
-    // reference and copyCacheWithCrc owns any disk buffers and the GPU workspace.
+    // reference and copyCacheWithCrc holds the workspace slot, including its disk buffers.
     // References prevent recycling, not unsynchronized mutation. Only the owned
     // snapshot is stable; it is not an atomic observation of the live block.
     std::vector<uint8_t> cpu(captured), cpu_output;
@@ -368,7 +481,22 @@ void KVCacheMemoryConnector::dumpCrcFailure(const MemoryOperationRequestPB& requ
         {"disk_slot", std::to_string(inherited ? item.src_disk_slot() : item.disk_slot())},
         {"staging_captured", result.staging_snapshot.empty() ? "false" : "true"},
         {"copy_item", item.DebugString()},
+        {"copy_request", request.DebugString()},
+        {"tile_count", std::to_string(tiles.size())},
+        {"tile_copy_stage",
+         to_device             ? "scatter_not_started" :
+         result.output_written ? "gather_completed" :
+                                 "gather_not_started"},
     };
+    // Preserve the generated copy plan; a rejected load has not executed its scatter/gather yet.
+    for (size_t index = 0; index < tiles.size(); ++index) {
+        const auto& tile          = tiles[index];
+        const auto  key           = "tile_" + std::to_string(index) + "_";
+        manifest[key + "address"] = std::to_string(reinterpret_cast<uintptr_t>(tile.address));
+        manifest[key + "offset"]  = std::to_string(tile.offset);
+        manifest[key + "bytes"]   = std::to_string(tile.bytes);
+        manifest[key + "is_cuda"] = tile.is_cuda ? "true" : "false";
+    }
     describeFooter(manifest, "cpu_footer_", footer);
     if (result.checked_footer) {
         describeFooter(manifest, "checked_footer_", *result.checked_footer);

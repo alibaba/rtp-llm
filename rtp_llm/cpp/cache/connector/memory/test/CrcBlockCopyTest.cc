@@ -50,11 +50,15 @@ CrcBlockCopyResult copyBlock(CrcBlockCopy&                        workspace,
         if (!result.success)
             return result;
         if (to_device) {
-            workspace.scatter(bytes, tiles);
+            auto scatter_result = workspace.scatter(bytes, tiles);
+            if (!scatter_result.success)
+                return scatter_result;
             return result;
         }
     }
-    workspace.gather(bytes, tiles, inherited != nullptr);
+    auto result = workspace.gather(bytes, tiles, inherited != nullptr);
+    if (!result.success)
+        return result;
     return workspace.store(host, bytes, host_is_pinned, capture_failure);
 }
 
@@ -152,7 +156,7 @@ TEST(CrcBlockCopyTest, PayloadAndStoredCrcTamperingRejectBeforeScatter) {
     for (bool corrupt_footer : {false, true}) {
         SCOPED_TRACE(corrupt_footer);
         Fixture f({19, 4096, 31});
-        f.copy->gather(f.bytes, f.tiles);
+        ASSERT_TRUE(f.copy->gather(f.bytes, f.tiles).success);
         ASSERT_TRUE(f.copy->store(f.host, f.bytes).success);
         const auto stored_crc = f.footer().crc32c;
         ASSERT_EQ(cudaMemset(f.device, 0xa5, f.bytes), cudaSuccess);
@@ -174,8 +178,9 @@ TEST(CrcBlockCopyTest, PayloadAndStoredCrcTamperingRejectBeforeScatter) {
         if (corrupt_footer) {
             EXPECT_EQ(rejected.actual_crc, stored_crc);
         }
-        if (rejected.success)
-            f.copy->scatter(f.bytes, f.tiles);
+        if (rejected.success) {
+            ASSERT_TRUE(f.copy->scatter(f.bytes, f.tiles).success);
+        }
         EXPECT_EQ(untouched, f.deviceBytes());
         ASSERT_EQ(rejected.staging_snapshot.size(), f.bytes);
         EXPECT_EQ(std::memcmp(rejected.staging_snapshot.data(), f.host, f.bytes), 0);
@@ -193,7 +198,7 @@ TEST(CrcBlockCopyTest, WholeBlockAlignmentKeepsPaddingOutsideCrc) {
         const auto original = f.deviceBytes();
         ASSERT_EQ(CrcBlockCopy::footerOffset(f.bytes), 12u);
         ASSERT_EQ(CrcBlockCopy::storageBytes(f.bytes), 16u);
-        f.copy->gather(f.bytes, f.tiles);
+        ASSERT_TRUE(f.copy->gather(f.bytes, f.tiles).success);
         ASSERT_TRUE(f.copy->store(f.host, f.bytes, pinned).success);
         const auto stored_crc = f.footer().crc32c;
         std::fill(f.host + f.bytes, f.host + CrcBlockCopy::footerOffset(f.bytes), 0x6c);
@@ -204,9 +209,9 @@ TEST(CrcBlockCopyTest, WholeBlockAlignmentKeepsPaddingOutsideCrc) {
         ASSERT_TRUE(loaded.success);
         EXPECT_EQ(loaded.actual_crc, stored_crc);
         EXPECT_EQ(untouched, f.deviceBytes());  // load returns the CPU decision without scattering.
-        f.copy->scatter(f.bytes, f.tiles);
+        ASSERT_TRUE(f.copy->scatter(f.bytes, f.tiles).success);
         EXPECT_EQ(original, f.deviceBytes());
-        f.copy->gather(f.bytes, f.tiles);
+        ASSERT_TRUE(f.copy->gather(f.bytes, f.tiles).success);
         ASSERT_TRUE(f.copy->store(f.host, f.bytes, pinned).success);
         EXPECT_EQ(f.footer().crc32c, stored_crc);
         for (size_t i = f.bytes; i < CrcBlockCopy::footerOffset(f.bytes); ++i)
@@ -215,7 +220,7 @@ TEST(CrcBlockCopyTest, WholeBlockAlignmentKeepsPaddingOutsideCrc) {
 
     // The next page is inaccessible: neither transfer may read or write past the aligned block.
     Fixture f({9});
-    f.copy->gather(f.bytes, f.tiles);
+    ASSERT_TRUE(f.copy->gather(f.bytes, f.tiles).success);
     ASSERT_TRUE(f.copy->store(f.host, f.bytes).success);
     const auto original  = f.deviceBytes();
     const long page_size = ::sysconf(_SC_PAGESIZE);
@@ -232,21 +237,21 @@ TEST(CrcBlockCopyTest, WholeBlockAlignmentKeepsPaddingOutsideCrc) {
     ASSERT_EQ(cudaMemset(f.device, 0xa5, f.bytes), cudaSuccess);
     ASSERT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess);
     ASSERT_TRUE(f.copy->loadAndValidate(transferred, f.bytes, false).success);
-    f.copy->scatter(f.bytes, f.tiles);
+    ASSERT_TRUE(f.copy->scatter(f.bytes, f.tiles).success);
     EXPECT_EQ(original, f.deviceBytes());
-    f.copy->gather(f.bytes, f.tiles);
+    ASSERT_TRUE(f.copy->gather(f.bytes, f.tiles).success);
     ASSERT_TRUE(f.copy->store(transferred, f.bytes, false).success);
     EXPECT_EQ(std::memcmp(transferred, f.host, CrcBlockCopy::storageBytes(f.bytes)), 0);
 }
 
-TEST(CrcBlockCopyTest, InvalidPayloadAndTileBoundsThrowBeforeCopy) {
+TEST(CrcBlockCopyTest, InvalidPayloadAndTileBoundsRejectBeforeCopy) {
     if (!CrcBlockCopy::supported()) {
         GTEST_SKIP() << "CRC backend unavailable";
     }
     EXPECT_THROW(CrcBlockCopy(std::vector<size_t>{}, 1), std::invalid_argument);
     EXPECT_THROW(CrcBlockCopy(std::vector<size_t>{12}, 0), std::invalid_argument);
     Fixture f({4, 4, 4});
-    f.copy->gather(f.bytes, f.tiles);
+    ASSERT_TRUE(f.copy->gather(f.bytes, f.tiles).success);
     ASSERT_TRUE(f.copy->store(f.host, f.bytes).success);
     ASSERT_TRUE(f.copy->loadAndValidate(f.host, f.bytes).success);
     const auto                                       original = f.deviceBytes();
@@ -263,24 +268,30 @@ TEST(CrcBlockCopyTest, InvalidPayloadAndTileBoundsThrowBeforeCopy) {
         {{f.device + 2, 2, 1}, {f.device, 0, 1}},
         {{f.device, 0, 1}, {f.device + 1, 1, 1}, {f.device + 2, 2, 1}, {f.device + 3, 3, 1}},
     };
+    const auto expect_invalid_input = [](const CrcBlockCopyResult& result) {
+        EXPECT_FALSE(result.success);
+        EXPECT_EQ(result.failure_stage, CrcBlockCopyResult::FailureStage::INPUT);
+        EXPECT_FALSE(result.error_message.empty());
+        EXPECT_FALSE(result.gpu_crc_observed);
+    };
     for (size_t i = 0; i < invalid_tiles.size(); ++i) {
         SCOPED_TRACE(i);
-        EXPECT_THROW(f.copy->gather(f.bytes, invalid_tiles[i]), std::invalid_argument);
-        EXPECT_THROW(f.copy->scatter(f.bytes, invalid_tiles[i]), std::invalid_argument);
+        expect_invalid_input(f.copy->gather(f.bytes, invalid_tiles[i]));
+        expect_invalid_input(f.copy->scatter(f.bytes, invalid_tiles[i]));
     }
     for (size_t bytes : {size_t(0), f.bytes + 1}) {
         SCOPED_TRACE(bytes);
-        EXPECT_THROW(f.copy->gather(bytes, f.tiles), std::invalid_argument);
-        EXPECT_THROW(f.copy->store(f.host, bytes), std::invalid_argument);
-        EXPECT_THROW(f.copy->loadAndValidate(f.host, bytes), std::invalid_argument);
-        EXPECT_THROW(f.copy->scatter(bytes, f.tiles), std::invalid_argument);
+        expect_invalid_input(f.copy->gather(bytes, f.tiles));
+        expect_invalid_input(f.copy->store(f.host, bytes));
+        expect_invalid_input(f.copy->loadAndValidate(f.host, bytes));
+        expect_invalid_input(f.copy->scatter(bytes, f.tiles));
     }
-    EXPECT_THROW(f.copy->store(nullptr, f.bytes), std::invalid_argument);
-    EXPECT_THROW(f.copy->loadAndValidate(nullptr, f.bytes), std::invalid_argument);
+    expect_invalid_input(f.copy->store(nullptr, f.bytes));
+    expect_invalid_input(f.copy->loadAndValidate(nullptr, f.bytes));
     EXPECT_EQ(original, f.deviceBytes());
     EXPECT_EQ(std::memcmp(f.host, host_before.data(), host_before.size()), 0);
     ASSERT_TRUE(f.copy->loadAndValidate(f.host, f.bytes).success);
-    f.copy->scatter(f.bytes, f.tiles);
+    ASSERT_TRUE(f.copy->scatter(f.bytes, f.tiles).success);
     EXPECT_EQ(original, f.deviceBytes());
 }
 
@@ -289,7 +300,7 @@ TEST(CrcBlockCopyTest, DumpAllocationFailurePreservesRejection) {
         GTEST_SKIP() << "CRC backend unavailable";
     }
     Fixture f({4096});
-    f.copy->gather(f.bytes, f.tiles);
+    ASSERT_TRUE(f.copy->gather(f.bytes, f.tiles).success);
     ASSERT_TRUE(f.copy->store(f.host, f.bytes).success);
     f.host[0] ^= 1;
     CrcBlockCopyResult result;

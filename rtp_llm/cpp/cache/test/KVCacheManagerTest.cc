@@ -269,19 +269,20 @@ static void assertDsv4RegionPatternEq(const std::shared_ptr<KVCacheManager>& man
     }
 }
 
-TEST(KVCacheManagerInitTest, Dsv4RejectsUnsupportedLinearStepBeforeAllocating) {
+TEST_F(KVCacheManagerTest, Dsv4DeviceOnlyLinearStepRemainsConfigurable) {
     auto config = makeCompactDSV4ManagerConfig();
     ASSERT_TRUE(config.use_opaque_kv_cache_store);
     for (auto role : {RoleType::PREFILL, RoleType::DECODE, RoleType::PDFUSION}) {
         PDSepConfig pd_sep_config;
         pd_sep_config.role_type = role;
-        for (int step : {-1, 0, 2, 4}) {
+        for (int step : {1, 4, 32}) {
             SCOPED_TRACE(::testing::Message() << "role=" << static_cast<int>(role) << " step=" << step);
             config.linear_step = step;
             KVCacheManager manager(config, /*warmup=*/true, nullptr, {}, {}, {}, {}, pd_sep_config);
-            EXPECT_THROW(manager.init(), std::runtime_error);
-            EXPECT_EQ(manager.allocator_, nullptr);
-            EXPECT_EQ(manager.coordinator_, nullptr);
+            ASSERT_TRUE(manager.init());
+            EXPECT_NE(manager.allocator_, nullptr);
+            EXPECT_NE(manager.coordinator_, nullptr);
+            EXPECT_FALSE(manager.hasActiveConnectors());
             EXPECT_EQ(manager.cacheConfig().linear_step, step);
         }
     }

@@ -191,23 +191,38 @@ struct CrcBlockCopy::Impl {
         }
     }
 
-    void checkPayload(size_t bytes) const {
-        if (bytes == 0 || options.find(bytes) == options.end())
-            throw std::invalid_argument("CRC workspace payload size mismatch");
+    CrcBlockCopyResult checkPayload(size_t bytes) const {
+        CrcBlockCopyResult result;
+        result.success = bytes != 0 && options.find(bytes) != options.end();
+        if (!result.success)
+            result.error_message = "CRC workspace payload size mismatch";
+        return result;
     }
 
-    size_t prepareTiles(size_t bytes, const std::vector<CrcBlockCopyTile>& tiles, bool& complete, bool& has_device) {
-        checkPayload(bytes);
-        if (tiles.empty() || tiles.size() > tile_capacity)
-            throw std::invalid_argument("CRC workspace tile count mismatch");
+    CrcBlockCopyResult prepareTiles(size_t                               bytes,
+                                    const std::vector<CrcBlockCopyTile>& tiles,
+                                    bool&                                complete,
+                                    bool&                                has_device,
+                                    size_t&                              host_count) {
+        auto result = checkPayload(bytes);
+        if (!result.success)
+            return result;
+        if (tiles.empty() || tiles.size() > tile_capacity) {
+            result.success       = false;
+            result.error_message = "CRC workspace tile count mismatch";
+            return result;
+        }
         size_t covered  = 0;
         bool   has_host = false;
         complete        = true;
         has_device      = false;
         for (const auto& tile : tiles) {
             if (!tile.address || tile.bytes == 0 || tile.offset < covered || tile.offset > bytes
-                || tile.bytes > bytes - tile.offset)
-                throw std::invalid_argument("invalid CRC copy tile");
+                || tile.bytes > bytes - tile.offset) {
+                result.success       = false;
+                result.error_message = "invalid CRC copy tile";
+                return result;
+            }
             complete   = complete && tile.offset == covered;
             covered    = tile.offset + tile.bytes;
             has_host   = has_host || !tile.is_cuda;
@@ -215,13 +230,13 @@ struct CrcBlockCopy::Impl {
         }
         complete = complete && covered == bytes;
         checkCuda(cudaSetDevice(device));
-        const size_t host_count = has_host ? planHostCopies(tiles) : 0;
+        host_count = has_host ? planHostCopies(tiles) : 0;
         if (has_device) {
             std::copy(tiles.begin(), tiles.end(), host_tiles);
             checkCuda(cudaMemcpyAsync(
                 device_tiles, host_tiles, tiles.size() * sizeof(CrcBlockCopyTile), cudaMemcpyHostToDevice, stream));
         }
-        return host_count;
+        return result;
     }
 
     void calculateCrc(size_t bytes, uint32_t* output) {
@@ -327,10 +342,14 @@ CrcBlockCopy::CrcBlockCopy(const std::vector<size_t>& sizes, size_t max_tiles): 
 
 CrcBlockCopy::~CrcBlockCopy() = default;
 
-void CrcBlockCopy::gather(size_t bytes, const std::vector<CrcBlockCopyTile>& tiles, bool preserve_payload) {
-    auto&        work     = *impl_;
-    bool         complete = false, has_device = false;
-    const size_t host_count = work.prepareTiles(bytes, tiles, complete, has_device);
+CrcBlockCopyResult
+CrcBlockCopy::gather(size_t bytes, const std::vector<CrcBlockCopyTile>& tiles, bool preserve_payload) {
+    auto&  work     = *impl_;
+    bool   complete = false, has_device = false;
+    size_t host_count = 0;
+    auto   result     = work.prepareTiles(bytes, tiles, complete, has_device, host_count);
+    if (!result.success)
+        return result;
     if (!preserve_payload) {
         const size_t clear_begin = complete ? bytes : 0;
         if (clear_begin < footerOffset(bytes))
@@ -341,14 +360,20 @@ void CrcBlockCopy::gather(size_t bytes, const std::vector<CrcBlockCopyTile>& til
         copyTiles<<<tiles.size(), 256, 0, work.stream>>>(work.device_tiles, tiles.size(), work.staging, false);
         checkCuda(cudaGetLastError());
     }
+    return result;
 }
 
-CrcBlockCopyResult CrcBlockCopy::store(
-    void* host, size_t bytes, bool host_is_pinned, const std::function<bool()>& capture_failure) {
-    auto& work = *impl_;
-    work.checkPayload(bytes);
-    if (!host)
-        throw std::invalid_argument("null CRC output block");
+CrcBlockCopyResult
+CrcBlockCopy::store(void* host, size_t bytes, bool host_is_pinned, const std::function<bool()>& capture_failure) {
+    auto& work   = *impl_;
+    auto  result = work.checkPayload(bytes);
+    if (!result.success)
+        return result;
+    if (!host) {
+        result.success       = false;
+        result.error_message = "null CRC output block";
+        return result;
+    }
     checkCuda(cudaSetDevice(work.device));
     auto* footer = reinterpret_cast<CrcBlockFooter*>(work.staging + footerOffset(bytes));
     work.calculateCrc(bytes, &footer->crc32c);
@@ -365,7 +390,6 @@ CrcBlockCopyResult CrcBlockCopy::store(
     checkCuda(cudaStreamSynchronize(work.stream));
     if (!host_is_pinned)
         std::memcpy(host, work.host_staging, storageBytes(bytes));
-    CrcBlockCopyResult result;
     result.success        = work.host_result->status == nvcompSuccess;
     result.output_written = true;
     result.gpu_crc_status = static_cast<uint32_t>(work.host_result->status);
@@ -378,10 +402,15 @@ CrcBlockCopyResult CrcBlockCopy::loadAndValidate(const void*                  ho
                                                  size_t                       bytes,
                                                  bool                         host_is_pinned,
                                                  const std::function<bool()>& capture_failure) {
-    auto& work = *impl_;
-    work.checkPayload(bytes);
-    if (!host)
-        throw std::invalid_argument("null CRC input block");
+    auto& work   = *impl_;
+    auto  result = work.checkPayload(bytes);
+    if (!result.success)
+        return result;
+    if (!host) {
+        result.success       = false;
+        result.error_message = "null CRC input block";
+        return result;
+    }
     checkCuda(cudaSetDevice(work.device));
     const void* input = host;
     if (!host_is_pinned) {
@@ -396,7 +425,6 @@ CrcBlockCopyResult CrcBlockCopy::loadAndValidate(const void*                  ho
     checkCuda(cudaMemcpyAsync(
         work.host_result, work.device_result, sizeof(DeviceResult), cudaMemcpyDeviceToHost, work.stream));
     checkCuda(cudaStreamSynchronize(work.stream));
-    CrcBlockCopyResult result;
     result.success          = work.host_result->valid != 0;
     result.expected_crc     = work.host_result->footer.crc32c;
     result.actual_crc       = work.host_result->crc;
@@ -409,16 +437,20 @@ CrcBlockCopyResult CrcBlockCopy::loadAndValidate(const void*                  ho
     return result;
 }
 
-void CrcBlockCopy::scatter(size_t bytes, const std::vector<CrcBlockCopyTile>& tiles) {
-    auto&        work     = *impl_;
-    bool         complete = false, has_device = false;
-    const size_t host_count = work.prepareTiles(bytes, tiles, complete, has_device);
+CrcBlockCopyResult CrcBlockCopy::scatter(size_t bytes, const std::vector<CrcBlockCopyTile>& tiles) {
+    auto&  work     = *impl_;
+    bool   complete = false, has_device = false;
+    size_t host_count = 0;
+    auto   result     = work.prepareTiles(bytes, tiles, complete, has_device, host_count);
+    if (!result.success)
+        return result;
     if (has_device) {
         copyTiles<<<tiles.size(), 256, 0, work.stream>>>(work.device_tiles, tiles.size(), work.staging, true);
         checkCuda(cudaGetLastError());
     }
     work.copyHostTiles(host_count, true);
     checkCuda(cudaStreamSynchronize(work.stream));
+    return result;
 }
 
 }  // namespace rtp_llm

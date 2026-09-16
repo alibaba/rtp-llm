@@ -122,7 +122,7 @@ CacheConfig createDsv4TypedConnectorConfig() {
     config.block_num                    = 16;
     config.seq_size_per_block           = 128;
     config.kernel_seq_size_per_block    = 128;
-    config.linear_step                  = 4;
+    config.linear_step                  = 1;
     config.use_independent_block_pools  = true;
     config.use_typed_cache_regions      = true;
     config.use_opaque_kv_cache_store    = true;
@@ -663,6 +663,36 @@ private:
     }
 };
 
+TEST(KVCacheMemoryConnectorInitTest, Dsv4RejectsUnsupportedLinearStepBeforeAllocating) {
+    auto config = createDsv4TypedConnectorConfig();
+    for (auto role : {RoleType::PREFILL, RoleType::DECODE, RoleType::PDFUSION}) {
+        ParallelismConfig parallel;
+        parallel.role_type = role;
+        for (bool disk : {false, true}) {
+            KVCacheConfig kv_config;
+            kv_config.enable_memory_cache      = true;
+            kv_config.enable_memory_cache_disk = disk;
+            for (int step : {-1, 0, 2, 4, 32}) {
+                SCOPED_TRACE(::testing::Message()
+                             << "role=" << static_cast<int>(role) << " disk=" << disk << " step=" << step);
+                config.linear_step = step;
+                KVCacheMemoryConnector connector(config, kv_config, parallel, nullptr, {});
+                try {
+                    connector.init();
+                    FAIL() << "unsupported linear_step accepted";
+                } catch (const std::runtime_error& error) {
+                    EXPECT_NE(std::string(error.what()).find("memory/disk cache requires linear_step=1"),
+                              std::string::npos);
+                }
+                EXPECT_EQ(connector.block_pool_, nullptr);
+                EXPECT_EQ(connector.compressed_pool_, nullptr);
+                EXPECT_EQ(connector.complete_disk_pool_, nullptr);
+                EXPECT_EQ(connector.broadcast_manager_, nullptr);
+            }
+        }
+    }
+}
+
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_NoWorkerAddrs) {
     // 构造空的 worker 地址，BroadcastManager::init() 会失败；业务代码使用 RTP_LLM_CHECK，
     // 因此这里期望抛出 std::runtime_error。
@@ -781,6 +811,11 @@ TEST_F(KVCacheMemoryConnectorTest, CrcSelection_Dsv4AutomaticallyInitializesMemo
         EXPECT_EQ(conn->crc_copy_slots_.size(), KVCacheMemoryConnector::kCopyThreadCount);
         EXPECT_EQ(conn->usePrefixTreeMemoryCache(), prefix);
         for (bool complete : {true, false}) {
+            if (!prefix && !complete) {
+                EXPECT_EQ(conn->incomplete_pool_, nullptr);
+                EXPECT_EQ(conn->incomplete_disk_pool_, nullptr);
+                continue;
+            }
             const auto   kind    = prefix ? (complete ? CacheBlockKind::COMPRESSED_KV : CacheBlockKind::STATE_SWA_KV) :
                                             (complete ? CacheBlockKind::COMPLETE : CacheBlockKind::INCOMPLETE);
             const size_t payload = prefix ? conn->prefixKindBlockSize(kind, conn->layerRegionSlots()) :
