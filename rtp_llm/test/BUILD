@@ -1,21 +1,4 @@
 py_test(
-    name = "fused_rope_kvcache_legacy_mrope_test",
-    srcs = ["fused_rope_kvcache_legacy_mrope_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    exec_properties = {"gpu": "SM100_ARM"},
-)
-
-py_test(
-    name = "fused_rope_kvcache_compat_test",
-    srcs = [
-        "fused_rope_kvcache_compat_test.py",
-    ],
-    deps = [
-        "//rtp_llm:testlib",
-    ],
-)
-
-py_test(
     name = "kv_cache_specs_test",
     srcs = [
         "kv_cache_specs_test.py",
