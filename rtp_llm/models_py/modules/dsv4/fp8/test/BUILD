@@ -65,6 +65,8 @@ _CONTRACT_TESTS = [
     "test_decode_topk_length",
     "test_indexer_forward_with_pending_nested",
     "test_prefill_mixed_layer_cache_store",
+    "test_mtp_swa_ring_page",
+    "test_pool_slot_mapping_contract",
     "test_fp8_sparse_attn_decode_op",
     "test_compressor_cp_merged_gather",
 ]
@@ -160,3 +162,63 @@ test_suite(
         ":test_fused_decode_meta_comprehensive",
     ],
 )
+
+
+alias(
+    name = "test_rich_contract",
+    actual = ":test_rich_contract_source_only",
+)
+
+py_test(
+    name = "test_rich_contract_source_only",
+    srcs = ["test_rich_contract.py"],
+    data = ["//rtp_llm/models_py:dsv4_rich_attention_contract_sources"],
+    main = "test_rich_contract.py",
+)
+
+py_test(
+    name = "test_indexer_topk_routing_ppu_cpu",
+    srcs = ["test_indexer_topk_v3_routing.py"],
+    data = ["//rtp_llm/models_py:dsv4_indexer_source"],
+    deps = ["@pip_ppu_torch//torch"],
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "DSV4_INDEXER_TOPK_SOURCE_ONLY": "1",
+    },
+    main = "test_indexer_topk_v3_routing.py",
+    tags = ["ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "test_model1_layout_contract",
+    srcs = ["test_model1_layout_contract.py"],
+    data = ["testdata/dsv4_model1_golden_v1.json"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    target_compatible_with = DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_fused_pool_slot_mapping_contract",
+    srcs = ["test_fused_pool_slot_mapping_contract.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+    target_compatible_with = DSV4_CUDA13_ONLY,
+)
+
+
+[
+    py_test(
+        name = name + "_ppu",
+        srcs = [name + ".py"],
+        main = name + ".py",
+        deps = _DSV4_FP8_TEST_DEPS,
+        tags = ["ppu"],
+        target_compatible_with = select({"@//:using_ppu": [], "//conditions:default": ["@platforms//:incompatible"]}),
+    )
+    for name in ["test_compressor_cp_merged_gather", "test_compressor_prepare_metadata_varlen"]
+]

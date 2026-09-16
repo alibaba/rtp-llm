@@ -129,7 +129,11 @@ class Expert(nn.Module):
                 up.contiguous(),
                 clamp_limit=self.swiglu_limit,
             )
-        if weights is not None:
-            x = weights * x
         with record_function_range("moe.expert.w2"):
-            return self._apply_layer(self.w2, x.to(dtype))
+            down = self._apply_layer(self.w2, x.to(dtype))
+        if weights is not None:
+            # V4 routed weights belong to the expert output.  Applying them to
+            # the SwiGLU activation before W2 changes the activation seen by
+            # W4A4 quantization and is therefore not numerically equivalent.
+            return weights * down.float()
+        return down

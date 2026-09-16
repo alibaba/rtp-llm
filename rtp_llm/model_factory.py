@@ -14,6 +14,7 @@ from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig, build_model_config
+from rtp_llm.config.module_dispatch_config import ModuleDispatchConfig
 from rtp_llm.config.py_config_modules import (
     EmbeddingConfig,
     GenerateEnvConfig,
@@ -93,6 +94,14 @@ class ModelFactory:
         model_config.model_name = model_name
         engine_config.runtime_config.model_name = model_name
 
+        module_kwargs = {}
+        if engine_config.module_dispatch.mode != "legacy":
+            if engine_config.module_build_context is None:
+                raise RuntimeError(
+                    "Module dispatch requires worker preflight before model loading"
+                )
+            module_kwargs["module_build_context"] = engine_config.module_build_context
+
         model = model_cls.from_config(
             model_config=model_config,
             parallelism_config=engine_config.parallelism_config,
@@ -108,6 +117,7 @@ class ModelFactory:
             force_cpu_load_weights=engine_config.load_config.force_cpu_load_weights,
             loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
             moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
+            **module_kwargs,
         )
         return model
 
@@ -182,6 +192,16 @@ class ModelFactory:
             if alias_names and target_model.weight is None:
                 raise RuntimeError("speculative shared-weight owner is not loaded")
 
+            module_kwargs = {}
+            if engine_config.module_dispatch.mode != "legacy":
+                if engine_config.propose_module_build_context is None:
+                    raise RuntimeError(
+                        "Draft module dispatch requires worker preflight before model loading"
+                    )
+                module_kwargs["module_build_context"] = (
+                    engine_config.propose_module_build_context
+                )
+
             propose_hw_kernel_config = engine_config.hw_kernel_config
             if (
                 sp_type == SpeculativeType.DSPARK
@@ -216,6 +236,7 @@ class ModelFactory:
                 moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
                 weight_alias_owner=target_model if alias_names else None,
                 weight_alias_names=alias_names,
+                **module_kwargs,
             )
             aliased_local_bytes = 0
             for name in alias_names:
@@ -334,6 +355,7 @@ class ModelFactory:
         render_config: Optional[Any] = None,
         eplb_config: Optional[Any] = None,
         vit_config: Optional[VitConfig] = None,
+        module_dispatch_config: Optional[ModuleDispatchConfig] = None,
     ) -> ModelConfig:
         """Create ModelConfig from configuration objects.
 
@@ -369,7 +391,17 @@ class ModelFactory:
             quantization_config=quantization_config,
             vit_config=vit_config,
         )
-        model_cls._apply_kv_cache_config(model_config, kv_cache_config)
+        if module_dispatch_config is not None and module_dispatch_config.mode == "auto":
+            adapter = model_cls.get_module_adapter()
+            if adapter is None:
+                raise ValueError(
+                    f"Model {model_args.model_type!r} has no module adapter"
+                )
+            adapter.configure_model(
+                model_cls, model_config, kv_cache_config, module_dispatch_config
+            )
+        else:
+            model_cls._apply_kv_cache_config(model_config, kv_cache_config)
         model_cls._post_build_model_config(model_config)
 
         # Set model metadata fields
@@ -488,6 +520,7 @@ class ModelFactory:
         )
         # Ensure max_seq_len matches main model
         propose_model_config.max_seq_len = model_config.max_seq_len
+        propose_model_config.gen_num_per_cycle = model_config.gen_num_per_cycle
         propose_model_config.quantization = sp_config.quantization
 
         logging.info(
@@ -503,9 +536,22 @@ class ModelFactory:
             profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
             embedding_config=None,  # Propose model doesn't need embedding_config
         )
-        propose_model_cls._apply_kv_cache_config(
-            propose_model_config, engine_config.kv_cache_config
-        )
+        if engine_config.module_dispatch.mode == "legacy":
+            propose_model_cls._apply_kv_cache_config(
+                propose_model_config, engine_config.kv_cache_config
+            )
+        else:
+            adapter = propose_model_cls.get_module_adapter()
+            if adapter is None:
+                raise ValueError(
+                    f"Draft model {propose_model_config.model_type!r} has no module adapter"
+                )
+            adapter.configure_model(
+                propose_model_cls,
+                propose_model_config,
+                engine_config.kv_cache_config,
+                engine_config.module_dispatch,
+            )
         propose_model_cls._post_build_model_config(propose_model_config)
 
         if sp_config.type == SpeculativeType.DSPARK:

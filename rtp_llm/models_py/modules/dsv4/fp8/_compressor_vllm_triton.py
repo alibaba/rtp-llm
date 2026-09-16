@@ -53,12 +53,12 @@ hide the per-``head_dim`` constexpr table.
 
 from __future__ import annotations
 
+import os
 from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
     invalid_kv_access_validation_enabled,
     trap_invalid_kv_access_enabled,
@@ -324,7 +324,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
 
     rms_w = tl.load(rms_norm_weight_ptr + block, mask=mask, other=0.0)
     variance = tl.sum(compressed_kv * compressed_kv, axis=0) / HEAD_SIZE
-    rrms = tl.rsqrt(variance + rms_norm_eps)
+    rrms = 1.0 / tl.sqrt(variance + rms_norm_eps)
     normed = compressed_kv * rrms * rms_w
 
     kv_slot_idx = tl.load(kv_slot_mapping_ptr + token_idx)
@@ -600,7 +600,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
 
     rms_w = tl.load(rms_norm_weight_ptr + block, mask=mask, other=0.0)
     variance = tl.sum(compressed_kv * compressed_kv, axis=0) / HEAD_SIZE
-    rrms = tl.rsqrt(variance + rms_norm_eps)
+    rrms = 1.0 / tl.sqrt(variance + rms_norm_eps)
     normed = compressed_kv * rrms * rms_w
 
     kv_slot_idx = tl.load(kv_slot_mapping_ptr + token_idx)
@@ -842,7 +842,7 @@ def run_fused_compress_kv_write(
     seq_start_per_req: Optional[torch.Tensor] = None,  # [B] int64
     cu_seq_per_req: Optional[torch.Tensor] = None,  # [B+1] int64
     state_tokens_per_block: int,
-) -> None:
+) -> Optional[torch.Tensor]:
     """Boundary-token compress→norm→rope→fp8 quant→KV-pool store.
 
     For each boundary token (``(position+1) % compress_ratio == 0``), the
@@ -858,7 +858,7 @@ def run_fused_compress_kv_write(
     """
     N = int(slot_mapping.shape[0])
     if N == 0:
-        return
+        return None
     cfg = _FUSED_CONSTEXPR_BY_HEAD_DIM.get(head_dim)
     if cfg is None:
         raise ValueError(f"Unsupported head_dim {head_dim} for fused compressor write")

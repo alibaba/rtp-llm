@@ -48,6 +48,10 @@ load("@rtp_deps//:git.bzl", "git_deps")
 
 git_deps()
 
+load("//3rdparty/ppu:repositories.bzl", "ppu_sdk_repositories")
+
+ppu_sdk_repositories()
+
 load("//3rdparty/xgrammar:repositories.bzl", "xgrammar_deps")
 
 xgrammar_deps()

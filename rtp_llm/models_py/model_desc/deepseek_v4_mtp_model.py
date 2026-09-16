@@ -47,6 +47,8 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         fmha_config=None,
         py_hw_kernel_config=None,
         device_resource_config=None,
+        module_build_context=None,
+        platform_provider=None,
     ):
         super().__init__(
             model_config,
@@ -57,8 +59,11 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
+            module_build_context=module_build_context,
+            platform_provider=platform_provider,
         )
-        Dsv4SharedRuntimeBufferStore.enable_mtp_hidden()
+        if module_build_context is None:
+            Dsv4SharedRuntimeBufferStore.enable_mtp_hidden()
         # MTP overrides for V4Args. ``DeepSeekV4Mtp._create_config``
         # already sets ``num_layers=1`` and ``layer_compress_ratios=[0]``
         # on the ModelConfig; we additionally drop the hash-router count
@@ -122,8 +127,16 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         eps = float(self._v4_args.norm_eps)
         self.enorm = RMSNorm(gw[W.v4_mtp_enorm], eps)
         self.hnorm = RMSNorm(gw[W.v4_mtp_hnorm], eps)
-        self.e_proj = _v4_fp8_linear(gw[W.v4_mtp_e_proj_w], gw[W.v4_mtp_e_proj_s])
-        self.h_proj = _v4_fp8_linear(gw[W.v4_mtp_h_proj_w], gw[W.v4_mtp_h_proj_s])
+        self.e_proj = _v4_fp8_linear(
+            gw[W.v4_mtp_e_proj_w],
+            gw[W.v4_mtp_e_proj_s],
+            platform_provider=self._platform_provider,
+        )
+        self.h_proj = _v4_fp8_linear(
+            gw[W.v4_mtp_h_proj_w],
+            gw[W.v4_mtp_h_proj_s],
+            platform_provider=self._platform_provider,
+        )
 
     # ------------------------------------------------------------------
     # Hidden-state preparation overrides — splice the e/h fusion stage in
@@ -181,13 +194,13 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
             end = min(start + chunk_tokens, T)
             input_ids_chunk = input_ids[start:end]
             positions_chunk = positions[start:end]
-            embed_chunk = self.v4.embed(input_ids_chunk)
+            embed_chunk = self.v4._embed(input_ids_chunk)
             embed_chunk = torch.where(
                 positions_chunk.reshape(-1, 1) == 0,
                 torch.zeros_like(embed_chunk),
                 embed_chunk,
             )
-            e_norm = self.enorm(embed_chunk)
+            e_norm = self.enorm(embed_chunk.contiguous())
             pre_hc_chunk = pre_hc[start:end]
             chunk_len = int(pre_hc_chunk.size(0))
             h_norm = self.hnorm(pre_hc_chunk.reshape(-1, dim)).view(chunk_len, hc, dim)
@@ -215,7 +228,9 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
                 input_ids.reshape(-1), pre_hc, positions[:T], chunk_tokens
             )
 
-        inputs_embeds = self.v4.embed(input_ids)  # [T, dim]
+        # The shared embedding can be sharded along hidden size under TP.
+        # Use the target's gather path before the full-width fusion norms.
+        inputs_embeds = self.v4._embed(input_ids)  # [T, dim]
         # Suppress position-0 embedding (matches main-model "step 0 of a
         # brand-new request" behavior the official MTP impl relies on).
         inputs_embeds = torch.where(
@@ -223,7 +238,7 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
             torch.zeros_like(inputs_embeds),
             inputs_embeds,
         )
-        e_norm = self.enorm(inputs_embeds)  # [T, dim]
+        e_norm = self.enorm(inputs_embeds.contiguous())  # [T, dim]
         h_norm = self.hnorm(pre_hc.reshape(-1, dim)).view(T, hc, dim)
         return self._apply_proj(self.h_proj, h_norm) + self._apply_proj(
             self.e_proj, e_norm

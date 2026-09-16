@@ -1,0 +1,24 @@
+Third-party source provenance (Apache-2.0)
+
+These kernels are adapted from the frozen PPU SGLang / DeepGEMM development
+snapshot used for the 890P comparison, not an assumed public upstream release.
+Original files were copied read-only from the task-owned SGLang source snapshot.
+
+SGLang: https://github.com/sgl-project/sglang
+jit_kernel/csrc/deepseek_v4/topk_prefill.cuh
+SHA256 ea73e15889831f5c122cd41edef64bfe14f2db3e56590679c4350a27a71aa156
+Changes: TVM host adapter removed; device selection and page mapping unchanged.
+RTP uses the same FP32 variant for its FP32 score tensor. SGLang's FP4 indexer
+uses the separate BF16 variant, which this adapter must not silently emulate
+by narrowing RTP's scores. Header is launched through the existing PPU JIT ABI.
+
+PPU DeepGEMM: https://github.com/deepseek-ai/DeepGEMM
+include/deep_gemm/fused_permute.cuh
+SHA256 2d96652e811bde3010b0fc13ca0e93782ef2827a60df0d4b5eb18da18fa2720f
+Device header copied unchanged.
+jit_kernels/einsum.py (fused_permute wrapper and launch geometry)
+SHA256 cad434e19e94d273341acfe9bcedc66f00d96af52d8ea5095b49499365ee879d
+Changes: task-owned include path, distinct cache name, PPU/dtype validation.
+
+All kernels run on the caller's current stream. See repository Apache-2.0
+LICENSE and the task's sg-align-reference-v1/v2.json for frozen source receipts.

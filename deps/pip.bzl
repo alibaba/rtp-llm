@@ -1,4 +1,5 @@
 load("@rules_python//python:pip.bzl", "pip_parse")
+load(":ppu_requirements.bzl", "ppu_requirements")
 
 PIP_EXTRA_ARGS = [
     "--cache-dir=~/.cache/pip",
@@ -7,6 +8,8 @@ PIP_EXTRA_ARGS = [
 ]
 
 def pip_deps():
+    ppu_requirements(name = "ppu_requirements")
+
     pip_parse(
         name = "pip_cpu_torch",
         requirements_lock = "@rtp_deps//:requirements_lock_torch_cpu.txt",
@@ -25,7 +28,7 @@ def pip_deps():
 
     pip_parse(
         name = "pip_ppu_torch",
-        requirements_lock = "@rtp_deps//:requirements_lock_torch_gpu_cuda12.txt",
+        requirements_lock = "@rtp_deps//:requirements_lock_torch_ppu.txt",
         python_interpreter = "/opt/conda310/bin/python3",
         extra_pip_args = PIP_EXTRA_ARGS,
         timeout = 3600,

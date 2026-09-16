@@ -10,7 +10,6 @@ from typing import Callable, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
-
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.chunk_env import chunked_moe_enabled
@@ -19,34 +18,29 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     CommitOnlyAttentionFP8,
 )
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
-from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
-    ChunkedFp8Fp4MoeLayer,
+from rtp_llm.models_py.modules.dsv4.moe_builder import build_baseline_moe
+from rtp_llm.models_py.modules.dsv4.platform_provider import (
+    DefaultDsv4PlatformProvider,
+    Dsv4AttentionLayout,
+    Dsv4PlatformProvider,
+    Dsv4ProviderCapability,
+    resolve_dsv4_attention_layout,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.weight_adapter import (
-    adapt_split_moe_weights,
-)
+from rtp_llm.models_py.modules.dsv4.tp_norm import tp_rms_norm
 from rtp_llm.utils.model_weight import W
 
 _PrefillFastHCImpls = Tuple[Callable, Callable, Callable, Callable]
 
-_MOE_WEIGHT_NAMES = {
-    "routed_gate": W.v4_routed_w1_w,
-    "routed_gate_scale": W.v4_routed_w1_s,
-    "routed_up": W.v4_routed_w3_w,
-    "routed_up_scale": W.v4_routed_w3_s,
-    "routed_down": W.v4_routed_w2_w,
-    "routed_down_scale": W.v4_routed_w2_s,
-    "router": W.v4_router_w,
-    "router_bias": W.v4_router_bias,
-    "router_tid2eid": W.v4_router_tid2eid,
-    "shared_gate_up": W.v4_shared_w13_w,
-    "shared_gate_up_scale": W.v4_shared_w13_s,
-    "shared_down": W.v4_shared_w2_w,
-    "shared_down_scale": W.v4_shared_w2_s,
-}
 
-
-def _prefill_fast_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
+def _prefill_fast_norm(
+    norm: nn.Module,
+    x: torch.Tensor,
+    *,
+    tp_size: int = 1,
+    tp_rank: int = 0,
+) -> torch.Tensor:
+    if tp_size > 1:
+        return tp_rms_norm(norm, x, tp_size=tp_size, tp_rank=tp_rank)
     if (
         isinstance(norm, RMSNorm)
         and norm.__class__.__module__ == "rtp_llm.models_py.modules.base.cuda.norm"
@@ -103,15 +97,25 @@ class Block(nn.Module):
         is_decode_role: bool = False,
         moe_strategy: str = "auto",
         fp8_kv_cache: bool = False,
+        platform_provider: Optional[Dsv4PlatformProvider] = None,
+        module_build_context=None,
         commit_only: bool = False,
         n_physical_experts: Optional[int] = None,
     ):
         super().__init__()
         self.layer_id = layer_id
+        self.tp_size = int(tp_size)
+        self.tp_rank = int(tp_rank)
         self.fp8_kv_cache = fp8_kv_cache
+        self._platform_provider = platform_provider
+        self._attention_layout = resolve_dsv4_attention_layout(
+            platform_provider
+            if platform_provider is not None
+            else DefaultDsv4PlatformProvider()
+        )
 
         attn_cls = CommitOnlyAttentionFP8 if commit_only else AttentionFP8
-        self.attn = attn_cls(
+        attn_kwargs = dict(
             layer_id=layer_id,
             dim=dim,
             n_heads=n_heads,
@@ -138,6 +142,21 @@ class Block(nn.Module):
             tp_size=tp_size,
             tp_rank=tp_rank,
         )
+        if module_build_context is not None:
+            from rtp_llm.models.dsv4.specs import request_for
+
+            self.attn = module_build_context.factory.build(
+                request_for("attention", module_build_context.selection, layer_id),
+                platform_provider=platform_provider,
+                **attn_kwargs,
+            )
+        else:
+            self.attn = (
+                platform_provider.build_attention(attn_cls, **attn_kwargs)
+                if platform_provider is not None
+                and Dsv4ProviderCapability.ATTENTION in platform_provider.capabilities
+                else attn_cls(**attn_kwargs)
+            )
         self._cp_sync_after_attn_done = False
         if commit_only:
             self.ffn = None
@@ -150,10 +169,7 @@ class Block(nn.Module):
 
         if layer_weights is None:
             raise ValueError("Block requires per-layer weights")
-        adapt_split_moe_weights(
-            layer_weights, moe_inter_dim, n_shared_experts, _MOE_WEIGHT_NAMES
-        )
-        self.ffn = ChunkedFp8Fp4MoeLayer(
+        moe_kwargs = dict(
             layer_id=layer_id,
             dim=dim,
             moe_inter_dim=moe_inter_dim,
@@ -166,6 +182,7 @@ class Block(nn.Module):
             n_hash_layers=n_hash_layers,
             vocab_size=vocab_size,
             layer_weights=layer_weights,
+            tp_size=tp_size,
             ep_size=ep_size,
             ep_rank=ep_rank,
             world_size=world_size,
@@ -174,12 +191,28 @@ class Block(nn.Module):
             is_decode_role=is_decode_role,
             strategy=moe_strategy,
             n_physical_experts=n_physical_experts,
-            chunking_enabled=chunked_moe_enabled(),
-            model_type="deepseek_v4",
-            moe_w1_layout="gate_up",
             observer_factory=self._moe_observer,
             record_function_scope=_profiler.moe_record_function_scope,
         )
+        if module_build_context is not None:
+            self.ffn = module_build_context.factory.build(
+                request_for("moe", module_build_context.selection, layer_id),
+                platform_provider=platform_provider,
+                tp_rank=tp_rank,
+                **moe_kwargs,
+            )
+        else:
+            self.ffn = (
+                platform_provider.build_moe(
+                    build_baseline_moe, tp_rank=tp_rank, **moe_kwargs
+                )
+                if platform_provider is not None
+                and Dsv4ProviderCapability.MOE in platform_provider.capabilities
+                else build_baseline_moe(
+                    platform_provider=platform_provider, tp_rank=tp_rank, **moe_kwargs
+                )
+            )
+
         # Framework loader already casts norms to bf16 (compute_dtype) and
         # hc_* tensors to fp32 (descriptor data_type); pass refs straight
         # into ``RMSNorm`` at construction time.  Norms here see 2D inputs
@@ -199,6 +232,9 @@ class Block(nn.Module):
             hc_eps=hc_eps,
             layer_id=layer_id,
             name="attn",
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            platform_provider=self._platform_provider,
         )
         self.ffn_hc = build_hc_unit(
             layer_weights[W.v4_hc_ffn_fn],
@@ -211,6 +247,9 @@ class Block(nn.Module):
             hc_eps=hc_eps,
             layer_id=layer_id,
             name="ffn",
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            platform_provider=self._platform_provider,
         )
         self._prefill_fast_hc_impls_cached = self._resolve_prefill_fast_hc_impls()
 
@@ -301,7 +340,7 @@ class Block(nn.Module):
         return impls
 
     def prefill_fast_callable(self):
-        if not isinstance(self.attn, AttentionFP8):
+        if getattr(self.attn, "prefill_fast_protocol", None) != "dsv4.fp8-attention.v1":
             return None
         # ``prefill.forward_layers`` caches this private callable only after the
         # layer has passed the production FP8 support matrix. Keep the public
@@ -312,7 +351,12 @@ class Block(nn.Module):
         attn_hc_pre, _, _, _ = self._prefill_fast_hc_impls()
         residual = x
         x_pre, post, comb = attn_hc_pre(x)
-        x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
+        x_pre = _prefill_fast_norm(
+            self.attn_norm,
+            x_pre,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+        )
         return residual, x_pre, post, comb
 
     def prefill_fast_attn_body(
@@ -346,7 +390,12 @@ class Block(nn.Module):
         _, ffn_hc_pre, _, _ = self._prefill_fast_hc_impls()
         residual = x
         x_pre, post, comb = ffn_hc_pre(x)
-        x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
+        x_pre = _prefill_fast_norm(
+            self.ffn_norm,
+            x_pre,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+        )
         return residual, x_pre, post, comb
 
     def prefill_fast_ffn_body(
@@ -386,20 +435,23 @@ class Block(nn.Module):
         _dbg_layer = _rt.should_record_layer(self.layer_id)
         # Attention path
         residual = x
-        x_pre, post, comb = self.attn_hc.pre(
+        x_pre, post, comb = self.attn_hc.pre_norm(
             x,
+            self.attn_norm,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
             dbg_tag=f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None,
         )
-        # Framework RMSNorm wants 2D — collapse [B, q_len, dim] → [B*q_len, dim]
-        # and view back; attention.forward_decode wants the original 3D shape.
-        bsz, q_len, dim_ = x_pre.shape
-        x_pre = self.attn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
         if attn_fn is not None:
             attn_out = attn_fn(x_pre)
         else:
-            attn_out = self.attn.forward_decode(x_pre, attn_metadata, kv_cache=kv_cache)
+            attn_out = self.attn.forward_decode(
+                x_pre,
+                attn_metadata,
+                kv_cache=kv_cache,
+            )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_out", attn_out)
         x = self.attn_hc.post(attn_out, residual, post, comb)
@@ -408,12 +460,13 @@ class Block(nn.Module):
 
         # FFN path — MoE has no per-step state, reuse existing forward
         residual = x
-        x_pre, post, comb = self.ffn_hc.pre(
+        x_pre, post, comb = self.ffn_hc.pre_norm(
             x,
+            self.ffn_norm,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
             dbg_tag=f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None,
         )
-        bsz, q_len, dim_ = x_pre.shape
-        x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
         ffn_out = self.ffn(x_pre, input_ids, is_decode_forward=True)
@@ -486,7 +539,7 @@ class Block(nn.Module):
 
         residual = x
         x_pre, post, comb = attn_hc_pre(x)
-        if self.attn.can_fuse_prefill_attn_norm_input_quant(
+        if self.tp_size == 1 and self.attn.can_fuse_prefill_attn_norm_input_quant(
             x_pre, self.attn_norm.weight.data
         ):
             x_pre, shared_input_quant = self.attn.prefill_fused_attn_norm_input_quant(
@@ -502,7 +555,12 @@ class Block(nn.Module):
                 block_tables_by_type=block_tables_by_type,
             )
         else:
-            x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
+            x_pre = _prefill_fast_norm(
+                self.attn_norm,
+                x_pre,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+            )
             attn_out = self.attn(
                 x_pre,
                 positions,
@@ -514,7 +572,12 @@ class Block(nn.Module):
 
         residual = x
         x_pre, post, comb = ffn_hc_pre(x)
-        x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
+        x_pre = _prefill_fast_norm(
+            self.ffn_norm,
+            x_pre,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+        )
         ffn_out = self.ffn(x_pre, input_ids)
         return ffn_hc_post(ffn_out, residual, post, comb)
 
@@ -561,11 +624,13 @@ class Block(nn.Module):
             dbg_pos_name = f"pos{dbg_pos}"
         # Attention path
         residual = x
-        x_pre, post, comb = self.attn_hc.pre(
+        x_pre, post, comb = self.attn_hc.pre_norm(
             x,
+            self.attn_norm,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
             dbg_tag=f"L{self.layer_id:02d}_attn_hc_pre" if _dbg_layer else None,
         )  # [T, dim], [T, hc, 1], [T, hc, hc]
-        x_pre = self.attn_norm(x_pre)  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_in", x_pre)
             if dbg_pos_mask is not None:
@@ -579,7 +644,7 @@ class Block(nn.Module):
         # no padding / per-request scalars. The runtime kv-cache dtype flag can
         # be false while this branch still constructs AttentionFP8, so dispatch
         # on the module type instead of only the cache config.
-        if isinstance(self.attn, AttentionFP8):
+        if self._attention_layout == Dsv4AttentionLayout.FLAT:
             attn_out = self.attn(
                 x_pre,  # [T, dim]
                 positions,  # [T] int64 absolute positions
@@ -659,11 +724,13 @@ class Block(nn.Module):
 
         # FFN path
         residual = x
-        x_pre, post, comb = self.ffn_hc.pre(
+        x_pre, post, comb = self.ffn_hc.pre_norm(
             x,
+            self.ffn_norm,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
             dbg_tag=f"L{self.layer_id:02d}_ffn_hc_pre" if _dbg_layer else None,
         )  # [T, dim], ...
-        x_pre = self.ffn_norm(x_pre)  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_in", x_pre)
             if dbg_pos_mask is not None:

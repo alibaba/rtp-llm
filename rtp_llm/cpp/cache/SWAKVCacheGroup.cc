@@ -219,10 +219,16 @@ void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
     const bool effective_reuse_enabled = effectiveReuseCacheForAllocation(enable_reuse_cache);
     const int  active_tail_blocks      = activeTailBlockCount();
     const int  block_size              = static_cast<int>(block_indices.size());
+    // reserve_step is a token count, while this loop indexes physical blocks.
+    // Keep enough extra blocks for the speculative window even when it crosses
+    // a block boundary, without retaining one whole block per draft token.
+    const int reserve_tokens   = std::max(reserve_step, 0);
+    const int tokens_per_block = seqSizePerBlock();
+    const int reserve_blocks   = reserve_tokens / tokens_per_block + (reserve_tokens % tokens_per_block != 0);
 
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
-    for (int i = block_size - active_tail_blocks - 1 - reserve_step; i >= 0; i--) {
+    for (int i = block_size - active_tail_blocks - 1 - reserve_blocks; i >= 0; i--) {
         if (isNullBlockIdx(block_indices[i])) {
             continue;
         }
