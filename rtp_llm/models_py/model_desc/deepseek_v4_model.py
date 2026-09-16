@@ -756,9 +756,25 @@ class DeepSeekV4Model(GptModelBase):
             from rtp_llm.models_py.distributed.ep_stage_context import (
                 EpStageContext,
                 validate_pp_ep_shape,
+                validate_pp_ep_target,
+            )
+            from rtp_llm.models_py.modules.dsv4.moe.strategies.nccl_ep_mxfp8 import (
+                _is_sm120_runtime,
+            )
+            from rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4 import (
+                _has_fp8_fp4_grouped_kernel,
             )
 
             validate_pp_ep_shape(_pcfg)
+            is_sm120 = _is_sm120_runtime()
+            has_grouped_fp4 = is_sm120 and _has_fp8_fp4_grouped_kernel()
+            validate_pp_ep_target(
+                _pcfg,
+                hw_kernel_config=self.py_hw_kernel_config,
+                is_sm120=is_sm120,
+                has_grouped_fp4=has_grouped_fp4,
+                is_speculative=self._is_speculative,
+            )
             self._v4_args.moe_stage_context = EpStageContext.build(
                 _pcfg, backend=_pp_ep_backend
             )

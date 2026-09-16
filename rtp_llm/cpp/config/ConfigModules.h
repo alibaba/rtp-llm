@@ -130,7 +130,8 @@ struct ParallelismConfig {
     }
     bool pp_ep_experimental_ok() const {
         return pp_ep_enabled && pp_ep_backend_valid(pp_ep_backend) && pp_size == 2 && dp_size == 1
-               && tp_size == 4 && ep_size == 4 && world_size == 8;
+               && tp_size == 4 && ep_size == 4 && world_size == 8
+               && role_type == RoleType::PDFUSION;
     }
 
     std::string to_string() const;

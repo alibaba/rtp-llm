@@ -142,6 +142,66 @@ def validate_pp_ep_shape(parallelism_config) -> RankLayout:
     return layout
 
 
+def validate_pp_ep_target(
+    parallelism_config,
+    *,
+    hw_kernel_config,
+    is_sm120: bool = False,
+    has_grouped_fp4: bool = False,
+    is_speculative: bool = False,
+) -> None:
+    """Widen the PP+EP validation beyond pure shape.
+
+    Called at model construction (where model-specific context is available).
+    The shape and CP cache conditions are separately enforced by
+    :func:`validate_pp_ep_shape` — this function targets the remaining
+    target-configuration invariants that must hold before allocating weights or
+    building collectives.
+
+    ``is_sm120`` and ``has_grouped_fp4`` defend against silent backend fallback:
+    the ``PP_EP_BACKEND=fork_nccl_mxfp8`` advertised for SM120 must not silently
+    degrade to ``LocalLoopStrategy``.
+
+    ``is_speculative`` refuses MTP/DSpark variants under the first PP+EP route.
+
+    ``role_type`` (from ``parallelism_config``) must be PDFUSION — PREFILL or
+    DECODE engage PD-publish paths not yet validated for PP+EP.  Ditto for
+    graph flags read from the resolved ``hw_kernel_config``: graphs under
+    chunked MoE and PP are not validated.
+    """
+    from rtp_llm.ops import RoleType
+
+    problems: List[str] = []
+
+    if not is_sm120:
+        problems.append("SM120 runtime required (is_sm120=False)")
+    if not has_grouped_fp4:
+        problems.append(
+            "SM120 GroupedFP4 backend unavailable; fork_nccl_mxfp8 would "
+            "silently fall back to LocalLoopStrategy"
+        )
+    if is_speculative:
+        problems.append("speculative (MTP/DSpark) models not supported under PP+EP")
+
+    role_type = getattr(parallelism_config, "role_type", None)
+    if role_type is not None and role_type != RoleType.PDFUSION:
+        problems.append("PP+EP requires role PDFUSION; got %r" % role_type)
+
+    # Graph flags belong to the resolved HWKernelConfig, not ParallelismConfig.
+    # Missing configuration must not silently look like disabled graphs.
+    for graph_flag in ("enable_cuda_graph", "enable_native_cuda_graph"):
+        enabled = getattr(hw_kernel_config, graph_flag, None)
+        if enabled is None:
+            problems.append("missing resolved HWKernelConfig.%s" % graph_flag)
+        elif enabled:
+            problems.append("CUDA graphs not supported under PP+EP (%s=True)" % graph_flag)
+
+    if problems:
+        raise ValueError(
+            "DSV4_PP_EP_ENABLE=1 target validation failed: " + "; ".join(problems)
+        )
+
+
 @dataclasses.dataclass(frozen=True)
 class EpStageContext:
     """Immutable, validated view of one pipeline stage's CP/EP roster.

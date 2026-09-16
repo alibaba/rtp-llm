@@ -66,7 +66,7 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
     """Stage-local NCCL all_to_all_single with MXFP8 activation and return."""
 
     name = BACKEND_NAME
-    requires_synchronized_chunk_schedule = False
+    requires_synchronized_chunk_schedule = True
     # The MoE layer adds the shared expert; this strategy returns routed only.
     routed_includes_shared = False
 
@@ -90,6 +90,7 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
             self._local: RoutedExpertsStrategy = GroupedFP4Strategy(local_cfg)
         else:
             self._local = LocalLoopStrategy(local_cfg)
+        self._chunk_extent_tensor: Optional[torch.Tensor] = None
         self._count_tensor: Optional[torch.Tensor] = None
         self._count_gather: Optional[torch.Tensor] = None
 
@@ -139,13 +140,13 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
 
     def synchronized_chunk_extent(self, local_tokens: int, device: torch.device) -> int:
         group, _, _ = self._stage()
-        if self._count_tensor is None or self._count_tensor.device != device:
-            self._count_tensor = torch.empty((1,), dtype=torch.int64, device=device)
-        self._count_tensor.fill_(int(local_tokens))
+        if self._chunk_extent_tensor is None or self._chunk_extent_tensor.device != device:
+            self._chunk_extent_tensor = torch.empty((1,), dtype=torch.int64, device=device)
+        self._chunk_extent_tensor.fill_(int(local_tokens))
         torch.distributed.all_reduce(
-            self._count_tensor, op=torch.distributed.ReduceOp.MAX, group=group
+            self._chunk_extent_tensor, op=torch.distributed.ReduceOp.MAX, group=group
         )
-        return int(self._count_tensor.item())
+        return int(self._chunk_extent_tensor.item())
 
     # ---- forward ----------------------------------------------------------
 
