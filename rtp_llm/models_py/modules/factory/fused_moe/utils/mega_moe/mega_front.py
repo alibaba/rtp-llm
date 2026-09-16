@@ -26,6 +26,7 @@ _HC_WIDTH = 24
 _ABI_VERSION = 1
 _KERNEL_CONTRACT_VERSION = 3
 _TOPK = 6
+_LEARNED_ROUTER_LOGITS_MAX_M = 9
 _TRUE_ENV_VALUES = frozenset(("1", "true", "yes", "on"))
 _FALSE_ENV_VALUES = frozenset(("0", "false", "no", "off", ""))
 _AUTO_ENV_VALUES = frozenset(("auto",))
@@ -48,19 +49,13 @@ def moe_front_mode() -> str:
     )
 
 
-def moe_front_requested() -> bool:
-    """Return whether the standalone MoE-front path is explicitly enabled."""
-
-    return moe_front_mode() != "off"
-
-
 def _parse_arches(value: object) -> set[str]:
     return {item.strip() for item in str(value).split(",") if item.strip()}
 
 
 def _validate_extension_contract(
     ops, dim: int, experts: int, topk: int, device: torch.device
-) -> dict:
+) -> Mapping:
     geometry = ops.geometry_moe_front(dim)
     if not isinstance(geometry, Mapping):
         raise RuntimeError(
@@ -128,7 +123,7 @@ def _validate_extension_contract(
                 "DSV4 MoE-front build has invalid dependency identity "
                 f"{field}={dependency_commit!r}"
             )
-    return dict(geometry)
+    return geometry
 
 
 class MegaMoeFrontAdapter:
@@ -166,8 +161,7 @@ class MegaMoeFrontAdapter:
 
         if int(self.gate.topk) != _TOPK:
             raise RuntimeError(
-                "DSV4 MoE front requires TopK-"
-                f"{_TOPK}, got {int(self.gate.topk)}"
+                f"DSV4 MoE front requires TopK-{_TOPK}, got {int(self.gate.topk)}"
             )
 
         device = self.gate.weight.device
@@ -267,6 +261,19 @@ class MegaMoeFrontAdapter:
             self._graph_plans[key] = plan
         return plan, False
 
+    def close(self) -> None:
+        """Release graph-capture plans owned by this model layer.
+
+        Captured plans cannot be evicted independently while their CUDA graph
+        may still replay, so their lifetime is tied to the adapter instead of
+        an address-count LRU. Model teardown and all-or-none attach rollback
+        call this method explicitly.
+        """
+
+        plans, self._graph_plans = self._graph_plans, {}
+        for plan in plans.values():
+            plan.close()
+
     def supports(
         self, residual: torch.Tensor, input_ids: torch.Tensor | None = None
     ) -> bool:
@@ -281,11 +288,11 @@ class MegaMoeFrontAdapter:
         ):
             return False
         tokens = reduce(mul, (int(value) for value in residual.shape[:-2]), 1)
-        if input_ids is not None and (
-            not input_ids.is_contiguous() or int(input_ids.numel()) != tokens
-        ):
+        if input_ids is None:
             return False
-        if self.gate.hash and (input_ids is None or input_ids.dtype != torch.int32):
+        if not input_ids.is_contiguous() or int(input_ids.numel()) != tokens:
+            return False
+        if self.gate.hash and input_ids.dtype != torch.int32:
             return False
         mega_capacity = int(self.executor._mega_buf.num_max_tokens_per_rank)
         return 0 <= tokens <= min(MEGA_MOE_FRONT_CAPACITY, mega_capacity)
@@ -386,7 +393,14 @@ class MegaMoeFrontAdapter:
                         self.post,
                         self.comb,
                         block_m,
-                        router_logits=self.router_logits if tokens <= 9 else None,
+                        # The extension's learned M<=9 specialization performs
+                        # top-k from a materialized logits buffer. Larger M
+                        # performs router projection and selection in K3.
+                        router_logits=(
+                            self.router_logits
+                            if tokens <= _LEARNED_ROUTER_LOGITS_MAX_M
+                            else None
+                        ),
                         norm_eps=float(self.ffn_norm.variance_epsilon),
                         hc_eps=float(self.ffn_hc.hc_eps),
                         route_scale=float(self.gate.route_scale),
@@ -410,5 +424,4 @@ __all__ = [
     "MEGA_MOE_FRONT_CAPACITY",
     "MegaMoeFrontAdapter",
     "moe_front_mode",
-    "moe_front_requested",
 ]
