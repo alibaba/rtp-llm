@@ -7,12 +7,14 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedList;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.DoubleBinaryOperator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -107,7 +109,7 @@ class ArithmeticFormulaTest {
     }
 
     @Test
-    void repeatedAggregatesTraverseItemsOncePerDistinctExpression() {
+    void distinctAndRepeatedAggregatesShareOneTraversal() {
         ArithmeticFormula formula = aggregateFormula("sum(max(x, 2)) + sum(max((x), 2)) + sum(x)");
         List<double[]> values = List.of(new double[]{1}, new double[]{3});
         int[] reads = {0};
@@ -125,7 +127,23 @@ class ArithmeticFormulaTest {
         };
 
         assertEquals(14.0, formula.evaluateAsDouble(new double[]{0}, counted));
-        assertEquals(4, reads[0], "two distinct aggregates each traverse the two items once");
+        assertEquals(2, reads[0], "all aggregates share one traversal of the two items");
+    }
+
+    @Test
+    void fusedAggregatesKeepIndependentFloatingPointAccumulationOrder() {
+        ArithmeticFormula formula = ArithmeticFormula.parse("sum(x) + sum(y) + sum(x*y)",
+                Map.of("x", 0, "y", 1), Set.of(), true);
+        List<double[]> items = new LinkedList<>();
+        double sumX = 0, sumY = 0, sumProduct = 0;
+        for (double[] item : List.of(new double[]{1e16, 1}, new double[]{1, -3},
+                new double[]{-1e16, 1}, new double[]{0.25, 0.125}, new double[]{-0.0, 0.0})) {
+            items.add(item);
+            sumX += item[0];
+            sumY += item[1];
+            sumProduct += item[0]*item[1];
+            assertBitsEqual(sumX + sumY + sumProduct, formula.evaluateAsDouble(new double[0], items));
+        }
     }
 
     @Test
@@ -140,7 +158,7 @@ class ArithmeticFormulaTest {
     }
 
     @Test
-    void aggregateResultsAreResetForChangedInputsDifferentFormulasAndFailures() {
+    void aggregateResultsDoNotLeakAcrossInputsFormulasOrFailures() {
         ArithmeticFormula first = aggregateFormula("sum(x) + sum(x) + x");
         ArithmeticFormula second = aggregateFormula("sum(x*x) + sum(x*x)");
         double[] item = {2};
@@ -189,8 +207,149 @@ class ArithmeticFormulaTest {
     }
 
     @Test
+    void largeExpressionPreservesArithmeticOrderAndAllFunctions() {
+        ArithmeticFormula formula = ArithmeticFormula.parse(
+                "((x+y)+z) + sqrt(abs(x)) + log(abs(y)+1) + exp(z)"
+                        + " + min(x,y) + max(y,z) + pow(x,2) + x^3 - (-y) / (abs(z)+1)",
+                Map.of("x", 0, "y", 1, "z", 2));
+        double[] values = {-0.0, 0.0, 0.25, -3, 1e16, Double.POSITIVE_INFINITY, Double.NaN};
+        for (double x : values) {
+            for (double y : values) {
+                for (double z : values) {
+                    double expected = ((x+y)+z) + Math.sqrt(Math.abs(x)) + Math.log(Math.abs(y)+1)
+                            + Math.exp(z) + Math.min(x,y) + Math.max(y,z) + Math.pow(x,2)
+                            + Math.pow(x,3) - (-y) / (Math.abs(z)+1);
+                    assertBitsEqual(expected, formula.evaluateAsDouble(new double[]{x,y,z}, null));
+                }
+            }
+        }
+    }
+
+    @Test
+    void largeExpressionPreservesNegativeZeroAndDoesNotSimplifyInfinityTimesZero() {
+        ArithmeticFormula product = aggregateFormula("x*2*3*5*7*11*13*17*19*23");
+        assertBitsEqual(-0.0, product.evaluateAsDouble(new double[]{-0.0}, null));
+        ArithmeticFormula zero = aggregateFormula("x*2*3*5*7*11*13*17*19*23*0");
+        assertTrue(Double.isNaN(zero.evaluateAsDouble(new double[]{Double.POSITIVE_INFINITY}, null)));
+    }
+
+    @Test
+    void largeAggregateExpressionsPreserveNestedScopesAfterFailure() {
+        String itemExpression = "x + x*x + x*x*x + max(x,2) + min(x,3) + abs(x) + sqrt(abs(x))";
+        ArithmeticFormula formula = aggregateFormula("(" + itemExpression + ") + sum(" + itemExpression
+                + ") + sum(sum(" + itemExpression + ")) + (" + itemExpression + ")");
+        double[] item = {2};
+        List<double[]> items = List.of(item, new double[]{3});
+        for (int i = 0; i < 20; i++) {
+            item[0] = i;
+            double batch = largeItemValue(i) + largeItemValue(3);
+            assertBitsEqual(largeItemValue(7) + batch + batch + largeItemValue(7),
+                    formula.evaluateAsDouble(new double[]{7}, items));
+        }
+        assertBitsEqual(4 * largeItemValue(7), formula.evaluateAsDouble(new double[]{7}, null));
+        assertBitsEqual(4 * largeItemValue(7), formula.evaluateAsDouble(new double[]{7}, List.of()));
+        assertThrows(ArrayIndexOutOfBoundsException.class,
+                () -> formula.evaluateAsDouble(new double[]{7}, List.of(new double[0])));
+        assertBitsEqual(4 * largeItemValue(7), formula.evaluateAsDouble(new double[]{7}, null));
+    }
+
+    private static double largeItemValue(double x) {
+        return x + x*x + x*x*x + Math.max(x,2) + Math.min(x,3) + Math.abs(x) + Math.sqrt(Math.abs(x));
+    }
+
+    @Test
+    void compiledAggregatesPreserveScalarFallbackAndExactOperationOrder() {
+        double[] values = {-0.0, 0.0, 1, -3, 1e308, 1e-308,
+                Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.NaN};
+        for (String divisor : List.of("1024", "-0.0", "0.0", "1e308", "1e-308")) {
+            double d = Double.parseDouble(divisor);
+            assertAggregateMatchesReference("x / " + divisor, (x, y) -> x / d, values);
+            assertAggregateMatchesReference("x / " + divisor + " * y / 17", (x, y) -> ((x / d) * y) / 17, values);
+            assertAggregateMatchesReference("max(x / " + divisor + " - 2, -0.0)",
+                    (x, y) -> Math.max(x / d - 2, -0.0), values);
+        }
+    }
+
+    private static void assertAggregateMatchesReference(String term, DoubleBinaryOperator reference, double[] values) {
+        ArithmeticFormula formula = ArithmeticFormula.parse("sum(" + term + ")",
+                Map.of("x", 0, "y", 1), Set.of(), true);
+        List<double[]> batch = new ArrayList<>();
+        double expectedSum = 0.0;
+        for (double x : values) {
+            for (double y : values) {
+                double[] item = {x, y};
+                double expected = reference.applyAsDouble(x, y);
+                assertBitsEqual(expected, formula.evaluateAsDouble(item, null));
+                assertBitsEqual(expected, formula.evaluateAsDouble(item, List.of()));
+                assertBitsEqual(0.0 + expected, formula.evaluateAsDouble(new double[]{999, 999}, List.of(item)));
+                batch.add(item);
+                expectedSum += expected;
+                assertBitsEqual(expectedSum, formula.evaluateAsDouble(new double[]{999, 999}, batch));
+            }
+        }
+    }
+
+    @Test
+    void compiledAggregatesRespectNestedScopesAndDoNotRetainResultsAfterFailure() {
+        ArithmeticFormula formula = aggregateFormula(
+                "sum(x/2) + sum(x/2) + sum(sum(x/2))");
+        double[] item = {4};
+        assertEquals(6.0, formula.evaluateAsDouble(new double[]{100}, List.of(item)));
+        item[0] = 8;
+        assertEquals(12.0, formula.evaluateAsDouble(new double[]{100}, List.of(item)));
+        assertThrows(ArrayIndexOutOfBoundsException.class,
+                () -> formula.evaluateAsDouble(new double[]{100}, List.of(new double[0])));
+        assertEquals(12.0, formula.evaluateAsDouble(new double[]{100}, List.of(item)));
+        assertBitsEqual(-0.0, formula.evaluateAsDouble(new double[]{-0.0}, null));
+    }
+
+    @Test
+    void compilesArbitraryAggregateBodiesWithoutExpressionShapeSpecialCases() {
+        String term = "exp(x/1024) + sqrt(abs(y)) - log(1+abs(y)) + pow(x-y,3)/max(abs(x),1)";
+        ArithmeticFormula formula = ArithmeticFormula.parse("sum(" + term + ") + sum(sum(" + term + "))",
+                Map.of("x", 0, "y", 1), Set.of(), true);
+        List<double[]> items = new ArrayList<>();
+        double expected = 0;
+        for (int i = 0; i < 32; i++) {
+            double x = i * 0.75 - 10, y = i * 1.5 - 20;
+            items.add(new double[]{x, y});
+            expected += Math.exp(x/1024) + Math.sqrt(Math.abs(y)) - Math.log(1+Math.abs(y))
+                    + Math.pow(x-y,3)/Math.max(Math.abs(x),1);
+            assertBitsEqual(expected + expected, formula.evaluateAsDouble(new double[0], items));
+        }
+    }
+
+    @Test
+    void liveFormulasRemainValidAfterCompiledCacheEviction() {
+        List<ArithmeticFormula> formulas = new ArrayList<>();
+        for (int i = 0; i < 160; i++) formulas.add(aggregateFormula("sum(x / " + (i+1) + ") + " + i));
+        for (int i = 0; i < formulas.size(); i++) {
+            assertBitsEqual(0.0 + 2.0/(i+1) + 3.0/(i+1) + i,
+                    formulas.get(i).evaluateAsDouble(new double[0], List.of(new double[]{2}, new double[]{3})));
+        }
+    }
+
+    @Test
+    void oversizedJvmMethodFallsBackWithoutRejectingValidFormula() {
+        // Balanced depth avoids testing parser recursion limits instead of JVM code size.
+        List<String> terms = new ArrayList<>();
+        for (int i = 0; i < 4000; i++) terms.add("(x + " + i + ")");
+        while (terms.size() > 1) {
+            List<String> next = new ArrayList<>();
+            for (int i = 0; i < terms.size(); i += 2) {
+                next.add(i+1 == terms.size() ? terms.get(i) : "(" + terms.get(i) + "+" + terms.get(i+1) + ")");
+            }
+            terms = next;
+        }
+        ArithmeticFormula formula = aggregateFormula(terms.getFirst());
+        assertEquals(8_002_000.0, formula.evaluateAsDouble(new double[]{1}, null));
+        assertEquals(8_006_000.0, formula.evaluateAsDouble(new double[]{2}, null));
+    }
+
+    @Test
     void oneFormulaCanBeEvaluatedConcurrentlyWithIndependentInputs() throws Exception {
-        ArithmeticFormula formula = aggregateFormula("sum(x*x) + sum(x*x) + sum(x)");
+        ArithmeticFormula formula = aggregateFormula("sum(x*x) + sum(x*x) + sum(x)"
+                + " + max(x,0) + min(x,0) + abs(x) + sqrt(abs(x)) + x^2 + sum(x/2) + sum(x/2)");
         int threads = 6;
         CountDownLatch ready = new CountDownLatch(threads);
         try (var executor = Executors.newFixedThreadPool(threads)) {
@@ -203,6 +362,8 @@ class ArithmeticFormulaTest {
                     for (int j = 0; j < 1000; j++) {
                         double x = offset + j;
                         double expected = 2 * (x*x + (x+1)*(x+1)) + x + (x+1);
+                        double scaled = x/2 + (x+1)/2;
+                        expected = expected + scaled + scaled;
                         assertBitsEqual(expected, formula.evaluateAsDouble(new double[]{0},
                                 List.of(new double[]{x}, new double[]{x+1})));
                     }
