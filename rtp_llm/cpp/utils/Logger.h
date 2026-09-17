@@ -39,6 +39,13 @@ namespace rtp_llm {
 
 bool initLogger(std::string log_file_path = "");
 
+// File, layout, level and flush policy are owned by alog.conf. Keep this
+// non-inheriting logger independent of USE_CONSOLE_APPENDER / LOG_LEVEL.
+inline alog::Logger* getBatchScheduleLogger() {
+    static auto* logger = alog::Logger::getLogger("batch_schedule", false);
+    return logger;
+}
+
 class Logger {
 public:
     Logger(const std::string& submodule_name);
@@ -206,6 +213,19 @@ private:
 #define RTP_LLM_ACCESS_LOG_WARNING(...) RTP_LLM_ACCESS_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
 #define RTP_LLM_ACCESS_LOG_ERROR(...) RTP_LLM_ACCESS_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
 #define RTP_LLM_ACCESS_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getAccessLogger().log(ex, ##__VA_ARGS__)
+
+// message is a serialized JSON object, not a printf format string.
+// Preserve the complete message without alog.max_msg_len truncation.
+#define RTP_LLM_BATCH_SCHEDULE_LOG(level, message) \
+    do { \
+        auto* batch_logger = rtp_llm::getBatchScheduleLogger(); \
+        const auto batch_level = (level); \
+        if (batch_logger->isLevelEnabled(batch_level)) { \
+            batch_logger->logBinaryMessage(batch_level, message); \
+        } \
+    } while (0)
+
+#define RTP_LLM_BATCH_SCHEDULE_LOG_INFO(message) RTP_LLM_BATCH_SCHEDULE_LOG(alog::LOG_LEVEL_INFO, message)
 
 #define RTP_LLM_QUERY_ACCESS_LOG(level, ...)                                                                           \
     do {                                                                                                               \

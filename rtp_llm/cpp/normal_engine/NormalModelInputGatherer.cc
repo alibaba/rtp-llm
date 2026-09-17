@@ -422,6 +422,14 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     std::vector<torch::Tensor> normal_combo_tokens_gpu;
     std::vector<torch::Tensor> normal_sequence_lengths_gpu;
     if (use_normal_device_state) {
+        // Validate before modifying any stream. Live seqLength() can lag the
+        // device state while async output bookkeeping is still in flight.
+        for (const auto& stream : stream_groups.decodeStreams()) {
+            if (stream->getNormalAsyncDeviceState().next_real_seq_len <= 0) {
+                return absl::FailedPreconditionError("normal decode CPU length mirror missing or invalid for stream "
+                                                     + std::to_string(stream->streamId()));
+            }
+        }
         normal_combo_tokens_gpu.reserve(stream_groups.totalDecodeBatchSize());
         normal_sequence_lengths_gpu.reserve(stream_groups.totalDecodeBatchSize());
     }
@@ -454,6 +462,10 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                 normal_combo_tokens_gpu.push_back(state.last_sample_token_gpu.reshape({1}));
                 normal_sequence_lengths_gpu.push_back((state.next_seq_len_gpu - 1).to(torch::kInt32).reshape({1}));
                 ctx.input_lengths[ctx.batch_idx] = stream->inputLength();
+                if (model_input.record_lengths) {
+                    model_input.record_lengths->q_tokens[ctx.batch_idx]         = 1;
+                    model_input.record_lengths->kv_tokens_before[ctx.batch_idx] = state.next_real_seq_len - 1;
+                }
             } else {
                 auto currentTokens = stream->currentExecuteTokens(i);
                 if (currentTokens[0] >= ctx.input_vocab_size) {
@@ -465,6 +477,10 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                 ctx.merged_tokens[ctx.batch_idx]    = currentTokens[0];
                 ctx.input_lengths[ctx.batch_idx]    = stream->inputLength();
                 ctx.sequence_lengths[ctx.batch_idx] = stream->seqLength() - 1;
+                if (model_input.record_lengths) {
+                    model_input.record_lengths->q_tokens[ctx.batch_idx]         = 1;
+                    model_input.record_lengths->kv_tokens_before[ctx.batch_idx] = ctx.sequence_lengths[ctx.batch_idx];
+                }
                 if (ctx.need_cal_position_id) {
                     stream->generateNextPositionId(ctx.combo_position_ids
                                                    + ctx.batch_idx * config_.position_id_len_factor);
@@ -530,6 +546,11 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
             ctx.input_lengths[ctx.batch_idx]           = input_tokens.size();
             ctx.prefix_lengths_host[prefill_batch_idx] = stream->prefixLength();
+            if (model_input.record_lengths) {
+                model_input.record_lengths->q_tokens[ctx.batch_idx] = ctx.input_lengths[ctx.batch_idx];
+                model_input.record_lengths->kv_tokens_before[ctx.batch_idx] =
+                    ctx.prefix_lengths_host[prefill_batch_idx];
+            }
             gatherMultimodalFeaturesForContextBatch(stream, ctx, gathered_mm_features, host_holder);
 
             if (ctx.need_cal_position_id) {
@@ -618,12 +639,18 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
 }
 
 absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGroups& stream_groups,
-                                                                TensorHolder&       host_holder) const {
+                                                                TensorHolder&       host_holder,
+                                                                bool                record_lengths) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",
                       stream_groups.contextStreams().size(),
                       stream_groups.decodeStreams().size());
     auto model_input = allocateModelInputBuffers(stream_groups);
+    if (record_lengths) {
+        model_input.record_lengths.emplace();
+        model_input.record_lengths->q_tokens.resize(stream_groups.totalModelBatchSize(), -1);
+        model_input.record_lengths->kv_tokens_before.resize(stream_groups.totalModelBatchSize(), -1);
+    }
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));

@@ -15,6 +15,9 @@ namespace rtp_llm {
 class Executor {
 public:
     Executor() {};
+    void setRecordingStep(int64_t step) {
+        recording_step_ = step;
+    }
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) = 0;
     virtual void         notifyStop() {}
 
@@ -84,7 +87,8 @@ public:
         return false;
     }
 
-public:
+protected:
+    int64_t recording_step_ = 0;
 };
 
 }  // namespace rtp_llm

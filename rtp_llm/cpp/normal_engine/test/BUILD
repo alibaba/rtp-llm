@@ -83,6 +83,15 @@ cc_test(
 )
 
 cc_test(
+    name = "recording_engine_test",
+    srcs = ["RecordingEngineTest.cc"],
+    copts = test_copts,
+    deps = [":mock_engine", "//rtp_llm/cpp/observability:execution_recorder"] + cuda13_torch_link_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    tags = ["manual"],
+)
+
+cc_test(
     name = "async_runner_test",
     srcs = [
         "AsyncRunnerTest.cc",

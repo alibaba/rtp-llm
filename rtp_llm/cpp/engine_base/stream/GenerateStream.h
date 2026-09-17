@@ -20,6 +20,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 
 namespace rtp_llm {
 
@@ -174,13 +175,18 @@ public:
         return is_fake_stream_;
     }
 
+    std::shared_ptr<RecordedRequest> recordedRequest() const {
+        return recorded_request_;
+    }
+
     virtual ErrorResult<GenerateOutputs> nextOutput() = 0;
     virtual bool                         hasOutput() {
         return false;
     }
 
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
-    void         update(const StreamUpdateInfo& update_info);
+    void         update(const StreamUpdateInfo& update_info,
+                        RecordedTokenTiming* timings = nullptr, size_t timing_count = 0);
     void         specUpdate(const StreamSpecUpdateInfo& update_info);
     bool         updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
@@ -945,7 +951,8 @@ protected:
     // just for bool test
     bool perf_test_ = false;
     friend class StreamCacheResource;
-    bool is_fake_stream_ = false;
+    bool                             is_fake_stream_ = false;
+    std::shared_ptr<RecordedRequest> recorded_request_;
 
     // prefill TP size queried from prefill server (used for asymmetric TP)
     int prefill_tp_size_ = -1;

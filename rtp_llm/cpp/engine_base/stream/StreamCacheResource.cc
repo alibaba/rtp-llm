@@ -168,11 +168,14 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                         .logprobs_offset = stream->generateConfig()->return_logprobs ? 1 : 0});
         if (stream->nextBatchSize() == 1) {
             c10::DeviceGuard runtime_device_guard(getTorchCudaDevice());
-            const auto       cuda_i32 = runtimeCudaI32Options();
+            const auto       cuda_i32   = runtimeCudaI32Options();
+            const auto       seq_length = stream->seqLength();
             stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
                 .epoch                 = 0,
                 .last_sample_token_gpu = new_tokens.reshape({1}).to(cuda_i32),
-                .next_seq_len_gpu      = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32),
+                .next_seq_len_gpu      = torch::full({1}, static_cast<int64_t>(seq_length), cuda_i32),
+                .last_real_seq_len     = seq_length,
+                .next_real_seq_len     = seq_length,
             });
         }
         RTP_LLM_LOG_DEBUG("applyP2PSideChannel: appended first_token_id=%ld, stream_id=%ld",

@@ -84,6 +84,7 @@ private:
     std::atomic<bool>                             armed_stop_cancel_requested_{false};
     std::atomic<bool>                             armed_stop_cancel_observed_{false};
     std::atomic<int64_t>                          stop_target_step_{-1};
+    int64_t                                       recording_step_ = 0;
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     ParallelismConfig                             parallelism_config;

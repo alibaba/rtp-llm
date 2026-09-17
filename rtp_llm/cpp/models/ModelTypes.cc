@@ -26,6 +26,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // TP ranks do not see overflowed dimensions when allocating buffers.
     auto shape_hints_t   = torch::empty({(int64_t)shape_hints_size}, torch::kInt64).pin_memory();
     auto shape_hints_ptr = shape_hints_t.data_ptr<int64_t>();
+    shape_hints_ptr[GptModelInputIndex::recordExecutionId]     = inputs.record_execution_id;
+    shape_hints_ptr[GptModelInputIndex::recordSchedulerStepId] = inputs.record_scheduler_step_id;
     shape_hints_ptr[GptModelInputIndex::comboTokens] = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::inputLengths] =
         inputs.input_lengths.defined() ? inputs.input_lengths.numel() : 0;
@@ -110,6 +112,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.need_all_hidden_states       = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
     inputs.skip_run                     = shape_hints_ptr[GptModelInputIndex::skipRun];
     inputs.is_fake_stream               = shape_hints_ptr[GptModelInputIndex::isFakeStream];
+    inputs.record_execution_id          = shape_hints_ptr[GptModelInputIndex::recordExecutionId];
+    inputs.record_scheduler_step_id     = shape_hints_ptr[GptModelInputIndex::recordSchedulerStepId];
     if (inputs.skip_run) {
         return;
     }

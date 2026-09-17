@@ -73,7 +73,8 @@ protected:
                                      GptModelOutputs               model_output,
                                      SamplerOutput                 sampler_output,
                                      std::shared_ptr<torch::Event> sampler_event,
-                                     std::function<void()>         profile_step_finish);
+                                     std::function<void()>         profile_step_finish,
+                                     std::shared_ptr<RecordedBatch> recorded_batch = nullptr);
 
     void publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output);
     void prepareGrpcNormalDeviceState(const StreamGroups& stream_groups);

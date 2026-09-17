@@ -79,9 +79,11 @@ protected:
     static absl::Status dispatchLogprobsStep(const NormalBatchStreamProcessor&   processor,
                                              const std::list<GenerateStreamPtr>& streams,
                                              const torch::Tensor&                raw_logits,
-                                             const std::vector<int32_t>&         sampled_tokens) {
+                                             const std::vector<int32_t>&         sampled_tokens,
+                                             std::shared_ptr<RecordedBatch> recorded_batch = nullptr) {
         StreamGroups stream_groups(streams);
         MergedOutput outputs;
+        outputs.recorded_batch = std::move(recorded_batch);
         outputs.model_output.logits = raw_logits.to(torch::kCUDA);
         outputs.sampler_output.token_ids =
             torch::tensor(sampled_tokens, torch::kInt32).reshape({(int64_t)sampled_tokens.size(), 1});
@@ -134,6 +136,35 @@ private:
     bool    async_device_state_;
     int64_t accepted_token_len_ = 0;
 };
+
+TEST_F(NormalBatchStreamProcessorTest, testBatchTtftCapturedAtOutputUpdate) {
+    const auto config = makeLogprobsModelConfig();
+    auto processor = makeLogprobsProcessor(config);
+    // Non-streaming, aux_info disabled: TTFT must not wait for publication.
+    auto first = makeLogprobsStream(config, false, 0, 3, false);
+    auto second = makeLogprobsStream(config, false, 0, 3, false);
+    ExecutionRecorder recorder("", "", 0, 0);
+    auto make_batch = [&] {
+        return std::make_shared<RecordedBatch>(recorder, ExecutionRecorder::Json{},
+                                               std::vector<ExecutionRecorder::Json>(2));
+    };
+    auto prefill = make_batch();
+    auto logits = torch::zeros({2, 4}, torch::kFloat32);
+    ASSERT_TRUE(dispatchLogprobsStep(*processor, {first, second}, logits, {1, 2}, prefill).ok());
+    for (const auto& timing : prefill->timings) {
+        ASSERT_TRUE(timing.ttft_us.has_value());
+        EXPECT_TRUE(timing.first_token_produced);
+    }
+    EXPECT_EQ(*prefill->timings[0].ttft_us, first->complete_token_ids_->firstTokenLatencyUs());
+    EXPECT_EQ(*prefill->timings[1].ttft_us, second->complete_token_ids_->firstTokenLatencyUs());
+    auto decode = make_batch();
+    ASSERT_TRUE(dispatchLogprobsStep(*processor, {first, second}, logits, {2, 1}, decode).ok());
+    for (size_t i = 0; i < 2; ++i) {
+        EXPECT_EQ(decode->timings[i].ttft_us, prefill->timings[i].ttft_us);
+        EXPECT_FALSE(decode->timings[i].first_token_produced);
+        EXPECT_TRUE(prefill->timings[i].first_token_produced);  // Prior snapshot is immutable.
+    }
+}
 
 TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     ResourceContext resource_context;
@@ -214,7 +245,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         StreamGroups stream_groups(streams);
         TensorHolder holder;
 
-        auto merge_input_status = processor.gatherModelInput(stream_groups, holder);
+        auto merge_input_status = processor.gatherModelInput(stream_groups, holder, true);
 
         EXPECT_TRUE(merge_input_status.ok());
         auto&       model_input       = merge_input_status.value();
@@ -227,6 +258,9 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(input_lengths, toVec<int>(model_input.input_lengths));
         EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
+        ASSERT_TRUE(model_input.record_lengths.has_value());
+        EXPECT_EQ(model_input.record_lengths->q_tokens, (std::vector<int32_t>{1, 1, 3, 3}));
+        EXPECT_EQ(model_input.record_lengths->kv_tokens_before, (std::vector<int32_t>{1, 2, 0, 1}));
         EXPECT_EQ(kv_cache_block_id, toVec<int>(model_input.kv_cache_block_id));
     }
     {
@@ -241,6 +275,54 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_TRUE(merge_input_status.ok());
         auto& model_input = merge_input_status.value();
         EXPECT_FALSE(model_input.attention_mask.defined());
+        EXPECT_FALSE(model_input.record_lengths.has_value());
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testRecordedDeviceLengthsUseCpuMirror) {
+    const auto model_config = makeLogprobsModelConfig(128);
+    auto       processor    = makeLogprobsProcessor(model_config);
+    auto       stream       = makeLogprobsStream(model_config, false, 0, 8, true);
+    stream->setIsContextStream(false);
+    stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+        .last_sample_token_gpu = torch::tensor({42}, torch::kInt32).to(torch::kCUDA),
+        .next_seq_len_gpu      = torch::tensor({4}, torch::kInt32).to(torch::kCUDA),
+        .last_real_seq_len     = 3,
+        .next_real_seq_len     = 4,
+    });
+    ASSERT_EQ(stream->seqLength(), 1);  // Async CPU bookkeeping has not caught up.
+    StreamGroups groups({stream});
+    TensorHolder holder;
+    auto         result = processor->gatherModelInput(groups, holder, true);
+    ASSERT_TRUE(result.ok()) << result.status();
+    ASSERT_TRUE(result->record_lengths.has_value());
+    EXPECT_EQ(result->record_lengths->q_tokens, (std::vector<int32_t>{1}));
+    EXPECT_EQ(result->record_lengths->kv_tokens_before, (std::vector<int32_t>{3}));
+    EXPECT_EQ(result->record_lengths->kv_tokens_before, toVec<int32_t>(result->sequence_lengths));
+    auto next_state              = stream->getNormalAsyncDeviceState();
+    next_state.next_real_seq_len = 5;
+    stream->setNormalAsyncDeviceState(std::move(next_state));
+    EXPECT_EQ(result->record_lengths->kv_tokens_before, (std::vector<int32_t>{3}));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDeviceLengthsRejectMissingCpuMirror) {
+    const auto model_config = makeLogprobsModelConfig(128);
+    auto       processor    = makeLogprobsProcessor(model_config);
+    auto       stream       = makeLogprobsStream(model_config, false, 0, 8, true);
+    stream->setIsContextStream(false);
+    for (int mirror : {-1, 0}) {
+        stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+            .last_sample_token_gpu = torch::tensor({42}, torch::kInt32).to(torch::kCUDA),
+            .next_seq_len_gpu      = torch::tensor({4}, torch::kInt32).to(torch::kCUDA),
+            .next_real_seq_len     = mirror,
+        });
+        for (bool record : {false, true}) {
+            StreamGroups groups({stream});
+            TensorHolder holder;
+            auto         result = processor->gatherModelInput(groups, holder, record);
+            EXPECT_EQ(result.status().code(), absl::StatusCode::kFailedPrecondition);
+            EXPECT_NE(std::string(result.status().message()).find("CPU length mirror"), std::string::npos);
+        }
     }
 }
 
