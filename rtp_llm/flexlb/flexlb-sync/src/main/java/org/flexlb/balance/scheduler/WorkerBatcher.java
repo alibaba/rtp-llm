@@ -185,7 +185,6 @@ public final class WorkerBatcher {
     private final boolean queueScheduling;
     private final DeliveryStrategy deliveryStrategy;
     private final PrefillActiveIndex activeIndex;
-    private final Comparator<ScheduledRequest> queueOrder;
     private final Comparator<GroupPlanner.Item> projectionOrder;
     /**
      * Monotonic queue mutation generation, bumped on enqueue, removal,
@@ -205,7 +204,7 @@ public final class WorkerBatcher {
      * live endpoint, but do not rebuild identical queue snapshots for each
      * request in the global planner.
      */
-    private volatile ProjectionCache projectionCache;
+    private volatile ProjectionSource projectionSource;
     /**
      * Guards queue mutations and exact ownership publication.
      *
@@ -262,7 +261,7 @@ public final class WorkerBatcher {
                 endpointEvents, "endpointEvents");
         this.deliveryStrategy = Objects.requireNonNull(
                 deliveryStrategy, "deliveryStrategy");
-        this.queueOrder = priorityOrdering
+        Comparator<ScheduledRequest> queueOrder = priorityOrdering
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
         this.projectionOrder =
                 priorityOrdering
@@ -899,10 +898,7 @@ public final class WorkerBatcher {
     }
 
     private List<ScheduledRequest> activeItemsInSchedulingOrder() {
-        List<ScheduledRequest> candidates = new ArrayList<>();
-        activeIndex.forEach(candidates::add);
-        candidates.sort(queueOrder);
-        return candidates;
+        return activeIndex.capture().items();
     }
 
     private ActiveQueueSnapshot snapshotActiveQueueHead() {
@@ -929,12 +925,10 @@ public final class WorkerBatcher {
                 return new ActiveQueueSnapshot(
                         version, inputVersion, List.of());
             }
-            items = new ArrayList<>();
-            activeIndex.forEach(items::add);
+            items = activeIndex.capture().items();
         } finally {
             queueLock.unlock();
         }
-        items.sort(queueOrder);
         return new ActiveQueueSnapshot(version, inputVersion, items);
     }
 
@@ -953,48 +947,59 @@ public final class WorkerBatcher {
             long ownership) {
     }
 
-    private record ProjectionCache(
-            ProjectionVersion version,
-            RouteProjection.Inputs inputs) {
-    }
+    /** Captured under queueLock; the shared result is built without that lock. */
+    private final class ProjectionSource {
+        private final ProjectionVersion version;
+        private PrefillState.Snapshot ownership;
+        private final GroupPlanner.Constraints constraints;
+        private final AdmissionBlock admissionBlock;
+        private volatile RouteProjection.Inputs materialized;
 
-    /** State and version captured together under queueLock; materialized outside it. */
-    private record ProjectionSource(
-            ProjectionVersion version,
-            PrefillState.Snapshot ownership,
-            GroupPlanner.Constraints constraints,
-            AdmissionBlock admissionBlock) {
+        private ProjectionSource(ProjectionVersion version, PrefillState.Snapshot ownership,
+                                 GroupPlanner.Constraints constraints, AdmissionBlock admissionBlock) {
+            this.version = version;
+            this.ownership = ownership;
+            this.constraints = constraints;
+            this.admissionBlock = admissionBlock;
+        }
+
+        private RouteProjection.Inputs materialize() {
+            RouteProjection.Inputs result = materialized;
+            if (result != null) {
+                return result;
+            }
+            synchronized (this) {
+                if (materialized == null) {
+                    var queueSnapshot = new org.flexlb.balance.projection.QueueSnapshot(
+                            ownership.capturedAtMs(), queueScheduling, projectionOrder,
+                            constraints, ownership.active().projectedItems(), admissionBlock);
+                    materialized = new RouteProjection.Inputs(
+                            queueSnapshot, ownership.work().materialize(), version.ownership());
+                    // The cached projection must not retain completed request contexts.
+                    ownership = null;
+                }
+                return materialized;
+            }
+        }
     }
 
     public RouteProjection.Inputs captureRouteProjectionInputs() {
-        ProjectionCache cached = projectionCache;
-        if (cached != null && isCurrentProjection(cached.version())) {
-            return cached.inputs();
-        }
-        ProjectionSource source;
-        queueLock.lock();
-        try {
-            cached = projectionCache;
-            if (cached != null && isCurrentProjection(cached.version())) {
-                return cached.inputs();
+        ProjectionSource source = projectionSource;
+        if (source == null || !isCurrentProjection(source.version)) {
+            queueLock.lock();
+            try {
+                source = projectionSource;
+                if (source == null || !isCurrentProjection(source.version)) {
+                    source = captureProjectionSourceUnderLock();
+                    projectionSource = source;
+                }
+            } finally {
+                queueLock.unlock();
             }
-            source = captureProjectionSourceUnderLock();
-        } finally {
-            queueLock.unlock();
         }
-
-        RouteProjection.Inputs captured = materializeProjection(source);
-        queueLock.lock();
-        try {
-            // Checking and publishing share the mutation lock. An old capture
-            // may serve its caller, but cannot become the current cache entry.
-            if (isCurrentProjection(source.version())) {
-                projectionCache = new ProjectionCache(source.version(), captured);
-            }
-        } finally {
-            queueLock.unlock();
-        }
-        return captured;
+        // Concurrent callers share one source per version. A late build only
+        // fills its own source; it can never overwrite a newer capture.
+        return source.materialize();
     }
 
     private boolean isCurrentProjection(ProjectionVersion version) {
@@ -1017,26 +1022,6 @@ public final class WorkerBatcher {
                         capacity.batchKvCapacity(), predictedExecutionBudgetMs(),
                         collectionWindowMs()),
                 ownership.activeItems().isEmpty() ? null : admissionBlockUnderLock());
-    }
-
-    private RouteProjection.Inputs materializeProjection(ProjectionSource source) {
-        List<GroupPlanner.Item> items = source.ownership().activeItems().stream()
-                .sorted(queueOrder)
-                .map(WorkerBatcher::projectionItem)
-                .toList();
-        var queueSnapshot = new org.flexlb.balance.projection.QueueSnapshot(
-                source.ownership().capturedAtMs(), queueScheduling, projectionOrder,
-                source.constraints(), items, source.admissionBlock());
-        return new RouteProjection.Inputs(
-                queueSnapshot, source.ownership().work().materialize(),
-                source.version().ownership());
-    }
-
-    private static GroupPlanner.Item projectionItem(ScheduledRequest item) {
-        return new GroupPlanner.Item(
-                item.requestId(), item.priority(), item.enqueueSeq(),
-                item.enqueuedAtMs(), item.expiresAtMs(), item.seqLen(),
-                item.hitCache());
     }
 
     private BatchCapacitySnapshot batchCapacitySnapshot() {
