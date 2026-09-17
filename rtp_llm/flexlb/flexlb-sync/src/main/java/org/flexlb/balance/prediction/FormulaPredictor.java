@@ -74,6 +74,18 @@ public class FormulaPredictor
     }
 
     @Override
+    public BatchPrediction newBatchPrediction() {
+        ArithmeticFormula.Aggregation aggregation = formula.newAggregation();
+        if (aggregation == null) return PrefillTimePredictor.Evaluator.super.newBatchPrediction();
+        var bindings = new PrefillTimeVariableBindings.AppendBindings();
+        return (seqLen, hitCache) -> {
+            bindings.append(seqLen, hitCache);
+            aggregation.append(bindings.item);
+            return aggregation.evaluate(bindings.batch);
+        };
+    }
+
+    @Override
     public LearningResult learn(
             PrefillBatchFeatures features, long predictedMs, long actualMs) {
         logger.debug("learn sample: batchSize={} predictedMs={} actualMs={}",

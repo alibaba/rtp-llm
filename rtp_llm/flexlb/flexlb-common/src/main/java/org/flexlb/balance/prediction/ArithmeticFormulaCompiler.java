@@ -60,6 +60,80 @@ final class ArithmeticFormulaCompiler {
         }
     }
 
+    interface Incremental {
+        int aggregateCount();
+        void append(double[] item, double[] sums);
+        double evaluate(double[] batch, double[] sums);
+    }
+
+    /** Same AST and ordered additions as full evaluation; only the lifetime of sums changes. */
+    static Incremental compileIncremental(Node root) {
+        Map<AggregateFuncNode, Integer> aggregates = new LinkedHashMap<>();
+        collectAggregates(root, aggregates, new HashSet<>());
+        int index = 0;
+        for (var entry : aggregates.entrySet()) entry.setValue(index++);
+        try {
+            ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+            writer.visit(V17, ACC_FINAL | ACC_SUPER, CLASS_NAME, null, "java/lang/Object",
+                    new String[]{Incremental.class.getName().replace('.', '/')});
+            MethodVisitor init = writer.visitMethod(ACC_PUBLIC, "<init>", "()V", null, null);
+            init.visitCode();
+            init.visitVarInsn(ALOAD, 0);
+            init.visitMethodInsn(INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+            finish(init, RETURN);
+            MethodVisitor count = writer.visitMethod(ACC_PUBLIC, "aggregateCount", "()I", null, null);
+            count.visitCode();
+            count.visitLdcInsn(aggregates.size());
+            finish(count, IRETURN);
+
+            MethodVisitor append = writer.visitMethod(ACC_PUBLIC, "append", "([D[D)V", null, null);
+            append.visitCode();
+            var compiler = new ArithmeticFormulaCompiler(append);
+            Scope item = new Scope(1, -1);
+            for (var entry : aggregates.entrySet()) {
+                append.visitVarInsn(ALOAD, 2);
+                append.visitLdcInsn(entry.getValue());
+                append.visitInsn(DUP2);
+                append.visitInsn(DALOAD);
+                compiler.emit(entry.getKey().arg(), item);
+                append.visitInsn(DADD);
+                append.visitInsn(DASTORE);
+            }
+            finish(append, RETURN);
+
+            MethodVisitor evaluate = writer.visitMethod(ACC_PUBLIC, "evaluate", "([D[D)D", null, null);
+            evaluate.visitCode();
+            compiler = new ArithmeticFormulaCompiler(evaluate);
+            Scope batch = new Scope(1, -1);
+            for (var entry : aggregates.entrySet()) {
+                evaluate.visitVarInsn(ALOAD, 2);
+                evaluate.visitLdcInsn(entry.getValue());
+                evaluate.visitInsn(DALOAD);
+                int slot = compiler.nextLocal;
+                compiler.nextLocal += 2;
+                evaluate.visitVarInsn(DSTORE, slot);
+                batch.locals.put(entry.getKey(), slot);
+            }
+            compiler.emit(root, batch);
+            finish(evaluate, DRETURN);
+            writer.visitEnd();
+            var lookup = MethodHandles.lookup().defineHiddenClass(writer.toByteArray(), true);
+            return (Incremental) lookup.findConstructor(lookup.lookupClass(), MethodType.methodType(void.class))
+                    .invoke();
+        } catch (MethodTooLargeException | ClassTooLargeException tooLarge) {
+            return null;
+        } catch (Throwable failure) {
+            if (failure instanceof Error error) throw error;
+            throw new IllegalStateException("Cannot compile incremental arithmetic formula", failure);
+        }
+    }
+
+    private static void finish(MethodVisitor method, int returnOpcode) {
+        method.visitInsn(returnOpcode);
+        method.visitMaxs(0, 0);
+        method.visitEnd();
+    }
+
     private void expression(Node root) {
         Scope outer = new Scope(1, 2);
         Map<AggregateFuncNode, Integer> aggregates = new LinkedHashMap<>();
