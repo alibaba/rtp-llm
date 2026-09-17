@@ -23,13 +23,14 @@ public:
 
     static std::vector<MultimodalInput> transMMInput(const MultimodalInputsPB* mm_inputs);
 
-    static MultimodalInputsPB transMMInputsPB(const std::vector<MultimodalInput> mm_inputs);
+    static MultimodalInputsPB transMMInputsPB(const std::vector<MultimodalInput> mm_inputs, int64_t request_id = 0);
 
     static MultimodalOutput transMMOutput(const MultimodalOutputPB* output_pb);
 
     static std::vector<RoleAddr> getRoleAddrs(const GenerateConfigPB* config_proto);
 
     static torch::Tensor transTensor(const TensorPB& tensor_pb);
+    static torch::Tensor transPinnedTensor(const TensorPB& tensor_pb);
 
     static void transTensorPB(TensorPB* tensor_pb, const torch::Tensor& tensor);
 

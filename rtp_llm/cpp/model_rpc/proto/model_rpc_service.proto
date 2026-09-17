@@ -114,11 +114,12 @@ message MMPreprocessConfigPB {
     int32 height = 2;
     int32 min_pixels = 3;
     int32 max_pixels = 4;
-    int32 fps = 5;
+    float fps = 5;
     int32 min_frames = 6;
     int32 max_frames = 7;
     repeated float crop_positions = 8;
     int32 mm_timeout_ms = 9;
+    int32 max_long_side_pixel = 11;
 }
 
 message MultimodalInputPB {
@@ -133,6 +134,9 @@ message MultimodalInputsPB {
     // LLM consumer declares it can receive the embedding via GPUDirect RDMA.
     // When false (default) or RDMA unavailable, encoder falls back to inline bytes.
     bool support_rdma = 2;
+    // Globally unique RTP-LLM request id. Propagated to the VIT worker for
+    // access logging and downstream data-inspection correlation.
+    int64 request_id = 3;
 }
 
 // {nicid, rkey} of an MR on the encoder-registered receive/send pool, one per NIC.
@@ -191,6 +195,9 @@ message MultimodalOutputPB {
     // per-role tensors (see MMRdmaTensorPB.Role) before applying split_size. Exactly one of
     // output_rdma / output_rdma_chunks is set on the RDMA path; both empty => inline bytes.
     repeated MMRdmaDescPB output_rdma_chunks = 6;
+    // Compact CPU row hashes stay inline on both bytes and RDMA paths.
+    TensorPB multimodal_feature_hash = 7;
+    uint32 feature_hash_version = 8;
 }
 
 message ReleaseEmbeddingPB {
@@ -442,6 +449,17 @@ message CacheStatusPB {
     int64 block_size = 3;
     int64 version = 4;
     map<int64, bool> cache_keys = 5;
+    // ViT routing directory; populated only when need_cache_keys is true.
+    // Presence distinguishes an empty directory from an unsupported worker.
+    MultimodalCacheStatusPB multimodal_cache = 6;
+}
+
+message MultimodalCacheStatusPB {
+    string worker_instance = 1;
+    uint32 feature_hash_version = 2;
+    repeated string keys = 3;
+    repeated string gpu_embedding_keys = 4;
+    repeated string cpu_embedding_keys = 5;
 }
 
 message UpdateSchedulerInfoRequestPB {
@@ -730,17 +748,45 @@ service RpcService {
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
 }
 
+// Frontend routing metadata only. Omit inputs for a cache-only probe; supplying
+// inputs computes missing hashes and waits for any enabled safety inspection.
+message MultimodalHashRequestPB {
+    repeated string keys = 1;
+    MultimodalInputsPB inputs = 2;
+    int64 timeout_ms = 3;
+}
+
+message MultimodalHashEntryPB {
+    string key = 1;
+    bool hash_hit = 2;
+    bool embedding_hit = 3;
+    string embedding_tier = 4;
+    bool greennet_passed = 5;
+    string entry_generation = 6;
+    repeated uint32 split_size = 7;
+    // Flattened little-endian signed int32 hashes, one per output token.
+    bytes feature_hashes = 8;
+}
+
+message MultimodalHashResponsePB {
+    string worker_instance = 1;
+    uint32 feature_hash_version = 2;
+    repeated MultimodalHashEntryPB entries = 3;
+}
+
 // Response type intentionally changed as part of multimodal refactoring — not a rolling-upgrade concern
 // because VIT proxy and LLM backend are always deployed together in this service.
 service MultimodalRpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
+    rpc GetMultimodalHashes(MultimodalHashRequestPB) returns (MultimodalHashResponsePB);
+    // Optional compatibility endpoint for clients that explicitly prefetch ViT work.
+    // The RTP-LLM frontend no longer calls it on the normal generation path.
     rpc AsyncSubmitEmbedding(MultimodalInputsPB) returns (EmptyPB);
-    // GreenNet content-safety gate. Called by the LLM client AFTER
-    // AsyncSubmitEmbedding (which kicked the async preprocess + inspect) and
-    // BEFORE prefill. Returns EmptyPB when all inputs pass; on a violation the
-    // server aborts with PERMISSION_DENIED and an ErrorDetailsPB
+    // GreenNet content-safety gate. It starts any missing ViT work itself and
+    // blocks before prefill. Returns EmptyPB when all inputs pass; on a violation
+    // the server aborts with PERMISSION_DENIED and an ErrorDetailsPB
     // (error_code=UNSAFE_INPUT_CONTENT) in the grpc-status-details-bin trailer,
     // which the client converts back to FtRuntimeException.
     rpc WaitGreenNetVerdict(MultimodalInputsPB) returns (EmptyPB);

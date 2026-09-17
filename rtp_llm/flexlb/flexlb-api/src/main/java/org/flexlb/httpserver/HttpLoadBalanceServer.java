@@ -74,6 +74,8 @@ public class HttpLoadBalanceServer {
     @Bean
     public RouterFunction<ServerResponse> loadBalancePrefill() {
         return route()
+                .POST("/rtp_llm/vit/route", accept(MediaType.APPLICATION_JSON),
+                        this::scheduleRequest)
                 .POST("/rtp_llm/schedule", accept(MediaType.APPLICATION_JSON),
                         this::scheduleRequest)
                 .POST("/rtp_llm/master/info", accept(MediaType.APPLICATION_JSON),
@@ -105,6 +107,9 @@ public class HttpLoadBalanceServer {
                         throw new IllegalArgumentException("requestId is 0");
                     }
                     populateApiKeyFromHeaders(req, request);
+                    if ("/rtp_llm/vit/route".equals(request.path())) {
+                        req.setVitRouteOnly(true);
+                    }
                     ctx.setRequest(req);
                     return Mono.using(
                             activeRequestCounter::acquire,
