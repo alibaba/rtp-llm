@@ -71,7 +71,7 @@ def _get_or_create_cuda_graph_clone_buf_fp8(
 class GLM5MegaMoEFP8(GLM5MegaMoE):
     """GLM-5 MegaMoE wrapper for DeepGEMM ``fp8_fp8_mega_moe``."""
 
-    def clone_for_cuda_graph(self) -> "GLM5MegaMoEFP8":
+    def clone_for_cuda_graph(self, *, share_mega_buf: bool = False) -> "GLM5MegaMoEFP8":
         clone = object.__new__(type(self))
         torch.nn.Module.__init__(clone)
         clone.cfg = self.cfg
@@ -80,12 +80,17 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
         clone._mega_l2_w = self._mega_l2_w
         clone._mega_l2_sf = self._mega_l2_sf
         clone._num_shared_experts = getattr(self, "_num_shared_experts", 0)
-        clone._mega_buf = _get_or_create_cuda_graph_clone_buf_fp8(
-            self._mega_buf,
-            self._mega_group,
-            self.cfg,
-            clone._num_shared_experts,
-        )
+        if share_mega_buf:
+            if self._mega_buf is None or self._mega_group is None:
+                raise RuntimeError("Shared MegaMoE buffer must be initialized")
+            clone._mega_buf = self._mega_buf
+        else:
+            clone._mega_buf = _get_or_create_cuda_graph_clone_buf_fp8(
+                self._mega_buf,
+                self._mega_group,
+                self.cfg,
+                clone._num_shared_experts,
+            )
         clone._mega_y = (
             torch.empty_like(self._mega_y) if self._mega_y is not None else None
         )

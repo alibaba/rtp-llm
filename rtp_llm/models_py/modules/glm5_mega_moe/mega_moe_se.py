@@ -253,7 +253,7 @@ class GLM5MegaMoESE(GLM5MegaMoE):
         ):
             raise RuntimeError("mega_moe_se shared expert weights are not set up")
 
-    def clone_for_cuda_graph(self) -> "GLM5MegaMoESE":
+    def clone_for_cuda_graph(self, *, share_mega_buf: bool = False) -> "GLM5MegaMoESE":
         clone = object.__new__(type(self))
         torch.nn.Module.__init__(clone)
         clone.cfg = self.cfg
@@ -266,12 +266,17 @@ class GLM5MegaMoESE(GLM5MegaMoE):
         clone._shared_l2_w = self._shared_l2_w
         clone._shared_l2_sf = self._shared_l2_sf
         clone._num_shared_experts = self._num_shared_experts
-        clone._mega_buf = get_or_create_mega_moe_se_clone_buf(
-            self._mega_buf,
-            self._mega_group,
-            self.cfg,
-            self._num_shared_experts,
-        )
+        if share_mega_buf:
+            if self._mega_buf is None or self._mega_group is None:
+                raise RuntimeError("Shared MegaMoE buffer must be initialized")
+            clone._mega_buf = self._mega_buf
+        else:
+            clone._mega_buf = get_or_create_mega_moe_se_clone_buf(
+                self._mega_buf,
+                self._mega_group,
+                self.cfg,
+                self._num_shared_experts,
+            )
         clone._mega_y = (
             torch.empty_like(self._mega_y) if self._mega_y is not None else None
         )

@@ -65,10 +65,14 @@ class MegaMoeSEWrapper(MegaMoeWrapper):
         torch.cuda.empty_cache()
         self.mega_moe.maybe_warmup_fused_shared_jit_once()
 
-    def clone_for_cuda_graph(self) -> "MegaMoeSEWrapper":
+    def clone_for_cuda_graph(
+        self, *, share_mega_buf: bool = False
+    ) -> "MegaMoeSEWrapper":
         clone = object.__new__(type(self))
         torch.nn.Module.__init__(clone)
-        clone.mega_moe = self.mega_moe.clone_for_cuda_graph()
+        clone.mega_moe = self.mega_moe.clone_for_cuda_graph(
+            share_mega_buf=share_mega_buf
+        )
         clone.expert_num = self.expert_num
         return clone
 

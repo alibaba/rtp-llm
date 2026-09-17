@@ -1483,9 +1483,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                              || is_mega_moe_strategy(mtp_params->moe_config.moe_strategy);
             const bool draft_uses_ep_collective =
                 params.parallelism_config.ep_size > 1 || mtp_params->parallelism_config.ep_size > 1;
-            mtp_indexer_graph_choice_world_sync_ = mtp_indexer_share_enabled_ && draft_uses_mega_moe
-                                                   && draft_uses_ep_collective
-                                                   && params.parallelism_config.world_size > 1;
+            const bool share_decode_mega_buf = mtp_indexer_share_enabled_ && draft_uses_mega_moe
+                                               && draft_uses_ep_collective && params.parallelism_config.world_size > 1;
             const bool disable_sp_prefill_for_mega_moe = draft_uses_mega_moe && draft_uses_ep_collective
                                                          && !force_sp_prefill_cuda_graph && !mtp_indexer_share_enabled_;
             const bool disable_sp_prefill_cuda_graph = disable_sp_prefill_by_env || disable_sp_prefill_for_mega_moe;
@@ -1494,7 +1493,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                 "MTP indexer sharing requires the draft-extend CUDA graph; eager fallback is disabled");
             RTP_LLM_LOG_INFO("[speculative decoding] enable_cuda_graph=%d disable_sp_prefill_cuda_graph=%d "
                              "disable_by_env=%d disable_for_mega_moe=%d force_sp_prefill_cuda_graph=%d "
-                             "draft_uses_mega_moe=%d draft_uses_ep_collective=%d indexer_choice_world_sync=%d "
+                             "draft_uses_mega_moe=%d draft_uses_ep_collective=%d share_decode_mega_buf=%d "
                              "(set ENABLE_CUDA_GRAPH=1 when starting server to enable sp_prefill_draft_model_; "
                              "set DISABLE_SP_PREFILL_CUDA_GRAPH=1 to skip the draft prefill CUDA graph capture only; "
                              "set RTP_LLM_FORCE_SP_PREFILL_CUDA_GRAPH=1 for diagnostic replay on GLM5 MegaMoE)",
@@ -1505,7 +1504,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                              static_cast<int>(force_sp_prefill_cuda_graph),
                              static_cast<int>(draft_uses_mega_moe),
                              static_cast<int>(draft_uses_ep_collective),
-                             static_cast<int>(mtp_indexer_graph_choice_world_sync_));
+                             static_cast<int>(share_decode_mega_buf));
             if (enable_cuda_graph && !disable_sp_prefill_cuda_graph) {
                 RTP_LLM_LOG_INFO(
                     "[speculative decoding] creating separate prefill draft model with CUDA graph support");
@@ -1540,7 +1539,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                     py::gil_scoped_acquire gil;
                     RTP_LLM_CHECK_WITH_INFO(py::hasattr(params.py_sp_model, "clone_for_cuda_graph"),
                                             "MTP indexer seed graph requires clone_for_cuda_graph()");
-                    seed_decode_py_model = params.py_sp_model.attr("clone_for_cuda_graph")();
+                    seed_decode_py_model =
+                        share_decode_mega_buf ?
+                            params.py_sp_model.attr("clone_for_cuda_graph")(py::arg("share_mega_buf") = true) :
+                            params.py_sp_model.attr("clone_for_cuda_graph")();
                 }
                 seed_decode_draft_model_.reset(new PyWrappedModel(model_params,
                                                                   seed_decode_py_model,
@@ -3285,11 +3287,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     }
     const auto all_streams = stream_groups.allStreams();
 
-    // Root owns request-scoped seeds. Rebuild the current batch order on GPU;
-    // no seed is sent across PD. The seed payload remains TP-local. Only the
-    // one-element cold flag is reduced across DP+TP for MegaMoE, whose
-    // symmetric-buffer collective requires every peer to enter the same model
-    // clone. Other models retain the cheaper TP-only decision.
+    // Seeds remain request-scoped and TP-local. Seed/reuse decode models share
+    // MegaMoE communication buffers, so DP peers can independently choose their
+    // indexer path while entering the same EP collective. TP peers still agree.
     bool use_seed_graph = false;
     if (mtp_indexer_share_enabled_) {
         std::vector<torch::Tensor> seed_rows;
@@ -3305,17 +3305,13 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                 seed_rows.push_back(seed.reshape({1, mtp_indexer_topk_}));
             }
         }
-        // Graph selection is host control state. Keep it off CUDA so choosing
-        // a graph never drains the current compute stream. DP_AND_TP CPU
-        // all-reduce is routed to the feature-gated Gloo control group.
-        auto seed_flag = torch::tensor({isTpRank0() && !all_seeded ? 1 : 0}, torch::kInt32);
-        if (mtp_indexer_graph_choice_world_sync_) {
-            seed_flag = execAllReduce({seed_flag, ReduceOp::Sum, false, ParallelMode::DP_AND_TP}).buffer;
-        } else if (parallelism_config_.tp_size > 1) {
+        // Keep graph selection on the host; TP=1 needs no tensor or collective.
+        use_seed_graph = !all_seeded;
+        if (parallelism_config_.tp_size > 1) {
+            auto seed_flag = torch::tensor({isTpRank0() && !all_seeded ? 1 : 0}, torch::kInt32);
             execBroadcastCpu({{seed_flag}, 0});
+            use_seed_graph = seed_flag.item<int32_t>() != 0;
         }
-        use_seed_graph =
-            mtp_indexer_graph_choice_world_sync_ || !isTpRank0() ? seed_flag.item<int32_t>() != 0 : !all_seeded;
 
         if (!use_seed_graph) {
             torch::Tensor ordered_seed;

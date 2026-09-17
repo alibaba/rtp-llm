@@ -117,3 +117,9 @@ py_test(
     tags = ["H20"],
     exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
 )
+
+py_test(
+    name = "mtp_mega_buf_share_test",
+    srcs = ["mtp_mega_buf_share_test.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+)
