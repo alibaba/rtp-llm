@@ -533,9 +533,16 @@ class GenericMoeDecoderLayer(nn.Module):
         from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 
         _fuse_on = fuse_kernels_enabled(hw_kernel_config)
+        # MiniMax-M3-only. Enabling these on Qwen3-Next / generic MoE / MLA
+        # changes greedy tokens vs existing smoke goldens.
+        _minimax_m3 = getattr(config, "msa_sparse_config", None) is not None
         self._fuse_input_norm_quant = False
         self._fuse_input_norm_quant_params = None
-        if _fuse_on and (fused_add_rmsnorm_fp8_quant_with_bf16_output is not None):
+        if (
+            _fuse_on
+            and _minimax_m3
+            and (fused_add_rmsnorm_fp8_quant_with_bf16_output is not None)
+        ):
             projection = self._input_quant_projection()
             params = _get_fused_fp8_quant_params(projection)
             if params is not None:
@@ -545,11 +552,12 @@ class GenericMoeDecoderLayer(nn.Module):
         # Fuse post_attention_layernorm + fp8_quant for DenseMLP
         self._fuse_post_norm_quant_params = (
             _get_fused_fp8_quant_params(getattr(self.mlp, "up_proj", None))
-            if isinstance(self.mlp, DenseMLP)
+            if _minimax_m3 and isinstance(self.mlp, DenseMLP)
             else None
         )
         self._fuse_post_norm_quant = (
             _fuse_on
+            and _minimax_m3
             and fused_add_rmsnorm_fp8_quant is not None
             and isinstance(self.mlp, DenseMLP)
             and self._fuse_post_norm_quant_params is not None
@@ -557,12 +565,17 @@ class GenericMoeDecoderLayer(nn.Module):
 
         # Fuse post_attention_layernorm + dual output (bf16+fp8) for MoE
         self._fuse_post_norm_quant_moe_params = None
-        if isinstance(self.mlp, GenericMoeLayer) and self.mlp.shared_expert is not None:
+        if (
+            _minimax_m3
+            and isinstance(self.mlp, GenericMoeLayer)
+            and self.mlp.shared_expert is not None
+        ):
             self._fuse_post_norm_quant_moe_params = _get_fused_fp8_quant_params(
                 getattr(self.mlp.shared_expert, "up_proj", None)
             )
         self._fuse_post_norm_quant_moe = (
             _fuse_on
+            and _minimax_m3
             and fused_add_rmsnorm_fp8_quant_with_bf16_output is not None
             and isinstance(self.mlp, GenericMoeLayer)
             and self.mlp.shared_expert is not None
@@ -580,6 +593,8 @@ class GenericMoeDecoderLayer(nn.Module):
         hw_kernel_config: Optional["HWKernelConfig"],
     ) -> nn.Module:
         if config.attn_config.use_mla:
+            # Current MlaAttention decides sparse/indexer from attn_config.is_sparse.
+            # Do not pass GLM5/DSA helpers that are not on this branch.
             return MlaAttention(
                 config.attn_config,
                 parallelism_config,
@@ -589,8 +604,6 @@ class GenericMoeDecoderLayer(nn.Module):
                 quant_config,
                 hw_kernel_config,
                 global_weights=global_weights,
-                has_indexer=dsa_layer_has_indexer(config, layer_idx),
-                reuse_topk_indices=dsa_layer_skips_topk(config, layer_idx),
             )
         attn_configs = config.getAttentionConfigs(parallelism_config.get_attn_tp_size())
         # MiniMax-M3 sparse layers (MSA): route to the Triton sparse attention
@@ -633,12 +646,6 @@ class GenericMoeDecoderLayer(nn.Module):
             # quant config; the idx_q/idx_k branches stay bf16 and consume the
             # bf16_normed output from the fused kernel.
             return getattr(self.self_attn, "qkv_proj", None)
-        if isinstance(self.self_attn, CausalAttention):
-            return getattr(self.self_attn, "qkv_proj", None)
-        if isinstance(self.self_attn, MlaAttention):
-            return getattr(self.self_attn, "fused_qkv_a_proj", None) or getattr(
-                self.self_attn, "fused_qkv_proj", None
-            )
         return None
 
     def _forward_attention(
@@ -669,16 +676,12 @@ class GenericMoeDecoderLayer(nn.Module):
             return hidden_states, None
 
         if isinstance(self.self_attn, MlaAttention):
-            hidden_states, topk_indices = self.self_attn(
+            hidden_states = self.self_attn(
                 hidden_states=hidden_states,
                 fmha_impl=fmha_impl,
                 kv_cache=kv_cache,
-                prev_topk_indices=prev_topk_indices,
-                force_reuse_topk_indices=force_reuse_topk_indices,
-                return_topk=True,
-                **quantized_inputs,
             )
-            return hidden_states, topk_indices
+            return hidden_states, None
 
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
