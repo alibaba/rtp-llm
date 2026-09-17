@@ -54,6 +54,9 @@ private:
     void                            initLoadBalance();
     absl::Status                    trySaveStepError() const;
     void                            loop();
+    // Waits out the shared cudacore collection window before the engine exits on
+    // a fatal CUDA incident; no-op when no incident was recorded.
+    void                            joinFatalCudacoreCollectionWindow(const char* reason) const;
     void                            normalizeSystemPromptCacheConfig();
     void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
     absl::Status                    initSystemPrompt();

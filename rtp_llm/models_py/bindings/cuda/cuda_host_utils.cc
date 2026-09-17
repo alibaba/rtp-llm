@@ -15,6 +15,7 @@
  */
 
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
+#include "rtp_llm/cpp/utils/CudacoreDiagnostics.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -25,6 +26,7 @@
 #endif
 #include <mutex>
 #include <unordered_map>
+#include <utility>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/sysinfo.h>
@@ -84,6 +86,22 @@ static const char* _cudaGetErrorEnum(CUresult error) {
 }
 #endif
 
+// Registers a fatal device error before the numeric code is lost in the
+// runtime_error below. Only the fatal whitelist is recorded; the recorder never
+// calls this throwing checker again, so a failure here cannot recurse.
+template<typename T>
+void recordFatalCheckError(T result, const char* const file, int const line) {
+    const int code = static_cast<int>(result);
+    if (!rtp_llm::isFatalCudaRuntimeError(code)) {
+        return;
+    }
+    rtp_llm::FatalCudaErrorRecord record =
+        rtp_llm::buildCudaRuntimeErrorRecord(code, rtp_llm::FatalCudaErrorSite::GenericCheck, file, line, -1);
+    record.code_name = _cudaGetErrorEnum(result);
+    record.message   = record.code_name;
+    (void)rtp_llm::recordFirstFatalCudaError(std::move(record));
+}
+
 template<typename T>
 void check(T result, const char* const file, int const line) {
     if (result) {
@@ -93,6 +111,7 @@ void check(T result, const char* const file, int const line) {
         RTP_LLM_LOG_ERROR(error_str);
         fflush(stdout);
         fflush(stderr);
+        recordFatalCheckError(result, file, line);
         throw std::runtime_error(error_str);
     }
 }

@@ -2,12 +2,15 @@
 #include "rtp_llm/models_py/bindings/common/kernels/sm_copy_kernel.h"
 #include "rtp_llm/models_py/bindings/cuda/SplitKvCacheCopy.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
+#include "rtp_llm/cpp/utils/CudacoreDiagnostics.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
 #include <cuda_runtime.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -140,6 +143,47 @@ void releaseMetadataScratch(StagedMemoryCopyScratch& scratch) {
     releaseDevicePointer(scratch.device_offsets);
     releaseDevicePointer(scratch.device_sizes);
     scratch.meta_capacity = 0;
+}
+
+// Copies bounded tile metadata for a fatal device error before throwing or
+// falling back. Ordinary OOM / argument errors stay out of this path.
+void recordFatalCopyError(cudaError_t        error,
+                          FatalCudaErrorSite site,
+                          const char*        file,
+                          int                line,
+                          int                device_index,
+                          cudaStream_t       stream,
+                          void* const*       dsts,
+                          const void* const* srcs,
+                          const size_t*      sizes,
+                          size_t             count) {
+    if (!isFatalCudaRuntimeError(static_cast<int>(error))) {
+        return;
+    }
+    FatalCudaErrorRecord record =
+        buildCudaRuntimeErrorRecord(static_cast<int>(error), site, file, line, device_index);
+    record.message = cudaGetErrorString(error);
+    char stream_repr[32] = {};
+    std::snprintf(stream_repr, sizeof(stream_repr), "%p", static_cast<const void*>(stream));
+    record.stream = stream_repr;
+
+    uint64_t bytes_total = 0;
+    const size_t kept = std::min(count, CudacoreDiagConstants::kMaxTileMetadata);
+    record.tiles.reserve(kept);
+    for (size_t index = 0; index < count; ++index) {
+        const size_t bytes = sizes == nullptr ? 0 : sizes[index];
+        bytes_total += bytes;
+        if (index < kept) {
+            FatalCudaTileRecord tile;
+            tile.dst   = dsts == nullptr ? 0 : reinterpret_cast<uintptr_t>(dsts[index]);
+            tile.src   = srcs == nullptr ? 0 : reinterpret_cast<uintptr_t>(srcs[index]);
+            tile.bytes = bytes;
+            record.tiles.push_back(tile);
+        }
+    }
+    record.tile_total  = count;
+    record.bytes_total = bytes_total;
+    (void)recordFirstFatalCudaError(std::move(record));
 }
 
 bool ensureStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch,
@@ -360,6 +404,16 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
                             dsts.size(),
                             static_cast<int>(submit_error),
                             cudaGetErrorString(submit_error));
+        recordFatalCopyError(submit_error,
+                             FatalCudaErrorSite::BatchedCopySubmit,
+                             __FILE__,
+                             __LINE__,
+                             params.device_index,
+                             stream,
+                             dsts.data(),
+                             srcs.data(),
+                             sizes.data(),
+                             dsts.size());
         return BatchedMemoryCopyStatus::EXECUTION_FAILED;
     }
 
@@ -377,6 +431,16 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
                             dsts.size(),
                             static_cast<int>(completion_error),
                             cudaGetErrorString(completion_error));
+        recordFatalCopyError(completion_error,
+                             FatalCudaErrorSite::BatchedCopyCompletion,
+                             __FILE__,
+                             __LINE__,
+                             params.device_index,
+                             stream,
+                             dsts.data(),
+                             srcs.data(),
+                             sizes.data(),
+                             dsts.size());
         return BatchedMemoryCopyStatus::EXECUTION_FAILED;
     }
     RTP_LLM_LOG_DEBUG("execBatchedMemoryCopy phase=completed device=%d stream=%p tiles=%zu",
@@ -520,6 +584,16 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
                             params.host_bytes,
                             params.direction == StagedMemoryCopyDirection::H2D ? "H2D" : "D2H",
                             cudaGetErrorString(err));
+        recordFatalCopyError(err,
+                             FatalCudaErrorSite::StagedCopy,
+                             __FILE__,
+                             __LINE__,
+                             params.device_index,
+                             stream,
+                             h_ptrs.data(),
+                             nullptr,
+                             h_sizes.data(),
+                             h_ptrs.size());
         cleanup_local_scratch();
         return false;
     }

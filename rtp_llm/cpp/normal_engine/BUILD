@@ -29,6 +29,7 @@ cc_library(
         "//rtp_llm/cpp/utils:tensor_debug_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
         "//rtp_llm/cpp/utils:torch_cuda_oom",
+        "//rtp_llm/cpp/utils:cudacore_diagnostics",
         "//rtp_llm/cpp/multimodal_processor:multimodal_input_utils",
     ] + select({
         "//:using_cuda": [

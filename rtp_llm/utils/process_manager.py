@@ -6,6 +6,7 @@ import time
 from multiprocessing import Process
 from typing import Callable, Dict, List, Optional, Set
 
+from rtp_llm.utils.cudacore_lease import wait_for_collection_leases
 from rtp_llm.utils.shutdown_config import (
     AUTO_PRE_STOP_DRAIN_HEADROOM_SECONDS,
     normalize_non_negative_seconds,
@@ -727,6 +728,23 @@ class ProcessManager:
                 logging.error(f"Error joining process {proc.pid}: {e}")
         logging.info("All processes joined")
 
+    def _await_cudacore_collection_window(self, reason: str) -> None:
+        """Let workers that registered a cudacore collection lease finish.
+
+        A worker that recorded a fatal CUDA error keeps the process alive until
+        the driver finishes writing the GPU coredump. Terminating it early
+        truncates that dump, so the parent waits out the worker's *remaining*
+        window (bounded by the lease) before interrupting anything.
+        """
+        pids = [proc.pid for proc in self.processes if proc.pid is not None]
+        if not pids:
+            return
+        waited = wait_for_collection_leases(pids, reason=reason)
+        if waited > 0:
+            logging.warning(
+                f"Cudacore collection window closed after {waited:.1f}s ({reason})"
+            )
+
     def _monitor_processes_health(self):
         """Watch children; on shutdown or unexpected death, SIGTERM then SIGKILL.
 
@@ -742,6 +760,7 @@ class ProcessManager:
 
             if self.shutdown_requested:
                 drain_timeout = 0 if self.failure_detected else self.shutdown_timeout
+                self._await_cudacore_collection_window("shutdown_sigterm")
                 self._terminate_processes(drain_timeout, staged=True)
             else:
                 # Unexpected death → escalate to failure shutdown.
@@ -750,9 +769,13 @@ class ProcessManager:
                         logging.error(f"Process {proc.pid} died unexpectedly")
                 self.failure_detected = True
                 logging.error("Some processes died unexpectedly, terminating all...")
+                # A sibling may be collecting a GPU coredump right now.
+                self._await_cudacore_collection_window("unexpected_death_sigterm")
                 self._terminate_processes(drain_timeout=0, staged=False)
 
             time.sleep(self.POST_KILL_REAP_WINDOW)
+            # A lease may have appeared while we were terminating.
+            self._await_cudacore_collection_window("force_kill")
             self._force_kill_processes()
             break
 
