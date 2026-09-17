@@ -273,6 +273,23 @@ def _create_rank_processes(
     local_world_size = _get_local_world_size(py_env_configs)
     cuda_device_list = _get_cuda_device_list()
     _validate_dp_configuration(py_env_configs)
+    isolate_cuda = os.environ.get("RTP_LLM_ISOLATE_RANK_CUDA_DEVICE", "0") == "1"
+    if isolate_cuda:
+        if pc.world_size != local_world_size or pc.dp_size != 1:
+            raise ValueError(
+                "CUDA rank isolation currently requires single-node TP with DP=1"
+            )
+        if pc.use_ub_comm:
+            raise ValueError(
+                "CUDA rank isolation does not support user-buffer communication"
+            )
+        device_offset = int(os.environ.get("RTP_LLM_LOCAL_DEVICE_OFFSET", "0"))
+        if device_offset < 0 or device_offset + local_world_size > len(
+            cuda_device_list
+        ):
+            raise ValueError(
+                "CUDA rank isolation requires one visible GPU per local rank"
+            )
 
     processes = []
     rank_pipe_readers = []  # Store pipe readers for each rank
@@ -295,7 +312,23 @@ def _create_rank_processes(
             ),
             name=f"rank-{world_rank}",
         )
-        proc.start()
+        if isolate_cuda:
+            local_rank = world_rank % local_world_size
+            previous_offset = os.environ.get("RTP_LLM_LOCAL_DEVICE_OFFSET")
+            os.environ["CUDA_VISIBLE_DEVICES"] = cuda_device_list[
+                local_rank + device_offset
+            ]
+            os.environ["RTP_LLM_LOCAL_DEVICE_OFFSET"] = str(-local_rank)
+            try:
+                proc.start()
+            finally:
+                os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
+                if previous_offset is None:
+                    os.environ.pop("RTP_LLM_LOCAL_DEVICE_OFFSET", None)
+                else:
+                    os.environ["RTP_LLM_LOCAL_DEVICE_OFFSET"] = previous_offset
+        else:
+            proc.start()
         writer.close()  # Parent process closes write end
         processes.append(proc)
         rank_pipe_readers.append(reader)

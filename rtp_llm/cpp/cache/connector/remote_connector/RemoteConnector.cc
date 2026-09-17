@@ -899,9 +899,10 @@ bool RemoteConnector::genWriteRequest(size_t                                  tp
 }
 
 int RemoteConnector::SetCudaDeviceOnce() const {
-    auto device_id     = static_cast<int>(init_params_->parallelism_config.local_rank);
-    int  before_device = -1;
-    int  after_device  = -1;
+    auto device_id = static_cast<int>(init_params_->parallelism_config.local_rank)
+                     + autil::EnvUtil::getEnv("RTP_LLM_LOCAL_DEVICE_OFFSET", 0);
+    int before_device = -1;
+    int after_device  = -1;
     check_cuda_value(cudaGetDevice(&before_device));
     if (before_device != device_id) {
         check_cuda_value(cudaSetDevice(device_id));

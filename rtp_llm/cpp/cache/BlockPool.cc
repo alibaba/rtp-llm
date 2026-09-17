@@ -15,7 +15,10 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <stdexcept>
+#include <sstream>
+#include <sched.h>
 #include <string>
 #include <thread>
 #include <utility>
@@ -175,11 +178,23 @@ public:
         if (thread_num_ <= 1 || size_bytes_ == 0) {
             return;
         }
+        cpu_groups_ = parseCpuGroups();
+        if (cpu_groups_.size() > thread_num_) {
+            throw std::invalid_argument("more Host prefault CPU groups than workers");
+        }
         chunk_num_ = (size_bytes_ + kChunkBytes - 1) / kChunkBytes;
         begin_us_  = currentTimeUs();
         workers_.reserve(thread_num_);
-        for (size_t i = 0; i < thread_num_; ++i) {
-            workers_.emplace_back([this]() { populateChunks(); });
+        try {
+            for (size_t i = 0; i < thread_num_; ++i) {
+                workers_.emplace_back([this]() { populateChunks(); });
+            }
+        } catch (...) {
+            for (auto& worker : workers_) {
+                if (worker.joinable())
+                    worker.join();
+            }
+            throw;
         }
     }
 
@@ -201,17 +216,71 @@ public:
         // prefault_ms is when the arena became fully resident; window_ms also
         // contains the cudaHostRegister that ran concurrently with it.
         RTP_LLM_LOG_INFO("host block pool prefaulted: threads=%zu chunk_bytes=%zu total_size=%zu "
-                         "madvise_fallbacks=%zu prefault_ms=%.3f window_ms=%.3f",
+                         "madvise_fallbacks=%zu prefault_ms=%.3f window_ms=%.3f cpu_groups=%zu affinity_failures=%zu",
                          thread_num_,
                          kChunkBytes,
                          size_bytes_,
                          madvise_fallbacks_.load(),
                          static_cast<double>(populate_end_us_.load() - begin_us_) / 1000.0,
-                         static_cast<double>(currentTimeUs() - begin_us_) / 1000.0);
+                         static_cast<double>(currentTimeUs() - begin_us_) / 1000.0,
+                         cpu_groups_.size(),
+                         affinity_failures_.load());
     }
 
 private:
+    static std::vector<cpu_set_t> parseCpuGroups() {
+        const char* value = std::getenv("RTP_LLM_HOST_BLOCK_POOL_PREFAULT_CPU_GROUPS");
+        if (value == nullptr || *value == '\0')
+            return {};
+        const auto parse_cpu = [](const std::string& text) -> unsigned long {
+            if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos) {
+                throw std::invalid_argument("invalid Host prefault CPU id");
+            }
+            const auto cpu = std::stoul(text);
+            if (cpu >= CPU_SETSIZE)
+                throw std::invalid_argument("Host prefault CPU id exceeds CPU_SETSIZE");
+            return cpu;
+        };
+        std::vector<cpu_set_t> groups;
+        std::istringstream     input(value);
+        std::string            group;
+        if (std::string(value).back() == ';')
+            throw std::invalid_argument("empty Host prefault CPU group");
+        while (std::getline(input, group, ';')) {
+            if (group.empty() || group.back() == ',')
+                throw std::invalid_argument("empty Host prefault CPU group");
+            cpu_set_t mask;
+            CPU_ZERO(&mask);
+            std::istringstream members(group);
+            std::string        member;
+            while (std::getline(members, member, ',')) {
+                const auto dash  = member.find('-');
+                const auto first = parse_cpu(member.substr(0, dash));
+                const auto last  = dash == std::string::npos ? first : parse_cpu(member.substr(dash + 1));
+                if (last < first)
+                    throw std::invalid_argument("reversed Host prefault CPU range");
+                for (auto cpu = first; cpu <= last; ++cpu)
+                    CPU_SET(cpu, &mask);
+            }
+            if (CPU_COUNT(&mask) == 0)
+                throw std::invalid_argument("empty Host prefault CPU mask");
+            groups.push_back(mask);
+        }
+        return groups;
+    }
+
     void populateChunks() {
+        if (!cpu_groups_.empty()) {
+            const auto  index     = worker_index_.fetch_add(1, std::memory_order_relaxed);
+            const auto& requested = cpu_groups_[index % cpu_groups_.size()];
+            cpu_set_t   actual;
+            // The kernel enforces the cpuset. A partial/failed binding is
+            // reported, while page preparation still completes correctly.
+            if (sched_setaffinity(0, sizeof(requested), &requested) != 0
+                || sched_getaffinity(0, sizeof(actual), &actual) != 0 || !CPU_EQUAL(&actual, &requested)) {
+                affinity_failures_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
         for (;;) {
             const size_t idx = cursor_.fetch_add(1, std::memory_order_relaxed);
             if (idx >= chunk_num_) {
@@ -244,11 +313,60 @@ private:
     std::atomic<size_t>      madvise_fallbacks_{0};
     std::atomic<int64_t>     populate_end_us_{0};
     std::vector<std::thread> workers_;
+    std::vector<cpu_set_t>   cpu_groups_;
+    std::atomic<size_t>      worker_index_{0};
+    std::atomic<size_t>      affinity_failures_{0};
 };
+
+#if USING_CUDA
+// Opt-in PMD alignment keeps prefault tasks on huge-page boundaries. This is
+// only an allocation hint: no synchronous collapse or global VM policy change.
+void* mmapHostArena(size_t size_bytes) {
+    const char* value     = std::getenv("RTP_LLM_HOST_BLOCK_POOL_HUGE_PAGE");
+    const bool  huge_page = value != nullptr && std::string(value) == "1";
+    if (value != nullptr && std::string(value) != "0" && !huge_page) {
+        throw std::invalid_argument("RTP_LLM_HOST_BLOCK_POOL_HUGE_PAGE must be 0 or 1");
+    }
+    if (!huge_page) {
+        return mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    }
+    constexpr size_t alignment = 2UL * 1024 * 1024;
+    const long       page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0 || alignment % static_cast<size_t>(page_size) != 0 || size_bytes == 0
+        || size_bytes > std::numeric_limits<size_t>::max() - 2 * alignment) {
+        throw std::invalid_argument("invalid size or page size for aligned Host arena");
+    }
+    const size_t page        = static_cast<size_t>(page_size);
+    const size_t mapped_size = (size_bytes + page - 1) / page * page;
+    void* raw = mmap(nullptr, mapped_size + alignment, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (raw == MAP_FAILED)
+        return MAP_FAILED;
+    const auto   start   = reinterpret_cast<uintptr_t>(raw);
+    const auto   aligned = (start + alignment - 1) & ~(alignment - 1);
+    const size_t prefix  = aligned - start;
+    const size_t suffix  = alignment - prefix;
+    if (prefix != 0)
+        (void)munmap(raw, prefix);
+    if (suffix != 0)
+        (void)munmap(reinterpret_cast<void*>(aligned + mapped_size), suffix);
+    void* ptr = reinterpret_cast<void*>(aligned);
+    if (madvise(ptr, mapped_size, MADV_HUGEPAGE) != 0) {
+        RTP_LLM_LOG_WARNING("Host arena MADV_HUGEPAGE failed: %s", std::strerror(errno));
+    }
+    RTP_LLM_LOG_INFO("Host arena huge-page hint: ptr=%p size=%zu mapped_size=%zu alignment=%zu",
+                     ptr,
+                     size_bytes,
+                     mapped_size,
+                     alignment);
+    return ptr;
+}
+
+#endif  // USING_CUDA
 
 torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_numa_nodes, size_t prefault_threads) {
 #if USING_CUDA
-    void* ptr = mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const auto begin_us = currentTimeUs();
+    void*      ptr      = mmapHostArena(size_bytes);
     if (ptr == MAP_FAILED) {
         throw std::runtime_error(std::string("anonymous mmap failed: ") + std::strerror(errno));
     }
@@ -281,16 +399,22 @@ torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_num
         }
     }
     cudaError_t err = cudaSuccess;
-    {
-        // Prefaulting runs concurrently with the registration below; the scope
-        // guarantees the threads are joined before any munmap of the arena.
+    try {
+        // Prefaulting runs concurrently with registration; construction and
+        // parsing failures must also release the not-yet-registered mapping.
         HostArenaPrefaulter prefaulter(ptr, size_bytes, prefault_threads);
         err = cudaHostRegister(ptr, size_bytes, cudaHostRegisterDefault);
+    } catch (...) {
+        (void)munmap(ptr, size_bytes);
+        throw;
     }
     if (err != cudaSuccess) {
         (void)munmap(ptr, size_bytes);
         throw std::runtime_error(std::string("cudaHostRegister failed: ") + cudaGetErrorString(err));
     }
+    RTP_LLM_LOG_INFO("Host arena preparation completed: size=%zu elapsed_ms=%.3f",
+                     size_bytes,
+                     static_cast<double>(currentTimeUs() - begin_us) / 1000.0);
     auto deleter = [size_bytes](void* registered_ptr) {
         if (registered_ptr != nullptr) {
             (void)cudaHostUnregister(registered_ptr);
@@ -388,7 +512,7 @@ void BlockPool::initializeCacheBuffer() {
                                     "pinned MLA backing requires a sparse MLA-only pool");
         }
         use_pinned_cpu_backing_ = true;
-        block_generations_ = torch::zeros(
+        block_generations_      = torch::zeros(
             {config_.block_num}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU).pinned_memory(true));
         layout_indexer_buffers_.resize(config_.memory_layouts.size());
         layout_hbm_buffers_.resize(config_.memory_layouts.size());
@@ -573,25 +697,25 @@ void BlockPool::processMemoryLayout(size_t layout_idx, const torch::Tensor& full
         if (config_.mla_tiered_cache) {
             // RDMA requires the same legacy CUDA allocation for the separate
             // Indexer buffer as for an ordinary HBM block pool.
-            kv_scale_tensor = use_cuda_malloc_backing_ ?
-                                  allocateCudaBuffer(layout_cfg.kv_scale_pool_size_bytes) :
-                                  torch::empty({static_cast<int64_t>(layout_cfg.kv_scale_pool_size_bytes)},
+            kv_scale_tensor                     = use_cuda_malloc_backing_ ?
+                                                      allocateCudaBuffer(layout_cfg.kv_scale_pool_size_bytes) :
+                                                      torch::empty({static_cast<int64_t>(layout_cfg.kv_scale_pool_size_bytes)},
                                                torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
             layout_indexer_buffers_[layout_idx] = kv_scale_tensor;
         } else {
             kv_scale_tensor = createTensor(full_tensor,
-                                       static_cast<int64_t>(layout_cfg.kv_scale_offset_bytes),
-                                       static_cast<int64_t>(layout_cfg.kv_scale_pool_size_bytes),
-                                       layout_idx,
-                                       "kv_scale");
+                                           static_cast<int64_t>(layout_cfg.kv_scale_offset_bytes),
+                                           static_cast<int64_t>(layout_cfg.kv_scale_pool_size_bytes),
+                                           layout_idx,
+                                           "kv_scale");
         }
     }
 
     if (config_.mla_tiered_cache) {
-        layout_hbm_buffers_[layout_idx] = use_cuda_malloc_backing_ ?
-            allocateCudaBuffer(layout_cfg.mla_hbm_size_bytes) :
-            torch::empty({static_cast<int64_t>(layout_cfg.mla_hbm_size_bytes)},
-                         torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        layout_hbm_buffers_[layout_idx] =
+            use_cuda_malloc_backing_ ? allocateCudaBuffer(layout_cfg.mla_hbm_size_bytes) :
+                                       torch::empty({static_cast<int64_t>(layout_cfg.mla_hbm_size_bytes)},
+                                                    torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
     }
     // 初始化内存布局策略
     initializeLayoutStrategy(layout_idx, layout_cfg, kv_cache_tensor, kv_scale_tensor);
@@ -635,11 +759,14 @@ void BlockPool::initializeLayoutStrategy(size_t                    layout_idx,
                             "Failed to create memory layout strategy for layout[%zu]",
                             layout_idx);
 
-    RTP_LLM_CHECK_WITH_INFO(
-        layout_strategies_[layout_idx]->init(layout_cfg, kv_cache_tensor, kv_scale_tensor, layout_cache_base_ptr,
-            config_.mla_tiered_cache ? layout_hbm_buffers_[layout_idx] : torch::Tensor()),
-        "Failed to initialize memory layout strategy for layout[%zu]",
-        layout_idx);
+    RTP_LLM_CHECK_WITH_INFO(layout_strategies_[layout_idx]->init(
+                                layout_cfg,
+                                kv_cache_tensor,
+                                kv_scale_tensor,
+                                layout_cache_base_ptr,
+                                config_.mla_tiered_cache ? layout_hbm_buffers_[layout_idx] : torch::Tensor()),
+                            "Failed to initialize memory layout strategy for layout[%zu]",
+                            layout_idx);
 }
 
 void BlockPool::processLayerTensors(size_t                    layout_idx,
@@ -700,19 +827,19 @@ BlockCachePtr BlockPool::blockCache() {
 
 void BlockPool::initFreeBlocks() {
     if (config_.mla_tiered_cache) {
-        const char* value = std::getenv("RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR");
+        const char*       value       = std::getenv("RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR");
         const std::string denominator = value ? value : "3";
-        RTP_LLM_CHECK_WITH_INFO(!denominator.empty()
-                                   && std::all_of(denominator.begin(), denominator.end(),
-                                                  [](char c) { return c >= '0' && c <= '9'; }),
-                               "RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR must be 0 or an integer >= 2");
+        RTP_LLM_CHECK_WITH_INFO(
+            !denominator.empty()
+                && std::all_of(denominator.begin(), denominator.end(), [](char c) { return c >= '0' && c <= '9'; }),
+            "RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR must be 0 or an integer >= 2");
         mla_hbm_share_denominator_ = std::stoull(denominator);
         RTP_LLM_CHECK_WITH_INFO(mla_hbm_share_denominator_ != 1,
-                               "RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR must be 0 or >= 2");
+                                "RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR must be 0 or >= 2");
         mla_hbm_blocks_ = config_.memory_layouts.front().mla_hbm_blocks;
         for (const auto& layout : config_.memory_layouts) {
             RTP_LLM_CHECK_WITH_INFO(layout.mla_hbm_blocks == static_cast<uint32_t>(mla_hbm_blocks_),
-                                   "MLA layouts must share the HBM block boundary");
+                                    "MLA layouts must share the HBM block boundary");
         }
         free_hbm_blocks_ = mla_hbm_blocks_ > 0 ? mla_hbm_blocks_ - 1 : 0;
     }
@@ -753,12 +880,12 @@ BlockIndicesType BlockPool::malloc(int num_blocks, int seq_len, BlockIdxType las
         }
         auto first = free_block_ids_.begin();
         if (mla_hbm_share_denominator_ > 0 && seq_len > 0) {
-            const size_t block_size = config_.memory_layouts.front().seq_size_per_block;
+            const size_t block_size   = config_.memory_layouts.front().seq_size_per_block;
             const size_t query_blocks = (static_cast<size_t>(seq_len) + block_size - 1) / block_size;
             // Decide from the complete sequence at admission. Growth follows the
             // last allocated tier so a host query cannot grab HBM one block at a time.
             const bool prefer_host = last_block > 0 ? last_block >= mla_hbm_blocks_ :
-                                     query_blocks > free_hbm_blocks_ / mla_hbm_share_denominator_;
+                                                      query_blocks > free_hbm_blocks_ / mla_hbm_share_denominator_;
             if (prefer_host) {
                 first = free_block_ids_.lower_bound(mla_hbm_blocks_);
             }
@@ -908,8 +1035,13 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
                                     "kv");
 
             if (config_.mla_tiered_cache) {
-                registerUserMrForBuffer(memory_util, layout_idx, 0, layout_cfg.mla_hbm_size_bytes,
-                                        layout_cfg.kv_block_stride_bytes, true, "hbm_kv");
+                registerUserMrForBuffer(memory_util,
+                                        layout_idx,
+                                        0,
+                                        layout_cfg.mla_hbm_size_bytes,
+                                        layout_cfg.kv_block_stride_bytes,
+                                        true,
+                                        "hbm_kv");
             }
             // Register scale buffer if present
             if (layout_cfg.hasScale()) {
@@ -963,12 +1095,12 @@ void BlockPool::registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> mem
     void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
     if (config_.mla_tiered_cache && buffer_type == "scale") {
         base_ptr = layout_indexer_buffers_[layout_idx].data_ptr();
-        gpu = true;
+        gpu      = true;
     } else if (config_.mla_tiered_cache && buffer_type == "hbm_kv") {
         base_ptr = layout_hbm_buffers_[layout_idx].data_ptr();
-        gpu = true;
+        gpu      = true;
     }
-    auto  start_us = currentTimeUs();
+    auto start_us = currentTimeUs();
 
     if (!memory_util->regUserMr(base_ptr, bytes, gpu, stride_bytes)) {
         RTP_LLM_FAIL("register user mr for block pool layout[%zu] %s buffer failed", layout_idx, buffer_type.c_str());
@@ -994,10 +1126,10 @@ void BlockPool::deregisterUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> m
     void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
     if (config_.mla_tiered_cache && buffer_type == "scale") {
         base_ptr = layout_indexer_buffers_[layout_idx].data_ptr();
-        gpu = true;
+        gpu      = true;
     } else if (config_.mla_tiered_cache && buffer_type == "hbm_kv") {
         base_ptr = layout_hbm_buffers_[layout_idx].data_ptr();
-        gpu = true;
+        gpu      = true;
     }
 
     if (!memory_util->deregUserMr(base_ptr, gpu)) {
@@ -1010,15 +1142,15 @@ std::vector<KVCachePoolMetricsSnapshot> BlockPool::tierMetricsSnapshots() const 
         return {};
     }
     std::vector<KVCachePoolMetricsSnapshot> snapshots(2);
-    snapshots[0].storage = "hbm";
-    snapshots[1].storage = "pinned";
-    const size_t hbm_blocks = config_.memory_layouts.front().mla_hbm_blocks;
-    size_t block_bytes = 0;
+    snapshots[0].storage     = "hbm";
+    snapshots[1].storage     = "pinned";
+    const size_t hbm_blocks  = config_.memory_layouts.front().mla_hbm_blocks;
+    size_t       block_bytes = 0;
     for (const auto& layout : config_.memory_layouts) {
         block_bytes += layout.layer_num * layout.kv_block_stride_bytes;
         snapshots[0].indexer_bytes += layout.kv_scale_pool_size_bytes;
-        snapshots[0].working_set_bytes += layout.layer_num * layout.kv_block_stride_bytes
-            * (layout.mla_resident_tokens / layout.seq_size_per_block);
+        snapshots[0].working_set_bytes +=
+            layout.layer_num * layout.kv_block_stride_bytes * (layout.mla_resident_tokens / layout.seq_size_per_block);
     }
     // Take a single consistent snapshot across request, connector and cache refs.
     std::scoped_lock lock(ref_mu_, free_mu_);
@@ -1034,8 +1166,8 @@ std::vector<KVCachePoolMetricsSnapshot> BlockPool::tierMetricsSnapshots() const 
         entry.capacity_bytes = entry.total_blocks * block_bytes;
         // Occupied includes reusable prefix-cache blocks; available excludes only in-flight refs.
         entry.occupied_bytes = (entry.total_blocks - entry.free_blocks) * block_bytes;
-        entry.used_ratio = entry.total_blocks ?
-            100.0 * (entry.total_blocks - entry.available_blocks) / entry.total_blocks : 0.0;
+        entry.used_ratio =
+            entry.total_blocks ? 100.0 * (entry.total_blocks - entry.available_blocks) / entry.total_blocks : 0.0;
     }
     return snapshots;
 }

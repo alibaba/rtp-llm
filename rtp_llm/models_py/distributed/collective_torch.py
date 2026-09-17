@@ -152,6 +152,23 @@ def init_distributed_environment(
         _init_glm5_cp_comm(parallelism_config)
         return
 
+    if os.environ.get("RTP_LLM_ISOLATE_RANK_CUDA_DEVICE") == "1":
+        # CUDA symmetric memory identifies peers by their visible ordinal.
+        # NVSHMEM supports one visible GPU per process and retains multicast.
+        import torch.distributed._symmetric_memory as symm_mem
+
+        if torch.cuda.device_count() != 1 or not symm_mem.is_nvshmem_available():
+            raise RuntimeError(
+                "CUDA rank isolation requires one GPU and NVSHMEM support"
+            )
+        torch.ops.load_library(
+            os.path.join(os.path.dirname(torch.__file__), "lib", "libtorch_nvshmem.so")
+        )
+        device = torch.device("cuda", torch.cuda.current_device())
+        if symm_mem.get_backend(device) != "NVSHMEM":
+            symm_mem.set_backend("NVSHMEM")
+        logging.info("Isolated CUDA rank uses NVSHMEM symmetric memory")
+
     _normalize_parallelism_ranks(parallelism_config)
     _cpu_tp_broadcaster_base_path = _make_cpu_tp_broadcaster_base_path(
         parallelism_config, nccl_init_port
@@ -304,7 +321,11 @@ def _init_glm5_cp_comm(parallelism_config: ParallelismConfig) -> None:
     if not pynccl_cp.enabled():
         return
     process_group = _get_group(Group.TP)
-    device = torch.device("cuda", parallelism_config.local_rank)
+    from rtp_llm.config.server_config_setup import get_cuda_device_id_for_local_rank
+
+    device = torch.device(
+        "cuda", get_cuda_device_id_for_local_rank(parallelism_config.local_rank)
+    )
     pynccl_cp.init(process_group, device)
     logging.info(
         "[rank: %s] initialized GLM5 pynccl CP resources",

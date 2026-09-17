@@ -1,4 +1,5 @@
 #include "autil/NetUtil.h"
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 
 using namespace std;
@@ -79,7 +80,8 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
     params.messager_io_thread_count     = init_params.cache_store_config.messager_io_thread_count;
     params.messager_worker_thread_count = init_params.cache_store_config.messager_worker_thread_count;
     params.metrics_reporter             = metrics_reporter_;
-    params.device_id                    = static_cast<int>(init_params.parallelism_config.local_rank);
+    params.device_id                    = static_cast<int>(init_params.parallelism_config.local_rank)
+                       + autil::EnvUtil::getEnv("RTP_LLM_LOCAL_DEVICE_OFFSET", 0);
     RTP_LLM_LOG_INFO("cache store listen port is [%ld], rdma listen port is [%ld] rdma_mode is [%d]",
                      params.listen_port,
                      params.rdma_listen_port,

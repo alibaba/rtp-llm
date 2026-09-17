@@ -98,9 +98,17 @@ class TorchSymmMemCommunicator:
         self.max_size = TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES[self.device_capability][
             self.world_size
         ]
+        # NVSHMEM's TeamManager compares the supplied device index, including
+        # the "current device" sentinel. Match DeepGEMM's device="cuda" allocations.
+        allocation_device = (
+            "cuda"
+            if hasattr(torch_symm_mem, "get_backend")
+            and torch_symm_mem.get_backend(self.device) == "NVSHMEM"
+            else self.device
+        )
         self.buffer = torch_symm_mem.empty(
             self.max_size // self.dtype.itemsize,
-            device=self.device,
+            device=allocation_device,
             dtype=self.dtype,
         )
         # Try ProcessGroup object first, fallback to group_name if needed

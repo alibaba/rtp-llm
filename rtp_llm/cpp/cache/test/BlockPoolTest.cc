@@ -135,29 +135,29 @@ TEST_F(BlockPoolTest, Glm52SharedIndexerKvCacheIsOptIn) {
 }
 
 TEST_F(BlockPoolTest, PinnedMlaKeepsIndexerOnGpuAndVersionsRecycledBlocks) {
-    auto model = makeTestModelConfig(4);
-    model.model_type = "glm_5";
-    model.attn_config.use_mla = true;
-    model.attn_config.is_sparse = true;
-    model.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
-    model.attn_config.kv_lora_rank = 512;
-    model.attn_config.rope_head_dim = 64;
-    model.attn_config.indexer_head_dim = 128;
+    auto model                                 = makeTestModelConfig(4);
+    model.model_type                           = "glm_5";
+    model.attn_config.use_mla                  = true;
+    model.attn_config.is_sparse                = true;
+    model.attn_config.kv_cache_dtype           = KvCacheDataType::FP8;
+    model.attn_config.kv_lora_rank             = 512;
+    model.attn_config.rope_head_dim            = 64;
+    model.attn_config.indexer_head_dim         = 128;
     model.enable_glm52_shared_indexer_kv_cache = true;
-    model.glm52_indexer_kv_slot_mapping = {0, 1, 1, 1};
+    model.glm52_indexer_kv_slot_mapping        = {0, 1, 1, 1};
     ParallelismConfig parallelism;
-    auto config = SingleConfigCreator::createSingleConfig(model, parallelism, false);
-    config.block_num = 8;
+    auto              config       = SingleConfigCreator::createSingleConfig(model, parallelism, false);
+    config.block_num               = 8;
     config.dsa_mla_resident_tokens = config.seq_size_per_block;
-    config.dsa_mla_hbm_blocks = 3;
-    auto pool_ptr = std::make_shared<BlockPool>(BlockPoolConfigHelper::createConfig(config),
+    config.dsa_mla_hbm_blocks      = 3;
+    auto  pool_ptr                 = std::make_shared<BlockPool>(BlockPoolConfigHelper::createConfig(config),
                                                 AllocationType::DEVICE,
                                                 /*use_pinned_cpu_backing=*/false,
                                                 /*use_cuda_malloc_backing=*/true);
-    auto& pool = *pool_ptr;
+    auto& pool                     = *pool_ptr;
     ASSERT_TRUE(pool.init());
-    const auto kv = pool.allLayerCacheBase();
-    const auto hbm = pool.allLayerHbmCacheBase();
+    const auto kv      = pool.allLayerCacheBase();
+    const auto hbm     = pool.allLayerHbmCacheBase();
     const auto indexer = pool.allLayerScaleCacheBase();
     for (const auto& layer : kv) {
         EXPECT_FALSE(layer.is_cuda());
@@ -197,7 +197,7 @@ TEST_F(BlockPoolTest, PinnedMlaKeepsIndexerOnGpuAndVersionsRecycledBlocks) {
 #endif
     auto blocks = pool.malloc(1);
     ASSERT_EQ(blocks.size(), 1u);
-    const int block = blocks.front();
+    const int  block = blocks.front();
     const auto parts = pool.convertIndexToBuffer(0, block);
     ASSERT_EQ(parts.size(), 2u);
     EXPECT_TRUE(parts[0].is_cuda);
@@ -261,7 +261,7 @@ TEST_F(BlockPoolTest, PinnedMlaKeepsIndexerOnGpuAndVersionsRecycledBlocks) {
     BlockDependency child;
     child.has_parent = true;
     child.parent_key = 10;
-    child.ordinal = 1;
+    child.ordinal    = 1;
     tree_cache.put(11, {rest[0]}, false, SharedBlockCache::kDefaultNamespace, child);
     tree_cache.put(12, {rest[2]}, false, SharedBlockCache::kDefaultNamespace, child);
     pool.requestFree({block, rest[0], rest[2]});
@@ -281,36 +281,35 @@ TEST_F(BlockPoolTest, PinnedMlaKeepsIndexerOnGpuAndVersionsRecycledBlocks) {
 // Scale the 48 x 16K + 16 x 192K workload to one/twelve blocks per query.
 // Under long-first arrival, adaptive admission leaves HBM available for short queries.
 TEST_F(BlockPoolTest, PinnedMlaLengthAwareAllocation) {
-    auto model = makeTestModelConfig(1);
-    model.model_type = "glm_5";
-    model.attn_config.use_mla = true;
-    model.attn_config.is_sparse = true;
-    model.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
-    model.attn_config.kv_lora_rank = 512;
-    model.attn_config.rope_head_dim = 64;
+    auto model                         = makeTestModelConfig(1);
+    model.model_type                   = "glm_5";
+    model.attn_config.use_mla          = true;
+    model.attn_config.is_sparse        = true;
+    model.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;
+    model.attn_config.kv_lora_rank     = 512;
+    model.attn_config.rope_head_dim    = 64;
     model.attn_config.indexer_head_dim = 128;
-    auto config = SingleConfigCreator::createSingleConfig(model, ParallelismConfig(), false);
-    config.block_num = 241;
-    config.dsa_mla_hbm_blocks = 49;
-    config.dsa_mla_resident_tokens = config.seq_size_per_block;
+    auto config                        = SingleConfigCreator::createSingleConfig(model, ParallelismConfig(), false);
+    config.block_num                   = 241;
+    config.dsa_mla_hbm_blocks          = 49;
+    config.dsa_mla_resident_tokens     = config.seq_size_per_block;
     for (const auto denominator : {"0", "3"}) {
         autil::EnvGuard guard("RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR", denominator);
-        auto pool = std::make_shared<BlockPool>(BlockPoolConfigHelper::createConfig(config));
+        auto            pool = std::make_shared<BlockPool>(BlockPoolConfigHelper::createConfig(config));
         ASSERT_TRUE(pool->init());
         FullKVCacheGroup group({0}, config.cache_specs[0], pool, 0);
         ASSERT_TRUE(group.init());
         for (int round = 0; round < 3; ++round) {
             std::vector<BlockIds> requests(64);
-            int host_queries = 0;
+            int                   host_queries = 0;
             for (int i = 0; i < 64; ++i) {
                 const bool is_long = round == 1 ? i >= 48 : i < 16;
                 ASSERT_TRUE(group.initMalloc(requests[i], (is_long ? 12 : 1) * config.seq_size_per_block));
-                const auto& blocks = requests[i].blocks();
-                const bool on_host = std::any_of(blocks.begin(), blocks.end(), [](int id) { return id >= 49; });
+                const auto& blocks  = requests[i].blocks();
+                const bool  on_host = std::any_of(blocks.begin(), blocks.end(), [](int id) { return id >= 49; });
                 host_queries += on_host;
             }
-            EXPECT_EQ(host_queries, std::string(denominator) == "0" ? (round == 1 ? 16 : 60) :
-                                                                    (round == 1 ? 18 : 38));
+            EXPECT_EQ(host_queries, std::string(denominator) == "0" ? (round == 1 ? 16 : 60) : (round == 1 ? 18 : 38));
             EXPECT_EQ(pool->freeBlocksNum(), 0u);
             EXPECT_TRUE(pool->malloc(1, 48).empty());
             for (const auto& request : requests) {
@@ -327,19 +326,19 @@ TEST_F(BlockPoolTest, PinnedMlaLengthAwareAllocation) {
 
 TEST_F(BlockPoolTest, PinnedMlaLengthAwareGrowthAndFallback) {
     autil::EnvGuard guard("RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR", "3");
-    auto model = makeTestModelConfig(1);
-    model.model_type = "glm_5";
-    model.attn_config.use_mla = true;
-    model.attn_config.is_sparse = true;
-    model.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
-    model.attn_config.kv_lora_rank = 512;
-    model.attn_config.rope_head_dim = 64;
+    auto            model              = makeTestModelConfig(1);
+    model.model_type                   = "glm_5";
+    model.attn_config.use_mla          = true;
+    model.attn_config.is_sparse        = true;
+    model.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;
+    model.attn_config.kv_lora_rank     = 512;
+    model.attn_config.rope_head_dim    = 64;
     model.attn_config.indexer_head_dim = 128;
-    auto config = SingleConfigCreator::createSingleConfig(model, ParallelismConfig(), false);
-    config.block_num = 20;
-    config.dsa_mla_hbm_blocks = 10;
-    config.dsa_mla_resident_tokens = config.seq_size_per_block;
-    auto pool = std::make_shared<BlockPool>(BlockPoolConfigHelper::createConfig(config));
+    auto config                        = SingleConfigCreator::createSingleConfig(model, ParallelismConfig(), false);
+    config.block_num                   = 20;
+    config.dsa_mla_hbm_blocks          = 10;
+    config.dsa_mla_resident_tokens     = config.seq_size_per_block;
+    auto pool                          = std::make_shared<BlockPool>(BlockPoolConfigHelper::createConfig(config));
     ASSERT_TRUE(pool->init());
     FullKVCacheGroup group({0}, config.cache_specs[0], pool, 0);
     ASSERT_TRUE(group.init());
@@ -359,7 +358,7 @@ TEST_F(BlockPoolTest, PinnedMlaLengthAwareGrowthAndFallback) {
     pool->connectorReference(10);
     group.free(long_query.blocks());
     EXPECT_EQ(pool->malloc(4, 8), (BlockIndicesType{11, 12, 13, 14}));  // HBM exhausted.
-    EXPECT_TRUE(pool->malloc(1, 48).empty());  // In-flight RDMA still owns 10.
+    EXPECT_TRUE(pool->malloc(1, 48).empty());                           // In-flight RDMA still owns 10.
     pool->connectorFree(10);
     EXPECT_EQ(pool->malloc(1, 48), (BlockIndicesType{10}));
     EXPECT_EQ(pool->blockGenerations().data_ptr<int64_t>()[10], 2);
@@ -379,33 +378,32 @@ TEST_F(BlockPoolTest, PinnedMlaLengthAwareGrowthAndFallback) {
     group.reference(reused_query, {1, 2, 3});
     ASSERT_TRUE(group.initMalloc(reused_query, 16));
     EXPECT_EQ(reused_query.blocks(), (BlockIndicesType{1, 2, 3, 13}));  // Long suffix goes to host.
-    EXPECT_EQ(pool->blockGenerations().data_ptr<int64_t>()[1], 2);  // Prefix was only referenced.
-
+    EXPECT_EQ(pool->blockGenerations().data_ptr<int64_t>()[1], 2);      // Prefix was only referenced.
 }
 
 TEST_F(BlockPoolTest, PinnedMlaRoundsAutomaticWorkingSetToPhysicalBlocks) {
     autil::EnvGuard host_budget("RTP_LLM_DSA_MLA_HOST_CACHE_MB", "256");
     autil::EnvGuard automatic_resident("RTP_LLM_DSA_MLA_RESIDENT_TOKENS", "0");
-    auto model = makeTestModelConfig(4);
-    model.model_type = "glm_5";
-    model.attn_config.use_mla = true;
-    model.attn_config.is_sparse = true;
-    model.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
-    model.attn_config.kv_lora_rank = 512;
-    model.attn_config.rope_head_dim = 64;
-    model.attn_config.indexer_head_dim = 128;
-    model.attn_config.indexer_topk = 2048;
-    model.attn_config.tokens_per_block = 4096;
+    auto            model                      = makeTestModelConfig(4);
+    model.model_type                           = "glm_5";
+    model.attn_config.use_mla                  = true;
+    model.attn_config.is_sparse                = true;
+    model.attn_config.kv_cache_dtype           = KvCacheDataType::FP8;
+    model.attn_config.kv_lora_rank             = 512;
+    model.attn_config.rope_head_dim            = 64;
+    model.attn_config.indexer_head_dim         = 128;
+    model.attn_config.indexer_topk             = 2048;
+    model.attn_config.tokens_per_block         = 4096;
     model.enable_glm52_shared_indexer_kv_cache = true;
-    model.glm52_indexer_kv_slot_mapping = {0, 1, 1, 1};
+    model.glm52_indexer_kv_slot_mapping        = {0, 1, 1, 1};
     ParallelismConfig parallelism;
-    RuntimeConfig runtime;
+    RuntimeConfig     runtime;
     runtime.max_generate_batch_size = 3;
     KVCacheConfig cache_options;
-    cache_options.seq_size_per_block = 4096;
+    cache_options.seq_size_per_block        = 4096;
     cache_options.kernel_seq_size_per_block = 64;
-    cache_options.test_block_num = 16;
-    auto create = [&] {
+    cache_options.test_block_num            = 16;
+    auto create                             = [&] {
         return CacheConfigCreator::createConfig(model, parallelism, runtime, cache_options, std::nullopt);
     };
 
@@ -427,7 +425,16 @@ TEST_F(BlockPoolTest, PinnedMlaRoundsAutomaticWorkingSetToPhysicalBlocks) {
     }
     {
         autil::EnvGuard oversized_pin_budget("RTP_LLM_DSA_MLA_HOST_CACHE_MB", "1048576");
-        EXPECT_GE(create().dsa_mla_hbm_blocks, 2u);  // Reserved zero + usable HBM.
+        const auto      limited = create();
+        EXPECT_GE(limited.dsa_mla_hbm_blocks, 2u);  // Reserved zero + usable HBM.
+        const auto   limited_pool = BlockPoolConfigHelper::createConfig(limited);
+        const size_t host_limit   = size_t{1048576} * 1024 * 1024;
+        EXPECT_GT(limited_pool.total_size_bytes, 0u);
+        EXPECT_LT(limited_pool.total_size_bytes, host_limit);
+        // Register only this effective capacity, not the larger environment budget.
+        EXPECT_EQ(limited_pool.total_size_bytes,
+                  (limited.block_num - limited.dsa_mla_hbm_blocks)
+                      * (limited.block_size_bytes - limited.kv_scale_size_bytes));
     }
     for (const char* invalid : {"6144", "4096"}) {
         autil::EnvGuard invalid_resident("RTP_LLM_DSA_MLA_RESIDENT_TOKENS", invalid);
@@ -481,7 +488,7 @@ TEST_F(BlockPoolTest, Glm52CompactScoreKeepsMtpIndexerLayoutIndependent) {
 TEST_F(BlockPoolTest, PinnedMlaSharedIndexerMtpBudgetCoversAllQueries) {
     autil::EnvGuard host_budget("RTP_LLM_DSA_MLA_HOST_CACHE_MB", "256");
     autil::EnvGuard resident_budget("RTP_LLM_DSA_MLA_RESIDENT_TOKENS", "0");
-    auto score_model_config                                 = makeTestModelConfig(/*num_layers=*/4);
+    auto            score_model_config                      = makeTestModelConfig(/*num_layers=*/4);
     score_model_config.model_type                           = "glm_5";
     score_model_config.attn_config.use_mla                  = true;
     score_model_config.attn_config.is_sparse                = true;
@@ -492,8 +499,8 @@ TEST_F(BlockPoolTest, PinnedMlaSharedIndexerMtpBudgetCoversAllQueries) {
     score_model_config.enable_glm52_shared_indexer_kv_cache = true;
     score_model_config.glm52_indexer_kv_slot_mapping        = {0, 1, 1, 1};
 
-    score_model_config.attn_config.indexer_topk = 2048;
-    score_model_config.attn_config.tokens_per_block = 64;
+    score_model_config.attn_config.indexer_topk               = 2048;
+    score_model_config.attn_config.tokens_per_block           = 64;
     auto propose_model_config                                 = score_model_config;
     propose_model_config.num_layers                           = 1;
     propose_model_config.enable_glm52_shared_indexer_kv_cache = false;
@@ -504,7 +511,7 @@ TEST_F(BlockPoolTest, PinnedMlaSharedIndexerMtpBudgetCoversAllQueries) {
     rtp_llm::RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size = 8;
     rtp_llm::KVCacheConfig kv_cache_config;
-    kv_cache_config.test_block_num = 2048;
+    kv_cache_config.test_block_num     = 2048;
     kv_cache_config.seq_size_per_block = 64;
     rtp_llm::SpeculativeExecutionConfig sp_config;
     sp_config.type              = SP_TYPE_MTP;
@@ -535,7 +542,6 @@ TEST_F(BlockPoolTest, PinnedMlaSharedIndexerMtpBudgetCoversAllQueries) {
         EXPECT_EQ(layout.kv_scale_pool_size_bytes,
                   layout.scale_layer_num * layout.block_num * layout.kv_scale_stride_bytes);
     }
-
 }
 
 TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
