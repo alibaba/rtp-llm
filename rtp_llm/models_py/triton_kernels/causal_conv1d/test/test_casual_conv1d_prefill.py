@@ -60,6 +60,56 @@ def causal_conv1d_ref(
 
 
 class TestCausalConv1dPrefill(unittest.TestCase):
+    def test_packed_qkv_preserves_outputs_and_prefix_state(self):
+        torch.manual_seed(531809)
+        lengths = [1, 3, 127, 128, 129, 513]
+        cu = torch.tensor(
+            [0] + list(itertools.accumulate(lengths)), device="cuda", dtype=torch.int32
+        )
+        dim = 3072
+        packed = torch.randn(sum(lengths), 3456, device="cuda", dtype=torch.bfloat16)
+        qkv = packed[:, :dim]
+        self.assertEqual(qkv.stride(), (3456, 1))
+        for width, prefix, activation in itertools.product(
+            (2, 4), (0, 128, 256), (None, "silu")
+        ):
+            with self.subTest(width=width, prefix=prefix, activation=activation):
+                counts = [math.ceil((prefix + n) / 128) for n in lengths]
+                slots = torch.randperm(sum(counts), device="cuda", dtype=torch.int32)
+                block_map = torch.full(
+                    (len(lengths), max(counts)), -1, device="cuda", dtype=torch.int32
+                )
+                offset = 0
+                for row, count in enumerate(counts):
+                    block_map[row, :count] = slots[offset : offset + count]
+                    offset += count
+                state = torch.randn(
+                    sum(counts), width - 1, dim, device="cuda", dtype=torch.bfloat16
+                )
+                actual_state, expected_state = state.clone(), state.clone()
+                kwargs = dict(
+                    weight=torch.randn(dim, width, device="cuda"),
+                    bias=torch.randn(dim, device="cuda"),
+                    query_start_loc=cu,
+                    block_map=block_map,
+                    seq_size_per_block=128,
+                    prefix_lengths=torch.full(
+                        (len(lengths),), prefix, device="cuda", dtype=torch.int32
+                    ),
+                    activation=activation,
+                    output_groups=3,
+                )
+                expected = causal_conv1d_fn(
+                    qkv.contiguous().T,
+                    conv_states=expected_state.transpose(1, 2),
+                    **kwargs,
+                )
+                actual = causal_conv1d_fn(
+                    qkv.T, conv_states=actual_state.transpose(1, 2), **kwargs
+                )
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                torch.testing.assert_close(actual_state, expected_state, rtol=0, atol=0)
+
     def test_grouped_output_preserves_fp32_arithmetic_and_prefix_cache(self):
         torch.manual_seed(530909)
         lengths = [1, 3, 127, 129, 513]

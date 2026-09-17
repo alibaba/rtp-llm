@@ -2,8 +2,6 @@ import os
 from typing import Any
 
 import torch
-from torch import nn
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.glm53_prefill_parallel import MlaCPParallelismView, mla_cp_enabled
@@ -29,6 +27,7 @@ from rtp_llm.models_py.modules.base.common.kvcache_store import (
 from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
     prepare_mtp_multimodal_inputs,
 )
+from rtp_llm.models_py.modules.dsv4.forward_metadata import scoped_forward_metadata
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
@@ -40,6 +39,7 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 _MTP_INDEXER_ROLE_NORMAL = 0
 _MTP_INDEXER_ROLE_SEED = 1
@@ -437,6 +437,7 @@ class GenericMoeMTPModel(GptModelBase):
         mask.scatter_(0, starts, prefix == 0)
         return torch.where(mask.unsqueeze(-1), 0, inputs_embeds)
 
+    @scoped_forward_metadata
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         if fmha_impl is None:

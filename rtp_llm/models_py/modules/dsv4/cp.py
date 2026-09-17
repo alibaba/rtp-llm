@@ -31,10 +31,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
 import torch
-
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv4.forward_metadata import (
+    cached_cp_context,
+    metadata_cache,
+)
 
 if TYPE_CHECKING:
     # PrefillWorkspace lives in its own module; cp.py only CONSUMES the
@@ -129,6 +132,10 @@ class CPContext:
     # pool readers/writers, but must not all-gather its already replicated
     # token projections.
     sequence_parallel: bool = True
+    full_prefill_positions: Optional[
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    ] = None
+    local_cu_seqlens: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -335,6 +342,7 @@ class CudaAsyncCPGatherImpl:
         return full
 
 
+@cached_cp_context
 def build_cp_context(
     cp_info,
     cp_size: int,
@@ -345,6 +353,28 @@ def build_cp_context(
     kv_cache_sharded: bool = False,
 ) -> CPContext:
     """Compute the per-forward derived CPContext from framework metadata."""
+    if (
+        metadata_cache() is not None
+        and torch.device(device).type == "cuda"
+        and getattr(cp_info, "prefill_actual_input_lengths_cpu", None) is not None
+        and cp_info.prefill_actual_input_lengths_cpu.numel() > 0
+        and getattr(cp_info, "prefill_cp_chunk_lengths", None) is not None
+        and cp_info.prefill_cp_chunk_lengths.numel() > 0
+    ):
+        from rtp_llm.models_py.modules.dsv4._cp_metadata_triton import (
+            build_fused_cp_context,
+        )
+
+        with record_function_range("glm53.cp.prepare_forward_metadata"):
+            return build_fused_cp_context(
+                cp_info,
+                cp_size,
+                cp_rank,
+                chunk_length,
+                device,
+                position_offset,
+                kv_cache_sharded,
+            )
     padding_mask = cp_info.prefill_qkv_padding_mask
     restore_indices = cp_info.prefill_qkv_restore_indice
     if padding_mask.device != device:
@@ -894,6 +924,9 @@ def build_cp_full_prefill_positions(
 
     Returns ``(positions, b_idx, seq_start_per_req, cu_seq_per_req)``.
     """
+    shared = getattr(cp_ctx, "full_prefill_positions", None)
+    if shared is not None:
+        return shared
     assert (
         cp_ctx.input_lengths_global is not None
     ), "CP full prefill positions require input_lengths_global"

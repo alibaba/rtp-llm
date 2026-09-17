@@ -34,6 +34,11 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
     build_cp_full_prefill_positions,
 )
+from rtp_llm.models_py.modules.dsv4.forward_metadata import (
+    cached_indexer_prefill,
+    metadata_cache,
+    score_workspace_budget,
+)
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
     indexer_q_fp8_quant_fold,
 )
@@ -465,6 +470,57 @@ class IndexerFP8(PoolBackedModule):
         out = torch.empty((meta.M, self.index_topk), dtype=torch.int32, device=q.device)
         if meta.M == 0:
             return out
+        if self.compressor.kpool_mode and metadata_cache() is not None:
+            # DeepGEMM's compressed-logits mode retains absolute ks/ke for
+            # loading K, but writes each row starting at its request-local zero.
+            # This batches requests without a dense cross-request output axis.
+            segments = getattr(meta, "score_segments", None)
+            max_keys = (
+                max((e - b for _, _, b, e in segments), default=0)
+                if segments is not None
+                else meta.T
+            )
+            if max_keys == 0:
+                out.fill_(-1)
+                return out
+            starts = getattr(meta, "score_relative_ks", None)
+            ends = getattr(meta, "score_relative_ke", None)
+            if starts is None:
+                starts = torch.zeros_like(meta.ks)
+                ends = meta.ke - meta.ks
+            budget = score_workspace_budget(q.device)
+            # DeepGEMM pads the logits row stride; include TopK/normalization
+            # scratch in the per-row bound instead of budgeting logits alone.
+            row_bytes = (((max_keys + 255) // 256 + 1) * 256 + 8 * self.index_topk) * 4
+            rows = budget // row_bytes
+            if rows < 1:
+                raise RuntimeError("Indexer score workspace cannot fit one query row")
+            rows = min(meta.M, max(1, rows // 128 * 128))
+            for begin in range(0, meta.M, rows):
+                end = min(begin + rows, meta.M)
+                with record_function_range("dsv4.fp8.indexer.prefill.score"):
+                    logits = fp8_mqa_indexer_score(
+                        q[begin:end],
+                        weights[begin:end],
+                        key,
+                        key_scale,
+                        meta.ks[begin:end],
+                        meta.ke[begin:end],
+                        clean_logits=False,
+                        max_seqlen_k=max_keys,
+                    )
+                with record_function_range("dsv4.fp8.indexer.prefill.topk"):
+                    _run_prefill_topk(
+                        logits,
+                        starts[begin:end],
+                        ends[begin:end],
+                        out[begin:end],
+                        self.index_topk,
+                        self.compress_ratio,
+                        backend=self.prefill_topk_backend,
+                    )
+                del logits
+            return out
         chunk = _fp8_prefill_score_chunk_rows() or meta.M
         segments = getattr(meta, "score_segments", None)
         starts, ends = meta.ks, meta.ke
@@ -814,6 +870,7 @@ class IndexerFP8(PoolBackedModule):
     # --------------------------------------------------------------
     # Prefill prepare — caller invokes once per layer-call, before forward
     # --------------------------------------------------------------
+    @cached_indexer_prefill
     def prepare(
         self,
         bsz: int,
@@ -1085,6 +1142,7 @@ class IndexerFP8(PoolBackedModule):
                     block_size=kv_eb,
                     device=device,
                     owner_block_size=owner_block_size,
+                    geometry_key=(self.compress_ratio, T),
                 )
                 indexer_cp_local_cu = asm.build_actual_local_cu_kv_seqlens(
                     indexer_cp_plan

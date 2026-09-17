@@ -8,9 +8,11 @@ import torch.distributed as dist
 
 from rtp_llm.models_py.distributed.glm53_collective_gemm import (
     all_gather_kda_projections,
+    all_gather_packed_kda_projections,
     all_gather_projections,
     can_fuse_input,
     configure_glm53_collective_gemm,
+    packed_kda_projections,
     project_reduce_scatter,
     reduce_scatter_glm53,
 )
@@ -61,6 +63,47 @@ class Glm53CollectiveGemmTest(unittest.TestCase):
                 expected = p(gathered[:logical])
                 self.assertEqual(y.shape, expected.shape)
                 torch.testing.assert_close(y, expected, rtol=1 / 128, atol=2e-3)
+
+    def test_packed_kda_padding_and_stream_handoff(self):
+        widths = (24576 // self.world, 64 // self.world, 128, 128)
+        weights = [
+            torch.randn(4096, n, device="cuda", dtype=torch.bfloat16) * 0.02
+            for n in widths
+        ]
+        projections = [CudaF16Linear(weight) for weight in weights]
+        pitch = (sum(widths) + 127) // 128 * 128
+        packed = torch.zeros(4096, pitch, device="cuda", dtype=torch.bfloat16)
+        packed[:, : sum(widths)].copy_(torch.cat(weights, -1))
+        stream = torch.cuda.Stream()
+        self.assertFalse(can_fuse_input(projections, 32767))
+        for logical in (1, 127, 128, 129, 4097, 32767, 32768, 32769, 33280):
+            local_m = (logical + self.world - 1) // self.world
+            x = torch.randn(local_m, 4096, device="cuda", dtype=torch.bfloat16) * 0.1
+            if self.rank == self.world - 1:
+                x[logical - local_m * self.rank :].zero_()
+            gathered = x.new_empty(local_m * self.world, 4096)
+            dist.all_gather_into_tensor(gathered, x)
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                if can_fuse_input(projections, logical):
+                    actual = all_gather_packed_kda_projections(
+                        x, projections, packed, widths, logical
+                    )
+                else:
+                    actual = packed_kda_projections(gathered[:logical], packed, widths)
+            torch.cuda.current_stream().wait_stream(stream)
+            baseline = (
+                all_gather_projections(x, projections, logical)
+                if can_fuse_input(projections, logical)
+                else [projection(gathered[:logical]) for projection in projections]
+            )
+            for output, old, weight in zip(actual, baseline, weights):
+                oracle = gathered[:logical].float() @ weight.float()
+                torch.testing.assert_close(
+                    output.float(), oracle, rtol=1 / 128, atol=2e-3
+                )
+                torch.testing.assert_close(output, old, rtol=1 / 128, atol=2e-3)
+                self.assertEqual(output.stride(), (pitch, 1))
 
     def test_output_padding_and_stream_handoff(self):
         weight = torch.randn(1024, 4096, device="cuda", dtype=torch.bfloat16) * 0.02

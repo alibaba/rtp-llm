@@ -3,8 +3,6 @@ from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
 import torch
-from torch import nn
-
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules import IndexerOp, LayerNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
@@ -15,6 +13,7 @@ from rtp_llm.models_py.modules.hybrid.indexer_compressor import (
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, KVCacheRegionName
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 _DEVICE_TYPE = get_device_type()
 if _DEVICE_TYPE == DeviceType.Cuda:
@@ -423,17 +422,19 @@ class Indexer(nn.Module):
                     input_lengths = cp_ctx.input_lengths_global
                     prefix_lengths = cp_ctx.prefix_lengths
                     batch_size = int(input_lengths.numel())
-                    local_lengths = torch.tensor(
-                        cp_ctx.chunk_lengths_per_req,
-                        dtype=torch.int32,
-                        device=hidden_states.device,
-                    )
-                    cu_seqlens = torch.zeros(
-                        batch_size + 1,
-                        dtype=torch.int32,
-                        device=hidden_states.device,
-                    )
-                    cu_seqlens[1:] = torch.cumsum(local_lengths, dim=0)
+                    cu_seqlens = getattr(cp_ctx, "local_cu_seqlens", None)
+                    if cu_seqlens is None:
+                        local_lengths = torch.tensor(
+                            cp_ctx.chunk_lengths_per_req,
+                            dtype=torch.int32,
+                            device=hidden_states.device,
+                        )
+                        cu_seqlens = torch.zeros(
+                            batch_size + 1,
+                            dtype=torch.int32,
+                            device=hidden_states.device,
+                        )
+                        cu_seqlens[1:] = torch.cumsum(local_lengths, dim=0)
                 elif cache_sharded:
                     if cp_params is None:
                         raise RuntimeError(

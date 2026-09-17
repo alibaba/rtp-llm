@@ -52,6 +52,7 @@ def _load_cp_module():
         sys.modules[profiler_name] = profiler
 
     here = os.path.dirname(os.path.abspath(__file__))
+    sys.modules["rtp_llm.models_py.modules.dsv4"].__path__ = [os.path.dirname(here)]
     cp_path = os.path.normpath(os.path.join(here, os.pardir, "cp.py"))
     spec = importlib.util.spec_from_file_location(
         "rtp_llm.models_py.modules.dsv4.cp", cp_path
@@ -272,14 +273,20 @@ def test_cp2_gather_last_by_request_handles_split_owners() -> None:
     cp_info = _CpInfo(
         padding_mask,
         restore_indice,
-        prefill_actual_input_lengths_cpu=torch.tensor(actual_lengths, dtype=torch.int32),
+        prefill_actual_input_lengths_cpu=torch.tensor(
+            actual_lengths, dtype=torch.int32
+        ),
         prefill_cp_chunk_lengths=torch.tensor(chunk_lengths, dtype=torch.int32),
     )
 
     ctx0 = build_cp_context(cp_info, cp_size, 0, chunk_length, torch.device("cpu"))
     ctx1 = build_cp_context(cp_info, cp_size, 1, chunk_length, torch.device("cpu"))
-    local0 = torch.arange(chunk_length * 2, dtype=torch.float32).reshape(chunk_length, 2)
-    local1 = (100 + torch.arange(chunk_length * 2, dtype=torch.float32)).reshape(chunk_length, 2)
+    local0 = torch.arange(chunk_length * 2, dtype=torch.float32).reshape(
+        chunk_length, 2
+    )
+    local1 = (100 + torch.arange(chunk_length * 2, dtype=torch.float32)).reshape(
+        chunk_length, 2
+    )
 
     rank0_last = torch.zeros(2, 2)
     rank0_last[1] = local0[6]

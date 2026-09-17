@@ -40,6 +40,9 @@ def _stub_and_import():
 
     cp_name = "rtp_llm.models_py.modules.dsv4.cp"
     if cp_name not in sys.modules:
+        sys.modules["rtp_llm.models_py.modules.dsv4"].__path__ = [
+            str(_REPO_ROOT / "rtp_llm/models_py/modules/dsv4")
+        ]
         cp_spec = importlib.util.spec_from_file_location(
             cp_name, _REPO_ROOT / "rtp_llm/models_py/modules/dsv4/cp.py"
         )

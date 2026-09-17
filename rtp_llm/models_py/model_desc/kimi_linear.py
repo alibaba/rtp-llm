@@ -49,6 +49,7 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.base.common.kvcache_store import (
     write_typed_aux_cache_regions,
 )
+from rtp_llm.models_py.modules.dsv4.forward_metadata import scoped_forward_metadata
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
@@ -79,6 +80,7 @@ from rtp_llm.ops import (
     HybridAttentionType,
     LinearAttentionConfig,
     ParallelismConfig,
+    RoleType,
 )
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -877,6 +879,33 @@ class KimiLinearKDA(nn.Module):
             weights, W.linear_attn_g_b_w, None, None, quant_config
         )
 
+        self.register_buffer("packed_input_weight", None, persistent=False)
+        self.packed_input_widths = None
+        if (
+            gate_lower_bound is not None
+            and parallelism_config.role_type == RoleType.PREFILL
+        ):
+            from rtp_llm.models_py.distributed.glm53_collective_gemm import (
+                canonical_bf16_weight,
+            )
+
+            packed_parts = [
+                canonical_bf16_weight(proj) for proj in self.input_projections()
+            ]
+            if all(part is not None for part in packed_parts):
+                self.packed_input_widths = tuple(part.shape[1] for part in packed_parts)
+                # A 128-column row pitch keeps each gathered GEMM tile aligned.
+                width = sum(self.packed_input_widths)
+                padded_width = (width + 127) // 128 * 128
+                packed = packed_parts[0].new_zeros(
+                    (packed_parts[0].shape[0], padded_width)
+                )
+                offset = 0
+                for part in packed_parts:
+                    packed[:, offset : offset + part.shape[1]].copy_(part)
+                    offset += part.shape[1]
+                self.packed_input_weight = packed
+
         self.head_k_dim = linear_attn_config.linear_key_head_dim
         self.head_v_dim = linear_attn_config.linear_value_head_dim
         self.local_num_v_heads = (
@@ -934,13 +963,47 @@ class KimiLinearKDA(nn.Module):
                 >= self.local_low_rank_min_tokens
                 else all_gather_projections
             )
-            projected_qkv, beta_input, forget_low, gate_low = project(
-                hidden_states,
-                self.input_projections(),
-                attn_meta.token_shard.logical_tokens,
+            if self.packed_input_weight is not None:
+                from rtp_llm.models_py.distributed.glm53_collective_gemm import (
+                    all_gather_packed_kda_projections,
+                )
+
+                projected_qkv, beta_input, forget_low, gate_low = (
+                    all_gather_packed_kda_projections(
+                        hidden_states,
+                        self.input_projections(),
+                        self.packed_input_weight,
+                        self.packed_input_widths,
+                        attn_meta.token_shard.logical_tokens,
+                    )
+                )
+            else:
+                projected_qkv, beta_input, forget_low, gate_low = project(
+                    hidden_states,
+                    self.input_projections(),
+                    attn_meta.token_shard.logical_tokens,
+                )
+            forget_gate = self.f_b_proj(forget_low)
+            g_proj = self.g_b_proj(gate_low)
+            del forget_low, gate_low
+        elif (
+            self.packed_input_weight is not None
+            and attention_inputs.is_prefill
+            and not attn_meta.is_target_verify
+        ):
+            # The caller already completed AG when communication/GEMM overlap
+            # is unsuitable. Packing the four GEMMs is independent of that
+            # choice, including short inputs and Prefill without SP.
+            from rtp_llm.models_py.distributed.glm53_collective_gemm import (
+                packed_kda_projections,
+            )
+
+            projected_qkv, beta_input, forget_low, gate_low = packed_kda_projections(
+                hidden_states, self.packed_input_weight, self.packed_input_widths
             )
             forget_gate = self.f_b_proj(forget_low)
             g_proj = self.g_b_proj(gate_low)
+            del forget_low, gate_low
         else:
             projected_qkv = self.in_proj_qkv(hidden_states)
             beta_input = self.in_proj_b(hidden_states)
@@ -966,6 +1029,9 @@ class KimiLinearKDA(nn.Module):
                 kv_cache,
                 attn_meta,
             )
+
+        if attention_inputs.is_prefill and not attn_meta.is_target_verify:
+            del projected_qkv, beta_input, forget_gate
 
         # 3. o_norm with sigmoid gating: y = RMSNorm(attn_out) * sigmoid(g_proj)
         if self.decode_kda.fuse_decode and not attention_inputs.is_prefill:
@@ -1445,6 +1511,7 @@ class KimiLinearModel(GptModelBase):
 
         return prepare_mla_cp_fmha(self, inputs, is_cuda_graph)
 
+    @scoped_forward_metadata
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         multimodal_embedding_injector = getattr(

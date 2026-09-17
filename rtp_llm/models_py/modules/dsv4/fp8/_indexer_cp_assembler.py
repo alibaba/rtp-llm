@@ -32,7 +32,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
-
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
@@ -40,6 +39,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_actual_owned_kv_lens,
     cp_padded_local_kv_lens,
 )
+from rtp_llm.models_py.modules.dsv4.forward_metadata import metadata_cache
 
 
 @dataclass
@@ -60,6 +60,7 @@ class IndexerCPChunkPlan:
     restore_indices: torch.Tensor  # [chunk_T] int64
     block_size: int
     owner_block_size: int
+    actual_local_cu: Optional[torch.Tensor] = None
 
 
 def build_indexer_cp_chunk_plan(
@@ -68,6 +69,7 @@ def build_indexer_cp_chunk_plan(
     block_size: int,
     device: torch.device,
     owner_block_size: Optional[int] = None,
+    geometry_key: Optional[tuple] = None,
 ) -> IndexerCPChunkPlan:
     """Build per-chunk indexer assembler plan (CPU; no NCCL)."""
     if cp_ctx.cp_size <= 0:
@@ -77,6 +79,18 @@ def build_indexer_cp_chunk_plan(
     owner_bs = int(owner_block_size or block_size)
     if owner_bs <= 0:
         raise ValueError(f"owner_block_size must be > 0, got {owner_bs}")
+    cache = metadata_cache() if geometry_key is not None else None
+    cache_key = (
+        "indexer_cp_plan",
+        id(cp_ctx),
+        geometry_key,
+        block_size,
+        owner_bs,
+        per_req_total_kv_lens.numel(),
+        str(device),
+    )
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
     per_req = per_req_total_kv_lens.to(device=device, dtype=torch.int64).contiguous()
     local_lens = cp_padded_local_kv_lens(per_req, cp_ctx.cp_size, owner_bs).contiguous()
     actual_lens = cp_actual_owned_kv_lens(
@@ -87,7 +101,7 @@ def build_indexer_cp_chunk_plan(
     restore = build_kv_allgather_restore_indices(
         per_req, cp_ctx.cp_size, owner_bs, device
     )
-    return IndexerCPChunkPlan(
+    plan = IndexerCPChunkPlan(
         cp_ctx=cp_ctx,
         per_req_total_kv_lens=per_req,
         per_req_local_kv_lens=local_lens,
@@ -98,6 +112,9 @@ def build_indexer_cp_chunk_plan(
         block_size=block_size,
         owner_block_size=owner_bs,
     )
+    if cache is not None:
+        cache[cache_key] = plan
+    return plan
 
 
 def build_local_cu_kv_seqlens(plan: IndexerCPChunkPlan) -> torch.Tensor:
@@ -117,12 +134,15 @@ def build_actual_local_cu_kv_seqlens(plan: IndexerCPChunkPlan) -> torch.Tensor:
     This is the length vector that should drive the paged-pool read kernel.
     The padded cu vector is only for NCCL shape/restore layout.
     """
+    if getattr(plan, "actual_local_cu", None) is not None:
+        return plan.actual_local_cu
     cu = torch.zeros(
         plan.per_req_actual_local_kv_lens.numel() + 1,
         dtype=torch.int32,
         device=plan.per_req_actual_local_kv_lens.device,
     )
     cu[1:] = torch.cumsum(plan.per_req_actual_local_kv_lens, dim=0).to(torch.int32)
+    plan.actual_local_cu = cu
     return cu
 
 

@@ -231,6 +231,27 @@ def all_gather_projections(local_x, projections, logical_tokens: int):
     return tuple(output[:logical_tokens] for output in outputs)
 
 
+def packed_kda_projections(x, packed_weight, widths):
+    """Project gathered tokens once; consumers keep views of the packed layout."""
+    with torch.profiler.record_function("RTP::glm53.prefill.packed_gemm"):
+        packed = torch.mm(x, packed_weight)
+    return packed[:, : sum(widths)].split(widths, dim=-1)
+
+
+def all_gather_packed_kda_projections(
+    local_x, projections, packed_weight, widths, logical_tokens
+):
+    """One packed GEMM per AG chunk; return row-strided views without repacking."""
+    _all_gather_weights(local_x, projections, logical_tokens)
+    state = _STATE
+    with torch.profiler.record_function("RTP::glm53.prefill.packed_ag_gemm"):
+        _, outputs = torch.ops.symm_mem.fused_all_gather_matmul(
+            local_x, [packed_weight], 0, state.group.group_name, return_A=False
+        )
+    packed = outputs[0][:logical_tokens, : sum(widths)]
+    return packed.split(widths, dim=-1)
+
+
 def all_gather_kda_projections(local_x, projections, logical_tokens: int):
     """Compute replicated low-rank weights only for local tokens.
 

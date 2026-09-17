@@ -44,6 +44,15 @@ def _stub_modules():
 
     cp_name = "rtp_llm.models_py.modules.dsv4.cp"
     if cp_name not in sys.modules:
+        for name in (
+            "rtp_llm.models_py.modules",
+            "rtp_llm.models_py.modules.dsv4",
+        ):
+            if name not in sys.modules:
+                sys.modules[name] = types.ModuleType(name)
+        sys.modules["rtp_llm.models_py.modules.dsv4"].__path__ = [
+            str(_REPO_ROOT / "rtp_llm/models_py/modules/dsv4")
+        ]
         profiler_name = "rtp_llm.models_py.modules.dsv4._profiler"
         if profiler_name not in sys.modules:
             profiler = types.ModuleType(profiler_name)

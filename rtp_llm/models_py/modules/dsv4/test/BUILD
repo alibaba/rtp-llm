@@ -4,6 +4,12 @@ _DSV4_TEST_DEPS = [
 ]
 
 py_test(
+    name = "test_forward_metadata",
+    srcs = ["test_forward_metadata.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
     name = "test_kv_cache_group_mapping",
     srcs = ["test_kv_cache_group_mapping.py"],
     deps = _DSV4_TEST_DEPS,
@@ -298,6 +304,14 @@ py_test(
         "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
     ],
+    tags = ["manual", "SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_glm53_prefill_metadata_gpu",
+    srcs = ["test_glm53_prefill_metadata_gpu.py"],
+    deps = _DSV4_TEST_DEPS,
     tags = ["manual", "SM100_ARM"],
     exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
 )

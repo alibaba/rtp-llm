@@ -60,11 +60,21 @@ def _stub_distributed():
 
 def _import_cp():
     _stub_distributed()
+    for name in (
+        "rtp_llm.models_py.modules",
+        "rtp_llm.models_py.modules.dsv4",
+    ):
+        if name not in sys.modules:
+            sys.modules[name] = types.ModuleType(name)
+    sys.modules["rtp_llm.models_py.modules.dsv4"].__path__ = [
+        str(_REPO_ROOT / "rtp_llm/models_py/modules/dsv4")
+    ]
     spec = importlib.util.spec_from_file_location(
         "_dsv4_cp_for_test",
         _REPO_ROOT / "rtp_llm/models_py/modules/dsv4/cp.py",
     )
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 
