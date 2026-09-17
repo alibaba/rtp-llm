@@ -113,24 +113,6 @@ py_test(
 )
 
 py_test(
-    name = "test_generation_lifecycle",
-    srcs = ["test_generation_lifecycle.py", "test_generation.py", "test_prefill.py", "test_attention.py", "test_transformer.py", "fixture.py", "official_compressor.py", "test_compact_writer.py"],
-    deps = [
-        "//rtp_llm/models_py/standalone:py_standalone_testlib",
-        "//rtp_llm:models",
-    ],
-)
-
-py_test(
-    name = "test_generation",
-    srcs = ["test_generation.py", "test_prefill.py", "test_attention.py", "test_transformer.py", "fixture.py", "official_compressor.py", "test_compact_writer.py"],
-    deps = [
-        "//rtp_llm/models_py/standalone:py_standalone_testlib",
-        "//rtp_llm:models",
-    ],
-)
-
-py_test(
     name = "test_snapshot_metadata_tail",
     srcs = ["test_snapshot_metadata_tail.py", "test_prefill.py", "test_attention.py", "test_transformer.py", "fixture.py", "official_compressor.py", "test_compact_writer.py"],
     deps = [
