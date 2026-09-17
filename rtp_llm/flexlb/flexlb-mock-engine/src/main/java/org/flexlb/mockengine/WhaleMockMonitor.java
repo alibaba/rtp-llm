@@ -52,7 +52,7 @@ final class WhaleMockMonitor implements AutoCloseable {
     WhaleMockMonitor(FlexMonitor monitor) { this.monitor = monitor; }
 
     void sample(JavaMockEngineCluster.FastRpcService service) {
-        sample(service.whaleMetrics(), service.whaleMetricTags(), System.nanoTime());
+        sample(service.whaleMetrics(), service.whaleMetricTags(), System.nanoTime(), service.autoFetchEnabled());
     }
 
     synchronized void reportEvent(Map<String, Number> metrics, Map<String, String> labels) {
@@ -75,6 +75,11 @@ final class WhaleMockMonitor implements AutoCloseable {
     }
 
     synchronized void sample(Map<String, Number> metrics, Map<String, String> labels, long now) {
+        sample(metrics, labels, now, false);
+    }
+
+    synchronized void sample(Map<String, Number> metrics, Map<String, String> labels,
+                             long now, boolean noFetch) {
         EngineSample sample = state(labels);
         double seconds = Math.max(1e-9, (now - sample.sampledAt) / 1e9);
         sample.sampledAt = now;
@@ -94,8 +99,17 @@ final class WhaleMockMonitor implements AutoCloseable {
                 && metrics.containsKey("mock_completed_requests_total")) {
             String name = "mock_decode_success_qps";
             if (registered.add(name)) monitor.register(name, FlexMetricType.GAUGE);
-            monitor.report(name, tags,
-                    deltas.getOrDefault("mock_completed_requests_total", 0L) / seconds);
+            double successQps = deltas.getOrDefault("mock_completed_requests_total", 0L) / seconds;
+            monitor.report(name, tags, successQps);
+            if (noFetch) {
+                // Dashboard-compatible alias for the synthetic no-Fetch path.
+                // Keep the source tag so it cannot be mistaken for frontend success.
+                String alias = "py_rtp_success_qps_metric";
+                if (registered.add(alias)) monitor.register(alias, FlexMetricType.GAUGE);
+                var aliasLabels = new HashMap<>(labels);
+                aliasLabels.put("success_source", "mock_decode");
+                monitor.report(alias, new FlexMetricTags.ImmutableFlexMetricTags(aliasLabels), successQps);
+            }
         }
         metrics.forEach((name, value) -> {
             // Preserve execution-round samples. A periodic zero between two

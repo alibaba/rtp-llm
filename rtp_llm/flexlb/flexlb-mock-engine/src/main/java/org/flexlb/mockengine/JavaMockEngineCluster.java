@@ -4110,6 +4110,8 @@ public final class JavaMockEngineCluster {
             autoFetch = enabled;
         }
 
+        boolean autoFetchEnabled() { return autoFetch; }
+
         void setFetchAttachTimeoutMs(long timeoutMs) {
             if (timeoutMs < 1) {
                 throw new IllegalArgumentException("fetch attach timeout must be positive");
