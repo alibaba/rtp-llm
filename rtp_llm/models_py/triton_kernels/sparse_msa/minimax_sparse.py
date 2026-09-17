@@ -75,6 +75,7 @@ def m3_fmha_prefill_enabled(
     has_sink: bool,
     max_seqlen_k: int,
     total_q: int,
+    require_workspace: bool = True,
 ) -> bool:
     """Return whether the FMHA index-score and sparse-attention path is usable."""
     fmha_score_rows = total_q
@@ -84,7 +85,7 @@ def m3_fmha_prefill_enabled(
         num_idx_heads, max_seqlen_k, fmha_score_rows
     )
     return (
-        workspace is not None
+        (workspace is not None or not require_workspace)
         and sparse_attn_plan is not None
         and num_idx_heads == num_kv_heads
         and disable_index_value

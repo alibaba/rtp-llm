@@ -52,6 +52,7 @@ import triton.language as tl
 _FUSED_KV_GATHER = os.environ.get("M3_MSA_FUSED_KV_GATHER", "1") != "0"
 _CP_PACKED_KV_OVERLAP = os.environ.get("RTP_LLM_CP_PACKED_KV_OVERLAP", "0") == "1"
 _CP_PREFIX_PREFETCH = os.environ.get("RTP_LLM_CP_PREFIX_PREFETCH", "0") == "1"
+_CP_COMPACT_PREFILL = os.environ.get("M3_MSA_CP_COMPACT_PREFILL", "0") == "1"
 _MAX_LIVE_PREFETCH = 2
 
 import torch.nn as nn
@@ -1091,6 +1092,7 @@ def _fused_cp_paged_write_kernel(
     PAGE_SIZE: tl.constexpr,
     SCRATCH_SEQ_LEN: tl.constexpr,
     SCRATCH_IS_PAGED: tl.constexpr,
+    WRITE_MAIN_SCRATCH: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_I: tl.constexpr,
 ):
@@ -1121,18 +1123,19 @@ def _fused_cp_paged_write_kernel(
                 mask=dmask,
                 other=0.0,
             )
-            if SCRATCH_IS_PAGED:
-                scratch_page = dst_slot // PAGE_SIZE
-                scratch_off = dst_slot - scratch_page * PAGE_SIZE
-                scratch_addr = (
-                    scratch_page * NUM_KV_HEADS * PAGE_SIZE * HEAD_DIM
-                    + h * PAGE_SIZE * HEAD_DIM
-                    + scratch_off * HEAD_DIM
-                )
-            else:
-                scratch_addr = dst_slot * NK + h * HEAD_DIM
-            tl.store(scratch_k_ptr + scratch_addr + d, k, mask=dmask)
-            tl.store(scratch_v_ptr + scratch_addr + d, v, mask=dmask)
+            if WRITE_MAIN_SCRATCH:
+                if SCRATCH_IS_PAGED:
+                    scratch_page = dst_slot // PAGE_SIZE
+                    scratch_off = dst_slot - scratch_page * PAGE_SIZE
+                    scratch_addr = (
+                        scratch_page * NUM_KV_HEADS * PAGE_SIZE * HEAD_DIM
+                        + h * PAGE_SIZE * HEAD_DIM
+                        + scratch_off * HEAD_DIM
+                    )
+                else:
+                    scratch_addr = dst_slot * NK + h * HEAD_DIM
+                tl.store(scratch_k_ptr + scratch_addr + d, k, mask=dmask)
+                tl.store(scratch_v_ptr + scratch_addr + d, v, mask=dmask)
             tl.store(
                 base_flat_ptr + paged_k + h * head_stride + d,
                 k,
@@ -1158,27 +1161,28 @@ def _fused_cp_paged_write_kernel(
         tail = (PAGE_SIZE - kv_len % PAGE_SIZE) % PAGE_SIZE
         scratch_row = batch_idx * SCRATCH_SEQ_LEN + kv_len + page_offset
         clear = (page_offset < tail) & (scratch_row < (batch_idx + 1) * SCRATCH_SEQ_LEN)
-        for h in tl.range(0, NUM_KV_HEADS):
-            if SCRATCH_IS_PAGED:
-                scratch_page = scratch_row // PAGE_SIZE
-                scratch_off = scratch_row - scratch_page * PAGE_SIZE
-                scratch_addr = (
-                    scratch_page * NUM_KV_HEADS * PAGE_SIZE * HEAD_DIM
-                    + h * PAGE_SIZE * HEAD_DIM
-                    + scratch_off * HEAD_DIM
+        if WRITE_MAIN_SCRATCH:
+            for h in tl.range(0, NUM_KV_HEADS):
+                if SCRATCH_IS_PAGED:
+                    scratch_page = scratch_row // PAGE_SIZE
+                    scratch_off = scratch_row - scratch_page * PAGE_SIZE
+                    scratch_addr = (
+                        scratch_page * NUM_KV_HEADS * PAGE_SIZE * HEAD_DIM
+                        + h * PAGE_SIZE * HEAD_DIM
+                        + scratch_off * HEAD_DIM
+                    )
+                else:
+                    scratch_addr = scratch_row * NK + h * HEAD_DIM
+                tl.store(
+                    scratch_k_ptr + scratch_addr + d,
+                    0.0,
+                    mask=dmask & clear,
                 )
-            else:
-                scratch_addr = scratch_row * NK + h * HEAD_DIM
-            tl.store(
-                scratch_k_ptr + scratch_addr + d,
-                0.0,
-                mask=dmask & clear,
-            )
-            tl.store(
-                scratch_v_ptr + scratch_addr + d,
-                0.0,
-                mask=dmask & clear,
-            )
+                tl.store(
+                    scratch_v_ptr + scratch_addr + d,
+                    0.0,
+                    mask=dmask & clear,
+                )
         tl.store(
             scratch_idx_ptr + scratch_row * NI + di,
             0.0,
@@ -1205,6 +1209,7 @@ def _fused_cp_paged_write(
     page_size: int,
     token_count: Optional[int] = None,
     scratch_is_paged: bool = False,
+    write_main_scratch: bool = True,
 ) -> None:
     """Unpad CP all-gather output and write scratch plus scheduler paged caches."""
     if token_count is None:
@@ -1223,8 +1228,8 @@ def _fused_cp_paged_write(
         unpad_indices,
         write_slots,
         slot_mapping,
-        scratch_k.reshape(-1, nk),
-        scratch_v.reshape(-1, nk),
+        scratch_k.reshape(-1, nk) if write_main_scratch else packed,
+        scratch_v.reshape(-1, nk) if write_main_scratch else packed,
         idx_scratch.reshape(-1, ni),
         base.reshape(-1),
         scale_flat,
@@ -1238,6 +1243,7 @@ def _fused_cp_paged_write(
         PAGE_SIZE=page_size,
         SCRATCH_SEQ_LEN=scratch_seq_len,
         SCRATCH_IS_PAGED=scratch_is_paged,
+        WRITE_MAIN_SCRATCH=write_main_scratch,
         BLOCK_D=triton.next_power_of_2(head_dim),
         BLOCK_I=triton.next_power_of_2(ni),
         num_warps=1,
@@ -2475,9 +2481,13 @@ class MSAAttention(nn.Module):
         nk: int,
         ni: int,
         token_count: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Write suffix K/V directly into process-wide BF16 HND working pages.
+        *,
+        write_main_scratch: bool = True,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Persist suffix/idx, optionally materializing full BF16 working pages.
 
+        Compact prefill disables main scratch while retaining all persistent
+        writes and idx scratch writes/padding. The default path is unchanged.
         The same launch persists rank-owned suffix pages and fills the BF16
         idx-K scratch. Main K/V never materialize in the process-wide BF16
         flat scratch on this path. Working pages come from ``_BF16_WORKING_PAGES``
@@ -2517,13 +2527,15 @@ class MSAAttention(nn.Module):
         # Process-wide pool: one BF16 HND working set shared across all sparse
         # layers of a forward. Avoids N x ~2GiB empties that pile up under CP
         # side/prefetch stream deferred frees.
-        k_paged, v_paged = _BF16_WORKING_PAGES.acquire(
-            page_count,
-            self.kv_head_num,
-            int(self.page_size),
-            self.head_dim,
-            device,
-        )
+        k_paged, v_paged = None, None
+        if write_main_scratch:
+            k_paged, v_paged = _BF16_WORKING_PAGES.acquire(
+                page_count,
+                self.kv_head_num,
+                int(self.page_size),
+                self.head_dim,
+                device,
+            )
         idx_scratch = _IDX_K_SCRATCH.acquire(
             scratch_slots, 1, self.idx_head_dim, packed.dtype, device
         )
@@ -2546,6 +2558,7 @@ class MSAAttention(nn.Module):
             self.page_size,
             token_count=token_count,
             scratch_is_paged=True,
+            write_main_scratch=write_main_scratch,
         )
         self._scratch_k = None
         self._scratch_v = None
@@ -2889,6 +2902,35 @@ class MSAAttention(nn.Module):
             ),
         )
 
+    def _gather_cp_compact_prefix_pool(
+        self, pool, attn_inputs, prefix_lengths, gather_plan
+    ):
+        """Keep complete gathered prefixes in pool dtype, without BF16 expansion."""
+        if not any(prefix_lengths):
+            return pool[:0]
+        if any(length % self.page_size for length in prefix_lengths):
+            raise ValueError("compact CP prefixes must be page aligned")
+        block_table = self._physical_block_table(attn_inputs)
+        if self._kv_sharded:
+            return gather_cp_sharded_prefix_pool(
+                pool,
+                block_table,
+                torch.tensor(prefix_lengths, dtype=torch.int64),
+                page_size=self.page_size,
+                cp_size=self._cp_size,
+                cp_rank=self._cp_rank,
+                gather_plan=gather_plan,
+                restore_logical_order=False,
+            )
+        pages = torch.cat(
+            [
+                block_table[b, : length // self.page_size]
+                for b, length in enumerate(prefix_lengths)
+                if length
+            ]
+        ).long()
+        return pool.index_select(0, pages)
+
     def _write_kv_cache_and_idx_k_for_decode(
         self,
         kv_cache: LayerKVCache,
@@ -3135,6 +3177,15 @@ class MSAAttention(nn.Module):
         from rtp_llm.models_py.triton_kernels.sparse_msa.minimax_sparse import (
             minimax_sparse_prefill,
         )
+
+        if _CP_COMPACT_PREFILL:
+            from .msa_cp_compact import validate_compact_mode
+
+            validate_compact_mode(_CP_PACKED_KV_OVERLAP, _CP_PREFIX_PREFETCH)
+            if self.block_size != self.page_size:
+                raise ValueError(
+                    "compact CP prefill requires sparse block size == cache page size"
+                )
 
         cp_info = attn_inputs.context_parallel_info
         device = hidden_states.device
@@ -3473,7 +3524,27 @@ class MSAAttention(nn.Module):
         else:
             prefix_gather_plan = None
 
-        fmha_workspace = MSAAttention._get_trtllm_workspace(device)
+        if _CP_COMPACT_PREFILL:
+            from rtp_llm.models_py.triton_kernels.sparse_msa.minimax_sparse import (
+                m3_fmha_prefill_enabled,
+            )
+
+            if not m3_fmha_prefill_enabled(
+                workspace=None,
+                require_workspace=False,
+                sparse_attn_plan=sparse_attn_plan,
+                num_idx_heads=self.num_idx_heads,
+                num_kv_heads=self.kv_head_num,
+                disable_index_value=self.disable_index_value,
+                has_idx_sink=False,
+                has_sink=False,
+                max_seqlen_k=max_seqlen_k,
+                total_q=local_tokens,
+            ):
+                raise ValueError("compact CP prefill requires the native FMHA path")
+            fmha_workspace = None
+        else:
+            fmha_workspace = MSAAttention._get_trtllm_workspace(device)
         if index_score_chunk_enabled:
             assert index_score_host_metadata is not None
             from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
@@ -3562,6 +3633,102 @@ class MSAAttention(nn.Module):
 
         if packed_kv_event is not None:
             torch.cuda.current_stream(all_packed.device).wait_event(packed_kv_event)
+
+        if _CP_COMPACT_PREFILL:
+            from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
+                flash_prefill_topk_to_block_tables,
+            )
+
+            from .msa_cp_compact import (
+                build_source_metadata,
+                restore_idx_pages,
+                run_compact_attention,
+            )
+
+            self._write_cp_suffix_to_bf16_working_pages(
+                kv_cache,
+                all_packed,
+                unpad_indices,
+                write_slots,
+                slot_mapping,
+                kv_lens_i32,
+                nk,
+                ni,
+                token_count_py,
+                write_main_scratch=False,
+            )
+            prefix_rows = (
+                prefix_gather_plan.restore_indices
+                if prefix_gather_plan is not None
+                else None
+            )
+            idx_pages = self._gather_cp_compact_prefix_pool(
+                self._idx_k_paged_view(kv_cache),
+                attn_inputs,
+                prefix_cpu_list,
+                prefix_gather_plan,
+            )
+            restore_idx_pages(
+                idx_pages, prefix_dst_pages, self._scratch_idx_k, prefix_rows
+            )
+            del idx_pages
+            if attn_inputs.cache_store_inputs:
+                from rtp_llm.models_py.modules.factory.attention import (
+                    common as _attn_common,
+                )
+
+                write_impl = _attn_common.create_write_cache_store_impl(attn_inputs)
+                _attn_common.apply_write_cache_store(write_impl, attn_inputs, kv_cache)
+            _, _, topk_idx = flash_prefill_topk_to_block_tables(
+                idx_q=idx_q,
+                idx_k_cache=self._scratch_idx_k,
+                req_to_token=req_to_token_segments,
+                cu_seqlens=cu_seqlens,
+                seq_lens=seq_lens_i32,
+                prefix_lens=prefix_i32,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                block_size_k=self.block_size,
+                topk=self.topk_blocks,
+                num_pages=triton.cdiv(max_seqlen_k, self.block_size),
+                init_blocks=self.init_blocks,
+                local_blocks=self.local_blocks,
+                index_score_plan=index_score_plan,
+                kv_indices=kv_page_indices,
+                emit_block_table=False,
+            )
+            main_pages = self._gather_cp_compact_prefix_pool(
+                self._paged_kv_base_view(kv_cache),
+                attn_inputs,
+                prefix_cpu_list,
+                prefix_gather_plan,
+            )
+            source_meta = build_source_metadata(
+                prefix_cpu_list,
+                kv_lens_i32,
+                int(self._scratch_seq_len),
+                self.page_size,
+                prefix_dst_pages,
+                prefix_rows,
+            )
+            o = run_compact_attention(
+                q,
+                topk_idx,
+                kv_page_indices,
+                sparse_attn_plan,
+                main_pages,
+                all_packed,
+                unpad_indices,
+                source_meta,
+                int(self._scratch_seq_len),
+                self.page_size,
+                self.kv_head_num,
+                self.head_dim,
+                ni,
+                self.topk_blocks,
+            )
+            del all_packed, packed_kv, main_pages, q, idx_q, topk_idx, source_meta
+            return self.o_proj(o.reshape(local_tokens, -1).contiguous())
 
         # The fused writer persists rank-owned suffix pages, fills idx-K scratch,
         # and builds the BF16 HND working pages consumed by native sparse FMHA.

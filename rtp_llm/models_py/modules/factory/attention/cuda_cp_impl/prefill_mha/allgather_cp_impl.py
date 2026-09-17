@@ -927,7 +927,12 @@ class PCPAllGatherAttnOp:
             ],
             dim=-1,
         )
-        q = q.contiguous()
+        # Ragged parts use index_select, which creates contiguous Q itself.
+        # FA4 accepts the token stride (and casts Q for an FP8 prefix), so avoid
+        # an additional full-size BF16 Q copy. Keep FlashInfer prefix's existing
+        # layout contract unchanged.
+        if self.has_prefix and not self._fa4_prefix:
+            q = q.contiguous()
         k = k.contiguous()
         v = v.contiguous()
 
@@ -1007,18 +1012,15 @@ class PCPAllGatherAttnOp:
                 kv_cache_dtype=self.attn_configs.kv_cache_dtype,
             )
 
-        q0 = torch.index_select(q_reshaped, 0, self.q0_idx).contiguous()
-        q1 = torch.index_select(q_reshaped, 0, self.q1_idx).contiguous()
+        # Cache writes and attention run on the current stream. These restore
+        # buffers have no further readers; let the allocator reuse their storage.
+        del restore_k, restore_v
+        if not self._kv_sharded:
+            del append_k, append_v
 
-        k0 = torch.index_select(all_keys, 0, self.kv0_idx).contiguous()
-        k1 = torch.index_select(all_keys, 0, self.kv1_idx).contiguous()
-        v0 = torch.index_select(all_values, 0, self.kv0_idx).contiguous()
-        v1 = torch.index_select(all_values, 0, self.kv1_idx).contiguous()
         if self.has_prefix:
-            # A cache hit is a non-causal paged pass over the prefix plus a causal
-            # ragged pass per CP part, combined through the LSE. The pool is sized
-            # from prefix_lengths alone, which every rank agrees on, so the gather
-            # backing it sends an identical count from every rank.
+            # Finish the full prefix pass before materializing either ragged part.
+            # Part Q/K/V copies otherwise overlap the largest prefix workspace.
             prefix_kv_cache_tensor = kv_cache_tensor
             if self._kv_sharded:
                 prefix_kv_cache_tensor = gather_cp_sharded_prefix_pool(
@@ -1030,74 +1032,78 @@ class PCPAllGatherAttnOp:
                     cp_rank=self._cp_rank,
                 )
             if self._fa4_prefix:
-                # Uniform fp8 throughout: the prefix is read in its stored dtype and
-                # the gathered extend is cast to match, so both passes agree.
-                kv_dtype = kv_cache_tensor.dtype
                 prefix_out, prefix_lse = self._run_fa4_paged_prefix(
                     q_reshaped, prefix_kv_cache_tensor, self.cu_seqlens
                 )
-                out0, lse0 = self._run_fa4_ragged(
-                    q0,
-                    k0.to(kv_dtype),
-                    v0.to(kv_dtype),
-                    self.qo_indptr,
-                    self.kv_indptr_part0,
-                    return_lse=True,
-                )
-                out1, lse1 = self._run_fa4_ragged(
-                    q1,
-                    k1.to(kv_dtype),
-                    v1.to(kv_dtype),
-                    self.qo_indptr,
-                    self.kv_indptr_part1,
-                    return_lse=True,
-                )
             else:
-                # FlashInfer keeps q and the extend in bf16 and dequantises only the
-                # cached prefix.
                 prefix_out, prefix_lse = self.prefill_wrappers["paged"]["prefix"].run(
                     q_reshaped, prefix_kv_cache_tensor, return_lse=True
                 )
-                out0, lse0 = self._run_ragged_part("part0", q0, k0, v0, return_lse=True)
-                out1, lse1 = self._run_ragged_part("part1", q1, k1, v1, return_lse=True)
+            del prefix_kv_cache_tensor
 
-            out0, _ = merge_state(
-                v_a=prefix_out[self.q0_idx],
-                s_a=prefix_lse[self.q0_idx],
-                v_b=out0,
-                s_b=lse0,
-            )
-            out1, _ = merge_state(
-                v_a=prefix_out[self.q1_idx],
-                s_a=prefix_lse[self.q1_idx],
-                v_b=out1,
-                s_b=lse1,
-            )
-            output = torch.empty_like(q_reshaped)
-            output[self.q0_idx] = out0
-            output[self.q1_idx] = out1
-            return output
-        else:
-            output = torch.empty_like(q_reshaped)
-            if self._fa4_no_prefix:
-                # Cast the gathered extend K/V to the cache dtype so an fp8 cache
-                # still gets uniform-fp8 attention; a no-op for bf16.
-                kv_dtype = kv_cache_tensor.dtype
-                output[self.q0_idx] = self._run_fa4_ragged(
-                    q0,
-                    k0.to(kv_dtype),
-                    v0.to(kv_dtype),
-                    self.qo_indptr,
-                    self.kv_indptr_part0,
+            if (
+                prefix_out.shape == q_reshaped.shape
+                and prefix_out.dtype == q_reshaped.dtype
+                and prefix_out.is_contiguous()
+            ):
+                output = prefix_out
+            else:
+                output = torch.empty_like(q_reshaped)
+
+            # q0/q1 partition the local rows (including padding). Updating one
+            # part cannot overwrite prefix values needed by the other part.
+            # Keep only one part's gathers, attention result and merge live.
+            for part, q_idx, kv_idx, kv_indptr in (
+                ("part0", self.q0_idx, self.kv0_idx, self.kv_indptr_part0),
+                ("part1", self.q1_idx, self.kv1_idx, self.kv_indptr_part1),
+            ):
+                q_part = torch.index_select(q_reshaped, 0, q_idx)
+                k_part = torch.index_select(all_keys, 0, kv_idx)
+                v_part = torch.index_select(all_values, 0, kv_idx)
+                if self._fa4_prefix:
+                    kv_dtype = kv_cache_tensor.dtype
+                    part_out, part_lse = self._run_fa4_ragged(
+                        q_part,
+                        k_part.to(kv_dtype),
+                        v_part.to(kv_dtype),
+                        self.qo_indptr,
+                        kv_indptr,
+                        return_lse=True,
+                    )
+                else:
+                    part_out, part_lse = self._run_ragged_part(
+                        part, q_part, k_part, v_part, return_lse=True
+                    )
+                del q_part, k_part, v_part
+                merged, _ = merge_state(
+                    v_a=prefix_out[q_idx],
+                    s_a=prefix_lse[q_idx],
+                    v_b=part_out,
+                    s_b=part_lse,
                 )
-                output[self.q1_idx] = self._run_fa4_ragged(
-                    q1,
-                    k1.to(kv_dtype),
-                    v1.to(kv_dtype),
+                output[q_idx] = merged
+                del part_out, part_lse, merged
+            return output
+
+        output = torch.empty_like(q_reshaped)
+        for part, q_idx, kv_idx, kv_indptr in (
+            ("part0", self.q0_idx, self.kv0_idx, self.kv_indptr_part0),
+            ("part1", self.q1_idx, self.kv1_idx, self.kv_indptr_part1),
+        ):
+            q_part = torch.index_select(q_reshaped, 0, q_idx)
+            k_part = torch.index_select(all_keys, 0, kv_idx)
+            v_part = torch.index_select(all_values, 0, kv_idx)
+            if self._fa4_no_prefix:
+                kv_dtype = kv_cache_tensor.dtype
+                part_out = self._run_fa4_ragged(
+                    q_part,
+                    k_part.to(kv_dtype),
+                    v_part.to(kv_dtype),
                     self.qo_indptr,
-                    self.kv_indptr_part1,
+                    kv_indptr,
                 )
             else:
-                output[self.q0_idx] = self._run_ragged_part("part0", q0, k0, v0)
-                output[self.q1_idx] = self._run_ragged_part("part1", q1, k1, v1)
-            return output
+                part_out = self._run_ragged_part(part, q_part, k_part, v_part)
+            output[q_idx] = part_out
+            del q_part, k_part, v_part, part_out
+        return output

@@ -100,3 +100,12 @@ py_test(
     tags = ["H20"],
     exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
 )
+
+py_test(
+    name = "test_msa_cp_compact",
+    srcs = ["test_msa_cp_compact.py"],
+    deps = py_test_deps + ["//rtp_llm:fmha-sm100"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["open_skip", "SM100_X86"],
+    exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
+)

@@ -34,3 +34,13 @@ py_test(
     tags = ["open_skip", "SM100_X86"],
     exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
 )
+
+# Local compact-page oracle validation; explicitly hide GPUs.
+py_test(
+    name = "test_compact_prefill_pages",
+    srcs = ["test_compact_prefill_pages.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)

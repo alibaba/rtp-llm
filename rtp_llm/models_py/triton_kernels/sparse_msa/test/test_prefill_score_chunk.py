@@ -122,6 +122,20 @@ class PrefillScoreChunkTest(unittest.TestCase):
                 total_q=128,
             )
         )
+        self.assertTrue(
+            m3_fmha_prefill_enabled(
+                workspace=None,
+                sparse_attn_plan={},
+                num_idx_heads=4,
+                num_kv_heads=4,
+                disable_index_value=True,
+                has_idx_sink=False,
+                has_sink=False,
+                max_seqlen_k=1024,
+                total_q=128,
+                require_workspace=False,
+            )
+        )
 
         os.environ["M3_MSA_INDEX_SCORE_CHUNK_ROWS"] = "100000"
         self.assertFalse(

@@ -426,6 +426,183 @@ class SparsePrefillChunkTest(unittest.TestCase):
         self._assert_close(out, ref, case_name)
         return out, ref
 
+    def _assert_compact_parity(self, q, k, v, topk_idx, page_map, plan, sm, chunk):
+        # Never reuse the compact table in the baseline: that would hide stale maps.
+        baseline_plan = {
+            key: value for key, value in plan.items() if key != "_chunk_meta"
+        }
+        ref = self.tbf._sparse_attn_chunked(
+            q,
+            k,
+            v,
+            topk_idx,
+            page_map,
+            baseline_plan,
+            self.TOPK,
+            self.BLK,
+            sm,
+            chunk,
+        )
+        out = self.tbf.sparse_prefill_from_topk(
+            q,
+            k,
+            v,
+            topk_idx,
+            page_map,
+            plan,
+            self.TOPK,
+            self.BLK,
+            sm,
+            compact_oracle=True,
+            query_chunk_size=chunk,
+        )
+        self.assertTrue(
+            torch.equal(out, ref),
+            f"compact parity failed: max_abs="
+            f"{(out.float() - ref.float()).abs().max().item()}",
+        )
+
+    def _check_compact_changed_mapping(self, partial_dtype):
+        device = torch.device("cuda", 0)
+        segs = [_seg(7, prefix=256, kv_run=512), _seg(9, prefix=256, kv_run=512)]
+        q, k, v, topk_idx, _, _, sm = self._make_inputs(segs, device, seed=71)
+        topk_idx.fill_(-1)
+        topk_idx[:, :, :3] = torch.tensor([0, 1, 2], device=device)
+        k[2].fill_(1.0078125)
+        k[6].fill_(1.015625)
+        plan = dict(
+            num_kv_heads=self.HKV,
+            qo_segment_lens=torch.tensor([7, 9], dtype=torch.int32),
+            seqused_k=torch.tensor([263, 265], dtype=torch.int32, device=device),
+            kv_segment_lens=torch.tensor([512, 512], dtype=torch.int32),
+            causal=True,
+            partial_dtype=partial_dtype,
+            usable_SM_count=-1,
+        )
+        for suffix_page in (6, 5):
+            page_map = torch.tensor(
+                [0, 1, 2, 3, 0, 1, suffix_page, 7], dtype=torch.int32, device=device
+            )
+            self._assert_compact_parity(q, k, v, topk_idx, page_map, plan, sm, 10)
+
+    def test_compact_pages_same_plan_changed_mapping(self):
+        self._check_compact_changed_mapping(torch.bfloat16)
+
+    def test_compact_pages_changed_mapping_fp8_partial(self):
+        self._check_compact_changed_mapping(torch.float8_e4m3fn)
+
+    def test_compact_refresh_preserves_legacy_page_map_cache(self):
+        device = torch.device("cuda", 0)
+        segs = [_seg(7, prefix=256, kv_run=512), _seg(9, prefix=256, kv_run=512)]
+        q, k, v, topk_idx, map_a, _, sm = self._make_inputs(segs, device, seed=79)
+        topk_idx.fill_(-1)
+        topk_idx[:, :, :3] = torch.tensor([0, 1, 2], device=device)
+        map_b = map_a.flip(0).contiguous()
+        for partial_dtype in (torch.bfloat16, torch.float8_e4m3fn):
+            with self.subTest(partial_dtype=partial_dtype):
+                plan = dict(
+                    num_kv_heads=self.HKV,
+                    qo_segment_lens=torch.tensor([7, 9], dtype=torch.int32),
+                    seqused_k=torch.tensor(
+                        [263, 265], dtype=torch.int32, device=device
+                    ),
+                    kv_segment_lens=torch.tensor([512, 512], dtype=torch.int32),
+                    causal=True,
+                    partial_dtype=partial_dtype,
+                    usable_SM_count=-1,
+                )
+                before = self.tbf._sparse_attn_chunked(
+                    q,
+                    k,
+                    v,
+                    topk_idx,
+                    map_a,
+                    plan,
+                    self.TOPK,
+                    self.BLK,
+                    sm,
+                    10,
+                )
+                cache_a = plan["_chunk_meta"]
+                tables_a = [c["pt"].clone() for c in cache_a["chunks"]]
+                # New API consumes B while sharing exactly the legacy plan A.
+                self._assert_compact_parity(q, k, v, topk_idx, map_b, plan, sm, 10)
+                self.assertIs(plan["_chunk_meta"], cache_a)
+                for chunk, original_table in zip(cache_a["chunks"], tables_a):
+                    self.assertTrue(torch.equal(chunk["pt"], original_table))
+                after = self.tbf._sparse_attn_chunked(
+                    q,
+                    k,
+                    v,
+                    topk_idx,
+                    map_a,
+                    plan,
+                    self.TOPK,
+                    self.BLK,
+                    sm,
+                    10,
+                )
+                self.assertTrue(torch.equal(before, after))
+                self.assertIs(plan["_chunk_meta"], cache_a)
+
+    def _check_compact_sparse_history(self, partial_dtype):
+        device = torch.device("cuda", 0)
+        prefix = 512 * self.BLK
+        kv_run = prefix + self.BLK
+        segs = [
+            _seg(17, prefix=prefix, kv_run=kv_run),
+            _seg(19, prefix=prefix, kv_run=kv_run),
+        ]
+        q, k, v, topk_idx, _, _, sm = self._make_inputs(segs, device, seed=83)
+        pages = 513
+        # Both requests alias all immutable prefix pages; suffix remains distinct.
+        page_map = torch.cat(
+            (
+                torch.arange(pages, dtype=torch.int32, device=device),
+                torch.arange(pages - 1, dtype=torch.int32, device=device),
+                torch.tensor([2 * pages - 1], dtype=torch.int32, device=device),
+            )
+        )
+        k[pages - 1].fill_(1.0078125)
+        k[2 * pages - 1].fill_(1.015625)
+        plan = dict(
+            num_kv_heads=self.HKV,
+            qo_segment_lens=torch.tensor([17, 19], dtype=torch.int32),
+            seqused_k=torch.tensor(
+                [prefix + 17, prefix + 19], dtype=torch.int32, device=device
+            ),
+            kv_segment_lens=torch.tensor([kv_run, kv_run], dtype=torch.int32),
+            causal=True,
+            partial_dtype=partial_dtype,
+            usable_SM_count=-1,
+        )
+        for layer in range(2):
+            # Same plan and map, different selection per layer, head and query.
+            topk_idx.fill_(-1)
+            for head in range(self.HKV):
+                topk_idx[head, :, :4] = torch.tensor(
+                    [0, 7 + head * 11 + layer * 101, 300 + head * 13 + layer * 17, 512],
+                    device=device,
+                )
+                topk_idx[head, 1::2, 1] += 1
+            compact_k, _, _, selected = self.tbf.compact_bf16_pages_for_topk(
+                k,
+                v,
+                topk_idx,
+                page_map.reshape(2, pages),
+                torch.tensor([0, 17, 36], dtype=torch.int32, device=device),
+            )
+            self.assertLess(selected.numel(), pages // 8)
+            self.assertEqual(compact_k.shape[0], selected.numel() + 1)
+            del compact_k
+            self._assert_compact_parity(q, k, v, topk_idx, page_map, plan, sm, 23)
+
+    def test_compact_sparse_history_changed_selection(self):
+        self._check_compact_sparse_history(torch.bfloat16)
+
+    def test_compact_sparse_history_changed_selection_fp8_partial(self):
+        self._check_compact_sparse_history(torch.float8_e4m3fn)
+
     def test_even_partition(self):
         # single request, total_q divisible by chunk_size.
         self._run_case([_seg(8192)], 2048, "even_partition")

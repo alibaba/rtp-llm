@@ -76,3 +76,14 @@ py_test(
     tags = ["manual"],
     exec_properties = {'gpu': 'H20'},
 )
+
+# CPU tensors with mocked device kernels; no GPU resource required.
+py_test(
+    name = "test_allgather_cp_forward_cpu",
+    srcs = ["test_allgather_cp_forward_cpu.py"],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": []
+    }),
+)
