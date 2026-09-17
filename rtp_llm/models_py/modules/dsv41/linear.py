@@ -5,7 +5,6 @@ Activations cross the official BF16 -> group32 FP8/UE8M0 boundary. Checkpoint
 """
 
 import logging
-import os
 from functools import partial
 
 import torch
@@ -21,20 +20,10 @@ def is_supported(values: torch.Tensor) -> bool:
     )
 
 
-def _require_execution(values: torch.Tensor) -> None:
-    if os.environ.get("DSV41_BLOCK32_LINEAR", "0") != "1":
-        raise RuntimeError("V4.1 block32 linear requires DSV41_BLOCK32_LINEAR=1")
-    if not is_supported(values):
-        raise RuntimeError("V4.1 block32 linear requires CUDA13 on a Blackwell GPU")
-    if torch.is_autocast_enabled():
-        raise RuntimeError("V4.1 block32 activation quantization requires autocast off")
-
-
 def quantize_block32(
     values: torch.Tensor, *, packed: bool = False, swizzled: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return E4M3 and raw, DeepGEMM-packed or F8_128x4 group32 scales."""
-    _require_execution(values)
     if (
         values.ndim != 2
         or values.dtype != torch.bfloat16
@@ -48,7 +37,6 @@ def quantize_block32(
     if (packed or swizzled) and values.shape[1] % 128:
         raise ValueError("packed V4.1 activation scales require K%128=0")
     from rtp_llm.models_py.modules.dsv41._linear_triton import (
-        quantize_block32_kernel,
         quantize_block32_vector_kernel,
     )
 
@@ -71,36 +59,26 @@ def quantize_block32(
             (rows, columns // 32), dtype=torch.float32, device=values.device
         )
     if rows:
-        if packed or swizzled or os.environ.get("DSV41_BLOCK32_FAST_QUANT", "1") == "1":
-            packs = 16 if values.numel() >= 1024 * 1024 else 4
-            stored_rows = ((rows + 127) // 128) * 128 if swizzled else rows
-            blocks = (stored_rows * columns + packs * 128 - 1) // (packs * 128)
-            valid = torch.empty(blocks, dtype=torch.bool, device=values.device)
-            quantize_block32_vector_kernel[(blocks,)](
-                values,
-                encoded,
-                scales,
-                valid,
-                rows,
-                K=columns,
-                PACKED=packed,
-                PACKS=packs,
-                SWIZZLED=swizzled,
-                num_warps=4,
-            )
-        else:
-            valid = torch.empty_like(scales, dtype=torch.bool)
-            quantize_block32_kernel[(rows, columns // 32)](
-                values, encoded, scales, valid, K=columns, num_warps=1
-            )
-        torch._assert_async(valid.all(), "nonfinite V4.1 block32 activation")
+        packs = 16 if values.numel() >= 1024 * 1024 else 4
+        stored_rows = ((rows + 127) // 128) * 128 if swizzled else rows
+        blocks = (stored_rows * columns + packs * 128 - 1) // (packs * 128)
+        quantize_block32_vector_kernel[(blocks,)](
+            values,
+            encoded,
+            scales,
+            rows,
+            K=columns,
+            PACKED=packed,
+            PACKS=packs,
+            SWIZZLED=swizzled,
+            num_warps=4,
+        )
     return encoded, scales
 
 
 class V41Block32Linear(nn.Module):
     def __init__(self, weight: torch.Tensor, scale: torch.Tensor):
         super().__init__()
-        _require_execution(weight)
         if (
             weight.ndim != 2
             or weight.dtype != torch.float8_e4m3fn
@@ -113,10 +91,7 @@ class V41Block32Linear(nn.Module):
                 "V4.1 dense weight must be contiguous E4M3 [N,K], N/K%32=0"
             )
         self.out_features, self.in_features = weight.shape
-        self._packed_activations = (
-            os.environ.get("DSV41_BLOCK32_FAST_QUANT", "1") == "1"
-            and self.in_features % 128 == 0
-        )
+        self._packed_activations = self.in_features % 128 == 0
         if (
             scale.shape != (self.out_features // 32, self.in_features // 32)
             or scale.dtype != torch.float8_e8m0fnu
@@ -133,18 +108,14 @@ class V41Block32Linear(nn.Module):
         )
         self.register_buffer("weight", weight)
         self.register_buffer("weight_scale", scales)
-        self._prepack_weight_scale = os.environ.get("DSV41_BLOCK32_PREPACK", "1") == "1"
         flashinfer_shape = (
             (self.out_features, self.in_features) == (32768, 1280)
             and torch.cuda.get_device_capability(weight.device) == (10, 3)
-            and self._prepack_weight_scale
             and self._packed_activations
         )
-        self._use_cudnn = (
-            flashinfer_shape and os.environ.get("DSV41_BLOCK32_CUDNN", "1") == "1"
-        )
+        self._use_cudnn = flashinfer_shape
         self._use_cute = False
-        if flashinfer_shape and os.environ.get("DSV41_BLOCK32_CUTE", "1") == "1":
+        if flashinfer_shape:
             import cutlass
             import flashinfer
             from packaging.version import Version
@@ -166,17 +137,16 @@ class V41Block32Linear(nn.Module):
         self.register_load_state_dict_post_hook(self._refresh_weight_scale_packed)
 
     def _refresh_weight_scale_packed(self, _module=None, _incompatible_keys=None):
-        if self._prepack_weight_scale:
-            import deep_gemm
+        import deep_gemm
 
-            packed_scales = deep_gemm.get_mn_major_tma_aligned_packed_ue8m0_tensor(
-                self.weight_scale.repeat_interleave(32, dim=0)
-            )
-            previous = self._weight_scale_packed
-            if previous is not None and previous.device == packed_scales.device:
-                previous.copy_(packed_scales)
-            else:
-                self._weight_scale_packed = packed_scales
+        packed_scales = deep_gemm.get_mn_major_tma_aligned_packed_ue8m0_tensor(
+            self.weight_scale.repeat_interleave(32, dim=0)
+        )
+        previous = self._weight_scale_packed
+        if previous is not None and previous.device == packed_scales.device:
+            previous.copy_(packed_scales)
+        else:
+            self._weight_scale_packed = packed_scales
         if self._use_cudnn or self._use_cute:
             import flashinfer
 
@@ -287,7 +257,6 @@ class V41Block32Linear(nn.Module):
 
     @torch.inference_mode()
     def forward(self, values: torch.Tensor, *, out=None) -> torch.Tensor:
-        _require_execution(values)
         if (
             values.ndim < 2
             or values.shape[-1] != self.in_features

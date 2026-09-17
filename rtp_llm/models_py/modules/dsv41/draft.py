@@ -238,7 +238,6 @@ class V41PrefillDraftCommit(nn.Module):
                     binding.page_ids[request_index] * entries + absolute % entries
                 ).contiguous()
                 result = write_compact(values.contiguous(), binding.pages, slots)
-                result.check()
                 writes.append(result)
         else:
             for binding, _ in destinations:

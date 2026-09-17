@@ -33,8 +33,6 @@ def warmup_sparse_indexer(device) -> None:
     use the largest graph bucket and the fixed V4.1 block geometry once during
     model construction.
     """
-    if os.environ.get("DSV41_SPARSE_INDEXER") != "1":
-        return
     with torch.cuda.device(device):
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
@@ -174,10 +172,6 @@ def _validate(query, weights, pages, page_table, request_ids, visible_lengths, l
     source = layer_sources(layer)
     if not source.scores_queries:
         raise ValueError("only the eight V4.1 index query owners may score queries")
-    if os.environ.get("DSV41_SPARSE_INDEXER") != "1":
-        raise RuntimeError("set DSV41_SPARSE_INDEXER=1 for this component")
-    if not query.is_cuda or torch.cuda.get_device_capability(query.device)[0] != 10:
-        raise RuntimeError("V4.1 sparse scoring requires Blackwell")
     if (
         query.ndim != 3
         or query.shape[1:] != (32, 128)

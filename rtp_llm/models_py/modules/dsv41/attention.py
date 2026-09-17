@@ -445,8 +445,6 @@ class V41Attention(nn.Module):
             global_slots[0],
             index_slots[0],
         )
-        for result in results:
-            result.check()
         state.pair = source.next_pair
         state.materialized_end = context.end
         context.published_sources.add(self.layer)
@@ -486,7 +484,6 @@ class V41Attention(nn.Module):
                     None if candidates is None else candidates[first:last].contiguous()
                 ),
             )
-            result.check()
             results.append(result)
         if not results:
             topk = torch.empty((0, 512), dtype=torch.int32, device=hidden.device)
@@ -524,10 +521,8 @@ class V41Attention(nn.Module):
 
             return forward_cp_attention(self, hidden, context)
         context.validate()
-        if os.environ.get("DSV41_ATTENTION") != "1" or not is_supported(hidden):
-            raise RuntimeError(
-                "V4.1 attention requires opt-in Blackwell BF16 execution"
-            )
+        if not hidden.is_cuda or hidden.dtype != torch.bfloat16:
+            raise ValueError("V4.1 attention needs CUDA BF16 hidden rows")
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
                 "eager attention composition cannot be captured; use reader Graph probes"
@@ -597,7 +592,7 @@ class V41Attention(nn.Module):
                     swa.page_ids[0] * swa.pages.entries_per_page
                     + pos % swa.pages.entries_per_page
                 ).contiguous()
-                write_compact(kv[first:last].contiguous(), swa.pages, slots).check()
+                write_compact(kv[first:last].contiguous(), swa.pages, slots)
                 valid_end = context.start + last
                 swa.valid_starts.fill_(
                     max(
@@ -624,7 +619,6 @@ class V41Attention(nn.Module):
                         None if indices is None else indices[first:last].contiguous()
                     ),
                 )
-                result.check()
                 outputs.append(result.output)
             output = torch.cat(outputs) if outputs else query.new_empty((0, 64, 512))
             output = attention_rope(

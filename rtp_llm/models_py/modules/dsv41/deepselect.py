@@ -10,19 +10,6 @@ from dataclasses import dataclass
 
 import torch
 
-from rtp_llm.models_py.modules.dsv41.native_aot import native_identity
-
-
-def is_supported(values, k):
-    return (
-        values.is_cuda
-        and torch.cuda.get_device_capability(values.device)[0] == 10
-        and values.ndim == 2
-        and values.dtype in (torch.bfloat16, torch.float32)
-        and 0 < values.shape[1] < 2**23
-        and type(k) is int
-        and 1 <= k <= 4096
-    )
 
 
 def _aligned(rows, columns, dtype, device, alignment):
@@ -55,13 +42,17 @@ def topk(
     are sanitized before calling the vendor, including its unchecked short-row
     path, and never return an addressable sentinel.
     """
-    if os.environ.get("DSV41_DEEPSELECT") != "1" or not is_supported(values, k):
-        raise RuntimeError(
-            "DeepSelect requires explicit supported V4.1 CUDA TopK dispatch"
-        )
+    if (
+        values.ndim != 2
+        or not values.is_cuda
+        or values.dtype not in (torch.bfloat16, torch.float32)
+        or type(k) is not int
+        or not 1 <= k <= 4096
+        or not 0 < values.shape[1] < 2**23
+    ):
+        raise ValueError("DeepSelect needs CUDA BF16/FP32 [rows,columns] and 1<=k<=4096")
     if sorted_value and (values.dtype != torch.float32 or sorted_index):
         raise ValueError("value sorting requires FP32 and excludes index sorting")
-    native_identity("deep-select")
     import deep_select
 
     if tuple(deep_select.get_stride_requirement()) != (1024, 32):

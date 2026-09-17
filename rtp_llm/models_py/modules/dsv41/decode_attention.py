@@ -424,8 +424,6 @@ class V41DecodeAttention(nn.Module):
     def forward(self, hidden, context):
         if context is not self.context:
             raise ValueError("decode wrapper received another graph's context")
-        if os.environ.get("DSV41_DECODE_ATTENTION", "0") != "1":
-            raise RuntimeError("set DSV41_DECODE_ATTENTION=1 for graph attention")
         _tensor(
             hidden,
             (context.rows, 5120),

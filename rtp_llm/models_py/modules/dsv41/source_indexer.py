@@ -1,6 +1,5 @@
 """Shared FP4 source tiles for CP prefill's contiguous index-history scan."""
 
-import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -113,10 +112,6 @@ def score_index_source(
     """
     if not layer_sources(layer).scores_queries or layer > 20:
         raise ValueError("shared source scoring is only for source query owners")
-    if os.environ.get("DSV41_SPARSE_INDEXER") != "1":
-        raise RuntimeError("set DSV41_SPARSE_INDEXER=1 for source scoring")
-    if not query.is_cuda or torch.cuda.get_device_capability(query.device)[0] != 10:
-        raise RuntimeError("source scoring requires Blackwell")
     if torch.cuda.is_current_stream_capturing():
         raise RuntimeError("shared source scoring is an eager CP-prefill interface")
     if (

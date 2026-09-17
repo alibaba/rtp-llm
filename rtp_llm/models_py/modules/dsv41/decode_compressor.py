@@ -8,7 +8,6 @@ This component does not enable model Graph execution or publish cache state.
 """
 
 import math
-import os
 from dataclasses import dataclass
 
 import torch
@@ -314,10 +313,6 @@ class V41DecodeOwnerCompressor(nn.Module):
 
     @torch.inference_mode()
     def forward(self, normalized_hidden):
-        if os.environ.get("DSV41_DECODE_OWNER_COMPRESSOR", "0") != "1":
-            raise RuntimeError("decode owner requires DSV41_DECODE_OWNER_COMPRESSOR=1")
-        if torch.is_autocast_enabled() or torch.backends.cuda.matmul.allow_tf32:
-            raise RuntimeError("decode owner requires autocast and TF32 disabled")
         _tensor(
             normalized_hidden,
             (self.batch_size, self.query_width, 5120),

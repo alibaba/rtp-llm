@@ -16,7 +16,7 @@ from rtp_llm.models_py.modules.dsv41.block import V41Block
 from rtp_llm.models_py.modules.dsv41.cache_layout import CacheRegion
 from rtp_llm.models_py.modules.dsv41.compact_writer import encode_compact, write_compact
 from rtp_llm.models_py.modules.dsv41.draft import V41PrefillDraftCommit
-from rtp_llm.models_py.modules.dsv41.flashmla import PlanarPages, _require_enabled
+from rtp_llm.models_py.modules.dsv41.flashmla import PlanarPages
 from rtp_llm.models_py.modules.dsv41.linear import V41Block32Linear
 from rtp_llm.models_py.modules.dsv41.math import (
     grouped_wo_a,
@@ -62,7 +62,6 @@ def draft_flashmla_attention(query, query_kv, context, stage, sinks):
     """Use the fixed native reader with a bounded raw-byte pack per request."""
     from flash_mla.flash_mla_interface import FlashMLASchedMeta, flash_mla_with_kvcache
 
-    _require_enabled(query)
     batch, width = context.batch_size, 5
     if (
         query.shape != (batch * width, 64, 512)

@@ -35,7 +35,6 @@ from rtp_llm.models_py.modules.dsv41.cache_layout import (
     SWA_WINDOW,
     CacheRegion,
     RegionSlot,
-    layer_sources,
 )
 from rtp_llm.models_py.modules.dsv41.ced import (
     AuxRowMap,
@@ -1943,8 +1942,8 @@ def _score_queries(attention, hidden, qr, context):
 @torch.inference_mode()
 def forward_cp_attention(attention, hidden, context):
     context.validate()
-    if os.environ.get("DSV41_ATTENTION") != "1" or not is_supported(hidden):
-        raise RuntimeError("CP8 attention requires opt-in Blackwell BF16 execution")
+    if not hidden.is_cuda or hidden.dtype != torch.bfloat16:
+        raise ValueError("CP attention needs CUDA BF16 hidden rows")
     if torch.cuda.is_current_stream_capturing():
         raise RuntimeError(
             "CP prefill collectives require eager scheduling outside Graph capture"

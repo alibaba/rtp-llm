@@ -6,7 +6,6 @@ ranges. Capture uses explicit invalid rows and never touches a request page.
 """
 
 from contextlib import nullcontext
-import os
 
 import torch
 
@@ -555,8 +554,6 @@ class V41DecodeFmhaImpl:
         self.model._active_v41_graph_impl = self
 
     def _warmup_sparse_indexer(self):
-        if os.environ.get("DSV41_SPARSE_INDEXER") != "1":
-            return
         stream = torch.cuda.current_stream(self.device)
         stream_id = stream.cuda_stream
         if self._sparse_warmup_stream == stream_id:

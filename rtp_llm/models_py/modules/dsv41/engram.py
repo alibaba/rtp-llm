@@ -231,9 +231,6 @@ class Engram(nn.Module):
         )
 
     def _project_quantized(self, encoded, scales):
-        from rtp_llm.models_py.modules.dsv41.linear import _require_execution
-
-        _require_execution(encoded)
         projection = self.projection
         rows = encoded.numel() // projection.in_features
         output = torch.empty(

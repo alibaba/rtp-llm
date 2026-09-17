@@ -7,7 +7,6 @@ sharding and PD protocol integration are caller responsibilities.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -17,7 +16,6 @@ from rtp_llm.models_py.modules.dsv41.cache_layout import ENCODINGS, CacheRegion
 from rtp_llm.models_py.modules.dsv41.compact_reader import (
     CompactPages,
     _separate_outputs,
-    is_supported,
 )
 
 MAX_ENCODE_BYTES = 64 * 1024 * 1024
@@ -75,12 +73,6 @@ class CompactWriteResult:
 
 
 def _validate(values: torch.Tensor, region: CacheRegion) -> None:
-    if os.environ.get("DSV41_NATIVE_COMPACT_WRITER", "0") != "1":
-        raise RuntimeError(
-            "native compact writer requires DSV41_NATIVE_COMPACT_WRITER=1"
-        )
-    if not is_supported(values):
-        raise RuntimeError("native compact writer requires a Blackwell CUDA device")
     if region not in ENCODINGS:
         raise ValueError("unknown compact cache region")
     if (

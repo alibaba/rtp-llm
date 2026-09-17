@@ -23,7 +23,6 @@ from rtp_llm.models_py.modules.dsv41.compact_reader import (
     _output_tensor,
     _separate_outputs,
 )
-from rtp_llm.models_py.modules.dsv41.native_aot import native_identity
 
 FLASHMLA_REVISION = "07a1089857b63e74e3133630c02b083b75e8d4b2"
 
@@ -33,14 +32,6 @@ def is_supported(tensor: torch.Tensor) -> bool:
         (10, 0),
         (10, 3),
     )
-
-
-def _require_enabled(tensor):
-    if os.environ.get("DSV41_FLASHMLA", "0") != "1":
-        raise RuntimeError("V4.1 FlashMLA requires DSV41_FLASHMLA=1")
-    if not is_supported(tensor):
-        raise RuntimeError("V4.1 FlashMLA requires SM100 or SM103")
-    native_identity("flash-mla")
 
 
 @dataclass(frozen=True)
@@ -67,7 +58,6 @@ def to_planar(pages: CompactPages, *, out: PlanarPages | None = None) -> PlanarP
     """Copy interleaved rows to upstream page planes without decoding any byte."""
     if out is not None and not isinstance(out, PlanarPages):
         raise TypeError("planar destination must be explicit PlanarPages")
-    _require_enabled(pages.data)
     pages.validate(pages.data.device)
     if not isinstance(pages, CompactPages) or pages.region not in (
         CacheRegion.SWA,
@@ -109,7 +99,6 @@ def to_planar(pages: CompactPages, *, out: PlanarPages | None = None) -> PlanarP
 
 def copy_to_compact(pages: PlanarPages, out: CompactPages) -> None:
     """Reverse the byte permutation for explicit copy/offload integration probes."""
-    _require_enabled(pages.data)
     pages.validate(pages.data.device)
     out.validate(pages.data.device)
     if (
@@ -549,7 +538,6 @@ def _flashmla_attention(
     Native outputs/workspaces still use PyTorch's Graph private pool, whose
     lifetime belongs to the caller's retained CUDAGraph object.
     """
-    _require_enabled(query)
     if (
         query.ndim != 3
         or query.shape[1] not in (64, 128)

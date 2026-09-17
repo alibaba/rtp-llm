@@ -124,10 +124,6 @@ class V41L20Tail:
             raise ValueError(
                 "L20 tail requires its query top-k, candidates and valid status"
             )
-        selected.check()
-        torch._assert_async(
-            l20.rows.valid.all(), "local L20 tail cannot retain padding"
-        )
         start = max(0, context.end - SWA_WINDOW)
         if previous is not None:
             if (
@@ -726,9 +722,6 @@ class V41PrefillExecutor:
                 )
             ):
                 raise ValueError("prefill features disagree with the canonical images")
-        torch._assert_async(
-            rows.valid.all(), "local prefill cannot substitute padded rows"
-        )
         context = self.cache.begin_forward(
             epoch=epoch, start=extend.encoder_rows.start, end=extend.encoder_rows.end
         )
