@@ -124,11 +124,18 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
         )
         self._input_packer = get_mega_moe_input_packer()
 
-    def clone_for_cuda_graph(self) -> "GLM5MegaMoEFused":
-        clone = super().clone_for_cuda_graph()
-        clone._mega_buf = _get_or_create_cuda_graph_clone_buf_fused(
-            self._mega_buf, self._mega_group, self.cfg
-        )
+    def clone_for_cuda_graph(
+        self, *, share_mega_buf: bool = False
+    ) -> "GLM5MegaMoEFused":
+        clone = super().clone_for_cuda_graph(share_mega_buf=share_mega_buf)
+        if share_mega_buf:
+            if self._mega_buf is None or self._mega_group is None:
+                raise RuntimeError("Shared MegaMoE buffer must be initialized")
+            clone._mega_buf = self._mega_buf
+        else:
+            clone._mega_buf = _get_or_create_cuda_graph_clone_buf_fused(
+                self._mega_buf, self._mega_group, self.cfg
+            )
         clone._shared_l1_w = self._shared_l1_w
         clone._shared_l1_sf = self._shared_l1_sf
         clone._shared_l2_w = self._shared_l2_w

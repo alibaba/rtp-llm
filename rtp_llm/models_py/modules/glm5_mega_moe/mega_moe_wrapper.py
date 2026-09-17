@@ -242,10 +242,14 @@ class MegaMoeWrapper(nn.Module):
             )
         return output
 
-    def clone_for_cuda_graph(self) -> "MegaMoeWrapper":
+    supports_shared_mega_buf = True
+
+    def clone_for_cuda_graph(self, *, share_mega_buf: bool = False) -> "MegaMoeWrapper":
         clone = object.__new__(type(self))
         nn.Module.__init__(clone)
-        clone.mega_moe = self.mega_moe.clone_for_cuda_graph()
+        clone.mega_moe = self.mega_moe.clone_for_cuda_graph(
+            share_mega_buf=share_mega_buf
+        )
         clone.expert_num = self.expert_num
         return clone
 

@@ -162,8 +162,10 @@ class GLM5MegaMoEFP8SE(GLM5MegaMoEFP8):
         ):
             raise RuntimeError("mega_moe_fp8_se shared expert weights are not set up")
 
-    def clone_for_cuda_graph(self) -> "GLM5MegaMoEFP8SE":
-        clone = super().clone_for_cuda_graph()
+    def clone_for_cuda_graph(
+        self, *, share_mega_buf: bool = False
+    ) -> "GLM5MegaMoEFP8SE":
+        clone = super().clone_for_cuda_graph(share_mega_buf=share_mega_buf)
         clone._shared_l1_w = self._shared_l1_w
         clone._shared_l1_sf = self._shared_l1_sf
         clone._shared_l2_w = self._shared_l2_w

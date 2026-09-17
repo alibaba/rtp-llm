@@ -124,7 +124,9 @@ class GenericMoeMTPModel(GptModelBase):
             device=buffer_device,
         )
 
-    def clone_for_cuda_graph(self) -> "GenericMoeMTPModel":
+    def clone_for_cuda_graph(
+        self, *, share_mega_buf: bool = False
+    ) -> "GenericMoeMTPModel":
         clone = object.__new__(type(self))
         nn.Module.__init__(clone)
 
@@ -151,16 +153,19 @@ class GenericMoeMTPModel(GptModelBase):
         clone.pre_fc_norm_embedding = self.pre_fc_norm_embedding
         clone.pre_fc_norm_hidden = self.pre_fc_norm_hidden
         clone.fc = self.fc
-        clone.layers = nn.ModuleList(
-            [
-                (
-                    layer.clone_for_cuda_graph(draft_prefill=True)
-                    if hasattr(layer, "clone_for_cuda_graph")
-                    else layer
+        # Only the seed-decode clone shares communication state. The default
+        # draft-prefill clone keeps its existing, separate communication arena.
+        cloned_layers = []
+        for layer in self.layers:
+            if share_mega_buf:
+                cloned_layers.append(
+                    layer.clone_for_cuda_graph(draft_prefill=True, share_mega_buf=True)
                 )
-                for layer in self.layers
-            ]
-        )
+            elif hasattr(layer, "clone_for_cuda_graph"):
+                cloned_layers.append(layer.clone_for_cuda_graph(draft_prefill=True))
+            else:
+                cloned_layers.append(layer)
+        clone.layers = nn.ModuleList(cloned_layers)
         clone.norm = self.norm
         clone._mtp_indexer_share_enabled = self._mtp_indexer_share_enabled
         clone._mtp_indexer_role = _MTP_INDEXER_ROLE_NORMAL

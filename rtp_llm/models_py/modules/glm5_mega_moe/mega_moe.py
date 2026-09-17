@@ -248,7 +248,13 @@ class GLM5MegaMoE(nn.Module):
         self._input_packer = None
         self._mega_group = None
 
-    def clone_for_cuda_graph(self) -> "GLM5MegaMoE":
+    def clone_for_cuda_graph(self, *, share_mega_buf: bool = False) -> "GLM5MegaMoE":
+        """Clone runtime outputs; optionally share an ordered decode EP arena.
+
+        Shared clones must be captured before replay and execute in stream order.
+        Every peer must enter the same sequence of EP calls, even when choosing
+        different local graphs. This is not for concurrent independent forwards.
+        """
         clone = object.__new__(type(self))
         nn.Module.__init__(clone)
         clone.cfg = self.cfg
@@ -256,9 +262,14 @@ class GLM5MegaMoE(nn.Module):
         clone._mega_l1_sf = self._mega_l1_sf
         clone._mega_l2_w = self._mega_l2_w
         clone._mega_l2_sf = self._mega_l2_sf
-        clone._mega_buf = _get_or_create_cuda_graph_clone_buf(
-            self._mega_buf, self._mega_group, self.cfg
-        )
+        if share_mega_buf:
+            if self._mega_buf is None or self._mega_group is None:
+                raise RuntimeError("Shared MegaMoE buffer must be initialized")
+            clone._mega_buf = self._mega_buf
+        else:
+            clone._mega_buf = _get_or_create_cuda_graph_clone_buf(
+                self._mega_buf, self._mega_group, self.cfg
+            )
         clone._mega_y = (
             torch.empty_like(self._mega_y) if self._mega_y is not None else None
         )

@@ -257,7 +257,9 @@ class GenericMoeLayer(nn.Module):
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
 
-    def clone_for_cuda_graph(self) -> "GenericMoeLayer":
+    def clone_for_cuda_graph(
+        self, *, share_mega_buf: bool = False
+    ) -> "GenericMoeLayer":
         clone = object.__new__(type(self))
         nn.Module.__init__(clone)
 
@@ -271,7 +273,13 @@ class GenericMoeLayer(nn.Module):
         clone.gate = self.gate
         clone.select_topk = self.select_topk
         clone.fake_balance_expert = self.fake_balance_expert
-        if hasattr(self.fused_moe, "clone_for_cuda_graph"):
+        if share_mega_buf:
+            if not getattr(self.fused_moe, "supports_shared_mega_buf", False):
+                raise RuntimeError(
+                    "MoE implementation does not support shared MegaMoE buffers"
+                )
+            clone.fused_moe = self.fused_moe.clone_for_cuda_graph(share_mega_buf=True)
+        elif hasattr(self.fused_moe, "clone_for_cuda_graph"):
             clone.fused_moe = self.fused_moe.clone_for_cuda_graph()
         else:
             clone.fused_moe = self.fused_moe
@@ -559,14 +567,18 @@ class GenericMoeDecoderLayer(nn.Module):
         )
 
     def clone_for_cuda_graph(
-        self, *, draft_prefill: bool = False
+        self, *, draft_prefill: bool = False, share_mega_buf: bool = False
     ) -> "GenericMoeDecoderLayer":
         clone = object.__new__(type(self))
         nn.Module.__init__(clone)
         clone.layer_idx = self.layer_idx
         clone._drain_pinned_mla_before_moe = self._drain_pinned_mla_before_moe
         clone.self_attn = self.self_attn
-        if hasattr(self.mlp, "clone_for_cuda_graph"):
+        if share_mega_buf:
+            if not isinstance(self.mlp, GenericMoeLayer):
+                raise RuntimeError("Shared MegaMoE buffers require a MoE layer")
+            clone.mlp = self.mlp.clone_for_cuda_graph(share_mega_buf=True)
+        elif hasattr(self.mlp, "clone_for_cuda_graph"):
             clone.mlp = self.mlp.clone_for_cuda_graph()
         else:
             clone.mlp = self.mlp
