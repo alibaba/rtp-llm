@@ -955,7 +955,7 @@ absl::StatusOr<GenerateStream::LinearReplayRound> GenerateStream::prepareLinearR
     std::lock_guard<std::mutex> stream_lock(*mutex_);
     std::lock_guard<std::mutex> state_lock(*mtp_async_state_mutex_);
     const auto&                 lease = stream_cache_resource_->linearReplayLease();
-    if (!lease || stream_cache_resource_->isResourceReleased() || hasError()) {
+    if (!lease || stream_cache_resource_->isResourceReleased()) {
         return absl::FailedPreconditionError("target LINEAR replay requires a live log lease");
     }
     LinearReplayRound round;

@@ -93,6 +93,42 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
+TEST_F(GenerateStreamTest, testCancelledReplayFinishesBeforeNextSchedule) {
+    for (bool pending_worker : {false, true}) {
+        SCOPED_TRACE(pending_worker);
+        auto stream = GenerateStreamBuilder().createComplexContextStream({1, 2});
+        stream->reportEvent(StreamEvents::CanRun);
+        ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+        stream->setIsContextStream(false);
+        stream->stream_cache_resource_->linear_replay_lease_ = std::make_shared<LinearReplayLease>();
+        // Cancellation after scheduling only marks an error; this batch still owns its resources.
+        stream->reportError(ErrorCode::CANCELLED, "cancel scheduled replay");
+        EXPECT_TRUE(stream->hasError());
+        EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
+        EXPECT_TRUE(stream->prepareLinearReplayRound().ok());
+        if (pending_worker) {
+            stream->incPendingAsyncBookkeeping();
+        }
+        // The next scheduling round consumes the cancellation.
+        EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+        if (pending_worker) {
+            EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
+            stream->decPendingAsyncBookkeepingAndMaybeRelease();
+        }
+        EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+        EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
+        EXPECT_TRUE(absl::IsFailedPrecondition(stream->prepareLinearReplayRound().status()));
+    }
+}
+
+TEST_F(GenerateStreamTest, testLinearReplayRequiresLiveResources) {
+    auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3, 4});
+    EXPECT_TRUE(absl::IsFailedPrecondition(stream->prepareLinearReplayRound().status()));
+    stream->stream_cache_resource_->linear_replay_lease_ = std::make_shared<LinearReplayLease>();
+    stream->stream_cache_resource_->resource_released_ = true;
+    EXPECT_TRUE(absl::IsFailedPrecondition(stream->prepareLinearReplayRound().status()));
+}
+
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
