@@ -871,7 +871,7 @@ class BuildPackagingContractTest(TestCase):
             "py_ut_sm8x": 2730,
             "py_ut_oss_sm8x": 2730,
             "py_ut_sm9x": 491,
-            "py_ut_sm100": 3,
+            "py_ut_sm100": 20,
             "py_ut_sm100_arm": 104,
             "py_ut_amd": 405,
             "py_ut_frontend": 71,

@@ -594,7 +594,9 @@ markexpr = "SM100_ARM and not smoke and not perf and not manual"
 description = "Python UT on SM100 x86 (py-ut-sm100)"
 gpu_type = "SM100"
 minimum_count = 1
-expected_count = 3
+# Two pack/GEMM integration cases plus the linear adapter's own case and
+# seventeen inherited functional cases. Historical profiling stays manual.
+expected_count = 20
 forbid_skips = true
 paths = [
     "rtp_llm/models_py/kernels/cuda/test/pack_ue8m0_kernel_test.py",
