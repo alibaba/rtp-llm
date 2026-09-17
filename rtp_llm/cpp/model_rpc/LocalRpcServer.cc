@@ -239,11 +239,49 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
     return grpc::Status::OK;
 }
 
-ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output) {
+ErrorInfo LocalRpcServer::updateMultimodalFeaturesWithTrace(
+    std::shared_ptr<GenerateInput>&                                     input,
+    const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span) {
+    if (!telemetry::TelemetryRuntime::isActive() || parent_span == nullptr || !input->multimodal_inputs
+        || input->multimodal_inputs->empty()) {
+        return mm_processor_->updateMultimodalFeatures(input);
+    }
+
+    opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> span;
+    try {
+        opentelemetry::trace::StartSpanOptions options;
+        options.parent = parent_span->GetContext();
+        options.kind   = opentelemetry::trace::SpanKind::kInternal;
+        span           = telemetry::TelemetryRuntime::tracer()->StartSpan("rtp_llm.vit", options);
+    } catch (...) {}
+    grpc::Status                   status;
+    telemetry::GrpcStatusSpanGuard guard(span, &status, telemetry::SpanStatusSemantics::Logical);
+    try {
+        guard.setAttribute(telemetry::kAttrRequestId, std::to_string(input->request_id));
+    } catch (...) {}
+
+    // Include preprocessing, embedding transport and token expansion in one operation.
+    auto result = mm_processor_->updateMultimodalFeatures(input);
+    if (!result.ok()) {
+        status = grpc::Status(grpc::StatusCode::INTERNAL, "");
+        try {
+            const auto reason = ErrorCodeToString(result.code());
+            guard.setLogicalErrorType(reason);
+            guard.setAttribute(telemetry::kAttrRtpLlmErrorCode, static_cast<int64_t>(result.code()));
+            guard.setAttribute(telemetry::kAttrRtpLlmErrorReason, reason);
+        } catch (...) {}
+    }
+    return result;
+}
+
+ErrorInfo
+LocalRpcServer::prepareInput(const GenerateInputPB&                                              input_pb,
+                             std::shared_ptr<GenerateInput>&                                     output,
+                             const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span) {
     output = QueryConverter::transQuery(&input_pb);
     if (mm_processor_ != nullptr && output->multimodal_inputs) {
         RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
-        auto mm_res = mm_processor_->updateMultimodalFeatures(output);
+        auto mm_res = updateMultimodalFeaturesWithTrace(output, parent_span);
         if (!mm_res.ok()) {
             return mm_res;
         }
@@ -294,9 +332,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
         generate_context.trace_span_guard =
             std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &generate_context.error_status);
         // `request_id` is the Bailian Unitrace index key (string, verified);
-        // rtp_llm.request_id stays as the internal numeric field.
         generate_context.trace_span_guard->setAttribute(telemetry::kAttrRequestId, std::to_string(request_id));
-        generate_context.trace_span_guard->setAttribute(telemetry::kAttrRtpLlmRequestId, request_id);
     }
     telemetry::PhaseSpanSynthesisScope phase_span_scope([&generate_context](bool exception_unwinding) {
         if (!generate_context.trace_span_guard || !generate_context.trace_span_guard->valid()) {
@@ -338,7 +374,11 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     });
     std::shared_ptr<GenerateInput>     input;
     {
-        auto mm_res = prepareInput(*request, input);
+        auto mm_res = prepareInput(*request,
+                                   input,
+                                   generate_context.trace_span_guard ?
+                                       generate_context.trace_span_guard->sharedSpan() :
+                                       opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{});
         if (!mm_res.ok()) {
             generate_context.error_info = mm_res;
             generate_context.error_status =

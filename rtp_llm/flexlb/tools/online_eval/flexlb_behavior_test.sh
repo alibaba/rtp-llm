@@ -288,8 +288,6 @@ PY
     "${env_args[@]+"${env_args[@]}"}" \
     "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
     "FLEXLB_EXPECT_FETCH_RESPONSE=true" \
-    "OTEL_TRACE_SKIP_PATTERN=.*" \
-    "OTEL_EXPORTER_OTLP_ENDPOINT=none" \
     "HIPPO_ROLE=flexlb_behavior_test" \
     java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
     --server.port="${FLEXLB_HTTP_PORT}" \

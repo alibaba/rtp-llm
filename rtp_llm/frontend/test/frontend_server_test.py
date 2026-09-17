@@ -3,7 +3,7 @@ import json
 from types import SimpleNamespace
 from typing import Any
 from unittest import TestCase, main
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import torch
 from pydantic import BaseModel
@@ -846,7 +846,11 @@ class FrontendServerTest(TestCase):
                     self.assertEqual(response.status_code, 500)
 
             loop = asyncio.new_event_loop()
-            loop.run_until_complete(_run())
+            with patch(
+                "rtp_llm.frontend.frontend_server.generate_request_id",
+                return_value=3540218608800727041,
+            ):
+                loop.run_until_complete(_run())
         finally:
             self.frontend_server._infer_impl = original_impl
             self.frontend_server._openai_endpoint = original_endpoint
@@ -855,6 +859,11 @@ class FrontendServerTest(TestCase):
         spans = exporter.get_finished_spans()
         self.assertEqual(len(spans), 2)
         for span, expected_model in zip(spans, ("requested-model", "loaded-model")):
+            self.assertEqual(
+                span.attributes[trace_attrs.REQUEST_ID], "3540218608800727041"
+            )
+            self.assertIsInstance(span.attributes[trace_attrs.REQUEST_ID], str)
+            self.assertNotIn("rtp_llm.request_id", span.attributes)
             self.assertEqual(span.attributes[trace_attrs.GEN_AI_SPAN_KIND], "LLM")
             self.assertEqual(span.attributes[trace_attrs.GEN_AI_OPERATION_NAME], "chat")
             self.assertEqual(span.attributes[trace_attrs.GEN_AI_SYSTEM], "rtp_llm")
@@ -1007,6 +1016,11 @@ class FrontendServerTest(TestCase):
                 root_span.attributes[trace_attrs.RTP_LLM_PD_SEP], expected_pd_sep
             )
             self.assertEqual(client_span.attributes["server.address"], host)
+            self.assertEqual(
+                client_span.attributes[trace_attrs.REQUEST_ID], str(request_id)
+            )
+            self.assertIsInstance(client_span.attributes[trace_attrs.REQUEST_ID], str)
+            self.assertNotIn("rtp_llm.request_id", client_span.attributes)
             self.assertEqual(client_span.status.status_code, StatusCode.ERROR)
             self.assertEqual(client_span.attributes["error.type"], "RuntimeError")
 

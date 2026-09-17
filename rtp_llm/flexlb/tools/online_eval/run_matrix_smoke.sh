@@ -42,8 +42,6 @@ START_MOCK="${START_MOCK:-1}"
 
 # -- Common process config -------------------------------------------------
 
-OTEL_TRACE_SKIP_PATTERN="${OTEL_TRACE_SKIP_PATTERN:-.*}"
-OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-none}"
 HIPPO_ROLE="${HIPPO_ROLE:-flexlb_matrix_smoke_master}"
 
 # -- Internal state --------------------------------------------------------
@@ -240,8 +238,6 @@ start_master() {
   echo "  starting master (group=${group}, profile=${SCHEDULING_PROFILE}) ..."
   env ${FLEXLB_ENV_ARGS[@]+"${FLEXLB_ENV_ARGS[@]}"} \
     "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
-    "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
-    "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
     "HIPPO_ROLE=${HIPPO_ROLE}" \
     "FLEXLB_EXPECT_FETCH_RESPONSE=true" \
     java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
