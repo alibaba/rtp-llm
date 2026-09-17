@@ -1,3 +1,4 @@
+import copy
 import json
 import unittest
 
@@ -131,6 +132,68 @@ class NormalComparerGraphStatusTest(unittest.TestCase):
                     self.comparer.compare_result(
                         self._parse(expected), self._parse(self._response(status))
                     )
+
+
+class NormalComparerPromptScoringTest(unittest.TestCase):
+    def setUp(self):
+        # Value comparison needs neither server setup nor tensor golden files.
+        self.comparer = object.__new__(NormalComparer)
+        self.comparer.test_logits = self.comparer.test_hidden_states = False
+        self.payload = {
+            "response": "same output",
+            "prompt_logprobs": {
+                "start_pos": 0,
+                "end_pos": 2,
+                "topk_token_ids_head": [[11, 12], [21, 22]],
+                "topk_logprobs_head": [[-0.5, -1.5], [-0.6, -1.6]],
+                "target_logprobs": [-0.5, -0.6],
+            },
+        }
+
+    def _parse(self, payload):
+        return self.comparer.format_result(copy.deepcopy(payload))
+
+    def test_prompt_scoring_survives_response_parsing(self):
+        parsed = self._parse(self.payload)
+        scoring = parsed.model_dump()["prompt_logprobs"]
+        for field, expected in self.payload["prompt_logprobs"].items():
+            self.assertEqual(scoring[field], expected)
+
+    def test_full_prompt_arrays_match_golden_heads(self):
+        self.comparer.compare_result(self._parse(self.payload), self._parse(self.payload))
+        actual = copy.deepcopy(self.payload)
+        scoring = actual["prompt_logprobs"]
+        scoring["topk_token_ids"] = scoring.pop("topk_token_ids_head")
+        scoring["topk_logprobs"] = scoring.pop("topk_logprobs_head")
+        self.comparer.compare_result(self._parse(self.payload), self._parse(actual))
+
+    def test_prompt_scoring_mismatches_are_rejected(self):
+        invalid = []
+        missing = copy.deepcopy(self.payload)
+        missing.pop("prompt_logprobs")
+        invalid.append(("missing", missing))
+        for field, value in (
+            ("start_pos", 1),
+            ("end_pos", 3),
+            ("topk_token_ids_head", [[99, 12], [21, 22]]),
+            ("topk_logprobs_head", [[-5.0, -1.5], [-0.6, -1.6]]),
+            ("topk_logprobs_head", None),
+            ("target_logprobs", [-5.0, -0.6]),
+            ("target_logprobs", None),
+        ):
+            actual = copy.deepcopy(self.payload)
+            actual["prompt_logprobs"][field] = value
+            invalid.append((field, actual))
+        for field, actual in invalid:
+            with self.subTest(field=field), self.assertRaises(SmokeException) as raised:
+                self.comparer.compare_result(self._parse(self.payload), self._parse(actual))
+            self.assertEqual(raised.exception.error_status, QueryStatus.COMPARE_FAILED)
+            self.assertIn("prompt_logits", raised.exception.message)
+
+    def test_unrequested_prompt_scoring_preserves_legacy_comparison(self):
+        self.comparer.compare_result(
+            self._parse({"response": "same output"}), self._parse(self.payload)
+        )
 
 
 if __name__ == "__main__":
