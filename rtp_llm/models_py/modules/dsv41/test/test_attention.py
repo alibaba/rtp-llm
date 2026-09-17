@@ -258,15 +258,17 @@ class AttentionGpuTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "owner has not published"):
             context_b.indices_for(3)
 
-    def test_failed_write_poison_prevents_partial_cache_reuse(self):
+    def test_unmapped_owner_pages_read_as_zero_rows_without_poisoning(self):
+        # F1: page ownership is the allocator's guarantee; the model path no
+        # longer re-reads writer status. Unmapped pages read as zero rows and
+        # the forward completes without poisoning the cache.
         cache = self.cache()
         context = cache.begin_forward(epoch=0, start=0, end=3)
         cache.swa[0].page_ids.zero_()
-        with self.assertRaisesRegex(RuntimeError, "rejected"):
-            self.model(0)(self.hidden(3), context)
-        self.assertTrue(cache.poisoned)
-        with self.assertRaisesRegex(RuntimeError, "discarded or restored"):
-            cache.begin_forward(epoch=1, start=3, end=4)
+        actual = self.model(0)(self.hidden(3), context)
+        self.assertEqual(actual.shape, self.hidden(3).shape)
+        self.assertFalse(cache.poisoned)
+        self.assertIn(0, context.completed_layers)
 
     def test_empty_rank_projections_preserve_no_row_state(self):
         cache = self.cache()

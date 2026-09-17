@@ -103,7 +103,7 @@ class MathTest(unittest.TestCase):
         self.assertTrue(torch.all(result[:, :3] == 0).item())
 
     @torch.inference_mode()
-    def test_hc_split_sinkhorn_preserves_fp32_formula(self):
+    def test_hc_mixes_preserves_fp32_formula(self):
         if self.device.type != "cuda":
             self.skipTest("TileLang split/Sinkhorn requires CUDA")
         torch.manual_seed(83)
@@ -129,7 +129,7 @@ class MathTest(unittest.TestCase):
                     torch.testing.assert_close(left, right, atol=2e-6, rtol=2e-5)
 
     @torch.inference_mode()
-    def test_hc_split_sinkhorn_graph_uses_updated_inputs(self):
+    def test_hc_mixes_graph_uses_updated_inputs(self):
         if self.device.type != "cuda":
             self.skipTest("CUDA Graph requires CUDA")
         hidden = torch.randn(7, 4, 5120, device=self.device).bfloat16()
@@ -156,7 +156,7 @@ class MathTest(unittest.TestCase):
             for left, right in zip(actual, expected):
                 torch.testing.assert_close(left, right, atol=2e-6, rtol=2e-5)
 
-    def test_hc_split_sinkhorn_preserves_gradient_fallback(self):
+    def test_hc_mixes_preserves_gradient_fallback(self):
         hidden = torch.randn(3, 4, 17, device=self.device, requires_grad=True)
         weight = torch.randn(24, 4 * 17, device=self.device)
         scale = torch.ones(3, device=self.device)
