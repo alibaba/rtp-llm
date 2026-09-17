@@ -103,6 +103,21 @@ class FusedQKRMSNorm(nn.Module):
         self.enable_pdl = enable_pdl
 
     def forward(self, hidden_states: torch.Tensor):
+        from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.fused_qk_rmsnorm import (
+            maybe_fused_qk_rmsnorm,
+        )
+
+        fused = maybe_fused_qk_rmsnorm(
+            hidden_states,
+            self.q_weight,
+            self.k_weight,
+            self.head_num,
+            self.kv_head_num,
+            self.size_per_head,
+            self.eps,
+        )
+        if fused is not None:
+            return fused
         assert hidden_states.dim() == 2
         m, n = hidden_states.shape
         qkv = hidden_states.reshape(

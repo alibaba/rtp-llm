@@ -54,6 +54,15 @@ from rtp_llm.models_py.triton_kernels.fla.gdn_gating_prefill import (
     gdn_gating_prefill,
     supports_gdn_gating_prefill,
 )
+from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.conv1d_gdn_gating import (
+    maybe_fused_conv1d_update_gdn_gating,
+)
+from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.fused_add_rmsnorm_fp8_quant import (
+    maybe_fused_add_rmsnorm_fp8_quant,
+)
+from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.rmsnorm_gated_fp8_quant import (
+    maybe_rmsnorm_gated_fp8_quant,
+)
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
@@ -499,6 +508,8 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
         is_target_verify: bool,
+        g: Optional[torch.Tensor] = None,
+        beta: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         batch, seq = self._get_bs_from_attenion_input(
             mixed_qkv, attn_inputs, is_target_verify
@@ -520,7 +531,8 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             dim=2,
         )
 
-        g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
+        if g is None or beta is None:
+            g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
 
         # contiguous will be applyed when call fused_recurrent_gated_delta_rule
         g = g.view(batch, seq, self.local_num_v_heads)
@@ -562,13 +574,38 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             kv_cache.kv_cache_base.shape[0], -1
         )
         is_target_verify = attn_meta.is_target_verify
-        mixed_qkv = self._conv1d(
-            mixed_qkv,
-            kv_cache_tensor,
-            kv_cache.seq_size_per_block,
-            attn_inputs,
-            is_target_verify,
-        )
+        g = None
+        beta = None
+        if not is_target_verify:
+            batch, seq = self._get_bs_from_attenion_input(
+                mixed_qkv, attn_inputs, is_target_verify
+            )
+            origin_shape = mixed_qkv.shape
+            conv_states = self._get_conv_states(kv_cache_tensor)
+            x = mixed_qkv.reshape(batch, seq, -1).transpose(1, 2)
+            fused = maybe_fused_conv1d_update_gdn_gating(
+                x,
+                conv_states.transpose(1, 2),
+                self.conv_weights,
+                self.alog,
+                a,
+                b,
+                self.dt_bias,
+                block_map=attn_inputs.kv_cache_kernel_block_id_device,
+                seq_size_per_block=kv_cache.seq_size_per_block,
+                sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
+            )
+            if fused is not None:
+                mixed_qkv_out, g, beta = fused
+                mixed_qkv = mixed_qkv_out.transpose(1, 2).reshape(origin_shape)
+        if g is None:
+            mixed_qkv = self._conv1d(
+                mixed_qkv,
+                kv_cache_tensor,
+                kv_cache.seq_size_per_block,
+                attn_inputs,
+                is_target_verify,
+            )
         attn_out = self._fla(
             mixed_qkv,
             b,
@@ -577,6 +614,8 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             kv_cache.seq_size_per_block,
             attn_inputs,
             is_target_verify,
+            g=g,
+            beta=beta,
         )
 
         return attn_out
@@ -638,9 +677,19 @@ class Qwen3NextAttention(CausalAttention):
         kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
+        quantized_input: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
-        gate = self.gate(hidden_states)
-        attn_out = super().forward(hidden_states, fmha_impl, kv_cache, gate)
+        if quantized_input is not None and hasattr(self.gate, "forward_quantized"):
+            gate = self.gate.forward_quantized(*quantized_input)
+        else:
+            gate = self.gate(hidden_states)
+        attn_out = super().forward(
+            hidden_states,
+            fmha_impl,
+            kv_cache,
+            gate,
+            quantized_input=quantized_input,
+        )
         return attn_out
 
 
@@ -760,17 +809,27 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         )
 
     def _input_project(
-        self, hidden_states: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        quantized_input: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the input projection and return (projected_qkvz, projected_ba).
 
         Hides the fusion vs 2-GEMM dispatch from callers (forward + tests).
         Both branches produce tensors with identical shape/semantics; the
         fused branch slices a single GEMM output, the fallback runs two.
+        BA stays BF16. QKVZ may consume a shared FP8 hidden from group G.
         """
         if self._qkvz_ba_fused:
             fused = self.in_proj_fused(hidden_states)
             return fused[..., : self._qkvz_size], fused[..., self._qkvz_size :]
+        if quantized_input is not None and hasattr(
+            self.in_proj_qkvz, "forward_quantized"
+        ):
+            return (
+                self.in_proj_qkvz.forward_quantized(*quantized_input),
+                self.in_proj_ba(hidden_states),
+            )
         return self.in_proj_qkvz(hidden_states), self.in_proj_ba(hidden_states)
 
     # mixed_qkvz, mixed_ba -> q, k, v, z, b, a
@@ -973,11 +1032,24 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         valid_mask = attn_meta.cp_local_valid_mask
         local_attn_out[valid_mask] = full_attn_out[attn_meta.cp_local_extract_indices]
 
-        local_attn_out = self.norm(
-            local_attn_out.reshape(-1, self.local_num_v_heads * self.head_v_dim), z
+        return self._la_norm_out_proj(local_attn_out, z)
+
+    def _la_norm_out_proj(
+        self, attn_output: torch.Tensor, z: torch.Tensor
+    ) -> torch.Tensor:
+        attn_2d = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
+        fused = maybe_rmsnorm_gated_fp8_quant(
+            attn_2d,
+            z,
+            self.norm.weight,
+            group_size=self.norm.group_size,
+            eps=self.norm.eps,
+            activation=self.norm.activation,
         )
-        local_attn_out = self.out_proj(local_attn_out)
-        return local_attn_out
+        if fused is not None and hasattr(self.out_proj, "forward_quantized"):
+            _y, attn_fp8, attn_scale = fused
+            return self.out_proj.forward_quantized(attn_fp8, attn_scale)
+        return self.out_proj(self.norm(attn_2d, z))
 
     def forward(
         self,
@@ -986,6 +1058,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata,
+        quantized_input: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         assert attention_inputs is not None, "attention_inputs is required"
         assert (
@@ -994,7 +1067,9 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             or attn_meta.get_prefill_conv1d_meta() is not None
             or attn_meta.is_cp_linear_attn
         ), "prefill_conv1d_meta is required for prefill"
-        projected_states_qkvz, projected_states_ba = self._input_project(hidden_states)
+        projected_states_qkvz, projected_states_ba = self._input_project(
+            hidden_states, quantized_input=quantized_input
+        )
         mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba
         )
@@ -1010,10 +1085,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             attn_output = self.decode_gdn(
                 mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
             )
-        attn_output = self.norm(
-            attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim), z
-        )
-        attn_output = self.out_proj(attn_output)
+        attn_output = self._la_norm_out_proj(attn_output, z)
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
         return attn_output
@@ -1093,7 +1165,18 @@ class Qwen3NextDecoderLayer(nn.Module):
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        fused = maybe_fused_add_rmsnorm_fp8_quant(
+            hidden_states,
+            residual,
+            self.input_layernorm.weight,
+            eps=self.input_layernorm.variance_epsilon,
+        )
+        attn_quant = None
+        if fused is None:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        else:
+            hidden_states, residual, hidden_fp8, hidden_scale = fused
+            attn_quant = (hidden_fp8, hidden_scale)
 
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
@@ -1101,6 +1184,7 @@ class Qwen3NextDecoderLayer(nn.Module):
             kv_cache=kv_cache,
             attention_inputs=attention_inputs,
             attn_meta=attn_meta,
+            quantized_input=attn_quant,
         )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)

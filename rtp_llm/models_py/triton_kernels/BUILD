@@ -50,6 +50,20 @@ py_library(
 )
 
 py_library(
+    name = "qwen35_decode_fusion",
+    srcs = glob(
+        ["qwen35_decode_fusion/*.py"],
+        exclude = ["qwen35_decode_fusion/bench_*.py"],
+    ),
+    deps = [
+        ":causal_conv1d",
+        ":common",
+        ":fla",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "sparse_mla",
     srcs = glob(["sparse_mla/*.py"]),
     visibility = ["//visibility:public"]
@@ -64,6 +78,7 @@ py_library(
         ":causal_conv1d",
         ":moe",
         ":common",
+        ":qwen35_decode_fusion",
         ":sparse_mla",
     ],
     visibility = ["//visibility:public"]
