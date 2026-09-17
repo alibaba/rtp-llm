@@ -5,7 +5,12 @@ import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -112,6 +117,56 @@ class ServerScheduleLatencyRecorderTest {
         assertTrue(((Map<?, ?>) snapshot.get("server_total_ms")).containsKey("p99"));
         assertTrue(((Map<?, ?>) snapshot.get("batch_wait_ms_by_priority")).isEmpty());
         assertEquals("", recorder.batchWaitPriorityLogSuffix());
+    }
+
+    @Test
+    void preservesExactPercentilesAcrossBucketBoundariesAndOverflow() {
+        ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
+        long end = TimeUnit.MINUTES.toNanos(10);
+        for (long latencyMs : new long[]{0, 8191, 8192, 8193, 119999, 120000, 120001, 240000}) {
+            recorder.recordCompletion(contextWithBatchWait(end, latencyMs, metadata(40)), end);
+        }
+
+        Map<String, Object> snapshot = recorder.snapshot();
+        Map<?, ?> aggregate = (Map<?, ?>) snapshot.get("batch_wait_ms");
+        assertEquals(8L, aggregate.get("count"));
+        assertEquals(8193L, aggregate.get("p50"));
+        assertEquals(120000L, aggregate.get("p90"));
+        assertEquals(120000L, aggregate.get("p95"));
+        assertEquals(120000L, aggregate.get("p99"));
+        assertEquals(240000L, aggregate.get("max"));
+        assertEquals(78072.0, aggregate.get("mean"));
+        assertEquals(aggregate, ((Map<?, ?>) snapshot.get("batch_wait_ms_by_priority")).get(40));
+    }
+
+    @Test
+    void concurrentUpdatesAcrossBucketBoundariesRetainEverySample() throws Exception {
+        ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
+        long end = TimeUnit.MINUTES.toNanos(10);
+        ExecutorService executor = Executors.newFixedThreadPool(4);
+        try {
+            List<Future<?>> tasks = new ArrayList<>();
+            for (int thread = 0; thread < 4; thread++) {
+                tasks.add(executor.submit(() -> {
+                    for (int sample = 0; sample < 2000; sample++) {
+                        recorder.recordCompletion(
+                                contextWithBatchWait(end, 8191 + sample % 2, metadata(40)), end);
+                    }
+                }));
+            }
+            for (Future<?> task : tasks) {
+                task.get(10, TimeUnit.SECONDS);
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+
+        Map<?, ?> aggregate = (Map<?, ?>) recorder.snapshot().get("batch_wait_ms");
+        assertEquals(8000L, aggregate.get("count"));
+        assertEquals(8191L, aggregate.get("p50"));
+        assertEquals(8192L, aggregate.get("p99"));
+        assertEquals(8192L, aggregate.get("max"));
+        assertEquals(8191.5, aggregate.get("mean"));
     }
 
     private static SchedulingMetadata metadata(int priority) {

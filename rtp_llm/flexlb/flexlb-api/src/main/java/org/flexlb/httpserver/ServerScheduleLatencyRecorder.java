@@ -170,10 +170,21 @@ public class ServerScheduleLatencyRecorder {
     }
 
     private static final class LatencyHistogram {
-        private final AtomicLongArray buckets = new AtomicLongArray(MAX_TRACKED_MS + 1);
+        private static final int BUCKET_SHIFT = 13;
+        private static final int BUCKET_MASK = (1 << BUCKET_SHIFT) - 1;
+        private final AtomicLongArray[] buckets =
+                new AtomicLongArray[(MAX_TRACKED_MS >>> BUCKET_SHIFT) + 1];
         private final LongAdder count = new LongAdder();
         private final LongAdder sumMs = new LongAdder();
         private final AtomicLong maxMs = new AtomicLong();
+
+        private LatencyHistogram() {
+            for (int index = 0; index < buckets.length; index++) {
+                int length = Math.min(1 << BUCKET_SHIFT,
+                        MAX_TRACKED_MS + 1 - (index << BUCKET_SHIFT));
+                buckets[index] = new AtomicLongArray(length);
+            }
+        }
 
         private void recordBetween(long startNanos, long endNanos) {
             if (startNanos <= 0 || endNanos < startNanos) {
@@ -181,7 +192,7 @@ public class ServerScheduleLatencyRecorder {
             }
             long valueMs = TimeUnit.NANOSECONDS.toMillis(endNanos - startNanos);
             int bucket = (int) Math.min(valueMs, MAX_TRACKED_MS);
-            buckets.incrementAndGet(bucket);
+            buckets[bucket >>> BUCKET_SHIFT].incrementAndGet(bucket & BUCKET_MASK);
             count.increment();
             sumMs.add(valueMs);
             maxMs.accumulateAndGet(valueMs, Math::max);
@@ -219,7 +230,7 @@ public class ServerScheduleLatencyRecorder {
             long target = Math.max(1, (long) Math.ceil(samples * percentile));
             long seen = 0;
             for (int value = 0; value <= MAX_TRACKED_MS; value++) {
-                seen += buckets.get(value);
+                seen += buckets[value >>> BUCKET_SHIFT].get(value & BUCKET_MASK);
                 if (seen >= target) {
                     return value;
                 }
