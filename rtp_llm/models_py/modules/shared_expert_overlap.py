@@ -1,22 +1,7 @@
-"""Shared expert overlap executor for GenericMoeLayer.
+"""Run the shared expert on a side stream when explicitly enabled.
 
-Runs the shared expert (DenseMLP) on an auxiliary CUDA stream while the
-routed expert pipeline (DeepEP dispatch → execute → combine) runs on the
-main stream.  The two overlap in wall-clock time: shared-expert compute
-hides behind the all-to-all communication of the routed path.
-
-Controlled by ``MOE_SHARED_EXPERT_OVERLAP`` (default ``"0"`` = off).
-When overlap is disabled or unavailable the executor falls back to
-sequential execution with no overhead.
-
-Design notes (aligned with ``dsv4/moe/shared_expert.py:OverlapSharedExpertExecutor``):
-  - Token-count threshold (``MOE_SHARED_EXPERT_OVERLAP_TOKEN_THRESHOLD``,
-    default 4096): overlap is used only when explicitly enabled and the
-    rank-local token count is no larger than the configured threshold.
-  - CUDA graph capture: overlap is disabled while capture is in progress.
-    Capturing the auxiliary stream once per graph/layer creates a large
-    multi-stream replay topology; the sequential fallback keeps decode graph
-    capture compact and matches the DSV4 shared expert policy.
+Large batches, CUDA graph warmup, and unsupported devices use the sequential
+path.
 """
 
 from __future__ import annotations
@@ -48,9 +33,7 @@ def _is_cuda_graph_warmup() -> bool:
         return False
 
 
-# Per-device auxiliary stream cache for shared-expert overlap work.
-# One stream per GPU is sufficient because shared-expert work within a
-# single layer is serial (start → routed → finish).
+# Shared-expert work is serial within a layer, so one stream per GPU suffices.
 _shared_expert_stream_cache: dict[int, Any] = {}
 
 
@@ -66,20 +49,7 @@ def _get_or_create_shared_expert_stream(device: torch.device) -> Any:
 
 
 class SharedExpertOverlapExecutor:
-    """Run a shared expert on an auxiliary CUDA stream concurrently with
-    the routed-expert pipeline on the main stream.
-
-    Usage::
-
-        executor = SharedExpertOverlapExecutor()
-        # Call prepare() once at construction time (or before CUDA graph capture)
-        # so the auxiliary stream exists before capture begins.
-        executor.prepare(hidden_states_device)
-        ...
-        executor.start(shared_expert_fn, hidden_states, ...)
-        # ... routed expert work on main stream ...
-        shared_output = executor.finish()
-    """
+    """Overlap shared-expert work with the routed-expert pipeline."""
 
     def __init__(self) -> None:
         self._shared_expert_output: Optional[torch.Tensor] = None
@@ -92,15 +62,7 @@ class SharedExpertOverlapExecutor:
     # ------------------------------------------------------------------
 
     def prepare(self, device: torch.device) -> None:
-        """Pre-create the auxiliary stream for *device*.
-
-        Must be called before any CUDA graph capture that will include
-        the shared-expert forward.  Without this, ``start()`` would
-        allocate a new stream during capture, which is not allowed and
-        would silently fall back to sequential execution.
-
-        No-op when overlap is disabled via ``MOE_SHARED_EXPERT_OVERLAP``.
-        """
+        """Create the auxiliary stream before CUDA graph capture."""
         if not _overlap_enabled():
             return
         if torch.cuda.is_available() and device.type == "cuda":
@@ -111,7 +73,7 @@ class SharedExpertOverlapExecutor:
     # ------------------------------------------------------------------
 
     def start(self, fn: Callable[..., torch.Tensor], *args: Any, **kwargs: Any) -> None:
-        """Launch *fn(\*args, \*\*kwargs)* on the auxiliary stream.
+        """Launch ``fn(*args, **kwargs)`` on the auxiliary stream.
 
         If overlap is not possible (env var off, non-CUDA tensor, token
         count above threshold, CUDA graph warmup), *fn* is called

@@ -29,23 +29,11 @@ from .score_chunk import (
     resolve_prefill_score_host_metadata,
 )
 
-# Opt-1+: bypass the fmha_sm100 adapter in step3, preallocating the CSR/schedule/
-# page_table buffers once per forward (reused across all sparse layers) so the
-# per-layer ``.tolist()`` DtoH sync + 6 torch.empty allocs + schedule-capacity
-# recompute (~250us/layer of GPU idle) collapse to once-per-forward. The native CSR
-# kernel + schedule are reused verbatim -> output is bit-identical + deterministic.
+# Reuse CSR and schedule buffers across sparse layers in one forward pass.
 _M3_MSA_FUSED_CSR = os.environ.get("M3_MSA_FUSED_CSR", "1") == "1"
 
-# Opt-in chunked step3: sparse_atten_func internally allocates O_partial
-# [topk, total_q, Hq, dim] (+ LSE_partial), i.e. workspace scales with total_q --
-# tens of GB at 1M-token prefill. When enabled, step3 splits the query dim into
-# fixed-size chunks (CSR/schedule rebuilt per chunk, causal alignment preserved
-# via per-chunk seqused_k) so the workspace is bounded by the chunk size.
-# Enabled by default; chunk size defaults to 16K queries.  This is an
-# independent sparse-attention workspace policy, not a direct-paged layout
-# prerequisite.  Set M3_SPARSE_ATTN_CHUNK_ENABLE=0 only for controlled A/B or
-# compatibility rollback.
-# Read lazily (not at import) so env set after module import still takes effect.
+# Chunk prefill to bound the O(total_q) sparse-attention workspace. Read the
+# switch lazily so tests and controlled rollbacks can change it after import.
 _DEFAULT_SPARSE_ATTN_CHUNK_SIZE = 16384
 
 
@@ -77,25 +65,8 @@ _M3_SPARSE_ATTN_PARTIAL_DTYPE = (
     else torch.bfloat16
 )
 
-# One-time reusable workspace for chunked prefill score and step3. The two
-# phases execute serially, so one flat allocation can back both layouts.
-# Mirrors the megamoe symm-mem buffer pattern (mega_buf._MEGA_BUF_CACHE): a single
-# flat CUDA uint8 tensor is allocated on first use, cached at module level per
-# device, grown only when a later plan needs more bytes, and reused across every
-# chunk / sparse layer / prefill step. Without it, sparse_atten_func +
-# SparseK2qCsrBuilderSm100 re-allocate the temporaries below on every chunk of
-# every layer. Layout (sizes computed by fmha_sm100, offsets 256B-aligned):
-#   [0, fwd_bytes)  sparse_atten_func intra-call temporaries
-#       O_partial   [topk, chunk_q, Hq, dim] partial_dtype -- dominant term;
-#                   topk=16, chunk_q=16384, Hq=64, dim=128 uses 4 GiB in
-#                   BF16 or 2 GiB in FP8
-#       LSE_partial [topk, chunk_q, Hq] fp32     -- ~64 MiB at the same shape
-#       fwd_bytes = interface.sparse_fwd_workspace_bytes(...) (256B-aligned)
-#   [fwd_bytes, fwd_bytes + csr_words*4)  CSR builder pipeline scratch, int32
-#       row_counts [Hkv, total_rows] + row_map [1, max_kv_blocks]
-#       + row_coords [total_rows, 2] + tile_counts [G_total, Hkv, total_rows],
-#       csr_words = build_k2q_csr.k2q_csr_workspace_words(...) (a few MiB)
-# Compatibility alias retained for the existing sparse-prefill chunk tests.
+# Score and CSR phases run serially, so they share one grow-only workspace per
+# device. Offsets remain 256-byte aligned for fmha_sm100.
 _M3_CHUNK_WS_CACHE = M3_PREFILL_WORKSPACE_CACHE
 
 _CHUNKED_SPARSE_ATTN_LOGGED = False

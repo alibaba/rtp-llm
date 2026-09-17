@@ -1,41 +1,8 @@
-"""MiniMax-M3 sparse attention (MSA) module.
+"""MiniMax-M3 sparse attention backed by the shared paged KV cache.
 
-Wires the ported Triton MSA kernels (``rtp_llm/models_py/triton_kernels/
-sparse_msa``) into rtp-llm's GenericMoe decoder for MiniMax-M3 *sparse* layers
-(e.g. layers 3,4 in the 5-layer mini model). Dense layers keep using the
-shared FlashInfer FMHA impl; only sparse layers are routed here.
-
-Design (paged-only store):
-
-* The persistent store for both the main K/V and the index-K is the standard
-  cache-manager paged pool — there is NO self-built per-layer side cache.
-  Main K/V live in ``kv_cache.kv_cache_base`` (HND paged pool) and idx_K lives
-  in that pool's scale region ``kv_cache.kv_scale_base`` (reinterpreted as
-  BF16). Both are addressed by the same block table and therefore travel
-  together under PD separation.
-
-* Prefill MSA kernels consume flat *token-slot* tensors
-  ``[max_slots, num_kv_heads, head_dim]`` addressed by a
-  ``req_to_token [max_reqs, max_kv_len]`` map plus ``slot_ids [batch]``. Since
-  that layout differs from the paged pool, prefill gathers the active sequence
-  out of the paged pool into a process-wide *transient* scratch
-  (``_MainKVScratch`` / ``_IdxKScratch``) that the prefill kernel reads.
-  The opt-in paged decode path writes only the current K/V/idx_K token into the
-  persistent paged pool and reads history directly via the physical block table.
-
-* In the normal non-CP path the physical slot for ``(request b, token
-  position p)`` is the paged block table::
-
-      slot = block_table[b, p // page_size] * page_size + (p % page_size)
-
-* In CP prefill, K/V are all-gathered into full sequence order while Q stays
-  rank-local, then written into this rank's paged shard; the gather scratch is
-  indexed by a compact ``b*seq_len + pos`` grid for the kernel.
-
-The index branch (``index_q_proj`` / ``index_k_proj`` + per-head Gemma RMSNorm
-+ partial RoPE) only selects top-k blocks; with ``disable_index_value=True``
-(M3 default) it does not contribute to the attention value, so ``idx_v`` is
-``None`` and the index output ``idx_o`` is discarded.
+Prefill gathers active pages into transient scratch; decode reads the paged
+cache directly. The index branch selects blocks and does not contribute values
+when ``disable_index_value`` is enabled.
 """
 
 import logging
@@ -47,18 +14,13 @@ import torch
 import triton
 import triton.language as tl
 
-# Opt-in CP prompt-prefill path that builds a BF16 HND working set directly for
-# fmha_sm100 instead of materializing flat main-K/V scratch and then converting
-# it to pages. FP8_KV_CACHE controls the persistent cache dtype; this switch
-# only selects the production-safe direct-paged execution path.
+# Use a BF16 HND working set directly for CP prompt prefill.
 _USE_CP_DIRECT_PAGED_PREFILL = (
     os.environ.get("M3_MSA_CP_DIRECT_PAGED_PREFILL", "0") == "1"
 )
-# Fused CP paged write is the production default. Tests patch this off to
-# prove the direct-paged gate stays closed without it.
+# Allow tests and rollback configurations to disable fused paged writes.
 _USE_FUSED_CP_PAGED_WRITE = os.environ.get("M3_MSA_FUSED_CP_PAGED_WRITE", "1") == "1"
-# Fused paged->scratch main-K/V gather (one pass instead of torch's
-# index -> cast -> index_put). Set M3_MSA_FUSED_KV_GATHER=0 for the torch path.
+# Set M3_MSA_FUSED_KV_GATHER=0 to use the Torch gather path.
 _FUSED_KV_GATHER = os.environ.get("M3_MSA_FUSED_KV_GATHER", "1") != "0"
 _CP_PACKED_KV_OVERLAP = os.environ.get("RTP_LLM_CP_PACKED_KV_OVERLAP", "0") == "1"
 _CP_PREFIX_PREFETCH = os.environ.get("RTP_LLM_CP_PREFIX_PREFETCH", "0") == "1"

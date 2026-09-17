@@ -1,27 +1,7 @@
-"""MXFP8 DeepEP normal executor for MiniMax-M3.
+"""MXFP8 executor for DeepEP's non-expanded dispatch format.
 
-Optimized executor for the DeepEP normal dispatch path with MXFP8 (1x32)
-quantization. Unlike :class:`Mxfp8ContiguousExecutor` (designed for pure-TP),
-this executor is tailored for the DeepEP normal dispatch output format:
-
-- DeepEP non-expand dispatch produces ``[N_recv, K]`` of **unique** received
-  tokens (no per-expert duplication) with ``[N_recv, top_k]`` routing metadata
-- The executor expands tokens into per-expert contiguous layout (duplicating
-  tokens with multiple local expert assignments), runs MXFP8 grouped GEMMs,
-  then gathers results back with router weight application via ``ep_gather``
-
-DeepEP normal dispatch output (non-expand mode)::
-
-    expert_x:        [N_recv, K] BF16, unique received tokens (no duplicates)
-    expert_topk_ids: [N_recv, top_k] local expert IDs in [0, E_local) + -1
-    expert_num_tokens: [E_local] padded to expert_alignment (128)
-
-Executor output (fed to normal combine)::
-
-    fused_expert_output: [N_recv, K] BF16
-        = Σ_{k assigned to local experts} expert_ffn(token, expert_k) * weight_k
-
-Normal combine then sums partial results across ranks (no weight application).
+It expands local expert assignments, runs grouped GEMMs, then gathers weighted
+results back to one row per received token.
 """
 
 import os

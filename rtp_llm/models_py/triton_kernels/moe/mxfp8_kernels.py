@@ -223,21 +223,6 @@ def _mxfp8_quant_act_masked_packed_kernel(
 
 
 @triton.jit
-def _mxfp8_build_active_expert_kernel(
-    masked_m_ptr,
-    active_expert_ptr,
-    active_count_ptr,
-    E: tl.constexpr,
-):
-    tl.store(active_count_ptr, 0)
-    for expert in tl.static_range(0, E):
-        count = tl.load(masked_m_ptr + expert)
-        if count > 0:
-            slot = tl.atomic_add(active_count_ptr, 1, sem="relaxed")
-            tl.store(active_expert_ptr + slot, expert)
-
-
-@triton.jit
 def _mxfp8_quant_act_active_expert_kernel(
     x_ptr,
     q_ptr,
@@ -299,28 +284,6 @@ def _mxfp8_quant_act_active_expert_kernel(
 
 
 @triton.jit
-def _mxfp8_zero_i32_kernel(ptr):
-    tl.store(ptr, 0)
-
-
-@triton.jit
-def _mxfp8_build_active_row_kernel(
-    masked_m_ptr,
-    row_expert_ptr,
-    row_token_ptr,
-    row_count_ptr,
-    MAX_ACTIVE_ROWS: tl.constexpr,
-):
-    expert = tl.program_id(0)
-    token = tl.program_id(1)
-    if token < tl.load(masked_m_ptr + expert):
-        slot = tl.atomic_add(row_count_ptr, 1, sem="relaxed")
-        if slot < MAX_ACTIVE_ROWS:
-            tl.store(row_expert_ptr + slot, expert)
-            tl.store(row_token_ptr + slot, token)
-
-
-@triton.jit
 def _mxfp8_build_active_row_prefix_kernel(
     masked_m_ptr,
     row_expert_ptr,
@@ -349,67 +312,6 @@ def _mxfp8_build_active_row_prefix_kernel(
 
     total = tl.minimum(prefix + count, MAX_ACTIVE_ROWS)
     tl.store(row_count_ptr, total, mask=expert == E - 1)
-
-
-@triton.jit
-def _mxfp8_quant_act_active_row_kernel(
-    x_ptr,
-    q_ptr,
-    s_ptr,
-    row_expert_ptr,
-    row_token_ptr,
-    row_count_ptr,
-    masked_m_ptr,
-    x_stride_e,
-    x_stride_m,
-    x_stride_k,
-    q_stride_e,
-    q_stride_m,
-    q_stride_k,
-    s_stride_e,
-    s_stride_m,
-    s_stride_g,
-    K: tl.constexpr,
-    FP8_MAX: tl.constexpr,
-    GROUP: tl.constexpr,
-):
-    row_slot = tl.program_id(0)
-    packed_group = tl.program_id(1)
-    if row_slot >= tl.load(row_count_ptr):
-        return
-    expert = tl.load(row_expert_ptr + row_slot).to(tl.int64)
-    token = tl.load(row_token_ptr + row_slot).to(tl.int64)
-    if token >= tl.load(masked_m_ptr + expert):
-        return
-
-    offs = tl.arange(0, GROUP)
-    base_group = packed_group * 4
-    packed_scale: tl.int32 = 0
-
-    for g in tl.static_range(4):
-        group = base_group + g
-        cols = group * GROUP + offs
-        mask = cols < K
-        vals = tl.load(
-            x_ptr + expert * x_stride_e + token * x_stride_m + cols * x_stride_k,
-            mask=mask,
-            other=0.0,
-        ).to(tl.float32)
-        amax = tl.maximum(tl.max(tl.abs(vals), axis=0), 1e-20)
-        scale, exp_bits = _ue8m0_pow2_round(amax / FP8_MAX)
-        q_vals = vals / scale
-        q_vals = tl.minimum(tl.maximum(q_vals, -FP8_MAX), FP8_MAX)
-        tl.store(
-            q_ptr + expert * q_stride_e + token * q_stride_m + cols * q_stride_k,
-            q_vals.to(q_ptr.dtype.element_ty),
-            mask=mask,
-        )
-        packed_scale = packed_scale | (exp_bits.to(tl.int32) << (g * 8))
-
-    tl.store(
-        s_ptr + expert * s_stride_e + token * s_stride_m + packed_group * s_stride_g,
-        packed_scale,
-    )
 
 
 @triton.jit
@@ -559,19 +461,6 @@ def _mxfp8_quant_act_active_row_block_kernel(
             packed_scale,
             mask=valid_row,
         )
-
-
-def mxfp8_build_active_experts(masked_m: torch.Tensor, E: int):
-    active_experts = torch.empty((E,), device=masked_m.device, dtype=torch.int32)
-    active_count = torch.empty((1,), device=masked_m.device, dtype=torch.int32)
-    _mxfp8_build_active_expert_kernel[(1,)](
-        masked_m,
-        active_experts,
-        active_count,
-        E=E,
-        num_warps=1,
-    )
-    return active_experts, active_count
 
 
 def mxfp8_build_active_rows(

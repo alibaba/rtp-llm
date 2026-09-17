@@ -23,11 +23,6 @@ _FP8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 _FLASHINFER_CUTE_DSL_MAX_NUMEL = 2**31 - 1
 
 
-def ue8m0_uint8_to_fp32(scale_u8: torch.Tensor) -> torch.Tensor:
-    """On-disk UE8M0 (uint8 exponent, bias 127) -> fp32 power-of-two scale."""
-    return torch.exp2(scale_u8.to(torch.float32) - 127.0)
-
-
 def mxfp8_quant_act_eager(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Dynamic per-(row, 32-col) MXFP8 quant of a 2D activation.
 

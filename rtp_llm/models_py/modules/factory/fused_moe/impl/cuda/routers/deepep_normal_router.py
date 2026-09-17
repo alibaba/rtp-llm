@@ -40,7 +40,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
     # When True, keep DeepEP's recv expert indices in this rank's *local*
     # range ``[0, expert_num_per_rank)`` (with -1 for non-local) instead of
     # remapping them back to global ids. Used by the MXFP8 path whose executor
-    # (``mxfp8_moe_forward``) consumes local ids + ``num_experts=E_local``.
+    # MXFP8 executors consume local ids with ``num_experts=E_local``.
     LOCAL_TOPK_IDS: bool = False
 
     # When True, always dispatch the raw BF16 activations (no pre-quant), even

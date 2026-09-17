@@ -778,39 +778,6 @@ def is_mega_moe_fused_strategy() -> bool:
     return os.environ.get("MOE_STRATEGY") == "mega_moe_fused"
 
 
-def is_online_fp4gemm_enabled() -> bool:
-    """Return True when USE_ONLINE_FP4GEMM=1 is set in the env."""
-    import os
-
-    return os.environ.get("USE_ONLINE_FP4GEMM", "0") == "1"
-
-
-def mxfp4_quantize_linear_weight(weight: torch.Tensor):
-    """Quantize a 2D BF16/FP16 weight ``[K, N]`` to MXFP4 (block=32, UE8M0).
-
-    Returns the transposed FP4 packed weight (uint8) and transposed scale
-    tensor consumed by ``flashinfer.mm_fp4(backend='cute-dsl', block_size=32,
-    use_nvfp4=False)`` from the linear's forward path.
-
-    Numerically and layout-wise identical to the original inline code in
-    ``CudaOnlineMxfp4Linear.__init__``. **Do not** call ``.contiguous()`` on
-    the returned tensors — ``mm_fp4`` expects the strided
-    transposed view (``stride[0]==1``, ``stride[1]==K_packed``) and rejects
-    a row-major contiguous version with a "Mismatched strides" error. The
-    BF16 source tensor is released internally.
-    """
-    from flashinfer import mxfp4_quantize
-
-    assert weight.dim() == 2, f"expected 2D, got {tuple(weight.shape)}"
-    K, _N = weight.shape
-    assert K % 128 == 0, f"K={K} must be divisible by 128 for MXFP4"
-
-    w = weight.T.to(torch.bfloat16).contiguous()  # [N, K]
-    w_fp4, w_sf = mxfp4_quantize(w, backend="cute-dsl")
-    del w
-    return w_fp4.T, w_sf.T
-
-
 # ---------------------------------------------------------------------------
 # Wiring helpers (mega-MoE FP4)
 # ---------------------------------------------------------------------------

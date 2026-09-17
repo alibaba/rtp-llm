@@ -1,4 +1,4 @@
-"""CUDA MXFP8 (1x32) MoE strategy (pure-TP, no DP)."""
+"""CUDA MXFP8 MoE strategy selection."""
 
 from typing import Any
 
@@ -21,7 +21,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 
 class CudaMxfp8NoDPStrategy(MoeStrategy):
     """MXFP8 1x32 MoE via grouped fp8_fp4 contiguous GEMM (pure-TP / no DP)."""
-
 
     strategy_name = "mxfp8_no_dp"
     @classmethod
@@ -54,15 +53,7 @@ class CudaMxfp8NoDPStrategy(MoeStrategy):
 
 
 class CudaMxfp8EpNormalStrategy(MoeStrategy):
-    """MXFP8 1x32 MoE via DeepEP normal dispatch/combine (EP, no all_reduce).
-
-    Enabled with ``use_deepep_moe=True`` (and ``use_all_gather=False``): the
-    full (TP-replicated) hidden states are TP-sliced, DeepEP all-to-all
-    dispatched to expert-owning ranks, run through the same MXFP8 grouped-GEMM
-    executor on each rank's local experts, then combined + TP all_gathered
-    back. Replaces the pure-TP path's full-hidden TP all_reduce, which is the
-    long-context MoE communication bottleneck for MiniMax-M3."""
-
+    """MXFP8 MoE using DeepEP normal dispatch and combine."""
 
     strategy_name = "mxfp8_ep_normal"
     @classmethod
@@ -94,7 +85,6 @@ class CudaMxfp8EpNormalStrategy(MoeStrategy):
 
 class CudaMxfp8EpLowLatencyStrategy(MoeStrategy):
     """MXFP8 1x32 MoE via DeepEP low-latency dispatch/combine."""
-
 
     strategy_name = "mxfp8_ep_low_latency"
     @classmethod

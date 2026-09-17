@@ -1,23 +1,6 @@
-"""
-MiniMax-M3 VL multimodal mixin.
+"""MiniMax-M3 image/video preprocessing and embedding assembly.
 
-Handles both image and video inputs.  For images the HF processor produces
-``]<]start of image[>[`` + N × ``]<]image[>[`` + ``]<]end of image[>[``;
-for video each temporal group gets a timestamp prefix
-``]<]X.X seconds[>[`` + the same bracket/token pattern.
-
-This mixin reproduces the same token-count contract by:
-
-1. Running the ViT + projector to get patch features (N rows).
-2. Looking up the LLM word-embedding vectors for the bracket / timestamp
-   tokens and concatenating them around the ViT features.
-3. Returning one flat ``(total_tokens, hidden_dim)`` tensor so the C++
-   ``expandTokenIds`` single-token mode replaces the 1 placeholder token
-   with the correct number of embedding rows — no C++ changes needed.
-
-The LLM word-embedding table is loaded once from the same checkpoint at
-init time (kept on CPU, ~2.3 GB); fixed bracket embeddings are cached on
-GPU.
+The output preserves the model's placeholder-token expansion contract.
 """
 
 import json

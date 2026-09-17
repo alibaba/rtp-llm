@@ -1046,31 +1046,8 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
     return output, output_scale
 
 
-# ---------------------------------------------------------------------------
-# Tiled fused kernel: SwiGLU-OAI + MXFP8 quant, optimized for large T (prefill).
-# ---------------------------------------------------------------------------
-#
-# The original _silu_and_mul_post_quant_dense_packed_kernel uses
-# grid=(num_groups, T) with num_warps=1 — one program per (row, group), each
-# processing only 32 elements.  At T=8192 this creates 786K tiny programs
-# that saturate the SM scheduler, causing O(T) scaling that loses to the
-# unfused path (swiglu_oai_torch + mxfp8_quant_act) for T >= 1024.
-#
-# This kernel tiles along BOTH the T and group dimensions:
-#   grid = (cdiv(num_groups, NG), cdiv(T, BLOCK_T))
-# Each program processes BLOCK_T rows × NG *contiguous* groups.  Instead of a
-# per-group loop of narrow [BLOCK_T, 32] loads (64 B/row — poor coalescing),
-# it issues ONE wide contiguous load of [BLOCK_T, NG*32] for gate and one for
-# up, then reshapes to [BLOCK_T, NG, 32] and reduces along the last axis for
-# the per-group absmax.  The wide load (NG*32*2 B/row, e.g. 1 KB at NG=16) is
-# what makes this memory-bound kernel approach peak HBM bandwidth at large T.
-#
-# BLOCK_T / NG / num_warps are autotuned per H_out (`size_n`), so the shared
-# expert (size_n=3072) and dense MLP (size_n=12288) each get their best config.
-#
-# Output format: fp32 row-major scale [T, num_groups] (same as original
-# MXFP8 mode).  Caller packs via pack_mxfp8_scale if DeepGEMM needs int32.
-# ---------------------------------------------------------------------------
+# Tile tokens and quantization groups together to avoid one tiny program per
+# row/group. The output scale remains fp32 row-major for downstream packing.
 
 
 def _tiled_swiglu_mxfp8_configs():
