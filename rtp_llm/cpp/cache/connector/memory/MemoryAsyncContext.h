@@ -45,26 +45,31 @@ private:
 // 用于 memory connector read/write
 class MemoryAsyncContext: public AsyncContext {
 public:
-    explicit MemoryAsyncContext(const std::function<void(bool)>& done_callback): done_callback_(done_callback) {}
+    using DoneCallback = std::function<void(MemoryOperationResponsePB::ErrorCode)>;
+
+    explicit MemoryAsyncContext(const DoneCallback& done_callback): done_callback_(done_callback) {}
     ~MemoryAsyncContext() override = default;
 
 public:
-    void waitDone() override;
-    bool done() const override;
-    bool success() const override;
-    void setBroadcastResult(const std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result);
+    void      waitDone() override;
+    bool      done() const override;
+    bool      success() const override;
+    void      setBroadcastResult(const std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result);
+    ErrorInfo errorInfo() const override;
 
 private:
-    bool successLocked() const;
+    MemoryOperationResponsePB::ErrorCode resultErrorLocked() const;
 
 private:
     mutable std::mutex                                                      mutex_;
     std::condition_variable                                                 cv_;
     std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>> broadcast_result_;
-    std::function<void(bool)>                                               done_callback_;
+    DoneCallback                                                            done_callback_;
     bool                                                                    result_ready_{false};
     bool                                                                    finalizing_{false};
     std::atomic<bool>                                                       already_done_{false};
+
+    MemoryOperationResponsePB::ErrorCode copy_error_{MemoryOperationResponsePB::NONE};
 };
 
 }  // namespace rtp_llm

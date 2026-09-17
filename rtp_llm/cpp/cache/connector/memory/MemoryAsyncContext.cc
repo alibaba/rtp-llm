@@ -42,22 +42,47 @@ bool MemoryAsyncContext::done() const {
     return already_done_.load();
 }
 
-bool MemoryAsyncContext::successLocked() const {
-    if (!broadcast_result_ || !broadcast_result_->success()) {
-        return false;
+MemoryOperationResponsePB::ErrorCode MemoryAsyncContext::resultErrorLocked() const {
+    using Response = MemoryOperationResponsePB;
+    if (!broadcast_result_) {
+        return Response::RPC_FAILED;
     }
-    const auto& responses = broadcast_result_->responses();
-    for (const auto& response : responses) {
-        if (!response.has_mem_response() || !response.mem_response().success()) {
-            return false;
+    const bool rpc_success = broadcast_result_->success();
+    auto       error       = rpc_success ? Response::NONE : Response::RPC_FAILED;
+    const auto responses   = broadcast_result_->responses();
+    for (size_t rank = 0; rank < responses.size(); ++rank) {
+        if (!rpc_success && !broadcast_result_->rpcSucceeded(rank)) {
+            continue;
+        }
+        const auto& response     = responses[rank];
+        auto        worker_error = Response::COPY_FAILED;
+        if (response.has_mem_response()) {
+            const auto& copy = response.mem_response();
+            worker_error     = copy.error_code();
+            if (!Response::ErrorCode_IsValid(worker_error) || (worker_error == Response::NONE && !copy.success())) {
+                worker_error = Response::COPY_FAILED;
+            }
+        }
+        // A confirmed mismatch must remain visible even if another rank's RPC failed.
+        if (worker_error == Response::CRC_MISMATCH || error == Response::NONE) {
+            error = worker_error;
         }
     }
-    return true;
+    return error;
 }
 
 bool MemoryAsyncContext::success() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return successLocked();
+    return (already_done_.load() ? copy_error_ : resultErrorLocked()) == MemoryOperationResponsePB::NONE;
+}
+
+ErrorInfo MemoryAsyncContext::errorInfo() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!already_done_.load() || copy_error_ == MemoryOperationResponsePB::NONE) {
+        return ErrorInfo::OkStatus();
+    }
+    // Adapt to the existing stream fallback interface; connector callbacks retain the precise error enum.
+    return ErrorInfo(ErrorCode::KV_CACHE_REUSE_ERROR, MemoryOperationResponsePB::ErrorCode_Name(copy_error_));
 }
 
 void MemoryAsyncContext::waitDone() {
@@ -80,16 +105,19 @@ void MemoryAsyncContext::waitDone() {
         result->waitDone();
     }
 
-    bool ok = false;
-    std::function<void(bool)> done_callback;
+    MemoryOperationResponsePB::ErrorCode error;
+    DoneCallback                         done_callback;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        ok            = successLocked();
+        copy_error_   = resultErrorLocked();
+        error         = copy_error_;
         done_callback = std::move(done_callback_);
     }
     if (done_callback) {
-        done_callback(ok);
+        done_callback(error);
     }
+    // Release callback-owned block references before the scheduler can observe completion.
+    done_callback = {};
 
     {
         std::lock_guard<std::mutex> lock(mutex_);

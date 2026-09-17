@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <set>
@@ -45,14 +46,18 @@ public:
 
 public:
     MatchResult match(CacheKeyType cache_key);
-    MatchResult matchAndMarkInFlight(CacheKeyType cache_key);
+    // Acquire the physical backing while the index lock prevents removal/replacement.
+    // The callback must not reenter this cache; false means no backing reference was acquired.
+    MatchResult matchAndMarkInFlight(CacheKeyType cache_key,
+                                    const std::function<bool(const CacheItem&)>& acquire_backing);
     bool        contains(CacheKeyType cache_key) const;
 
     std::pair<bool, std::optional<CacheItem>>                   putCommitted(const CacheItem& item);
-    std::optional<CacheItem>                                    removeIfMatch(CacheKeyType     cache_key,
-                                                                              CacheBackingType backing_type,
-                                                                              BlockIdxType     expected_block_index,
-                                                                              int32_t          expected_disk_slot);
+    std::optional<CacheItem>                                    removeIfMatch(CacheKeyType        cache_key,
+                                                                              CacheBackingType    backing_type,
+                                                                              BlockIdxType        expected_block_index,
+                                                                              int32_t             expected_disk_slot,
+                                                                              std::optional<bool> expected_is_complete = std::nullopt);
     std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> put(const MemoryBlockCache::CacheItem& item);
     std::optional<MemoryBlockCache::CacheItem>                  remove(CacheKeyType cache_key);
     std::optional<MemoryBlockCache::CacheItem> removeIfMatch(CacheKeyType cache_key, BlockIdxType expected_block_index);
@@ -61,8 +66,12 @@ public:
 
     bool
     markInFlight(CacheKeyType cache_key, CacheBackingType backing_type, BlockIdxType block_index, int32_t disk_slot);
-    void
-    releaseInFlight(CacheKeyType cache_key, CacheBackingType backing_type, BlockIdxType block_index, int32_t disk_slot);
+    // Call before dropping the physical backing reference, so its index cannot be recycled.
+    void releaseInFlight(CacheKeyType     cache_key,
+                         CacheBackingType backing_type,
+                         BlockIdxType     block_index,
+                         int32_t          disk_slot,
+                         bool             is_complete);
 
     bool                      empty() const;
     size_t                    size() const;

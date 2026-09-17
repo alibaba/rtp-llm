@@ -495,6 +495,10 @@ bool StreamCacheResource::loadCacheDone() {
     // 加载完成（无论成功失败），更新 reuse lengths
     waitLoadCacheDone(load_cache_context_);
     if (!load_cache_context_->success()) {
+        if (load_cache_context_->errorInfo().hasError()) {
+            load_cache_context_.reset();
+            return true;
+        }
         // 区分匹配失败和传输失败
         auto      read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
         bool      should_retry = false;
@@ -683,8 +687,20 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
                             stream_->streamLogTag().c_str(),
                             error.ToString().c_str());
         if (error.hasError()) {
-            // loadCacheDone() is called from moveToNext(), which already holds the stream mutex.
-            stream_->reportErrorWithoutLock(error.code(), error.ToString());
+            // Keep the device prefix; prefill overwrites the failed connector suffix.
+            const int device_reuse_len =
+                batch_kv_cache_resource_->cacheResource(0).deviceReuseBlockNum() * reuseBlockTokens();
+            for (int batch = 0; batch < batch_kv_cache_resource_->batchSize(); ++batch) {
+                auto& resource = batch_kv_cache_resource_->cacheResource(batch);
+                resource.setMemoryReuseBlockNum(0);
+                resource.setRemoteReuseBlockNum(0);
+            }
+            stream_->setMemoryReuseLength(0);
+            stream_->setRemoteReuseLength(0);
+            stream_->setLocalReuseLength(device_reuse_len);
+            stream_->setInitialReuseLength(device_reuse_len);
+            stream_->setReuseLength(device_reuse_len);
+            stream_->setMtpTokenIndex(device_reuse_len);
         }
         return;
     }
