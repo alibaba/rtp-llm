@@ -99,8 +99,8 @@ public class DecodeSelector {
             return Availability.IMPOSSIBLE;
         }
         var usage = switch (request.mode()) {
-            case IMMEDIATE, WAIT_AT_DISPATCH -> view.dispatchUsage();
-            case PREEMPT_AT_PLACEMENT -> view.placementUsage();
+            case IMMEDIATE -> view.dispatchUsage();
+            case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT -> view.placementUsage();
         };
         return request.capacity().evaluate(usage, request.hardKvTokens(), request.expectedKvTokens()).fits()
                 ? Availability.READY : Availability.BUSY;

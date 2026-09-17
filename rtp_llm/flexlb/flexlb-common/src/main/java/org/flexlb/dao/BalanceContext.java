@@ -60,6 +60,10 @@ public class BalanceContext {
 
     private long enqueueTime;
 
+    /** Stable worker-queue age and tie-breaker across local route withdrawals. */
+    private long firstWorkerEnqueueTime;
+    private long workerEnqueueSequence;
+
     /**
      * Timestamp (ms) when the engine acknowledges the batch in BATCH mode.
      * Set when RequestScheduler confirms the EnqueueBatch acknowledgement.

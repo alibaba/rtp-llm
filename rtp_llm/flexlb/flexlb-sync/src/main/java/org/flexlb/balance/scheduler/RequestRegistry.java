@@ -56,6 +56,7 @@ public class RequestRegistry {
 
     private final Object admissionQuiescenceMonitor = new Object();
     private int inFlightAdmissionHandles;
+    private volatile GlobalQueueCoordinator globalQueue;
 
     private final Object registrationLock = new Object();
     private final BatchSchedulerReporter reporter;
@@ -75,6 +76,106 @@ public class RequestRegistry {
         this.completionPublisher = new RequestCompletionPublisher(
                 completionPublisherWorkers(configService), reporter);
         this.terminalCleanup = new RequestTerminalCleanup(expirationTimer);
+    }
+
+    void attachGlobalQueue(GlobalQueueCoordinator queue) {
+        if (globalQueue != null) { throw new IllegalStateException("global queue already attached"); }
+        globalQueue = Objects.requireNonNull(queue, "queue");
+    }
+
+    private record WithdrawnRoute(RequestSlot slot, ScheduledRequest item, AdmissionHandle claim) { }
+
+    /** Transfer queued Decode capacity, then return each victim to its original global queue identity. */
+    public boolean replaceQueuedDecodeReservations(
+            DecodeEndpoint endpoint, List<DecodeEndpoint.ReservationHandle> victims,
+            long incomingRequestId, long hardKv, long expectedKv, int priority,
+            DecodeEndpoint.AdmissionCapacity capacity) {
+        GlobalQueueCoordinator queue = globalQueue;
+        if (queue == null || shuttingDown.get()) { return false; }
+        List<WithdrawnRoute> claimed = new ArrayList<>(victims.size());
+        boolean replaced = false;
+        try {
+            for (DecodeEndpoint.ReservationHandle victim : victims) {
+                WithdrawnRoute withdrawal = claimQueuedRoute(endpoint, victim, priority);
+                if (withdrawal == null) { return false; }
+                try {
+                    claimed.add(withdrawal);
+                } catch (Throwable failure) {
+                    withdrawal.claim().close();
+                    throw failure;
+                }
+            }
+            replaced = endpoint.replaceQueuedRequests(
+                    victims, incomingRequestId, hardKv, expectedKv, priority, capacity);
+            return replaced;
+        } finally {
+            Throwable failure = null;
+            for (WithdrawnRoute withdrawal : claimed) {
+                try {
+                    if (replaced) {
+                        withdrawal.slot().detachWithdrawnRoute(withdrawal.claim(), withdrawal.item());
+                    }
+                } catch (Throwable detachFailure) {
+                    failure = RequestTerminalCleanup.appendFailure(failure, detachFailure);
+                    try {
+                        withdrawal.claim().terminate(buildErrorResponse(
+                                StrategyErrorType.DISPATCH_FAILED, "queued route withdrawal failed"));
+                    } catch (Throwable terminalFailure) {
+                        failure = RequestTerminalCleanup.appendFailure(failure, terminalFailure);
+                    }
+                } finally {
+                    try {
+                        withdrawal.claim().close();
+                        if (replaced && withdrawal.slot().isOpen()
+                                && !queue.requeue(withdrawal.item())) {
+                            completeError(withdrawal.item().future(), StrategyErrorType.DISPATCH_FAILED,
+                                    "scheduler closed during route withdrawal");
+                        }
+                    } catch (Throwable closeFailure) {
+                        failure = RequestTerminalCleanup.appendFailure(failure, closeFailure);
+                        try {
+                            completeError(withdrawal.item().future(), StrategyErrorType.DISPATCH_FAILED,
+                                    "queued route requeue failed");
+                        } catch (Throwable terminalFailure) {
+                            failure = RequestTerminalCleanup.appendFailure(failure, terminalFailure);
+                        }
+                    }
+                }
+            }
+            if (failure != null) {
+                if (replaced) {
+                    DecodeEndpoint.ReservationHandle incoming = endpoint.reservationHandle(incomingRequestId);
+                    if (incoming != null) { endpoint.release(incoming, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK); }
+                }
+                RequestTerminalCleanup.rethrowCleanup(failure);
+            }
+        }
+    }
+
+    private WithdrawnRoute claimQueuedRoute(DecodeEndpoint endpoint,
+                                            DecodeEndpoint.ReservationHandle victim, int incomingPriority) {
+        if (!enterAdmissionHandleGate()) { return null; }
+        AdmissionHandle claim = null;
+        boolean retained = false;
+        try {
+            RequestSlot slot = requestSlots.get(victim.requestId());
+            if (slot == null) { return null; }
+            synchronized (slot) {
+                if (!isCurrentSlot(slot)) { return null; }
+                ScheduledRequest active = slot.activeItem();
+                if (active == null || active.priority() >= incomingPriority) { return null; }
+                claim = slot.tryBeginRouteWithdrawal(endpoint, victim);
+                if (claim == null) { return null; }
+                WithdrawnRoute withdrawal = new WithdrawnRoute(slot, active, claim);
+                retained = true;
+                return withdrawal;
+            }
+        } finally {
+            if (!retained) {
+                if (claim == null) { exitAdmissionHandleGate(); }
+                else { claim.close(); }
+            }
+        }
     }
 
     private static int completionPublisherWorkers(ConfigService configService) {

@@ -41,9 +41,6 @@ import java.util.concurrent.CompletableFuture;
 @Component
 public class EvictionManager {
 
-    private static final String YIELDED_TERMINAL =
-            "yielded_" + StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode();
-
     private final RequestSchedulerReporter reporter;
     private final EngineCancelChannel cancelChannel;
     private final DecodePreemptionCoordinator preemptionCoordinator;
@@ -109,9 +106,8 @@ public class EvictionManager {
         }
 
         try {
-            commitDecodeEviction(
+            return commitDecodeEviction(
                     ctx, future, planned, preemption, admission);
-            return true;
         } catch (RuntimeException | Error failure) {
             admission.close();
             throw failure;
@@ -195,7 +191,7 @@ public class EvictionManager {
     }
 
     /** Commit exactly the immutable plan selected before takeover. */
-    private void commitDecodeEviction(
+    private boolean commitDecodeEviction(
             BalanceContext ctx,
             CompletableFuture<Response> future,
             PlannedDecodeEviction planned,
@@ -213,7 +209,7 @@ public class EvictionManager {
         if (proposal.requiresEngineCancel()) {
             startEngineCancelPreemption(ctx, future, preemption, proposal,
                     decodeEp, request, admission);
-            return;
+            return true;
         }
 
         List<DecodeEndpoint.ReservationHandle> reservedVictims =
@@ -233,11 +229,13 @@ public class EvictionManager {
                         request.requestId(), future);
         if (handle == null) {
             admission.close();
-            return;
+            return true;
         }
-        try (handle; admission) {
+        boolean transferred = false;
+        try (handle) {
             boolean evictionCommitted =
-                    decodeEp.replaceQueuedRequests(
+                    requests.replaceQueuedDecodeReservations(
+                            decodeEp,
                             reservedVictims,
                             request.requestId(),
                             request.hardKvTokens(),
@@ -253,20 +251,16 @@ public class EvictionManager {
                         ctx.getRequestId(),
                         reservedVictims.size(),
                         proposal.endpointId());
-                handle.terminate(admissionError(
-                        StrategyErrorType.RESOURCE_EXHAUSTED,
-                        AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                        "exact Decode eviction plan changed before commit"));
-                return;
+                // A concurrent dispatch can invalidate the victim plan. Keep the
+                // incoming request queued instead of publishing a capacity error.
+                return false;
             }
 
-            // Shadow accounting already reversed atomically; drive each victim
-            // terminal before publishing the incoming item. Reserved-only
-            // victims were never seen by the engine, so they terminate with
-            // the retryable NO_AVAILABLE_WORKER contract.
+            transferred = true;
+            // The registry has detached each old route and requeued its original
+            // request. The replacement reservation belongs exclusively to this incoming route.
             for (DecodeRequestView victim : proposal.victims()) {
-                finishDecodeVictim(ctx, victim,
-                        "decode_reserved", proposal);
+                reportRequeuedVictim(ctx, victim, proposal);
             }
             reportCommittedLocalDecodeEviction(ctx, proposal);
             recordDecodePlanObservability(ctx, proposal);
@@ -277,14 +271,17 @@ public class EvictionManager {
                         StrategyErrorType.RESOURCE_EXHAUSTED,
                         AdmissionRejectReason.RESOURCE_EXHAUSTED,
                         "Decode reservation disappeared before canonical placement"));
-                return;
+                return true;
             }
             Response placementFailure = placeReservedDecode(
                     ctx, future, decodeEp, incoming, admission);
             if (placementFailure != null) {
                 handle.terminate(placementFailure);
-                return;
+                return true;
             }
+            return true;
+        } finally {
+            if (transferred) { admission.close(); }
         }
     }
 
@@ -332,26 +329,10 @@ public class EvictionManager {
         }
     }
 
-    /**
-     * Drive one decode eviction victim to its terminal state and emit the
-     * per-victim metrics ({@code stage} distinguishes reserved vs accepted
-     * victims). Terminal split per contract 5.3: a reserved-only victim was
-     * never seen by the engine — retryable NO_AVAILABLE_WORKER (yielded);
-     * an engine-accepted victim keeps PRIORITY_PREEMPTED.
-     */
-    private void finishDecodeVictim(BalanceContext ctx,
-                                    DecodeRequestView victim, String stage,
-                                    DecodeEvictionProposal proposal) {
-        if (victim.phase().isEngineConfirmed()
-                || victim.reservationToken() <= 0L) {
-            throw new IllegalStateException(
-                    "local Decode eviction requires an exact reserved victim: request_id="
-                            + victim.requestId());
-        }
-        String detail = "yielded to higher-priority request "
-                + ctx.getRequestId();
-        requests.finishYieldedReservation(
-                victim.requestId(), victim.reservationToken(), detail);
+    /** Observability only: the registry owns non-terminal withdrawal and requeue. */
+    private void reportRequeuedVictim(BalanceContext ctx, DecodeRequestView victim,
+                                     DecodeEvictionProposal proposal) {
+        String stage = "decode_reserved";
         try {
             reporter.reportVictim(victim.priority(), ctx.getPriority(),
                     stage, proposal.evictionCase());
@@ -365,12 +346,12 @@ public class EvictionManager {
         }
         Logger.debug(
                 "[eviction-manager] decode victim preempted: victim_id={} victim_priority={}"
-                    + " stage={} terminal={} kv_tokens={} incoming_id={} incoming_priority={}"
+                    + " stage={} outcome={} kv_tokens={} incoming_id={} incoming_priority={}"
                     + " worker={}",
                 victim.requestId(),
                 victim.priority(),
                 stage,
-                YIELDED_TERMINAL,
+                "requeued",
                 victim.kvTokens(),
                 ctx.getRequestId(),
                 ctx.getPriority(),

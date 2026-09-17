@@ -195,7 +195,7 @@ public final class DeliveryStrategyTestSupport {
                 ScheduledRequest.DecodeBinding binding = new ScheduledRequest.DecodeBinding(
                         null, decode, reservation, requestId, item.priority(), item.seqLen(), item.seqLen(),
                         new DecodeEndpoint.AdmissionCapacity(0L, 100L),
-                        ScheduledRequest.DecodeMode.WAIT_AT_DISPATCH,
+                        ScheduledRequest.DecodeMode.WAIT_AT_PLACEMENT,
                         DecodeCostFormula.parse("kvcache_used_ratio"));
                 Mockito.when(item.decodeBinding()).thenReturn(binding);
             }
