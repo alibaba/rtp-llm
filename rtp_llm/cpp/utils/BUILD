@@ -66,6 +66,18 @@ cc_library(
 )
 
 cc_library(
+    name = "cudacore_diagnostics",
+    srcs = ["CudacoreDiagnostics.cc"],
+    hdrs = ["CudacoreDiagnostics.h"],
+    copts = copts(),
+    linkopts = ["-ldl"],
+    deps = [
+        ":core_utils",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "profiling_scope",
     hdrs = [
         "ProfilingScope.h",

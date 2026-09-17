@@ -247,3 +247,13 @@ py_test(
         "//rtp_llm:utils",
     ],
 )
+
+py_test(
+    name = "cudacore_lease_test",
+    srcs = [
+        "cudacore_lease_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+)

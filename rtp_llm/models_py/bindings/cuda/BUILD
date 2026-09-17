@@ -18,6 +18,7 @@ cc_library(
     ],
     implementation_deps = [
         "//rtp_llm/cpp/utils:stack_trace",
+        "//rtp_llm/cpp/utils:cudacore_diagnostics",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:static_config",
         "@local_config_cuda//cuda:cublas_headers",
@@ -113,6 +114,7 @@ cc_library(
     deps = [
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:cudacore_diagnostics",
         ":split_kv_cache_copy",
         ":cuda_host_utils",
     ] + torch_deps(),

@@ -2,6 +2,7 @@ import logging
 import multiprocessing
 import os
 import signal
+import socket
 import sys
 import time
 import traceback
@@ -26,6 +27,10 @@ from rtp_llm.config.server_config_setup import (
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
+)
+from rtp_llm.utils.cudacore_lease import (
+    cudacore_diagnostics_dir,
+    wait_for_collection_leases,
 )
 from rtp_llm.utils.oom_diag import install_oom_dump
 from rtp_llm.utils.process_manager import ProcessManager
@@ -56,6 +61,30 @@ def _send_pipe_status(pipe_writer, status: str, message: str, error_trace: str =
         logging.warning(f"Failed to send status via pipe: {e}")
 
 
+def _setup_cudacore_diagnostics_env() -> None:
+    """Temporary GPU coredump diagnostics: enable the user-trigger channel before
+    this process creates a CUDA context. Driver coredump settings are picked up
+    when the context is created, so this must run before any CUDA call; explicit
+    deployment settings always win."""
+    try:
+        os.environ.setdefault("CUDA_ENABLE_USER_TRIGGERED_COREDUMP", "1")
+        if not os.environ.get("CUDA_COREDUMP_PIPE"):
+            diagnostics_dir = cudacore_diagnostics_dir()
+            os.makedirs(diagnostics_dir, exist_ok=True)
+            os.environ["CUDA_COREDUMP_PIPE"] = os.path.join(
+                diagnostics_dir,
+                f"cudacore_pipe.{socket.gethostname()}.{os.getpid()}",
+            )
+        logging.info(
+            "[CudacoreDiag] diagnostics env: dir=%s pipe=%s user_trigger=%s",
+            cudacore_diagnostics_dir(),
+            os.environ.get("CUDA_COREDUMP_PIPE", ""),
+            os.environ.get("CUDA_ENABLE_USER_TRIGGERED_COREDUMP", ""),
+        )
+    except Exception as e:
+        logging.warning("[CudacoreDiag] failed to configure diagnostics env: %s", e)
+
+
 def local_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
@@ -64,6 +93,7 @@ def local_rank_start(
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     _install_hot_hook_runtime(f"backend_rank_{world_rank}")
+    _setup_cudacore_diagnostics_env()
     backend_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
 
@@ -328,7 +358,17 @@ def multi_rank_start(
 
         _close_readers(rank_pipe_readers)
 
-        # Terminate all processes if any rank failed
+        # Terminate all processes if any rank failed. A surviving rank may be in
+        # the middle of a GPU coredump collection: respect the window it
+        # registered before interrupting it (bounded by its own deadline).
+        waited = wait_for_collection_leases(
+            [proc.pid for proc in processes if proc.pid is not None],
+            reason="startup_failure",
+        )
+        if waited > 0:
+            logging.warning(
+                f"Startup failure cleanup waited {waited:.1f}s for a cudacore collection window"
+            )
         logging.error("Terminating all ranks due to startup failures")
         for proc in processes:
             if proc.pid is not None and proc.is_alive():
@@ -339,6 +379,10 @@ def multi_rank_start(
             if proc.pid is None:
                 continue
             proc.join(timeout=5)
+            if proc.is_alive():
+                wait_for_collection_leases(
+                    [proc.pid], reason="startup_failure_force_kill"
+                )
             if proc.is_alive():
                 logging.warning(f"Force killing process {proc.name} (pid={proc.pid})")
                 proc.kill()

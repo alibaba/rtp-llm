@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
+#include "rtp_llm/cpp/utils/CudacoreDiagnostics.h"
 #include "autil/EnvUtil.h"
 #include <stdexcept>
 
@@ -34,6 +35,11 @@ void EngineBase::initRuntime(const EngineInitParams& params) {
                                          params.device_resource_config.enable_comm_overlap,
                                          params.model_config_.mla_ops_type);
     warmupNoBlockCopy();
+    // Temporary cudacore diagnostics: register the worker identity and audit the
+    // coredump configuration the driver actually adopted. Read-only, never blocks
+    // startup, never throws.
+    setCudacoreProcessIdentity(rank, static_cast<int>(device_id));
+    auditCudacoreAttributesAtStartup();
 }
 
 std::shared_ptr<KVCacheManager> EngineBase::getCacheManager() const {
