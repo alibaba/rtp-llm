@@ -43,8 +43,8 @@ struct StageGroupLoadParams {
     bool prefill_cp_enabled;
     int  decode_tp_size;
     int  decode_tp_rank;
-    bool replicated_kv;
-    bool opaque_kv_store;
+    bool use_mla;
+    bool use_opaque_kv_store;
 };
 
 // One stage group's load plan. loads reuses StagePeerSlice; page_level_rr is the
@@ -59,9 +59,9 @@ struct StageGroupLoadPlan {
 // Maps one decode lane onto the prefill stage's TP lanes by head-sliced KV
 // ownership: equal widths copy whole-to-whole, a finer prefill TP assembles
 // tp_P/tp_D consecutive peer slices, a finer decode TP reads one sub-slice of
-// a single peer block. replicated_kv (MLA) keeps one whole-block peer per
-// stage since every lane owns the full block.
-std::vector<StagePeerSlice> planStagePeerSlices(int prefill_tp, int decode_tp, int decode_tp_rank, bool replicated_kv);
+// a single peer block. use_mla keeps one whole-block peer per stage since
+// every lane owns the full block.
+std::vector<StagePeerSlice> planStagePeerSlices(int prefill_tp, int decode_tp, int decode_tp_rank, bool use_mla);
 
 // Plans the per-group loads for one stage group: CP-sharded whole-block reads
 // (MLA/opaque only), CP full-replication lane reads, or planStagePeerSlices.

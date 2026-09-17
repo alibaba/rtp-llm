@@ -102,7 +102,7 @@ TEST(StagePeerGroups, PlanSlicesFinerDecodeTpReadsSubSlice) {
     EXPECT_EQ(slices[0].peer_piece_id, 1);
 }
 
-TEST(StagePeerGroups, PlanSlicesReplicatedKvUsesSingleWholePeer) {
+TEST(StagePeerGroups, PlanSlicesMlaUsesSingleWholePeer) {
     const auto slices = planStagePeerSlices(1, 2, 1, true);
     ASSERT_EQ(slices.size(), 1u);
     EXPECT_EQ(slices[0].peer_index, 0u);
@@ -122,20 +122,20 @@ TEST(StagePeerGroups, PlanSlicesRejectsOutOfRangeLane) {
 namespace {
 
 StageGroupLoadParams makeGroupParams(int  peer_count,
-                                     int  cp_size            = 1,
-                                     bool prefill_cp_enabled = false,
-                                     int  decode_tp_size     = 1,
-                                     int  decode_tp_rank     = 0,
-                                     bool replicated         = false,
-                                     bool opaque             = false) {
-    return {peer_count, cp_size, prefill_cp_enabled, decode_tp_size, decode_tp_rank, replicated, opaque};
+                                     int  cp_size             = 1,
+                                     bool prefill_cp_enabled  = false,
+                                     int  decode_tp_size      = 1,
+                                     int  decode_tp_rank      = 0,
+                                     bool use_mla             = false,
+                                     bool use_opaque_kv_store = false) {
+    return {peer_count, cp_size, prefill_cp_enabled, decode_tp_size, decode_tp_rank, use_mla, use_opaque_kv_store};
 }
 
 }  // namespace
 
 // Mode A reads whole blocks: one read per group peer, no cutting on either side.
 TEST(StagePeerGroups, GroupLoadShardedMlaEnumeratesPeers) {
-    const auto plan = planStageGroupLoads(makeGroupParams(2, 2, true, 2, 1, /*replicated=*/true));
+    const auto plan = planStageGroupLoads(makeGroupParams(2, 2, true, 2, 1, /*use_mla=*/true));
     EXPECT_TRUE(plan.error.empty());
     EXPECT_TRUE(plan.page_level_rr);
     ASSERT_EQ(plan.loads.size(), 2u);
@@ -149,7 +149,8 @@ TEST(StagePeerGroups, GroupLoadShardedMlaEnumeratesPeers) {
 }
 
 TEST(StagePeerGroups, GroupLoadShardedOpaqueAllowed) {
-    const auto plan = planStageGroupLoads(makeGroupParams(2, 2, true, 2, 1, /*replicated=*/false, /*opaque=*/true));
+    const auto plan =
+        planStageGroupLoads(makeGroupParams(2, 2, true, 2, 1, /*use_mla=*/false, /*use_opaque_kv_store=*/true));
     EXPECT_TRUE(plan.error.empty());
     EXPECT_TRUE(plan.page_level_rr);
     ASSERT_EQ(plan.loads.size(), 2u);
@@ -158,13 +159,14 @@ TEST(StagePeerGroups, GroupLoadShardedOpaqueAllowed) {
 }
 
 TEST(StagePeerGroups, GroupLoadShardedRejectsPlainMha) {
-    const auto plan = planStageGroupLoads(makeGroupParams(2, 2, true, 2, 1, /*replicated=*/false, /*opaque=*/false));
+    const auto plan =
+        planStageGroupLoads(makeGroupParams(2, 2, true, 2, 1, /*use_mla=*/false, /*use_opaque_kv_store=*/false));
     EXPECT_TRUE(plan.loads.empty());
     EXPECT_NE(plan.error.find("only supported for MLA or opaque"), std::string::npos);
 }
 
 TEST(StagePeerGroups, GroupLoadShardedRejectsPeerCountMismatch) {
-    const auto plan = planStageGroupLoads(makeGroupParams(4, 2, true, 2, 1, /*replicated=*/true));
+    const auto plan = planStageGroupLoads(makeGroupParams(4, 2, true, 2, 1, /*use_mla=*/true));
     EXPECT_TRUE(plan.loads.empty());
     EXPECT_NE(plan.error.find("requires stage peer group size"), std::string::npos);
 }
@@ -191,13 +193,23 @@ TEST(StagePeerGroups, GroupLoadFullReplicationBalancesPeersAcrossLanes) {
     EXPECT_EQ(lane1.loads[0].peer_index, 1u);
 }
 
-// Replicated KV keeps the same lane slicing as MHA in full-replication mode.
-TEST(StagePeerGroups, GroupLoadFullReplicationKeepsReplicatedLaneSlicing) {
-    const auto plan = planStageGroupLoads(makeGroupParams(2, 1, true, 4, 3, /*replicated=*/true));
+// MLA/opaque blocks are replicated whole: slicing the source would fail the
+// serving-side length check (src_len / count == dst_len).
+TEST(StagePeerGroups, GroupLoadFullReplicationMlaKeepsWholeBlock) {
+    const auto plan = planStageGroupLoads(makeGroupParams(2, 1, true, 4, 3, /*use_mla=*/true));
     ASSERT_EQ(plan.loads.size(), 1u);
     EXPECT_EQ(plan.loads[0].peer_index, 1u);
-    EXPECT_EQ(plan.loads[0].peer_piece_count, 4);
-    EXPECT_EQ(plan.loads[0].peer_piece_id, 3);
+    EXPECT_EQ(plan.loads[0].peer_piece_count, 1);
+    EXPECT_EQ(plan.loads[0].peer_piece_id, 0);
+}
+
+TEST(StagePeerGroups, GroupLoadFullReplicationOpaqueKeepsWholeBlock) {
+    const auto plan =
+        planStageGroupLoads(makeGroupParams(2, 1, true, 4, 1, /*use_mla=*/false, /*use_opaque_kv_store=*/true));
+    ASSERT_EQ(plan.loads.size(), 1u);
+    EXPECT_EQ(plan.loads[0].peer_index, 1u);
+    EXPECT_EQ(plan.loads[0].peer_piece_count, 1);
+    EXPECT_EQ(plan.loads[0].peer_piece_id, 0);
 }
 
 TEST(StagePeerGroups, GroupLoadSymmetricTpMatchesFlatTuple) {
@@ -232,8 +244,8 @@ TEST(StagePeerGroups, GroupLoadFinerDecodeTpReadsSubSlice) {
     EXPECT_EQ(plan.loads[0].peer_piece_id, 1);
 }
 
-TEST(StagePeerGroups, GroupLoadReplicatedKvUsesSingleWholePeer) {
-    const auto plan = planStageGroupLoads(makeGroupParams(2, 1, false, 2, 1, /*replicated=*/true));
+TEST(StagePeerGroups, GroupLoadMlaUsesSingleWholePeer) {
+    const auto plan = planStageGroupLoads(makeGroupParams(2, 1, false, 2, 1, /*use_mla=*/true));
     ASSERT_EQ(plan.loads.size(), 1u);
     EXPECT_EQ(plan.loads[0].peer_index, 1u);
     EXPECT_EQ(plan.loads[0].peer_piece_count, 1);

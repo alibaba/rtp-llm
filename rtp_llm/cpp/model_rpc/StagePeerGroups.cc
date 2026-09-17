@@ -41,14 +41,14 @@ std::vector<StagePeerGroup> buildStagePeerGroups(const ParallelismConfig&       
     return groups;
 }
 
-std::vector<StagePeerSlice> planStagePeerSlices(int prefill_tp, int decode_tp, int decode_tp_rank, bool replicated_kv) {
+std::vector<StagePeerSlice> planStagePeerSlices(int prefill_tp, int decode_tp, int decode_tp_rank, bool use_mla) {
     RTP_LLM_CHECK_WITH_INFO(
         prefill_tp > 0 && decode_tp > 0, "invalid TP sizes: prefill=%d decode=%d", prefill_tp, decode_tp);
     RTP_LLM_CHECK_WITH_INFO(decode_tp_rank >= 0 && decode_tp_rank < decode_tp,
                             "decode tp_rank %d out of [0, %d)",
                             decode_tp_rank,
                             decode_tp);
-    if (replicated_kv) {
+    if (use_mla) {
         // Every lane owns the full block: one whole-block peer per stage suffices.
         return {{static_cast<size_t>(decode_tp_rank % prefill_tp), 1, 0, 1, 0}};
     }
@@ -90,7 +90,7 @@ StageGroupLoadPlan planStageGroupLoads(const StageGroupLoadParams& params) {
     if (params.prefill_cp_size > 1) {
         // CP-sharded: every peer holds a page-level or in-page shard; the
         // decode side reassembles whole blocks, so replicated KV is required.
-        if (!params.replicated_kv && !params.opaque_kv_store) {
+        if (!params.use_mla && !params.use_opaque_kv_store) {
             plan.error = "CP-sharded prefill is only supported for MLA or opaque KV caches";
             return plan;
         }
@@ -102,15 +102,18 @@ StageGroupLoadPlan planStageGroupLoads(const StageGroupLoadParams& params) {
         return plan;
     }
     if (params.prefill_cp_enabled) {
-        // CP full replication: every peer holds the complete KV; one peer per lane.
+        // CP full replication: every peer holds the complete KV; one peer per
+        // lane. MLA/opaque blocks are replicated whole, so the peer must not
+        // slice them (the serving side checks src_len / count == dst_len).
+        const bool whole_block_peer = params.use_mla || params.use_opaque_kv_store;
         plan.loads.push_back({static_cast<size_t>(params.decode_tp_rank % peer_count),
                               1,
                               0,
-                              params.decode_tp_size,
-                              params.decode_tp_rank});
+                              whole_block_peer ? 1 : params.decode_tp_size,
+                              whole_block_peer ? 0 : params.decode_tp_rank});
         return plan;
     }
-    plan.loads = planStagePeerSlices(peer_count, params.decode_tp_size, params.decode_tp_rank, params.replicated_kv);
+    plan.loads = planStagePeerSlices(peer_count, params.decode_tp_size, params.decode_tp_rank, params.use_mla);
     return plan;
 }
 

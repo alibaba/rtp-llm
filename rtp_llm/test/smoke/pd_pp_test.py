@@ -8,25 +8,46 @@ from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
 from rtp_llm.test.utils.device_resource import get_gpu_ids
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
-MODEL_TYPE = "qwen_3"
+# Overridable for MLA checkpoints (deepseek2); CP mode A and MLA mode B need one.
+MODEL_TYPE = os.environ.get("PD_MODEL_TYPE", "qwen_3")
+# Every server here uses small KV blocks so the 32/64-token cases span several
+# blocks; the BUILD-level 2048 would keep each case inside one block and leave
+# block-level routing (peer assembly, CP page-level round robin) unexercised.
+SEQ_SIZE_PER_BLOCK = 16
 
 # Variant table: each side's (pp, tp) width. decode_gpus = decode_pp*decode_tp.
 #   sym:              prefill pp2tp1 / decode pp2tp1 - symmetric PP stage routing
 #   asym:             prefill pp2tp1 / decode pp2tp2 - decode TP finer, sub-slice read
 #   conv:             prefill pp2tp2 / decode pp2tp1 - prefill TP finer, peer assembly
+#   pp2_tp2:          prefill pp2tp2 / decode pp2tp2 - TP>1 both sides, no CP (control)
 #   pp1_tp2:          prefill pp1tp2 / decode pp1tp2 - pp=1 flat path with TP>1
+#   pp1_tp1:          prefill pp1tp1 / decode pp1tp1 - flat single-worker direct path
+#   pp1_asym:         prefill pp1tp1 / decode pp1tp2 - flat, decode TP finer
+#   pp1_conv:         prefill pp1tp2 / decode pp1tp1 - flat, prefill TP finer
 #   cp_sharded:       prefill pp2tp2(cp=2,sharded) / decode pp2tp1 - CP mode A
 #   cp_full:          prefill pp2tp2(cp=2,full) / decode pp2tp1 - CP mode B
 #   cp_full_decode_tp2: prefill pp2tp2(cp=2,full) / decode pp2tp2 - CP mode B + decode TP>1
+#   pp1_cp_full:      prefill pp1tp2(cp=2,full) / decode pp1tp1 - flat path + CP mode B
+#   pp1_cp_full_tp2:  prefill pp1tp2(cp=2,full) / decode pp1tp2 - flat + CP mode B + decode TP>1
+#   pp1_mla_cp_import: prefill pp1tp2 / decode pp1tp2 - MLA only: decode-side PREFILL_CP flag
+#   pp2_pp1:          prefill pp2tp1 / decode pp1tp1 - decode rank pulls across both stage groups
+#   pp1_pp2:          prefill pp1tp1 / decode pp2tp1 - each decode stage pulls a partial range
+#   pp2_pp1_tp2:      prefill pp2tp2 / decode pp1tp2 - partial ranges with TP>1 on both sides
 #
-# Note: CP mode A (sharded) requires an MLA/opaque model; plain MHA KV cache is
-# rejected by the decode-side whole-block load path. Needs a separate test with
-# an MLA model.
+# Note: CP mode A (sharded) and MLA mode B need an MLA checkpoint: run with
+# PD_MODEL_TYPE=deepseek2 and CHECKPOINT_PATH=<DeepSeek-V2 dir>. Classic MLA has
+# no rotating prefill attention impl ("can not find mla type"), so MLA mode B is
+# covered by pp1_mla_cp_import: decode declares PREFILL_CP while the prefill
+# stays plain - whole-block MLA KV makes the two layouts byte-identical.
 VARIANTS = {
     "sym": {"prefill_pp": 2, "prefill_tp": 1, "decode_pp": 2, "decode_tp": 1},
     "asym": {"prefill_pp": 2, "prefill_tp": 1, "decode_pp": 2, "decode_tp": 2},
     "conv": {"prefill_pp": 2, "prefill_tp": 2, "decode_pp": 2, "decode_tp": 1},
+    "pp2_tp2": {"prefill_pp": 2, "prefill_tp": 2, "decode_pp": 2, "decode_tp": 2},
     "pp1_tp2": {"prefill_pp": 1, "prefill_tp": 2, "decode_pp": 1, "decode_tp": 2},
+    "pp1_tp1": {"prefill_pp": 1, "prefill_tp": 1, "decode_pp": 1, "decode_tp": 1},
+    "pp1_asym": {"prefill_pp": 1, "prefill_tp": 1, "decode_pp": 1, "decode_tp": 2},
+    "pp1_conv": {"prefill_pp": 1, "prefill_tp": 2, "decode_pp": 1, "decode_tp": 1},
     "cp_sharded": {
         "prefill_pp": 2,
         "prefill_tp": 2,
@@ -51,12 +72,38 @@ VARIANTS = {
         "prefill_cp": 2,
         "kv_cache_sharded": False,
     },
+    "pp1_cp_full": {
+        "prefill_pp": 1,
+        "prefill_tp": 2,
+        "decode_pp": 1,
+        "decode_tp": 1,
+        "prefill_cp": 2,
+        "kv_cache_sharded": False,
+    },
+    "pp1_cp_full_tp2": {
+        "prefill_pp": 1,
+        "prefill_tp": 2,
+        "decode_pp": 1,
+        "decode_tp": 2,
+        "prefill_cp": 2,
+        "kv_cache_sharded": False,
+    },
+    "pp1_mla_cp_import": {
+        "prefill_pp": 1,
+        "prefill_tp": 2,
+        "decode_pp": 1,
+        "decode_tp": 2,
+        "decode_prefill_cp": True,
+    },
+    "pp2_pp1": {"prefill_pp": 2, "prefill_tp": 1, "decode_pp": 1, "decode_tp": 1},
+    "pp1_pp2": {"prefill_pp": 1, "prefill_tp": 1, "decode_pp": 2, "decode_tp": 1},
+    "pp2_pp1_tp2": {"prefill_pp": 2, "prefill_tp": 2, "decode_pp": 1, "decode_tp": 2},
 }
 
 
 def base_smoke_args():
     # SMOKE_ARGS carries the BUILD-level GPU reservation; strip its parallelism
-    # flags so each server sets its own.
+    # flags so each server sets its own, and swap in the small KV block size.
     args = shlex.split(os.environ["SMOKE_ARGS"])
     stripped = []
     skip_next = False
@@ -64,11 +111,17 @@ def base_smoke_args():
         if skip_next:
             skip_next = False
             continue
-        if token in ("--world_size", "--tp_size", "--dp_size", "--pp_size"):
+        if token in (
+            "--world_size",
+            "--tp_size",
+            "--dp_size",
+            "--pp_size",
+            "--seq_size_per_block",
+        ):
             skip_next = True
             continue
         stripped.append(token)
-    return stripped
+    return stripped + ["--seq_size_per_block", str(SEQ_SIZE_PER_BLOCK)]
 
 
 class PdPPTest(unittest.TestCase):
@@ -149,6 +202,7 @@ class PdPPTest(unittest.TestCase):
         decode_tp,
         prefill_cp=1,
         kv_cache_sharded=False,
+        decode_prefill_cp=False,
     ):
         prefill_port = MagaServerManager.get_free_port()
         decode_port = MagaServerManager.get_free_port()
@@ -191,7 +245,7 @@ class PdPPTest(unittest.TestCase):
             if kv_cache_sharded:
                 prefill_args += " --prefill_cp_kv_cache_sharded 1"
         decode_args = f"--pp_size {decode_pp} --tp_size {decode_tp} --world_size {decode_ws} {common_pd}"
-        if prefill_cp > 1:
+        if prefill_cp > 1 or decode_prefill_cp:
             decode_args += " --cp_rotate_method PREFILL_CP"
             if kv_cache_sharded:
                 decode_args += (
@@ -276,6 +330,14 @@ class PdPPTest(unittest.TestCase):
         decode_pp = variant["decode_pp"]
         prefill_cp = variant.get("prefill_cp", 1)
         kv_cache_sharded = variant.get("kv_cache_sharded", False)
+        decode_prefill_cp = variant.get("decode_prefill_cp", False)
+        if decode_prefill_cp:
+            # MLA-only: with MHA the slice plan assumes a rotating prefill.
+            self.assertNotEqual(
+                MODEL_TYPE,
+                "qwen_3",
+                f"variant {pd_variant} needs an MLA checkpoint (PD_MODEL_TYPE=deepseek2)",
+            )
         prefill_gpus = prefill_pp * prefill_tp
         decode_gpus = decode_pp * decode_tp
         # Baseline and prefill run strictly sequentially and share the first
@@ -296,12 +358,14 @@ class PdPPTest(unittest.TestCase):
             decode_tp=decode_tp,
             prefill_cp=prefill_cp,
             kv_cache_sharded=kv_cache_sharded,
+            decode_prefill_cp=decode_prefill_cp,
         )
         for (prompt, _), base, got in zip(self.cases(), baseline, actual):
-            if prefill_tp != 1 and prefill_tp != decode_tp:
-                # Prefill TP differs from the baseline, so numerics can flip a
-                # greedy token mid-sequence; a routing error instead garbles
-                # token 1. Require the first token to match, report the overlap.
+            if (prefill_tp != 1 and prefill_tp != decode_tp) or prefill_cp > 1:
+                # Prefill TP or CP differs from the baseline (CP changes the
+                # attention reduction order), so numerics can flip a greedy
+                # token mid-sequence; a routing error instead garbles token 1.
+                # Require the first token to match, report the overlap.
                 self.assertEqual(
                     got["output_ids"][0][:1],
                     base["output_ids"][0][:1],
