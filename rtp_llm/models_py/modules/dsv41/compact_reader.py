@@ -178,6 +178,35 @@ class ReaderResult:
                 f"compact reader rejected metadata: status={codes}; 1=missing KV, 2=invalid metadata"
             )
 
+    @staticmethod
+    def check_all(results) -> None:
+        """One synchronous status check for a sequence of reader results.
+
+        Same accept/reject semantics as calling ``check`` on each result, but
+        pays a single device-to-host copy instead of one per result.
+        """
+        results = tuple(results)
+        if not results:
+            return
+        first = results[0].status
+        with torch.cuda.device(first.device):
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "reader status must be checked after graph execution"
+                )
+        for result in results:
+            if (
+                result.status.dtype != first.dtype
+                or result.status.device != first.device
+            ):
+                raise ValueError("batched reader check requires one device/dtype")
+        errors = torch.cat([result.status for result in results]).detach().cpu()
+        if torch.any(errors != 0):
+            codes = sorted(set(errors.reshape(-1).tolist()) - {0})
+            raise RuntimeError(
+                f"compact reader rejected metadata: status={codes}; 1=missing KV, 2=invalid metadata"
+            )
+
 
 def gather_compact(
     pages: CompactPages,

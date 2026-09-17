@@ -93,7 +93,10 @@ _SOURCE_ROWS = 8192
 # 64.18s -> 34.25s -> 22.54s; composition ATen 62,595 -> 35,331 -> 28,515,
 # forced syncs 9,470 -> 6,446 -> 5,690, chunks=1 held, reuse pins held).
 _READ_QUERIES = 512
-_REINDEX_BLOCKS = 512
+# The candidate transport tile cap; the 1 GiB live-byte formula below stays
+# the binding constraint (735 blocks at 512 queries x 8 rows x 156B), so 768
+# lets one reindex tile cover the full budget instead of an extra partial tile.
+_REINDEX_BLOCKS = 768
 _INDEX_ROWS = CANDIDATE_BLOCKS * SPARSE_BLOCK
 # Per gathered row: int64 page/index vectors and transient mask/index results.
 _SELECTED_METADATA_BYTES = 80
@@ -119,7 +122,9 @@ def _copy_query_rows(destination, indices, values):
         destination.index_copy_(0, indices, values)
 
 
-def _selected_local_rows(pool, table, wanted, entries, entry_bytes, rank):
+def _selected_local_rows(
+    pool, table, wanted, entries, entry_bytes, rank, *, defer_status=None
+):
     message = "CP selected KV row has no allocated owner page"
     if (
         pool.is_cuda
@@ -159,7 +164,11 @@ def _selected_local_rows(pool, table, wanted, entries, entry_bytes, rank):
             # The async assert is the measured optimum (P0-2 GB200 A/B): the
             # synchronous _check forced an NCCL drain per tile. The env remains
             # only as a diagnostic override.
-            if os.environ.get("DSV41_CP_GATHER_CHECK_ASYNC", "1") == "1":
+            if defer_status is not None:
+                # The caller batches one async assert over the whole transport
+                # loop; the per-tile status tensors stay alive in the list.
+                defer_status.append(status)
+            elif os.environ.get("DSV41_CP_GATHER_CHECK_ASYNC", "1") == "1":
                 torch._assert_async((status == 0).all(), message)
             else:
                 _check(status == 0, message)
@@ -745,6 +754,20 @@ class V41CPAttentionContext(V41AttentionContext):
             raise ValueError("CP fixed state requires an allocated rank-local page")
         return page
 
+    def _physical_async(self, table, logical, pool):
+        # The GPU-side twin of _physical: the page ID stays on device (no host
+        # sync) and the bounds check rides the async assert stream.
+        if not 0 <= logical < table.shape[1]:
+            raise ValueError("CP fixed state is missing its canonical checkpoint page")
+        page = table[0, logical : logical + 1]
+        torch._assert_async(
+            ((page > 0) & (page < pool.shape[0])).all(),
+            "CP fixed state requires an allocated rank-local page",
+        )
+        # Clamp before indexing: the async assert reports after the write, so
+        # an invalid page must land on the unmapped null page, never OOB.
+        return page.clamp(0, pool.shape[0] - 1).long()
+
     def _fixed_receive(self, pool, table, logical):
         page = self._physical(table, logical, pool)
         local = torch.zeros((2, pool.shape[1]), dtype=torch.uint8, device=pool.device)
@@ -802,9 +825,13 @@ class V41CPAttentionContext(V41AttentionContext):
         data = initial.pages.data[1, : spec.entries * 528].view(spec.entries, 528)
         data.index_copy_(0, positions % spec.entries, rows)
         slot = spec.slot
-        destination = self._physical(self.tables[slot], self.current, self.pools[slot])
+        destination = self._physical_async(
+            self.tables[slot], self.current, self.pools[slot]
+        )
         begin, end = spec.swa_byte_slice(self.cp.cp_rank)
-        self.pools[slot][destination].copy_(initial.pages.data[1, begin:end])
+        self.pools[slot].index_copy_(
+            0, destination, initial.pages.data[1, begin:end].unsqueeze(0)
+        )
         self.cache.swa[layer] = V41CPSwaState(
             self.tables[slot][0, self.current : self.current + 1],
             torch.tensor(
@@ -924,9 +951,9 @@ class V41CPAttentionContext(V41AttentionContext):
                 view[2048:4096].view(torch.float32).copy_(value.partial_score)
             view[4096:4104].view(torch.int64).fill_(value.next_position)
             view[4104:4108].view(torch.int32).fill_(value.next_position % 2)
-        destination = self._physical(self.pair_tables[owner], self.current, pool)
+        destination = self._physical_async(self.pair_tables[owner], self.current, pool)
         first = self.cp.cp_rank * pool.shape[1]
-        pool[destination].copy_(raw[first : first + pool.shape[1]])
+        pool.index_copy_(0, destination, raw[first : first + pool.shape[1]].unsqueeze(0))
 
     def lease(self, slot, resources, layer):
         lease = CprrReaderLease(
@@ -980,7 +1007,15 @@ class V41CPAttentionContext(V41AttentionContext):
         return group, torch.distributed.get_global_rank(group, query_owner)
 
     def gather_selected(
-        self, slot, positions, layer, *, retained_bytes=0, query_owner=None
+        self,
+        slot,
+        positions,
+        layer,
+        *,
+        retained_bytes=0,
+        query_owner=None,
+        mask_negative=True,
+        defer_status=None,
     ):
         """Receive compact rows selected by each rank, retaining original quantization."""
         spec, pool, table = self._page_specs[slot], self.pools[slot], self.tables[slot]
@@ -1011,6 +1046,7 @@ class V41CPAttentionContext(V41AttentionContext):
             spec.entries,
             spec.encoding.entry_bytes,
             self.cp.cp_rank,
+            defer_status=defer_status,
         )
         # Each byte has exactly one page owner; SUM preserves its bit pattern.
         if query_owner is None:
@@ -1026,7 +1062,8 @@ class V41CPAttentionContext(V41AttentionContext):
             torch.distributed.reduce(local, dst=destination, group=group)
             values = local
         values = values.view(requests, width, -1)
-        values.masked_fill_((positions < 0)[:, :, None], 0)
+        if mask_negative:
+            values.masked_fill_((positions < 0)[:, :, None], 0)
         return values, self.lease(slot, (values,), layer)
 
     def swa_queries(
@@ -1782,7 +1819,11 @@ def _score_queries(attention, hidden, qr, context):
                     ),
                 )
                 # Tile transport, then score the complete candidate set once.
-                # This preserves the existing selector's tie behavior.
+                # This preserves the existing selector's tie behavior. The
+                # per-tile owner-page status asserts batch into one async
+                # assert and the negative-position mask applies once over the
+                # complete values tensor (bitwise identical to per-tile masks).
+                statuses = []
                 for row_first in range(
                     0, actual.shape[1], transport_blocks * SPARSE_BLOCK
                 ):
@@ -1793,6 +1834,8 @@ def _score_queries(attention, hidden, qr, context):
                         layer,
                         retained_bytes=_bytes(values, actual),
                         query_owner=context.single_query_owner,
+                        mask_negative=False,
+                        defer_status=statuses,
                     )
                     if count:
                         values[:, row_first:row_last].copy_(
@@ -1800,11 +1843,19 @@ def _score_queries(attention, hidden, qr, context):
                         )
                     context.release(row_lease, layer)
                     del received, row_lease
+                if statuses:
+                    torch._assert_async(
+                        (torch.cat(statuses) == 0).all(),
+                        "CP selected KV row has no allocated owner page",
+                    )
                 if not count:
                     del values, actual
                     continue
                 chosen = _query_rows(chosen, query_rows)
                 actual = _query_rows(actual, query_rows)
+                # The mask follows the query-row-selected actual (values holds
+                # exactly those rows); bitwise identical to the per-tile masks.
+                values.masked_fill_((actual < 0)[:, :, None], 0)
                 pages, table = _packed_pages(values, context._page_specs[slot])
                 tile_visible = (chosen >= 0).sum(-1, dtype=torch.int32) * SPARSE_BLOCK
                 ids = torch.where(
@@ -1961,6 +2012,17 @@ def forward_cp_attention(attention, hidden, context):
         indices = (
             context.indices_for(attention.layer) if attention.source.ratio else None
         )
+        dense_base = (
+            torch.arange(INDEX_TOPK, dtype=torch.int32, device=hidden.device)
+            if indices is not None
+            else None
+        )
+        # The per-tile reader status checks batch into one DtoH copy per layer
+        # (measured: the per-tile .cpu() is the dominant forced host sync in
+        # the p13-final py-spy, 126 samples vs single digits elsewhere). The
+        # batched check keeps identical accept/reject semantics and still runs
+        # before the output is consumed by the inverse RoPE below.
+        read_results = []
         for first in range(0, hidden.shape[0], read_queries):
             last = min(first + read_queries, hidden.shape[0])
             query_rows = context.query_row_indices(first, last)
@@ -1994,9 +2056,7 @@ def forward_cp_attention(attention, hidden, context):
                 values = _query_rows(values, query_rows)
                 pages, table = _packed_pages(values, context._page_specs[slot])
                 global_kv = GlobalBinding(pages, table, attention.source.ratio)
-                dense = torch.arange(
-                    INDEX_TOPK, dtype=torch.int32, device=hidden.device
-                )[None, :].expand(count, -1)
+                dense = dense_base[None, :].expand(count, -1)
                 global_indices = torch.where(selected >= 0, dense, -1).contiguous()
             elif not count:
                 continue
@@ -2022,12 +2082,14 @@ def forward_cp_attention(attention, hidden, context):
                 global_kv=global_kv,
                 global_indices=global_indices,
             )
-            result.check()
+            read_results.append(result)
             _copy_query_rows(output[first:last], query_rows, result.output)
             if lease is not None:
                 context.release(lease, attention.layer)
                 del values, pages, table, lease
             del result, swa, global_kv
+        ReaderResult.check_all(read_results)
+        del read_results
         context.publish_swa(attention.layer, initial, encoded_rows)
         output = attention_rope(
             context.pack_model_rows(output),

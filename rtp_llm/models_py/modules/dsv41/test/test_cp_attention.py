@@ -775,6 +775,71 @@ def _selected_query_transport(rank, device):
     return observations
 
 
+def _selected_query_transport_deferred(rank, device):
+    # Deferred owner-page asserts plus one-shot negative masking must produce
+    # bitwise-identical bytes to the default per-call checked path.
+    observations = []
+    for slot in (
+        RegionSlot(CacheRegion.GLOBAL, 2),
+        RegionSlot(CacheRegion.GLOBAL, 20),
+        RegionSlot(CacheRegion.INDEX_K, 20),
+    ):
+        context, spec = _selected_transport_context(rank, device, slot, count=129)
+        width = 4096 if slot.region == CacheRegion.INDEX_K else 512
+        for count in ((1, 32) if slot.region == CacheRegion.INDEX_K else (1, 64)):
+            row = torch.arange(count, dtype=torch.int64)[:, None]
+            column = torch.arange(width, dtype=torch.int64)[None, :]
+            positions = (row * 9973 + column * 1877) % (context.start // spec.ratio)
+            positions[:, ::17] = -1
+            if rank != 4:
+                positions.fill_(-1)
+            selected = positions.to(device=device, dtype=torch.int32)
+            columns = torch.arange(spec.encoding.entry_bytes, dtype=torch.int64)
+            expected = ((positions[:, :, None] * 73 + columns * 29 + 11) % 256).to(
+                torch.uint8
+            )
+            expected.masked_fill_((positions < 0)[:, :, None], 0)
+            for owner in (None, 4):
+                reference, lease = context.gather_selected(
+                    slot, selected, slot.owner_layer, query_owner=owner
+                )
+                context.release(lease, slot.owner_layer)
+                statuses = []
+                deferred, lease = context.gather_selected(
+                    slot,
+                    selected,
+                    slot.owner_layer,
+                    query_owner=owner,
+                    mask_negative=False,
+                    defer_status=statuses,
+                )
+                context.release(lease, slot.owner_layer)
+                assert statuses, "deferred transport must collect per-call status"
+                torch._assert_async(
+                    (torch.cat(statuses) == 0).all(),
+                    "CP selected KV row has no allocated owner page",
+                )
+                deferred.masked_fill_((selected < 0)[:, :, None], 0)
+                torch.cuda.synchronize()
+                _equal(deferred.cpu(), expected, f"{slot} deferred selected bytes")
+                _equal(
+                    deferred.cpu(),
+                    reference.cpu(),
+                    f"{slot} deferred matches default checked transport",
+                )
+                observations.append(
+                    dict(
+                        region=slot.region.value,
+                        source_owner=slot.owner_layer,
+                        query_owner=owner,
+                        query_rows=count,
+                        deferred_statuses=len(statuses),
+                    )
+                )
+                del reference, deferred, statuses
+    return observations
+
+
 def _compare_pages(layout, context, reference):
     for layer in _LAYERS:
         slot = RegionSlot(CacheRegion.SWA, layer)
@@ -1041,6 +1106,7 @@ def _run_rank():
     swa_reads = _swa_read_batches(rank, device)
     swa_index_cache = _swa_index_cache_reads(rank, device)
     selected_reads = _selected_query_transport(rank, device)
+    deferred_reads = _selected_query_transport_deferred(rank, device)
     pair_checkpoints = _pair_checkpoint_restore(rank, device)
     score_status = _score_status_check(rank, device)
     publish_status = _publish_status_check(rank, device)
@@ -1251,6 +1317,7 @@ def _run_rank():
         swa_reads=swa_reads,
         swa_index_cache=swa_index_cache,
         selected_reads=selected_reads,
+        deferred_reads=deferred_reads,
         score_status=score_status,
         publish_status=publish_status,
         rejected_read_queries=rejected_batches,

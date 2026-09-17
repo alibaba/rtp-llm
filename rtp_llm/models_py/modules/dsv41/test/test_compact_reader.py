@@ -268,6 +268,32 @@ class CompactReaderGpuTest(unittest.TestCase):
     def test_attention_output_aliases_rejected_and_disjoint_graph_buffers_reused(self):
         _probe_attention_output_buffers(self, compact_attention)
 
+    def test_check_all_batches_statuses_with_the_same_semantics(self):
+        from rtp_llm.models_py.modules.dsv41.compact_reader import ReaderResult
+
+        def result(code):
+            status = torch.full((2, 3), code, dtype=torch.int32, device="cuda")
+            return ReaderResult(None, status)
+
+        ok_a, ok_b, bad = result(0), result(0), result(2)
+        ReaderResult.check_all(())
+        ReaderResult.check_all([ok_a])
+        ReaderResult.check_all([ok_a, ok_b])
+        for results in ([bad], [ok_a, bad, ok_b]):
+            with self.assertRaisesRegex(RuntimeError, "invalid metadata"):
+                ReaderResult.check_all(results)
+        try:
+            ReaderResult.check_all([ok_a, bad, ok_b])
+        except RuntimeError as batched:
+            try:
+                bad.check()
+            except RuntimeError as single:
+                self.assertEqual(str(batched), str(single))
+            else:
+                self.fail("single-result check accepted rejected metadata")
+        else:
+            self.fail("batched check accepted rejected metadata")
+
     def test_gather_rejects_output_aliases_without_overwriting_pages_or_metadata(self):
         pages, _ = _fixture(CacheRegion.INDEX_K)
         table, requests, positions, lengths = (
@@ -430,13 +456,17 @@ class CompactReaderGpuTest(unittest.TestCase):
 
     def test_gather_workspace_is_bounded_before_allocation(self):
         pages, _ = _fixture(CacheRegion.SWA)
+        # 1025 rows x 512 slots x 512 heads x 4B = 1.0009 GiB; the p11d
+        # calibration (1024 rows) lands exactly on the 1 GiB budget boundary
+        # because SWA head_dim is 512, not the 528-byte padded entry, so it
+        # never tripped the check.
         with self.assertRaisesRegex(ValueError, "1 GiB"):
             gather_compact(
                 pages,
                 _ints([[1]]),
-                _ints([0] * 1024),
-                torch.zeros((1024, 512), dtype=torch.int32, device="cuda"),
-                _ints([128] * 1024),
+                _ints([0] * 1025),
+                torch.zeros((1025, 512), dtype=torch.int32, device="cuda"),
+                _ints([128] * 1025),
                 output_dtype=torch.float32,
             )
 
