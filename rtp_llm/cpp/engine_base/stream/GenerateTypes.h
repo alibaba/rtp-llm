@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include "rtp_llm/cpp/engine_base/stream/FrontendSpTpotSamples.h"
 #include <optional>
 #include <sstream>
 #include <string>
@@ -148,15 +149,16 @@ public:
 
 class GenerateOutputs {
 public:
-    std::vector<GenerateOutput> generate_outputs;
-    int64_t                     request_id;
-    bool                        frontend_metric_only = false;
-    std::optional<int64_t>      frontend_context_token_num;
-    std::optional<int64_t>      frontend_context_token_num_with_cache;
-    std::optional<int64_t>      frontend_context_execute_time_us;
-    std::optional<int64_t>      frontend_context_execute_time_with_cache_us;
-    std::optional<int64_t>      frontend_generate_token_num;
-    std::optional<int64_t>      frontend_generate_execute_time_us;
+    std::vector<GenerateOutput>            generate_outputs;
+    int64_t                                request_id;
+    bool                                   frontend_metric_only = false;
+    std::shared_ptr<FrontendSpTpotSamples> frontend_sp_tpot_samples;
+    std::optional<int64_t>                 frontend_context_token_num;
+    std::optional<int64_t>                 frontend_context_token_num_with_cache;
+    std::optional<int64_t>                 frontend_context_execute_time_us;
+    std::optional<int64_t>                 frontend_context_execute_time_with_cache_us;
+    std::optional<int64_t>                 frontend_generate_token_num;
+    std::optional<int64_t>                 frontend_generate_execute_time_us;
 };
 
 enum class StreamState {

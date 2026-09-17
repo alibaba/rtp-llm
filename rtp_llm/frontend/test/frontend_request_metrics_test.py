@@ -28,6 +28,52 @@ def _batch_response(*responses):
 
 
 class FrontendRequestMetricsTest(unittest.TestCase):
+
+    def test_sp_tpot_forwards_samples_once_without_request_recalculation(self):
+        state = self.metrics.begin(
+            rank_id="0",
+            server_id="s",
+            source="dash",
+            streaming=True,
+            speculative_steps=3,
+        )
+        frame = {
+            "frontend_sp_tpot_samples": [(1, 12000.0), (2, 7500.0)],
+            "_frontend_metric_unit_id": 0,
+            "_frontend_metric_attempt": 0,
+        }
+        state.observe_tps(frame)
+        state.observe_tps(frame)  # Duplicate transport observation.
+        state.observe(_response("text", output_len=100), now_ms=2000)
+        state.observe_tps({**frame, "frontend_sp_tpot_samples": [(3, 2000.0)]})
+        state.finish(now_ms=999999)
+        self.assertEqual(
+            [12.0, 7.5, 2.0], self.sink.values(GaugeMetrics.FRONTEND_TPOT_MS_METRIC)
+        )
+
+    def test_sp_tpot_retry_sequence_is_independent_and_legacy_does_not_fallback(self):
+        state = self.metrics.begin(
+            rank_id="0",
+            server_id="s",
+            source="dash",
+            streaming=False,
+            speculative_steps=3,
+        )
+        for attempt in (0, 1):
+            state.observe_tps(
+                {
+                    "frontend_sp_tpot_samples": [(1, 4000.0)],
+                    "_frontend_metric_attempt": attempt,
+                }
+            )
+        state.observe_tps(
+            {"aux_info": {"generate_execute_time_us": 100000, "output_len": 10}}
+        )
+        state.finish()
+        self.assertEqual(
+            [4.0, 4.0], self.sink.values(GaugeMetrics.FRONTEND_TPOT_MS_METRIC)
+        )
+
     def setUp(self):
         self.sink = _MetricSink()
         self.metrics = FrontendRequestMetrics(self.sink, clock=lambda: 1.0)
@@ -50,13 +96,18 @@ class FrontendRequestMetricsTest(unittest.TestCase):
             for metric, _, tags in self.sink.calls
             if metric == GaugeMetrics.FRONTEND_REQUEST_RT_MS_METRIC
         ]
-        self.assertEqual(request_rt_calls, [{
-            "rank_id": "0",
-            "server_id": "1",
-            "source": "test",
-            "streaming": "true",
-            "priority": "70",
-        }])
+        self.assertEqual(
+            request_rt_calls,
+            [
+                {
+                    "rank_id": "0",
+                    "server_id": "1",
+                    "source": "test",
+                    "streaming": "true",
+                    "priority": "70",
+                }
+            ],
+        )
 
     def test_reports_container_tps_lengths_cache_and_latency(self):
         state = self.begin()
@@ -112,7 +163,7 @@ class FrontendRequestMetricsTest(unittest.TestCase):
         self.assertEqual(
             [100.0], self.sink.values(GaugeMetrics.FRONTEND_TTFT_MS_METRIC)
         )
-        self.assertEqual([40.0], self.sink.values(GaugeMetrics.FRONTEND_TPOT_MS_METRIC))
+        self.assertEqual([], self.sink.values(GaugeMetrics.FRONTEND_TPOT_MS_METRIC))
         self.assertEqual(
             [10],
             self.sink.values(
@@ -905,7 +956,7 @@ class FrontendRequestMetricsTest(unittest.TestCase):
         self.assertEqual(
             [120], self.sink.values(GaugeMetrics.FRONTEND_OUTPUT_LENGTH_METRIC)
         )
-        self.assertEqual([4.0], self.sink.values(GaugeMetrics.FRONTEND_TPOT_MS_METRIC))
+        self.assertEqual([], self.sink.values(GaugeMetrics.FRONTEND_TPOT_MS_METRIC))
 
     def test_request_output_length_sums_independent_sequence_terminal_lengths(self):
         state = self.begin(streaming=False)

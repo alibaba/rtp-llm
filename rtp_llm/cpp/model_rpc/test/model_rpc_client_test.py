@@ -213,6 +213,7 @@ class ModelRpcClientTest(TestCase):
         outputs_pb.frontend_context_execute_time_with_cache_us.value = 81
         outputs_pb.frontend_generate_token_num.value = 17
         outputs_pb.frontend_generate_execute_time_us.value = 201
+        outputs_pb.frontend_sp_tpot_samples.add(sequence_id=3, tpot_us=12345.5)
         outputs_pb.flatten_output.finished.append(False)
         outputs_pb.flatten_output.aux_info.add().output_len = 4
 
@@ -225,6 +226,10 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(output.frontend_context_execute_time_with_cache_us, 81)
         self.assertEqual(output.frontend_generate_token_num, 17)
         self.assertEqual(output.frontend_generate_execute_time_us, 201)
+        self.assertEqual(output.frontend_sp_tpot_samples, [(3, 12345.5)])
+        self.assertNotIn(
+            "frontend_sp_tpot_samples", asdict(output.generate_outputs[0].aux_info)
+        )
         self.assertNotIn(
             "frontend_metric_only",
             asdict(output.generate_outputs[0].aux_info),

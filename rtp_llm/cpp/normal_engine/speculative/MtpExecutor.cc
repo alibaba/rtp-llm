@@ -2434,6 +2434,21 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         stream_groups.addFrontendGenerateExecuteMetrics(decode_execute_time_us, engine_generate_token_num);
     }
 
+    // Select from the actual executed batch after previous async bookkeeping
+    // has settled, not the original scheduled list which can contain finished
+    // streams. One owner avoids weighting the gauge by batch size.
+    if (isKmonMetricReportingEnabled() && metrics_reporter_ && isTpRank0() && !warm_up_) {
+        for (const auto& stream : stream_groups.allStreams()) {
+            if (!stream->isFakeStream() && stream->generateConfig()->frontend_metric_streaming) {
+                auto owner = std::dynamic_pointer_cast<NormalGenerateStream>(stream);
+                if (owner) {
+                    metrics_collector.frontend_tpot_sample = owner->beginFrontendSpTpotSample();
+                    break;
+                }
+            }
+        }
+    }
+
     return dispatchDecodeOutput(stream_groups,
                                 streams,
                                 speculative_sampler_output,
@@ -3194,6 +3209,16 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
 
     metrics_collector.sp_engine_collector.step_latency_us =
         autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+
+    auto& frontend_tpot_sample = metrics_collector.frontend_tpot_sample;
+    if (frontend_tpot_sample && metrics_collector.not_skip) {
+        const auto& sp = metrics_collector.sp_engine_collector;
+        if (sp.total_propose_token_num > 0 && sp.total_stream_num > 0) {
+            frontend_tpot_sample->complete(sp.estimateTpotUs());
+        }
+    }
+    // Release pending RPC consumers also on an unreported step.
+    frontend_tpot_sample.reset();
 
     // report metrics
     if (report_metrics && isTpRank0() && metrics_reporter_ && metrics_collector.not_skip) {

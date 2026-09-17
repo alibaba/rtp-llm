@@ -1226,6 +1226,10 @@ public:
     int64_t total_accepted_token_num       = 0;
     int64_t total_stream_num               = 0;
     int64_t spec_steps                     = 1;
+    double  estimateTpotUs() const {
+        return static_cast<double>(step_latency_us)
+               / (static_cast<double>(total_accepted_token_num) / total_stream_num);
+    }
 };
 
 class RtpLLMSpeculativeEngineMetrics: public kmonitor::MetricsGroup {
