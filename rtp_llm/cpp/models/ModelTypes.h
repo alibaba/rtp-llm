@@ -148,7 +148,7 @@ public:
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
-    virtual std::vector<DSV41ExecutionState> commitV41RetainedRows(const torch::Tensor& /*retained_rows*/) {
+    virtual void commitV41RetainedRows(const torch::Tensor& /*retained_rows*/) {
         throw std::logic_error("V4.1 target model does not implement retained-row commit");
     }
 

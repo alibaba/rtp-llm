@@ -203,11 +203,8 @@ TEST(DSV41RpcStateTest, CompleteEightShardInventoryAndPhysicalSliceSizes) {
 }
 
 TEST(DSV41RpcStateTest, OddPublicationRestoresReadyOnlyWithCompleteTargetAndPairState) {
-    const auto prefill = cacheConfig(RoleType::PREFILL);
-    const auto decode = cacheConfig(RoleType::DECODE);
-    const auto local_identity = dsv41CacheIdentity(decode);
-    const auto wire = dsv41ExecutionStateToProto(publication(1025), prefill, 8);
-    auto recovered = dsv41ExecutionStateFromProto(wire, decode, 8, 19, 1025);
+    const auto local_identity = dsv41CacheIdentity(cacheConfig(RoleType::DECODE));
+    auto recovered = publication(1025);
     DSV41CacheState state(local_identity);
     EXPECT_EQ(state.view().target_ready_end, 0);
     auto missing = recovered;
@@ -223,11 +220,6 @@ TEST(DSV41RpcStateTest, OddPublicationRestoresReadyOnlyWithCompleteTargetAndPair
     EXPECT_NO_THROW(state.publishExecution(recovered, 0));
     EXPECT_EQ(state.view().target_ready_end, 1025);
     EXPECT_THROW(recovered.checkpoint(local_identity, 1024), std::invalid_argument);
-    EXPECT_THROW(dsv41ExecutionStateFromProto(wire, decode, 8, 20, 1025), std::invalid_argument);
-    EXPECT_THROW(dsv41ExecutionStateFromProto(wire, decode, 8, 19, 1024), std::invalid_argument);
-    auto malformed = wire;
-    malformed.set_pair_valid(0, 256);
-    EXPECT_THROW(dsv41ExecutionStateFromProto(malformed, decode, 8, 19, 1025), std::invalid_argument);
 }
 
 TEST(DSV41RpcStateTest, DraftAndMemoryCheckpointRemainCompleteAndAlignedContracts) {
@@ -242,22 +234,6 @@ TEST(DSV41RpcStateTest, DraftAndMemoryCheckpointRemainCompleteAndAlignedContract
     state = publication(1025, 3);
     EXPECT_NO_THROW(state.validate(identity, 3));
     EXPECT_THROW(state.checkpoint(identity, 1024), std::invalid_argument);
-}
-
-TEST(DSV41RpcStateTest, HandoffHistoryMustMatchActualCanonicalRequest) {
-    auto state = publication(3);
-    GenerateInputPB input;
-    for (int token : {31, 32, 33}) {
-        input.add_token_ids(token);
-        input.mutable_v41_inputs()->add_image_mask(false);
-    }
-    EXPECT_NO_THROW(validateDSV41History(state, input));
-    input.mutable_v41_inputs()->set_image_mask(1, true);
-    EXPECT_THROW(validateDSV41History(state, input), std::invalid_argument);
-    state.history_image_mask[1] = 1;
-    EXPECT_NO_THROW(validateDSV41History(state, input));
-    input.set_token_ids(2, 34);
-    EXPECT_THROW(validateDSV41History(state, input), std::invalid_argument);
 }
 
 TEST(DSV41RpcStateTest, BoundedProgressPreservesDecoderBoundaryAndRequiresProtectedCopyBeforeSuffix) {

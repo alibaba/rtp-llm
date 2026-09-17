@@ -567,16 +567,12 @@ class EngineAdapterContractTest(unittest.TestCase):
             with (
                 patch.object(impl, "begin_forward", create=True) as begin,
                 patch.object(impl, "finish_forward", create=True) as finish,
-                patch.object(
-                    impl, "get_execution_states", create=True, return_value=[]
-                ) as states,
                 patch("torch.cuda.is_current_stream_capturing", return_value=False),
             ):
                 model._active_v41_graph_impl = impl
                 output = model(inputs, impl)
             self.assertEqual(begin.call_count, 1)
             self.assertEqual(finish.call_count, 1)
-            self.assertEqual(states.call_count, 1)
             self.assertEqual(tuple(output.hidden_states.shape), (width, 5120))
             aux = model.get_mtp_target_hidden_states(width)
             self.assertEqual(aux.data_ptr(), buffer_ptr)

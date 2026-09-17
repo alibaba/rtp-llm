@@ -236,7 +236,9 @@ class DecodeFmhaGpuTest(unittest.TestCase):
                     )
                     retained = 1 if start == 127 or width == 1 else 3
                     if width == 6:
-                        self.assertEqual(impl.get_execution_states(inputs), [])
+                        self.assertNotEqual(
+                            int(impl._committed_epoch), impl._prepare_generation
+                        )
                         for layer in PAIR_OWNERS:
                             snapshots = V41DecodePairState(
                                 impl.context.layers[layer].compressor.pair_snapshots
@@ -253,28 +255,12 @@ class DecodeFmhaGpuTest(unittest.TestCase):
                             ),
                             draft_committed=True,
                         )
-                    states = impl.get_execution_states(inputs)
-                    self.assertEqual(len(states), 1)
-                    self.assertEqual(states[0].materialized_end, start + retained)
-                    if width == 6:
-                        self.assertTrue(states[0].draft_committed)
-                        self.assertLessEqual(
-                            states[0].aux_valid_start, max(0, start + retained - 128)
-                        )
-                        self.assertEqual(states[0].aux_valid_end, start + retained)
-                    else:
+                        self.assertTrue(impl._draft_committed)
+                    self.assertEqual(int(impl._committed_epoch), impl._prepare_generation)
+                    self.assertEqual(int(impl._retained_rows[0]), retained)
+                    for layer in range(40):
                         self.assertEqual(
-                            (states[0].aux_valid_start, states[0].aux_valid_end), (0, 0)
-                        )
-                    self.assertEqual(
-                        len(states[0].swa_valid_end), 43 if width == 6 else 40
-                    )
-                    self.assertTrue(
-                        all(end == start + retained for end in states[0].swa_valid_end)
-                    )
-                    if retained == 3:
-                        self.assertEqual(
-                            states[0].history_token_ids, [token, token + 1, token + 2]
+                            int(impl.context.swa[layer].valid_ends[0]), start + retained
                         )
                     for layer in PAIR_OWNERS:
                         pool = model._pair_pools[layer]

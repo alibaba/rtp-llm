@@ -285,8 +285,6 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("params_ptr"),
              "Initialize with hidden states tensor and params pointer")
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
-        .def_readwrite("v41_execution_states", &PyModelOutputs::v41_execution_states)
-        .def_readwrite("v41_execution_progress", &PyModelOutputs::v41_execution_progress)
         .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer");
 }
 

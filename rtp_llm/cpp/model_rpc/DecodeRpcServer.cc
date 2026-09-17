@@ -239,29 +239,6 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                       generate_request.stage() == RemoteStage::GENERATE,
                       grpc::StatusCode::INTERNAL,
                       "message first status != RemoteStage::GENERATE");
-    const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
-    if (cache_config.dsv41_cache_layout_version != 0 || generate_request.has_v41_execution_state()) {
-        try {
-            if (!decode_context.cache_load_complete || !generate_request.has_v41_execution_state()
-                || generate_request.request_id() != decode_context.request_id
-                || generate_stream->currentBatchSize() != 1)
-                throw std::invalid_argument(
-                    "V4.1 PD GENERATE requires completed cache bytes and a producer publication");
-            const auto publication = dsv41ExecutionStateFromProto(generate_request.v41_execution_state(),
-                                                                  cache_config,
-                                                                  decode_context.prefill_cp_size,
-                                                                  decode_context.request_id,
-                                                                  generate_stream->inputLength());
-            validateDSV41History(publication, decode_context.allocate_request.input());
-            const auto& state = generate_stream->kvCachePtr()->cacheResource(0).dsv41CacheState();
-            if (!state)
-                throw std::invalid_argument("V4.1 PD destination is missing request state");
-            state->publishExecution(publication, cache_config.layer_all_num - cache_config.layer_num);
-        } catch (const std::exception& e) {
-            decode_context.error_status = grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what());
-            return;
-        }
-    }
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);
     generate_stream->step();

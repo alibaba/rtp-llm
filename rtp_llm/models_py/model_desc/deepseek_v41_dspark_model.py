@@ -541,11 +541,6 @@ class DeepSeekV41DSparkModel(GptModelBase):
             torch.zeros((0, 5120), dtype=torch.bfloat16, device=self.device)
         )
 
-    def get_execution_states(self, original_inputs):
-        if self._active_v41_draft_impl is not None:
-            self._active_v41_draft_impl.check(original_inputs)
-        return []
-
     def forward(self, inputs, fmha_impl=None):
         raise RuntimeError(
             "V4.1 DSpark requires fixed forward_propose or forward_commit entrypoints"

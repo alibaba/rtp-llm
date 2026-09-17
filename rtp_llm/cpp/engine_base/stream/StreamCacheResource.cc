@@ -772,52 +772,6 @@ std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
     return store_context;
 }
 
-void StreamCacheResource::publishDsv41Execution(const DSV41ExecutionState& publication,
-                                               int64_t materialized_end, bool finish_prefill,
-                                               const torch::Tensor& accepted_tokens) {
-    if (publication.request_id != stream_->streamId() || publication.materialized_end != materialized_end
-        || !resource_context_.cache_manager || batch_kv_cache_resource_->batchSize() != 1)
-        throw std::invalid_argument("V4.1 execution publication does not match its native request boundary");
-    auto& resource = batch_kv_cache_resource_->cacheResource(0);
-    const auto state = resource.dsv41CacheState();
-    const auto& config = resource_context_.cache_manager->cacheConfig();
-    const auto* swa = dynamic_cast<const DSV41KVCacheSpec*>(config.cache_specs.at(5).get());
-    if (!state || !swa)
-        throw std::invalid_argument("V4.1 execution publication has no native cache state");
-    publication.validate(state->view().identity, config.layer_all_num - config.layer_num);
-    const auto& canonical = stream_->generateInput()->v41_inputs;
-    if (!canonical)
-        throw std::invalid_argument("V4.1 execution publication has no canonical request");
-    if (materialized_end > stream_->seqLength()
-        && (!accepted_tokens.defined() || !accepted_tokens.device().is_cpu() || !accepted_tokens.is_contiguous()
-            || accepted_tokens.scalar_type() != torch::kInt32
-            || accepted_tokens.numel() < materialized_end - stream_->seqLength()))
-        throw std::invalid_argument("V4.1 speculative publication requires its canonical accepted tokens");
-    for (int64_t slot = 0; slot < 3; ++slot) {
-        const int64_t position = materialized_end - 3 + slot;
-        if (position < 0)
-            continue;
-        const bool image = position < canonical->image_mask.numel()
-                           && canonical->image_mask.data_ptr<bool>()[position];
-        const int32_t token = position < stream_->seqLength() ? stream_->completeTokenIdsPtr()->data(0)[position] :
-                                                                accepted_tokens.data_ptr<int32_t>()[position - stream_->seqLength()];
-        if (publication.history_token_ids[slot] != token
-            || publication.history_image_mask[slot] != static_cast<uint8_t>(image))
-            throw std::invalid_argument("V4.1 execution history differs from its canonical request");
-    }
-    state->publishExecution(publication, config.layer_all_num - config.layer_num);
-    const size_t unit = config.seq_size_per_block * swa->cp_size;
-    if (publication.draft_layers == 3 && publication.materialized_end % unit == 0) {
-        const auto metadata = publication.checkpoint(state->view().identity, unit);
-        state->completeDecoder(metadata, unit);
-        const size_t data_unit = config.seq_size_per_block * (swa->prefill_byte_slice ? swa->cp_size : 1);
-        resource.setDsv41RecoveryMetadata(publication.materialized_end / data_unit - 1,
-                                          std::make_shared<DSV41CheckpointMetadata>(metadata));
-    }
-    if (finish_prefill && state->view().final_handoff_end > 0)
-        state->finish(materialized_end);
-}
-
 std::shared_ptr<DSV41ExecutionContext> StreamCacheResource::createDsv41ExecutionContext() {
     if (!stream_->queryPdSep() || !isContextStream() || stream_->isFakeStream() || !resource_context_.cache_manager
         || batch_kv_cache_resource_->batchSize() != 1)

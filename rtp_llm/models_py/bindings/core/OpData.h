@@ -124,8 +124,6 @@ struct GptModelOutputs {
     torch::Tensor softmax_result;
 
     std::vector<torch::Tensor> moe_gating;
-    std::vector<DSV41ExecutionState> v41_execution_states;
-    std::vector<DSV41ExecutionProgress> v41_execution_progress;
 };
 
 struct CopyParams {

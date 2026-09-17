@@ -403,14 +403,6 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&  strea
     // we set propose token in extra loop to avoid cuda sync
     updateProposeTokens(stream_groups, propose_output, spec_update_infos);
 
-    for (const auto& publication : prefill_output.model_output.v41_execution_states) {
-        for (const auto& stream : stream_groups.allStreams()) {
-            if (!stream->isFakeStream() && stream->streamId() == publication.request_id)
-                stream->streamCacheResource().publishDsv41Execution(publication, stream->seqLength(),
-                                                                    stream->queryPdSep());
-        }
-    }
-
     // update streams
     stream_groups.updateStreams(spec_update_infos);
 
@@ -452,22 +444,6 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
 
     // to avoid cuda sync, we need to set propose token in extra loop
     updateProposeTokens(stream_groups, draft_prefill_output, spec_update_infos);
-
-    size_t stream_index = 0;
-    for (const auto& stream : stream_groups.allStreams()) {
-        if (!stream->isFakeStream() && stream->generateInput()->v41_inputs) {
-            const auto& publications = draft_prefill_output.model_output.v41_execution_states;
-            const auto publication = std::find_if(publications.begin(), publications.end(), [&](const auto& value) {
-                return value.request_id == stream->streamId();
-            });
-            RTP_LLM_CHECK_WITH_INFO(publication != publications.end(),
-                                    "V4.1 speculative dispatch has no committed execution publication");
-            const auto end = stream->seqLength() - 1 + spec_update_infos.at(stream_index).num_new_tokens;
-            stream->streamCacheResource().publishDsv41Execution(
-                *publication, end, false, spec_update_infos.at(stream_index).new_tokens);
-        }
-        ++stream_index;
-    }
 
     stream_groups.updateStreams(spec_update_infos);
 

@@ -310,10 +310,6 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         return absl::OkStatus();
     }
 
-    const auto v41_sampling = NormalOutputDispatcher::prepareV41Sampling(stream_groups, model_output);
-    if (!v41_sampling.ok())
-        return v41_sampling;
-
     {
         RTP_LLM_PROFILE_SCOPE("executor.sampler_forward");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();

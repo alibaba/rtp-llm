@@ -940,20 +940,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
         if (!model_input.is_fake_stream) {
-            const auto status = NormalOutputDispatcher::prepareV41Sampling(stream_groups, model_output);
-            if (!status.ok())
-                return status;
-            if (v41_prefill_commit && !warm_up_) {
-                for (const auto& stream : streams) {
-                    const auto found = std::find_if(model_output.v41_execution_states.begin(),
-                                                    model_output.v41_execution_states.end(), [&](const auto& value) {
-                        return value.request_id == stream->streamId() && value.draft_layers == 3
-                               && value.materialized_end == stream->seqLength() && value.draft_committed;
-                    });
-                    RTP_LLM_CHECK_WITH_INFO(found != model_output.v41_execution_states.end(),
-                                            "V4.1 prefill must commit selected draft rows before sampling");
-                }
-            }
             CHECK_AND_RETURN_REF(sampler_input,
                                  batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
@@ -1556,7 +1542,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                                   torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
         if (parallelism_config_.tp_size > 1)
             execBroadcast({{retained}, 0});
-        draft_prefill_model_output.v41_execution_states = model_->commitV41RetainedRows(retained);
+        model_->commitV41RetainedRows(retained);
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {

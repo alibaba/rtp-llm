@@ -378,8 +378,6 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor          hidden_states;
-    std::vector<rtp_llm::DSV41ExecutionState> v41_execution_states;
-    std::vector<rtp_llm::DSV41ExecutionProgress> v41_execution_progress;
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
     py::object             py_attn_params{py::none()};
 

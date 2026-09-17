@@ -398,18 +398,12 @@ class DeepSeekV41Model(GptModelBase):
             return impl
         return None
 
-    def get_execution_states(self, inputs):
-        if self._active_v41_graph_impl is None:
-            raise RuntimeError("V4.1 replay has no current execution context")
-        return self._active_v41_graph_impl.get_execution_states(inputs)
-
-    def commit_retained_rows(self, retained_rows, inputs):
+    def commit_retained_rows(self, retained_rows):
         if self._active_v41_graph_impl is None:
             raise RuntimeError("V4.1 speculative commit has no active verify context")
         self._active_v41_graph_impl.commit_retained_rows(
             retained_rows, draft_committed=self.layout.draft_enabled
         )
-        return self.get_execution_states(inputs)
 
     def get_mtp_target_hidden_states(self, num_tokens):
         if self._mtp_aux_buffer is None:
@@ -847,7 +841,6 @@ class DeepSeekV41Model(GptModelBase):
         hidden = self.target.embedding.new_zeros(
             (rows.token_ids.numel(), self.config.hidden_size)
         )
-        states = []
         self._prefill_observations = []
         for request in requests:
             context = request.context
@@ -933,13 +926,6 @@ class DeepSeekV41Model(GptModelBase):
                 image_features=current_images,
             )
             hidden[request.first : request.last].copy_(output.hidden_states)
-            states.append(
-                self._context_state(
-                    output.decoder_context,
-                    output.history.token_ids,
-                    output.history.image_mask,
-                )
-            )
             self._prefill_observations.append(
                 {
                     "request_id": context.cache.request_id,
@@ -947,7 +933,6 @@ class DeepSeekV41Model(GptModelBase):
                 }
             )
         result = PyModelOutputs(hidden)
-        result.v41_execution_states = states
         return result
 
     @staticmethod
@@ -1047,67 +1032,6 @@ class DeepSeekV41Model(GptModelBase):
         )
         return V41ImageFeatures(indices, rows.token_types[indices], torch.cat(features))
 
-    @staticmethod
-    def _execution_states(requests, rows):
-        from rtp_llm.ops.compute_ops import V41ExecutionState
-
-        states = []
-        for request in requests:
-            context = request.context
-            cache = context.cache
-            end = context.end
-            local = slice(request.first, request.last)
-            history = torch.cat(
-                (rows.history_ids[local, -2:], rows.token_ids[local, None]), dim=1
-            )
-            image_mask = torch.cat(
-                (~rows.history_valid[local, -2:], rows.image_mask[local, None]), dim=1
-            )
-            tail = torch.cat((history, image_mask.to(torch.int32)), dim=1)
-            if hasattr(context, "gather_rows"):
-                tail = context.gather_rows(tail, end - 1, end)
-            else:
-                tail = tail[-1:]
-            tail = tail.cpu().tolist()[0]
-            for index, position in enumerate(range(end - 3, end)):
-                if position < 0:
-                    tail[index], tail[index + 3] = -1, 0
-            state = V41ExecutionState()
-            state.request_id = int(cache.request_id)
-            state.materialized_end = end
-            state.encoder_materialized_end = end
-            state.decoder_checkpoint_end = end
-            state.draft_layers = 0
-            state.global_entries = [
-                cache.owners[layer].materialized_end // layer_sources(layer).ratio
-                for layer in GLOBAL_OWNERS
-            ]
-            state.index_entries = list(state.global_entries)
-            state.swa_valid_start = [
-                int(cache.swa[layer].valid_starts[0]) for layer in range(40)
-            ]
-            state.swa_valid_end = [
-                int(cache.swa[layer].valid_ends[0]) for layer in range(40)
-            ]
-            state.swa_replay_floor = [0] * 40
-            state.pair_positions = [
-                (
-                    cache.owners[layer].pair.next_position - 1
-                    if cache.owners[layer].pair.next_position % 2
-                    else -1
-                )
-                for layer in PAIR_OWNERS
-            ]
-            state.pair_valid = [
-                cache.owners[layer].pair.next_position % 2 for layer in PAIR_OWNERS
-            ]
-            state.history_token_ids = tail[:3]
-            state.history_image_mask = tail[3:]
-            state.history_ready = True
-            state.draft_committed = False
-            states.append(state)
-        return states
-
     @torch.inference_mode()
     def forward(self, inputs, fmha_impl=None):
         if self.kv_cache is None:
@@ -1146,11 +1070,6 @@ class DeepSeekV41Model(GptModelBase):
                 )
             fmha_impl.finish_forward()
             result = PyModelOutputs(output.hidden_states)
-            if (
-                not torch.cuda.is_current_stream_capturing()
-                and self._active_v41_graph_impl is fmha_impl
-            ):
-                result.v41_execution_states = fmha_impl.get_execution_states(inputs)
             return result
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("V4.1 capture requires its prepared decode context")
@@ -1198,7 +1117,6 @@ class DeepSeekV41Model(GptModelBase):
                 _write_pair(destination, request.context.cache.owners[layer].pair)
         self._write_cache_store(inputs)
         result = PyModelOutputs(output.hidden_states)
-        result.v41_execution_states = self._execution_states(requests, rows)
         return result
 
     def _write_cache_store(self, inputs):
