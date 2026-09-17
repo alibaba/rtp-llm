@@ -5,10 +5,10 @@ Run directly (conda310 interpreter) or via Bazel:
     bazelisk test //rtp_llm/telemetry/test:test_tracing
 
 unittest style on purpose (repo convention; pytest is not part of the test
-runtime). The dependency-contract tests verify the SDK when the configured test
-environment provides it. Public Bazel locks intentionally omit this optional
-runtime, so SDK-dependent tests report an explicit skip there while the
-dependency-independent contracts continue to run.
+runtime). The dependency-contract test checks that the tracing SDK is available
+in the configured test environment rather than relying on an ambient import.
+The unskipped dependency-contract test prevents a missing runtime from turning
+the functional suite into an all-skip success.
 """
 
 import json
@@ -68,7 +68,6 @@ def _start_in_memory_runtime(config=None):
 
 
 class TestDependencyContract(unittest.TestCase):
-    @unittest.skipUnless(OTEL_AVAILABLE, "opentelemetry not installed")
     def test_opentelemetry_runtime_is_available(self):
         with tracing._isolated_sdk_environment():
             tracing._load_otel_sdk()
@@ -77,7 +76,6 @@ class TestDependencyContract(unittest.TestCase):
             f"opentelemetry runtime unavailable: {tracing._OTEL_IMPORT_ERROR!r}",
         )
 
-    @unittest.skipUnless(OTEL_AVAILABLE, "opentelemetry not installed")
     def test_otlp_http_trace_exporter_is_available(self):
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter,
