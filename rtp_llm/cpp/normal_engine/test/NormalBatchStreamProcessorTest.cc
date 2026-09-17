@@ -60,6 +60,46 @@ static GenerateStreamPtr makeAsyncDecodeStream(const ModelConfig&   model_config
 
 class NormalBatchStreamProcessorTest: public DeviceTestBase {};
 
+class FakeStreamBatchProcessor: public NormalBatchStreamProcessor {
+public:
+    explicit FakeStreamBatchProcessor(const ModelConfig& model_config):
+        NormalBatchStreamProcessor(model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, CacheConfig{}, false) {}
+
+    absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups&, TensorHolder&, bool) const override {
+        GptModelInputs input;
+        input.is_fake_stream = true;
+        return input;
+    }
+
+    absl::StatusOr<SamplerInputs> gatherSamplerInput(const StreamGroups&    stream_groups,
+                                                     const GptModelInputs&  model_inputs,
+                                                     const GptModelOutputs& model_output) const override {
+        sampler_gather_called = true;
+        return NormalBatchStreamProcessor::gatherSamplerInput(stream_groups, model_inputs, model_output);
+    }
+
+    mutable bool sampler_gather_called = false;
+};
+
+class ZeroRowLogitsModel: public ModelBase {
+public:
+    explicit ZeroRowLogitsModel(int64_t vocab_size): vocab_size_(vocab_size) {}
+
+    GptModelOutputs forward(const GptModelInputs& inputs) override {
+        forward_called = true;
+        EXPECT_TRUE(inputs.is_fake_stream);
+        GptModelOutputs output;
+        output.logits =
+            torch::empty({0, vocab_size_}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        return output;
+    }
+
+    bool forward_called = false;
+
+private:
+    int64_t vocab_size_;
+};
+
 class TestStatefulLogitsProcessor: public BaseLogitsProcessor {
 public:
     explicit TestStatefulLogitsProcessor(bool async_device_state): async_device_state_(async_device_state) {}
@@ -95,6 +135,35 @@ private:
     bool    async_device_state_;
     int64_t accepted_token_len_ = 0;
 };
+
+TEST_F(NormalBatchStreamProcessorTest, testFakeStreamSkipsSamplingWithZeroRowLogits) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 128;
+    model_config.vocab_size  = 128;
+    RuntimeConfig runtime_config;
+
+    auto stream = makeAsyncDecodeStream(model_config, runtime_config, resource_context, 1);
+    stream->setIsFakeStream(true);
+
+    EngineInitParams params;
+    params.model_config_ = model_config;
+    params.py_model      = py::none();
+    NormalExecutor executor(params, nullptr, false);
+
+    auto model     = std::make_unique<ZeroRowLogitsModel>(model_config.vocab_size);
+    auto model_ptr = model.get();
+    executor.setModel(std::move(model));
+
+    auto processor     = std::make_unique<FakeStreamBatchProcessor>(model_config);
+    auto processor_ptr = processor.get();
+    executor.setBatchProcessor(std::move(processor));
+
+    auto status = executor.process({stream});
+    EXPECT_TRUE(status.ok()) << status;
+    EXPECT_TRUE(model_ptr->forward_called);
+    EXPECT_FALSE(processor_ptr->sampler_gather_called);
+}
 
 TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     ResourceContext resource_context;

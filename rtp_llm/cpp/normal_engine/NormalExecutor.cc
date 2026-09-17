@@ -325,7 +325,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
+    // Projection-KTP uses TP size 1 per process; non-owner inputs are fake and have no rows to sample.
+    if (tp_rank_ > 0 || warm_up_ || streams.empty() || model_input.is_fake_stream) {
         cudaSyncAndCheck();
         model_->releaseBuffers();
         if (profile_step_finish_) {
