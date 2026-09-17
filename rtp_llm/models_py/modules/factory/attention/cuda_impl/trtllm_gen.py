@@ -469,11 +469,10 @@ class FlashInferTRTLLMDecodeOp(object):
         *,
         relax_force_py: bool = False,
     ):
-        # SpecDecode/Decode Impl.support pass relax_force_py=True. Accept the
-        # kwarg so dispatch does not TypeError, but still skip trtllm-gen on
-        # B300/SM103 (no valid kernel image; it hard-crashes).
-        del relax_force_py
-        if force_py_flashinfer():
+        # Prefill stays on the Python FlashInfer path when LOAD_PYTHON_MODEL=1.
+        # Decode/SpecDecode pass relax_force_py=True so FP8 KV can still use
+        # trtllm-gen on SM100 (GB200).
+        if force_py_flashinfer() and not relax_force_py:
             return False
         if not is_blackwell():
             return False
