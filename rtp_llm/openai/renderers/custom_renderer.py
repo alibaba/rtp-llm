@@ -339,6 +339,14 @@ class RenderedInputs:
 
 
 class CustomChatRenderer:
+    # Whether this renderer's model spontaneously emits <think> blocks.
+    # Subclasses under ReasoningToolBaseRenderer set this True. It is the sole
+    # capability signal for think handling and must be decided by the renderer
+    # (model) family, never derived from generate_env_config's think_start_tag /
+    # think_end_tag defaults: those are non-empty, so deriving from them is True
+    # for every deployment including genuinely non-reasoning models.
+    emits_reasoning_stream: bool = False
+
     def __init__(
         self,
         tokenizer: BaseTokenizer,
@@ -1221,18 +1229,26 @@ class CustomChatRenderer:
     def needs_reasoning_tool_status(self, request: ChatCompletionRequest) -> bool:
         """Whether the response path needs the tool/reasoning-aware status object.
 
-        The anchor term is what stops a template-injected think block from
-        leaking: with thinking_mode DISABLED and no tools the request config
-        alone says "nothing to parse", while the model is in fact going to
-        think. Only the flag recorded during rendering is consulted here, and
-        every render path fills it in (see _record_prompt_think_anchor), so the
-        gate never renders the prompt itself. A request that no code path has
-        rendered yet keeps the gate shut, which is also why
-        _resolve_think_anchor's fallback render is a safety net for other
-        callers rather than the gate's decision path.
+        Openers, in order:
+        - effective tools: a detector is needed;
+        - ``emits_reasoning_stream``: a reasoning renderer may spontaneously emit
+          a <think> block even when the request says DISABLED, so the gate must
+          open regardless of thinking_mode or anchor — otherwise the think block
+          leaks into the visible reply (critic / Dart / diversion);
+        - ``in_think_mode``: ENABLED requests on a renderer that delegates think
+          splitting (e.g. QwenRenderer routes to its internal reasoning renderer)
+          must keep opening the gate;
+        - recorded open anchor: safety net for a reasoning model mistakenly served
+          by a non-reasoning renderer.
+
+        The capability term is purely additive over the previous gate, so nothing
+        that opened before ever closes here. Only the flag recorded during
+        rendering is consulted; the gate never renders the prompt itself (every
+        render path fills the flag in via _record_prompt_think_anchor).
         """
         return bool(
             self._effective_tools(request)
+            or self.emits_reasoning_stream
             or self.in_think_mode(request)
             or request.prompt_has_think_anchor() is True
         )

@@ -417,6 +417,7 @@ class OpenaiGenerateConfigTest(TestCase):
         input_ids: Optional[List[int]] = None,
         thinking_mode: Optional[ThinkingMode] = None,
         env_think_mode: Optional[Union[str, int]] = None,
+        prompt_has_think_anchor: bool = False,
     ):
         special_tokens = SpecialTokens()
         if model_stop_word_str is not None:
@@ -457,6 +458,8 @@ class OpenaiGenerateConfigTest(TestCase):
             enable_thinking=enable_thinking,
             thinking_budget=thinking_budget,
         )
+        if prompt_has_think_anchor:
+            request.set_prompt_has_think_anchor(True)
         if thinking_mode is not None:
             if request.extra_configs is None:
                 request.extra_configs = GenerateConfig()
@@ -619,6 +622,9 @@ class OpenaiGenerateConfigTest(TestCase):
         request = ChatCompletionRequest(
             messages=[], thinking_budget=10, enable_thinking=True
         )
+        # The template opened a <think> anchor, so the model can emit the end
+        # tag: request-level enable_thinking is honored end-to-end.
+        request.set_prompt_has_think_anchor(True)
 
         config = self._extract_openai_generation_config(request, generate_env_config)
 
@@ -639,6 +645,7 @@ class OpenaiGenerateConfigTest(TestCase):
             response_format={"type": "json_object"},
             enable_thinking=True,
         )
+        request.set_prompt_has_think_anchor(True)
 
         config = self._extract_openai_generation_config(request, generate_env_config)
 
@@ -659,6 +666,7 @@ class OpenaiGenerateConfigTest(TestCase):
             response_format={"type": "json_object"},
             chat_template_kwargs={"enable_thinking": True},
         )
+        request.set_prompt_has_think_anchor(True)
 
         config = self._extract_openai_generation_config(request, generate_env_config)
 
@@ -681,6 +689,7 @@ class OpenaiGenerateConfigTest(TestCase):
                 chat_template_kwargs={"enable_thinking": True}
             ),
         )
+        request.set_prompt_has_think_anchor(True)
 
         config = self._extract_openai_generation_config(request, generate_env_config)
 
@@ -827,6 +836,7 @@ class OpenaiGenerateConfigTest(TestCase):
         enabled = self._generate_config_with_stop_word(
             enable_thinking=True,
             env_think_mode="disabled",
+            prompt_has_think_anchor=True,
         )
 
         self.assertEqual(disabled.thinking_mode, ThinkingMode.DISABLED)
@@ -878,7 +888,9 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertTrue(adaptive_request.get_enable_thinking())
 
     def test_enabled_openai_thinking_keeps_legacy_empty_grammar_begin(self):
-        config = self._generate_config_with_stop_word(enable_thinking=True)
+        config = self._generate_config_with_stop_word(
+            enable_thinking=True, prompt_has_think_anchor=True
+        )
 
         self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
         self.assertTrue(config.in_think_mode)
@@ -887,18 +899,21 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertEqual(config.begin_think_token_ids, [])
 
     def test_enabled_thinking_without_anchor_warns(self):
-        """固定 ENABLED 不要求模型自吐 begin 标记，模板又没注入锚点时只告警不拦截：
-        此时模型可能永远吐不出结束标记（案例二的结构性隐患）。"""
+        """Request-forced ENABLED on a non-reasoning renderer whose prompt has no
+        <think> anchor cannot emit the think end tag (case-two structural hazard).
+        It is now clamped back to DISABLED so the grammar never masks EOS."""
         with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
             config = self._generate_config_with_stop_word(enable_thinking=True)
 
-        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
+        self.assertFalse(config.in_think_mode)
+        self.assertIsNone(config.structural_tag)
         self.assertEqual(
             len(
                 [
                     call
                     for call in mock_logging.warning.call_args_list
-                    if "does not end with the think start tag" in str(call)
+                    if "clamping to DISABLED" in str(call)
                 ]
             ),
             1,

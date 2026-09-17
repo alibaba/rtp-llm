@@ -47,12 +47,14 @@ class KimiK2Renderer(ReasoningToolBaseRenderer):
     def _create_reasoning_parser(
         self, request: ChatCompletionRequest
     ) -> Optional[ReasoningParser]:
-        # 模板注入了 think 锚点就意味着模型会输出思考内容，此时即便请求侧
-        # thinking_mode 为 DISABLED 也必须建解析器，否则思考块会泄漏进可见回复。
+        # kimi_k2 的思考内容可能不带标签直接输出，parser 恒为 force_reasoning=True。
+        # 因此这里的守卫必须保留（不同于 qwen/deepseek/glm 工厂）：force parser 会把
+        # 整段输出当 reasoning，若无 <think> 结束标记则 normal_text 为空。一旦对
+        # DISABLED 且无锚点的请求也建 force parser，就会吞掉可见回复。仅在锚点存在
+        # 或 in_think_mode（模型确实会思考）时才建。
         if not self._resolve_think_anchor(request) and not self.in_think_mode(request):
             return None
 
-        # kimi_k2 的思考内容可能不带标签直接输出，保持原有的强制解析行为。
         return ReasoningParser(
             model_type="kimi_k2",
             stream_reasoning=True,

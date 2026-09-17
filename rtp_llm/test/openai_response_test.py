@@ -523,6 +523,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             chat_template_kwargs={"thinking_mode": request_mode},
             stream=True,
         )
+        # The thinking template opened a <think> anchor, so a request that
+        # force-enables thinking is honored (the model can emit </think>).
+        request.set_prompt_has_think_anchor(True)
         config = endpoint._extract_generation_config(
             request, input_ids=[], renderer=renderer
         )
@@ -1408,12 +1411,21 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         def _assert_tool_call_response(
             self,
             response_delta,
-            expected_content="<think>\n好的\n</think>\n\n文本内容\n",
+            expected_content="文本内容",
         ):
-            """断言工具调用响应的内容"""
+            """断言工具调用响应的内容。
+
+            DISABLED（think_mode=0）下推理模型仍会自发吐 <think>，能力驱动剥离（P0-B）
+            把它归入 reasoning_content、content 只留干净正文——与 ENABLED 的
+            QwenThinkTestSuite 一致。旧行为让 think 泄漏进 content，正是
+            critic/Dart/diversion 的泄漏形态。
+            """
             assert (
                 response_delta.content.strip() == expected_content.strip()
             ), f"Content mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.reasoning_content.strip() == "好的"
+            ), f"reasoning_content mismatch. Full response_delta: {response_delta}"
             assert (
                 response_delta.tool_calls is not None
             ), f"tool_calls is None. Full response_delta: {response_delta}"

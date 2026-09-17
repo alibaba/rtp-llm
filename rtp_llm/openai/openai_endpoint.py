@@ -218,6 +218,33 @@ class OpenaiEndpoint(object):
     ) -> List[List[int]]:
         return [i for i, _ in itertools.groupby(sorted(stop_words_list))]
 
+    def _prompt_ends_with_think_anchor(
+        self,
+        config: GenerateConfig,
+        input_ids: Optional[List[int]],
+        request: Optional[ChatCompletionRequest] = None,
+    ) -> bool:
+        """Whether the rendered prompt ends with an open think start tag.
+
+        Prefers the flag recorded while rendering; falls back to a token-level
+        comparison against the prompt tail so callers that pass input_ids but no
+        recorded flag still resolve correctly.
+        """
+        anchor_state = (
+            request.prompt_has_think_anchor() if request is not None else None
+        )
+        if anchor_state is not None:
+            return anchor_state
+        think_start_tag = normalize_think_tag(self.generate_env_config.think_start_tag)
+        begin_ids = config.begin_think_token_ids or self.tokenizer.encode(
+            think_start_tag, add_special_tokens=False
+        )
+        return bool(
+            begin_ids
+            and input_ids is not None
+            and input_ids[-len(begin_ids) :] == begin_ids
+        )
+
     def _reasoning_format_for_prompt(
         self,
         config: GenerateConfig,
@@ -234,20 +261,7 @@ class OpenaiEndpoint(object):
         base_format = renderer.get_reasoning_format()
         think_start_tag = normalize_think_tag(self.generate_env_config.think_start_tag)
         if config.thinking_mode == ThinkingMode.ENABLED:
-            anchor_state = (
-                request.prompt_has_think_anchor() if request is not None else None
-            )
-            if anchor_state is None:
-                begin_ids = config.begin_think_token_ids or self.tokenizer.encode(
-                    think_start_tag, add_special_tokens=False
-                )
-                anchored = bool(
-                    begin_ids
-                    and input_ids is not None
-                    and input_ids[-len(begin_ids) :] == begin_ids
-                )
-            else:
-                anchored = anchor_state
+            anchored = self._prompt_ends_with_think_anchor(config, input_ids, request)
 
             if anchored:
                 return base_format
@@ -415,6 +429,31 @@ class OpenaiEndpoint(object):
             budget = int(request.thinking_budget)
             config.max_thinking_tokens = _INT32_MAX if budget < 0 else budget
         config.thinking_mode = renderer.resolve_thinking_mode(request)
+        if (
+            config.thinking_mode == ThinkingMode.ENABLED
+            and renderer.default_thinking_mode != ThinkingMode.ENABLED
+            and not renderer.emits_reasoning_stream
+            and not self._prompt_ends_with_think_anchor(config, input_ids, request)
+        ):
+            # A fixed-ENABLED think envelope compiles with begin="" and masks EOS
+            # until the model emits the think end tag. That is only reachable for
+            # models that actually produce a reasoning stream (they emit
+            # </think>) or when the template opened a <think> anchor. When the
+            # service did not declare thinking on and a request force-enables it
+            # on a non-reasoning renderer whose prompt has no anchor (e.g. passing
+            # enable_thinking=true to a Qwen2 template that ignores it), the model
+            # cannot emit the end tag, so the grammar masks EOS forever and the
+            # reply repeats until the length cap. Clamp back to DISABLED and let
+            # the model answer normally. A service-level ENABLED is trusted as the
+            # deployer declaring the model can think, so it is never clamped.
+            logging.warning(
+                "thinking_mode=ENABLED was force-enabled by the request on a "
+                "non-reasoning renderer (%s) whose rendered prompt has no <think> "
+                "anchor; the model cannot emit the think end tag, so clamping to "
+                "DISABLED to avoid masking EOS.",
+                type(renderer).__name__,
+            )
+            config.thinking_mode = ThinkingMode.DISABLED
         config.in_think_mode = config.thinking_mode == ThinkingMode.ENABLED
         if config.thinking_mode == ThinkingMode.DISABLED:
             config.max_thinking_tokens = 0

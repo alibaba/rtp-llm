@@ -63,6 +63,9 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
     提供工具调用的通用逻辑，子类需要实现具体的检测器创建逻辑
     """
 
+    # 推理家族：模型会自发输出 <think> 块，think 处理判据以此为准。
+    emits_reasoning_stream: bool = True
+
     def __init__(
         self,
         tokenizer: BaseTokenizer,
