@@ -96,6 +96,32 @@ def _dg_repack_tma_scale(plain, n_rows):
 _SM120_FUSED_MOE_WORKSPACES = {}
 
 
+def _sm120_fused_moe_capacity(
+    max_tokens_per_rank: int, input_rows: int, capacity_tokens: int = 0
+) -> int:
+    """Token capacity for the SM120 fused-MoE workspace AND autotuner ceiling.
+
+    flashinfer's ``cutlass_fused_moe`` sizes its workspace monotonically by
+    ``max_num_tokens`` and requires it to cover the largest runtime
+    ``input.shape[0]``; undersizing it (or ``tune_max_num_tokens``) makes the C++
+    runner abort natively during CUDA-graph capture (no Python exception, so it
+    surfaces as a silent rank SIGABRT).
+
+    On the fixed-EP path the kernel sees the POST-gather tile (``world * n_pad``
+    rows), which exceeds the PRE-gather per-rank budget ``max_tokens_per_rank``
+    (= ``max_generate_batch_size * (gen_num_per_cycle + 1)``) whenever
+    ``world * n_pad > budget`` -- e.g. a 4-rank DP+EP MTP-3 decode capture at bs>=2
+    (budget 16 vs a 32/64-row tile). The capacity is therefore the max of the
+    concrete input rows, the caller-declared post-gather tile bound, and the
+    budget-derived floor. The 512 clamp applies only to the budget term (it
+    matches the fixed-EP ``MAX_TILES`` tiling and preserves prefill/grid sizing);
+    ``input_rows``/``capacity_tokens`` are never clamped, so the actual tile is
+    always covered.
+    """
+    budget = min(max(int(max_tokens_per_rank), 1), 512)
+    return max(int(input_rows or 0), int(capacity_tokens or 0), budget)
+
+
 def _has_fp8_fp4_grouped_kernel() -> bool:
     """True iff the grouped FP4 routed-expert path should be used.
 
@@ -647,11 +673,17 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         output = torch.empty((n, d), dtype=torch.float32, device=device)
         ep_gather(down, adjusted_ids, weights, output_index, output)
         return output
-    def _get_sm120_fused_moe_workspace(self, device) -> torch.Tensor:
+    def _get_sm120_fused_moe_workspace(self, device, capacity_tokens: int = 0) -> torch.Tensor:
         from flashinfer.fused_moe import cutlass_fused_moe_workspace_size
         from flashinfer.fused_moe.core import ActivationType
         cfg = self.cfg
-        max_tokens = min(max(int(cfg.max_tokens_per_rank), 1), 512)
+        # Size for the capacity the caller actually needs (the POST-gather tile on
+        # the fixed-EP path), falling back to the pre-gather per-rank budget. The
+        # cache key carries max_tokens, so each distinct capacity gets its own
+        # stable buffer (one entry per captured batch size => a stable pointer
+        # baked into that graph, retained for replay).
+        max_tokens = _sm120_fused_moe_capacity(
+            cfg.max_tokens_per_rank, capacity_tokens, capacity_tokens)
         key = (device.index, max_tokens, cfg.dim, cfg.moe_inter_dim,
                cfg.n_routed_experts, cfg.n_activated_experts)
         workspace = _SM120_FUSED_MOE_WORKSPACES.get(key)
@@ -665,7 +697,7 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             workspace = torch.empty(workspace_bytes, dtype=torch.uint8, device=device)
             _SM120_FUSED_MOE_WORKSPACES[key] = workspace
         return workspace
-    def _forward_capture_sm120(self, x, weights, indices) -> torch.Tensor:
+    def _forward_capture_sm120(self, x, weights, indices, capacity_tokens: int = 0) -> torch.Tensor:
         if _DG_BACKEND == "deepgemm":
             # The capture path reads the flashinfer-swizzled scale buffers,
             # which setup_weights does NOT build under the deepgemm backend
@@ -676,6 +708,16 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         from flashinfer.fused_moe.core import ActivationType
         cfg = self.cfg
         num_experts = cfg.n_routed_experts
+        # Capacity for BOTH the workspace and the autotuner ceiling must cover the
+        # ACTUAL rows the fused kernel processes (input.shape[0] == the post-gather
+        # tile on the fixed-EP path), not the pre-gather per-rank budget. Undersized
+        # capacity made cutlass_fused_moe abort natively at capture for bs>=2.
+        try:
+            _rows = int(x.shape[0])
+        except Exception:
+            _rows = 0
+        cap_tokens = _sm120_fused_moe_capacity(
+            cfg.max_tokens_per_rank, _rows, capacity_tokens)
         fake_input_scale = torch.ones(num_experts, dtype=torch.float32, device=x.device)
         swiglu_limit = torch.full_like(fake_input_scale, cfg.swiglu_limit)
         output = torch.empty_like(x)
@@ -689,8 +731,8 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
                 self._s2_sm120.view(torch.int32), fake_input_scale],
             input_sf=input_sf, swiglu_limit=swiglu_limit, output=output,
             use_mxfp8_act_scaling=True, use_fused_finalize=False, enable_pdl=False,
-            workspace_buffer=self._get_sm120_fused_moe_workspace(x.device),
-            tune_max_num_tokens=min(max(int(cfg.max_tokens_per_rank), 1), 512),
+            workspace_buffer=self._get_sm120_fused_moe_workspace(x.device, cap_tokens),
+            tune_max_num_tokens=cap_tokens,
             activation_type=ActivationType.Swiglu)
         return output.float()
     def _forward_capture_topk(

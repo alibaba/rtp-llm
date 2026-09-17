@@ -573,11 +573,17 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         local_w = all_w * valid.to(all_w.dtype)
         local_i.clamp_(0, self.cfg.n_local_experts - 1)
         # Tile the grouped GEMM into 512-row chunks so the flashinfer workspace
-        # (sized for max_tokens_per_rank up to 512) does not balloon.  With the
-        # capture pad floor of 64 the loop runs ceil(world*64/512) = 1 tile for
-        # decode graphs; prefill-fallback pads still tile at 512-row chunks.
+        # does not balloon.  With the capture pad floor of 64 the loop runs
+        # ceil(world*64/512) = 1 tile for decode graphs; prefill-fallback pads
+        # still tile at 512-row chunks.  The fused-MoE workspace/tuning capacity
+        # must cover the POST-gather tile (world * n_pad rows), which exceeds the
+        # pre-gather per-rank budget cfg.max_tokens_per_rank for a 4-rank DP+EP decode
+        # capture at bs>=2 (undersizing it aborted cutlass_fused_moe natively).
+        # Declare the max tile bound once so every tile shares one stable workspace
+        # buffer (a single cache entry => a stable pointer baked into the graph).
         MAX_TILES = 512
         total_rows = world * n_pad
+        tile_cap = min(MAX_TILES, total_rows)
         partial = torch.empty(total_rows, d, dtype=torch.float32, device=x.device)
         for offset in range(0, total_rows, MAX_TILES):
             end = min(offset + MAX_TILES, total_rows)
@@ -589,7 +595,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             cw = chunk_w * cv.to(chunk_w.dtype)
             cli.clamp_(0, self.cfg.n_local_experts - 1)
             partial[offset:end] = self._sm120_grouped._forward_capture_sm120(
-                chunk_x, cw, cli).to(x.dtype).contiguous()
+                chunk_x, cw, cli, capacity_tokens=tile_cap).to(x.dtype).contiguous()
         dist.all_reduce(partial, op=dist.ReduceOp.SUM, group=group)
         return partial.view(world, n_pad, d)[rank][:n].float()
 
