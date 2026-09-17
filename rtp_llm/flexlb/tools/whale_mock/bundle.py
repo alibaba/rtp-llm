@@ -55,7 +55,8 @@ def run():
     jars = Path(os.environ.get("MOCK_BUNDLE_JAR_DIR", ROOT / "jars"))
     raw = os.environ.get("FLEXLB_CONFIG") or render_env(cfg["profile"])
     legacy = os.environ.get("MOCK_BUNDLE_LEGACY_MASTER") == "1"
-    mock_raw = mock_formula_config(raw, legacy)
+    mock_raw = mock_formula_config(raw, legacy,
+                                   os.environ.get("MOCK_PREFILL_EXECUTION_FORMULA"))
     (runtime / "master-source-config.json").write_text(raw)
     dispatcher = json.loads(raw).get("dispatcher", {}).get("type", "BATCH")
     (runtime / "master-config.json").write_text(

@@ -2,17 +2,25 @@
 import json
 
 
-def mock_formula_config(raw, legacy):
+def mock_formula_config(raw, legacy, mock_expression=None):
     config = json.loads(raw)
+    if mock_expression is not None and (not isinstance(mock_expression, str) or not mock_expression.strip()):
+        raise ValueError("MOCK_PREFILL_EXECUTION_FORMULA must be a nonempty string")
     if not legacy:
         if config.get("schemaVersion", 3) != 3:
             raise ValueError("legacy master config requires MOCK_BUNDLE_LEGACY_MASTER=1")
-        return raw
+        if mock_expression is None:
+            return raw
+        config["router"]["roles"]["prefill"]["executionTimeEstimator"] = {
+            "type": "FORMULA", "expression": mock_expression}
+        return json.dumps(config)
     if config.get("schemaVersion") != 1:
         raise ValueError("legacy master requires schemaVersion 1")
     estimator = config["router"]["roles"]["prefill"]["executionTimeEstimator"]
     if estimator.get("type") != "FORMULA" or not estimator.get("expression"):
         raise ValueError("mixed-version mock requires an explicit P formula")
+    if mock_expression is not None:
+        estimator = {"type": "FORMULA", "expression": mock_expression}
     # Only the mock's timing parser consumes this projection. It is never sent
     # to master: capacity, ordering, lifecycle and selectors stay on schema 1.
     return json.dumps({"schemaVersion": 3,

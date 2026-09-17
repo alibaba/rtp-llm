@@ -18,6 +18,12 @@ class MasterCompatibilityTest(unittest.TestCase):
         self.assertEqual(3, mock["schemaVersion"])
         self.assertEqual(config["router"]["roles"]["prefill"]["executionTimeEstimator"],
                          mock["router"]["roles"]["prefill"]["executionTimeEstimator"])
+        adjusted = json.loads(mock_formula_config(raw, True, "300 + batchSize"))
+        self.assertEqual("300 + batchSize", adjusted["router"]["roles"]["prefill"]
+                         ["executionTimeEstimator"]["expression"])
+        self.assertEqual("tokens - hitCacheTokens", json.loads(raw)["router"]["roles"]
+                         ["prefill"]["executionTimeEstimator"]["expression"])
+        with self.assertRaises(ValueError): mock_formula_config(raw, True, " ")
         self.assertNotIn("scheduler", mock)
         with self.assertRaises(ValueError): mock_formula_config(raw, False)
         with self.assertRaises(ValueError): mock_formula_config('{"schemaVersion":3}', True)
