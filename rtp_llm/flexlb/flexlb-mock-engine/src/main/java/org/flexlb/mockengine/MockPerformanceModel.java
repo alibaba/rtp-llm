@@ -177,6 +177,9 @@ final class MockPerformanceModel {
     private final PrefillTimeFormula prefillFormula;
     private record RuntimePrefill(String expression, PrefillTimeFormula formula) {}
     private volatile RuntimePrefill runtimePrefill;
+    private record RuntimeDecode(double stepBaseMs, double stepPerRunningMs,
+                                 double tokensPerStep) {}
+    private volatile RuntimeDecode runtimeDecode;
     private String configuredPrefillExpression = "";
     // Decode step-latency sources, exactly one active per model:
     //   - explicit step_ms_by_batch curve (decodePoints non-empty; legacy
@@ -744,12 +747,28 @@ final class MockPerformanceModel {
      * still costs a full step, like a real engine's last draft round).
      */
     int decodeSteps(int outputLen) {
-        return (int) Math.ceil(outputLen / tokensPerStep);
+        return (int) Math.ceil(outputLen / tokensPerStep());
     }
 
     /** Tokens produced per running stream per decode step (MTP acceptance fold). */
     double tokensPerStep() {
-        return tokensPerStep;
+        RuntimeDecode current = runtimeDecode;
+        return current == null ? tokensPerStep : current.tokensPerStep();
+    }
+
+    void setRuntimeDecode(double baseMs, double perRunningMs, double tokensPerStep) {
+        if (!Double.isFinite(baseMs) || baseMs <= 0 || !Double.isFinite(perRunningMs)
+                || perRunningMs < 0 || !Double.isFinite(tokensPerStep) || tokensPerStep <= 0)
+            throw new IllegalArgumentException("decode coefficients must be finite; base/tokens positive and slope nonnegative");
+        runtimeDecode = new RuntimeDecode(baseMs, perRunningMs, tokensPerStep);
+    }
+
+    Map<String, Object> decodeModelState() {
+        RuntimeDecode current = runtimeDecode;
+        return Map.of("runtime_override", current != null,
+                "step_base_ms", current == null ? stepBaseMs : current.stepBaseMs(),
+                "step_per_running_ms", current == null ? stepPerRunningMs : current.stepPerRunningMs(),
+                "tokens_per_step", tokensPerStep(), "scale", effectiveDecodeScale());
     }
 
     /**
@@ -774,6 +793,8 @@ final class MockPerformanceModel {
      * linear production fit (stepBaseMs + stepPerRunningMs × running).
      */
     private double stepMs(int activeBatchSize) {
+        RuntimeDecode current = runtimeDecode;
+        if (current != null) return current.stepBaseMs() + current.stepPerRunningMs() * activeBatchSize;
         if (overrideDecodeStepMs != null) {
             // Runtime override (Python /set_perf decode_step_ms): fixed
             // per-STEP semantics (one step emits tokens_per_step tokens).

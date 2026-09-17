@@ -88,6 +88,7 @@ final class MockControlServer {
         httpServer.createContext("/cache_diagnostics", this::handleCacheDiagnostics);
         httpServer.createContext("/set_perf", this::handleSetPerf);
         httpServer.createContext("/prefill_formula", this::handlePrefillFormula);
+        httpServer.createContext("/decode_model", this::handleDecodeModel);
         httpServer.createContext("/output_length", this::handleOutputLength);
         httpServer.createContext("/set_kv_pressure", this::handleSetKvPressure);
         httpServer.createContext("/set_queue_depth", this::handleSetQueueDepth);
@@ -456,6 +457,50 @@ final class MockControlServer {
             for (var service : targets)
                 states.put(service.getEngineName(), service.getPerformance().prefillExpressionState());
             sendJson(exchange, 200, Map.of("engines", states, "scope", "mock execution only; subsequent batches; volatile until restart"));
+        } catch (IllegalArgumentException | com.fasterxml.jackson.core.JsonProcessingException error) {
+            sendJson(exchange, 400, Map.of("error", String.valueOf(error.getMessage())));
+        }
+    }
+
+    private synchronized void handleDecodeModel(HttpExchange exchange) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod()) && !"POST".equals(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
+            return;
+        }
+        try {
+            var targets = orderedServices().stream().filter(s -> !s.isDiagnosticPrefill()).toList();
+            if ("POST".equals(exchange.getRequestMethod())) {
+                byte[] bytes = exchange.getRequestBody().readNBytes(65537);
+                if (bytes.length > 65536) throw new IllegalArgumentException("body too large");
+                JsonNode body = MAPPER.readTree(bytes);
+                if (body == null || !body.isObject()) throw new IllegalArgumentException("JSON object required");
+                body.fieldNames().forEachRemaining(key -> {
+                    if (!key.equals("step_base_ms") && !key.equals("step_per_running_ms")
+                            && !key.equals("tokens_per_step") && !key.equals("engine"))
+                        throw new IllegalArgumentException("unknown field: " + key);
+                });
+                if (body.has("engine")) {
+                    if (!body.path("engine").isTextual()) throw new IllegalArgumentException("engine string required");
+                    String engine = body.path("engine").asText();
+                    targets = targets.stream().filter(s -> s.getEngineName().equals(engine)).toList();
+                }
+                if (targets.isEmpty()) throw new IllegalArgumentException("no matching decode engine");
+                for (String key : new String[]{"step_base_ms", "step_per_running_ms", "tokens_per_step"})
+                    if (!body.path(key).isNumber()) throw new IllegalArgumentException(key + " number required");
+                double base = body.path("step_base_ms").asDouble();
+                double slope = body.path("step_per_running_ms").asDouble();
+                double tokens = body.path("tokens_per_step").asDouble();
+                if (!Double.isFinite(base) || base <= 0 || !Double.isFinite(slope)
+                        || slope < 0 || !Double.isFinite(tokens) || tokens <= 0)
+                    throw new IllegalArgumentException("invalid decode coefficients");
+                for (var service : targets)
+                    service.getPerformance().setRuntimeDecode(base, slope, tokens);
+            }
+            Map<String, Object> states = new LinkedHashMap<>();
+            for (var service : targets)
+                states.put(service.getEngineName(), service.getPerformance().decodeModelState());
+            sendJson(exchange, 200, Map.of("engines", states,
+                    "scope", "subsequent decode steps; volatile until restart"));
         } catch (IllegalArgumentException | com.fasterxml.jackson.core.JsonProcessingException error) {
             sendJson(exchange, 400, Map.of("error", String.valueOf(error.getMessage())));
         }
