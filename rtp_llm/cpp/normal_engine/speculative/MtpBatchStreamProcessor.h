@@ -33,8 +33,8 @@ public:
     absl::Status dispatchDecode(const StreamGroups&                          stream_groups,
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                 const MergedOutput&                          draft_prefill_output) const;
-    void truncateV41AcceptedRows(const StreamGroups& stream_groups,
-                                  speculative::SpeculativeSamplerOutput& output) const;
+    void truncateAcceptedRows(const StreamGroups& stream_groups,
+                              speculative::SpeculativeSamplerOutput& output) const;
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                           TensorHolder&       host_holder) const;

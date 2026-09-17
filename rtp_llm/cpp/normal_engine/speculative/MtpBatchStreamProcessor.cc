@@ -410,23 +410,23 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&  strea
     return absl::OkStatus();
 }
 
-void MtpBatchStreamProcessor::truncateV41AcceptedRows(const StreamGroups& stream_groups,
-                                                      speculative::SpeculativeSamplerOutput& output) const {
+void MtpBatchStreamProcessor::truncateAcceptedRows(const StreamGroups& stream_groups,
+                                                   speculative::SpeculativeSamplerOutput& output) const {
     auto lengths = output.accept_len.to(torch::kCPU).contiguous();
     auto tokens = output.accept_tokens.to(torch::kCPU).contiguous();
     int64_t row = 0;
     for (const auto& stream : stream_groups.allStreams()) {
         RTP_LLM_CHECK_WITH_INFO(stream->currentBatchSize() == 1 && stream->nextBatchSize() == 1,
-                                "V4.1 speculative retained rows require one beam per request");
+                                "speculative retained rows require one beam per request");
         if (!stream->isFakeStream()) {
             lengths.data_ptr<int32_t>()[row] = stream->previewSpeculativeRetainedRows(
                 tokens[row], lengths.data_ptr<int32_t>()[row]);
             RTP_LLM_CHECK_WITH_INFO(lengths.data_ptr<int32_t>()[row] > 0,
-                                    "V4.1 cannot commit a speculative round for a request with no remaining tokens");
+                                    "cannot commit a speculative round for a request with no remaining tokens");
         }
         ++row;
     }
-    RTP_LLM_CHECK_WITH_INFO(row == lengths.numel(), "V4.1 accepted rows do not match the actual request batch");
+    RTP_LLM_CHECK_WITH_INFO(row == lengths.numel(), "accepted rows do not match the actual request batch");
     output.accept_len.copy_(lengths);
     output.accept_len_cpu = std::move(lengths);
     output.accept_tokens_cpu = std::move(tokens);

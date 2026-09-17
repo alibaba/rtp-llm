@@ -70,7 +70,7 @@ public:
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
-    void            commitV41RetainedRows(const torch::Tensor& retained_rows) override;
+    void            commitRetainedRows(const torch::Tensor& retained_rows) override;
     void            releaseBuffers() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;

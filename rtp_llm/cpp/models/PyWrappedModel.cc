@@ -79,10 +79,10 @@ torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tenso
     return cuda_tensor;
 }
 
-void PyWrappedModel::commitV41RetainedRows(const torch::Tensor& retained_rows) {
+void PyWrappedModel::commitRetainedRows(const torch::Tensor& retained_rows) {
     py::gil_scoped_acquire gil;
     if (!py::hasattr(py_model_, "commit_retained_rows"))
-        throw std::logic_error("V4.1 speculative commit requires the model callback");
+        throw std::logic_error("speculative retained-row commit requires the model callback");
     py_model_.attr("commit_retained_rows")(retained_rows);
 }
 

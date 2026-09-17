@@ -53,9 +53,6 @@ public:
 
     int32_t* data(int batch_id);
 
-    bool hasV41Inputs() const {
-        return v41_inputs_ != nullptr;
-    }
     void                 writeV41Rows(int      batch_id,
                                       int      begin,
                                       int      count,

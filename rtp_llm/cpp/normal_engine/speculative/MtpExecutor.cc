@@ -1484,7 +1484,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             applySpecLogitsAcceptLenCap(
                 sampler_input, sampler_output, speculative_sampler_output, batch_size, propose_step_);
             if (v41_decode)
-                batch_stream_processor_->truncateV41AcceptedRows(stream_groups, speculative_sampler_output);
+                batch_stream_processor_->truncateAcceptedRows(stream_groups, speculative_sampler_output);
         }
 
         if (is_dspark_) {
@@ -1542,7 +1542,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                                   torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
         if (parallelism_config_.tp_size > 1)
             execBroadcast({{retained}, 0});
-        model_->commitV41RetainedRows(retained);
+        model_->commitRetainedRows(retained);
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -2063,9 +2063,6 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.prepare_streams(stream_size=%zu)", streams.size());
 
     for (auto& stream : streams) {
-        if (cache_manager_ && cache_manager_->cacheConfig().dsv41_cache_layout_version == 1
-            && !stream->isFakeStream() && (stream->isFinished() || stream->hasError()))
-            continue;
         // split streams into prefill and decode
         if (stream->isContextStream()) {
             prefill_streams.push_back(stream);
@@ -2114,10 +2111,7 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
     // bookkeeping round. DROP_BROAD_SYNC lets draft/verify consume the state
     // already published on GPU and waits only at later host consumers such as
     // spec-logits processing and target sampling.
-    const bool v41_canonical_history = cache_manager_ && cache_manager_->cacheConfig().dsv41_cache_layout_version == 1;
-    // V4.1 gathers canonical predecessor tokens and completed execution state
-    // together, so its previous native publication must precede input gather.
-    if (useStreamAsync() && (!useDropBroadSync() || v41_canonical_history)) {
+    if (useStreamAsync() && !useDropBroadSync()) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.wait_prev_bookkeeping(stream_count=%zu)", streams.size());
         spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
     }

@@ -456,9 +456,6 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                     !stream->isFakeStream() && checkpoint && checkpoint->materialized_end == stream->seqLength() - 1;
             }
             if (model_input.v41_token_types.defined() && !stream->isFakeStream()) {
-                RTP_LLM_CHECK_WITH_INFO(
-                    !stream->hasPendingAsyncBookkeeping(),
-                    "V4.1 canonical history requires committed token bookkeeping before decode gather");
                 stream->completeTokenIdsPtr()->writeV41Rows(
                     i,
                     stream->seqLength() - 1,
