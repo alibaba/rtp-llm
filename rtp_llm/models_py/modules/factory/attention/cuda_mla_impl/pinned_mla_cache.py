@@ -455,6 +455,18 @@ class PinnedMlaWorkingSet:
         self.compute_stream.wait_event(self.ready[layer])
         return self.resident[layer]
 
+    def wait_prefetch_complete(self) -> None:
+        """Join this group's prefetch on the caller stream before running MoE.
+
+        begin() has already enqueued every layer's fetch. Waiting for the last
+        ready event preserves overlap with attention but keeps remaining host
+        reads out of the following MoE. Use the caller stream: CMP and graph
+        capture can run MoE on a different stream from the TopK producer.
+        """
+        if not self.started:
+            raise RuntimeError("begin must precede wait_prefetch_complete")
+        torch.cuda.current_stream(self.device).wait_event(self.ready[-1])
+
     def write(self, layer: int, logical_slots: torch.Tensor, values: torch.Tensor) -> None:
         """Write through original KV bytes, refreshing any prefetched current token."""
         self._check_ids(logical_slots)

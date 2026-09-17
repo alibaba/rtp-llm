@@ -152,6 +152,43 @@ class PinnedMlaCacheTest(unittest.TestCase):
         )
         return cache, [tensor.cuda() for tensor in host]
 
+    def test_prefetch_drain_joins_caller_stream_on_every_graph_replay(self):
+        cache, _ = self.make_cache(width=16, layers=4, capacity=4096)
+        with self.assertRaisesRegex(RuntimeError, "begin must precede"):
+            cache.wait_prefetch_complete()
+        producer = torch.cuda.current_stream()
+        consumer = torch.cuda.Stream()
+        ids = torch.arange(4096, device="cuda", dtype=torch.int32)
+        payload = torch.full_like(cache.resident[-1], 17)
+        observed = torch.empty_like(payload)
+
+        def run():
+            cache.begin(ids)
+            # Delay the last producer and publish a replay-dependent payload.
+            # Only waiting on ready[0], or waiting on the old TopK stream,
+            # must not allow the consumer to read this data early.
+            with torch.cuda.stream(cache.transfer_stream):
+                torch.cuda._sleep(5_000_000)
+                cache.resident[-1].copy_(payload)
+                cache.ready[-1].record()
+            consumer.wait_stream(producer)
+            with torch.cuda.stream(consumer):
+                cache.wait_prefetch_complete()
+                observed.copy_(cache.resident[-1])
+            producer.wait_stream(consumer)
+
+        run()
+        producer.synchronize()
+        self.assertTrue(torch.equal(observed, payload))
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=producer):
+            run()
+        for value in (31, 47, 59, 71, 83, 97, 109, 127):
+            payload.fill_(value)
+            graph.replay()
+            producer.synchronize()
+            self.assertTrue(torch.equal(observed, payload), f"replay payload={value}")
+
     def test_mtp_graph_clone_reuses_working_set_for_same_kv_arena(self):
         from rtp_llm.models_py.model_desc.generic_moe_mtp import GenericMoeMTPModel
         from rtp_llm.models_py.model_desc.module_base import GptModelBase

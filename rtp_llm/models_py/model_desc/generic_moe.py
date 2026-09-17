@@ -441,6 +441,13 @@ class GenericMoeDecoderLayer(nn.Module):
         super().__init__()
         self.layer_idx = layer_idx
 
+        # Fixed before CUDA graph capture; graph clones retain the same policy.
+        self._drain_pinned_mla_before_moe = (
+            os.environ.get("RTP_LLM_DSA_MLA_DRAIN_BEFORE_MOE", "1") == "1"
+            and layer_idx in config.moe_layer_index
+            and str(moe_config.moe_strategy).startswith("mega_moe")
+        )
+
         # Get quant_config from model_config
         quant_config = config.quant_config
         if config.attn_config.use_mla:
@@ -557,6 +564,7 @@ class GenericMoeDecoderLayer(nn.Module):
         clone = object.__new__(type(self))
         nn.Module.__init__(clone)
         clone.layer_idx = self.layer_idx
+        clone._drain_pinned_mla_before_moe = self._drain_pinned_mla_before_moe
         clone.self_attn = self.self_attn
         if hasattr(self.mlp, "clone_for_cuda_graph"):
             clone.mlp = self.mlp.clone_for_cuda_graph()
@@ -577,6 +585,21 @@ class GenericMoeDecoderLayer(nn.Module):
             )
         )
         return clone
+
+    def _wait_pinned_mla_before_moe(self, fmha_impl: FMHAImplBase) -> None:
+        if not getattr(self, "_drain_pinned_mla_before_moe", False):
+            return
+        implementation = fmha_impl
+        groups = getattr(implementation, "pinned_mla_groups", None)
+        if groups is None:
+            implementation = getattr(implementation, "fmha_impl", None)
+            groups = getattr(implementation, "pinned_mla_groups", {})
+        entry = groups.get(self.layer_idx)
+        if entry is not None:
+            # Do not restrict this to group_layer == 0: a shared-index group
+            # can begin with a dense layer followed by its first MoE layer.
+            working, _ = entry
+            working.wait_prefetch_complete()
 
     def _fwd_mlp_or_moe(
         self,
@@ -662,6 +685,7 @@ class GenericMoeDecoderLayer(nn.Module):
             routed_indices=routed_indices,
             routed_weights=routed_weights,
         )
+        self._wait_pinned_mla_before_moe(fmha_impl)
         if moe_activation is not None:
             moe_hidden_states, output_residual, routed_indices, routed_weights = (
                 mla_post
@@ -745,6 +769,7 @@ class GenericMoeDecoderLayer(nn.Module):
                     hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
                 )
 
+        self._wait_pinned_mla_before_moe(fmha_impl)
         hidden_states, residual = self._fwd_mlp_or_moe(hidden_states, residual)
 
         return DecodeLayerOutput(hidden_states, residual, topk_indices)
