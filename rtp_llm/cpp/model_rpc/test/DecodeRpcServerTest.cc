@@ -28,8 +28,6 @@ DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&          
             block_ids_by_group,
             reuse_block_size,
             /*timeout_ms=*/1000,
-            /*partition_count=*/1,
-            /*partition_id=*/0,
             /*server_context=*/nullptr,
             prefill_cp_size,
             stage_peer_groups};
@@ -105,11 +103,9 @@ TEST(DecodeRpcServerTest, PpLoadRequestCarriesStagePeerGroups) {
     const auto                        load_context =
         makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1, /*reuse=*/0, groups);
 
-    const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/3, peer_addrs);
+    const auto request = server.buildBroadcastLoadRequest(load_context);
 
-    // PP routing ignores the flat fields and ships the stage groups instead.
-    EXPECT_EQ(request.partition_count(), 1);
-    EXPECT_EQ(request.partition_id(), 0);
+    // PP routing ignores the flat peer list and ships the stage groups instead.
     EXPECT_EQ(request.peer_addrs_size(), 0);
     ASSERT_EQ(request.stage_peer_groups_size(), 2);
     EXPECT_EQ(request.stage_peer_groups(0).layer_begin(), 0);
@@ -135,14 +131,14 @@ TEST(DecodeRpcServerTest, PpMlaLoadRequestCarriesStagePeerGroups) {
     const auto                        load_context =
         makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1, /*reuse=*/0, groups);
 
-    const auto request = server.constructRemoteLoadRequestForMla(load_context, /*index=*/0, peer_addrs);
+    const auto request = server.buildBroadcastLoadRequest(load_context);
 
     EXPECT_EQ(request.peer_addrs_size(), 0);
     ASSERT_EQ(request.stage_peer_groups_size(), 2);
     EXPECT_EQ(request.stage_peer_groups(1).peer_addrs(0), "prefill-1");
 }
 
-TEST(DecodeRpcServerTest, FlatLoadRequestMapsDecodeLaneToPrefillPeer) {
+TEST(DecodeRpcServerTest, FlatLoadRequestCarriesRawPrefillPeers) {
     DecodeRpcServer server;
     server.resource_.workers                            = {"decode-0", "decode-1", "decode-2", "decode-3"};
     server.maga_init_params_.parallelism_config.tp_size = 2;
@@ -153,16 +149,15 @@ TEST(DecodeRpcServerTest, FlatLoadRequestMapsDecodeLaneToPrefillPeer) {
     const GroupBlockIds             block_ids_by_group;
     const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1);
 
-    // decode stage 1 lane 1 reads its whole block from the same-lane peer.
-    const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/3, peer_addrs);
-    ASSERT_EQ(request.peer_addrs_size(), 1);
-    EXPECT_EQ(request.peer_addrs(0), "prefill-1");
-    EXPECT_EQ(request.partition_count(), 1);
-    EXPECT_EQ(request.partition_id(), 0);
+    // Flat ships the raw peer list; per-lane peer selection happens in loadCache.
+    const auto request = server.buildBroadcastLoadRequest(load_context);
+    ASSERT_EQ(request.peer_addrs_size(), 2);
+    EXPECT_EQ(request.peer_addrs(0), "prefill-0");
+    EXPECT_EQ(request.peer_addrs(1), "prefill-1");
     EXPECT_EQ(request.stage_peer_groups_size(), 0);
 }
 
-TEST(DecodeRpcServerTest, FlatLoadRequestSlicesSourceForFinerDecodeTp) {
+TEST(DecodeRpcServerTest, FlatLoadRequestCarriesSingleRawPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers                            = {"decode-0", "decode-1", "decode-2", "decode-3"};
     server.maga_init_params_.parallelism_config.tp_size = 2;
@@ -173,15 +168,14 @@ TEST(DecodeRpcServerTest, FlatLoadRequestSlicesSourceForFinerDecodeTp) {
     const GroupBlockIds             block_ids_by_group;
     const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1);
 
-    // decode stage 1 lane 1 reads slice 1 of 2 from the single prefill peer.
-    const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/3, peer_addrs);
+    // A single prefill peer is shipped raw; the worker derives the source slice.
+    const auto request = server.buildBroadcastLoadRequest(load_context);
     ASSERT_EQ(request.peer_addrs_size(), 1);
     EXPECT_EQ(request.peer_addrs(0), "prefill-0");
-    EXPECT_EQ(request.partition_count(), 2);
-    EXPECT_EQ(request.partition_id(), 1);
+    EXPECT_EQ(request.stage_peer_groups_size(), 0);
 }
 
-TEST(DecodeRpcServerTest, MlaFlatLoadRequestMapsDecodeLaneToPrefillPeer) {
+TEST(DecodeRpcServerTest, MlaFlatLoadRequestCarriesRawPrefillPeers) {
     DecodeRpcServer server;
     server.resource_.workers                            = {"decode-0", "decode-1", "decode-2", "decode-3"};
     server.maga_init_params_.parallelism_config.tp_size = 2;
@@ -192,10 +186,10 @@ TEST(DecodeRpcServerTest, MlaFlatLoadRequestMapsDecodeLaneToPrefillPeer) {
     const GroupBlockIds             block_ids_by_group;
     const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1);
 
-    const auto request = server.constructRemoteLoadRequestForMla(load_context, /*index=*/2, peer_addrs);
-    ASSERT_EQ(request.peer_addrs_size(), 1);
+    const auto request = server.buildBroadcastLoadRequest(load_context);
+    ASSERT_EQ(request.peer_addrs_size(), 2);
     EXPECT_EQ(request.peer_addrs(0), "prefill-0");
-    EXPECT_EQ(request.partition_count(), 1);
+    EXPECT_EQ(request.peer_addrs(1), "prefill-1");
 }
 
 TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
@@ -209,11 +203,9 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     const auto                      load_context =
         makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2, /*reuse=*/3);
 
-    const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
+    const auto request = server.buildBroadcastLoadRequest(load_context);
 
     EXPECT_EQ(request.prefill_cp_size(), 2);
-    EXPECT_EQ(request.partition_count(), 1);
-    EXPECT_EQ(request.partition_id(), 0);
     EXPECT_EQ(request.reuse_block_size(), 3);
     ASSERT_EQ(request.peer_addrs_size(), 2);
     EXPECT_EQ(request.peer_addrs(0), "prefill-0");
@@ -234,11 +226,9 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     const auto                      load_context =
         makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2, /*reuse=*/3);
 
-    const auto request = server.constructRemoteLoadRequestForMla(load_context, /*index=*/1, peer_addrs);
+    const auto request = server.buildBroadcastLoadRequest(load_context);
 
     EXPECT_EQ(request.prefill_cp_size(), 2);
-    EXPECT_EQ(request.partition_count(), 1);
-    EXPECT_EQ(request.partition_id(), 0);
     EXPECT_EQ(request.reuse_block_size(), 3);
     ASSERT_EQ(request.peer_addrs_size(), 2);
     EXPECT_EQ(request.peer_addrs(0), "prefill-0");
@@ -259,12 +249,10 @@ TEST(DecodeRpcServerTest, PpCPShardedLoadRequestCarriesStagePeerGroups) {
     const auto                        load_context =
         makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2, /*reuse=*/0, groups);
 
-    const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
+    const auto request = server.buildBroadcastLoadRequest(load_context);
 
-    // PP + CP sharded: stage groups carry the routing, flat fields unused.
+    // PP + CP sharded: stage groups carry the routing, the flat peer list is unused.
     EXPECT_EQ(request.prefill_cp_size(), 2);
-    EXPECT_EQ(request.partition_count(), 1);
-    EXPECT_EQ(request.partition_id(), 0);
     EXPECT_EQ(request.peer_addrs_size(), 0);
     ASSERT_EQ(request.stage_peer_groups_size(), 2);
     EXPECT_EQ(request.stage_peer_groups(0).layer_begin(), 0);
@@ -293,12 +281,10 @@ TEST(DecodeRpcServerTest, PpCPFullReplicationLoadRequestCarriesStagePeerGroups) 
     const auto                        load_context =
         makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1, /*reuse=*/0, groups);
 
-    const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/3, peer_addrs);
+    const auto request = server.buildBroadcastLoadRequest(load_context);
 
-    // PP + CP full replication: stage groups carry the routing, flat fields unused.
+    // PP + CP full replication: stage groups carry the routing, the flat peer list is unused.
     EXPECT_EQ(request.prefill_cp_size(), 1);
-    EXPECT_EQ(request.partition_count(), 1);
-    EXPECT_EQ(request.partition_id(), 0);
     EXPECT_EQ(request.peer_addrs_size(), 0);
     ASSERT_EQ(request.stage_peer_groups_size(), 2);
     EXPECT_EQ(request.stage_peer_groups(0).layer_begin(), 0);

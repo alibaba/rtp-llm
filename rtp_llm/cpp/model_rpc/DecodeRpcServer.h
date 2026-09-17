@@ -31,8 +31,6 @@ public:
                            const GroupBlockIds&               block_ids_by_group,
                            int64_t                            reuse_block_size,
                            int64_t                            timeout_ms,
-                           int                                partition_count,
-                           int                                partition_id,
                            grpc::ServerContext*               server_context,
                            int32_t                            prefill_cp_size          = 1,
                            const std::vector<StagePeerGroup>& remote_stage_peer_groups = {}):
@@ -43,8 +41,6 @@ public:
             block_ids_by_group(block_ids_by_group),
             reuse_block_size(reuse_block_size),
             timeout_ms(timeout_ms),
-            partition_count(partition_count),
-            partition_id(partition_id),
             server_context(server_context),
             prefill_cp_size(prefill_cp_size),
             remote_stage_peer_groups(remote_stage_peer_groups) {}
@@ -55,8 +51,6 @@ public:
         const GroupBlockIds&             block_ids_by_group;
         int64_t                          reuse_block_size;
         int64_t                          timeout_ms;
-        int                              partition_count;
-        int                              partition_id;
 
         grpc::ServerContext* server_context;
         int32_t              prefill_cp_size;
@@ -86,13 +80,7 @@ private:
     ErrorInfo              loadCache(const LoadKVCacheContext& load_context);
     ErrorInfo              loadCacheForAllRank(DecodeGenerateContext& decode_context);
     ErrorInfo              loadCacheAsyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
-    ErrorInfo              loadCacheSyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
-    BroadcastLoadRequestPB constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
-                                                      int                             index,
-                                                      const std::vector<std::string>& peer_ips) const;
-    BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
-                                                            int                             index,
-                                                            const std::vector<std::string>& peer_ips) const;
+    BroadcastLoadRequestPB buildBroadcastLoadRequest(const LoadKVCacheContext& load_context) const;
     static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
     static std::string     makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string
