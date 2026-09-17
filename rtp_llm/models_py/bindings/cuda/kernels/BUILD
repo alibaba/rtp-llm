@@ -297,6 +297,37 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Vendored from Tencent hpc-ops (MIT).  These AOT kernels are deliberately
+# restricted by the Python dispatcher to the SM103 HY4 production path.
+hy4_ihc_cutlass_deps = select({
+    "@//:using_cuda13_arm": ["@cutlass_cu13//:cutlass"],
+    "@//:using_cuda13_x86": ["@cutlass_cu13//:cutlass"],
+    "//conditions:default": ["@cutlass//:cutlass"],
+})
+
+hy4_ihc_cuda_copts = copts() + cuda_default_copts_without_arch() + [
+    "-O3",
+    "--cuda-include-ptx=sm_100", "--cuda-gpu-arch=sm_100",
+    "--cuda-include-ptx=sm_103", "--cuda-gpu-arch=sm_103",
+]
+
+cc_library(
+    name = "hy4_ihc",
+    srcs = ["hy4_ihc.cu"],
+    hdrs = [
+        "hy4_ihc.h",
+        "hy4_ihc_utils.cuh",
+    ],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        "//rtp_llm/cpp/utils:core_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + hy4_ihc_cutlass_deps,
+    copts = hy4_ihc_cuda_copts,
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "cuda_cu",
     deps = [

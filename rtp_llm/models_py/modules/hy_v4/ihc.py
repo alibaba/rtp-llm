@@ -19,6 +19,7 @@ from rtp_llm.models_py.modules.hy_v4.ihc_triton import (
     maybe_fused_ihc_pre_normed,
     maybe_fused_ihc_pre_normed_grouped,
 )
+from rtp_llm.models_py.kernels.cuda.hy4_ihc_ops import maybe_fuse_head
 from rtp_llm.utils.model_weight import W
 
 
@@ -315,7 +316,7 @@ class Hy4IHCHead(nn.Module):
 
         outputs = []
         for chunk in channels.split(self.chunk_size, dim=0):
-            fused = maybe_fused_ihc_head(
+            fused = maybe_fuse_head(
                 chunk,
                 self.fn_weight,
                 self.scale,
@@ -323,6 +324,15 @@ class Hy4IHCHead(nn.Module):
                 hc_eps=self.hc_eps,
                 norm_eps=self.norm_eps,
             )
+            if fused is None:
+                fused = maybe_fused_ihc_head(
+                    chunk,
+                    self.fn_weight,
+                    self.scale,
+                    self.base,
+                    hc_eps=self.hc_eps,
+                    norm_eps=self.norm_eps,
+                )
             if fused is not None:
                 outputs.append(fused)
                 continue

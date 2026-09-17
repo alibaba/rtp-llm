@@ -16,6 +16,7 @@ from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import DenseMLP, Embedding, FMHAImplBase, MlaAttention, RMSNorm
 from rtp_llm.models_py.modules.hy_v4 import Hy4IHCHead, Hy4IHCUnit
+from rtp_llm.models_py.kernels.cuda.hy4_ihc_ops import maybe_fuse_post_pre
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
@@ -186,11 +187,32 @@ class Hy4DecoderLayer(nn.Module):
             return_topk=True,
             **attn_kwargs,
         )
-        channels = self.attn_ihc.post(attn_output, channels, attn_post_gate)
-
         mlp_input_fp8 = None
         mlp_input_scale = None
-        if getattr(self, "_fuse_mlp_ihc_mxfp8", False):
+        fused_post_pre = None
+        # The hpc AOT kernel is valid only for this exact adjacent boundary:
+        # attention post -> MLP pre -> post-attention RMSNorm.  The MXFP8
+        # route retains its existing packed-scale producer instead.
+        if not getattr(self, "_fuse_mlp_ihc_mxfp8", False):
+            fused_post_pre = maybe_fuse_post_pre(
+                attn_output,
+                channels,
+                attn_post_gate,
+                self.mlp_ihc.fn_weight,
+                self.mlp_ihc.scale,
+                self.mlp_ihc.base,
+                ihc_norm_eps=self.mlp_ihc.norm_eps,
+                hc_eps=self.mlp_ihc.hc_eps,
+                magnitude=self.mlp_ihc.magnitude,
+                rms_weight=self.post_attention_layernorm.weight.data,
+                rms_eps=self.post_attention_layernorm.variance_epsilon,
+            )
+        if fused_post_pre is not None:
+            channels, mlp_input, mlp_post_gate = fused_post_pre
+        else:
+            channels = self.attn_ihc.post(attn_output, channels, attn_post_gate)
+
+        if fused_post_pre is None and getattr(self, "_fuse_mlp_ihc_mxfp8", False):
             (
                 mlp_input,
                 mlp_post_gate,
@@ -199,7 +221,7 @@ class Hy4DecoderLayer(nn.Module):
             ) = self.mlp_ihc.pre_normed_mxfp8(
                 channels, self.post_attention_layernorm
             )
-        else:
+        elif fused_post_pre is None:
             mlp_input, mlp_post_gate = self.mlp_ihc.pre_normed(
                 channels, self.post_attention_layernorm
             )

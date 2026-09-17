@@ -20,6 +20,7 @@
 #include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
 #include "rtp_llm/models_py/bindings/cuda/UserBuffersOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FakeBalanceExpertOp.h"
+#include "rtp_llm/models_py/bindings/cuda/Hy4IhcOp.h"
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
@@ -108,6 +109,32 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("weight"),
                   py::arg("beta"),
                   py::arg("eps"));
+
+    rtp_ops_m.def("fuse_hy4_ihc_head",
+                  &fuse_hy4_ihc_head,
+                  "AOT fused HY4 iHC head kernel",
+                  py::arg("channels"),
+                  py::arg("fn_weight"),
+                  py::arg("scale"),
+                  py::arg("base"),
+                  py::arg("norm_eps"),
+                  py::arg("hc_eps"));
+
+    rtp_ops_m.def("fuse_hy4_ihc_post_pre",
+                  &fuse_hy4_ihc_post_pre,
+                  "AOT fused HY4 iHC post followed by next pre/RMSNorm kernel",
+                  py::arg("block_output"),
+                  py::arg("residual"),
+                  py::arg("post_gate"),
+                  py::arg("next_fn_weight"),
+                  py::arg("next_scale"),
+                  py::arg("next_base"),
+                  py::arg("ihc_norm_eps"),
+                  py::arg("hc_eps"),
+                  py::arg("magnitude"),
+                  py::arg("rms_weight"),
+                  py::arg("rms_eps"),
+                  py::arg("cast_bfloat_for_norm") = true);
 
     rtp_ops_m.def("per_token_group_quant_int8",
                   &per_token_group_quant_int8,
