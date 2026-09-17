@@ -28,7 +28,7 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
                                                        size_t                   device_disk_staging_block_count,
                                                        size_t                   max_descriptors_per_batch,
                                                        size_t                   transfer_worker_count,
-                                                       size_t transfer_queue_max_size,
+                                                       size_t                   transfer_queue_max_size,
                                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
     group_sets_(std::move(group_sets)), transfer_worker_count_(transfer_worker_count) {
     RTP_LLM_CHECK(max_descriptors_per_batch > 0);
@@ -38,9 +38,9 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
     RTP_LLM_CHECK(transfer_task_pool_->start());
     device_host_executor_ = std::make_unique<DeviceHostTransferExecutor>(
         *transfer_task_pool_, max_descriptors_per_batch, std::move(device_host_options), metrics_reporter);
-    host_disk_executor_ = std::make_unique<HostDiskTransferExecutor>(
-        *transfer_task_pool_, max_descriptors_per_batch, metrics_reporter);
-    if (enable_disk_cache) {
+    host_disk_executor_ =
+        std::make_unique<HostDiskTransferExecutor>(*transfer_task_pool_, max_descriptors_per_batch, metrics_reporter);
+    if (enable_disk_cache && !group_sets_.empty()) {
         device_disk_executor_ = std::make_unique<DeviceDiskTransferExecutor>(*device_host_executor_,
                                                                              *host_disk_executor_,
                                                                              group_sets_,

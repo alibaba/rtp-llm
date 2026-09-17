@@ -716,6 +716,27 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteMatchSkipsBackendWhenNoGroupSupportsPref
     EXPECT_EQ(backend->matchCalls(), 0u);
 }
 
+TEST_F(BlockTreeCacheFactoryTest, DiskCacheAllowsNoPrefixReusableGroups) {
+    auto config   = makeSingleConfig();
+    auto policies = config.groupPoliciesSnapshot();
+    ASSERT_EQ(policies.size(), 1u);
+    policies[0].enable_prefix_reuse = false;
+    config.setGroupPolicies(std::move(policies));
+
+    auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_empty_l3");
+    KVCacheConfig                            kv_cache_config;
+    kv_cache_config.enable_disk_cache      = true;
+    kv_cache_config.disk_cache_size_mb     = 1;
+    kv_cache_config.disk_cache_paths       = disk_dir.path;
+    kv_cache_config.disk_cache_buffered_io = true;
+
+    auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{});
+    ASSERT_NE(cache, nullptr);
+    EXPECT_TRUE(cache->groupSets().empty());
+    EXPECT_TRUE(cache->isDiskCacheEnabled());
+}
+
 TEST_F(BlockTreeCacheFactoryTest, RemoteMatchReceivesCompleteKeysAndExplicitLocalBoundary) {
     const auto    config    = makeSingleConfig();
     auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
