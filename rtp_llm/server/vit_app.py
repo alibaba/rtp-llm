@@ -29,11 +29,13 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.ops import RoleType
-from rtp_llm.server.mm_cache_metadata import get_mm_cache_metadata
+from rtp_llm.server.mm_cache_metadata import (
+    MM_CACHE_SNAPSHOT_MAX_KEYS,
+    get_mm_cache_keys,
+    get_mm_cache_metadata,
+)
 from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer, create_rpc_server
-
-MM_CACHE_SNAPSHOT_MAX_KEYS = 100000
 
 
 class MMCacheMetadataRequest(BaseModel):
@@ -43,43 +45,16 @@ class MMCacheMetadataRequest(BaseModel):
     timeout_ms: int = Field(default=120000, gt=0)
 
 
-def _get_hash_key_cache(engine: MMProcessEngine):
-    """Return the routing-key index, with compatibility for lightweight fakes."""
-    return getattr(engine, "_hash_key_cache", None)
-
-
 def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
     @app.get("/mm_cache/keys")
     @app.post("/mm_cache/keys")
     def cache_keys():
-        if engine is None or engine.is_proxy_mode:
-            raise HTTPException(status_code=501, detail="worker-local cache required")
-        hash_key_cache = _get_hash_key_cache(engine)
-        if hash_key_cache is None:
-            # Keep older test doubles and mixed-version workers functional.
-            cache = engine._embedding_cache
-            keys = cache.metadata_keys()
-            worker_instance = cache.instance_id
-        else:
-            keys = hash_key_cache.keys(limit=MM_CACHE_SNAPSHOT_MAX_KEYS)
-            worker_instance = hash_key_cache.instance_id
-        tiers = engine._embedding_cache.resident_tiers(limit=MM_CACHE_SNAPSHOT_MAX_KEYS)
-        # Keep recent routing hashes first, then fill the snapshot with embeddings.
-        selected = set(keys)
-        for key in tiers:
-            if len(selected) >= MM_CACHE_SNAPSHOT_MAX_KEYS:
-                break
-            selected.add(key)
-        tiers = {key: tier for key, tier in tiers.items() if key in selected}
-        if len(keys) > MM_CACHE_SNAPSHOT_MAX_KEYS:
-            raise HTTPException(status_code=413, detail="cache key snapshot too large")
-        return {
-            "worker_instance": worker_instance,
-            "feature_hash_version": 1,
-            "keys": keys,
-            "gpu_embedding_keys": [key for key, tier in tiers.items() if tier == "gpu"],
-            "cpu_embedding_keys": [key for key, tier in tiers.items() if tier == "cpu"],
-        }
+        try:
+            return get_mm_cache_keys(engine, MM_CACHE_SNAPSHOT_MAX_KEYS)
+        except NotImplementedError as error:
+            raise HTTPException(status_code=501, detail=str(error)) from error
+        except OverflowError as error:
+            raise HTTPException(status_code=413, detail=str(error)) from error
 
     @app.post("/mm_cache/metadata")
     def cache_metadata(request: MMCacheMetadataRequest, raw_request: RawRequest):

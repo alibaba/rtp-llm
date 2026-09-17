@@ -1,6 +1,16 @@
 package org.flexlb.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import io.grpc.Server;
+import io.grpc.netty.NettyServerBuilder;
+import io.grpc.stub.StreamObserver;
+import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.EngineRpcService.CacheStatusPB;
+import org.flexlb.engine.grpc.EngineRpcService.CacheVersionPB;
+import org.flexlb.engine.grpc.EngineRpcService.MultimodalCacheStatusPB;
+import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
+import org.flexlb.engine.grpc.monitor.GrpcReporter;
+import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -10,17 +20,18 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.transport.GeneralHttpNettyService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import reactor.core.publisher.Mono;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -39,7 +50,7 @@ class VitCacheDirectoryTest {
     private final Map<String, WorkerStatus> live = new HashMap<>();
     private WorkerStatus a;
     private WorkerStatus b;
-    private GeneralHttpNettyService http;
+    private EngineGrpcClient grpc;
     private LBStatusConsistencyService consistency;
 
     @BeforeEach
@@ -64,9 +75,9 @@ class VitCacheDirectoryTest {
         });
         var config = mock(ConfigService.class);
         when(config.loadBalanceConfig()).thenReturn(new FlexlbConfig());
-        http = mock(GeneralHttpNettyService.class);
+        grpc = mock(EngineGrpcClient.class);
         consistency = mock(LBStatusConsistencyService.class);
-        directory = new VitCacheDirectory(workers, config, new ResourceMeasureFactory(List.of()), http, consistency);
+        directory = new VitCacheDirectory(workers, config, new ResourceMeasureFactory(List.of()), grpc, consistency);
     }
 
     @AfterEach
@@ -94,21 +105,14 @@ class VitCacheDirectoryTest {
     }
 
     private void snapshot(WorkerStatus worker, String epoch, String... keys) {
-        var response = new VitCacheDirectory.CacheKeys();
-        response.setFeatureHashVersion(1);
-        response.setWorkerInstance(epoch);
-        response.setKeys(List.of(keys));
-        directory.replace(worker, response);
+        directory.replace(worker, MultimodalCacheStatusPB.newBuilder()
+                .setFeatureHashVersion(1).setWorkerInstance(epoch).addAllKeys(List.of(keys)).build());
     }
 
     private void tierSnapshot(WorkerStatus worker, List<String> hashes, List<String> gpu, List<String> cpu) {
-        var response = new VitCacheDirectory.CacheKeys();
-        response.setFeatureHashVersion(1);
-        response.setWorkerInstance("instance");
-        response.setKeys(hashes);
-        response.setGpuEmbeddingKeys(gpu);
-        response.setCpuEmbeddingKeys(cpu);
-        directory.replace(worker, response);
+        directory.replace(worker, MultimodalCacheStatusPB.newBuilder()
+                .setFeatureHashVersion(1).setWorkerInstance("instance").addAllKeys(hashes)
+                .addAllGpuEmbeddingKeys(gpu).addAllCpuEmbeddingKeys(cpu).build());
     }
 
     @Test
@@ -165,14 +169,72 @@ class VitCacheDirectoryTest {
     }
 
     @Test
-    void acceptsTierFieldsFromWorkerJson() throws Exception {
-        var response = new ObjectMapper().readValue("""
-                {"worker_instance":"a1","feature_hash_version":1,"keys":["hash"],
-                 "gpu_embedding_keys":["gpu"],"cpu_embedding_keys":["cpu"]}
-                """, VitCacheDirectory.CacheKeys.class);
-        directory.replace(a, response);
+    void refreshUsesGrpcPortAndPreservesTierFields() {
+        var snapshot = MultimodalCacheStatusPB.newBuilder().setWorkerInstance("a1")
+                .setFeatureHashVersion(1).addKeys("hash")
+                .addGpuEmbeddingKeys("gpu").addCpuEmbeddingKeys("cpu").build();
+        var request = CacheVersionPB.newBuilder().setNeedCacheKeys(true).build();
+        when(grpc.getMultimodalCacheStatus(a.getIp(), 8001, request, 2000))
+                .thenReturn(CacheStatusPB.newBuilder().setMultimodalCache(snapshot).build());
+        when(grpc.getMultimodalCacheStatus(b.getIp(), 8001, request, 2000))
+                .thenReturn(CacheStatusPB.getDefaultInstance());
+        directory.refresh();
+        directory.refresh();
+        verify(grpc, times(1)).getMultimodalCacheStatus(a.getIp(), 8001, request, 2000);
+        verify(grpc, times(1)).getMultimodalCacheStatus(b.getIp(), 8001, request, 2000);
         for (String key : List.of("hash", "gpu", "cpu")) {
             assertEquals(a.getIp(), directory.select(context(key), null).getServerIp());
+        }
+    }
+
+    @Test
+    void absentGrpcDirectoryKeepsKnownKeysButExplicitEmptyDirectoryClearsThem() {
+        tierSnapshot(a, List.of("image"), List.of("image"), List.of());
+        snapshot(b, "b1", "image");
+        when(grpc.getMultimodalCacheStatus(any(), eq(8001), any(), eq(2000L)))
+                .thenReturn(CacheStatusPB.getDefaultInstance());
+        directory.refresh();
+        assertEquals(a.getIp(), directory.select(context("image"), null).getServerIp());
+        snapshot(a, "a1");
+        assertEquals(b.getIp(), directory.select(context("image"), null).getServerIp());
+    }
+
+    @Test
+    void grpcTransportAcceptsLargeDirectoryAndReusesClientChannel() throws Exception {
+        List<String> keys = IntStream.range(0, 100_000)
+                .mapToObj(i -> String.format("%064x", i)).toList();
+        var response = CacheStatusPB.newBuilder().setMultimodalCache(
+                MultimodalCacheStatusPB.newBuilder().setWorkerInstance("large-worker")
+                        .setFeatureHashVersion(1).addAllKeys(keys).addAllGpuEmbeddingKeys(keys)).build();
+        assertTrue(response.getSerializedSize() > 8 * 1024 * 1024);
+        var received = new AtomicReference<CacheVersionPB>();
+        Server server = NettyServerBuilder.forPort(0)
+                .addService(new MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase() {
+                    @Override
+                    public void getCacheStatus(CacheVersionPB request, StreamObserver<CacheStatusPB> observer) {
+                        received.set(request);
+                        observer.onNext(response);
+                        observer.onCompleted();
+                    }
+                }).build().start();
+        var executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(2);
+        var eventLoop = new NioEventLoopGroup(1);
+        var client = new EngineGrpcClient(mock(CustomNameResolver.class), executor, eventLoop,
+                null, null, mock(GrpcReporter.class));
+        try {
+            var request = CacheVersionPB.newBuilder().setNeedCacheKeys(true).build();
+            for (int i = 0; i < 2; i++) {
+                var actual = client.getMultimodalCacheStatus("127.0.0.1", server.getPort(), request, 5000);
+                assertEquals(response, actual);
+                assertTrue(received.get().getNeedCacheKeys());
+            }
+            directory.replace(a, response.getMultimodalCache());
+            assertEquals(a.getIp(), directory.select(context(keys.get(keys.size() - 1)), null).getServerIp());
+        } finally {
+            client.shutdownChannelPool();
+            server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+            eventLoop.shutdownGracefully(0, 5, TimeUnit.SECONDS).sync();
+            executor.shutdownNow();
         }
     }
 
@@ -237,18 +299,18 @@ class VitCacheDirectoryTest {
         when(consistency.isNeedConsistency()).thenReturn(true);
         when(consistency.isMaster()).thenReturn(false);
         directory.refresh();
-        verifyNoInteractions(http);
-        when(http.request(any(), any(), eq("/mm_cache/keys"), eq(VitCacheDirectory.CacheKeys.class)))
-                .thenReturn(Mono.error(new RuntimeException("unavailable")));
+        verifyNoInteractions(grpc);
+        when(grpc.getMultimodalCacheStatus(any(), eq(8001), any(), eq(2000L)))
+                .thenThrow(new RuntimeException("unavailable"));
         when(consistency.isMaster()).thenReturn(true);
         directory.refresh();
         assertEquals(a.getIp(), directory.select(context("image"), null).getServerIp());
         directory.refresh();
-        verify(http, times(2)).request(any(), any(), eq("/mm_cache/keys"), eq(VitCacheDirectory.CacheKeys.class));
+        verify(grpc, times(2)).getMultimodalCacheStatus(any(), eq(8001), any(), eq(2000L));
         when(consistency.isMaster()).thenReturn(false);
         directory.refresh();
         when(consistency.isMaster()).thenReturn(true);
         directory.refresh();
-        verify(http, times(4)).request(any(), any(), eq("/mm_cache/keys"), eq(VitCacheDirectory.CacheKeys.class));
+        verify(grpc, times(4)).getMultimodalCacheStatus(any(), eq(8001), any(), eq(2000L));
     }
 }

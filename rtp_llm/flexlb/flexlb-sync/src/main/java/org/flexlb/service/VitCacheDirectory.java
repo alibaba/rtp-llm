@@ -1,8 +1,5 @@
 package org.flexlb.service;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import lombok.Data;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
@@ -12,18 +9,19 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.EngineRpcService.CacheVersionPB;
+import org.flexlb.engine.grpc.EngineRpcService.MultimodalCacheStatusPB;
 import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
-import java.net.URI;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -44,7 +42,7 @@ public class VitCacheDirectory {
     private final EngineWorkerStatus workers;
     private final ConfigService config;
     private final ResourceMeasureFactory resources;
-    private final GeneralHttpNettyService http;
+    private final EngineGrpcClient grpc;
     private final LBStatusConsistencyService consistency;
     private final Map<String, Snapshot> snapshots = new HashMap<>();
     private final Map<String, Set<String>> owners = new HashMap<>();
@@ -77,27 +75,13 @@ public class VitCacheDirectory {
         }
     }
 
-    @Data
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    public static class CacheKeys {
-        @JsonProperty("worker_instance")
-        private String workerInstance;
-        @JsonProperty("feature_hash_version")
-        private int featureHashVersion;
-        private List<String> keys;
-        @JsonProperty("gpu_embedding_keys")
-        private List<String> gpuEmbeddingKeys;
-        @JsonProperty("cpu_embedding_keys")
-        private List<String> cpuEmbeddingKeys;
-    }
-
     public VitCacheDirectory(EngineWorkerStatus workers, ConfigService config,
-                             ResourceMeasureFactory resources, GeneralHttpNettyService http,
+                             ResourceMeasureFactory resources, EngineGrpcClient grpc,
                              LBStatusConsistencyService consistency) {
         this.workers = workers;
         this.config = config;
         this.resources = resources;
-        this.http = http;
+        this.grpc = grpc;
         this.consistency = consistency;
     }
 
@@ -133,10 +117,12 @@ public class VitCacheDirectory {
                 }
                 wasMaster = true;
             }
-            Flux.fromIterable(due).flatMap(worker -> http.request(Map.of(),
-                    URI.create("http://" + worker.getIpPort()), "/mm_cache/keys", CacheKeys.class)
-                    .timeout(Duration.ofSeconds(2))
-                    .doOnNext(keys -> replace(worker, keys))
+            CacheVersionPB request = CacheVersionPB.newBuilder().setNeedCacheKeys(true).build();
+            Flux.fromIterable(due).flatMap(worker -> Mono.fromCallable(() -> grpc.getMultimodalCacheStatus(
+                            worker.getIp(), CommonUtils.toGrpcPort(worker.getPort()), request, 2000))
+                    .subscribeOn(Schedulers.boundedElastic())
+                    .filter(response -> response.hasMultimodalCache())
+                    .doOnNext(response -> replace(worker, response.getMultimodalCache()))
                     .onErrorResume(error -> {
                         Logger.debug("ViT cache snapshot unavailable for {}: {}", worker.getIpPort(), error.toString());
                         return Mono.empty();
@@ -146,19 +132,17 @@ public class VitCacheDirectory {
         }
     }
 
-    synchronized void replace(WorkerStatus worker, CacheKeys response) {
+    synchronized void replace(WorkerStatus worker, MultimodalCacheStatusPB response) {
         Map<String, WorkerStatus> live = workers.selectModelWorkerStatus(RoleType.VIT, null);
         if (live.get(worker.getIpPort()) != worker || !worker.isAlive()
                 || StringUtils.isBlank(response.getWorkerInstance()) || response.getFeatureHashVersion() != 1
-                || response.getKeys() == null || !validKeys(response.getKeys())
-                || !validKeys(response.getGpuEmbeddingKeys()) || !validKeys(response.getCpuEmbeddingKeys())) {
+                || !validKeys(response.getKeysList())
+                || !validKeys(response.getGpuEmbeddingKeysList()) || !validKeys(response.getCpuEmbeddingKeysList())) {
             return;
         }
-        Set<String> keys = Set.copyOf(response.getKeys());
-        Set<String> gpuKeys = response.getGpuEmbeddingKeys() == null
-                ? Set.of() : Set.copyOf(response.getGpuEmbeddingKeys());
-        Set<String> cpuKeys = response.getCpuEmbeddingKeys() == null
-                ? Set.of() : Set.copyOf(response.getCpuEmbeddingKeys());
+        Set<String> keys = Set.copyOf(response.getKeysList());
+        Set<String> gpuKeys = Set.copyOf(response.getGpuEmbeddingKeysList());
+        Set<String> cpuKeys = Set.copyOf(response.getCpuEmbeddingKeysList());
         Set<String> allKeys = new HashSet<>(keys);
         allKeys.addAll(gpuKeys);
         allKeys.addAll(cpuKeys);

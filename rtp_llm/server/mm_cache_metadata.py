@@ -11,6 +11,41 @@ MAX_METADATA_ROWS = 1048576
 MAX_METADATA_BYTES = 16 * 1024 * 1024
 
 
+MM_CACHE_SNAPSHOT_MAX_KEYS = 100000
+MM_CACHE_SNAPSHOT_MAX_BYTES = 16 * 1024 * 1024
+
+
+def get_mm_cache_keys(engine, max_keys=MM_CACHE_SNAPSHOT_MAX_KEYS):
+    """Snapshot routing hashes and resident tiers without reading tensor data."""
+    if engine is None or engine.is_proxy_mode:
+        raise NotImplementedError("worker-local cache required")
+    hash_key_cache = getattr(engine, "_hash_key_cache", None)
+    if hash_key_cache is None:
+        cache = engine._embedding_cache
+        keys = cache.metadata_keys()
+        worker_instance = cache.instance_id
+    else:
+        keys = hash_key_cache.keys(limit=max_keys)
+        worker_instance = hash_key_cache.instance_id
+    tiers = engine._embedding_cache.resident_tiers(limit=max_keys)
+    # Keep recent routing hashes first, then fill the snapshot with embeddings.
+    selected = set(keys)
+    for key in tiers:
+        if len(selected) >= max_keys:
+            break
+        selected.add(key)
+    tiers = {key: tier for key, tier in tiers.items() if key in selected}
+    if len(keys) > max_keys:
+        raise OverflowError("cache key snapshot too large")
+    return {
+        "worker_instance": worker_instance,
+        "feature_hash_version": 1,
+        "keys": keys,
+        "gpu_embedding_keys": [key for key, tier in tiers.items() if tier == "gpu"],
+        "cpu_embedding_keys": [key for key, tier in tiers.items() if tier == "cpu"],
+    }
+
+
 def get_mm_cache_metadata(
     engine,
     keys,

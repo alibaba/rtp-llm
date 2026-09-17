@@ -4,7 +4,7 @@ import threading
 import unittest
 from concurrent import futures
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import grpc
 import torch
@@ -16,6 +16,7 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
     multimodal_cache_keys,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    CacheVersionPB,
     MultimodalHashRequestPB,
     MultimodalHashResponsePB,
     MultimodalInputsPB,
@@ -102,6 +103,79 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         return MultimodalHashRequestPB(
             keys=keys or self.keys, inputs=inputs, timeout_ms=2000
         )
+
+    async def test_status_poll_does_not_snapshot_keys(self):
+        with patch.object(self.engine._hash_key_cache, "keys") as hashes, patch.object(
+            self.engine._embedding_cache, "resident_tiers"
+        ) as tiers:
+            response = await self.stub.GetCacheStatus(CacheVersionPB(), timeout=2)
+        self.assertFalse(response.HasField("multimodal_cache"))
+        self.assertEqual(response.ByteSize(), 0)
+        hashes.assert_not_called()
+        tiers.assert_not_called()
+
+    async def test_cache_directory_tracks_hashes_and_embedding_eviction(self):
+        self.engine._hash_key_cache.put("hash-only", self.hashes)
+        self.engine._hash_key_cache.put("ready", self.hashes)
+        _, ready = self.engine._embedding_cache.try_acquire("ready")
+        ready.complete(torch.ones(2, 4), self.hashes)
+        _, embedding_only = self.engine._embedding_cache.try_acquire("embedding-only")
+        embedding_only.complete(torch.ones(1))
+        _, pending = self.engine._embedding_cache.try_acquire("pending")
+        request = CacheVersionPB(need_cache_keys=True)
+        response = await self.stub.GetCacheStatus(request, timeout=2)
+        self.assertTrue(response.HasField("multimodal_cache"))
+        cache = response.multimodal_cache
+        self.assertEqual(cache.worker_instance, self.engine._hash_key_cache.instance_id)
+        self.assertEqual(cache.feature_hash_version, 1)
+        self.assertEqual(set(cache.keys), {"hash-only", "ready"})
+        self.assertEqual(set(cache.cpu_embedding_keys), {"ready", "embedding-only"})
+        self.assertEqual(list(cache.gpu_embedding_keys), [])
+        self.assertFalse(pending.is_done)
+        self.engine.get_embedding_result.assert_not_called()
+
+        self.engine._embedding_cache.remove("ready")
+        response = await self.stub.GetCacheStatus(request, timeout=2)
+        self.assertIn("ready", response.multimodal_cache.keys)
+        self.assertNotIn("ready", response.multimodal_cache.cpu_embedding_keys)
+        self.engine._hash_key_cache.clear()
+        self.engine._embedding_cache.clear()
+        response = await self.stub.GetCacheStatus(request, timeout=2)
+        self.assertTrue(response.HasField("multimodal_cache"))
+        self.assertTrue(response.multimodal_cache.worker_instance)
+        self.assertFalse(response.multimodal_cache.keys)
+        self.assertFalse(response.multimodal_cache.cpu_embedding_keys)
+
+    async def test_cache_directory_preserves_gpu_tier_without_reading_tensors(self):
+        self.engine._hash_key_cache.put("hash", self.hashes)
+        with patch.object(
+            self.engine._embedding_cache,
+            "resident_tiers",
+            return_value={"hash": "gpu", "cpu-only": "cpu"},
+        ):
+            response = await self.stub.GetCacheStatus(
+                CacheVersionPB(need_cache_keys=True), timeout=2
+            )
+        self.assertEqual(list(response.multimodal_cache.gpu_embedding_keys), ["hash"])
+        self.assertEqual(
+            list(response.multimodal_cache.cpu_embedding_keys), ["cpu-only"]
+        )
+        self.engine.get_embedding_result.assert_not_called()
+
+    async def test_cache_directory_rejects_proxy_and_oversized_response(self):
+        self.engine.is_proxy_mode = True
+        with self.assertRaises(grpc.aio.AioRpcError) as error:
+            await self.stub.GetCacheStatus(
+                CacheVersionPB(need_cache_keys=True), timeout=2
+            )
+        self.assertEqual(error.exception.code(), grpc.StatusCode.UNIMPLEMENTED)
+        self.engine.is_proxy_mode = False
+        with patch("rtp_llm.server.vit_rpc_server.MM_CACHE_SNAPSHOT_MAX_BYTES", 1):
+            with self.assertRaises(grpc.aio.AioRpcError) as error:
+                await self.stub.GetCacheStatus(
+                    CacheVersionPB(need_cache_keys=True), timeout=2
+                )
+        self.assertEqual(error.exception.code(), grpc.StatusCode.RESOURCE_EXHAUSTED)
 
     async def test_cold_hot_and_evicted_embedding_preserve_hashes_and_approval(self):
         self.engine._greennet_enabled.return_value = True

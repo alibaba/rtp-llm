@@ -38,7 +38,12 @@ from rtp_llm.multimodal.multimodal_util import (
     trans_mm_input,
 )
 from rtp_llm.ops import MMPreprocessConfig, MMRdmaEncoderOp, MultimodalInput
-from rtp_llm.server.mm_cache_metadata import get_mm_cache_metadata, metadata_to_proto
+from rtp_llm.server.mm_cache_metadata import (
+    MM_CACHE_SNAPSHOT_MAX_BYTES,
+    get_mm_cache_keys,
+    get_mm_cache_metadata,
+    metadata_to_proto,
+)
 from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
@@ -405,7 +410,18 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         return worker_status
 
     def GetCacheStatus(self, request: CacheVersionPB, context):
-        return CacheStatusPB()
+        # Frequent status polls must not build or transfer the routing directory.
+        if not request.need_cache_keys:
+            return CacheStatusPB()
+        try:
+            response = CacheStatusPB(multimodal_cache=get_mm_cache_keys(self.engine))
+            if response.ByteSize() > MM_CACHE_SNAPSHOT_MAX_BYTES:
+                raise OverflowError("cache key snapshot exceeds gRPC response limit")
+            return response
+        except NotImplementedError as error:
+            context.abort(grpc.StatusCode.UNIMPLEMENTED, str(error))
+        except OverflowError as error:
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(error))
 
     def stop(self):
         self.engine.stop()

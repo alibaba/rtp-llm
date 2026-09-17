@@ -443,6 +443,17 @@ message CacheStatusPB {
     int64 block_size = 3;
     int64 version = 4;
     map<int64, bool> cache_keys = 5;
+    // ViT routing directory; populated only when need_cache_keys is true.
+    // Presence distinguishes an empty directory from an unsupported worker.
+    MultimodalCacheStatusPB multimodal_cache = 6;
+}
+
+message MultimodalCacheStatusPB {
+    string worker_instance = 1;
+    uint32 feature_hash_version = 2;
+    repeated string keys = 3;
+    repeated string gpu_embedding_keys = 4;
+    repeated string cpu_embedding_keys = 5;
 }
 
 message UpdateSchedulerInfoRequestPB {
