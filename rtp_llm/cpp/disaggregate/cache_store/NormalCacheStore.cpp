@@ -5,9 +5,7 @@
 
 #include "autil/LockFreeThreadPool.h"
 
-#include <cstring>
 #include <vector>
-#include <sstream>
 #include <stdexcept>
 #include <thread>
 
@@ -22,48 +20,8 @@ const bool kPdDebugEnabled = []() {
     return env != nullptr && std::string(env) == "1";
 }();
 
-const size_t kTcpLoadMaxInflightChunks = []() {
-    constexpr size_t kDefaultMaxInflightChunks = 1;
-    const char*      env                       = std::getenv("CACHE_STORE_TCP_LOAD_MAX_INFLIGHT_CHUNKS");
-    if (env == nullptr || std::strlen(env) == 0) {
-        return kDefaultMaxInflightChunks;
-    }
-    char* end = nullptr;
-    auto  val = std::strtoull(env, &end, 10);
-    if (end == env || val == 0) {
-        return kDefaultMaxInflightChunks;
-    }
-    return static_cast<size_t>(val);
-}();
-
 bool pdDebugEnabled() {
     return kPdDebugEnabled;
-}
-
-std::string summarizeBlocks(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer, size_t limit = 3) {
-    if (request_block_buffer == nullptr) {
-        return "null";
-    }
-    std::ostringstream oss;
-    oss << "request_id=" << request_block_buffer->getRequestId()
-        << " request_key=" << request_block_buffer->getRequestKey()
-        << " blocks=" << request_block_buffer->getBlocksCount() << " bytes=" << request_block_buffer->getBlocksSize();
-    auto   blocks = request_block_buffer->getBlocks();
-    size_t idx    = 0;
-    oss << " sample_keys=[";
-    for (const auto& [key, block] : blocks) {
-        if (idx++ >= limit) {
-            oss << "...";
-            break;
-        }
-        if (idx > 1) {
-            oss << ",";
-        }
-        oss << key << ":" << (block == nullptr ? 0 : block->len)
-            << (block != nullptr && block->gpu_mem ? ":gpu" : ":cpu");
-    }
-    oss << "]";
-    return oss.str();
 }
 
 std::vector<std::shared_ptr<RequestBlockBuffer>>
@@ -141,15 +99,6 @@ chunkTcpLoadBuffersImpl(const std::vector<std::shared_ptr<RequestBlockBuffer>>& 
     flush();
 
     return chunked;
-}
-
-size_t tcpLoadMaxInflightChunks() {
-    // This limit is per load context (one decode request loading from one
-    // prefill peer). In PD with decode DP x prefill TP, total server-side TCP
-    // load fanout is dp_size * request_concurrency * this value per prefill
-    // rank. Keep the default at one rolling chunk per context so large
-    // 20-40MiB TCP responses do not overrun the prefill RPC worker pool.
-    return kTcpLoadMaxInflightChunks;
 }
 
 }  // namespace
