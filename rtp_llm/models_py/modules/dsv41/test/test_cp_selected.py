@@ -136,7 +136,7 @@ class CPSelectedRowsTest(unittest.TestCase):
             0,
         )
         empty = _selected_local_rows(
-            pool, table, wanted[:0], entries, entry_bytes, rank
+            pool, table, wanted[:0], entries, entry_bytes, rank, 8
         )
         self.assertEqual(empty.shape, (0, entry_bytes))
 
