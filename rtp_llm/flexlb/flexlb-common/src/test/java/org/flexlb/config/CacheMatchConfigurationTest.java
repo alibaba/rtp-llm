@@ -3,6 +3,10 @@ package org.flexlb.config;
 import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.ServiceRoute;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+
+import java.util.List;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -10,6 +14,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class CacheMatchConfigurationTest {
 
@@ -84,6 +91,53 @@ class CacheMatchConfigurationTest {
 
         assertTrue("service-1".equals(selectedServiceId)
                 || "service-2".equals(selectedServiceId));
+    }
+
+    @Test
+    void publishesKvcmRuntimeConfigUpdatesToReaders() {
+        ConfigService configService = mock(ConfigService.class);
+        FlexlbConfig initial = kvcmConfig(false);
+        when(configService.loadBalanceConfig()).thenReturn(initial);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Consumer<FlexlbConfig>> listener =
+                ArgumentCaptor.forClass(Consumer.class);
+
+        CacheMatchConfiguration configuration = new CacheMatchConfiguration(
+                modelMetaConfig(route("service-1", true)), configService);
+        assertSame(initial.kvcmCacheMatching(), configuration.getKvcmRuntimeConfig());
+        verify(configService).addUpdateListener(listener.capture());
+
+        FlexlbConfig updated = kvcmConfig(false);
+        updated.kvcmCacheMatching().setGlobalKvsHostCount(7);
+        updated.kvcmCacheMatching().setEnableP2p(true);
+        updated.kvcmCacheMatching().setMedium(List.of("kvs"));
+        listener.getValue().accept(updated);
+
+        assertEquals(7, configuration.getKvcmRuntimeConfig().getGlobalKvsHostCount());
+        assertTrue(configuration.getKvcmRuntimeConfig().isEnableP2p());
+        assertEquals(List.of("kvs"), configuration.getKvcmRuntimeConfig().getMedium());
+        assertEquals(initial.kvcmCacheMatching().getLocalStandby(),
+                configuration.getLocalStandbyConfig(),
+                "local standby stays fixed for the process lifetime");
+    }
+
+    @Test
+    void keepsKvcmRuntimeConfigWhenAnUpdateActivatesAnotherMode() {
+        ConfigService configService = mock(ConfigService.class);
+        FlexlbConfig initial = kvcmConfig(false);
+        when(configService.loadBalanceConfig()).thenReturn(initial);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Consumer<FlexlbConfig>> listener =
+                ArgumentCaptor.forClass(Consumer.class);
+
+        CacheMatchConfiguration configuration = new CacheMatchConfiguration(
+                modelMetaConfig(route("service-1", true)), configService);
+        verify(configService).addUpdateListener(listener.capture());
+
+        listener.getValue().accept(new FlexlbConfig());
+
+        assertSame(initial.kvcmCacheMatching(), configuration.getKvcmRuntimeConfig());
+        assertEquals(CacheMatchMode.KVCM, configuration.getConfiguredMode());
     }
 
     private FlexlbConfig kvcmConfig(boolean autoSwitch) {

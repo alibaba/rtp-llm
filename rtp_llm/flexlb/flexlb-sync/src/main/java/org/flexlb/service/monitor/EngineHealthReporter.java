@@ -42,8 +42,8 @@ import static org.flexlb.constant.MetricConstant.CACHE_BLOCK_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS;
-import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_P2P_TOTAL_MATCH_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS;
@@ -230,7 +230,7 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(CACHE_HIT_COMPARISON_KVCM_P2P_TOTAL_MATCH_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -797,14 +797,13 @@ public class EngineHealthReporter {
     public void reportKvcmSelectedMatch(RoleType roleType,
                                         String engineIp,
                                         long localMatchTokens,
-                                        long p2pFetchTokens,
-                                        long p2pTotalMatchTokens,
+                                        long globalMatchTokens,
                                         boolean available) {
         if (!available) {
             return;
         }
         cacheMetricsReporter.reportKvcmSelectedMatch(
-                roleType, engineIp, localMatchTokens, p2pFetchTokens, p2pTotalMatchTokens);
+                roleType, engineIp, localMatchTokens, globalMatchTokens);
     }
 
     public void reportCacheHitComparisonMetrics(String modelName,
@@ -828,8 +827,8 @@ public class EngineHealthReporter {
         if (kvcmDetails != null) {
             monitor.report(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS,
                     metricTags, kvcmDetails.local().delta());
-            monitor.report(CACHE_HIT_COMPARISON_KVCM_P2P_TOTAL_MATCH_DELTA_TOKENS,
-                    metricTags, kvcmDetails.p2pTotal().delta());
+            monitor.report(CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS,
+                    metricTags, kvcmDetails.global().delta());
         }
         long inputTokens = comparison.inputTokens();
         if (inputTokens > 0) {

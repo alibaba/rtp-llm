@@ -6,16 +6,16 @@ import java.util.stream.Collectors;
 /**
  * Cache match details for one target worker.
  *
- * <p>{@code p2pTotalMatchBlocks} includes {@code localMatchBlocks}. The three fields are the
- * raw KVCM response; routing strategies apply their own P2P policy when scoring a worker.
+ * <p>{@code globalMatchBlocks} includes {@code localMatchBlocks} and additionally counts
+ * remote-source hits. Both fields are the raw KVCM response; routing strategies apply
+ * their own remote policy when scoring a worker.
  */
 public record HostCacheMatch(
         long localMatchBlocks,
-        long p2pFetchBlocks,
-        long p2pTotalMatchBlocks) {
+        long globalMatchBlocks) {
 
     public static HostCacheMatch local(long matchBlocks) {
-        return new HostCacheMatch(matchBlocks, 0, matchBlocks);
+        return new HostCacheMatch(matchBlocks, matchBlocks);
     }
 
     /**

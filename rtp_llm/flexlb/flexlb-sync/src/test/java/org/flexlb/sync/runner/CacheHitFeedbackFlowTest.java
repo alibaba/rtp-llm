@@ -89,7 +89,7 @@ class CacheHitFeedbackFlowTest {
         config.setDispatcher(DispatcherConfig.nonBatch());
         config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator().setExpression("sum(computeTokens)");
         var affinity = new RoutingConfig.CacheAffinityConfig();
-        affinity.setP2pHitDiscount(0.5);
+        affinity.setRemoteDiscount(0.5);
         config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
         ConfigService configs = mock(ConfigService.class);
         when(configs.loadBalanceConfig()).thenReturn(config);
@@ -114,7 +114,7 @@ class CacheHitFeedbackFlowTest {
                         CacheMatchSource.LOCAL_STANDBY, 1, 100)));
         KvcmCacheMatchProvider kvcm = mock(KvcmCacheMatchProvider.class);
         when(kvcm.findMatchingEngines(anyString(), anyList(), anyLong(), any(), anyString()))
-                .thenReturn(Map.of(worker.getLogicalIpPort(), new HostCacheMatch(2, 4, 6)));
+                .thenReturn(Map.of(worker.getLogicalIpPort(), new HostCacheMatch(2, 6)));
         when(failover.activeSource()).thenReturn(CacheMatchSource.KVCM);
         var query = new CacheMatchQueryOrchestrator(mock(LocalSyncCacheMatchProvider.class), kvcm, standby,
                 mock(LocalStandbyCacheManager.class), failover, comparison, cacheMetrics, cacheConfig);
@@ -152,8 +152,8 @@ class CacheHitFeedbackFlowTest {
         assertEquals(400, comparison.path("kvcm").path("hit").asLong());
         assertEquals(100, comparison.path("kvcm").path("delta").asLong());
         assertEquals(200, comparison.path("kvcm").path("local").path("hit").asLong());
-        assertEquals(600, comparison.path("kvcm").path("p2pTotal").path("hit").asLong());
-        assertEquals(-100, comparison.path("kvcm").path("p2pTotal").path("delta").asLong());
+        assertEquals(600, comparison.path("kvcm").path("global").path("hit").asLong());
+        assertEquals(-100, comparison.path("kvcm").path("global").path("delta").asLong());
         assertEquals(300, comparison.path("localStandby").path("hit").asLong());
         assertEquals(200, comparison.path("localStandby").path("delta").asLong());
         verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_DELTA_TOKENS), any(), eq(100.0));

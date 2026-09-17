@@ -145,7 +145,8 @@ master forwarding 透传 protobuf 响应。物理地址字段与既有 service p
 `CacheAwareService.findMatchingEngines(CacheMatchQuery)` 取得 cache 匹配，因此 PREFILL 和
 PDFUSION 的 cost-based 路径也遵循 [04-worker-sync-and-cache](04-worker-sync-and-cache.md) 的
 源选择：`LOCAL_SYNC`、`KVCM` 或 KVCM 不可用时的 `LOCAL_STANDBY`。本地命中按全量折算；KVCM
-返回的 P2P 增量命中按 `cacheAffinity.p2pHitDiscount` 折算（默认 `0.2`），再进入原有的成本估算。
+返回的远端增量命中（`global - local`，负值按 0 处理）按 `cacheAffinity.remoteDiscount`
+折算（默认 `0.2`，取值范围 `[0, 1]`），再进入原有的成本估算。
 批量策略先按总预测 TTFT 建立基线，再在每条请求自己的 `maxExtraTtftMs` 上限内提高总缓存命中；
 批内虚拟工作按原提交顺序累积，并共享 worker 状态快照中的可用 KV 与 delivery request 容量。
 规划不预留真实容量，逐请求发布仍执行现有精确容量检查与回滚。批量入口只有一条请求时直接复用

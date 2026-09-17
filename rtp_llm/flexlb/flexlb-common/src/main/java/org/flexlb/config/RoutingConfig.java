@@ -90,8 +90,8 @@ public final class RoutingConfig {
 
         /** Minimum reusable-prefix percentage required before affinity applies. */
         private double minPrefixHitPercent = 5;
-        /** Credit applied to P2P-only cache matches when estimating effective hit tokens. */
-        private double p2pHitDiscount = 0.2;
+        /** Credit applied to remote-source cache matches when estimating effective hit tokens. */
+        private double remoteDiscount = 0.2;
         /**
          * Optional guard for local lifecycle work plus this request's uncached tokens.
          * Zero disables the guard.

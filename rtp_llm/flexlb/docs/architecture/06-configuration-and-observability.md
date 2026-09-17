@@ -166,8 +166,10 @@ UniConfig / Nacos 的 v1 部分更新示例：
 - `observability.cacheHit`：recent-key window、指标和理论命中日志。
 - `observability.logging`：FlexLB logger group 级别与 root/PV stdout 开关。
 - `serviceDiscovery`：connect/read timeout、poll interval 与连接池运行参数。
-- `cacheMatching`：`LOCAL_SYNC` / `KVCM` tagged union；KVCM 分支拥有查询、健康、P2P
-  和 Local Standby 参数。
+- `cacheMatching`：`LOCAL_SYNC` / `KVCM` tagged union；KVCM 分支拥有查询、健康、远端命中
+  （`medium` / `globalKvsHostCount` / `enableP2p`）和 Local Standby 参数。除
+  `leaderRefreshIntervalMs`、`localStandby.*` 与 `type` 在启动时固定外，KVCM 运行参数
+  由 `CacheMatchConfiguration` 的配置监听器发布，更新后即时生效。
 - `optimizer`：启用开关和服务发现轮询间隔。
 - `consistency`：`NONE` / `ZOOKEEPER` tagged union；ZooKeeper 分支拥有连接和 master
   刷新参数。
@@ -259,7 +261,7 @@ objective 的有符号差值。`globalPlanning` 只是快照规划证据，不�
 Engine 的 `prefixLengthValid`
 表示实际命中值有效；有效的 0 表示零命中，无效值不参与差异计算。每个关联记录最多生成一次
 `cache_hit_comparison` 和一次 `prefill_worker_status`。比较事件包含实际命中、路由预测、
-KVCM 本地匹配、KVCM 本地加 P2P 总匹配，以及 Local Standby 预测；差值统一为实际值减预测值。
+KVCM 本地匹配、KVCM 本地加远端的 global 总匹配，以及 Local Standby 预测；差值统一为实际值减预测值。
 预测关联最多保留 100,000 条，保存期限为一小时。Local Standby 对照异步完成，反馈等待上限
 为一秒；不可用时省略 Standby 对照，其余比较正常输出。观测回调在 Worker 状态锁外执行。
 
@@ -277,7 +279,7 @@ PV 不输出 `inputIdsCount`、`requestMessageBytes`、`hashWaitUs`、`hashUs` �
 `cacheMatchSelections` 仅记录候选快照未覆盖或值不同的信息。回放支持顶层终态字段和嵌套终态字段，
 并从选中候选读取缓存匹配与选择原因。Schedule 协议响应保留请求 ID，不包含 Master 地址；`/rtp_llm/master/info` 提供 Master 地址供客户端心跳识别。
 缓存对比事件在 `source=KVCM` 时通过 `kvcm.hit/delta` 表达调度采用的预测，省略 `routing`；
-其他来源使用 `routing`。实际命中、KVCM 本地/P2P 匹配和 Local Standby 匹配各自保留。
+其他来源使用 `routing`。实际命中、KVCM 本地/global 匹配和 Local Standby 匹配各自保留。
 
 请求收尾上报 `app.request.input.ids.count` 和 `app.request.message.bytes`，后者是 Protobuf 序列化大小，
 不含 gRPC framing/compression。HTTP Content-Length 使用 `app.request.body.bytes`；未知值不按零上报。
@@ -289,7 +291,7 @@ PV 不输出 `inputIdsCount`、`requestMessageBytes`、`hashWaitUs`、`hashUs` �
 `app.flexlb.scheduler.queue.size` 周期性记录全局队列与 Worker 交付队列的等待请求总数，空队列记录 0。
 Prefill 与 PDFUSION 均参与周期性队列和在途观测，角色标签使用 Worker 实际角色。
 KV 容量与 Waiting 数来自 WorkerStatus；CacheStatus 查询负责缓存键数量和查询周期。
-KVCM 选中节点指标记录本地、P2P 拉取和 P2P 后总匹配 Token 数，使用与路由一致的逻辑 Worker 身份。
+KVCM 选中节点指标记录本地与 global 匹配 Token 数，使用与路由一致的逻辑 Worker 身份。
 
 
 `FlexMonitor` 提供 GAUGE、COUNTER、QPS 与优先级窗口抽象。opensource 默认使用

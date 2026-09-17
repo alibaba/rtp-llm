@@ -46,7 +46,6 @@ class V0ConfigDocumentParserTest {
                   "enableQueueing": true,
                   "fallbackBatchTokenCapacity": 4194304,
                   "cacheAffinityFirstMaxExtraWorkTokens": 8000,
-                  "p2pHitDiscount": 0,
                   "flexlbSyncConsistencyConfig": {
                     "needConsistency": true,
                     "masterElectType": "ZOOKEEPER",
@@ -65,7 +64,6 @@ class V0ConfigDocumentParserTest {
                   "modelServiceConfig": {
                     "service_id": "engine-service",
                     "kvcm": {
-                      "p2p_host_count": 0,
                       "enabled": true,
                       "namespace": "test",
                       "local_standby": {

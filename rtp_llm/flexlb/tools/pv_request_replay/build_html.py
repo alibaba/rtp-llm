@@ -173,7 +173,7 @@ def compact_request(row: dict[str, Any]) -> dict[str, Any] | None:
         "cacheComparison": {"source": row.get("cache comparison source"),
                             "kvcm": {"hit": number("kvcm_hit_tokens"), "delta": number("kvcm_delta_tokens")},
                             "kvcm_local": {"hit": number("kvcm_local_hit_tokens"), "delta": number("kvcm_local_delta_tokens")},
-                            "kvcm_p2p_total": {"hit": number("kvcm_p2p_total_hit_tokens"), "delta": number("kvcm_p2p_total_delta_tokens")},
+                            "kvcm_global": {"hit": number("kvcm_global_hit_tokens"), "delta": number("kvcm_global_delta_tokens")},
                             "local_standby": {"hit": number("local_standby_hit_tokens"), "delta": number("local_standby_delta_tokens")},
                             "kvcmMinusStandby": number("kvcm_minus_standby_tokens")},
         "cacheState": row.get("cache_state") or "",

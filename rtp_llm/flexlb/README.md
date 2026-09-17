@@ -443,7 +443,9 @@ Select KVCM and configure its runtime behavior in `FLEXLB_CONFIG`:
     "queryFailureThreshold": 10,
     "maxQueryRetryCount": 1,
     "recoverySuccessThreshold": 3,
-    "p2pHostCount": 0,
+    "medium": [],
+    "globalKvsHostCount": 3,
+    "enableP2p": false,
     "localStandby": {
       "autoSwitch": true,
       "blockSize": 0,

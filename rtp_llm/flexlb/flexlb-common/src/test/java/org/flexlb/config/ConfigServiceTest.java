@@ -193,7 +193,9 @@ class ConfigServiceTest {
                     "queryFailureThreshold": 12,
                     "maxQueryRetryCount": 2,
                     "recoverySuccessThreshold": 5,
-                    "p2pHostCount": 3,
+                    "globalKvsHostCount": 5,
+                    "enableP2p": true,
+                    "medium": ["hbm", "kvs"],
                     "localStandby": {
                       "autoSwitch": false,
                       "blockSize": 64,
@@ -267,6 +269,9 @@ class ConfigServiceTest {
         KvcmCacheMatchingConfig kvcm = assertInstanceOf(
                 KvcmCacheMatchingConfig.class, config.getCacheMatching());
         assertEquals(800, kvcm.getRequestTimeoutMs());
+        assertEquals(5, kvcm.getGlobalKvsHostCount());
+        assertTrue(kvcm.isEnableP2p());
+        assertEquals(List.of("hbm", "kvs"), kvcm.getMedium());
         assertEquals(64, kvcm.getLocalStandby().getBlockSize());
         assertTrue(config.getOptimizer().isEnabled());
         ZookeeperConsistencyConfig consistency = assertInstanceOf(
@@ -274,6 +279,76 @@ class ConfigServiceTest {
         assertEquals("zk-1:2181,zk-2:2181", consistency.getConnectString());
         assertTrue(config.isEnableFallback());
         assertEquals(2_097_152L, config.getFallbackBatchTokenCapacity());
+    }
+
+    @Test
+    void kvcm_defaults_query_three_global_hosts_without_p2p() {
+        FlexlbConfig config = FlexlbConfigMerger.mergeWithDefaults("""
+                {"schemaVersion":2,"cacheMatching":{"type":"KVCM"}}""");
+
+        KvcmCacheMatchingConfig kvcm = assertInstanceOf(
+                KvcmCacheMatchingConfig.class, config.getCacheMatching());
+
+        assertEquals(KvcmCacheMatchingConfig.DEFAULT_GLOBAL_KVS_HOST_COUNT,
+                kvcm.getGlobalKvsHostCount());
+        assertEquals(3, kvcm.getGlobalKvsHostCount());
+        assertFalse(kvcm.isEnableP2p());
+        assertTrue(kvcm.getMedium().isEmpty());
+    }
+
+    @Test
+    void cache_affinity_defaults_remote_discount() {
+        FlexlbConfig config = FlexlbConfigMerger.mergeWithDefaults("""
+                {"schemaVersion":2,"router":{"roles":{"prefill":\
+                {"cacheAffinity":{"maxExtraTtftMs":100}}}}}""");
+
+        assertEquals(0.2, config.getRouter().getRoles().getPrefill()
+                .getCacheAffinity().getRemoteDiscount());
+    }
+
+    @Test
+    void normalizes_null_medium_to_an_empty_list() {
+        FlexlbConfig config = FlexlbConfigMerger.mergeWithDefaults("""
+                {"schemaVersion":2,"cacheMatching":{"type":"KVCM","medium":["hbm"]}}""");
+        KvcmCacheMatchingConfig kvcm = assertInstanceOf(
+                KvcmCacheMatchingConfig.class, config.getCacheMatching());
+        kvcm.setMedium(null);
+
+        assertTrue(kvcm.getMedium().isEmpty());
+    }
+
+    @Test
+    void rejects_remote_discount_outside_unit_range() {
+        ConfigValidationException failure = assertThrows(
+                ConfigValidationException.class,
+                () -> FlexlbConfigMerger.mergeWithDefaults("""
+                        {"schemaVersion":2,"router":{"roles":{"prefill":\
+                        {"cacheAffinity":{"remoteDiscount":1.5}}}}}"""));
+
+        assertTrue(failure.getMessage().contains(
+                "router.roles.prefill.cacheAffinity.remoteDiscount"));
+    }
+
+    @Test
+    void rejects_negative_global_kvs_host_count() {
+        ConfigValidationException failure = assertThrows(
+                ConfigValidationException.class,
+                () -> FlexlbConfigMerger.mergeWithDefaults("""
+                        {"schemaVersion":2,"cacheMatching":{"type":"KVCM",\
+                        "globalKvsHostCount":-1}}"""));
+
+        assertTrue(failure.getMessage().contains("cacheMatching.globalKvsHostCount"));
+    }
+
+    @Test
+    void rejects_removed_p2p_configuration_names() {
+        assertThrows(ConfigValidationException.class,
+                () -> FlexlbConfigMerger.mergeWithDefaults("""
+                        {"schemaVersion":2,"cacheMatching":{"type":"KVCM","p2pHostCount":3}}"""));
+        assertThrows(ConfigValidationException.class,
+                () -> FlexlbConfigMerger.mergeWithDefaults("""
+                        {"schemaVersion":2,"router":{"roles":{"prefill":\
+                        {"cacheAffinity":{"p2pHitDiscount":0.4}}}}}"""));
     }
 
     @Test

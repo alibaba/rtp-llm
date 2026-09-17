@@ -89,11 +89,11 @@ class CostBasedPrefillSelectionMetricTest {
     @Test
     void reportsRawKvcmMatchesForSelectedWorker() {
         when(cache.findMatchingEngines(any())).thenReturn(new CacheMatchResult(
-                Map.of("10.0.0.1:8080@0", new HostCacheMatch(3, 2, 5)),
+                Map.of("10.0.0.1:8080@0", new HostCacheMatch(3, 5)),
                 CacheMatchSource.KVCM, 10L, 100L));
         try (SelectedRole selected = select()) {
             verify(reporter).reportKvcmSelectedMatch(RoleType.PREFILL,
-                    selected.serverStatus().getMetricIpPort(), 300L, 200L, 500L, true);
+                    selected.serverStatus().getMetricIpPort(), 300L, 500L, true);
         }
     }
 
@@ -223,17 +223,17 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
-    void p2pOnlyMatchUsesConfiguredDiscountInRoutingProjection() {
+    void remoteOnlyMatchUsesConfiguredDiscountInRoutingProjection() {
         publish("10.0.0.2", 8080);
         context.getRequest().setBlockCacheKeys(
                 List.of(1L, 2L, 3L, 4L, 5L));
         context.getRequest().setCacheKeyBlockSize(100L);
         RoutingConfig.CacheAffinityConfig affinity =
                 new RoutingConfig.CacheAffinityConfig();
-        affinity.setP2pHitDiscount(0.4);
+        affinity.setRemoteDiscount(0.4);
         config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
         when(cache.findMatchingEngines(any())).thenReturn(new CacheMatchResult(
-                Map.of("10.0.0.2:8080", new HostCacheMatch(0, 5, 5)),
+                Map.of("10.0.0.2:8080", new HostCacheMatch(0, 5)),
                 CacheMatchSource.KVCM,
                 0L,
                 100L));
@@ -242,6 +242,29 @@ class CostBasedPrefillSelectionMetricTest {
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
             verify(reporter).reportCacheHitMetrics(
                     RoleType.PREFILL, "10.0.0.2:8080", 200L, 0.2);
+        }
+    }
+
+    @Test
+    void globalBelowLocalMatchStillScoresLocalBlocksOnly() {
+        publish("10.0.0.2", 8080);
+        context.getRequest().setBlockCacheKeys(
+                List.of(1L, 2L, 3L, 4L, 5L));
+        context.getRequest().setCacheKeyBlockSize(100L);
+        RoutingConfig.CacheAffinityConfig affinity =
+                new RoutingConfig.CacheAffinityConfig();
+        affinity.setRemoteDiscount(0.4);
+        config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
+        when(cache.findMatchingEngines(any())).thenReturn(new CacheMatchResult(
+                Map.of("10.0.0.2:8080", new HostCacheMatch(5, 3)),
+                CacheMatchSource.KVCM,
+                0L,
+                100L));
+
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
+            verify(reporter).reportCacheHitMetrics(
+                    RoleType.PREFILL, "10.0.0.2:8080", 500L, 0.5);
         }
     }
 

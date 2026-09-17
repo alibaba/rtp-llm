@@ -302,6 +302,8 @@ public final class FlexlbConfigValidator {
             range(affinity.getMinPrefixHitPercent(), 0,
                     RoutingConfig.PERCENTAGE_SCALE,
                     "router.roles.prefill.cacheAffinity.minPrefixHitPercent");
+            range(affinity.getRemoteDiscount(), 0, 1,
+                    "router.roles.prefill.cacheAffinity.remoteDiscount");
         }
 
         require(routing.getRoles().getDecode() != null,
@@ -426,7 +428,7 @@ public final class FlexlbConfigValidator {
                 "cacheMatching.maxQueryRetryCount");
         positive(kvcm.getRecoverySuccessThreshold(),
                 "cacheMatching.recoverySuccessThreshold");
-        nonNegative(kvcm.getP2pHostCount(), "cacheMatching.p2pHostCount");
+        nonNegative(kvcm.getGlobalKvsHostCount(), "cacheMatching.globalKvsHostCount");
         require(kvcm.getLocalStandby() != null,
                 "cacheMatching.localStandby", "is required for KVCM");
         validateLocalStandby(kvcm.getLocalStandby());
