@@ -966,6 +966,58 @@ def _score_status_check(rank, device):
 
 
 @torch.inference_mode()
+def _publish_status_check(rank, device):
+    # A nonzero writer status in any source tile must fail the one per-layer
+    # batched status check before the owner is published.
+    layout = CacheLayout(cp_size=8, speculative_tokens=0, draft_enabled=False)
+    identity = ReplayConfig(ReplayMode.FULL).cache_identity("publish-status", layout)
+    framework = _framework_pages(layout, rank, device)
+    models = _models(layout, device)
+    cp = _metadata((1000, 1028), (0, 0), rank, device)
+    context = begin_cp_request(
+        cp,
+        0,
+        request_id="publish-status",
+        identity=identity,
+        layout=layout,
+        max_tokens=2048,
+        **framework,
+    )
+    local = _hidden(context.start, context.end, 0, device).index_select(
+        0, (context.positions - context.start).long()
+    ).contiguous()
+    local.masked_fill_(~context.valid[:, None], torch.nan)
+    rejected = []
+    for value in ("0", "513", "-1", "not-an-integer"):
+        with patch.dict(os.environ, {"DSV41_CP_SOURCE_ROWS": value}):
+            try:
+                models[2](local, context)
+            except ValueError:
+                rejected.append(value)
+            else:
+                raise AssertionError("invalid CP source tile accepted: " + value)
+        assert not context.completed_layers and not context.cache.poisoned
+    slot_mapping = cp_attention.cp_kv_slot_mapping
+
+    def reserved_slots(*args, **kwargs):
+        slots = slot_mapping(*args, **kwargs)
+        # Every row targets the reserved page zero, which the writer rejects
+        # with status=2 on every rank uniformly (ownership-independent).
+        return torch.zeros_like(slots)
+
+    try:
+        with patch.object(cp_attention, "cp_kv_slot_mapping", reserved_slots):
+            models[2](local, context)
+    except RuntimeError as error:
+        assert "compact writer rejected rows: status=[2]" in str(error)
+    else:
+        raise AssertionError("reserved-page owner KV accepted")
+    assert context.cache.poisoned and 2 not in context.completed_layers
+    assert 2 not in context.published_sources
+    return {"rejected_status": [2], "rejected_source_rows": rejected}
+
+
+@torch.inference_mode()
 def _run_rank():
     rank, device = int(os.environ["RANK"]), torch.device(
         "cuda", int(os.environ["LOCAL_RANK"])
@@ -991,6 +1043,7 @@ def _run_rank():
     selected_reads = _selected_query_transport(rank, device)
     pair_checkpoints = _pair_checkpoint_restore(rank, device)
     score_status = _score_status_check(rank, device)
+    publish_status = _publish_status_check(rank, device)
     layout = CacheLayout(cp_size=8, speculative_tokens=0, draft_enabled=False)
     identity = ReplayConfig(ReplayMode.FULL).cache_identity(
         "cp8-attention-integration", layout
@@ -1199,6 +1252,7 @@ def _run_rank():
         swa_index_cache=swa_index_cache,
         selected_reads=selected_reads,
         score_status=score_status,
+        publish_status=publish_status,
         rejected_read_queries=rejected_batches,
     )
     destination = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")

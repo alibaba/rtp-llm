@@ -152,6 +152,9 @@ class CompressedLatents:
     logical_entries_per_page: int
 
 
+_ROPE_BASE_CACHE: dict = {}
+
+
 @dataclass(frozen=True)
 class CompressorRoPE:
     dimension: int = 64
@@ -174,17 +177,17 @@ class CompressorRoPE:
                 "compressor RoPE must match the fixed V4.1 global/index configuration"
             )
 
-    def frequencies(self, positions: torch.Tensor) -> torch.Tensor:
-        if (
-            positions.ndim != 1
-            or positions.dtype != torch.int64
-            or not positions.is_cuda
-        ):
-            raise ValueError("RoPE positions must be a CUDA int64 vector")
-        if torch.any((positions < 0) | (positions >= 1048576)).item():
-            raise ValueError("RoPE position exceeds the actual model context limit")
+    def base_frequencies(self, device: torch.device) -> torch.Tensor:
+        """Position-independent blended frequency vector (cached per device).
+
+        The dataclass is frozen with the fixed V4.1 configuration, so the vector
+        depends only on the target device.
+        """
+        cached = _ROPE_BASE_CACHE.get(device)
+        if cached is not None:
+            return cached
         dimensions = torch.arange(
-            0, self.dimension, 2, dtype=torch.float32, device=positions.device
+            0, self.dimension, 2, dtype=torch.float32, device=device
         )
         frequencies = 1.0 / (self.theta ** (dimensions / self.dimension))
 
@@ -200,7 +203,7 @@ class CompressorRoPE:
         ramp = (
             (
                 torch.arange(
-                    self.dimension // 2, dtype=torch.float32, device=positions.device
+                    self.dimension // 2, dtype=torch.float32, device=device
                 )
                 - low
             )
@@ -208,7 +211,23 @@ class CompressorRoPE:
         ).clamp(0, 1)
         smooth = 1 - ramp
         frequencies = frequencies / self.factor * (1 - smooth) + frequencies * smooth
-        phases = torch.outer(positions.float(), frequencies)
+        _ROPE_BASE_CACHE[device] = frequencies
+        return frequencies
+
+    def frequencies(
+        self, positions: torch.Tensor, *, validate: bool = True
+    ) -> torch.Tensor:
+        if (
+            positions.ndim != 1
+            or positions.dtype != torch.int64
+            or not positions.is_cuda
+        ):
+            raise ValueError("RoPE positions must be a CUDA int64 vector")
+        if validate and torch.any((positions < 0) | (positions >= 1048576)).item():
+            raise ValueError("RoPE position exceeds the actual model context limit")
+        phases = torch.outer(
+            positions.float(), self.base_frequencies(positions.device)
+        )
         return torch.polar(torch.ones_like(phases), phases)
 
 
@@ -464,7 +483,12 @@ def prepare_owner_kv(
     ):
         raise ValueError("owner index projection requires BF16 128x512 weights")
     _norm_weight(index_norm, 128, source.unrotated.device)
-    frequencies = (rope or CompressorRoPE()).frequencies(source.group_positions)
+    # group_positions bounds are already guaranteed by OwnerCompressor.forward's
+    # Python-level start/end contract, so the per-tile GPU bounds check (a
+    # forced host sync) is skipped on this hot path.
+    frequencies = (rope or CompressorRoPE()).frequencies(
+        source.group_positions, validate=False
+    )
     index_k = rms_norm(F.linear(source.unrotated, index_weight), index_norm, eps=1e-20)
     return OwnerKVRows(
         source, _rotate(source.unrotated, frequencies), _rotate(index_k, frequencies)

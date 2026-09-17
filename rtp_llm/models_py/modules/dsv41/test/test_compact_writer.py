@@ -308,6 +308,34 @@ class CompactWriterGpuTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "invalid destination"):
             result.check()
 
+    def test_check_all_batches_statuses_with_the_same_semantics(self):
+        from rtp_llm.models_py.modules.dsv41.compact_writer import CompactWriteResult
+
+        for region in CacheRegion:
+            dimension = ENCODINGS[region].head_dim
+            clean = torch.ones((3, dimension), dtype=torch.bfloat16, device="cuda")
+            dirty = clean.clone()
+            dirty[1, 0] = torch.nan
+            ok_a, ok_b = encode_compact(clean, region), encode_compact(clean, region)
+            CompactWriteResult.check_all(())
+            CompactWriteResult.check_all([ok_a])
+            CompactWriteResult.check_all([ok_a, ok_b])
+            bad = encode_compact(dirty, region)
+            for results in ([bad], [ok_a, bad, ok_b]):
+                with self.assertRaisesRegex(RuntimeError, "nonfinite input"):
+                    CompactWriteResult.check_all(results)
+            try:
+                CompactWriteResult.check_all([ok_a, bad, ok_b])
+            except RuntimeError as batched:
+                try:
+                    bad.check()
+                except RuntimeError as single:
+                    self.assertEqual(str(batched), str(single))
+                else:
+                    self.fail("single-result check accepted nonfinite rows")
+            else:
+                self.fail("batched check accepted nonfinite rows")
+
     def test_graph_reads_new_values_and_slot_mapping_without_recapture(self):
         for region in CacheRegion:
             dimension = ENCODINGS[region].head_dim

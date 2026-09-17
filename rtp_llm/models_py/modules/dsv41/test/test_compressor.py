@@ -431,6 +431,23 @@ class OwnerCompressorGpuTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "autocast"):
                 self.run_candidate(candidate, hidden)
 
+    def test_rope_base_frequencies_cached_and_unvalidated_hot_path_exact(self):
+        positions = torch.tensor(
+            [0, 2, 65536, 1048574, 1048575], dtype=torch.int64, device="cuda"
+        )
+        rope = CompressorRoPE()
+        base = rope.base_frequencies(positions.device)
+        self.assertIs(base, rope.base_frequencies(positions.device))
+        fresh = CompressorRoPE()
+        self.assertIs(base, fresh.base_frequencies(positions.device))
+        expected = rope.frequencies(positions)
+        self.assert_exact(rope.frequencies(positions, validate=False), expected)
+        self.assert_exact(rope.frequencies(positions), expected)
+        with self.assertRaises(ValueError):
+            rope.frequencies(
+                torch.tensor([1048576], dtype=torch.int64, device="cuda")
+            )
+
     def test_rotary_positions_at_real_context_boundary(self):
         # Boundary arithmetic/RoPE probe only; this is not a 1M-generation test.
         positions = torch.tensor(

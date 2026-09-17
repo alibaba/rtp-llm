@@ -43,6 +43,36 @@ class CompactWriteResult:
                 "1=nonfinite input, 2=invalid destination, 4=nonfinite/zero scale"
             )
 
+    @staticmethod
+    def check_all(results) -> None:
+        """One synchronous status check for a sequence of writer results.
+
+        Same accept/reject semantics as calling ``check`` on each result, but
+        pays a single device-to-host copy instead of one per result.
+        """
+        results = tuple(results)
+        if not results:
+            return
+        first = results[0].status
+        with torch.cuda.device(first.device):
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "writer status must be checked after graph execution"
+                )
+        for result in results:
+            if (
+                result.status.dtype != first.dtype
+                or result.status.device != first.device
+            ):
+                raise ValueError("batched writer check requires one device/dtype")
+        errors = torch.cat([result.status for result in results]).detach().cpu()
+        if torch.any(errors != 0):
+            codes = sorted(set(errors.tolist()) - {0})
+            raise RuntimeError(
+                f"compact writer rejected rows: status={codes}; "
+                "1=nonfinite input, 2=invalid destination, 4=nonfinite/zero scale"
+            )
+
 
 def _validate(values: torch.Tensor, region: CacheRegion) -> None:
     if os.environ.get("DSV41_NATIVE_COMPACT_WRITER", "0") != "1":

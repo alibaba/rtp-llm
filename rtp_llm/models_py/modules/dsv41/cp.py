@@ -51,7 +51,10 @@ from rtp_llm.models_py.modules.dsv41.compact_reader import (
     SwaBinding,
     compact_attention,
 )
-from rtp_llm.models_py.modules.dsv41.compact_writer import encode_compact
+from rtp_llm.models_py.modules.dsv41.compact_writer import (
+    CompactWriteResult,
+    encode_compact,
+)
 from rtp_llm.models_py.modules.dsv41.compressor import (
     OwnerPageBinding,
     PairCarry,
@@ -84,7 +87,7 @@ from rtp_llm.models_py.modules.dsv41.source_indexer import (
 )
 
 _PAIR_BYTES = 4112
-_SOURCE_ROWS = 512
+_SOURCE_ROWS = 8192
 # Measured optimum (2026-09-17 GB200 same-wheel three-arm A/B, 32 -> 128 ->
 # 512 rows: 16K miss 5.55-7.08s -> 4.68-4.82s -> 3.47-3.68s, 64K miss
 # 64.18s -> 34.25s -> 22.54s; composition ATen 62,595 -> 35,331 -> 28,515,
@@ -1608,12 +1611,18 @@ def _packed_pages(values, spec):
     return CompactPages(storage, spec.slot.region, spec.entries), table
 
 
-def _publish_owner(attention, hidden, context):
+def _publish_owner(attention, hidden, context, source_rows=0):
     owner, state = attention.layer, context.cache.owners[attention.layer]
     if state.materialized_end != context.start:
         raise ValueError("CP compressor must extend its canonical materialized prefix")
-    for first in range(context.start, context.end, _SOURCE_ROWS):
-        last = min(first + _SOURCE_ROWS, context.end)
+    # The tile size is validated by the caller (forward_cp_attention); the
+    # default here only covers direct test callers of this helper.
+    source_rows = source_rows or _SOURCE_ROWS
+    if source_rows < 2 or source_rows % 2:
+        raise ValueError("CP source tile must be a positive even row count")
+    pending = []
+    for first in range(context.start, context.end, source_rows):
+        last = min(first + source_rows, context.end)
         source_hidden = context.gather_rows(hidden, first, last)
         source = attention.compressor(
             source_hidden,
@@ -1643,15 +1652,19 @@ def _publish_owner(attention, hidden, context):
                     context.cp.cp_rank,
                 )
             )
-        for result in rows.store(
-            OwnerPageBinding(owner, context.cache.identity, state.global_kv.pages),
-            OwnerPageBinding(owner, context.cache.identity, state.index_pages),
-            *slots,
-        ):
-            result.check()
+        pending.extend(
+            rows.store(
+                OwnerPageBinding(owner, context.cache.identity, state.global_kv.pages),
+                OwnerPageBinding(owner, context.cache.identity, state.index_pages),
+                *slots,
+            )
+        )
         state.pair = source.next_pair
         state.materialized_end = last
         del source_hidden, source, rows, slots
+    # One synchronous writer status check per layer, after every source tile.
+    CompactWriteResult.check_all(pending)
+    del pending
     if owner in PAIR_OWNERS:
         context.publish_pair(owner, state.pair)
     context.published_sources.add(owner)
@@ -1913,6 +1926,16 @@ def forward_cp_attention(attention, hidden, context):
             raise ValueError("CP single-owner query batch must be 32, 64 or 128")
         # Reader staging is additional to the per-gather live-byte accounting.
         read_queries = min(owner_batch, 8 * read_queries)
+    # The 8192-row source tile is the measured optimum (GB200 p13 A/B
+    # 2026-09-17: 512 vs 2048 vs 8192 same-wheel back-to-back arms; 8192 wins
+    # the 16K composition counts and the 64K unprofiled latency, ties 16K) and
+    # the code default; the gather live-byte accounting in _record_gather
+    # bounds the tile by the 1 GiB budget. The env stays only as a diagnostic
+    # override. Validated here (before the poisoned-on-failure body) like
+    # read_queries.
+    source_rows = int(os.environ.get("DSV41_CP_SOURCE_ROWS", _SOURCE_ROWS))
+    if source_rows < 2 or source_rows % 2:
+        raise ValueError("CP source tile must be a positive even row count")
     try:
         model_positions = context.pack_model_rows(context.positions)
         qr, query, kv = (
@@ -1922,7 +1945,7 @@ def forward_cp_attention(attention, hidden, context):
             )
         )
         if attention.source.writes_global:
-            _publish_owner(attention, hidden, context)
+            _publish_owner(attention, hidden, context, source_rows)
         if attention.source.scores_queries:
             _score_queries(attention, hidden, qr, context)
         query_rows = context.query_row_indices(0, context.query_rows)
