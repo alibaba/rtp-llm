@@ -43,10 +43,12 @@ def _geometry(config, draft):
 
 
 def _expert_range(experts, ep_size, ep_rank):
-    if type(ep_size) is not int or ep_size not in (8, 16):
-        raise ValueError("V4.1 expert ownership requires EP8 or EP16")
+    if type(ep_size) is not int or ep_size not in (4, 8, 16):
+        raise ValueError("V4.1 expert ownership requires EP4, EP8 or EP16")
     if type(ep_rank) is not int or not 0 <= ep_rank < ep_size:
         raise ValueError("V4.1 expert rank must belong to the actual EP group")
+    if experts % ep_size != 0:
+        raise ValueError("V4.1 routed experts must divide evenly across the EP group")
     local = experts // ep_size
     return range(ep_rank * local, (ep_rank + 1) * local)
 

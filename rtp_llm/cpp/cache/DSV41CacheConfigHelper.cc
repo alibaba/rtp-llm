@@ -16,7 +16,7 @@ uint32_t contextParallelSize(const ParallelismConfig& parallelism) {
     }
     const auto cp = parallelism.role_type == RoleType::PREFILL ? parallelism.tp_size :
                                                                  parallelism.prefill_cp_config.prefill_cp_size;
-    RTP_LLM_CHECK_WITH_INFO(cp == 8, "V4.1 sharded cache requires explicit CP8, got %ld", cp);
+    RTP_LLM_CHECK_WITH_INFO(cp == 4 || cp == 8, "V4.1 sharded cache requires explicit CP4/CP8, got %ld", cp);
     return static_cast<uint32_t>(cp);
 }
 

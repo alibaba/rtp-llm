@@ -20,6 +20,7 @@ def gather_selected_kernel(
     TABLE_STRIDE: tl.constexpr,
     WANTED_STRIDE: tl.constexpr,
     RANK: tl.constexpr,
+    CP: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
     BLOCK_BYTES: tl.constexpr,
 ):
@@ -29,8 +30,8 @@ def gather_selected_kernel(
         tl.int64
     )
     logical = tl.maximum(position, 0) // ENTRIES
-    owned = (rows < ROWS) & (position >= 0) & (logical % 8 == RANK)
-    virtual = logical // 8
+    owned = (rows < ROWS) & (position >= 0) & (logical % CP == RANK)
+    virtual = logical // CP
     in_table = owned & (virtual < TABLE_WIDTH)
     page = tl.load(table + virtual * TABLE_STRIDE, in_table, other=0).to(tl.int64)
     valid = in_table & (page > 0) & (page < POOL_PAGES)

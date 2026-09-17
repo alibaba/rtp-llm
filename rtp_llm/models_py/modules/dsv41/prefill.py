@@ -906,7 +906,7 @@ class V41CPPrefillExecutor:
     ):
         if (
             not request_id
-            or layout.cp_size != 8
+            or layout.cp_size not in (4, 8)
             or identity.layout_fingerprint != layout.fingerprint
             or identity.replay_fingerprint
             not in (

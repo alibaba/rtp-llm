@@ -32,8 +32,8 @@ from rtp_llm.models_py.modules.dsv41.compact_reader import (
 
 
 def _page(layout, slot):
-    if layout.cp_size != 8:
-        raise ValueError("CPRR restoration requires the declared CP8 layout")
+    if layout.cp_size not in (4, 8):
+        raise ValueError("CPRR restoration requires the declared CP4/CP8 layout")
     for page in layout.pages:
         if page.slot == slot:
             return page

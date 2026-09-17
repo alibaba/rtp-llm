@@ -144,12 +144,12 @@ class V41TargetModel(nn.Module):
         self.hc_mult = t["hc_mult"]
         if (
             type(head_tp_size) is not int
-            or head_tp_size not in (1, 8)
+            or head_tp_size not in (1, 4, 8)
             or type(head_tp_rank) is not int
             or not 0 <= head_tp_rank < head_tp_size
             or t["vocab_size"] % head_tp_size
         ):
-            raise ValueError("V4.1 head partition must be explicit TP1 or CP8 metadata")
+            raise ValueError("V4.1 head partition must be explicit TP1 or CP4/CP8 metadata")
         self.head_tp_size = head_tp_size
         self.head_tp_rank = head_tp_rank
         self.head_vocab_size = t["vocab_size"] // head_tp_size
@@ -225,18 +225,18 @@ class V41TargetModel(nn.Module):
 
         if (
             type(ep_size) is not int
-            or ep_size not in (8, 16)
+            or ep_size not in (4, 8, 16)
             or type(ep_rank) is not int
             or not 0 <= ep_rank < ep_size
             or not dist.is_initialized()
             or dist.get_world_size() != ep_size
             or dist.get_rank() != ep_rank
         ):
-            raise ValueError("V4.1 target binding requires the actual EP8/EP16 WORLD")
-        if layout.cp_size != 8:
-            raise ValueError("distributed V4.1 target requires the CP8 cache layout")
-        if head_tp_size == 8 and (ep_size != 8 or head_tp_rank != ep_rank):
-            raise ValueError("V4.1 P head must match its CP8/EP8 role rank")
+            raise ValueError("V4.1 target binding requires the actual EP4/EP8/EP16 WORLD")
+        if layout.cp_size not in (4, 8):
+            raise ValueError("distributed V4.1 target requires the CP4/CP8 cache layout")
+        if head_tp_size > 1 and (head_tp_size != ep_size or head_tp_rank != ep_rank):
+            raise ValueError("V4.1 P head must match its CP/EP role rank")
         return cls.from_model_weights(
             config,
             weights,

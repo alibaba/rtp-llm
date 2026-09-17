@@ -178,8 +178,8 @@ class CacheLayout:
             raise ValueError("unsupported V4.1 cache layout version")
         if self.token_block_size not in (128, 256):
             raise ValueError("V4.1 token blocks must contain 128 or 256 tokens")
-        if self.cp_size not in (1, 8):
-            raise ValueError("V4.1 supports CP8; CP1 is for local component probes")
+        if self.cp_size not in (1, 4, 8):
+            raise ValueError("V4.1 supports CP4/CP8; CP1 is for local component probes")
         if self.speculative_tokens < 0:
             raise ValueError("speculative token slack must be non-negative")
         if self.page_alignment < 512 or self.page_alignment % 512:
