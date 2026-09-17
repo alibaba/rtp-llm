@@ -1,0 +1,103 @@
+17:34:35.182 [main] INFO org.flexlb.config.ConfigService - FlexLB config loaded: schemaVersion=3, scheduler=QUEUE, ordering=FIFO, decision=FIXED_WINDOW, dispatcher=BATCH, prefillSelection=BEST_ONLY, decodeCostExpression=kvcache_used_ratio, groupRules=0
+index_remove_add_depth32 round=2 ns/op=84.89 cpu_ns/op=79.27 bytes/op=0.00
+index_remove_add_depth32 round=3 ns/op=91.24 cpu_ns/op=74.70 bytes/op=0.00
+index_remove_add_depth32 round=4 ns/op=74.99 cpu_ns/op=72.01 bytes/op=0.00
+VERIFY fleet10_depth32_p1_status_capture checksum=2560
+fleet10_depth32_p1_status_capture round=2 ns/op=10271.49 cpu_ns/op=5293.65 bytes/op=4874.01
+fleet10_depth32_p1_status_capture round=3 ns/op=8907.36 cpu_ns/op=5024.67 bytes/op=4874.00
+fleet10_depth32_p1_status_capture round=4 ns/op=9716.34 cpu_ns/op=5167.75 bytes/op=4870.09
+VERIFY fleet10_depth32_p1_membership_capture checksum=2560
+fleet10_depth32_p1_membership_capture round=2 ns/op=9715.17 cpu_ns/op=6256.75 bytes/op=5386.82
+fleet10_depth32_p1_membership_capture round=3 ns/op=8577.69 cpu_ns/op=5821.87 bytes/op=5340.68
+fleet10_depth32_p1_membership_capture round=4 ns/op=7586.16 cpu_ns/op=4970.10 bytes/op=5337.00
+VERIFY fleet10_depth32_p1_status_project checksum=11292
+fleet10_depth32_p1_status_project round=2 ns/op=99120.23 cpu_ns/op=68779.48 bytes/op=70875.21
+fleet10_depth32_p1_status_project round=3 ns/op=85771.94 cpu_ns/op=62957.55 bytes/op=70868.00
+fleet10_depth32_p1_status_project round=4 ns/op=77920.24 cpu_ns/op=60069.70 bytes/op=70868.00
+VERIFY fleet10_depth32_p64_status_capture checksum=2560
+fleet10_depth32_p64_status_capture round=2 ns/op=557.59 cpu_ns/op=437.02 bytes/op=123.72
+fleet10_depth32_p64_status_capture round=3 ns/op=425.65 cpu_ns/op=430.70 bytes/op=120.23
+fleet10_depth32_p64_status_capture round=4 ns/op=343.51 cpu_ns/op=428.33 bytes/op=122.10
+VERIFY fleet10_depth32_p64_membership_capture checksum=2560
+fleet10_depth32_p64_membership_capture round=2 ns/op=434.59 cpu_ns/op=487.41 bytes/op=128.57
+fleet10_depth32_p64_membership_capture round=3 ns/op=435.16 cpu_ns/op=479.38 bytes/op=127.59
+fleet10_depth32_p64_membership_capture round=4 ns/op=412.67 cpu_ns/op=465.81 bytes/op=128.39
+VERIFY fleet10_depth32_p64_status_project checksum=11292
+fleet10_depth32_p64_status_project round=2 ns/op=6553.50 cpu_ns/op=36514.78 bytes/op=52039.39
+fleet10_depth32_p64_status_project round=3 ns/op=6836.20 cpu_ns/op=36970.52 bytes/op=52034.21
+fleet10_depth32_p64_status_project round=4 ns/op=6446.59 cpu_ns/op=36481.77 bytes/op=52027.07
+VERIFY fleet100_depth32_p1_status_capture checksum=25600
+fleet100_depth32_p1_status_capture round=2 ns/op=18875.77 cpu_ns/op=17191.70 bytes/op=48040.00
+fleet100_depth32_p1_status_capture round=3 ns/op=17395.55 cpu_ns/op=16015.91 bytes/op=48040.00
+fleet100_depth32_p1_status_capture round=4 ns/op=18148.19 cpu_ns/op=16268.57 bytes/op=48040.00
+VERIFY fleet100_depth32_p1_membership_capture checksum=25600
+fleet100_depth32_p1_membership_capture round=2 ns/op=23180.31 cpu_ns/op=21154.54 bytes/op=53040.00
+fleet100_depth32_p1_membership_capture round=3 ns/op=32235.26 cpu_ns/op=27112.76 bytes/op=53040.00
+fleet100_depth32_p1_membership_capture round=4 ns/op=20662.02 cpu_ns/op=19223.55 bytes/op=53040.00
+VERIFY fleet100_depth32_p1_status_project checksum=111508
+fleet100_depth32_p1_status_project round=2 ns/op=365861.47 cpu_ns/op=340184.31 bytes/op=707360.00
+fleet100_depth32_p1_status_project round=3 ns/op=308484.36 cpu_ns/op=292446.15 bytes/op=707360.00
+fleet100_depth32_p1_status_project round=4 ns/op=279469.91 cpu_ns/op=274268.16 bytes/op=707360.00
+VERIFY fleet100_depth32_p64_status_capture checksum=25600
+fleet100_depth32_p64_status_capture round=2 ns/op=794.48 cpu_ns/op=3756.31 bytes/op=1386.15
+fleet100_depth32_p64_status_capture round=3 ns/op=766.94 cpu_ns/op=3655.71 bytes/op=1381.07
+fleet100_depth32_p64_status_capture round=4 ns/op=721.01 cpu_ns/op=3349.26 bytes/op=1378.71
+VERIFY fleet100_depth32_p64_membership_capture checksum=25600
+fleet100_depth32_p64_membership_capture round=2 ns/op=1036.50 cpu_ns/op=5048.12 bytes/op=1467.03
+fleet100_depth32_p64_membership_capture round=3 ns/op=954.03 cpu_ns/op=4591.56 bytes/op=1459.89
+fleet100_depth32_p64_membership_capture round=4 ns/op=855.49 cpu_ns/op=3994.57 bytes/op=1453.80
+VERIFY fleet100_depth32_p64_status_project checksum=111508
+fleet100_depth32_p64_status_project round=2 ns/op=56016.29 cpu_ns/op=373368.53 bytes/op=519772.57
+fleet100_depth32_p64_status_project round=3 ns/op=54399.31 cpu_ns/op=375693.16 bytes/op=520018.07
+fleet100_depth32_p64_status_project round=4 ns/op=49772.64 cpu_ns/op=378512.21 bytes/op=520531.47
+index_remove_add_depth1024 round=2 ns/op=245.86 cpu_ns/op=242.21 bytes/op=0.00
+index_remove_add_depth1024 round=3 ns/op=212.90 cpu_ns/op=211.14 bytes/op=0.00
+index_remove_add_depth1024 round=4 ns/op=203.03 cpu_ns/op=200.68 bytes/op=0.00
+VERIFY fleet10_depth1024_p1_status_capture checksum=81920
+fleet10_depth1024_p1_status_capture round=2 ns/op=50930.16 cpu_ns/op=49666.50 bytes/op=120160.00
+fleet10_depth1024_p1_status_capture round=3 ns/op=51532.86 cpu_ns/op=49786.78 bytes/op=120160.00
+fleet10_depth1024_p1_status_capture round=4 ns/op=54929.31 cpu_ns/op=51499.73 bytes/op=120160.00
+VERIFY fleet10_depth1024_p1_membership_capture checksum=81920
+fleet10_depth1024_p1_membership_capture round=2 ns/op=51917.02 cpu_ns/op=50152.75 bytes/op=120780.00
+fleet10_depth1024_p1_membership_capture round=3 ns/op=49930.53 cpu_ns/op=49168.91 bytes/op=120780.00
+fleet10_depth1024_p1_membership_capture round=4 ns/op=51315.56 cpu_ns/op=49863.22 bytes/op=120780.00
+VERIFY fleet10_depth1024_p1_status_project checksum=326656
+fleet10_depth1024_p1_status_project round=2 ns/op=962823.72 cpu_ns/op=949793.27 bytes/op=1976576.00
+fleet10_depth1024_p1_status_project round=3 ns/op=945076.85 cpu_ns/op=938971.70 bytes/op=1976576.00
+fleet10_depth1024_p1_status_project round=4 ns/op=953304.37 cpu_ns/op=941866.67 bytes/op=1976576.00
+VERIFY fleet10_depth1024_p64_status_capture checksum=81920
+fleet10_depth1024_p64_status_capture round=2 ns/op=1754.61 cpu_ns/op=9855.63 bytes/op=12679.35
+fleet10_depth1024_p64_status_capture round=3 ns/op=2366.69 cpu_ns/op=13331.49 bytes/op=13001.78
+fleet10_depth1024_p64_status_capture round=4 ns/op=2628.06 cpu_ns/op=13907.31 bytes/op=12714.90
+VERIFY fleet10_depth1024_p64_membership_capture checksum=81920
+fleet10_depth1024_p64_membership_capture round=2 ns/op=2583.83 cpu_ns/op=14192.56 bytes/op=12934.76
+fleet10_depth1024_p64_membership_capture round=3 ns/op=2833.76 cpu_ns/op=14377.86 bytes/op=12882.52
+fleet10_depth1024_p64_membership_capture round=4 ns/op=3230.70 cpu_ns/op=15507.13 bytes/op=13547.15
+VERIFY fleet10_depth1024_p64_status_project checksum=326656
+fleet10_depth1024_p64_status_project round=2 ns/op=177753.22 cpu_ns/op=1320341.15 bytes/op=1526719.82
+fleet10_depth1024_p64_status_project round=3 ns/op=165850.03 cpu_ns/op=1289664.06 bytes/op=1524550.69
+fleet10_depth1024_p64_status_project round=4 ns/op=186659.36 cpu_ns/op=1311181.42 bytes/op=1529806.90
+VERIFY fleet100_depth1024_p1_status_capture checksum=819200
+fleet100_depth1024_p1_status_capture round=2 ns/op=759856.38 cpu_ns/op=757071.97 bytes/op=1201240.00
+fleet100_depth1024_p1_status_capture round=3 ns/op=820809.98 cpu_ns/op=774822.58 bytes/op=1201240.00
+fleet100_depth1024_p1_status_capture round=4 ns/op=759726.64 cpu_ns/op=757102.27 bytes/op=1201240.00
+VERIFY fleet100_depth1024_p1_membership_capture checksum=819200
+fleet100_depth1024_p1_membership_capture round=2 ns/op=773258.52 cpu_ns/op=771030.30 bytes/op=1207440.00
+fleet100_depth1024_p1_membership_capture round=3 ns/op=792197.75 cpu_ns/op=782621.09 bytes/op=1207440.00
+fleet100_depth1024_p1_membership_capture round=4 ns/op=785362.14 cpu_ns/op=782781.25 bytes/op=1207440.00
+VERIFY fleet100_depth1024_p1_status_project checksum=3262292
+fleet100_depth1024_p1_status_project round=2 ns/op=10460381.25 cpu_ns/op=10439200.00 bytes/op=19752912.00
+fleet100_depth1024_p1_status_project round=3 ns/op=10688943.75 cpu_ns/op=10585300.00 bytes/op=19752912.00
+fleet100_depth1024_p1_status_project round=4 ns/op=10847483.30 cpu_ns/op=10735250.00 bytes/op=19752912.00
+VERIFY fleet100_depth1024_p64_status_capture checksum=819200
+fleet100_depth1024_p64_status_capture round=2 ns/op=19809.35 cpu_ns/op=164800.59 bytes/op=156886.45
+fleet100_depth1024_p64_status_capture round=3 ns/op=23126.36 cpu_ns/op=193515.19 bytes/op=157231.32
+fleet100_depth1024_p64_status_capture round=4 ns/op=29313.37 cpu_ns/op=191787.39 bytes/op=150451.33
+VERIFY fleet100_depth1024_p64_membership_capture checksum=819200
+fleet100_depth1024_p64_membership_capture round=2 ns/op=29973.31 cpu_ns/op=196625.00 bytes/op=150666.26
+fleet100_depth1024_p64_membership_capture round=3 ns/op=29209.45 cpu_ns/op=188022.32 bytes/op=146090.26
+fleet100_depth1024_p64_membership_capture round=4 ns/op=27541.12 cpu_ns/op=167476.30 bytes/op=133939.26
+VERIFY fleet100_depth1024_p64_status_project checksum=3262292
+fleet100_depth1024_p64_status_project round=2 ns/op=2197188.16 cpu_ns/op=13229640.63 bytes/op=15047140.63
+fleet100_depth1024_p64_status_project round=3 ns/op=2524126.63 cpu_ns/op=12918617.19 bytes/op=15083187.94
+fleet100_depth1024_p64_status_project round=4 ns/op=2220464.19 cpu_ns/op=13360750.00 bytes/op=15073421.56
