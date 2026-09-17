@@ -37,7 +37,6 @@ inline DSV41CacheIdentity dsv41CacheIdentity(const CacheConfig& config) {
                                 config.dsv41_tail_policy_version,
                                 128,
                                 swa->entries_per_block};
-    identity.validate();
     return identity;
 }
 
@@ -49,7 +48,7 @@ inline CacheKeysType dsv41PrefillPromptCacheKeys(const CompleteTokenIdsPtr& toke
         throw std::invalid_argument("V4.1 PD requires a complete canonical prompt before enqueue");
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->resetBatchSize(1);
-    resource->cacheResource().setDsv41CacheState(std::make_shared<DSV41CacheState>(dsv41CacheIdentity(config)));
+    resource->cacheResource().setDsv41CacheKeySeed(dsv41CacheIdentity(config).cacheKeySeed());
     initCacheKeys(resource, tokens, config.seq_size_per_block);
     return resource->cacheKeys();
 }

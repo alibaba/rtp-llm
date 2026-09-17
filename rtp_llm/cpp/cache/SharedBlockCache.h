@@ -15,8 +15,6 @@
 
 namespace rtp_llm {
 
-struct DSV41CheckpointMetadata;
-
 class SharedBlockCache {
 public:
     using NamespaceId = uint32_t;
@@ -51,7 +49,7 @@ public:
         BlockDependency           dependency;
         NamespaceId               dependency_namespace = kDefaultNamespace;
         bool                      has_dependency = false;
-        std::shared_ptr<const DSV41CheckpointMetadata> recovery_metadata;
+        std::shared_ptr<const void> recovery_metadata;
     };
 
     struct EvictResult {
@@ -61,13 +59,13 @@ public:
         std::unordered_map<CacheKeyType, NamespaceId>               evicted_namespaces;
         std::unordered_map<CacheKeyType, int64_t>                   evicted_lifetime_ms;
         std::unordered_map<CacheKeyType, int>                       evicted_state_only_group;
-        std::unordered_map<CacheKeyType, std::shared_ptr<const DSV41CheckpointMetadata>> recovery_metadata;
+        std::unordered_map<CacheKeyType, std::shared_ptr<const void>> recovery_metadata;
     };
 
     struct MatchResult {
         bool                      found = false;
         std::vector<BlockIdxType> group_blocks;
-        std::shared_ptr<const DSV41CheckpointMetadata> recovery_metadata;
+        std::shared_ptr<const void> recovery_metadata;
     };
 
     using LRUCacheType = LRUCache<CacheKeyType, UnifiedCacheItem>;
@@ -84,7 +82,7 @@ public:
              NamespaceId                                    namespace_id,
              const BlockDependency&                         dependency,
              const std::vector<bool>&                       matchable_slots   = {},
-             std::shared_ptr<const DSV41CheckpointMetadata> recovery_metadata = nullptr);
+             std::shared_ptr<const void>           recovery_metadata = nullptr);
 
     MatchResult match(CacheKeyType cache_key);
     // The request owns returned references even if this cache entry is evicted.

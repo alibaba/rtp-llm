@@ -22,37 +22,25 @@ bool asyncDebugEnabled() {
     return env != nullptr && std::string(env) == "1";
 }
 
-void copyV41ExecutionContext(GptModelInputs&                         model_input,
-                             const GenerateStreamPtr&                stream,
-                             const std::shared_ptr<DSV41CacheState>& state,
-                             size_t                                  batch) {
+void copyV41ExecutionContext(GptModelInputs&                                     model_input,
+                             const GenerateStreamPtr&                            stream,
+                             const std::shared_ptr<const DSV41CheckpointMetadata>& checkpoint,
+                             size_t                                              batch) {
     if (stream->isFakeStream())
         return;
     auto* context = model_input.v41_execution_context.data_ptr<int64_t>() + batch * 4;
     context[0]    = stream->inputLength();
-    if (!state)
+    context[1]    = checkpoint ? checkpoint->materialized_end : 0;
+    context[2]    = context[1];
+    context[3]    = 0;
+    if (!checkpoint)
         return;
-    const auto view = state->view();
-    context[1]      = view.encoder_materialized_end;
-    context[2]      = view.decoder_checkpoint_end;
-    context[3]      = view.protected_prefix_end;
-    if (view.encoder_materialized_end != view.decoder_checkpoint_end)
-        return;
-    auto* ranges    = model_input.v41_swa_ranges.data_ptr<int64_t>() + batch * 43 * 3;
-    if (view.execution && view.execution->materialized_end == view.decoder_checkpoint_end) {
-        const auto& execution = *view.execution;
-        for (size_t layer = 0; layer < execution.swa_valid_start.size(); ++layer) {
-            ranges[layer * 3]     = execution.swa_valid_start[layer];
-            ranges[layer * 3 + 1] = execution.swa_valid_end[layer];
-            ranges[layer * 3 + 2] = execution.swa_replay_floor[layer];
-        }
-    } else if (view.completed && view.completed->materialized_end == view.decoder_checkpoint_end) {
-        for (size_t layer = 0; layer < view.completed->swa.size(); ++layer) {
-            const auto& range     = view.completed->swa[layer];
-            ranges[layer * 3]     = range.valid_start;
-            ranges[layer * 3 + 1] = range.valid_end;
-            ranges[layer * 3 + 2] = range.replay_floor;
-        }
+    auto* ranges = model_input.v41_swa_ranges.data_ptr<int64_t>() + batch * 43 * 3;
+    for (size_t layer = 0; layer < checkpoint->swa.size(); ++layer) {
+        const auto& range     = checkpoint->swa[layer];
+        ranges[layer * 3]     = range.valid_start;
+        ranges[layer * 3 + 1] = range.valid_end;
+        ranges[layer * 3 + 2] = range.replay_floor;
     }
 }
 
@@ -461,10 +449,11 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
             if (model_input.v41_request_id.defined()) {
                 model_input.v41_request_id.data_ptr<int64_t>()[ctx.batch_idx] = stream->streamId();
                 model_input.v41_is_fake.data_ptr<bool>()[ctx.batch_idx]       = stream->isFakeStream();
-                const auto state = kv_cache.cacheResource(i).dsv41CacheState();
-                copyV41ExecutionContext(model_input, stream, state, ctx.batch_idx);
+                const auto checkpoint                                         = std::static_pointer_cast<
+                    const DSV41CheckpointMetadata>(kv_cache.cacheResource(i).dsv41RestoredCheckpoint());
+                copyV41ExecutionContext(model_input, stream, checkpoint, ctx.batch_idx);
                 model_input.v41_state_ready.data_ptr<bool>()[ctx.batch_idx] =
-                    !stream->isFakeStream() && state && state->view().target_ready_end == stream->seqLength() - 1;
+                    !stream->isFakeStream() && checkpoint && checkpoint->materialized_end == stream->seqLength() - 1;
             }
             if (model_input.v41_token_types.defined() && !stream->isFakeStream()) {
                 RTP_LLM_CHECK_WITH_INFO(
@@ -562,12 +551,13 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             if (model_input.v41_request_id.defined()) {
                 model_input.v41_request_id.data_ptr<int64_t>()[ctx.batch_idx] = stream->streamId();
                 model_input.v41_is_fake.data_ptr<bool>()[ctx.batch_idx]       = stream->isFakeStream();
-                const auto state = kv_cache.cacheResource(i).dsv41CacheState();
-                copyV41ExecutionContext(model_input, stream, state, ctx.batch_idx);
+                const auto checkpoint                                         = std::static_pointer_cast<
+                    const DSV41CheckpointMetadata>(kv_cache.cacheResource(i).dsv41RestoredCheckpoint());
+                copyV41ExecutionContext(model_input, stream, checkpoint, ctx.batch_idx);
                 model_input.v41_state_ready.data_ptr<bool>()[ctx.batch_idx] =
                     !stream->isFakeStream()
                     && (stream->prefixLength() == 0
-                        || (state && state->view().target_ready_end == stream->prefixLength()));
+                        || (checkpoint && checkpoint->materialized_end == stream->prefixLength()));
             }
             if (model_input.v41_token_types.defined() && !stream->isFakeStream()) {
                 stream->generateInput()->v41_inputs->validateChunk(stream->prefixLength(),

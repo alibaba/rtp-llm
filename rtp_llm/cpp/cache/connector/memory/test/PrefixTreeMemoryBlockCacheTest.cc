@@ -900,7 +900,7 @@ TEST(PrefixTreeMemoryBlockCacheTest, RecoveryMetadataFollowsBackingGenerationAnd
     ASSERT_TRUE(current.found);
     EXPECT_NE(current.generation, held.generation);
     EXPECT_EQ(current.recovery_metadata, new_metadata);
-    EXPECT_EQ(held.recovery_metadata->materialized_end, 128);
+    EXPECT_EQ(std::static_pointer_cast<const DSV41CheckpointMetadata>(held.recovery_metadata)->materialized_end, 128);
 
     const auto retired = cache.releaseInFlight(
         1, CacheBlockKind::STATE_SWA_KV, held.backing_type, held.block_index, held.disk_slot, held.generation);

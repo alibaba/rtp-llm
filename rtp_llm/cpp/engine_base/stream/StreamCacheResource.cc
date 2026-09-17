@@ -294,8 +294,7 @@ void StreamCacheResource::init(int batch_size) {
                                         128,
                                         swa->entries_per_block};
             for (int batch = 0; batch < batch_size; ++batch)
-                batch_kv_cache_resource_->cacheResource(batch).setDsv41CacheState(
-                    std::make_shared<DSV41CacheState>(identity));
+                batch_kv_cache_resource_->cacheResource(batch).setDsv41CacheKeySeed(identity.cacheKeySeed());
         }
     }
     resource_released_ = false;
@@ -736,12 +735,18 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
 void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context) {
     const int block_tokens     = reuseBlockTokens();
     const int   data_reuse_len   = read_context->resource()->reuseBlockNum() * block_tokens;
-    const auto& state            = read_context->resource()->dsv41CacheState();
-    const bool  is_v41           = state || stream_->generateInput()->v41_inputs
+    const bool  is_v41           = stream_->generateInput()->v41_inputs
                         || (resource_context_.cache_manager
                             && resource_context_.cache_manager->cacheConfig().dsv41_cache_layout_version != 0);
+    const int64_t restored_end   = read_context->resource()->dsv41RestoredCheckpointEnd();
     const int total_reuse_len =
-        is_v41 ? (state ? std::min<int64_t>(data_reuse_len, state->view().target_ready_end) : 0) : data_reuse_len;
+        is_v41 ? std::min<int64_t>(data_reuse_len, restored_end) : data_reuse_len;
+    // Adopt the checkpoint the read context restored so later gathers and the
+    // end-of-request publication see it on the stream's own resource.
+    const auto& restored_checkpoint = read_context->resource()->dsv41RestoredCheckpoint();
+    if (restored_checkpoint) {
+        stream_->kvCachePtr()->cacheResource(0).setDsv41RestoredCheckpoint(restored_checkpoint, restored_end);
+    }
     const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * block_tokens;
     const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * block_tokens;
     const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * block_tokens;

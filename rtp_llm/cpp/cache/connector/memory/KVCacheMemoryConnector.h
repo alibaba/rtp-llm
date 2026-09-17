@@ -12,7 +12,6 @@
 #include "autil/LockFreeThreadPool.h"
 #include <torch/torch.h>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/DSV41CacheState.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/memory/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
@@ -102,7 +101,7 @@ private:
         uint64_t                  generation{0};
         uint64_t                  src_generation{0};
 
-        std::shared_ptr<const DSV41CheckpointMetadata> recovery_metadata;
+        std::shared_ptr<const void> recovery_metadata;
     };
     enum class CopyDirection {
         H2D = 0,

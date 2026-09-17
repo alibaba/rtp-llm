@@ -161,56 +161,6 @@ void cudaCheck(cudaError_t status) {
 
 }  // namespace
 
-TEST(DSV41CacheStateTest, MissingOwnerAuxHistoryPairOrOneDraftSwaRejectsCheckpoint) {
-    const auto valid = checkpoint(identity(), 256);
-    auto       value = valid;
-    value.index_entries[3]--;
-    EXPECT_THROW(value.validate(128), std::invalid_argument);
-    value = valid;
-    value.global_entries[0]--;
-    EXPECT_THROW(value.validate(128), std::invalid_argument);
-    value = valid;
-    value.swa[42].valid_start++;
-    EXPECT_THROW(value.validate(128), std::invalid_argument);
-    value = valid;
-    value.aux_valid_end--;
-    EXPECT_THROW(value.validate(128), std::invalid_argument);
-    value            = valid;
-    value.pair_empty = false;
-    EXPECT_THROW(value.validate(128), std::invalid_argument);
-    value               = valid;
-    value.history_ready = false;
-    EXPECT_THROW(value.validate(128), std::invalid_argument);
-    EXPECT_NO_THROW(valid.validate(128));
-}
-
-TEST(DSV41CacheStateTest, ModeTailPolicyAndActualRangesFollowRestoredState) {
-    auto full           = identity();
-    auto bounded        = full;
-    bounded.replay_mode = DSV41ReplayMode::BOUNDED_CHECKPOINT_V1;
-    DSV41CacheState state(bounded);
-    EXPECT_THROW(state.restore(checkpoint(full, 256), 128), std::invalid_argument);
-    const auto metadata = checkpoint(bounded, 256);
-    state.restore(metadata, 128);
-    EXPECT_TRUE(*state.view().completed == metadata);
-    EXPECT_EQ(state.view().completed->swa[21].replay_floor, 128);
-    EXPECT_EQ(state.view().target_ready_end, 256);
-    bounded.tail_policy_version = 2;
-    EXPECT_THROW(DSV41CacheState invalid(bounded), std::invalid_argument);
-}
-
-TEST(DSV41CacheStateTest, SwaRangeUsesThePhysicalCapacityInItsLayoutIdentity) {
-    auto id                   = identity();
-    id.physical_swa_entries   = 134;
-    auto value                = checkpoint(id, 256);
-    value.swa[42].valid_start = 256 - 134;
-    EXPECT_NO_THROW(value.validate(128));
-    value.swa[42].valid_start--;
-    EXPECT_THROW(value.validate(128), std::invalid_argument);
-    id.physical_swa_entries = 0;
-    EXPECT_THROW(DSV41CacheState invalid(id), std::invalid_argument);
-}
-
 class DSV41MemoryCheckpointGpuTest: public ::testing::Test {
 protected:
     using ByteKey = std::tuple<size_t, int, size_t>;
@@ -277,7 +227,9 @@ protected:
         allocator_.reset();
     }
     DSV41CacheIdentity cacheIdentity(DSV41ReplayMode mode = DSV41ReplayMode::FULL) const {
-        return connector_->dsv41CacheIdentity(identity().model_revision, mode);
+        const auto spec = std::dynamic_pointer_cast<DSV41KVCacheSpec>(config_.cache_specs.at(5));
+        return DSV41CacheIdentity{
+            identity().model_revision, connector_->dsv41LayoutFingerprint(), mode, 1, 128, spec->entries_per_block};
     }
     CacheKeysType keys(size_t blocks, int32_t first, const DSV41CacheIdentity& id) const {
         CacheKeysType result;
@@ -324,7 +276,7 @@ protected:
                 mapping[blocks - 1] = ids.front();
             value->mutableBlockIds(group).assign(mapping);
         }
-        value->setDsv41CacheState(std::make_shared<DSV41CacheState>(cacheIdentity(mode)));
+        value->setDsv41CacheKeySeed(cacheIdentity(mode).cacheKeySeed());
         return value;
     }
     void fill(const std::shared_ptr<KVCacheResource>& value, uint32_t salt, bool fixed_only = false) {
@@ -370,11 +322,12 @@ protected:
         }
         return result;
     }
-    void tail(const std::shared_ptr<KVCacheResource>& value, size_t index) {
+    void tail(const std::shared_ptr<KVCacheResource>& value,
+              size_t                                  index,
+              DSV41ReplayMode                         mode = DSV41ReplayMode::FULL) {
         const auto end = (uint64_t{value->blockDependencies()[index].ordinal} + 1) * connector_->dsv41DataUnit();
         value->setDsv41RecoveryMetadata(
-            index,
-            std::make_shared<DSV41CheckpointMetadata>(checkpoint(value->dsv41CacheState()->view().identity, end)));
+            index, std::make_shared<DSV41CheckpointMetadata>(checkpoint(cacheIdentity(mode), end)));
     }
     bool done(const std::shared_ptr<AsyncContext>& context) {
         if (!context)
@@ -406,7 +359,7 @@ protected:
         value->setCacheKeysAreCpCanonical(source->cacheKeysAreCpCanonical());
         value->setLastBlockAligned(source->lastBlockAligned());
         value->setBlockIdsKeyAligned(true);
-        value->setDsv41CacheState(source->dsv41CacheState());
+        value->setDsv41CacheKeySeed(source->dsv41CacheKeySeed());
         for (int group = 0; group < 6; ++group)
             value->mutableBlockIds(group).assign(
                 BlockIndicesType(source->blocks(group).begin() + begin, source->blocks(group).end()));
@@ -469,11 +422,8 @@ TEST_F(DSV41MemoryCheckpointGpuTest, KvOnlyHitPreservesWritableStateAndBothExecu
     ASSERT_TRUE(restore(destination, 3));
     EXPECT_EQ(bytes(destination, 3, false), expected);
     EXPECT_EQ(destination->memoryReuseBlockNum(), 3);
-    const auto view = destination->dsv41CacheState()->view();
-    EXPECT_EQ(view.encoder_materialized_end, 0);
-    EXPECT_EQ(view.decoder_checkpoint_end, 0);
-    EXPECT_EQ(view.target_ready_end, 0);
-    EXPECT_FALSE(view.completed.has_value());
+    EXPECT_EQ(destination->dsv41RestoredCheckpointEnd(), 0);
+    EXPECT_FALSE(destination->dsv41RestoredCheckpoint());
     EXPECT_EQ(destination->dsv41RecoveryMetadata(2), nullptr);
 }
 
@@ -483,7 +433,6 @@ TEST_F(DSV41MemoryCheckpointGpuTest, GpuPrefixAndCpuSuffixUseOriginalGlobalOrdin
     tail(source, 2);
     const auto expected      = bytes(source, 3, true);
     auto       stored_suffix = suffix(source, 1);
-    stored_suffix->setDsv41CacheState(nullptr);
     ASSERT_TRUE(write(stored_suffix));
     EXPECT_FALSE(connector_->prefix_block_cache_->contains(source->cacheKeys()[0], CacheBlockKind::COMPRESSED_KV));
     auto destination = resource(3, 20000);
@@ -498,9 +447,10 @@ TEST_F(DSV41MemoryCheckpointGpuTest, GpuPrefixAndCpuSuffixUseOriginalGlobalOrdin
     EXPECT_EQ(destination->reuseBlockNum(), 3);
     EXPECT_EQ(destination->memoryReuseBlockNum(), 2);
     ASSERT_NE(destination->dsv41RecoveryMetadata(2), nullptr);
-    EXPECT_EQ(destination->dsv41RecoveryMetadata(2)->materialized_end, 384);
-    EXPECT_EQ(destination->dsv41CacheState()->view().decoder_checkpoint_end, 384);
-    EXPECT_EQ(destination->dsv41CacheState()->view().target_ready_end, 384);
+    EXPECT_EQ(std::static_pointer_cast<const DSV41CheckpointMetadata>(destination->dsv41RecoveryMetadata(2))
+                  ->materialized_end,
+              384);
+    EXPECT_EQ(destination->dsv41RestoredCheckpointEnd(), 384);
 }
 
 TEST_F(DSV41MemoryCheckpointGpuTest, SharedPrefixAndDivergingSuffixRemainReadableAcrossConcurrentPlans) {
@@ -533,7 +483,9 @@ TEST_F(DSV41MemoryCheckpointGpuTest, SharedPrefixAndDivergingSuffixRemainReadabl
     EXPECT_EQ(bytes(b, 2, false), bytes(second, 2, true));
 }
 
-TEST_F(DSV41MemoryCheckpointGpuTest, InvalidTailMetadataDoesNotHideKvHit) {
+TEST_F(DSV41MemoryCheckpointGpuTest, UnvalidatedTailMetadataRestoresAndKeepsKvHit) {
+    // Recovery metadata is an opaque model payload: the connector copies and
+    // restores whatever is attached; model-side policy decides usability.
     for (int bad = 0; bad < 3; ++bad) {
         auto source = resource(1, 40000 + bad * 100);
         fill(source, 17);
@@ -548,9 +500,8 @@ TEST_F(DSV41MemoryCheckpointGpuTest, InvalidTailMetadataDoesNotHideKvHit) {
         ASSERT_TRUE(write(source));
         auto destination = resource(1, 40000 + bad * 100);
         ASSERT_TRUE(restore(destination, 1));
-        EXPECT_EQ(destination->dsv41CacheState()->view().encoder_materialized_end, 0);
-        EXPECT_EQ(destination->dsv41CacheState()->view().decoder_checkpoint_end, 0);
-        EXPECT_EQ(destination->dsv41RecoveryMetadata(0), nullptr);
+        EXPECT_EQ(destination->dsv41RestoredCheckpointEnd(), metadata->materialized_end);
+        EXPECT_NE(destination->dsv41RecoveryMetadata(0), nullptr);
     }
 }
 
@@ -560,13 +511,14 @@ TEST_F(DSV41MemoryCheckpointGpuTest, MissingTailPreservesAnEarlierRecoveredBound
     ASSERT_TRUE(write(source));
     auto       destination = resource(2, 50000);
     const auto old         = checkpoint(cacheIdentity(), 128);
-    destination->dsv41CacheState()->restore(old, 128);
+    destination->setDsv41RestoredCheckpoint(std::make_shared<DSV41CheckpointMetadata>(old), 128);
     destination->setDsv41RecoveryMetadata(0, std::make_shared<DSV41CheckpointMetadata>(old));
     ASSERT_TRUE(restore(destination, 2));
-    EXPECT_EQ(destination->dsv41CacheState()->view().encoder_materialized_end, 128);
-    EXPECT_EQ(destination->dsv41CacheState()->view().decoder_checkpoint_end, 128);
+    EXPECT_EQ(destination->dsv41RestoredCheckpointEnd(), 128);
     EXPECT_EQ(destination->dsv41RecoveryMetadata(1), nullptr);
-    EXPECT_EQ(destination->dsv41RecoveryMetadata(0)->materialized_end, 128);
+    EXPECT_EQ(std::static_pointer_cast<const DSV41CheckpointMetadata>(destination->dsv41RecoveryMetadata(0))
+                  ->materialized_end,
+              128);
 }
 
 TEST_F(DSV41MemoryCheckpointGpuTest, SelectedEarlierReadKeepsKvHitWithoutInventingIntermediateTail) {
@@ -580,11 +532,11 @@ TEST_F(DSV41MemoryCheckpointGpuTest, SelectedEarlierReadKeepsKvHitWithoutInventi
     EXPECT_EQ(match->matchedBlockCount(), 3);
     ASSERT_TRUE(done(connector_->asyncRead(destination, meta_, match, 0, 2)));
     EXPECT_EQ(destination->reuseBlockNum(), 2);
-    EXPECT_EQ(destination->dsv41CacheState()->view().decoder_checkpoint_end, 0);
+    EXPECT_EQ(destination->dsv41RestoredCheckpointEnd(), 0);
     EXPECT_EQ(destination->dsv41RecoveryMetadata(1), nullptr);
     ASSERT_TRUE(done(connector_->asyncRead(destination, meta_, match, 2, 1)));
     EXPECT_EQ(bytes(destination, 3, false), bytes(source, 3, true));
-    EXPECT_EQ(destination->dsv41CacheState()->view().decoder_checkpoint_end, 384);
+    EXPECT_EQ(destination->dsv41RestoredCheckpointEnd(), 384);
     EXPECT_EQ(destination->reuseBlockNum(), 3);
 }
 
@@ -597,8 +549,7 @@ TEST_F(DSV41MemoryCheckpointGpuTest, UnassignedDestinationSwaDoesNotBlockKvCopy)
     destination->mutableBlockIds(5).setAt(0, NULL_BLOCK_IDX);
     ASSERT_TRUE(restore(destination, 1));
     EXPECT_EQ(destination->reuseBlockNum(), 1);
-    EXPECT_EQ(destination->dsv41CacheState()->view().encoder_materialized_end, 0);
-    EXPECT_EQ(destination->dsv41CacheState()->view().decoder_checkpoint_end, 0);
+    EXPECT_EQ(destination->dsv41RestoredCheckpointEnd(), 0);
     EXPECT_EQ(destination->dsv41RecoveryMetadata(0), nullptr);
 }
 
@@ -672,7 +623,7 @@ TEST_F(DSV41MemoryCheckpointGpuTest, WorkerSpecificPagesAndDelayedCompletionPres
     ASSERT_TRUE(restore(destination, 1));
     EXPECT_EQ(bytes(destination, 1, false), expected);
     EXPECT_EQ(bytes(destination_other, 1, false), expected_other);
-    EXPECT_EQ(destination->dsv41CacheState()->view().target_ready_end, 128);
+    EXPECT_EQ(destination->dsv41RestoredCheckpointEnd(), 128);
     EXPECT_EQ(other.service.copied_requests.load(), 2);
 }
 
@@ -716,7 +667,7 @@ TEST_F(DSV41MemoryCheckpointGpuTest, FailedReadRetainsCpuSourceAndDoesNotPublish
     EXPECT_FALSE(done(connector_->asyncRead(destination, meta_, match, 0, 1)));
     EXPECT_EQ(destination->reuseBlockNum(), 0);
     EXPECT_EQ(destination->dsv41RecoveryMetadata(0), nullptr);
-    EXPECT_EQ(destination->dsv41CacheState()->view().decoder_checkpoint_end, 0);
+    EXPECT_EQ(destination->dsv41RestoredCheckpointEnd(), 0);
     EXPECT_TRUE(connector_->prefix_block_cache_->contains(source->cacheKeys()[0], CacheBlockKind::COMPRESSED_KV));
     EXPECT_TRUE(connector_->prefix_block_cache_->contains(source->cacheKeys()[0], CacheBlockKind::STATE_SWA_KV));
     ASSERT_TRUE(done(connector_->asyncRead(destination, meta_, match, 0, 1)));
@@ -758,8 +709,10 @@ TEST_F(DSV41MemoryCheckpointGpuTest, DuplicateDifferentBytesCannotRelabelExistin
     auto destination = resource(1, 90000);
     ASSERT_TRUE(restore(destination, 1));
     EXPECT_EQ(bytes(destination, 1, false), bytes(source, 1, true));
-    EXPECT_EQ(destination->dsv41RecoveryMetadata(0)->history_token_ids,
-              source->dsv41RecoveryMetadata(0)->history_token_ids);
+    EXPECT_EQ(std::static_pointer_cast<const DSV41CheckpointMetadata>(destination->dsv41RecoveryMetadata(0))
+                  ->history_token_ids,
+              std::static_pointer_cast<const DSV41CheckpointMetadata>(source->dsv41RecoveryMetadata(0))
+                  ->history_token_ids);
 }
 
 TEST_F(DSV41MemoryCheckpointGpuTest, ReadRefreshesDestinationMappingsAndKeepsSwaPrivate) {
@@ -792,39 +745,39 @@ TEST_F(DSV41MemoryCheckpointGpuTest, ProtectedNUsesOriginalAsyncCopyAndSurvivesL
     auto source = resource(1, 110000);
     fill(source, 59);
     const auto expected = bytes(source, 1, true);
-    auto       state    = source->dsv41CacheState();
-    state->advanceEncoder(128);
-    state->completeDecoder(checkpoint(cacheIdentity(), 128), 128);
+    source->setDsv41RestoredCheckpoint(
+        std::make_shared<DSV41CheckpointMetadata>(checkpoint(cacheIdentity(), 128)), 128);
     ASSERT_TRUE(connector_->stageDsv41Checkpoint(source, [] { cudaCheck(cudaDeviceSynchronize()); }, meta_));
     EXPECT_FALSE(connector_->cacheKeys().empty());
-    state->advanceEncoder(300);
+    // Later writes to the live ring do not touch the staged copy.
     fill(source, 61, true);
-    state->completeHandoff(300, true, true, true);
-    state->finish(300);
     auto destination = resource(1, 110000);
     ASSERT_TRUE(restore(destination, 1));
     EXPECT_EQ(bytes(destination, 1, false), expected);
-    EXPECT_EQ(destination->dsv41CacheState()->view().decoder_checkpoint_end, 128);
+    EXPECT_EQ(destination->dsv41RestoredCheckpointEnd(), 128);
 }
 
 TEST_F(DSV41MemoryCheckpointGpuTest, StaleNIsRejectedBeforeCopyAndCancellationKeepsValidatedBlocks) {
     auto stale = resource(1, 111000);
     fill(stale, 59);
-    auto stale_state = stale->dsv41CacheState();
-    stale_state->advanceEncoder(128);
-    stale_state->completeDecoder(checkpoint(cacheIdentity(), 128), 128);
-    EXPECT_FALSE(connector_->stageDsv41Checkpoint(stale, [&] { stale_state->advanceEncoder(300); }, meta_));
+    stale->setDsv41RestoredCheckpoint(
+        std::make_shared<DSV41CheckpointMetadata>(checkpoint(cacheIdentity(), 128)), 128);
+    EXPECT_FALSE(connector_->stageDsv41Checkpoint(
+        stale,
+        [&] {
+            stale->setDsv41RestoredCheckpoint(
+                std::make_shared<DSV41CheckpointMetadata>(checkpoint(cacheIdentity(), 256)), 256);
+        },
+        meta_));
     EXPECT_TRUE(connector_->cacheKeys().empty());
     EXPECT_EQ(service_.copied_requests.load(), 0);
 
     auto source = resource(1, 112000);
     fill(source, 61);
-    auto state = source->dsv41CacheState();
-    state->advanceEncoder(128);
-    state->completeDecoder(checkpoint(cacheIdentity(), 128), 128);
+    source->setDsv41RestoredCheckpoint(
+        std::make_shared<DSV41CheckpointMetadata>(checkpoint(cacheIdentity(), 128)), 128);
     ASSERT_TRUE(connector_->stageDsv41Checkpoint(source, [] { cudaCheck(cudaDeviceSynchronize()); }, meta_));
-    state->cancel();
-    EXPECT_TRUE(state->view().snapshots.empty());
+    source->setDsv41RestoredCheckpoint(nullptr, 0);
     EXPECT_FALSE(connector_->cacheKeys().empty());
     auto destination = resource(1, 112000);
     ASSERT_TRUE(restore(destination, 1));
@@ -839,7 +792,7 @@ TEST_F(DSV41MemoryCheckpointGpuTest, PrefixMatchDoesNotRequireTailOrDestinationP
     destination->initGroups(
         6, config_.layer_all_num, config_.layer_to_group_id, 1, config_.group_types, config_.layer_region_to_group_id);
     destination->setCacheKeys(source->cacheKeys());
-    destination->setDsv41CacheState(std::make_shared<DSV41CacheState>(cacheIdentity()));
+    destination->setDsv41CacheKeySeed(cacheIdentity().cacheKeySeed());
     auto match = connector_->asyncMatch(destination, meta_);
     ASSERT_NE(match, nullptr);
     EXPECT_EQ(match->matchedBlockCount(), 2);
@@ -848,7 +801,7 @@ TEST_F(DSV41MemoryCheckpointGpuTest, PrefixMatchDoesNotRequireTailOrDestinationP
     for (int group = 0; group < 6; ++group)
         destination->mutableBlockIds(group).assign(allocated->blocks(group));
     ASSERT_TRUE(done(connector_->asyncRead(destination, meta_, match, 0, 2)));
-    EXPECT_EQ(destination->dsv41CacheState()->view().decoder_checkpoint_end, 0);
+    EXPECT_EQ(destination->dsv41RestoredCheckpointEnd(), 0);
 }
 
 TEST_F(DSV41MemoryCheckpointGpuTest, NamespacedBlockKeysSeparateReplayModeAndModelIdentity) {
@@ -862,7 +815,7 @@ TEST_F(DSV41MemoryCheckpointGpuTest, NamespacedBlockKeysSeparateReplayModeAndMod
     auto other = resource(1, 130000);
     auto id    = cacheIdentity();
     id.model_revision += "-other";
-    other->setDsv41CacheState(std::make_shared<DSV41CacheState>(id));
+    other->setDsv41CacheKeySeed(id.cacheKeySeed());
     other->setCacheKeys(keys(1, 130000, id));
     EXPECT_EQ(connector_->asyncMatch(other, meta_), nullptr);
 }
@@ -889,7 +842,7 @@ TEST_F(DSV41MemoryTargetOnlyGpuTest, FortyLayerLayoutStoresKvWithoutInventingDra
             EXPECT_EQ(copied.at(key), data);
         }
     }
-    EXPECT_EQ(destination->dsv41CacheState()->view().target_ready_end, 0);
+    EXPECT_EQ(destination->dsv41RestoredCheckpointEnd(), 0);
 }
 
 class DSV41MemoryFullPageGpuTest: public DSV41MemoryCheckpointGpuTest, public ::testing::WithParamInterface<uint32_t> {
@@ -934,7 +887,9 @@ TEST_P(DSV41MemoryFullPageGpuTest, DataPagesUseBAndRawFixedSlotsUseEightB) {
     EXPECT_EQ(bytes(destination, 8, false), expected);
     EXPECT_EQ(destination->memoryReuseBlockNum(), 4);
     ASSERT_NE(destination->dsv41RecoveryMetadata(7), nullptr);
-    EXPECT_EQ(destination->dsv41RecoveryMetadata(7)->materialized_end, blockSize() * 8);
+    EXPECT_EQ(std::static_pointer_cast<const DSV41CheckpointMetadata>(destination->dsv41RecoveryMetadata(7))
+                  ->materialized_end,
+              blockSize() * 8);
     EXPECT_NE(destination->blocks(5)[0], source->blocks(5)[0]);
     const auto unchanged = bytes(source, 8, false);
     fill(destination, 89, true);
@@ -965,7 +920,7 @@ protected:
 TEST_P(DSV41MemoryCheckpointCp8GpuTest, CanonicalSuffixCopiesExactOwnerBytesAtOriginalOrdinal) {
     auto source = resource(2, 140000, DSV41ReplayMode::BOUNDED_CHECKPOINT_V1);
     fill(source, 79);
-    tail(source, 1);
+    tail(source, 1, DSV41ReplayMode::BOUNDED_CHECKPOINT_V1);
     auto stored_suffix = suffix(source, 1);
     ASSERT_TRUE(write(stored_suffix));
     auto destination = resource(2, 140000, DSV41ReplayMode::BOUNDED_CHECKPOINT_V1);
@@ -977,11 +932,12 @@ TEST_P(DSV41MemoryCheckpointCp8GpuTest, CanonicalSuffixCopiesExactOwnerBytesAtOr
     ASSERT_TRUE(restore(destination, 2));
     EXPECT_EQ(bytes(destination, 2, false), bytes(source, 2, true));
     ASSERT_NE(destination->dsv41RecoveryMetadata(1), nullptr);
-    EXPECT_EQ(destination->dsv41RecoveryMetadata(1)->materialized_end, blockSize() * 8 * 2);
-    EXPECT_EQ(destination->dsv41CacheState()->view().decoder_checkpoint_end, blockSize() * 8 * 2);
+    const auto restored_metadata =
+        std::static_pointer_cast<const DSV41CheckpointMetadata>(destination->dsv41RecoveryMetadata(1));
+    EXPECT_EQ(restored_metadata->materialized_end, blockSize() * 8 * 2);
+    EXPECT_EQ(destination->dsv41RestoredCheckpointEnd(), blockSize() * 8 * 2);
     // Completed all-worker copies restore the complete decoder checkpoint.
-    EXPECT_GT(destination->dsv41RecoveryMetadata(1)->aux_valid_end, 0);
-    EXPECT_EQ(destination->dsv41CacheState()->view().target_ready_end, blockSize() * 8 * 2);
+    EXPECT_GT(restored_metadata->aux_valid_end, 0);
     EXPECT_EQ(destination->memoryReuseBlockNum(), 1);
 }
 

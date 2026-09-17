@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <numeric>
 
+#include "rtp_llm/cpp/cache/DSV41CacheState.h"
 #include "rtp_llm/cpp/cache/DSV41KVCacheSpec.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -23,8 +24,7 @@ size_t HybridPoolKVCacheAllocator::dsv41DataUnit() const {
     return config_.seq_size_per_block * (spec->prefill_byte_slice ? spec->cp_size : 1);
 }
 
-DSV41CacheIdentity HybridPoolKVCacheAllocator::dsv41Identity(const DSV41CacheIdentity& identity) const {
-    identity.validate();
+void HybridPoolKVCacheAllocator::checkDsv41PhysicalLayout() const {
     if (config_.dsv41_cache_layout_version != 1 || (config_.layer_all_num != 40 && config_.layer_all_num != 43)
         || config_.cache_specs.size() != 6 || config_.global_layer_ids.size() != 6 || !config_.use_typed_cache_regions
         || !config_.use_opaque_kv_cache_store || !config_.use_independent_block_pools)
@@ -45,16 +45,6 @@ DSV41CacheIdentity HybridPoolKVCacheAllocator::dsv41Identity(const DSV41CacheIde
         if (!spec || spec->region != regions[group] || config_.global_layer_ids[group] != owners)
             throw std::logic_error("V4.1 reuse has inconsistent physical owners");
     }
-    const auto swa = std::dynamic_pointer_cast<DSV41KVCacheSpec>(config_.cache_specs[5]);
-    DSV41CacheIdentity expected{identity.model_revision,
-                                config_.dsv41LayoutFingerprint(),
-                                identity.replay_mode,
-                                1,
-                                128,
-                                swa->entries_per_block};
-    if (!(identity == expected))
-        throw std::invalid_argument("V4.1 request identity differs from its physical cache layout");
-    return expected;
 }
 
 void HybridPoolKVCacheAllocator::insertIntoCache(const InsertInfo& info) {
@@ -66,10 +56,11 @@ void HybridPoolKVCacheAllocator::insertIntoCache(const InsertInfo& info) {
         throw std::invalid_argument("V4.1 publication requires its materialized request");
     for (int b = 0; b < info.batch_kv_cache_resource->batchSize(); ++b) {
         auto& resource = info.batch_kv_cache_resource->cacheResource(b);
-        if (!resource.dsv41CacheState() || resource.groupNums() != 6)
-            throw std::logic_error("V4.1 publication requires request identity and physical groups");
-        const auto view = resource.dsv41CacheState()->view();
-        dsv41Identity(view.identity);
+        if (resource.groupNums() != 6)
+            throw std::logic_error("V4.1 publication requires its physical groups");
+        checkDsv41PhysicalLayout();
+        const auto   restored =
+            std::static_pointer_cast<const DSV41CheckpointMetadata>(resource.dsv41RestoredCheckpoint());
         const size_t unit = dsv41DataUnit();
         const bool   cp   = unit != config_.seq_size_per_block;
         if (cp && (!info.cp_slot_mapper || !info.cp_slot_mapper->isSharded() || info.cp_slot_mapper->cpSize() < 2))
@@ -84,7 +75,7 @@ void HybridPoolKVCacheAllocator::insertIntoCache(const InsertInfo& info) {
         const size_t count =
             std::min(keys.size(),
                      static_cast<size_t>(std::min<int64_t>(std::max(info.complete_token_ids->seqLength() - 1, 0),
-                                                           view.encoder_materialized_end))
+                                                           resource.dsv41RestoredCheckpointEnd()))
                          / unit);
         runtimeSyncAndCheck();
         for (size_t index = 0; index < count; ++index) {
@@ -100,13 +91,11 @@ void HybridPoolKVCacheAllocator::insertIntoCache(const InsertInfo& info) {
             }
             if (!complete)
                 break;
-            std::shared_ptr<const DSV41CheckpointMetadata> metadata;
-            if (view.completed && view.encoder_materialized_end == view.completed->materialized_end
-                && view.decoder_checkpoint_end == view.completed->materialized_end
-                && view.completed->materialized_end == static_cast<int64_t>((index + 1) * unit)) {
-                view.completed->validate(dsv41ReuseUnit());
-                metadata                 = std::make_shared<DSV41CheckpointMetadata>(*view.completed);
-                const size_t fixed_index = view.completed->materialized_end / dsv41ReuseUnit() - 1;
+            std::shared_ptr<const void> metadata;
+            if (restored && restored->materialized_end == resource.dsv41RestoredCheckpointEnd()
+                && restored->materialized_end == static_cast<int64_t>((index + 1) * unit)) {
+                metadata                 = std::make_shared<DSV41CheckpointMetadata>(*restored);
+                const size_t fixed_index = restored->materialized_end / dsv41ReuseUnit() - 1;
                 for (size_t group = 4; group < 6; ++group) {
                     const auto& ids = resource.blocks(group);
                     if (fixed_index >= ids.size() || ids[fixed_index] <= 0) {
@@ -137,14 +126,13 @@ int HybridPoolKVCacheAllocator::reuseCache(const CacheKeysType&                 
     if (config_.dsv41_cache_layout_version == 0)
         return HybridKVCacheAllocator::reuseCache(keys, batch, mapper);
     auto& resource = batch.cacheResource(0);
-    if (!resource.dsv41CacheState() || !shared_block_cache_)
-        throw std::logic_error("V4.1 block matching requires request identity");
-    const auto view = resource.dsv41CacheState()->view();
-    dsv41Identity(view.identity);
+    if (!shared_block_cache_)
+        throw std::logic_error("V4.1 block matching requires its block cache");
+    checkDsv41PhysicalLayout();
     if (dsv41DataUnit() != config_.seq_size_per_block && (!mapper || !mapper->isSharded() || mapper->cpSize() < 2))
         throw std::invalid_argument("V4.1 block matching requires the CP canonical mapper");
     std::array<BlockIndicesType, 6>                blocks;
-    std::shared_ptr<const DSV41CheckpointMetadata> tail;
+    std::shared_ptr<const void>                    tail;
     size_t                                         tail_blocks = 0;
     for (size_t index = 0; index < keys.size(); ++index) {
         auto match = shared_block_cache_->matchAndReference(keys[index], {0, 1, 2, 3});
@@ -152,17 +140,11 @@ int HybridPoolKVCacheAllocator::reuseCache(const CacheKeysType&                 
             break;
         for (size_t group = 0; group < 4; ++group)
             blocks[group].push_back(match.group_blocks[group]);
-        auto metadata   = match.recovery_metadata;
-        bool valid_tail = metadata && metadata->identity == view.identity
+        const auto metadata = std::static_pointer_cast<const DSV41CheckpointMetadata>(match.recovery_metadata);
+        const bool valid_tail = metadata
                           && metadata->materialized_end == static_cast<int64_t>((index + 1) * dsv41DataUnit())
-                          && match.group_blocks.size() == 6 && match.group_blocks[4] > 0 && match.group_blocks[5] > 0;
-        if (valid_tail) {
-            try {
-                metadata->validate(dsv41ReuseUnit());
-            } catch (const std::invalid_argument&) {
-                valid_tail = false;
-            }
-        }
+                          && match.group_blocks.size() == 6 && match.group_blocks[4] > 0
+                          && match.group_blocks[5] > 0;
         for (size_t group = 4; group < 6; ++group) {
             if (valid_tail) {
                 if (!blocks[group].empty())
@@ -265,17 +247,18 @@ MallocResult HybridPoolKVCacheAllocator::incrMalloc(const MallocInfo& info) {
     std::shared_ptr<const DSV41CheckpointMetadata> restore;
     if (config_.dsv41_cache_layout_version != 0 && info.batch_kv_cache_resource) {
         auto& resource = info.batch_kv_cache_resource->cacheResource(0);
-        if (resource.dsv41CacheState() && resource.dsv41CacheState()->view().decoder_checkpoint_end == 0) {
+        if (resource.dsv41RestoredCheckpointEnd() == 0) {
             for (size_t index = 0; index < resource.deviceReuseBlockNum(); ++index)
                 if (auto metadata = resource.dsv41RecoveryMetadata(index))
-                    restore = std::move(metadata);
+                    restore = std::static_pointer_cast<const DSV41CheckpointMetadata>(std::move(metadata));
             if (restore)
                 adjusted.enable_remove_skipped_blocks = false;
         }
     }
     auto result = HybridKVCacheAllocator::incrMalloc(adjusted);
     if (result.success && restore)
-        info.batch_kv_cache_resource->cacheResource(0).dsv41CacheState()->restore(*restore, dsv41ReuseUnit());
+        info.batch_kv_cache_resource->cacheResource(0).setDsv41RestoredCheckpoint(restore,
+                                                                                  restore->materialized_end);
     return result;
 }
 

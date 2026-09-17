@@ -4,6 +4,7 @@
 #include <cstring>
 #include <set>
 
+#include "rtp_llm/cpp/cache/DSV41CacheState.h"
 #include "rtp_llm/cpp/cache/DSV41KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
@@ -73,7 +74,7 @@ bool KVCacheMemoryConnector::dsv41ResourceCompatible(const KVCacheResource& reso
     const auto spec = std::dynamic_pointer_cast<DSV41KVCacheSpec>(cache_config_.cache_specs.at(5));
     if (!spec || (spec->cp_size > 1 && spec->prefill_byte_slice && !resource.cacheKeysAreCpCanonical()))
         return false;
-    return resource.dsv41CacheState() || resource.blockIdsAreKeyAligned();
+    return resource.dsv41CacheKeySeed() != 0 || resource.blockIdsAreKeyAligned();
 }
 
 std::optional<size_t> KVCacheMemoryConnector::dsv41SlotIndex(const KVCacheResource& resource,
@@ -158,19 +159,17 @@ bool KVCacheMemoryConnector::bindDsv41WorkerBlocks(CopyPlan& plan, const KVCache
 bool KVCacheMemoryConnector::stageDsv41Checkpoint(const std::shared_ptr<KVCacheResource>& resource,
                                                   const std::function<void()>&            wait_for_producer,
                                                   const std::shared_ptr<Meta>&            meta) {
-    if (!resource || !resource->dsv41CacheState() || !wait_for_producer || !meta || stop_.load())
+    if (!resource || !wait_for_producer || !meta || stop_.load())
         return false;
-    const auto state = resource->dsv41CacheState();
-    const auto view  = state->view();
-    if (!view.completed || view.finished || view.cancelled || !dsv41ResourceCompatible(*resource)
-        || view.encoder_materialized_end != view.decoder_checkpoint_end
-        || view.completed->materialized_end != view.decoder_checkpoint_end)
+    const auto completed =
+        std::static_pointer_cast<const DSV41CheckpointMetadata>(resource->dsv41RestoredCheckpoint());
+    if (!completed || !dsv41ResourceCompatible(*resource))
         return false;
     resource->ensureLinearBlockDependencies();
     size_t count = 0;
     for (size_t i = 0; i < resource->cacheKeys().size(); ++i) {
         if (static_cast<int64_t>((uint64_t{resource->blockDependencies()[i].ordinal} + 1) * dsv41DataUnit())
-            == view.completed->materialized_end) {
+            == completed->materialized_end) {
             count = i + 1;
             break;
         }
@@ -187,12 +186,12 @@ bool KVCacheMemoryConnector::stageDsv41Checkpoint(const std::shared_ptr<KVCacheR
     source->setCacheKeysAreCpCanonical(resource->cacheKeysAreCpCanonical());
     source->setLastBlockAligned(true);
     source->clearDsv41RecoveryMetadata();
-    source->setDsv41RecoveryMetadata(count - 1, std::make_shared<DSV41CheckpointMetadata>(*view.completed));
+    source->setDsv41RecoveryMetadata(count - 1, std::make_shared<DSV41CheckpointMetadata>(*completed));
     try {
         wait_for_producer();
-        const auto current = state->view();
-        if (!current.completed || !(*current.completed == *view.completed)
-            || current.encoder_materialized_end != view.completed->materialized_end)
+        const auto current =
+            std::static_pointer_cast<const DSV41CheckpointMetadata>(resource->dsv41RestoredCheckpoint());
+        if (!current || !(*current == *completed))
             return false;
         auto write = asyncWrite(source, meta);
         if (write) {

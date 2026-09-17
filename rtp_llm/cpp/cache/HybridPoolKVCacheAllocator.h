@@ -4,7 +4,6 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/HybridKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/DSV41CacheState.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
@@ -62,7 +61,7 @@ private:
                                        const std::shared_ptr<CPSlotMapper>& mapper) override;
     MallocResult            initMallocForCommonLen(const MallocInfo& malloc_info) override;
     MallocResult            incrMalloc(const MallocInfo& malloc_info) override;
-    DSV41CacheIdentity      dsv41Identity(const DSV41CacheIdentity& identity) const;
+    void                    checkDsv41PhysicalLayout() const;
     size_t                  dsv41ReuseUnit() const;
     size_t                  dsv41DataUnit() const;
     bool                    cloneDsv41WritableBacking(KVCacheResource& resource, size_t state_ready_blocks);

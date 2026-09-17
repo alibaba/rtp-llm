@@ -29,7 +29,7 @@ void SharedBlockCache::put(CacheKeyType                                   cache_
                            NamespaceId                                    namespace_id,
                            const BlockDependency&                         dependency,
                            const std::vector<bool>&                       matchable_slots,
-                           std::shared_ptr<const DSV41CheckpointMetadata> recovery_metadata) {
+                           std::shared_ptr<const void>           recovery_metadata) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
 
