@@ -199,6 +199,7 @@ final class MockPerformanceModel {
     boolean prefillGpuPrefixTree = true;
     boolean decodeGpuPrefixTree = true;
     Double decodeReserveBlockRatio; // Explicit percentage; null preserves legacy case rounding.
+    Double prefillReserveBlockRatio; // Explicit percentage; null preserves legacy case rounding.
     private final double decodeScale;
     // Opt-in accepted-layer visibility window, JSON
     // "decode.report_queued_as_kv_allocated" (default false = current
@@ -324,6 +325,7 @@ final class MockPerformanceModel {
         copy.memoryCacheBlocks = memoryCacheBlocks;
         copy.memoryCopyLifecycle = memoryCopyLifecycle;
         copy.decodeReserveBlockRatio = decodeReserveBlockRatio;
+        copy.prefillReserveBlockRatio = prefillReserveBlockRatio;
         copy.prefillBatchPolicy = prefillBatchPolicy;
         copy.nativeTokenCacheKeys = nativeTokenCacheKeys;
         copy.overrideFixedPrefillMs = overrideFixedPrefillMs;
@@ -446,6 +448,14 @@ final class MockPerformanceModel {
                 throw new IllegalStateException("decode.reserve_block_ratio must be a percentage in [0, 50]");
             }
             model.decodeReserveBlockRatio = value;
+        }
+        if (prefill.has("reserve_block_ratio")) {
+            JsonNode ratio = prefill.get("reserve_block_ratio");
+            double value = ratio.asDouble(Double.NaN);
+            if (!ratio.isNumber() || !Double.isFinite(value) || value < 0 || value > 50) {
+                throw new IllegalStateException("prefill.reserve_block_ratio must be a percentage in [0, 50]");
+            }
+            model.prefillReserveBlockRatio = value;
         }
         JsonNode memory = prefill.path("memory_cache");
         if (memory.has("enabled") && !memory.get("enabled").isBoolean())

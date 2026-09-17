@@ -1442,6 +1442,9 @@ public final class JavaMockEngineCluster {
             this.cache = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
                     && performance.decodeReserveBlockRatio != null
                     ? new MockLruBlockCache(totalBlocks, performance.decodeReserveBlockRatio / 100.0, true)
+                    : roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
+                    && performance.prefillReserveBlockRatio != null
+                    ? new MockLruBlockCache(totalBlocks, performance.prefillReserveBlockRatio / 100.0)
                     : new MockLruBlockCache(totalBlocks);
             // Cache invalidation must not depend on event-log/monitor wiring.
             this.cache.setEvictionListener(this::onCacheEviction);
