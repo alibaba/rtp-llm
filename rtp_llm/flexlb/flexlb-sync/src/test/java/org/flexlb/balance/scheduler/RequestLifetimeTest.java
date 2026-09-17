@@ -392,10 +392,12 @@ class RequestLifetimeTest {
         }).when(fixture.slot).onInactivityDeadline(any(ExpirationTimer.InactivityDeadline.class), anyLong());
         try (var timer = new ExpirationTimer(registry, config)) {
             synchronized (fixture.slot) {
-                fixture.slot.configureInactivityTimeout(20L);
                 RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
                 RequestLifecycleTestSupport.markAcknowledged(fixture.slot);
                 fixture.slot.future().completeOwned(new Response());
+                // This test expires an already delivered request; shortening
+                // the timeout before claim would instead reject the handoff.
+                fixture.slot.configureInactivityTimeout(20L);
             }
             assertNotNull(timer.attachInactivityDeadline(fixture.slot));
             verify(fixture.slot, timeout(1000L).times(1)).onInactivityDeadline(any(ExpirationTimer.InactivityDeadline.class), anyLong());

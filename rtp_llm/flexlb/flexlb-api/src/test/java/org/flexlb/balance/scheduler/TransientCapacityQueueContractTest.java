@@ -1477,28 +1477,24 @@ class TransientCapacityQueueContractTest {
                         private boolean submitted;
 
                         @Override
-                        public void submitBatch(
-                                List<ScheduledRequest> exactItems,
-                                long batchId,
-                                long predictedMs,
-                                String decisionReason,
-                                BiConsumer<ScheduledRequest,
-                                        DeliveryResult> observer) {
+                        public void submit(BatchDeliveryStrategy.Delivery delivery) {
                             if (submitted) {
                                 throw new IllegalStateException(
                                         "prepared submission reused");
                             }
                             submitted = true;
-                            submittedItems.add(List.copyOf(exactItems));
-                            commandSignals.release();
-                            if (!holdCompletions.get()) {
-                                for (ScheduledRequest item : exactItems) {
-                                    observer.accept(
-                                            item,
-                                            DeliveryResult
-                                                    .delivered());
+                            delivery.run((exactItems, batchId, predictedMs, decisionReason, observer) -> {
+                                submittedItems.add(List.copyOf(exactItems));
+                                commandSignals.release();
+                                if (!holdCompletions.get()) {
+                                    for (ScheduledRequest item : exactItems) {
+                                        observer.accept(
+                                                item,
+                                                DeliveryResult
+                                                        .delivered());
+                                    }
                                 }
-                            }
+                            });
                         }
 
                         @Override

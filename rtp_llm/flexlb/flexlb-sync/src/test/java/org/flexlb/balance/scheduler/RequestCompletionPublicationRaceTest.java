@@ -99,8 +99,10 @@ class RequestCompletionPublicationRaceTest {
             assertEquals(RequestState.Phase.ACKNOWLEDGED, slot.snapshot().state());
             assertFalse(future.isDone());
 
+            long handoffAtMs = (long) org.springframework.test.util.ReflectionTestUtils
+                    .getField(slot, "batchEnqueueStartedAtMs");
             Future<?> expiry = operations.submit(() ->
-                    registry.expireInactiveRequest(slot, slot.createdAtMs() + timeoutMs));
+                    registry.expireInactiveRequest(slot, handoffAtMs + timeoutMs));
             assertTrue(cleanupEntered.await(2L, TimeUnit.SECONDS));
             resumeReporting.countDown();
             acknowledgement.get(2L, TimeUnit.SECONDS);
