@@ -499,7 +499,7 @@ class FormulaPredictorTest {
     }
 
     @Test
-    @DisplayName("same parameter name reused across formula shares one ParameterNode")
+    @DisplayName("reusing a parameter name retains its declared constant value")
     void paramSameNameReused() {
         // param(w0, 1) * computeTokens + param(w0, 1) * hitCacheTokens
         // inputTokens=100, hitCache=50, computeTokens=50 → 1*50 + 1*50 = 100
