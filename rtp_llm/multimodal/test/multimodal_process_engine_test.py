@@ -169,15 +169,21 @@ class FakeModel:
 
 
 class MMProcessEngineTest(TestCase):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def setUp(self):
         self.model = FakeModel(FakeMultiModalEmbeddingInterface())
+        vit_config = VitConfig()
+        # Construct one lightweight engine per running test. Direct VitConfig
+        # construction does not apply the Bazel test's cache environment vars.
+        vit_config.mm_cache_gpu_max_bytes = 0
+        vit_config.mm_cache_cpu_max_bytes = 0
+        vit_config.mm_hash_key_cache_max_bytes = 0
         self.mm_process_engine = MMProcessEngine(
             self.model.mm_part,
             self.model.model_config,
-            VitConfig(),
+            vit_config,
             ProfilingDebugLoggingConfig(),
         )
+        self.addCleanup(self.mm_process_engine.stop)
 
     def test_embedding(self):
         res = self.mm_process_engine.mm_embedding_cpp(
@@ -327,6 +333,9 @@ class MMProcessEngineTest(TestCase):
         model = FakeModel(FakeMultiModalEmbeddingInterface())
         vit_config = VitConfig()
         vit_config.use_local_preprocess = True
+        vit_config.mm_cache_item_num = 0
+        vit_config.mm_cache_cpu_max_bytes = 0
+        vit_config.mm_cache_gpu_max_bytes = 0
         engine = MMProcessEngine(
             model.mm_part,
             model.model_config,
@@ -424,6 +433,9 @@ class MMProcessEngineTest(TestCase):
         model = FakeModel(FakeMultiModalEmbeddingInterfaceBadCount())
         vit_config = VitConfig()
         vit_config.use_local_preprocess = True  # local preprocess, serial scheduler
+        vit_config.mm_cache_item_num = 0
+        vit_config.mm_cache_cpu_max_bytes = 0
+        vit_config.mm_cache_gpu_max_bytes = 0
         engine = MMProcessEngine(
             model.mm_part,
             model.model_config,
@@ -711,12 +723,13 @@ class MMEmbeddingAsyncCacheTest(TestCase):
         self.assertEqual(state, "miss")
         self.assertFalse(entry.is_done)
 
-        entry.complete("val1")
+        value = torch.tensor([[1.0, 2.0]])
+        entry.complete(value)
 
         state2, entry2 = cache.try_acquire("key1")
         self.assertEqual(state2, "complete")
         self.assertIs(entry2, entry)
-        self.assertEqual(entry2.wait(), "val1")
+        torch.testing.assert_close(entry2.wait(), value)
 
     def test_in_progress_state(self):
         cache = MMEmbeddingAsyncCache(gpu_max_bytes=0, cpu_max_bytes=4096)
@@ -738,20 +751,20 @@ class MMEmbeddingAsyncCacheTest(TestCase):
         self.assertIsNot(entry2, entry)
 
     def test_eviction(self):
-        cache = MMEmbeddingAsyncCache(gpu_max_bytes=0, cpu_max_bytes=8)
+        cache = MMEmbeddingAsyncCache(gpu_max_bytes=0, cpu_max_bytes=16)
         _, e1 = cache.try_acquire("k1")
-        e1.complete(torch.tensor([1.0]))
+        e1.complete(torch.tensor([1.0], dtype=torch.float64))
         _, e2 = cache.try_acquire("k2")
-        e2.complete(torch.tensor([2.0]))
+        e2.complete(torch.tensor([2.0], dtype=torch.float64))
         _, e3 = cache.try_acquire("k3")
 
         # Pending entries do not consume tensor bytes or evict completed work.
-        self.assertEqual(cache.stats()["resident_bytes"], 8)
+        self.assertEqual(cache.stats()["resident_bytes"], 16)
         self.assertEqual(cache.try_acquire("k3")[0], "in_progress")
-        e3.complete(torch.tensor([3.0]))
+        e3.complete(torch.tensor([3.0], dtype=torch.float64))
         self.assertNotIn("k1", cache._entries)
         self.assertEqual(cache.stats()["resident_entries"], 2)
-        self.assertEqual(cache.stats()["resident_bytes"], 8)
+        self.assertEqual(cache.stats()["resident_bytes"], 16)
         self.assertEqual(e1.wait().item(), 1.0)
 
     def test_resize(self):
@@ -1172,12 +1185,13 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         queued = self._make_input("fake://queue-waiting")
         rejected = self._make_input("fake://queue-rejected")
         try:
-            engine.async_submit([first])
+            # Separate requests must not share cancellation ownership.
+            engine.async_submit([first], request_id=1)
             self.assertTrue(started.wait(timeout=2))
-            engine.async_submit([queued])
+            engine.async_submit([queued], request_id=2)
 
             with self.assertRaises(FtRuntimeException) as raised:
-                engine.async_submit([rejected])
+                engine.async_submit([rejected], request_id=3)
             self.assertEqual(
                 raised.exception.exception_type,
                 ExceptionType.CONCURRENCY_LIMIT_ERROR,

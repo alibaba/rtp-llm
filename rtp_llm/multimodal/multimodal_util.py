@@ -24,6 +24,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
 from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
+from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 from rtp_llm.utils.lru_dict import LruDict
 
@@ -72,13 +73,20 @@ REQUEST_GET = None
 CONNECT_TIMEOUT_RETRIES = 2
 
 
-def _default_request_get(url, headers):
+def _default_request_get(url, headers, timeout=10):
     import requests
 
-    return requests.get(url, stream=True, headers=headers, timeout=10)
+    return requests.get(url, stream=True, headers=headers, timeout=timeout)
 
 
-def request_get(url, headers):
+def _check_download(deadline, cancellation_event):
+    if cancellation_event is not None and cancellation_event.is_set():
+        raise concurrent.futures.CancelledError("Media download cancelled")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("Media download deadline expired")
+
+
+def request_get(url, headers, *, deadline=None, cancellation_event=None):
     global REQUEST_GET
     if REQUEST_GET is None:
         try:
@@ -91,7 +99,14 @@ def request_get(url, headers):
     import requests
 
     for retry_count in range(CONNECT_TIMEOUT_RETRIES + 1):
+        _check_download(deadline, cancellation_event)
         try:
+            if deadline is not None:
+                return REQUEST_GET(
+                    url,
+                    headers,
+                    timeout=max(0.001, min(10, deadline - time.monotonic())),
+                )
             return REQUEST_GET(url, headers)
         except requests.exceptions.ConnectTimeout:
             if retry_count == CONNECT_TIMEOUT_RETRIES:
@@ -279,13 +294,23 @@ def _validate_file_size(size_bytes: int, max_file_size_kb: Optional[int]) -> Non
 
 
 def _download_http_content(
-    url: str, headers: dict, max_file_size_kb: Optional[int]
+    url: str,
+    headers: dict,
+    max_file_size_kb: Optional[int],
+    *,
+    deadline=None,
+    cancellation_event=None,
 ) -> BytesIO:
     import requests
 
     response = None
     try:
-        response = request_get(url, headers)
+        if deadline is None and cancellation_event is None:
+            response = request_get(url, headers)
+        else:
+            response = request_get(
+                url, headers, deadline=deadline, cancellation_event=cancellation_event
+            )
         if response.status_code != 200:
             raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
 
@@ -302,14 +327,18 @@ def _download_http_content(
         content = BytesIO()
         downloaded_bytes = 0
         for chunk in response.iter_content(chunk_size=1024 * 1024):
+            _check_download(deadline, cancellation_event)
             if not chunk:
                 continue
             downloaded_bytes += len(chunk)
             _validate_file_size(downloaded_bytes, max_file_size_kb)
             content.write(chunk)
+        _check_download(deadline, cancellation_event)
         content.seek(0)
         return content
     except FtRuntimeException:
+        raise
+    except concurrent.futures.CancelledError:
         raise
     except (requests.exceptions.Timeout, TimeoutError):
         raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_PROCESS_ERROR)
@@ -333,6 +362,9 @@ def get_bytes_io_from_url(
     url: str,
     download_headers: str = "",
     max_file_size_kb: Optional[int] = VitConfig.DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB,
+    *,
+    deadline=None,
+    cancellation_event=None,
 ):
     """Get BytesIO from URL.
 
@@ -343,13 +375,23 @@ def get_bytes_io_from_url(
             Content-Length header so the limit can be checked before reading the body.
     """
 
+    _check_download(deadline, cancellation_event)
     cached_res = url_data_cache_.check_cache(url)
     if cached_res is None:
         headers = _get_http_heads(download_headers)
         load_start = time.monotonic()
         try:
             if url.startswith("http") or url.startswith("https"):
-                res = _download_http_content(url, headers, max_file_size_kb)
+                if deadline is None and cancellation_event is None:
+                    res = _download_http_content(url, headers, max_file_size_kb)
+                else:
+                    res = _download_http_content(
+                        url,
+                        headers,
+                        max_file_size_kb,
+                        deadline=deadline,
+                        cancellation_event=cancellation_event,
+                    )
             elif url.startswith("oss"):
                 from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
@@ -361,8 +403,9 @@ def get_bytes_io_from_url(
                 with open(url, "rb") as fh:
                     buf = BytesIO(fh.read())
                 res = buf
+            _check_download(deadline, cancellation_event)
             _validate_file_size(res.getbuffer().nbytes, max_file_size_kb)
-        except FtRuntimeException:
+        except (FtRuntimeException, concurrent.futures.CancelledError, TimeoutError):
             raise
         except Exception:
             logger.exception("failed to load multimodal content")
@@ -481,6 +524,7 @@ def maybe_tensor_to_list(tensor: Any, ndim_threshold: int = 2) -> Any:
     return [tensor]
 
 
+@cuda_graph_gate.operation()
 def build_multimodal_output_pb(
     embeddings: Optional[List[torch.Tensor]],
     position_ids: Optional[List[torch.Tensor]],

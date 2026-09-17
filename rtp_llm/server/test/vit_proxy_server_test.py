@@ -8,6 +8,7 @@ import grpc
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMRdmaDescPB,
+    MultimodalHashRequestPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
     ReleaseEmbeddingPB,
@@ -104,6 +105,7 @@ class VitErrorQpsTest(TestCase):
         servicer.WaitGreenNetVerdict(MultimodalInputsPB(), context)
 
         engine.report_vit_error.assert_called_once_with(verdict)
+        engine.cancel_queued_request.assert_called_once_with(0)
         self.assertEqual(
             context.set_code.call_args.args[0], grpc.StatusCode.PERMISSION_DENIED
         )
@@ -156,6 +158,22 @@ class VitErrorQpsTest(TestCase):
 
 
 class VitWorkerRequestIdTest(TestCase):
+    def test_expired_hash_rpc_cancels_previously_submitted_work(self):
+        engine = MagicMock()
+        servicer = MultimodalRpcServer(engine)
+        context = MagicMock()
+        context.time_remaining.return_value = 0
+        context.add_callback.return_value = True
+        request = MultimodalHashRequestPB(inputs=MultimodalInputsPB(request_id=123))
+
+        servicer.GetMultimodalHashes(request, context)
+
+        engine.cancel_queued_request.assert_called_once_with(123)
+        engine.get_embedding_result.assert_not_called()
+        self.assertEqual(
+            context.abort.call_args.args[0], grpc.StatusCode.DEADLINE_EXCEEDED
+        )
+
     @patch("rtp_llm.server.vit_rpc_server.trans_mm_input")
     def test_request_id_is_forwarded_to_all_engine_entrypoints(self, trans_mm_input):
         converted = [MagicMock(name="mm_input")]
@@ -171,6 +189,7 @@ class VitWorkerRequestIdTest(TestCase):
         wait_context = MagicMock()
         remote_context = MagicMock()
         for ctx in (async_context, wait_context, remote_context):
+            ctx.time_remaining.return_value = 2.0
             ctx.invocation_metadata.return_value = (
                 ("x-dashscope-uid", "uid-worker"),
                 ("x-dashscope-service", "service-worker"),
@@ -187,6 +206,7 @@ class VitWorkerRequestIdTest(TestCase):
         )
         engine.wait_greennet_verdict.assert_called_once_with(
             converted,
+            timeout_ms=2000,
             request_id=987654321,
             cancellation_event=ANY,
             user_id="uid-worker",
@@ -194,6 +214,7 @@ class VitWorkerRequestIdTest(TestCase):
         )
         engine.get_embedding_result.assert_called_once_with(
             converted,
+            timeout_ms=2000,
             request_id=987654321,
             cancellation_event=ANY,
             user_id="uid-worker",
@@ -202,9 +223,13 @@ class VitWorkerRequestIdTest(TestCase):
 
         wait_context.add_callback.call_args.args[0]()
         remote_context.add_callback.call_args.args[0]()
-        self.assertEqual(engine.cancel_queued_request.call_count, 2)
-        for cancel_call in engine.cancel_queued_request.call_args_list:
-            self.assertEqual(cancel_call.args, (987654321,))
+        engine.cancel_queued_request.assert_not_called()
+        self.assertTrue(
+            engine.wait_greennet_verdict.call_args.kwargs["cancellation_event"].is_set()
+        )
+        self.assertTrue(
+            engine.get_embedding_result.call_args.kwargs["cancellation_event"].is_set()
+        )
 
 
 class LoadBalancerRoundRobinTest(TestCase):

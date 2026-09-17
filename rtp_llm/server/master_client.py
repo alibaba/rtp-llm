@@ -9,15 +9,29 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+import grpc
 import orjson
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.py_config_modules import MasterConfig
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    ErrorDetailsPB,
+    MultimodalHashRequestPB,
+    MultimodalInputsPB,
+)
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+    MultimodalRpcServiceStub,
+)
 from rtp_llm.server.host_service import HostService
-from rtp_llm.server.request_headers import normalize_request_headers
+from rtp_llm.server.mm_cache_metadata import MAX_METADATA_BYTES, metadata_from_proto
+from rtp_llm.server.request_headers import (
+    dashscope_greennet_metadata,
+    normalize_request_headers,
+)
 from rtp_llm.server.worker_status import ScheduleMeta
 from rtp_llm.utils.base_model_datatypes import GenerateInput
+from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 
 route_logger = logging.getLogger("route_logger")
 
@@ -112,6 +126,12 @@ class MasterClient:
         self.host_service: Optional[HostService] = host_service
         self.max_connect_pool_size = self.master_config.master_max_connect_pool_size
         self._session: Optional[Any] = None
+        self._vit_channels = GrpcHostChannelPool(
+            options=[
+                ("grpc.max_receive_message_length", MAX_METADATA_BYTES),
+                ("grpc.max_send_message_length", MAX_METADATA_BYTES),
+            ]
+        )
         self.latest_queue_length: int = 0
         self.session_timeout_s = self._get_session_timeout_s()
 
@@ -148,6 +168,7 @@ class MasterClient:
         return self._session
 
     async def close(self) -> None:
+        await self._vit_channels.close()
         if self._session and not self._session.closed:
             await self._session.close()
 
@@ -373,8 +394,11 @@ class MasterClient:
         unique_keys = list(dict.fromkeys(keys))
         if input is not None:
             input.greennet_verified_vit = None
-        metadata = await self._post_vit_metadata(
-            address, {"keys": unique_keys}, DEFAULT_REQUEST_TIMEOUT_SEC
+        metadata = await self._get_vit_metadata(
+            address,
+            MultimodalHashRequestPB(keys=unique_keys),
+            DEFAULT_REQUEST_TIMEOUT_SEC,
+            headers=input.headers if input is not None else None,
         )
         if input is None:
             return metadata
@@ -396,19 +420,17 @@ class MasterClient:
             self._record_greennet_approval(input, address, unique_keys, entries)
             return metadata
 
-        from google.protobuf.json_format import MessageToDict
-
         from rtp_llm.cpp.model_rpc.model_rpc_client import iter_multimodal_inputs
 
         # The cache-hit probe carries no URLs. On a miss serialize each distinct
         # missing input once, without copying image/video data into embeddings.
-        inputs = []
+        inputs = MultimodalInputsPB(request_id=input.request_id)
         submitted = set()
         for key, item in zip(
             keys, iter_multimodal_inputs(input, input.generate_config)
         ):
             if key in missing and key not in submitted:
-                inputs.append(MessageToDict(item, preserving_proto_field_name=True))
+                inputs.multimodal_inputs.add().CopyFrom(item)
                 submitted.add(key)
         if submitted != missing:
             raise FtRuntimeException(
@@ -434,20 +456,16 @@ class MasterClient:
             raise FtRuntimeException(
                 ExceptionType.GENERATE_TIMEOUT, "ViT hash acquisition timed out"
             )
-        filled = await self._post_vit_metadata(
+        filled = await self._get_vit_metadata(
             address,
-            {
-                "keys": [key for key in unique_keys if key in missing],
-                "inputs": inputs,
-                "request_id": input.request_id,
-                "timeout_ms": max(1, int(remaining * 1000)),
-            },
+            MultimodalHashRequestPB(
+                keys=[key for key in unique_keys if key in missing],
+                inputs=inputs,
+                timeout_ms=max(1, int(remaining * 1000)),
+            ),
             remaining,
             required=True,
-            user_id=normalize_request_headers(input.headers).get("x-dashscope-uid", ""),
-            service_name=normalize_request_headers(input.headers).get(
-                "x-dashscope-service", ""
-            ),
+            headers=input.headers,
         )
         if metadata and filled.get("worker_instance") != metadata.get(
             "worker_instance"
@@ -483,75 +501,59 @@ class MasterClient:
         if keys and all(entries[key].get("greennet_passed") is True for key in keys):
             input.greennet_verified_vit = (address.ip, address.grpc_port, tuple(keys))
 
-    async def _post_vit_metadata(
+    async def _get_vit_metadata(
         self,
         address,
-        payload,
+        request,
         timeout_sec,
         required=False,
-        user_id: str = "",
-        service_name: str = "",
+        headers=None,
     ):
-        import aiohttp
-
         started = time.monotonic()
         try:
-            session = await self._get_session()
-            async with session.post(
-                f"http://{address.ip}:{address.http_port}/mm_cache/metadata",
-                data=orjson.dumps(payload),
-                headers={
-                    "Content-Type": "application/json",
-                    **({"X-DashScope-Uid": user_id} if user_id else {}),
-                    **({"X-DashScope-Service": service_name} if service_name else {}),
-                },
-                timeout=aiohttp.ClientTimeout(total=timeout_sec),
-            ) as response:
-                # One bounded buffer avoids retaining chunks plus a joined copy.
-                body = bytearray()
-                async for chunk in response.content.iter_chunked(65536):
-                    if len(body) + len(chunk) > 16 * 1024 * 1024:
-                        raise ValueError("ViT metadata response exceeds byte limit")
-                    body.extend(chunk)
-                data = orjson.loads(body)
-                if response.status != SUCCESS_CODE:
-                    if not required:
-                        return None
-                    detail = data.get("detail", "ViT hash computation failed")
-                    code = (
-                        ExceptionType.GENERATE_TIMEOUT
-                        if response.status == 504
-                        else ExceptionType.MM_PROCESS_ERROR
-                    )
-                    if isinstance(detail, dict):
-                        code = ExceptionType(detail.get("error_code", int(code)))
-                        detail = detail.get("message", "ViT hash computation failed")
-                    raise FtRuntimeException(code, str(detail))
-                if not isinstance(data, dict):
-                    raise ValueError("Invalid ViT metadata response")
-                return data
-        except (
-            aiohttp.ClientError,
-            asyncio.TimeoutError,
-            TimeoutError,
-            OSError,
-            ValueError,
-        ) as error:
+            channel = await self._vit_channels.get(f"{address.ip}:{address.grpc_port}")
+            response = await MultimodalRpcServiceStub(channel).GetMultimodalHashes(
+                request,
+                timeout=timeout_sec,
+                metadata=dashscope_greennet_metadata(headers),
+            )
+            return metadata_from_proto(response)
+        except grpc.RpcError as error:
             if required:
                 code = (
                     ExceptionType.GENERATE_TIMEOUT
-                    if isinstance(error, (TimeoutError, asyncio.TimeoutError))
+                    if error.code() == grpc.StatusCode.DEADLINE_EXCEEDED
+                    else ExceptionType.MM_PROCESS_ERROR
+                )
+                message = error.details() or "ViT hash acquisition failed"
+                for key, value in error.trailing_metadata() or ():
+                    if key == "grpc-status-details-bin":
+                        details = ErrorDetailsPB.FromString(value)
+                        code = ExceptionType(details.error_code)
+                        message = details.error_message
+                        break
+                raise FtRuntimeException(code, message) from error
+            route_logger.warning(
+                "ViT hash probe unavailable, address=%s:%s, status=%s",
+                address.ip,
+                address.grpc_port,
+                error.code(),
+            )
+            return None
+        except (TimeoutError, OSError, ValueError) as error:
+            if required:
+                code = (
+                    ExceptionType.GENERATE_TIMEOUT
+                    if isinstance(error, TimeoutError)
                     else ExceptionType.MM_PROCESS_ERROR
                 )
                 raise FtRuntimeException(
                     code, f"ViT hash acquisition failed: {type(error).__name__}"
                 ) from error
-            route_logger.warning(
-                "ViT metadata unavailable, address=%s:%s", address.ip, address.http_port
-            )
+            route_logger.warning("ViT hash probe failed: %s", error)
             return None
         finally:
             route_logger.debug(
-                "ViT metadata query elapsed_ms=%.3f",
+                "ViT hash RPC elapsed_ms=%.3f",
                 (time.monotonic() - started) * 1000,
             )

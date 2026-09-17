@@ -596,27 +596,8 @@ class MMScheduler:
 
         return batch
 
-    def _run_items_with_oom_split(self, items: List[MMWorkItem]) -> None:
-        """Run one chunk, recursively halving its items after a CUDA OOM."""
-        try:
-            _run_embedding(self._mm_part, items)
-        except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
-            if len(items) <= 1:
-                raise
-            midpoint = len(items) // 2
-            logging.warning(
-                "MMScheduler: OOM retry splitting one request chunk "
-                "from %d items into %d + %d",
-                len(items),
-                midpoint,
-                len(items) - midpoint,
-            )
-            self._run_items_with_oom_split(items[:midpoint])
-            self._run_items_with_oom_split(items[midpoint:])
-
     def _execute_batch(self, batch: List[_EmbeddingChunk]) -> None:
-        """Run a batch, isolating CUDA OOMs by binary split and retry."""
+        """Run a batch once; a failed forward fails every request in the batch."""
         # Drop chunks whose callers already timed out, so the forward never runs
         # for work nobody awaits.
         batch = [chunk for chunk in batch if not chunk.request.cancelled]
@@ -632,56 +613,19 @@ class MMScheduler:
             n_images = sum(chunk.n_images for chunk in batch)
             work_estimate = self._sum_work_estimates(items)
             t0 = time.time()
+        oom_error = None
         try:
             _run_embedding(self._mm_part, items)
         except torch.cuda.OutOfMemoryError as error:
-            torch.cuda.empty_cache()
-            if self._work_budget is None:
-                logging.error(
-                    "MMScheduler: batch OOM with cost-aware scheduling disabled: %s",
-                    error,
-                    exc_info=True,
-                )
-                self._fail_chunks(batch, error)
-                return
-            if len(batch) > 1:
-                midpoint = len(batch) // 2
-                logging.warning(
-                    "MMScheduler: OOM retry splitting batch from %d chunks "
-                    "into %d + %d",
-                    len(batch),
-                    midpoint,
-                    len(batch) - midpoint,
-                )
-                self._execute_batch(batch[:midpoint])
-                self._execute_batch(batch[midpoint:])
-                return
-
-            chunk = batch[0]
-            if len(chunk.work_items) > 1:
-                midpoint = len(chunk.work_items) // 2
-                try:
-                    self._run_items_with_oom_split(chunk.work_items[:midpoint])
-                    self._run_items_with_oom_split(chunk.work_items[midpoint:])
-                except Exception as retry_error:
-                    logging.error(
-                        "MMScheduler: single request OOM retry failed: " "%s: %s",
-                        type(retry_error).__name__,
-                        retry_error,
-                        exc_info=True,
-                    )
-                    self._fail_chunks(batch, retry_error)
-                    return
-                self._complete_chunk(chunk)
-                return
-
             logging.error(
-                "MMScheduler: one work item still OOM after isolation: %s",
+                "MMScheduler: batch OOM, failing %d chunk(s) without retry: %s",
+                len(batch),
                 error,
                 exc_info=True,
             )
-            self._fail_chunks(batch, error)
-            return
+            # Keep the error type/message for callers, but do not let requests
+            # retain failed forward frames and their intermediate tensors.
+            oom_error = error.with_traceback(None)
         except Exception as error:
             logging.error(
                 "MMScheduler: batch forward failed, discarding %d chunk(s): " "%s: %s",
@@ -691,6 +635,13 @@ class MMScheduler:
                 exc_info=True,
             )
             self._fail_chunks(batch, error)
+            return
+
+        if oom_error is not None:
+            # Leave the exception handler before releasing cached memory: its
+            # active traceback can still own the failed forward's tensors.
+            torch.cuda.empty_cache()
+            self._fail_chunks(batch, oom_error)
             return
 
         if log_composition:

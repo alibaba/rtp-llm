@@ -6,6 +6,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from concurrent.futures import CancelledError
 from itertools import chain, islice
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -14,10 +15,26 @@ import torch
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
 
 class _PoolCapacityError(RuntimeError):
     pass
+
+
+def _wait_event(event, timeout, cancellation_event):
+    if cancellation_event is None:
+        return event.wait(timeout=timeout)
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        if cancellation_event.is_set():
+            raise CancelledError("ViT result wait was cancelled")
+        if event.is_set():
+            return True
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            return False
+        event.wait(timeout=0.05 if remaining is None else min(0.05, remaining))
 
 
 class _PoolBlock:
@@ -37,11 +54,12 @@ class _TensorMemoryPool:
         self.device = torch.device(device)
         self._alignment = 8
         self._lock = threading.Lock()
-        self._storage = (
-            torch.empty(capacity_bytes, dtype=torch.uint8, device=self.device)
-            if capacity_bytes > 0
-            else None
-        )
+        with cuda_graph_gate.operation():
+            self._storage = (
+                torch.empty(capacity_bytes, dtype=torch.uint8, device=self.device)
+                if capacity_bytes > 0
+                else None
+            )
         self._free: List[Tuple[int, int]] = (
             [(0, capacity_bytes)] if capacity_bytes > 0 else []
         )
@@ -76,6 +94,7 @@ class _TensorMemoryPool:
                 waiting.append((block, events))
         self._pending = waiting
 
+    @cuda_graph_gate.operation()
     def reserve(self, requested_bytes: int) -> Optional[_PoolBlock]:
         if requested_bytes == 0:
             return None
@@ -115,6 +134,7 @@ class _TensorMemoryPool:
                 self._used_bytes -= block.size
                 self._insert_free_locked(block.offset, block.size)
 
+    @cuda_graph_gate.operation()
     def release(self, block: Optional[_PoolBlock], events: List[Any]) -> None:
         if block is None:
             return
@@ -138,6 +158,7 @@ class _TensorMemoryPool:
         ]
         return byte_view.view(dtype).view(shape)
 
+    @cuda_graph_gate.operation()
     def stats(self) -> Dict[str, int]:
         with self._lock:
             self._reclaim_ready_locked()
@@ -170,6 +191,7 @@ class _PoolReservation:
         self._lock = threading.Lock()
         self._released = False
 
+    @cuda_graph_gate.operation()
     def add_events(self, events: List[Any]) -> None:
         if not events:
             return
@@ -181,6 +203,7 @@ class _PoolReservation:
             self._events = [event for event in self._events if not event.query()]
             self._events.extend(events)
 
+    @cuda_graph_gate.operation()
     def release(self) -> None:
         with self._lock:
             if self._released:
@@ -206,6 +229,7 @@ def _current_cuda_streams(value: Any) -> List[Any]:
     ]
 
 
+@cuda_graph_gate.operation()
 def _record_cuda_events(value: Any) -> List[Any]:
     devices = set()
     _map_tensors(value, lambda tensor: devices.add(tensor.device))
@@ -278,19 +302,20 @@ def _pool_result(
                 cpu_bytes += total
             for identity in identities:
                 tensor, device, nbytes = specs[identity]
-                if nbytes == 0:
-                    destination = torch.empty(
-                        tensor.shape, dtype=tensor.dtype, device=device
-                    )
-                else:
-                    destination = pool.tensor_view(
-                        block,
-                        offsets[identity],
-                        nbytes,
-                        tensor.dtype,
-                        tensor.shape,
-                    )
-                destination.copy_(tensor.detach(), non_blocking=False)
+                with cuda_graph_gate.operation():
+                    if nbytes == 0:
+                        destination = torch.empty(
+                            tensor.shape, dtype=tensor.dtype, device=device
+                        )
+                    else:
+                        destination = pool.tensor_view(
+                            block,
+                            offsets[identity],
+                            nbytes,
+                            tensor.dtype,
+                            tensor.shape,
+                        )
+                    destination.copy_(tensor.detach(), non_blocking=False)
                 copied[identity] = destination
 
         def rebuild(value: Any, target: Any) -> Any:
@@ -321,6 +346,7 @@ def _pool_result(
         raise
 
 
+@cuda_graph_gate.operation()
 def _copy_pooled_result_to_devices(result: Any, devices: Any) -> Any:
     copied = {}
 
@@ -419,6 +445,7 @@ def _compact_tensor_tier_bytes(result: Any, devices: Any) -> Tuple[int, int]:
     return tuple(sizes)
 
 
+@cuda_graph_gate.operation()
 def _copy_result_to_devices(result: Any, devices: Any) -> Any:
     """Copy without mutating a result that an active request may still hold."""
     copied = {}
@@ -504,6 +531,7 @@ class MMEmbeddingCacheEntry:
     ):
         self._event = threading.Event()
         self._state_lock = threading.Lock()
+        # Claim completion once; _event publishes it after callbacks finish.
         self._terminal = False
         self._on_complete = on_complete
         self._on_fail = on_fail
@@ -539,10 +567,14 @@ class MMEmbeddingCacheEntry:
             return True
 
     def wait(
-        self, timeout: Optional[float] = None, *, wait_on_current_stream: bool = False
+        self,
+        timeout: Optional[float] = None,
+        *,
+        wait_on_current_stream: bool = False,
+        cancellation_event: Optional[threading.Event] = None,
     ) -> Any:
         deadline = None if timeout is None else time.monotonic() + timeout
-        self.wait_ready(timeout)
+        self.wait_ready(timeout, cancellation_event=cancellation_event)
         if self._on_read is not None:
             remaining = (
                 None if deadline is None else max(0.0, deadline - time.monotonic())
@@ -553,16 +585,23 @@ class MMEmbeddingCacheEntry:
         # the result, including when its own current stream is different.
         for producer in self.producer_streams:
             if wait_on_current_stream:
-                consumer = torch.cuda.current_stream(producer.device)
-                if consumer != producer:
-                    consumer.wait_stream(producer)
+                with cuda_graph_gate.operation():
+                    consumer = torch.cuda.current_stream(producer.device)
+                    if consumer != producer:
+                        consumer.wait_stream(producer)
             else:
-                producer.synchronize()
+                with cuda_graph_gate.operation():
+                    producer.synchronize()
         return self.result
 
-    def wait_ready(self, timeout: Optional[float] = None) -> None:
+    def wait_ready(
+        self,
+        timeout: Optional[float] = None,
+        *,
+        cancellation_event: Optional[threading.Event] = None,
+    ) -> None:
         """Wait for completion without promoting an offloaded embedding."""
-        if not self._event.wait(timeout=timeout):
+        if not _wait_event(self._event, timeout, cancellation_event):
             raise TimeoutError("Waiting for embedding result timed out")
         if self.error is not None:
             raise self.error
@@ -578,6 +617,23 @@ class MMEmbeddingCacheEntry:
         try:
             if self._on_complete is not None:
                 self._on_complete(self, result)
+        except Exception as error:
+            # fail() cannot take over this already-claimed transition. Roll it
+            # back here so waiters never see a failed insertion as a cache hit.
+            self.error = error
+            with self.storage_lock:
+                self.result = None
+                self.original_devices = None
+                self.ready_events = []
+                self.producer_streams = []
+                owners, self.pool_owners = self.pool_owners, []
+            try:
+                if self._on_fail is not None:
+                    self._on_fail(self, error)
+            finally:
+                for owner in owners:
+                    owner.release()
+            raise
         finally:
             self._event.set()
         return True
@@ -597,7 +653,7 @@ class MMEmbeddingCacheEntry:
 
     @property
     def is_done(self) -> bool:
-        return self._terminal
+        return self._event.is_set()
 
     def ready_metadata(self) -> Optional[List[torch.Tensor]]:
         # Feature hashes are owned by MMHashKeyCache. Keep this compatibility
@@ -621,8 +677,13 @@ class MMEmbeddingCacheEntry:
             and self._greennet_verdict.passed
         )
 
-    def wait_greennet(self, timeout: Optional[float] = None) -> GreenNetVerdict:
-        if not self._greennet_event.wait(timeout=timeout):
+    def wait_greennet(
+        self,
+        timeout: Optional[float] = None,
+        *,
+        cancellation_event: Optional[threading.Event] = None,
+    ) -> GreenNetVerdict:
+        if not _wait_event(self._greennet_event, timeout, cancellation_event):
             raise TimeoutError("Waiting for greennet verdict timed out")
         return self._greennet_verdict
 
@@ -677,10 +738,11 @@ class MMHashKeyCache:
             return
         # Hashes are small CPU int32 token-id tensors. Store an owned CPU copy
         # so the sidecar does not retain embedding storage or a GPU tensor.
-        hashes = [
-            hash_tensor.detach().to(device="cpu", dtype=torch.int32).clone()
-            for hash_tensor in feature_hashes
-        ]
+        with cuda_graph_gate.operation():
+            hashes = [
+                hash_tensor.detach().to(device="cpu", dtype=torch.int32).clone()
+                for hash_tensor in feature_hashes
+            ]
         generation = generation or ""
         charge_bytes = (
             pool_bytes
@@ -789,7 +851,11 @@ class MMHashKeyCache:
             return stats
 
     def metadata(
-        self, keys: List[str], embedding_cache: "MMEmbeddingCache"
+        self,
+        keys: List[str],
+        embedding_cache: "MMEmbeddingCache",
+        *,
+        binary_hashes: bool = False,
     ) -> Dict[str, Any]:
         results = []
         total_rows = 0
@@ -829,11 +895,18 @@ class MMHashKeyCache:
             result.update(
                 {
                     "split_size": split_size,
-                    "feature_hashes": [
-                        value
-                        for hash_tensor in hashes
-                        for value in hash_tensor.tolist()
-                    ],
+                    "feature_hashes": (
+                        b"".join(
+                            tensor.numpy().astype("<i4", copy=False).tobytes()
+                            for tensor in hashes
+                        )
+                        if binary_hashes
+                        else [
+                            value
+                            for hash_tensor in hashes
+                            for value in hash_tensor.tolist()
+                        ]
+                    ),
                     "entry_generation": value[1],
                 }
             )
@@ -942,6 +1015,7 @@ class MMEmbeddingCache:
         return _record_cuda_events(result)
 
     @staticmethod
+    @cuda_graph_gate.operation()
     def _ready_result(result: Any, events: List[Any]) -> Any:
         # The producer may use a different thread/stream. Wait for its writes
         # before a D2H copy or exposing the value to the request's consumer.
@@ -1242,7 +1316,8 @@ class MMEmbeddingCache:
             copied = _copy_pooled_result_to_devices(result, devices)
             read_events = self._record_ready_events(copied)
             for event in read_events:
-                event.synchronize()
+                with cuda_graph_gate.operation():
+                    event.synchronize()
             return copied
 
     def _read_entry(

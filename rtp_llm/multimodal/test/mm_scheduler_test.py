@@ -1,5 +1,6 @@
 import threading
 import time
+import weakref
 from typing import Any, List, Optional
 from unittest import TestCase, main, mock
 
@@ -425,8 +426,8 @@ class MMSchedulerTest(TestCase):
         )
         self.assertEqual(fake.calls, [3])  # the failed combined forward only
 
-    def test_cost_aware_oom_retries_by_binary_split(self):
-        """An opted-in model isolates an oversized batch instead of failing it."""
+    def test_cost_aware_oom_fails_whole_batch_and_executor_continues(self):
+        """A cost-aware model fails the batch once; later requests still run."""
         fake = _FakeMMPart(
             oom_over=1,
             work_budget=MMWorkEstimate(input_patches=100),
@@ -441,29 +442,79 @@ class MMSchedulerTest(TestCase):
                 [[_FakeWorkItem(input_patches=1)] for _ in range(3)],
                 barrier=barrier,
             )
+            self.assertTrue(all(isinstance(e, RuntimeError) for e in errors), errors)
+            self.assertTrue(
+                all(
+                    isinstance(e.__cause__, torch.cuda.OutOfMemoryError) for e in errors
+                ),
+                errors,
+            )
+            self.assertEqual(fake.calls, [3])
+            next_item = _FakeWorkItem(input_patches=1)
+            sched.submit_and_wait([next_item])
+            self.assertIsNotNone(next_item.embedding_result)
         finally:
             sched.close()
 
-        self.assertTrue(all(error is None for error in errors), errors)
-        self.assertEqual(fake.calls, [3, 1, 2, 1, 1])
+        self.assertEqual(fake.calls, [3, 1])
 
-    def test_cost_aware_oom_splits_items_within_one_request(self):
-        """OOM retry can bisect a multi-item chunk while preserving completion."""
-        fake = _FakeMMPart(
-            oom_over=1,
-            work_budget=MMWorkEstimate(input_patches=100),
-        )
-        sched = MMScheduler(
-            fake, batch_wait_ms=0, max_batch_size=8, max_batch_images=100
-        )
-        items = [_FakeWorkItem(input_patches=1) for _ in range(4)]
+    def test_oom_fails_request_without_retrying_or_running_remaining_chunks(self):
+        for budget, batch_size in ((100, 4), (2, 2)):
+            with self.subTest(budget=budget):
+                fake = _FakeMMPart(
+                    oom_over=1, work_budget=MMWorkEstimate(input_patches=budget)
+                )
+                sched = MMScheduler(fake, batch_wait_ms=0, max_batch_images=100)
+                items = [_FakeWorkItem(input_patches=1) for _ in range(4)]
+                try:
+                    with self.assertRaisesRegex(
+                        RuntimeError, "fake CUDA OOM"
+                    ) as raised:
+                        sched.submit_and_wait(items)
+                    self.assertIsInstance(
+                        raised.exception.__cause__, torch.cuda.OutOfMemoryError
+                    )
+                    self.assertTrue(
+                        all(item.embedding_result is None for item in items)
+                    )
+                    next_item = _FakeWorkItem(input_patches=1)
+                    sched.submit_and_wait([next_item])
+                    self.assertIsNotNone(next_item.embedding_result)
+                    self.assertEqual(fake.calls, [batch_size, 1])
+                finally:
+                    sched.close()
+
+    def test_oom_releases_forward_workspace_before_empty_cache(self):
+        """The retained error must not keep failed forward locals alive."""
+
+        class OOMPart(_FakeMMPart):
+            def batched_embedding(self, data_list, mm_types, **kwargs):
+                workspace = torch.zeros(16)
+                self.workspace_ref = weakref.ref(workspace)
+                raise torch.cuda.OutOfMemoryError("fake workspace OOM")
+
+        fake = OOMPart()
+        sched = MMScheduler(fake, batch_wait_ms=0)
+
+        def check_workspace_released():
+            self.assertIsNone(fake.workspace_ref())
+
         try:
-            sched.submit_and_wait(items)
+            with mock.patch(
+                "rtp_llm.multimodal.mm_scheduler.torch.cuda.empty_cache",
+                side_effect=check_workspace_released,
+            ) as empty_cache:
+                with self.assertRaisesRegex(
+                    RuntimeError, "fake workspace OOM"
+                ) as raised:
+                    sched.submit_and_wait([_FakeWorkItem()])
+                empty_cache.assert_called_once()
+                cause = raised.exception.__cause__
+                self.assertIsInstance(cause, torch.cuda.OutOfMemoryError)
+                self.assertIsNone(cause.__traceback__)
+                self.assertIsNone(fake.workspace_ref())
         finally:
             sched.close()
-
-        self.assertEqual(fake.calls, [4, 2, 1, 1, 2, 1, 1])
-        self.assertTrue(all(item.embedding_result is not None for item in items))
 
     def test_count_mismatch_fails_whole_batch(self):
         """A short combined return fails the whole batch; there is no retry."""

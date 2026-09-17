@@ -1,7 +1,10 @@
+import asyncio
+import struct
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import grpc
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -10,7 +13,16 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
     multimodal_cache_keys,
     trans_multimodal_input,
 )
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import GenerateInputPB
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    ErrorDetailsPB,
+    GenerateInputPB,
+    MultimodalHashRequestPB,
+    MultimodalHashResponsePB,
+)
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+    MultimodalRpcServiceServicer,
+    add_MultimodalRpcServiceServicer_to_server,
+)
 from rtp_llm.multimodal.multimodal_util import trans_config
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
@@ -37,6 +49,18 @@ def metadata(keys, hashes):
             for key, values in zip(keys, hashes)
         ],
     }
+
+
+def hash_response(keys, hashes):
+    result = MultimodalHashResponsePB(worker_instance="epoch", feature_hash_version=1)
+    for key, values in zip(keys, hashes):
+        result.entries.add(
+            key=key,
+            hash_hit=True,
+            split_size=[len(values)],
+            feature_hashes=struct.pack(f"<{len(values)}i", *values),
+        )
+    return result
 
 
 class MMCacheRoutingTest(unittest.TestCase):
@@ -235,9 +259,6 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
 
     async def test_required_hash_miss_submits_only_missing_distinct_inputs(self):
-        from google.protobuf.json_format import ParseDict
-
-        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
         from rtp_llm.multimodal.multimodal_util import trans_mm_input
 
         item = self.request.mm_inputs[0]
@@ -255,23 +276,22 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         probe["entries"].append({"key": keys[1], "hash_hit": False})
         filled = metadata(keys[1:2], [[21, 22, 23]])
         client = MasterClient()
-        client._post_vit_metadata = AsyncMock(side_effect=[probe, filled])
+        client._get_vit_metadata = AsyncMock(side_effect=[probe, filled])
         result = await client.get_vit_cache_metadata(self.vit, keys, input=self.request)
         self.assertEqual(
             [e["feature_hashes"] for e in result["entries"]], [[-10, 11], [21, 22, 23]]
         )
-        calls = client._post_vit_metadata.call_args_list
-        self.assertEqual(calls[0].args[1], {"keys": keys[:2]})
+        calls = client._get_vit_metadata.call_args_list
+        self.assertEqual(list(calls[0].args[1].keys), keys[:2])
+        self.assertFalse(calls[0].args[1].HasField("inputs"))
         payload = calls[1].args[1]
-        self.assertEqual(payload["keys"], keys[1:2])
-        self.assertEqual(payload["request_id"], self.request.request_id)
-        self.assertEqual(len(payload["inputs"]), 1)
-        resolved = trans_mm_input(
-            ParseDict({"multimodal_inputs": payload["inputs"]}, MultimodalInputsPB())
-        )
+        self.assertEqual(list(payload.keys), keys[1:2])
+        self.assertEqual(payload.inputs.request_id, self.request.request_id)
+        self.assertEqual(len(payload.inputs.multimodal_inputs), 1)
+        resolved = trans_mm_input(payload.inputs)
         self.assertEqual(resolved[0].cache_key(), keys[1])
         self.assertEqual(resolved[0].mm_preprocess_config.max_pixels, 1024)
-        self.assertEqual(calls[1].kwargs["user_id"], "uid-http")
+        self.assertEqual(calls[1].kwargs["headers"]["X-DashScope-Uid"], "uid-http")
         self.assertTrue(calls[1].kwargs["required"])
         self.assertGreater(calls[1].args[2], 0.5)
 
@@ -279,14 +299,14 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         client = MasterClient()
         keys = multimodal_cache_keys(self.request)
         ready = metadata(keys, [[-10, 11]])
-        client._post_vit_metadata = AsyncMock(return_value=ready)
+        client._get_vit_metadata = AsyncMock(return_value=ready)
         self.assertIs(
             await client.get_vit_cache_metadata(self.vit, keys, input=self.request),
             ready,
         )
-        client._post_vit_metadata.assert_awaited_once()
-        self.assertEqual(client._post_vit_metadata.call_args.args[1], {"keys": keys})
-        client._post_vit_metadata = AsyncMock(
+        client._get_vit_metadata.assert_awaited_once()
+        self.assertEqual(list(client._get_vit_metadata.call_args.args[1].keys), keys)
+        client._get_vit_metadata = AsyncMock(
             side_effect=[
                 {"worker_instance": "epoch", "feature_hash_version": 1, "entries": []},
                 {"worker_instance": "epoch", "feature_hash_version": 1, "entries": []},
@@ -427,97 +447,78 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.args[2], 500)
         self.assertEqual(call.kwargs["path"], "/rtp_llm/vit/route")
 
-    async def test_metadata_http_failure_and_timeout_are_optional(self):
-        import asyncio
+    async def test_metadata_grpc_failure_and_timeout_are_optional(self):
+        class Service(MultimodalRpcServiceServicer):
+            async def GetMultimodalHashes(self, request, context):
+                if request.keys[0] == "slow":
+                    await asyncio.sleep(0.6)
+                if request.keys[0] == "ready":
+                    return hash_response(["ready"], [[-1, 2]])
+                await context.abort(grpc.StatusCode.UNIMPLEMENTED, "old worker")
 
-        from aiohttp import web
-
-        async def handler(request):
-            key = (await request.json())["keys"][0]
-            if key == "slow":
-                await asyncio.sleep(0.6)
-            if key == "ready":
-                return web.json_response(metadata(["ready"], [[-1, 2]]))
-            return web.Response(status=501)
-
-        app = web.Application()
-        app.router.add_post("/mm_cache/metadata", handler)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        address = RoleAddr(
-            role=RoleType.VIT,
-            ip="127.0.0.1",
-            http_port=runner.addresses[0][1],
-            grpc_port=8001,
-        )
+        server = grpc.aio.server()
+        add_MultimodalRpcServiceServicer_to_server(Service(), server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        await server.start()
+        address = self.vit.model_copy(update={"grpc_port": port, "http_port": 1})
         client = MasterClient()
         try:
-            self.assertEqual(
-                (await client.get_vit_cache_metadata(address, ["ready"]))["entries"][0][
-                    "feature_hashes"
-                ],
-                [-1, 2],
-            )
+            result = await client.get_vit_cache_metadata(address, ["ready"])
+            self.assertEqual(list(result["entries"][0]["feature_hashes"]), [-1, 2])
+            self.assertEqual(result["entries"][0]["feature_hashes"].itemsize, 4)
             self.assertIsNone(
                 await client.get_vit_cache_metadata(address, ["old-worker"])
             )
             self.assertIsNone(await client.get_vit_cache_metadata(address, ["slow"]))
         finally:
             await client.close()
-            await runner.cleanup()
+            await server.stop(0)
 
-    async def test_http_cold_hash_waits_for_submit_before_prefill_and_preserves_errors(
-        self,
-    ):
-        import asyncio
-
-        from aiohttp import web
-
+    async def test_grpc_cold_hash_waits_before_prefill_and_preserves_errors(self):
         keys = multimodal_cache_keys(self.request)
         self.request.generate_config.mm_timeout_ms = 2000
-        payloads = []
+        payloads, seen_headers = [], []
         self.request.headers = {
             "X-DashScope-Uid": "uid-cold-submit",
             "X-DashScope-Service": "service-cold",
+            "Authorization": "must-not-forward",
         }
         reject = False
 
-        async def handler(request):
-            body = await request.json()
-            payloads.append(body)
-            if "inputs" not in body:
-                return web.json_response(
-                    {
-                        "worker_instance": "epoch",
-                        "feature_hash_version": 1,
-                        "entries": [{"key": keys[0], "hash_hit": False}],
-                    }
-                )
-            self.assertEqual(request.headers.get("X-DashScope-Uid"), "uid-cold-submit")
-            self.assertEqual(request.headers.get("X-DashScope-Service"), "service-cold")
-            if reject:
-                return web.json_response(
-                    {
-                        "detail": {
-                            "error_code": int(ExceptionType.CONCURRENCY_LIMIT_ERROR),
-                            "message": "full",
-                        }
-                    },
-                    status=503,
-                )
-            await asyncio.sleep(0.6)  # Longer than the 500 ms metadata-probe timeout.
-            return web.json_response(metadata(keys, [[-10, 11]]))
+        class Service(MultimodalRpcServiceServicer):
+            async def GetMultimodalHashes(self, request, context):
+                payloads.append(request)
+                seen_headers.append(dict(context.invocation_metadata()))
+                if not request.HasField("inputs"):
+                    result = MultimodalHashResponsePB(
+                        worker_instance="epoch", feature_hash_version=1
+                    )
+                    result.entries.add(key=keys[0], hash_hit=False)
+                    return result
+                if reject:
+                    context.set_trailing_metadata(
+                        (
+                            (
+                                "grpc-status-details-bin",
+                                ErrorDetailsPB(
+                                    error_code=int(
+                                        ExceptionType.CONCURRENCY_LIMIT_ERROR
+                                    ),
+                                    error_message="full",
+                                ).SerializeToString(),
+                            ),
+                        )
+                    )
+                    await context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "full")
+                await asyncio.sleep(0.6)
+                return hash_response(keys, [[-10, 11]])
 
-        app = web.Application()
-        app.router.add_post("/mm_cache/metadata", handler)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        vit = self.vit.model_copy(update={"http_port": runner.addresses[0][1]})
-        status = {**self.status, "http_port": vit.http_port}
+        server = grpc.aio.server()
+        add_MultimodalRpcServiceServicer_to_server(Service(), server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        await server.start()
+        vit = self.vit.model_copy(update={"grpc_port": port, "http_port": 1})
+        status = {**self.status, "grpc_port": port, "http_port": 1}
         client = MasterClient()
         client.get_backend_role_addrs = AsyncMock(
             side_effect=[
@@ -529,8 +530,11 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         try:
             await self.visitor.get_master_route_addrs(self.request)
             self.assertEqual(len(payloads), 2)
-            self.assertNotIn("inputs", payloads[0])
-            self.assertEqual(len(payloads[1]["inputs"]), 1)
+            self.assertFalse(payloads[0].HasField("inputs"))
+            self.assertEqual(len(payloads[1].inputs.multimodal_inputs), 1)
+            self.assertEqual(seen_headers[1]["x-dashscope-uid"], "uid-cold-submit")
+            self.assertEqual(seen_headers[1]["x-dashscope-service"], "service-cold")
+            self.assertNotIn("authorization", seen_headers[1])
             route = client.get_backend_role_addrs.call_args.kwargs
             self.assertEqual(route["seq_len"], 4)
             self.assertTrue(route["block_cache_keys"])
@@ -543,7 +547,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             await client.close()
-            await runner.cleanup()
+            await server.stop(0)
 
 
 class MMCacheApiTest(unittest.TestCase):

@@ -750,12 +750,39 @@ service RpcService {
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
 }
 
+// Frontend routing metadata only. Omit inputs for a cache-only probe; supplying
+// inputs computes missing hashes and waits for any enabled safety inspection.
+message MultimodalHashRequestPB {
+    repeated string keys = 1;
+    MultimodalInputsPB inputs = 2;
+    int64 timeout_ms = 3;
+}
+
+message MultimodalHashEntryPB {
+    string key = 1;
+    bool hash_hit = 2;
+    bool embedding_hit = 3;
+    string embedding_tier = 4;
+    bool greennet_passed = 5;
+    string entry_generation = 6;
+    repeated uint32 split_size = 7;
+    // Flattened little-endian signed int32 hashes, one per output token.
+    bytes feature_hashes = 8;
+}
+
+message MultimodalHashResponsePB {
+    string worker_instance = 1;
+    uint32 feature_hash_version = 2;
+    repeated MultimodalHashEntryPB entries = 3;
+}
+
 // Response type intentionally changed as part of multimodal refactoring — not a rolling-upgrade concern
 // because VIT proxy and LLM backend are always deployed together in this service.
 service MultimodalRpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
+    rpc GetMultimodalHashes(MultimodalHashRequestPB) returns (MultimodalHashResponsePB);
     // Optional compatibility endpoint for clients that explicitly prefetch ViT work.
     // The RTP-LLM frontend no longer calls it on the normal generation path.
     rpc AsyncSubmitEmbedding(MultimodalInputsPB) returns (EmptyPB);

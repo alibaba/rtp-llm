@@ -28,8 +28,8 @@ from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
-from rtp_llm.multimodal.multimodal_util import trans_mm_input
 from rtp_llm.ops import RoleType
+from rtp_llm.server.mm_cache_metadata import get_mm_cache_metadata
 from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer, create_rpc_server
 
@@ -83,57 +83,28 @@ def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
 
     @app.post("/mm_cache/metadata")
     def cache_metadata(request: MMCacheMetadataRequest, raw_request: RawRequest):
-        if engine is None or engine.is_proxy_mode:
-            raise HTTPException(status_code=501, detail="worker-local cache required")
-        if any(not key or len(key) > 4096 for key in request.keys):
-            raise HTTPException(status_code=400, detail="invalid multimodal cache key")
         try:
-            hash_key_cache = _get_hash_key_cache(engine)
-            if hash_key_cache is None:
-                return engine._embedding_cache.metadata(request.keys)
-            metadata = hash_key_cache.metadata(request.keys, engine._embedding_cache)
-        except ValueError as error:
-            raise HTTPException(status_code=413, detail=str(error)) from error
-        inspection_enabled = getattr(engine, "_greennet_enabled", lambda: False)()
-        if inspection_enabled:
-            # A hash produced without inspection is not an approved cache hit.
-            for item in metadata["entries"]:
-                if not item.get("greennet_passed", False):
-                    item.update(hit=False, hash_hit=False)
-                    for field in ("feature_hashes", "split_size", "entry_generation"):
-                        item.pop(field, None)
-        missing = {e["key"] for e in metadata["entries"] if not e["hash_hit"]}
-        if not missing or request.inputs is None:
-            return metadata
-        try:
-            inputs_pb = ParseDict(
-                {"multimodal_inputs": request.inputs}, MultimodalInputsPB()
+            inputs = None
+            if request.inputs is not None:
+                inputs = ParseDict(
+                    {"multimodal_inputs": request.inputs}, MultimodalInputsPB()
+                )
+                inputs.request_id = request.request_id
+            headers = extract_request_headers(raw_request.headers)
+            return get_mm_cache_metadata(
+                engine,
+                request.keys,
+                inputs,
+                request.timeout_ms,
+                user_id=headers.get("x-dashscope-uid", ""),
+                service_name=headers.get("x-dashscope-service", ""),
             )
-            if any(
-                not i.multimodal_url or i.multimodal_tensor.ByteSize()
-                for i in inputs_pb.multimodal_inputs
-            ):
-                raise ValueError("hash submission requires URL inputs without tensors")
-            inputs = {item.cache_key(): item for item in trans_mm_input(inputs_pb)}
-            if not missing.issubset(inputs) or not inputs.keys() <= set(request.keys):
-                raise ValueError("multimodal inputs do not match requested cache keys")
+        except NotImplementedError as error:
+            raise HTTPException(status_code=501, detail=str(error)) from error
+        except OverflowError as error:
+            raise HTTPException(status_code=413, detail=str(error)) from error
         except (ValueError, TypeError, ParseError) as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        del inputs_pb
-        missing_keys = [key for key in dict.fromkeys(request.keys) if key in missing]
-        try:
-            results = engine.get_embedding_result(
-                [inputs[key] for key in missing_keys],
-                request_id=request.request_id,
-                timeout_ms=request.timeout_ms,
-                hashes_only=True,
-                user_id=extract_request_headers(raw_request.headers).get(
-                    "x-dashscope-uid", ""
-                ),
-                service_name=extract_request_headers(raw_request.headers).get(
-                    "x-dashscope-service", ""
-                ),
-            )
         except TimeoutError as error:
             raise HTTPException(
                 status_code=504, detail="ViT hash computation timed out"
@@ -146,40 +117,6 @@ def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
                     "message": error.message,
                 },
             ) from error
-        tiers = engine._embedding_cache.resident_tiers(missing_keys)
-        completed = {}
-        total_rows = sum(len(e.get("feature_hashes", [])) for e in metadata["entries"])
-        for key, result in zip(missing_keys, results):
-            hashes = result.feature_hashes
-            if not hashes or any(h.numel() == 0 for h in hashes):
-                raise HTTPException(
-                    status_code=500, detail="ViT returned no feature hashes"
-                )
-            sizes = [h.numel() for h in hashes]
-            total_rows += sum(sizes)
-            if total_rows > 1048576:
-                raise HTTPException(
-                    status_code=413,
-                    detail="multimodal metadata response exceeds row limit",
-                )
-            completed[key] = {
-                "key": key,
-                "hit": True,
-                "hash_hit": True,
-                "greennet_passed": inspection_enabled,
-                "embedding_hit": key in tiers,
-                "embedding_tier": tiers.get(key),
-                "split_size": sizes,
-                "feature_hashes": [
-                    int(h) for tensor in hashes for h in tensor.tolist()
-                ],
-            }
-        if len(completed) != len(missing_keys):
-            raise HTTPException(
-                status_code=500, detail="ViT returned incomplete feature hashes"
-            )
-        metadata["entries"] = [completed.get(e["key"], e) for e in metadata["entries"]]
-        return metadata
 
 
 class GracefulShutdownServer(Server):

@@ -78,6 +78,12 @@ py_test(
 )
 
 py_test(
+    name = "mm_cancellation_test",
+    srcs = ["mm_cancellation_test.py", "multimodal_process_engine_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "minimax_m3_vl_vit_test",
     srcs = [
         "minimax_m3_vl_vit_test.py",
@@ -95,4 +101,11 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
+)
+
+py_test(
+    name = "cuda_graph_gate_test",
+    srcs = ["cuda_graph_gate_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "A10"},
 )

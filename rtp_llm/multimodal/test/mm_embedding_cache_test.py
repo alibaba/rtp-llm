@@ -1,6 +1,8 @@
 import concurrent.futures
+import gc
 import threading
 import unittest
+import weakref
 from unittest.mock import patch
 
 import torch
@@ -36,6 +38,72 @@ class UncachedEntryReadinessTest(unittest.TestCase):
 
 
 class EmbeddingCapacityTest(unittest.TestCase):
+    def test_completion_failure_rolls_back_before_and_after_admission(self):
+        for after_admission in (False, True):
+            with self.subTest(after_admission=after_admission):
+                cache = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
+                original = cache._on_complete
+                refs = []
+
+                def fail_completion(key, entry, result):
+                    if after_admission:
+                        original(key, entry, result)
+                    raise RuntimeError("cache completion failed")
+
+                with patch.object(cache, "_on_complete", new=fail_completion):
+                    for index in range(8):
+                        key = f"failed-{index}"
+                        _, entry = cache.try_acquire(key)
+                        result = torch.ones(4)
+                        refs.append(weakref.ref(result))
+                        with self.assertRaisesRegex(RuntimeError, "completion failed"):
+                            entry.complete(result)
+                        with self.assertRaisesRegex(RuntimeError, "completion failed"):
+                            entry.wait(timeout=0)
+                        self.assertTrue(entry.is_done)
+                        self.assertIsNone(entry.result)
+                        self.assertIsNone(cache.peek(key))
+                        self.assertEqual(entry.pool_owners, [])
+                        del result, entry
+                gc.collect()
+                self.assertTrue(all(ref() is None for ref in refs))
+                stats = cache.stats()
+                self.assertEqual(stats["pending_entries"], 0)
+                self.assertEqual(stats["resident_bytes"], 0)
+                self.assertEqual(stats["cpu_pool_used_bytes"], 0)
+                state, replacement = cache.try_acquire("failed-0")
+                self.assertEqual(state, "miss")
+                replacement.complete(torch.ones(4))
+                self.assertTrue(torch.equal(replacement.wait(), torch.ones(4)))
+
+    def test_completion_is_not_published_while_callback_is_running(self):
+        cache = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
+        _, entry = cache.try_acquire("pending")
+        started, release = threading.Event(), threading.Event()
+        original = cache._on_complete
+
+        def slow_completion(key, current, result):
+            started.set()
+            self.assertTrue(release.wait(timeout=2))
+            original(key, current, result)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            with patch.object(cache, "_on_complete", new=slow_completion):
+                completed = pool.submit(entry.complete, torch.ones(4))
+                try:
+                    self.assertTrue(started.wait(timeout=2))
+                    self.assertFalse(entry.is_done)
+                    self.assertEqual(cache.try_acquire("pending")[0], "in_progress")
+                    self.assertFalse(entry.complete(torch.zeros(4)))
+                    self.assertFalse(entry.fail(RuntimeError("duplicate transition")))
+                    with self.assertRaises(TimeoutError):
+                        entry.wait_ready(timeout=0)
+                finally:
+                    release.set()
+                self.assertTrue(completed.result(timeout=2))
+        self.assertTrue(entry.is_done)
+        self.assertTrue(torch.equal(entry.wait(), torch.ones(4)))
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_active_tensor_survives_demotion_eviction_and_same_key_replacement(self):
         cache = MMEmbeddingCache(gpu_max_bytes=128, cpu_max_bytes=128)

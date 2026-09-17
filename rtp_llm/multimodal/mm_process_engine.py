@@ -44,6 +44,7 @@ from rtp_llm.multimodal.multimodal_util import (
 )
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, get_multimodal_feature_hash
 from rtp_llm.utils.base_model_datatypes import MMUrlType
+from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 from rtp_llm.utils.time_util import Timer, timer_wrapper
 
 _worker_vit_config: Optional[VitConfig] = None
@@ -83,6 +84,7 @@ def _embedding_token_length(embeddings: List[Any]) -> int:
     return total
 
 
+@cuda_graph_gate.operation()
 def _feature_hashes_from_result(result: Any) -> List[torch.Tensor]:
     """Build sidecar hashes while tolerating empty test/compatibility results."""
     embeddings = maybe_tensor_to_list(result[0], ndim_threshold=2)
@@ -853,6 +855,7 @@ class MMProcessEngine:
         request_id: int = 0,
         user_id: str = "",
         service_name: str = "",
+        deadline: Optional[float] = None,
     ) -> Tuple[
         List[MultimodalInput], Optional["concurrent.futures.Future"], Optional[Any]
     ]:
@@ -887,12 +890,50 @@ class MMProcessEngine:
                 and self._hash_key_cache.greennet_passed(mm_inputs[0].cache_key())
             ),
         )
-        handle = asyncio.run_coroutine_threadsafe(
-            self._greennet_provider.preprocess_and_submit(req, mm_inputs), loop
-        ).result(timeout=self._greennet_timeout_s)
-        rewritten = list(handle.rewritten_inputs)
+        if deadline is None:
+            deadline = time.monotonic() + self._greennet_timeout_s
+        ownership_lock = threading.Lock()
+        abandoned = threading.Event()
+        unclaimed = {}
 
-        verdict_future = asyncio.run_coroutine_threadsafe(handle.wait_result(), loop)
+        async def prepare():
+            handle = await self._greennet_provider.preprocess_and_submit(req, mm_inputs)
+            # A provider may finish concurrently with timeout, or even suppress
+            # cancellation. Keep ownership until the waiting thread takes it.
+            with ownership_lock:
+                if not abandoned.is_set():
+                    unclaimed["handle"] = handle
+                    return handle
+            handle.cancel()
+            raise asyncio.CancelledError()
+
+        preprocess_future = asyncio.run_coroutine_threadsafe(prepare(), loop)
+        try:
+            handle = preprocess_future.result(
+                timeout=max(0.0, deadline - time.monotonic())
+            )
+            with ownership_lock:
+                unclaimed.pop("handle", None)
+        except BaseException:
+            with ownership_lock:
+                abandoned.set()
+                late_handle = unclaimed.pop("handle", None)
+            preprocess_future.cancel()
+            self._cancel_greennet(late_handle)
+            raise
+
+        try:
+            rewritten = list(handle.rewritten_inputs)
+
+            async def wait_verdict():
+                return await asyncio.wait_for(
+                    handle.wait_result(), timeout=max(0.0, deadline - time.monotonic())
+                )
+
+            verdict_future = asyncio.run_coroutine_threadsafe(wait_verdict(), loop)
+        except BaseException:
+            self._cancel_greennet(handle)
+            raise
         if entry is not None:
 
             def _stamp(fut: "concurrent.futures.Future") -> None:
@@ -967,12 +1008,14 @@ class MMProcessEngine:
         cpp / rpc entrypoints). Preprocess + inspect run, ViT runs concurrently
         with inspect, then the verdict gates the result. Raises
         FtRuntimeException(UNSAFE_INPUT_CONTENT) on a non-passing verdict."""
+        deadline = time.monotonic() + self._greennet_timeout_s
         if len(mm_inputs) != 1 or mm_inputs[0].url == "":
             rewritten, verdict_future, handle = self._begin_greennet(
                 mm_inputs,
                 request_id=request_id,
                 user_id=user_id,
                 service_name=service_name,
+                deadline=deadline,
             )
             work_items: List[MMWorkItem] = []
             try:
@@ -984,7 +1027,9 @@ class MMProcessEngine:
                 )
                 verdict = GreenNetVerdict(passed=True)
                 if verdict_future is not None:
-                    verdict = verdict_future.result(timeout=self._greennet_timeout_s)
+                    verdict = verdict_future.result(
+                        timeout=max(0.0, deadline - time.monotonic())
+                    )
                     if verdict is None:
                         raise RuntimeError("sync GreenNet returned no verdict")
                     if not verdict.passed:
@@ -1023,6 +1068,7 @@ class MMProcessEngine:
                     request_id,
                     user_id=user_id,
                     service_name=service_name,
+                    deadline=deadline,
                 )
             else:
                 # The owner already ran GreenNet and owns any URL rewrite. A
@@ -1039,7 +1085,7 @@ class MMProcessEngine:
 
             if state == "miss":
                 verdict = (
-                    verdict_future.result(timeout=self._greennet_timeout_s)
+                    verdict_future.result(timeout=max(0.0, deadline - time.monotonic()))
                     if verdict_future is not None
                     else GreenNetVerdict(passed=True)
                 )
@@ -1060,7 +1106,9 @@ class MMProcessEngine:
                     raise RuntimeError("sync embedding did not produce a cache value")
                 work_items[0].complete_cache(raw_result, force=True)
             elif self._greennet_enabled():
-                verdict = entry.wait_greennet(timeout=self._greennet_timeout_s)
+                verdict = entry.wait_greennet(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
                 if verdict is None:
                     raise RuntimeError("cached GreenNet returned no verdict")
                 if not verdict.passed:
@@ -1096,7 +1144,9 @@ class MMProcessEngine:
         Called by the VIT RPC's ``WaitGreenNetVerdict`` handler before prefill.
         If an input was never async-submitted (cache miss), kick its compute
         now so the verdict gets produced."""
+        claims: List[Tuple[str, MMEmbeddingCacheEntry]] = []
         current_entry: Optional[MMEmbeddingCacheEntry] = None
+        deadline = time.monotonic() + timeout_ms / 1000.0
         try:
             if not self._greennet_enabled():
                 return GreenNetVerdict(passed=True)
@@ -1107,19 +1157,23 @@ class MMProcessEngine:
                 if mm_input.url != ""
                 and not self._hash_key_cache.greennet_passed(mm_input.cache_key())
             ]
+            self._raise_if_async_request_cancelled(request_id, cancellation_event)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("ViT request deadline expired before submission")
             claims = self._claim_and_submit_async(
                 valid_inputs,
                 request_id=request_id,
-                queue_timeout_ms=timeout_ms,
+                queue_timeout_ms=max(1, int((deadline - time.monotonic()) * 1000)),
                 cancellation_event=cancellation_event,
                 user_id=user_id,
                 service_name=service_name,
             )
-            deadline = time.monotonic() + timeout_ms / 1000.0
             for _, entry in claims:
                 current_entry = entry
                 remaining = max(0.0, deadline - time.monotonic())
-                verdict = entry.wait_greennet(timeout=remaining)
+                verdict = entry.wait_greennet(
+                    timeout=remaining, cancellation_event=cancellation_event
+                )
                 if verdict is None:
                     raise RuntimeError("GreenNet returned no verdict")
                 if not verdict.passed:
@@ -1129,8 +1183,16 @@ class MMProcessEngine:
                     return verdict
             return GreenNetVerdict(passed=True)
         except Exception as error:
+            self.cancel_queued_request(
+                request_id, entries=[entry for _, entry in claims]
+            )
+            if isinstance(error, concurrent.futures.CancelledError):
+                error = FtRuntimeException(
+                    ExceptionType.CANCELLED_ERROR,
+                    f"ViT request {request_id} was cancelled",
+                )
             self.report_vit_error(error, current_entry)
-            raise
+            raise error
 
     def mm_embedding_rpc(
         self, mm_inputs: MultimodalInputsPB, user_id: str = "", service_name: str = ""
@@ -1175,7 +1237,8 @@ class MMProcessEngine:
             mm_inputs, request_id=request_id, user_id=user_id, service_name=service_name
         )
         try:
-            res.position_ids = [pos.cpu() for pos in res.position_ids]
+            with cuda_graph_gate.operation():
+                res.position_ids = [pos.cpu() for pos in res.position_ids]
         except Exception as error:
             self.report_vit_error(error)
             raise
@@ -1297,19 +1360,26 @@ class MMProcessEngine:
         )
 
         work_items = []
-        for index in range(0, len(mm_inputs), batch_size):
-            batch = mm_inputs[index : index + batch_size]
-            work_item = MMWorkItem(
-                batch,
-                mm_timeout_ms=self.vit_config.mm_timeout_ms,
-                embedding_cache=self._embedding_cache,
-                hash_key_cache=self._hash_key_cache,
-                cache_claim=cache_claim if index == 0 else None,
-                defer_cache_complete=defer_cache_complete,
-                defer_feature_hashes=defer_feature_hashes,
-            )
-            work_items.append(work_item)
-            self.preprocess_executor.submit(work_item)
+        try:
+            for index in range(0, len(mm_inputs), batch_size):
+                batch = mm_inputs[index : index + batch_size]
+                work_item = MMWorkItem(
+                    batch,
+                    mm_timeout_ms=self.vit_config.mm_timeout_ms,
+                    embedding_cache=self._embedding_cache,
+                    hash_key_cache=self._hash_key_cache,
+                    cache_claim=cache_claim if index == 0 else None,
+                    defer_cache_complete=defer_cache_complete,
+                    defer_feature_hashes=defer_feature_hashes,
+                )
+                work_items.append(work_item)
+                self.preprocess_executor.submit(work_item)
+
+        except Exception as error:
+            # The caller has not received this list yet and cannot roll it back.
+            for work_item in work_items:
+                work_item.fail_cache(error)
+            raise
 
         return work_items
 
@@ -1424,29 +1494,36 @@ class MMProcessEngine:
         If complete, returns immediately. With hashes_only, return sidecar hashes
         without exporting embeddings or promoting a CPU entry with cached hashes.
         """
+        claims: List[Tuple[str, MMEmbeddingCacheEntry]] = []
         current_entry: Optional[MMEmbeddingCacheEntry] = None
+        deadline = time.monotonic() + timeout_ms / 1000.0
         try:
             self.mm_part.validate_inputs(mm_inputs)
             _report_image_count(mm_inputs)
+            self._raise_if_async_request_cancelled(request_id, cancellation_event)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("ViT request deadline expired before submission")
             claims = self._claim_and_submit_async(
                 mm_inputs,
                 request_id=request_id,
-                queue_timeout_ms=timeout_ms,
+                queue_timeout_ms=max(1, int((deadline - time.monotonic()) * 1000)),
                 cancellation_event=cancellation_event,
                 user_id=user_id,
                 service_name=service_name,
             )
-            deadline = time.monotonic() + timeout_ms / 1000.0
             results = []
             for cache_key, entry in claims:
                 current_entry = entry
                 remaining = max(0.0, deadline - time.monotonic())
-                entry.wait_ready(timeout=remaining)
+                entry.wait_ready(
+                    timeout=remaining, cancellation_event=cancellation_event
+                )
                 if self._greennet_enabled() and not entry.greennet_passed:
                     raise FtRuntimeException(
                         ExceptionType.MM_PROCESS_ERROR,
                         "ViT embedding has no completed GreenNet inspection",
                     )
+                self._raise_if_async_request_cancelled(request_id, cancellation_event)
                 feature_hashes = self._hash_key_cache.get(cache_key, entry.generation)
                 raw_result = None
                 if not hashes_only or feature_hashes is None:
@@ -1456,6 +1533,7 @@ class MMProcessEngine:
                         # CPU hashes. Queue producer dependencies on that stream
                         # instead of blocking this CPU thread before the hash.
                         wait_on_current_stream=feature_hashes is None,
+                        cancellation_event=cancellation_event,
                     )
                 if feature_hashes is None:
                     feature_hashes = _feature_hashes_from_result(raw_result)
@@ -1473,7 +1551,8 @@ class MMProcessEngine:
                     }
                     for producer in entry.producer_streams:
                         if producer.device not in hashed_devices:
-                            producer.synchronize()
+                            with cuda_graph_gate.operation():
+                                producer.synchronize()
                     self._hash_key_cache.put(
                         cache_key,
                         feature_hashes,
@@ -1501,10 +1580,16 @@ class MMProcessEngine:
             )
             return results
         except Exception as error:
-            if hashes_only:
-                self.cancel_queued_request(request_id)
+            self.cancel_queued_request(
+                request_id, entries=[entry for _, entry in claims]
+            )
+            if isinstance(error, concurrent.futures.CancelledError):
+                error = FtRuntimeException(
+                    ExceptionType.CANCELLED_ERROR,
+                    f"ViT request {request_id} was cancelled",
+                )
             self.report_vit_error(error, current_entry)
-            raise
+            raise error
 
     def _claim_and_submit_async(
         self,
@@ -1515,46 +1600,63 @@ class MMProcessEngine:
         user_id: str = "",
         service_name: str = "",
     ) -> List[Tuple[str, MMEmbeddingCacheEntry]]:
-        claims: List[Tuple[str, MMEmbeddingCacheEntry]] = []
-        pending: List[Tuple[MultimodalInput, str, MMEmbeddingCacheEntry]] = []
+        self._raise_if_async_request_cancelled(request_id, cancellation_event)
+        # Validate every input before creating any shared PENDING entries.
+        inputs = []
         for mm_input in mm_inputs:
             if mm_input.url == "":
                 raise ValueError(
                     "async embedding requires non-empty url for each input"
                 )
+            inputs.append((mm_input, mm_input.cache_key()))
 
-            cache_key = mm_input.cache_key()
+        claims: List[Tuple[str, MMEmbeddingCacheEntry]] = []
+        pending: List[Tuple[MultimodalInput, str, MMEmbeddingCacheEntry]] = []
+        try:
+            for mm_input, cache_key in inputs:
+                with self._async_task_lock:
+                    state, entry = self._async_cache.try_acquire(cache_key)
+                    claims.append((cache_key, entry))
+                    if state == "miss":
+                        self._async_tasks[entry] = _AsyncComputeTask(cache_key, entry)
+                        pending.append((mm_input, cache_key, entry))
+                    if (
+                        state == "complete"
+                        and self._embedding_cache.peek(cache_key) is entry
+                    ):
+                        self._hash_key_cache.get(cache_key, entry.generation)
+                    if state in ("miss", "in_progress"):
+                        task = self._async_tasks.get(entry)
+                        if task is not None:
+                            task.request_ids.add(request_id)
+                            self._async_request_tasks.setdefault(request_id, set()).add(
+                                entry
+                            )
+
+            self._raise_if_async_request_cancelled(request_id, cancellation_event)
+            self._submit_async_compute_batch(
+                pending,
+                request_id=request_id,
+                queue_timeout_ms=queue_timeout_ms,
+                user_id=user_id,
+                service_name=service_name,
+            )
+            self._raise_if_async_request_cancelled(request_id, cancellation_event)
+            return claims
+        except Exception as error:
+            # Only this invocation can submit these new claims. Even if another
+            # request joined one, an unsubmitted claim has no producer: fail it
+            # and wake all waiters instead of leaving shared PENDING state.
             with self._async_task_lock:
-                state, entry = self._async_cache.try_acquire(cache_key)
-                claims.append((cache_key, entry))
-                if (
-                    state == "complete"
-                    and self._embedding_cache.peek(cache_key) is entry
-                ):
-                    self._hash_key_cache.get(cache_key, entry.generation)
-                if state == "miss":
-                    self._async_tasks[entry] = _AsyncComputeTask(cache_key, entry)
-                    pending.append((mm_input, cache_key, entry))
-
-                if state in ("miss", "in_progress"):
+                for _, cache_key, entry in pending:
                     task = self._async_tasks.get(entry)
-                    if task is not None:
-                        task.request_ids.add(request_id)
-                        self._async_request_tasks.setdefault(request_id, set()).add(
-                            entry
-                        )
-
-        self._raise_if_async_request_cancelled(request_id, cancellation_event)
-
-        self._submit_async_compute_batch(
-            pending,
-            request_id=request_id,
-            queue_timeout_ms=queue_timeout_ms,
-            user_id=user_id,
-            service_name=service_name,
-        )
-        self._raise_if_async_request_cancelled(request_id, cancellation_event)
-        return claims
+                    if task is not None and task.future is None:
+                        self._forget_async_task_locked(entry)
+                        self._fail_async_compute(cache_key, entry, error)
+            self.cancel_queued_request(
+                request_id, entries=[entry for _, entry in claims]
+            )
+            raise
 
     def _raise_if_async_request_cancelled(
         self,
@@ -1581,7 +1683,9 @@ class MMProcessEngine:
             if not request_tasks:
                 self._async_request_tasks.pop(request_id, None)
 
-    def cancel_queued_request(self, request_id: int) -> int:
+    def cancel_queued_request(
+        self, request_id: int, *, entries: Optional[List[MMEmbeddingCacheEntry]] = None
+    ) -> int:
         """Cancel work that is still queued and exclusively owned by a request.
 
         Running futures are deliberately left alone. A deduplicated task remains
@@ -1589,7 +1693,16 @@ class MMProcessEngine:
         """
         cancelled = 0
         with self._async_task_lock:
-            entries = list(self._async_request_tasks.pop(request_id, set()))
+            if entries is None:
+                entries = list(self._async_request_tasks.pop(request_id, set()))
+            else:
+                # A failed submission must not cancel earlier work using the
+                # same request id (including callers that use the default 0).
+                owned = self._async_request_tasks.get(request_id, set())
+                entries = list(owned.intersection(entries))
+                owned.difference_update(entries)
+                if not owned:
+                    self._async_request_tasks.pop(request_id, None)
             for entry in entries:
                 task = self._async_tasks.get(entry)
                 if task is None:
@@ -1841,13 +1954,19 @@ class MMProcessEngine:
         user_id: str = "",
         service_name: str = "",
     ) -> None:
+        deadline = time.monotonic() + self._greennet_timeout_s
         handle = None
         try:
             # GreenNet preprocess (rewrites URL) + async inspect. The inspect
             # done-callback stamps entry.greennet_verdict the moment inspection
             # finishes, so WaitGreenNetVerdict unblocks independently of ViT.
             rewritten, verdict_future, handle = self._begin_greennet(
-                mm_inputs, entry, request_id, user_id=user_id, service_name=service_name
+                mm_inputs,
+                entry,
+                request_id,
+                user_id=user_id,
+                service_name=service_name,
+                deadline=deadline,
             )
             # ViT embedding runs concurrently with inspection.
             _, work_items = self._mm_embedding_impl(
@@ -1871,7 +1990,9 @@ class MMProcessEngine:
             )
             verdict = GreenNetVerdict(passed=True)
             if verdict_future is not None:
-                verdict = verdict_future.result(timeout=self._greennet_timeout_s)
+                verdict = verdict_future.result(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
                 if verdict is None:
                     raise RuntimeError("async GreenNet returned no verdict")
                 if not verdict.passed:

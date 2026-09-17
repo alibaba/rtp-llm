@@ -52,6 +52,7 @@ from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
 from rtp_llm.ops import MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType, VitParameters
+from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 from rtp_llm.utils.model_weight import CkptWeightInfo, concat_0, identity, sp_id
 
 from .image_processor import (
@@ -100,6 +101,22 @@ class _MiniMaxM3VLVisionGraphEntry:
         self.attention_context = attention_context
         self.ready_event = torch.cuda.Event()
         self.has_pending_output = False
+
+
+class _MiniMaxM3VLCUDAGraph(torch.cuda.CUDAGraph):
+    def capture_end(self):
+        try:
+            return super().capture_end()
+        except RuntimeError:
+            # Some PyTorch versions skip allocator endAllocateToPool when
+            # cudaStreamEndCapture fails. Eager fallback then leaks deferred
+            # frees indefinitely; only a fresh worker has a clean allocator.
+            logger.critical(
+                "M3VL CUDA Graph capture_end failed; exiting worker because "
+                "the CUDA allocator may be invalid. A worker restart is required.",
+                exc_info=True,
+            )
+            os._exit(1)
 
 
 class _MiniMaxM3VLVisionGraphCache:
@@ -154,11 +171,16 @@ class _MiniMaxM3VLVisionGraphCache:
         with self._lock:
             self._enabled = enabled
 
+    @cuda_graph_gate.operation()
+    def _eager(self, pixel_values, grid_thw):
+        return self._visual(pixel_values, grid_thw)
+
     def _fallback(self, pixel_values, grid_thw):
         self._stats["fallback"] += 1
         kmonitor.report(AccMetrics.VIT_CUDA_GRAPH_FALLBACK_QPS_METRIC, 1)
-        return self._visual(pixel_values, grid_thw)
+        return self._eager(pixel_values, grid_thw)
 
+    @cuda_graph_gate.capture()
     def _capture(self, pixel_values, grid_thw):
         static_input = pixel_values.detach().clone()
         vision_model = getattr(
@@ -183,7 +205,7 @@ class _MiniMaxM3VLVisionGraphCache:
         current_stream.wait_stream(capture_stream)
         torch.cuda.synchronize(pixel_values.device)
 
-        graph = torch.cuda.CUDAGraph()
+        graph = _MiniMaxM3VLCUDAGraph()
         with torch.cuda.graph(graph), torch.inference_mode():
             static_output = self._visual(
                 static_input,
@@ -198,6 +220,7 @@ class _MiniMaxM3VLVisionGraphCache:
         )
 
     @staticmethod
+    @cuda_graph_gate.operation()
     def _replay(entry, pixel_values):
         stream = torch.cuda.current_stream(pixel_values.device)
         if entry.has_pending_output:
@@ -211,12 +234,12 @@ class _MiniMaxM3VLVisionGraphCache:
 
     def run(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor):
         if not self._enabled:
-            return self._visual(pixel_values, grid_thw)
+            return self._eager(pixel_values, grid_thw)
         # Packed batches have data-dependent segment counts and graph I/O copies
         # outweighed launch savings in profiling. Keep them eager until Stage 6
         # has a padding scheme that preserves segment-level attention isolation.
         if grid_thw.ndim != 2 or grid_thw.shape[0] != 1:
-            return self._visual(pixel_values, grid_thw)
+            return self._eager(pixel_values, grid_thw)
         if (
             not pixel_values.is_cuda
             or pixel_values.shape[0] > self._max_graph_patches
@@ -239,12 +262,12 @@ class _MiniMaxM3VLVisionGraphCache:
             self._stats["miss"] += 1
             kmonitor.report(AccMetrics.VIT_CUDA_GRAPH_MISS_QPS_METRIC, 1)
             if signature in self._disabled:
-                return self._visual(pixel_values, grid_thw)
+                return self._eager(pixel_values, grid_thw)
 
             seen = self._seen.get(signature, 0) + 1
             self._seen[signature] = seen
             if seen < self._capture_after:
-                return self._visual(pixel_values, grid_thw)
+                return self._eager(pixel_values, grid_thw)
 
             try:
                 entry = self._capture(pixel_values, grid_thw)
@@ -256,7 +279,7 @@ class _MiniMaxM3VLVisionGraphCache:
                     "M3VL vision CUDA Graph capture failed; using eager: %s",
                     error,
                 )
-                return self._visual(pixel_values, grid_thw)
+                return self._eager(pixel_values, grid_thw)
 
             self._entries[signature] = entry
             self._seen.pop(signature, None)
