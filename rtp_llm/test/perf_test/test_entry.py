@@ -229,8 +229,8 @@ def validate_tps_against_baseline(result_dir: str, baseline: Dict[str, Any]) -> 
     """Validate TPS results against baseline. current_tps < baseline_tps * (1 - threshold) -> FAIL."""
     baseline_tps = baseline.get("tps", {})
     if not baseline_tps:
-        logging.info("Baseline has no tps data, skip TPS validation")
-        return True
+        logging.error("Requested TPS comparison has no baseline measurements")
+        return False
 
     current_tps = _collect_tps_results(result_dir)
     if not current_tps:
@@ -244,6 +244,7 @@ def validate_tps_against_baseline(result_dir: str, baseline: Dict[str, Any]) -> 
     passed = True
     for key, baseline_val in baseline_tps.items():
         if key not in current_tps:
+            passed = False
             continue
         current_val = current_tps[key]
         threshold = baseline_val * (1 - REGRESSION_THRESHOLD)
@@ -264,7 +265,8 @@ def validate_against_baseline(result_dir: str, baseline_path: Optional[str]) -> 
 
     baseline = _load_baseline(baseline_path)
     if not baseline:
-        return True
+        logging.error("Requested perf comparison has no baseline measurements")
+        return False
 
     # Route to TPS validator if baseline contains a "tps" section.
     if baseline.get("tps"):
@@ -272,13 +274,13 @@ def validate_against_baseline(result_dir: str, baseline_path: Optional[str]) -> 
 
     baseline_times = baseline.get("decode_times", {})
     if not baseline_times:
-        logging.info("Baseline has no decode_times, skip validation")
-        return True
+        logging.error("Requested perf comparison has no TPS or decode measurements")
+        return False
 
     current_times = _collect_decode_times(result_dir)
     if not current_times:
-        logging.warning("No decode times in results, skip validation")
-        return True
+        logging.error("No decode results found but baseline expects decode data")
+        return False
 
     table = _format_comparison_table(baseline_times, current_times)
     print(f"\n=== Perf Baseline Comparison (threshold: {REGRESSION_THRESHOLD * 100:.0f}%) ===")
@@ -287,6 +289,7 @@ def validate_against_baseline(result_dir: str, baseline_path: Optional[str]) -> 
     passed = True
     for key, baseline_val in baseline_times.items():
         if key not in current_times:
+            passed = False
             continue
         current_val = current_times[key]
         threshold = baseline_val * (1 + REGRESSION_THRESHOLD)
