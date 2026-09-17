@@ -38,7 +38,7 @@ class WhaleModeConfigurationTest {
         monitor.sample(java.util.Map.of("mock_completed_requests_total", 8), decode, now + 3_000_000_000L, true);
         monitor.sample(java.util.Map.of("mock_completed_requests_total", 20), prefill, now + 3_000_000_000L);
         assertEquals(List.of(0.0, 4.0, 0.0), reports);
-        assertEquals(reports, dashboardReports);
+        assertEquals(List.of(0.0, 8.0, 0.0), dashboardReports);
         monitor.sample(java.util.Map.of("mock_completed_requests_total", 9), decode, now + 4_000_000_000L);
         assertEquals(3, dashboardReports.size());
     }

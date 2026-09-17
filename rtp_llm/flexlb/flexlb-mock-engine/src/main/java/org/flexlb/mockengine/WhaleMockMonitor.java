@@ -105,10 +105,11 @@ final class WhaleMockMonitor implements AutoCloseable {
                 // Dashboard-compatible alias for the synthetic no-Fetch path.
                 // Keep the source tag so it cannot be mistaken for frontend success.
                 String alias = "py_rtp_success_qps_metric";
-                if (registered.add(alias)) monitor.register(alias, FlexMetricType.GAUGE);
+                if (registered.add(alias)) monitor.register(alias, FlexMetricType.QPS);
                 var aliasLabels = new HashMap<>(labels);
                 aliasLabels.put("success_source", "mock_decode");
-                monitor.report(alias, new FlexMetricTags.ImmutableFlexMetricTags(aliasLabels), successQps);
+                monitor.report(alias, new FlexMetricTags.ImmutableFlexMetricTags(aliasLabels),
+                        deltas.getOrDefault("mock_completed_requests_total", 0L));
             }
         }
         metrics.forEach((name, value) -> {
