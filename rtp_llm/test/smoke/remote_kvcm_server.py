@@ -52,7 +52,7 @@ class RemoteKVCMServer:
         return self._address
 
     def start_server(self, timeout: int = 120) -> bool:
-        os.environ["KVCM_SERVER_ADDRESS"] = f"127.0.0.1:{self._rpc_port}"
+        os.environ["RECO_SERVER_ADDRESS"] = f"127.0.0.1:{self._rpc_port}"
         self._enable_debug_service = str_to_bool(
             self._kvcm_config.get("ENABLE_DEBUG_SERVICE", "false")
         )

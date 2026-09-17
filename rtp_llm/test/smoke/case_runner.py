@@ -155,7 +155,7 @@ class CaseRunner(object):
         if enable_remote_cache:
             self.remote_kvcm_server = self._start_remote_kvcm_server()
             assert self.remote_kvcm_server is not None, "remote kvcm shoule not be None"
-            env_dict["KVCM_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
+            env_dict["RECO_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
         task_states = TaskStates()
         logging.info(f"smoke_args_str: {self.smoke_args_str}")
         server_manager = self.start_server(

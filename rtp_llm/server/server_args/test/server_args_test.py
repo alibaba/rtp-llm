@@ -67,6 +67,18 @@ class CacheConfigArgumentsTest(TestCase):
         }
 
     @classmethod
+    def startup_env(cls, samples):
+        # Deployments keep the historical RECO_* environment contract while
+        # the public CLI and in-process config use kvcm_* names.
+        return {
+            **{
+                f"RECO_{name.upper()}": str(samples[f"kvcm_{name}"])
+                for name in cls.samples
+            },
+            **{name.upper(): str(samples[name]) for name in cls.tier_samples},
+        }
+
+    @classmethod
     def removed_names(cls):
         return {
             **{f"kvcm_{name}": f"reco_{name}" for name in cls.samples},
@@ -91,7 +103,7 @@ class CacheConfigArgumentsTest(TestCase):
 
     def test_canonical_env_and_cli_bind_all_fields(self):
         samples = self.startup_samples()
-        env = {name.upper(): str(value) for name, value in samples.items()}
+        env = self.startup_env(samples)
         args = [
             part
             for name, value in samples.items()
@@ -108,7 +120,8 @@ class CacheConfigArgumentsTest(TestCase):
 
     def test_canonical_env_preserves_false_zero_and_empty(self):
         samples = self.startup_samples()
-        env = {name.upper(): str(type(value)()) for name, value in samples.items()}
+        empty_samples = {name: type(value)() for name, value in samples.items()}
+        env = self.startup_env(empty_samples)
         for args in (None, []):
             config = self.parse_cache_config(args, env)
             for name, value in samples.items():
@@ -117,7 +130,8 @@ class CacheConfigArgumentsTest(TestCase):
 
     def test_canonical_cli_overrides_environment(self):
         samples = self.startup_samples()
-        env = {name.upper(): str(type(value)()) for name, value in samples.items()}
+        empty_samples = {name: type(value)() for name, value in samples.items()}
+        env = self.startup_env(empty_samples)
         for equals in (False, True):
             args = []
             for name, value in samples.items():
@@ -144,11 +158,17 @@ class CacheConfigArgumentsTest(TestCase):
                     f"unrecognized arguments: --{old_name}", stderr.getvalue()
                 )
 
-    def test_removed_environment_names_do_not_change_defaults(self):
+    def test_removed_kvcm_and_tier_environment_names_do_not_change_defaults(self):
         samples = self.startup_samples()
         env = {
-            old_name.upper(): str(samples[name])
-            for name, old_name in self.removed_names().items()
+            **{
+                f"KVCM_{name.upper()}": str(samples[f"kvcm_{name}"])
+                for name in self.samples
+            },
+            **{
+                old_name.upper(): str(samples[name])
+                for name, (old_name, _) in self.tier_samples.items()
+            },
         }
         defaults = self.parse_cache_config([], {})
         for args in (None, []):
