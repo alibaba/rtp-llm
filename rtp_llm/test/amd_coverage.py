@@ -32,6 +32,16 @@ _DESC = "rtp_llm/models_py/model_desc/test/"
 
 AMD_TARGETS = (
     AmdTarget(
+        "cuda_graph_tagged_cache_test_rocm",
+        "rtp_llm/cpp/cuda_graph/tests/cuda_graph_tagged_cache_test.py",
+        excluded_cases=("test_dirty_capture_failure_is_fail_closed",),
+    ),
+    AmdTarget(
+        "cuda_graph_dirty_capture_test_rocm",
+        "rtp_llm/cpp/cuda_graph/tests/cuda_graph_tagged_cache_test.py",
+        case="test_dirty_capture_failure_is_fail_closed",
+    ),
+    AmdTarget(
         "test_aiter_flydsl_gdn_decode_rocm", _FLA + "test_aiter_flydsl_gdn_decode.py",
         excluded_cases=("test_real_nvidia_device_rejects_aiter_dispatch",),
     ),

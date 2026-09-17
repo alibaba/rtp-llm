@@ -22,10 +22,10 @@ def _baseline_nodeids():
     ]
 
 
-@pytest.mark.parametrize("missing", range(50))
+@pytest.mark.parametrize("missing", range(52))
 def test_missing_baseline_target_cannot_be_replaced_by_unrelated_cases(missing):
     nodeids = _baseline_nodeids()
-    assert len(nodeids) == 50  # 38 original identities plus 12 mainline additions.
+    assert len(nodeids) == 52  # 38 original identities plus 14 mainline additions.
     validate_amd_coverage(nodeids)
     nodeids.pop(missing)
     nodeids.extend(f"other.py::test_other[{i}]" for i in range(300))

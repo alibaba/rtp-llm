@@ -804,6 +804,7 @@ class BuildPackagingContractTest(TestCase):
         profile = profiles["py_ut_amd"]
         expected_paths = [
             "rtp_llm/models_py/triton_kernels/fla/test/test_aiter_flydsl_gdn_decode.py",
+            "rtp_llm/cpp/cuda_graph/tests/cuda_graph_tagged_cache_test.py",
             "rtp_llm/models_py/triton_kernels/fla/test/test_aiter_flydsl_gdn_prefill.py",
             "rtp_llm/cpp/cuda_graph/tests/cuda_graph_copy_kernel_test.py",
             "rtp_llm/cpp/models/test/pywrapped_model_cache_store_integration_test.py",
@@ -868,10 +869,10 @@ class BuildPackagingContractTest(TestCase):
 
         for name, expected_count in {
             "py_ut_sm8x": 2246,
-            "py_ut_sm9x": 416,
+            "py_ut_sm9x": 491,
             "py_ut_sm100": 3,
             "py_ut_sm100_arm": 104,
-            "py_ut_amd": 382,
+            "py_ut_amd": 405,
             "py_ut_frontend": 71,
         }.items():
             self.assertEqual(profiles[name].get("expected_count"), expected_count)

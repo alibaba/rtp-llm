@@ -25,7 +25,7 @@ from rtp_llm.ops import KvCacheDataType, RopeStyle
 from rtp_llm.ops.compute_ops import get_typemeta
 
 
-class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):
+class _TRTLLMFMHAv2PrefillCases:
     """Test suite for TRTLLMFMHAv2PrefillOp in non-padded mode
 
     TRTLLMFMHAv2PrefillOp:
@@ -267,23 +267,6 @@ class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):
 
                 torch.testing.assert_close(graph_output, expect_output, rtol=0, atol=0)
 
-    def test_prefill_cuda_graph_rope_kv_and_dynamic_batch(self):
-        """Gate GQA and packed-MHA prefill graphs on SM90 and SM12x."""
-        if self.kv_cache_dtype != KvCacheDataType.BASE:
-            self.skipTest("generation-prefill CUDA graph requires BF16 KV cache")
-        if not (is_sm90() or is_sm12x()):
-            self.skipTest(
-                "generation-prefill CUDA graph is allowlisted on SM90 and SM12x"
-            )
-
-        for head_num_kv in (2, 8):
-            for token_capacity in (64, 256):
-                with self.subTest(
-                    head_num_kv=head_num_kv, token_capacity=token_capacity
-                ):
-                    self._run_prefill_cuda_graph_rope_kv_and_dynamic_batch(
-                        head_num_kv, token_capacity
-                    )
 
     def _run_prefill_cuda_graph_rope_kv_and_dynamic_batch(
         self, head_num_kv: int, token_capacity: int
@@ -651,7 +634,27 @@ class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):
         self._run_impl_rope_correctness(RopeStyle.Base)
 
 
-class TestTRTLLMFMHAv2PrefillOpFP8(TestTRTLLMFMHAv2PrefillOpBF16):
+class TestTRTLLMFMHAv2PrefillOpBF16(_TRTLLMFMHAv2PrefillCases, TRTLLMFMHAv2TestBase):
+    # Graph replay is a BF16-only case; FP8 inherits only the common tests.
+    def test_prefill_cuda_graph_rope_kv_and_dynamic_batch(self):
+        """Gate GQA and packed-MHA prefill graphs on SM90 and SM12x."""
+        if not (is_sm90() or is_sm12x()):
+            self.skipTest(
+                "generation-prefill CUDA graph is allowlisted on SM90 and SM12x"
+            )
+
+        for head_num_kv in (2, 8):
+            for token_capacity in (64, 256):
+                with self.subTest(
+                    head_num_kv=head_num_kv, token_capacity=token_capacity
+                ):
+                    self._run_prefill_cuda_graph_rope_kv_and_dynamic_batch(
+                        head_num_kv, token_capacity
+                    )
+
+
+
+class TestTRTLLMFMHAv2PrefillOpFP8(_TRTLLMFMHAv2PrefillCases, TRTLLMFMHAv2TestBase):
     kv_cache_dtype = KvCacheDataType.FP8
 
     def setUp(self):

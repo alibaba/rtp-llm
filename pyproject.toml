@@ -560,7 +560,9 @@ markexpr = "not H20 and not MI308X and not SM100 and not SM100_ARM and not smoke
 description = "Python UT on H20 / SM9x pool (py-ut-sm9x)"
 gpu_type = "H20"
 minimum_count = 1
-expected_count = 416
+# Run 72942162 collected 493 after mainline sync. The ROCm-only case moves to
+# AMD; the inherited FP8 copy of a BF16-only case is no longer a phantom skip.
+expected_count = 491
 forbid_skips = true
 ignore_paths = ["rtp_llm/test/dsv4", "rtp_llm/models_py/modules/dsv4"]
 isolated_paths = [
@@ -601,11 +603,12 @@ gpu_type = "MI308X"
 minimum_count = 1
 # Mainline additions plus the original ROCm boundary coverage. The NVIDIA-only
 # dispatch guard runs on H20; report-validation errors are not test cases.
-expected_count = 382
+expected_count = 405
 forbid_skips = true
 remote_env = { RTP_LLM_REQUIRE_ACCELERATOR = "1" }
 paths = [
     "rtp_llm/models_py/triton_kernels/fla/test/test_aiter_flydsl_gdn_decode.py",
+    "rtp_llm/cpp/cuda_graph/tests/cuda_graph_tagged_cache_test.py",
     "rtp_llm/models_py/triton_kernels/fla/test/test_aiter_flydsl_gdn_prefill.py",
     "rtp_llm/cpp/cuda_graph/tests/cuda_graph_copy_kernel_test.py",
     "rtp_llm/cpp/models/test/pywrapped_model_cache_store_integration_test.py",
