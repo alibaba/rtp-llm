@@ -177,6 +177,23 @@ public final class GroupPlanner {
             ItemAccess<T> access,
             Constraints constraints,
             ToDoubleFunction<List<T>> predictor) {
+        return selectWithPrediction(orderedItems, access, constraints,
+                predictor == null ? null : (added, prefix) -> predictor.applyAsDouble(prefix));
+    }
+
+    /**
+     * Owned by one selection: invoked once per visited prefix in append order.
+     * The last tentative member may exceed the prediction budget and be excluded from the result.
+     * Callbacks must not retain the mutable prefix list.
+     */
+    @FunctionalInterface
+    public interface PrefixPrediction<T> {
+        double append(T added, List<T> prefix);
+    }
+
+    public static <T> Selection<T> selectWithPrediction(
+            Iterable<T> orderedItems, ItemAccess<T> access, Constraints constraints,
+            PrefixPrediction<T> predictor) {
         Iterator<T> ordered = orderedItems.iterator();
         if (!ordered.hasNext()) {
             return new Selection<>(List.of(), Shape.empty(),
@@ -201,7 +218,7 @@ public final class GroupPlanner {
         OptionalDouble selectedPredictionMs = OptionalDouble.empty();
         boolean predictionBoundaryTriggered = false;
         if (predictionEnabled) {
-            double predictedMs = validatedPrediction(predictor, picked);
+            double predictedMs = requireValidPrediction(predictor.append(head, picked));
             selectedPredictionMs = OptionalDouble.of(predictedMs);
             predictionBoundaryTriggered = predictionDispatchBoundaryReached(
                     predictedMs, constraints.predictedExecutionBudgetMs());
@@ -226,7 +243,7 @@ public final class GroupPlanner {
 
             picked.add(item);
             if (predictionEnabled) {
-                double predictedMs = validatedPrediction(predictor, picked);
+                double predictedMs = requireValidPrediction(predictor.append(item, picked));
                 if (predictionGrowthLimitExceeded(
                         predictedMs, constraints.predictedExecutionBudgetMs())) {
                     predictionBoundaryTriggered = true;
@@ -316,11 +333,6 @@ public final class GroupPlanner {
         if (selectedPredictionMs.isPresent()) {
             requireValidPrediction(selectedPredictionMs.getAsDouble());
         }
-    }
-
-    private static <T> double validatedPrediction(
-            ToDoubleFunction<List<T>> predictor, List<T> items) {
-        return requireValidPrediction(predictor.applyAsDouble(items));
     }
 
     private static double requireValidPrediction(double predictedMs) {

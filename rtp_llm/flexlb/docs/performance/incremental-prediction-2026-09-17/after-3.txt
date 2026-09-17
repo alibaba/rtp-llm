@@ -1,0 +1,30 @@
+Mockito is currently self-attaching to enable the inline-mock-maker. This will no longer work in future releases of the JDK. Please add Mockito as an agent to your build as described in Mockito's documentation: https://javadoc.io/doc/org.mockito/mockito-core/latest/org.mockito/org/mockito/Mockito.html#0.3
+WARNING: A Java agent has been loaded dynamically (/Users/hena/.m2/repository/net/bytebuddy/byte-buddy-agent/1.17.6/byte-buddy-agent-1.17.6.jar)
+WARNING: If a serviceability tool is in use, please run with -XX:+EnableDynamicAgentLoading to hide this warning
+WARNING: If a serviceability tool is not in use, please run with -Djdk.instrument.traceUsage for more information
+WARNING: Dynamic loading of agents will be disallowed by default in a future release
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+select_1 round=3 ns/op=74.90 cpu_ns/op=73.36 bytes/op=600.00 checksum=223.603939875
+select_1 round=4 ns/op=74.05 cpu_ns/op=72.36 bytes/op=600.00 checksum=223.603939875
+select_1 round=5 ns/op=75.61 cpu_ns/op=73.35 bytes/op=600.00 checksum=223.603939875
+select_8 round=3 ns/op=388.77 cpu_ns/op=383.84 bytes/op=1216.00 checksum=263.974394341
+select_8 round=4 ns/op=384.30 cpu_ns/op=381.38 bytes/op=1216.00 checksum=263.974394340
+select_8 round=5 ns/op=385.30 cpu_ns/op=379.70 bytes/op=1216.00 checksum=263.974394340
+select_32 round=3 ns/op=1363.15 cpu_ns/op=1338.21 bytes/op=3040.00 checksum=581.485471445
+select_32 round=4 ns/op=1344.11 cpu_ns/op=1329.78 bytes/op=3040.00 checksum=581.485471445
+select_32 round=5 ns/op=1347.48 cpu_ns/op=1334.05 bytes/op=3040.00 checksum=581.485471445
+select_64 round=3 ns/op=1902.23 cpu_ns/op=1894.70 bytes/op=4176.50 checksum=733.703934228
+select_64 round=4 ns/op=1924.77 cpu_ns/op=1907.18 bytes/op=4176.50 checksum=733.703934228
+select_64 round=5 ns/op=1918.02 cpu_ns/op=1902.56 bytes/op=4176.50 checksum=733.703934228
+fleet5_depth_0 round=3 ns/op=173.67 cpu_ns/op=172.57 bytes/op=392.00 checksum=1104.375000000
+fleet5_depth_0 round=4 ns/op=172.64 cpu_ns/op=171.55 bytes/op=392.00 checksum=1104.375000000
+fleet5_depth_0 round=5 ns/op=173.55 cpu_ns/op=172.81 bytes/op=392.00 checksum=1104.375000000
+fleet5_depth_32 round=3 ns/op=17854.65 cpu_ns/op=17704.06 bytes/op=48240.00 checksum=6392.078125000
+fleet5_depth_32 round=4 ns/op=17955.70 cpu_ns/op=17686.87 bytes/op=48240.00 checksum=6392.078125000
+fleet5_depth_32 round=5 ns/op=18176.97 cpu_ns/op=17902.12 bytes/op=48240.00 checksum=6392.078125000
+fleet5_depth_128 round=3 ns/op=45202.86 cpu_ns/op=44960.99 bytes/op=107120.00 checksum=10621.031250000
+fleet5_depth_128 round=4 ns/op=45223.94 cpu_ns/op=44983.25 bytes/op=107120.00 checksum=10621.031250000
+fleet5_depth_128 round=5 ns/op=45388.20 cpu_ns/op=45150.02 bytes/op=107120.00 checksum=10621.031250000
+fleet5_depth_512 round=3 ns/op=160205.92 cpu_ns/op=159209.38 bytes/op=386752.00 checksum=39688.203125000
+fleet5_depth_512 round=4 ns/op=160838.57 cpu_ns/op=159832.93 bytes/op=386752.00 checksum=39688.203125000
+fleet5_depth_512 round=5 ns/op=160619.56 cpu_ns/op=159758.01 bytes/op=386752.00 checksum=39688.203125000

@@ -195,6 +195,16 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     @Override
+    public GroupPlanner.PrefixPrediction<ScheduledRequest> newGroupPredictor(
+            PrefillTimePredictor.Evaluator evaluator) {
+        PrefillTimePredictor.BatchPrediction prediction = evaluator.newBatchPrediction();
+        return (added, items) -> {
+            return PrefillPredictionBoundary.requireValidDecisionGroupMs(
+                    prediction.append(added.seqLen(), added.hitCache()));
+        };
+    }
+
+    @Override
     public RouteProjection.DeliveryProjection projectionPolicy() {
         return PROJECTION;
     }
@@ -899,6 +909,10 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         @Override
         public RouteProjection.GroupPlanning planning(
                 RouteProjection.Predictions predictions) {
+            PrefillTimePredictor.BatchPrediction incremental = predictions.newBatchPrediction();
+            if (incremental != null) {
+                return new AppendPlanning(incremental);
+            }
             BatchPlanning planning = PLANNING.get();
             planning.reset(predictions);
             return planning;
@@ -909,8 +923,50 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 GroupPlanner.Plan<GroupPlanner.Item> plan,
                 RouteProjection.Predictions predictions) {
             BatchService service = SERVICE.get();
-            service.reset(plan, predictions);
+            service.reset(plan, predictions, null);
             return service;
+        }
+
+        @Override
+        public RouteProjection.GroupService service(
+                GroupPlanner.Plan<GroupPlanner.Item> plan, RouteProjection.Predictions predictions,
+                RouteProjection.GroupPlanning planning) {
+            BatchService service = SERVICE.get();
+            service.reset(plan, predictions, planning);
+            return service;
+        }
+
+        /** One planner invocation; prefixes only grow and the probe boundary never moves backwards. */
+        private static final class AppendPlanning implements RouteProjection.GroupPlanning {
+            private final PrefillTimePredictor.BatchPrediction prediction;
+            private int size;
+            private double[] durations = new double[8];
+
+            private AppendPlanning(PrefillTimePredictor.BatchPrediction prediction) {
+                this.prediction = prediction;
+            }
+
+            @Override
+            public double durationMs(List<GroupPlanner.Item> prefix, int through) {
+                if (through < 0 || through >= prefix.size() || through + 1 < size) {
+                    throw new IllegalArgumentException("Prediction requires a growing prefix");
+                }
+                while (size <= through) {
+                    GroupPlanner.Item item = prefix.get(size);
+                    if (size == durations.length) {
+                        durations = java.util.Arrays.copyOf(durations, size * 2);
+                    }
+                    durations[size++] = prediction.append(item.seqLen(), item.hitCache());
+                }
+                return durations[through];
+            }
+
+            @Override
+            public java.util.OptionalDouble predictedPrefixMs(int prefixSize) {
+                return prefixSize > 0 && prefixSize <= size
+                        ? java.util.OptionalDouble.of(durations[prefixSize - 1])
+                        : java.util.OptionalDouble.empty();
+            }
         }
 
         private static final class BatchPlanning
@@ -990,14 +1046,17 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 implements RouteProjection.GroupService {
             private GroupPlanner.Plan<GroupPlanner.Item> plan;
             private RouteProjection.Predictions predictions;
+            private RouteProjection.GroupPlanning planning;
             private long[] completionOffsets = new long[0];
             private boolean[] computed = new boolean[0];
 
             private void reset(
                     GroupPlanner.Plan<GroupPlanner.Item> exactPlan,
-                    RouteProjection.Predictions exactPredictions) {
+                    RouteProjection.Predictions exactPredictions,
+                    RouteProjection.GroupPlanning exactPlanning) {
                 plan = exactPlan;
                 predictions = exactPredictions;
+                planning = exactPlanning;
                 int size = exactPlan.items().size();
                 if (completionOffsets.length < size) {
                     completionOffsets = java.util.Arrays.copyOf(
@@ -1011,6 +1070,14 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             public long completionOffsetMs(int memberIndex) {
                 if (memberIndex < 0 || memberIndex >= plan.items().size()) {
                     throw new IndexOutOfBoundsException(memberIndex);
+                }
+                if (!computed[memberIndex] && planning != null) {
+                    var cached = planning.predictedPrefixMs(memberIndex + 1);
+                    if (cached.isPresent()) {
+                        completionOffsets[memberIndex] = PrefillPredictionBoundary.committedDecisionGroupMs(
+                                cached.getAsDouble());
+                        computed[memberIndex] = true;
+                    }
                 }
                 if (!computed[memberIndex]) {
                     completionOffsets[memberIndex] =
