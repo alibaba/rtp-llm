@@ -6,6 +6,7 @@ import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
 import java.util.OptionalLong;
+import java.util.OptionalDouble;
 
 /** Projects one incoming route against immutable, coherently captured inputs. */
 public final class RouteProjection {
@@ -35,16 +36,29 @@ public final class RouteProjection {
                 GroupPlanner.Plan<GroupPlanner.Item> plan,
                 Predictions predictions);
 
+        /** Service for the result of this exact planning cursor, with the same frozen model and inputs. */
+        default GroupService service(GroupPlanner.Plan<GroupPlanner.Item> plan,
+                                     Predictions predictions, GroupPlanning planning) {
+            return service(plan, predictions);
+        }
+
     }
 
     /**
      * Predict a candidate prefix only through the member whose timing is still
      * required, without evaluating members that complete after the probe.
+     * Owned by one planner invocation: members are appended in order and the
+     * required index never decreases. A changed snapshot gets a fresh cursor.
      */
     public interface GroupPlanning {
         double durationMs(
                 List<GroupPlanner.Item> candidatePrefix,
                 int requiredThroughIndex);
+
+        /** Only predictions actually evaluated for this cursor's exact prefixes may be reused. */
+        default OptionalDouble predictedPrefixMs(int size) {
+            return OptionalDouble.empty();
+        }
     }
 
     /** Prediction primitives evaluated against one frozen predictor snapshot. */
@@ -59,6 +73,11 @@ public final class RouteProjection {
         }
 
         double batchPlanningDurationMs(List<GroupPlanner.Item> items);
+
+        /** Optional append-only implementation, scoped to one GroupPlanner invocation. */
+        default PrefillTimePredictor.BatchPrediction newBatchPrediction() {
+            return null;
+        }
 
         long batchDurationMs(List<GroupPlanner.Item> items);
 

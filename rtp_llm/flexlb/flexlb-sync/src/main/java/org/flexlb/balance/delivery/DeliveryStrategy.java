@@ -1,6 +1,7 @@
 package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.ScheduledRequest;
@@ -28,6 +29,12 @@ public interface DeliveryStrategy {
     double projectGroupDurationMs(
             List<ScheduledRequest> items,
             PrefillTimePredictor.Evaluator evaluator);
+
+    /** Fresh callback for GroupPlanner's strictly growing prefixes in one select call. */
+    default GroupPlanner.PrefixPrediction<ScheduledRequest> newGroupPredictor(
+            PrefillTimePredictor.Evaluator evaluator) {
+        return (added, items) -> projectGroupDurationMs(items, evaluator);
+    }
 
     /** Pure projection behavior paired with this live delivery strategy. */
     RouteProjection.DeliveryProjection projectionPolicy();

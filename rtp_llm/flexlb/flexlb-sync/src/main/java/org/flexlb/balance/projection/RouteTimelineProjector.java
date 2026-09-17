@@ -204,9 +204,9 @@ final class RouteTimelineProjector {
             }
 
             final GroupPlanner.Plan<GroupPlanner.Item> plan;
+            final RouteProjection.GroupPlanning planning;
             try {
-                RouteProjection.GroupPlanning planning =
-                        deliveryProjection.planning(predictions);
+                planning = deliveryProjection.planning(predictions);
                 plan = GroupPlanner.plan(
                         ordered,
                         GroupPlanner.itemAccess(),
@@ -247,7 +247,7 @@ final class RouteTimelineProjector {
             int probeIndex = identityIndexOf(plan.items(), probe);
             try {
                 RouteProjection.GroupService service =
-                        deliveryProjection.service(plan, predictions);
+                        deliveryProjection.service(plan, predictions, planning);
                 if (probeIndex >= 0) {
                     return candidate(
                             RouteProjection.Candidate.State.MODELED,
@@ -673,6 +673,20 @@ final class RouteTimelineProjector {
             } catch (RuntimeException predictionFailure) {
                 throw PredictionFailure.execution(predictionFailure);
             }
+        }
+
+        @Override
+        public PrefillTimePredictor.BatchPrediction newBatchPrediction() {
+            PrefillTimePredictor.BatchPrediction batch = evaluator.newBatchPrediction();
+            return (seqLen, hitCache) -> {
+                try {
+                    return PrefillPredictionBoundary.requireValidDecisionGroupMs(batch.append(seqLen, hitCache));
+                } catch (InvalidPrefillPredictionException invalidPrediction) {
+                    throw PredictionFailure.invalid(invalidPrediction);
+                } catch (RuntimeException predictionFailure) {
+                    throw PredictionFailure.execution(predictionFailure);
+                }
+            };
         }
 
         private double singletonBatchPlanningDurationMs(

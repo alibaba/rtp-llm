@@ -1098,12 +1098,6 @@ public final class WorkerBatcher {
         }
     }
 
-    private double projectGroupDurationMs(
-            List<ScheduledRequest> items,
-            PrefillTimePredictor.Evaluator evaluator) {
-        return deliveryStrategy.projectGroupDurationMs(items, evaluator);
-    }
-
     private void handoff(
             DeliveryStrategy.Transaction transaction,
             String decisionReason,
@@ -1567,12 +1561,11 @@ public final class WorkerBatcher {
                             exactBatchKvTokens, exactPredictThresholdMs,
                             exactFixedWaitMs);
             GroupPlanner.Selection<ScheduledRequest> selection =
-                    GroupPlanner.select(
+                    GroupPlanner.selectWithPrediction(
                             snapshot.items(), PLANNER_ITEM_ACCESS,
                             plannerConstraints,
-                            planningEvaluator == null ? null : items ->
-                                    projectGroupDurationMs(
-                                            items, planningEvaluator));
+                            planningEvaluator == null ? null :
+                                    deliveryStrategy.newGroupPredictor(planningEvaluator));
             GroupPlanner.Plan<ScheduledRequest> plan =
                     GroupPlanner.evaluateReadiness(
                             selection, plannerConstraints, now());
