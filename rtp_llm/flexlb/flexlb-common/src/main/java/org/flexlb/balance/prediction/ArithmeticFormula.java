@@ -1,15 +1,11 @@
 package org.flexlb.balance.prediction;
 
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
-import java.util.function.DoubleBinaryOperator;
-import java.util.function.DoubleUnaryOperator;
+
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.Node;
 
 /**
  * Arithmetic expression engine shared by routing cost and prefill-time formulas.
@@ -19,32 +15,21 @@ import java.util.function.DoubleUnaryOperator;
  */
 public final class ArithmeticFormula {
 
-    private static final ThreadLocal<EvalContext> EVALUATION_CONTEXT =
-            ThreadLocal.withInitial(EvalContext::new);
+    // Bounded reuse also avoids one generated class per equal-model endpoint.
+    private static final int MAX_COMPILED_FORMULAS = 128;
+    private static final Map<Node, Executable> COMPILED = new LinkedHashMap<>(MAX_COMPILED_FORMULAS, 0.75f, true);
 
-    private static final Map<String, DoubleUnaryOperator> UNARY_FUNCTIONS = Map.of(
-            "sqrt",  Math::sqrt,
-            "log",   Math::log,
-            "exp",   Math::exp,
-            "abs",   Math::abs
-    );
-
-    private static final Map<String, DoubleBinaryOperator> BINARY_FUNCTIONS = Map.of(
-            "max", Math::max,
-            "min", Math::min,
-            "pow", Math::pow
-    );
-
-    private static final Set<String> AGGREGATE_FUNCTIONS = Set.of("sum");
-
-    private final Node root;
+    private final Executable executable;
     private final Set<String> referencedVariables;
-    private final int aggregateCacheSize;
 
-    private ArithmeticFormula(Node root, Set<String> referencedVariables, int aggregateCacheSize) {
-        this.root = root;
+    private ArithmeticFormula(Node root, Set<String> referencedVariables) {
+        synchronized (COMPILED) {
+            this.executable = COMPILED.computeIfAbsent(root, ArithmeticFormulaCompiler::compile);
+            if (COMPILED.size() > MAX_COMPILED_FORMULAS) {
+                COMPILED.remove(COMPILED.keySet().iterator().next());
+            }
+        }
         this.referencedVariables = Set.copyOf(referencedVariables);
-        this.aggregateCacheSize = aggregateCacheSize;
     }
 
     /** Parse a scalar expression; batch aggregates are not available. */
@@ -63,12 +48,9 @@ public final class ArithmeticFormula {
         if (expression == null) {
             throw new IllegalArgumentException("Formula expression is required");
         }
-        Parser parser = new Parser(expression, variables, aggregateExcludedVariables, allowAggregates);
-        Node root = parser.parseExpression();
-        parser.expectEnd();
-        Optimizer optimizer = new Optimizer(root);
-        Node optimized = optimizer.optimize(root, false);
-        return new ArithmeticFormula(optimized, parser.referencedVariables, optimizer.aggregateSlots.size());
+        ArithmeticFormulaParser parser = new ArithmeticFormulaParser(
+                expression, variables, aggregateExcludedVariables, allowAggregates);
+        return new ArithmeticFormula(parser.parse(), parser.referencedVariables());
     }
 
     /** Includes variables parsed inside a {@code param()} initial value. */
@@ -76,501 +58,15 @@ public final class ArithmeticFormula {
         return referencedVariables.contains(variable);
     }
 
-    /** Retain fractional and non-finite results for the caller's validation boundary. */
+    /**
+     * Retain fractional and non-finite results for the caller's validation boundary.
+     * Inputs must remain stable during this call; aggregates may share one traversal.
+     */
     public double evaluateAsDouble(double[] vars, List<double[]> itemVars) {
-        EvalContext context = EVALUATION_CONTEXT.get();
-        context.reset(vars, itemVars);
-        try {
-            context.prepareAggregates(aggregateCacheSize);
-            return root.evaluate(context);
-        } finally {
-            context.reset(null, null);
-        }
+        return executable.evaluate(vars, itemVars);
     }
 
-    // ---- AST nodes ----
-
-    private interface Node {
-        double evaluate(EvalContext ctx);
-    }
-
-    private static final class EvalContext {
-        double[] vars;
-        List<double[]> itemVars;
-        double[] aggregateValues = new double[0];
-        boolean[] aggregateComputed = new boolean[0];
-
-        private EvalContext() {
-        }
-
-        private void reset(double[] vars, List<double[]> itemVars) {
-            this.vars = vars;
-            this.itemVars = itemVars;
-        }
-
-        private void prepareAggregates(int count) {
-            if (count == 0) {
-                return;
-            }
-            if (aggregateValues.length < count) {
-                aggregateValues = new double[count];
-                aggregateComputed = new boolean[count];
-            } else {
-                Arrays.fill(aggregateComputed, 0, count, false);
-            }
-        }
-    }
-
-    private record ConstantNode(double value) implements Node {
-        @Override
-        public double evaluate(EvalContext ctx) {
-            return value;
-        }
-    }
-
-    private record VariableNode(int varIndex) implements Node {
-        @Override
-        public double evaluate(EvalContext ctx) {
-            return ctx.vars[varIndex];
-        }
-    }
-
-    private record UnaryNode(char op, Node operand) implements Node {
-        @Override
-        public double evaluate(EvalContext ctx) {
-            double v = operand.evaluate(ctx);
-            return op == '-' ? -v : v;
-        }
-    }
-
-    private record BinaryNode(char op, Node left, Node right) implements Node {
-        @Override
-        public double evaluate(EvalContext ctx) {
-            double l = left.evaluate(ctx);
-            double r = right.evaluate(ctx);
-            return switch (op) {
-                case '+' -> l + r;
-                case '-' -> l - r;
-                case '*' -> l * r;
-                case '/' -> l / r;
-                case '^' -> Math.pow(l, r);
-                default  -> throw new IllegalStateException("Unknown operator: " + op);
-            };
-        }
-    }
-
-    private record UnaryFuncNode(DoubleUnaryOperator function, Node arg) implements Node {
-        @Override
-        public double evaluate(EvalContext ctx) {
-            double a = arg.evaluate(ctx);
-            return function.applyAsDouble(a);
-        }
-    }
-
-    private record BinaryFuncNode(DoubleBinaryOperator function, Node left, Node right) implements Node {
-        @Override
-        public double evaluate(EvalContext ctx) {
-            double l = left.evaluate(ctx);
-            double r = right.evaluate(ctx);
-            return function.applyAsDouble(l, r);
-        }
-    }
-
-    private record AggregateFuncNode(Node arg) implements Node {
-        @Override
-        public double evaluate(EvalContext ctx) {
-            List<double[]> itemVars = ctx.itemVars;
-            if (itemVars == null || itemVars.isEmpty()) {
-                ctx.itemVars = null;
-                try {
-                    return arg.evaluate(ctx);
-                } finally {
-                    ctx.itemVars = itemVars;
-                }
-            }
-            double total = 0.0;
-            double[] savedVars = ctx.vars;
-            ctx.itemVars = null;
-            try {
-                for (double[] item : itemVars) {
-                    ctx.vars = item;
-                    total += arg.evaluate(ctx);
-                }
-            } finally {
-                ctx.vars = savedVars;
-                ctx.itemVars = itemVars;
-            }
-            return total;
-        }
-    }
-
-    /** Shared only within one evaluation; NaN and signed zero are ordinary cached values. */
-    private record CachedAggregateNode(int slot, Node aggregate) implements Node {
-        @Override
-        public double evaluate(EvalContext ctx) {
-            if (!ctx.aggregateComputed[slot]) {
-                double value = aggregate.evaluate(ctx);
-                ctx.aggregateValues[slot] = value;
-                ctx.aggregateComputed[slot] = true;
-            }
-            return ctx.aggregateValues[slot];
-        }
-    }
-
-    private static final class ParameterNode implements Node {
-        private final double value;
-
-        ParameterNode(double initialValue) {
-            this.value = initialValue;
-        }
-
-        @Override
-        public double evaluate(EvalContext ctx) {
-            return value;
-        }
-
-        double value() {
-            return value;
-        }
-    }
-
-    /** Constant folding and common aggregate elimination without changing arithmetic order. */
-    private static final class Optimizer {
-        private final Map<AggregateFuncNode, Integer> aggregateUses = new HashMap<>();
-        private final Map<AggregateFuncNode, Integer> aggregateSlots = new HashMap<>();
-
-        Optimizer(Node root) {
-            countAggregates(root);
-        }
-
-        private void countAggregates(Node node) {
-            switch (node) {
-                case AggregateFuncNode aggregate -> aggregateUses.merge(aggregate, 1, Integer::sum);
-                case UnaryNode unary -> countAggregates(unary.operand());
-                case BinaryNode binary -> {
-                    countAggregates(binary.left());
-                    countAggregates(binary.right());
-                }
-                case UnaryFuncNode function -> countAggregates(function.arg());
-                case BinaryFuncNode function -> {
-                    countAggregates(function.left());
-                    countAggregates(function.right());
-                }
-                default -> { }
-            }
-        }
-
-        private Node optimize(Node node, boolean insideAggregate) {
-            return switch (node) {
-                case ParameterNode parameter -> new ConstantNode(parameter.value());
-                case UnaryNode unary -> {
-                    Node operand = optimize(unary.operand(), insideAggregate);
-                    yield fold(new UnaryNode(unary.op(), operand), operand);
-                }
-                case BinaryNode binary -> {
-                    Node left = optimize(binary.left(), insideAggregate);
-                    Node right = optimize(binary.right(), insideAggregate);
-                    yield fold(new BinaryNode(binary.op(), left, right), left, right);
-                }
-                case UnaryFuncNode function -> {
-                    Node arg = optimize(function.arg(), insideAggregate);
-                    yield fold(new UnaryFuncNode(function.function(), arg), arg);
-                }
-                case BinaryFuncNode function -> {
-                    Node left = optimize(function.left(), insideAggregate);
-                    Node right = optimize(function.right(), insideAggregate);
-                    yield fold(new BinaryFuncNode(function.function(), left, right), left, right);
-                }
-                case AggregateFuncNode aggregate -> {
-                    Node optimized = new AggregateFuncNode(optimize(aggregate.arg(), true));
-                    // Nested sums evaluate in each item's scope, not the batch scope.
-                    if (insideAggregate || aggregateUses.getOrDefault(aggregate, 0) < 2) {
-                        yield optimized;
-                    }
-                    int slot = aggregateSlots.computeIfAbsent(aggregate, ignored -> aggregateSlots.size());
-                    yield new CachedAggregateNode(slot, optimized);
-                }
-                default -> node;
-            };
-        }
-
-        private static Node fold(Node node, Node... operands) {
-            for (Node operand : operands) {
-                if (!(operand instanceof ConstantNode)) {
-                    return node;
-                }
-            }
-            return new ConstantNode(node.evaluate(null));
-        }
-    }
-
-    // ---- Recursive-descent parser ----
-
-    private static final class Parser {
-        private final String input;
-        private final Map<String, ParameterNode> parameters = new LinkedHashMap<>();
-        private final Map<String, Integer> variables;
-        private final Set<String> aggregateExcludedVariables;
-        private final Set<String> referencedVariables = new HashSet<>();
-        private final boolean allowAggregates;
-        private final int variableCount;
-        private int pos;
-        private int aggregateDepth;
-
-        Parser(String input, Map<String, Integer> variables,
-               Set<String> aggregateExcludedVariables, boolean allowAggregates) {
-            this.input = input;
-            this.variables = Map.copyOf(Objects.requireNonNull(variables, "variables"));
-            this.aggregateExcludedVariables = Set.copyOf(
-                    Objects.requireNonNull(aggregateExcludedVariables, "aggregateExcludedVariables"));
-            this.allowAggregates = allowAggregates;
-            int count = 0;
-            for (int index : this.variables.values()) {
-                if (index < 0 || index == Integer.MAX_VALUE) {
-                    throw new IllegalArgumentException("Variable index is outside its domain: " + index);
-                }
-                count = Math.max(count, index + 1);
-            }
-            this.variableCount = count;
-        }
-
-        // expression → term (('+' | '-') term)*
-        Node parseExpression() {
-            Node node = parseTerm();
-            while (true) {
-                skipWs();
-                if (match('+')) {
-                    node = new BinaryNode('+', node, parseTerm());
-                } else if (match('-')) {
-                    node = new BinaryNode('-', node, parseTerm());
-                } else {
-                    return node;
-                }
-            }
-        }
-
-        // term → factor (('*' | '/') factor)*
-        Node parseTerm() {
-            Node node = parseFactor();
-            while (true) {
-                skipWs();
-                if (match('*')) {
-                    node = new BinaryNode('*', node, parseFactor());
-                } else if (match('/')) {
-                    node = new BinaryNode('/', node, parseFactor());
-                } else {
-                    return node;
-                }
-            }
-        }
-
-        // factor → unary ('^' factor)*    right-associative
-        Node parseFactor() {
-            Node node = parseUnary();
-            while (true) {
-                skipWs();
-                if (match('^')) {
-                    Node right = parseFactor();  // right-assoc: a^b^c = a^(b^c)
-                    node = new BinaryNode('^', node, right);
-                } else {
-                    return node;
-                }
-            }
-        }
-
-        // unary → ('+' | '-') unary | primary
-        Node parseUnary() {
-            skipWs();
-            if (match('+')) {
-                return new UnaryNode('+', parseUnary());
-            }
-            if (match('-')) {
-                return new UnaryNode('-', parseUnary());
-            }
-            return parsePrimary();
-        }
-
-        // primary → '(' expression ')' | function_call | param_call | number | variable
-        Node parsePrimary() {
-            skipWs();
-            if (match('(')) {
-                Node node = parseExpression();
-                skipWs();
-                if (!match(')')) {
-                    throw error("Expected ')'");
-                }
-                return node;
-            }
-            if (hasNext() && Character.isLetter(peek())) {
-                String name = parseIdentifier();
-                skipWs();
-                if (match('(')) {
-                    if (name.equals("param")) {
-                        return parseParamCall();
-                    }
-                    return parseFuncCall(name);
-                }
-                if (name.equals("param")) {
-                    throw error("'param' must be used as param(name, initialValue)");
-                }
-                if (aggregateDepth > 0 && aggregateExcludedVariables.contains(name)) {
-                    throw error("Batch-scoped variable cannot be used inside sum(): " + name);
-                }
-                Integer idx = variables.get(name);
-                if (idx == null) {
-                    throw error("Unknown variable: " + name);
-                }
-                referencedVariables.add(name);
-                return new VariableNode(idx);
-            }
-            if (hasNext() && (Character.isDigit(peek()) || peek() == '.')) {
-                return parseNumber();
-            }
-            throw error("Expected number, variable, or '('");
-        }
-
-        // param(name, initialValue) → ParameterNode
-        Node parseParamCall() {
-            skipWs();
-            if (!hasNext() || !(Character.isLetter(peek()) || peek() == '_')) {
-                throw error("Expected parameter name in param()");
-            }
-            String paramName = parseIdentifier();
-            skipWs();
-            if (!match(',')) {
-                throw error("Expected ',' after parameter name in param()");
-            }
-            skipWs();
-            Node initialValueNode = parseExpression();
-            EvalContext initialValueContext = new EvalContext();
-            initialValueContext.reset(new double[variableCount], null);
-            double initialValue = initialValueNode.evaluate(initialValueContext);
-            skipWs();
-            if (!match(')')) {
-                throw error("Expected ')' after param() arguments");
-            }
-            ParameterNode existing = parameters.get(paramName);
-            if (existing != null) {
-                if (existing.value() != initialValue) {
-                    throw error("Inconsistent initial value for parameter '" + paramName
-                            + "': " + existing.value() + " vs " + initialValue);
-                }
-                return existing;
-            }
-            ParameterNode node = new ParameterNode(initialValue);
-            parameters.put(paramName, node);
-            return node;
-        }
-
-        Node parseFuncCall(String name) {
-            if (!UNARY_FUNCTIONS.containsKey(name)
-                    && !BINARY_FUNCTIONS.containsKey(name)
-                    && !(allowAggregates && AGGREGATE_FUNCTIONS.contains(name))) {
-                throw error("Unknown function: " + name);
-            }
-            skipWs();
-            boolean aggregate = AGGREGATE_FUNCTIONS.contains(name);
-            if (aggregate) {
-                aggregateDepth++;
-            }
-            Node arg0;
-            try {
-                arg0 = parseExpression();
-            } finally {
-                if (aggregate) {
-                    aggregateDepth--;
-                }
-            }
-            if (aggregate) {
-                skipWs();
-                if (!match(')')) {
-                    throw error("Expected ')' after aggregate function argument");
-                }
-                return new AggregateFuncNode(arg0);
-            }
-            if (BINARY_FUNCTIONS.containsKey(name)) {
-                skipWs();
-                if (!match(',')) {
-                    throw error("Expected ',' in binary function '" + name + "'");
-                }
-                skipWs();
-                Node arg1 = parseExpression();
-                skipWs();
-                if (!match(')')) {
-                    throw error("Expected ')' after function arguments");
-                }
-                return new BinaryFuncNode(BINARY_FUNCTIONS.get(name), arg0, arg1);
-            }
-            skipWs();
-            if (!match(')')) {
-                throw error("Expected ')' after function argument");
-            }
-            return new UnaryFuncNode(UNARY_FUNCTIONS.get(name), arg0);
-        }
-
-        Node parseNumber() {
-            int start = pos;
-            while (hasNext() && (Character.isDigit(peek()) || peek() == '.')) {
-                pos++;
-            }
-            if (hasNext() && (peek() == 'e' || peek() == 'E')) {
-                pos++;
-                if (hasNext() && (peek() == '+' || peek() == '-')) {
-                    pos++;
-                }
-                while (hasNext() && Character.isDigit(peek())) {
-                    pos++;
-                }
-            }
-            try {
-                return new ConstantNode(Double.parseDouble(input.substring(start, pos)));
-            } catch (NumberFormatException e) {
-                throw error("Invalid number");
-            }
-        }
-
-        String parseIdentifier() {
-            int start = pos;
-            while (hasNext() && (Character.isLetterOrDigit(peek()) || peek() == '_')) {
-                pos++;
-            }
-            return input.substring(start, pos);
-        }
-
-        void expectEnd() {
-            skipWs();
-            if (hasNext()) {
-                throw error("Unexpected token");
-            }
-        }
-
-        // ---- helpers ----
-
-        boolean match(char expected) {
-            if (hasNext() && peek() == expected) {
-                pos++;
-                return true;
-            }
-            return false;
-        }
-
-        char peek() {
-            return input.charAt(pos);
-        }
-
-        boolean hasNext() {
-            return pos < input.length();
-        }
-
-        void skipWs() {
-            while (hasNext() && Character.isWhitespace(peek())) {
-                pos++;
-            }
-        }
-
-        IllegalArgumentException error(String msg) {
-            return new IllegalArgumentException(
-                    msg + " at pos " + pos + " in: " + input);
-        }
+    interface Executable {
+        double evaluate(double[] vars, List<double[]> items);
     }
 }
