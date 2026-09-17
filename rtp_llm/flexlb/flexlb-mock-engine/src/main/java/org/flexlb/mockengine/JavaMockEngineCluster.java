@@ -1450,16 +1450,8 @@ public final class JavaMockEngineCluster {
             this.cache.setEvictionListener(this::onCacheEviction);
             this.cache.setPrefixTreeEnabled(roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
                     ? performance.decodeGpuPrefixTree : performance.prefillGpuPrefixTree);
-            this.responseExecutor = Executors.newCachedThreadPool(r -> {
-                // Whale keeps a Fetch waiter for each in-flight request. Under
-                // replicated traffic those waits must not consume native threads.
-                if (whaleRemote || whaleBundle) {
-                    return Thread.ofVirtual().name("mock-response-poller-" + grpcPort).unstarted(r);
-                }
-                Thread thread = new Thread(r, "mock-response-poller-" + grpcPort);
-                thread.setDaemon(true);
-                return thread;
-            });
+            this.responseExecutor = Executors.newCachedThreadPool(r ->
+                    Thread.ofVirtual().name("mock-response-poller-" + grpcPort).unstarted(r));
             this.stats = stats;
         }
 

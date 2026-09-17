@@ -149,8 +149,7 @@ class DynamicEngineScaleTest {
         executorField.setAccessible(true);
         var responseExecutor = (ExecutorService) executorField.get(services.get(added.grpcPort()));
         assertTrue(responseExecutor.submit(() -> Thread.currentThread().isVirtual()).get(3, TimeUnit.SECONDS),
-                "Whale bundle Fetch waiters must not consume platform threads");
-        // The actual one-engine-per-pod mode remains platform-managed.
+                "Fetch waiters must always use virtual threads");
         clusterConfig.whaleBundle = false;
         org.junit.jupiter.api.Assertions.assertThrows(DynamicEngineManager.EngineOperationException.class,
                 () -> engineManager.addEngine("decode", null));
