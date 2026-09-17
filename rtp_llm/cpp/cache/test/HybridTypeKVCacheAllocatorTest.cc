@@ -1345,6 +1345,28 @@ TEST_F(HybridTypeKVCacheAllocatorTest, PreparedLoadReclaimsSharedPoolTreeCandida
     EXPECT_GE(allocator->freeBlocksNum(), 2u);
 }
 
+TEST_F(HybridTypeKVCacheAllocatorTest, DeviceMissReclaimsSharedPoolTreeCandidatesForReserve) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    allocator->setReserveBlocksNum(1);
+
+    const auto seeded = seedCompleteBlockTreePath(allocator, CacheKeysType{100, 101, 102, 103});
+    ASSERT_TRUE(seeded.success);
+    ASSERT_EQ(allocator->freeBlocksNum(), 1u);
+
+    auto       resource  = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{200});
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{resource, token_ids};
+    malloc_info.reuse_cache = true;
+    malloc_info.verbose     = false;
+
+    EXPECT_EQ(allocator->preparedReserveStatusForTest(
+                  malloc_info, /*reserve_blocks=*/1, {{}, {}}, /*has_load_context=*/false),
+              MallocStatus::NONE);
+    EXPECT_GE(allocator->freeBlocksNum(), 3u);
+}
+
 TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockForksAliasedBlocksAcrossGroups) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);

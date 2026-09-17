@@ -844,10 +844,23 @@ MallocStatus HybridKVCacheAllocator::evaluatePreparedInitCapacity(const MallocIn
         if (hasAvailableBlocksForReserve(malloc_info, reserve_blocks)) {
             return MallocStatus::NONE;
         }
-        return evaluateInitCapacity(malloc_info, reserve_blocks, InitCapacityMode::TOTAL_ONLY)
-                       == MallocStatus::PERMANENT_RESOURCE_EXHAUSTED ?
-                   MallocStatus::PERMANENT_RESOURCE_EXHAUSTED :
-                   MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
+        const auto total_status = evaluateInitCapacity(malloc_info, reserve_blocks, InitCapacityMode::TOTAL_ONLY);
+        if (total_status == MallocStatus::PERMANENT_RESOURCE_EXHAUSTED) {
+            return total_status;
+        }
+        const int need_blocks = getNeedBlocks(malloc_info);
+        if (need_blocks > 0) {
+            const size_t required_free_blocks = static_cast<size_t>(need_blocks) + reserve_blocks;
+            if (required_free_blocks <= static_cast<size_t>(std::numeric_limits<int>::max())) {
+                for (const auto& group : kv_cache_groups_) {
+                    (void)group->ensureFreeBlocks(static_cast<int>(required_free_blocks));
+                    if (hasAvailableBlocksForReserve(malloc_info, reserve_blocks)) {
+                        return MallocStatus::NONE;
+                    }
+                }
+            }
+        }
+        return MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
     }
     RTP_LLM_CHECK_WITH_INFO(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids
                                 && prepared.required_positions.size() == kv_cache_groups_.size(),

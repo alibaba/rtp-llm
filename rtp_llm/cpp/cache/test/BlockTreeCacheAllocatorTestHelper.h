@@ -47,16 +47,16 @@ public:
 
     MallocStatus preparedReserveStatusForTest(const MallocInfo&              malloc_info,
                                               size_t                         reserve_blocks,
-                                              std::vector<RequiredPositions> required_positions) const {
+                                              std::vector<RequiredPositions> required_positions,
+                                              bool                           has_load_context = true) const {
         typename Allocator::PreparedKVCache prepared;
         prepared.required_positions = std::move(required_positions);
-        return this->evaluatePreparedInitCapacity(
-            malloc_info, reserve_blocks, prepared, /*has_load_context=*/true);
+        return this->evaluatePreparedInitCapacity(malloc_info, reserve_blocks, prepared, has_load_context);
     }
 
 private:
-    CacheConfig   config_;
-    KVCacheConfig kv_cache_config_;
+    CacheConfig                     config_;
+    KVCacheConfig                   kv_cache_config_;
     std::shared_ptr<StorageBackend> storage_backend_;
 };
 
