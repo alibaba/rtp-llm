@@ -33,7 +33,7 @@
         },
         "executionTimeEstimator": {
           "type": "FORMULA",
-          "expression": "tokens - hitCacheTokens"
+          "expression": "max(1, sum(computeTokens))"
         },
         "selector": {
           "type": "ESTIMATED_TTFT",
