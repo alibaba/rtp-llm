@@ -1,5 +1,11 @@
 
 py_test(
+    name = "model_size_test",
+    srcs = ["model_size_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "exceptions_test",
     srcs = ["exceptions_test.py"],
     deps = ["//rtp_llm:testlib"],
