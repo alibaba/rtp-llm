@@ -141,6 +141,9 @@ class GenerateOutputs:
     # value is consumed by BackendRPCServerVisitor and is never serialized in
     # an outward inference response.
     frontend_metric_only: bool = field(default=False, repr=False, compare=False)
+    frontend_sp_tpot_samples: List[tuple[int, float]] = field(
+        default_factory=list, repr=False, compare=False
+    )
     frontend_context_token_num: Optional[int] = field(
         default=None, repr=False, compare=False
     )

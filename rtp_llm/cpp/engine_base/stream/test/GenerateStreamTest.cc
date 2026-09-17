@@ -178,6 +178,45 @@ TEST_F(GenerateStreamTest, testMtpMinNewTokensIgnoresEarlyStopWithinAcceptedBatc
     }
 }
 
+TEST_F(GenerateStreamTest, testFrontendTpotOwnerRejectsFinishedAndErrorStreams) {
+    auto config                       = std::make_shared<GenerateConfig>();
+    config->frontend_metric_streaming = true;
+    config->is_streaming              = true;
+    config->max_new_tokens            = 1;
+    auto stream =
+        std::dynamic_pointer_cast<NormalGenerateStream>(GenerateStreamBuilder().createContextStream({1, 2}, config));
+    auto pending = stream->beginFrontendSpTpotSample();
+    ASSERT_NE(pending, nullptr);
+    stream->update({torch::tensor({{3}}, torch::kInt32), 1});
+    EXPECT_EQ(stream->beginFrontendSpTpotSample(), nullptr);
+    auto output = stream->nextOutput();
+    ASSERT_TRUE(output.ok());
+    EXPECT_EQ(output.value().frontend_sp_tpot_sequence, 1u);
+    pending->complete(123.0);
+    auto values = output.value().frontend_sp_tpot_samples->take(output.value().frontend_sp_tpot_sequence);
+    ASSERT_EQ(values.size(), 1u);
+    EXPECT_DOUBLE_EQ(values[0].second, 123.0);
+
+    auto failed =
+        std::dynamic_pointer_cast<NormalGenerateStream>(GenerateStreamBuilder().createContextStream({1, 2}, config));
+    failed->reportEvent(StreamEvents::Error, ErrorCode::UNKNOWN_ERROR, "test");
+    EXPECT_EQ(failed->beginFrontendSpTpotSample(), nullptr);
+    auto live =
+        std::dynamic_pointer_cast<NormalGenerateStream>(GenerateStreamBuilder().createContextStream({1, 2}, config));
+    std::shared_ptr<PendingFrontendSpTpotSample> selected;
+    for (const auto& candidate : {stream, failed, live}) {
+        if ((selected = candidate->beginFrontendSpTpotSample())) {
+            break;
+        }
+    }
+    ASSERT_NE(selected, nullptr);
+    selected->complete(456.0);
+    live->update({torch::tensor({{3}}, torch::kInt32), 1});
+    auto live_output = live->nextOutput();
+    ASSERT_TRUE(live_output.ok());
+    EXPECT_EQ(live_output.value().frontend_sp_tpot_sequence, 1u);
+}
+
 TEST_F(GenerateStreamTest, testConstruct) {
     auto builder = GenerateStreamBuilder();
     auto stream1 = builder.createContextStream({{1, 2, 3, 4, 5}, {}});

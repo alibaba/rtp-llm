@@ -3407,9 +3407,8 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             sink.values(GaugeMetrics.FRONTEND_TTFT_MS_METRIC),
         )
-        self.assertTrue(
-            sink.values(GaugeMetrics.FRONTEND_TPOT_MS_METRIC),
-        )
+        # Legacy/mocked backend frames carry no authoritative SP TPOT sample.
+        self.assertEqual([], sink.values(GaugeMetrics.FRONTEND_TPOT_MS_METRIC))
         self.assertTrue(
             sink.values(GaugeMetrics.FRONTEND_REQUEST_RT_MS_METRIC),
         )
@@ -3466,10 +3465,12 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             frontend_context_execute_time_with_cache_us=5_000,
             frontend_generate_token_num=20,
             frontend_generate_execute_time_us=40_000,
+            frontend_sp_tpot_samples=[(1, 12000.0), (2, 8000.0)],
         )
 
         observer(output, 0)
         state.finish()
+        self.assertEqual(sink.values(GaugeMetrics.FRONTEND_TPOT_MS_METRIC), [12.0, 8.0])
 
         self.assertEqual(
             sink.values(GaugeMetrics.FRONTEND_INPUT_TOKEN_TPS_METRIC),

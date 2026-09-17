@@ -1,6 +1,12 @@
 load("//:def.bzl", "copts")
 
 cc_library(
+    name = "frontend_sp_tpot_samples",
+    hdrs = ["FrontendSpTpotSamples.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "generate_config",
     hdrs = [
         "GenerateConfig.h",
@@ -21,6 +27,7 @@ cc_library(
     ],
     deps = [
         "//rtp_llm/cpp/models:position_ids_generator",
+        ":frontend_sp_tpot_samples",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//:rtp_compute_ops",
     ],

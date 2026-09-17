@@ -3,6 +3,18 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "frontend_sp_tpot_samples_test",
+    srcs = ["FrontendSpTpotSamplesTest.cc"],
+    copts = copts(),
+    linkopts = ["-pthread"],
+    deps = [
+        "//rtp_llm/cpp/engine_base/stream:frontend_sp_tpot_samples",
+        "@com_google_googletest//:gtest_main",
+    ],
+    tags = ["cpu"],
+)
+
 test_copts = [
     "-fno-access-control",
 ] + copts()

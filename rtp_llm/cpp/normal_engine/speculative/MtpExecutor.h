@@ -24,10 +24,11 @@
 namespace rtp_llm {
 
 struct MtpMetricsCollector {
-    RtpLLMExecutorMetricsCollector          executor_collector;
-    RtpLLMTokenPSMetricsCollector           tps_collector;
-    RtpLLMSpeculativeEngineMetricsCollector sp_engine_collector;
-    int64_t                                 generate_execute_time_us = 0;
+    std::shared_ptr<PendingFrontendSpTpotSample> frontend_tpot_sample;
+    RtpLLMExecutorMetricsCollector               executor_collector;
+    RtpLLMTokenPSMetricsCollector                tps_collector;
+    RtpLLMSpeculativeEngineMetricsCollector      sp_engine_collector;
+    int64_t                                      generate_execute_time_us = 0;
 
     // Accepted decode tokens bucketed by stream priority; the bucket sums add
     // up exactly to sp_engine_collector.total_accepted_token_num.

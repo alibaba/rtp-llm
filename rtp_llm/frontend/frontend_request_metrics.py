@@ -1,4 +1,5 @@
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -394,6 +395,7 @@ class FrontendRequestMetricState:
         self._snapshot: Optional[_RequestSnapshot] = None
         self._last_tps_counters = _TpsCounters()
         self._finished = False
+        self._last_sp_tpot_sequence: Dict[Any, int] = {}
 
     def observe(self, response: Any, now_ms: Optional[float] = None) -> None:
         try:
@@ -445,10 +447,27 @@ class FrontendRequestMetricState:
             # Keep the raw backend generator isolated from metric parsing.
             logging.exception("failed to observe frontend TPS metrics")
 
+    def _report_sp_tpot_samples(self, unit_id: Any, response: Any) -> None:
+        # Samples are taken from the raw transport before outward buffering.
+        # No request averaging or wall-clock recomputation is performed here.
+        for sequence, value in _field(response, "frontend_sp_tpot_samples", ()) or ():
+            sequence = int(sequence)
+            value = float(value)
+            if sequence <= self._last_sp_tpot_sequence.get(unit_id, 0):
+                continue
+            self._last_sp_tpot_sequence[unit_id] = sequence
+            if math.isfinite(value) and value >= 0:
+                self._owner.report(
+                    GaugeMetrics.FRONTEND_TPOT_MS_METRIC,
+                    value / 1000.0,
+                    self._container_tags,
+                )
+
     def _observe_tps(self, response: Any) -> None:
         if self._finished:
             return
         for unit_id, unit_response in _request_units(response):
+            self._report_sp_tpot_samples(unit_id, unit_response)
             snapshot = _request_snapshot(unit_response)
             if snapshot is not None:
                 self._tps_unit_snapshots[unit_id] = self._backend_tps_snapshot(
@@ -608,15 +627,6 @@ class FrontendRequestMetricState:
         snapshot = self._snapshot
         if snapshot is None:
             return
-        tpot_ms: Optional[float] = None
-        if (
-            self._first_output_ms is not None
-            and self._first_output_len is not None
-            and snapshot.output_len is not None
-        ):
-            remaining_tokens = snapshot.output_len - self._first_output_len
-            if remaining_tokens > 0:
-                tpot_ms = max(end_ms - self._first_output_ms, 0.0) / remaining_tokens
         if snapshot.input_len is not None:
             report(
                 GaugeMetrics.FRONTEND_INPUT_LENGTH_METRIC,
@@ -653,9 +663,6 @@ class FrontendRequestMetricState:
                 self._first_output_len,
                 tags,
             )
-
-        if tpot_ms is not None:
-            report(GaugeMetrics.FRONTEND_TPOT_MS_METRIC, tpot_ms, tags)
 
         if snapshot.speculative_verify_rounds > 0:
             avg_accept_len = (

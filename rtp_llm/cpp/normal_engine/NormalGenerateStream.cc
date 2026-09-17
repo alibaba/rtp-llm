@@ -2,6 +2,16 @@
 
 namespace rtp_llm {
 
+std::shared_ptr<PendingFrontendSpTpotSample> NormalGenerateStream::beginFrontendSpTpotSample() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (!generate_input_->generate_config->frontend_metric_streaming || isFakeStream() || !isActive()
+        || generate_status_->hasEvent(StreamEvents::GenerateDone)
+        || (maxBatchSize() == 1 && isSubGenerateDoneWithoutLock(0))) {
+        return nullptr;
+    }
+    return frontend_sp_tpot_samples_->begin();
+}
+
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
     // TODO(xinfei.sxf) 某些case下会出现1s的等待
     while ((!hasError()) && getStatus() != StreamState::FINISHED && generate_outputs_queue_.isEmpty()) {
@@ -45,6 +55,8 @@ void NormalGenerateStream::fillFrontendMetricCounters(GenerateOutputs& generate_
     if (!generate_input_->generate_config->frontend_metric_streaming) {
         return;
     }
+    generate_results.frontend_sp_tpot_samples                    = frontend_sp_tpot_samples_;
+    generate_results.frontend_sp_tpot_sequence                   = frontend_sp_tpot_samples_->sequence();
     generate_results.frontend_context_token_num                  = frontend_context_token_num_;
     generate_results.frontend_context_token_num_with_cache       = frontend_context_token_num_with_cache_;
     generate_results.frontend_context_execute_time_us            = frontend_context_execute_time_us_;
