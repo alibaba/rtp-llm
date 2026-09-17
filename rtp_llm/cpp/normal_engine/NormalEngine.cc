@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
+#include "rtp_llm/cpp/utils/CudacoreDiagnostics.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <c10/core/InferenceMode.h>
@@ -719,9 +720,25 @@ void NormalEngine::loop() {
         auto status = step();
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
+            joinFatalCudacoreCollectionWindow("step_status_error");
             THROW_IF_STATUS_ERROR(trySaveStepError());
         }
     }
+}
+
+void NormalEngine::joinFatalCudacoreCollectionWindow(const char* reason) const {
+    if (!fatalCudacoreIncidentActive()) {
+        return;
+    }
+    // The first fatal CUDA error opened one process-wide deadline. Every thread
+    // that is about to leave must share it instead of racing the driver's dump
+    // generation; the original error/exit path stays unchanged afterwards.
+    const CudacoreCollectionOutcome outcome = waitForCudacoreCollection();
+    RTP_LLM_LOG_ERROR("[CudacoreDiag] collection window closed reason=%s terminal=%d waited_ms=%lld max_block=%lld",
+                      reason,
+                      static_cast<int>(outcome.terminal),
+                      static_cast<long long>(outcome.waited_ms),
+                      static_cast<long long>(CudacoreDiagConstants::kCollectionDeadlineMs));
 }
 
 absl::Status NormalEngine::trySaveStepError() const {
@@ -785,6 +802,11 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
 
 absl::Status NormalEngine::step() try {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
+    if (fatalCudacoreIncidentActive()) {
+        // Instance is not serviceable after a fatal CUDA incident: reject new
+        // work instead of submitting more GPU/NCCL work.
+        return absl::InternalError("fatal CUDA incident recorded, engine is not serviceable");
+    }
     while (pause_) {
         // wait 50ms if system paused.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -861,6 +883,13 @@ absl::Status NormalEngine::step() try {
     if (isTorchCudaOom(exception)) {
         dumpFatalTorchCudaOomDiagnostics(parallelism_config.local_rank, exception);
     }
+    if (isFatalCudaException(exception) && !fatalCudacoreIncidentActive()) {
+        // Wrapped exceptions may have lost the numeric CUDA code; the text
+        // classification is recorded with a low-confidence marker.
+        (void)recordFirstFatalCudaError(
+            buildCudaExceptionRecord(exception, FatalCudaErrorSite::EngineStep, __FILE__, __LINE__));
+    }
+    joinFatalCudacoreCollectionWindow("step_exception");
     throw;
 }
 

@@ -6,13 +6,39 @@
 
 #include <torch/torch.h>
 
+#include "rtp_llm/cpp/utils/CudacoreDiagnostics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
 namespace rtp_llm {
 
+namespace {
+
+// A fatal device error was already recorded: the instance must not accept new
+// transfers, and no further GPU work must be submitted for them.
+bool fatalIncidentBlocksTransfers() {
+    if (!fatalCudacoreIncidentActive()) {
+        return false;
+    }
+    RTP_LLM_LOG_WARNING("device host copy rejected: a fatal CUDA incident is active and the instance is not "
+                        "serviceable anymore");
+    return true;
+}
+
+void annotateTransferContext(const DeviceHostCopyPlan& plan) {
+    annotateFatalCudaTransferContext(plan.group_set_id,
+                                     plan.device_to_host,
+                                     reinterpret_cast<uintptr_t>(plan.host.base),
+                                     plan.host.payload_bytes);
+}
+
+}  // namespace
+
 StrategyResult GenericMultiCopyDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan& plan,
                                                                   const DeviceHostCopyOptions& /*options*/) {
+    if (fatalIncidentBlocksTransfers()) {
+        return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
+    }
     std::vector<torch::Tensor> dst_buffers;
     std::vector<torch::Tensor> src_buffers;
 
@@ -35,7 +61,12 @@ StrategyResult GenericMultiCopyDeviceHostCopyStrategy::tryExecute(const DeviceHo
     }
 
     MultiCopyParams mc{dst_buffers, src_buffers};
-    execNoBlockCopy(mc);
+    try {
+        execNoBlockCopy(mc);
+    } catch (...) {
+        annotateTransferContext(plan);
+        throw;
+    }
     return StrategyResult::done();
 }
 
@@ -48,6 +79,10 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
     const int device_index = plan.copy_tiles.front().device_index;
     if (device_index < 0) {
         return StrategyResult::notApplicable();
+    }
+
+    if (fatalIncidentBlocksTransfers()) {
+        return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
     }
 
     BatchedMemoryCopyParams params;
@@ -72,6 +107,9 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
         return StrategyResult::notApplicable();
     }
     if (status == BatchedMemoryCopyStatus::EXECUTION_FAILED) {
+        // Attach the transfer identity to the first fatal error record raised by
+        // the copy executor, if this failure was classified as fatal.
+        annotateTransferContext(plan);
         return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
     }
     return StrategyResult::done();
@@ -113,6 +151,10 @@ StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPl
 
     if (total_bytes < options.staged_sm_min_bytes) {
         return StrategyResult::notApplicable();
+    }
+
+    if (fatalIncidentBlocksTransfers()) {
+        return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
     }
 
     // Build staged params with compact host segments
@@ -163,6 +205,7 @@ StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPl
 
     bool ok = execStagedMemoryCopy(staged_params, entry.get());
     if (!ok) {
+        annotateTransferContext(plan);
         // Conservatively fall back to generic
         return StrategyResult::notApplicable();
     }

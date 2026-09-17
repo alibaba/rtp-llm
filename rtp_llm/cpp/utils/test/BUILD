@@ -96,3 +96,19 @@ cc_test(
     deps = google_test_deps + ["//rtp_llm/cpp/utils:torch_cuda_oom"],
     timeout = "short",
 )
+
+cc_test(
+    name = "cudacore_attributes_test",
+    srcs = ["CudacoreAttributesTest.cc"],
+    copts = test_copts,
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:cudacore_diagnostics"],
+    timeout = "short",
+)
+
+cc_test(
+    name = "cudacore_incident_test",
+    srcs = ["CudacoreIncidentTest.cc"],
+    copts = test_copts,
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:cudacore_diagnostics"],
+    timeout = "short",
+)
