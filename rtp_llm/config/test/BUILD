@@ -63,3 +63,16 @@ py_test(
         "//rtp_llm:config",
     ],
 )
+
+py_test(
+    name = "engine_config_test",
+    srcs = [
+        "engine_config_test.py",
+    ],
+    data = [
+        "//:th_transformer_config",
+    ],
+    deps = [
+        "//rtp_llm:config_ops",
+    ],
+)

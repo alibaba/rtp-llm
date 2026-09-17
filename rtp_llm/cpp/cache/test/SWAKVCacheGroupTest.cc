@@ -94,6 +94,51 @@ TEST_F(SWAKVCacheGroupTest, DefaultPolicyDrivesBehaviorInterfaces) {
     EXPECT_FALSE(group.memoryPlacement() == CacheMemoryPlacement::HOST_PINNED);
 }
 
+TEST_F(SWAKVCacheGroupTest, PrefillChunkBackfillsTailAndPreservesHistory) {
+    auto group = makeGroup(256);
+    BlockIds ids;
+    ASSERT_TRUE(group.malloc(ids, 32768, false));
+    ASSERT_EQ(ids.blocksNum(), 128);
+    EXPECT_EQ(validBlockCount(ids.blocks()), 2);
+    std::vector<size_t> filled;
+    ASSERT_TRUE(group.preparePrefillChunk(ids, 8192, &filled));
+    EXPECT_EQ(filled, (std::vector<size_t>{30, 31}));
+    const auto previous_tail = ids.blocks()[31];
+    group.releaseBeforePrefillChunk(ids, 0, false);
+    ASSERT_TRUE(group.preparePrefillChunk(ids, 16384, &filled));
+    EXPECT_EQ(filled, (std::vector<size_t>{62, 63}));
+    group.releaseBeforePrefillChunk(ids, 8192, false);
+    EXPECT_EQ(ids.blocks()[31], previous_tail);
+    ASSERT_TRUE(group.preparePrefillChunk(ids, 16384, &filled));
+    EXPECT_TRUE(filled.empty());
+    ASSERT_TRUE(group.preparePrefillChunk(ids, 24576, &filled));
+    group.releaseBeforePrefillChunk(ids, 16384, false);
+    EXPECT_TRUE(isNullBlockIdx(ids.blocks()[31]));
+    EXPECT_FALSE(isNullBlockIdx(ids.blocks()[63]));
+    EXPECT_FALSE(isNullBlockIdx(ids.blocks()[95]));
+    EXPECT_FALSE(isNullBlockIdx(ids.blocks()[127]));
+    EXPECT_EQ(validBlockCount(ids.blocks()), 6);
+    group.free(ids.blocks());
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
+}
+
+TEST_F(SWAKVCacheGroupTest, PrefillPartialTailAndRollbackPositions) {
+    auto group = makeGroup(256);
+    BlockIds ids;
+    ASSERT_TRUE(group.malloc(ids, 20000, false));
+    std::vector<size_t> filled;
+    ASSERT_TRUE(group.preparePrefillChunk(ids, 8192, &filled));
+    BlockIndicesType allocated;
+    for (const auto i : filled) allocated.push_back(ids.blocks()[i]);
+    group.free(allocated);
+    ids.remove(filled);
+    EXPECT_EQ(validBlockCount(ids.blocks()), 2);
+    ASSERT_TRUE(group.preparePrefillChunk(ids, 20000, &filled));
+    EXPECT_TRUE(filled.empty());
+    group.free(ids.blocks());
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
+}
+
 // ==================== needBlocksNum ====================
 
 TEST_F(SWAKVCacheGroupTest, NeedBlocksNum_Basic) {
@@ -536,6 +581,73 @@ TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_WithReserveStep) {
     EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[5]));
 
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 3);
+}
+
+TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_ReserveTokensUsePhysicalBlockUnits) {
+    struct Case {
+        int tokens_per_block;
+        int reserve_tokens;
+        int retained_blocks;
+    };
+    for (const auto& c : std::vector<Case>{
+             {256, 0, 1}, {256, 1, 2}, {256, 4, 2}, {256, 256, 2}, {256, 257, 3}, {4, 4, 2}, {4, 5, 3}, {1, 4, 5}}) {
+        SCOPED_TRACE(::testing::Message()
+                     << "block_tokens=" << c.tokens_per_block << " reserve_tokens=" << c.reserve_tokens);
+        auto            spec = makeDsv4StateSpec("hca_state", c.tokens_per_block);
+        SWAKVCacheGroup group({}, spec, block_pool_, 0, 2, nullptr, nullptr, makePolicy(true));
+        const size_t    free_before = block_pool_->freeBlocksNum();
+        auto            allocated   = block_pool_->malloc(6);
+        ASSERT_EQ(allocated.size(), 6u);
+        BlockIds blocks;
+        blocks.assign(allocated);
+        group.removeSkippedBlocks(blocks, true, c.reserve_tokens);
+        EXPECT_EQ(validBlockCount(blocks.blocks()), static_cast<size_t>(c.retained_blocks));
+        for (int i = 0; i < 6; ++i) {
+            EXPECT_EQ(isNullBlockIdx(blocks.blocks()[i]), i < 6 - c.retained_blocks);
+        }
+        group.free(blocks.blocks());
+        EXPECT_EQ(block_pool_->freeBlocksNum(), free_before);
+    }
+}
+
+TEST_F(SWAKVCacheGroupTest, Mtp3HcaStateSupportsEightyStreamsAcrossBlockBoundaries) {
+    // Match the service's 255 usable HCA state blocks and 80 concurrent streams.
+    // Only allocator bookkeeping is exercised, so use a small backing tensor.
+    auto        backing_spec = createTestKvCacheSpec(1, DataType::TYPE_FP32, 1, 256, 4, 0);
+    CacheConfig config;
+    config.layer_num = config.layer_all_num = 1;
+    config.block_num                        = 256;
+    config.dtype                            = DataType::TYPE_FP32;
+    config.seq_size_per_block               = 256;
+    config.kv_block_stride_bytes            = 4;
+    config.fromGroupedSpecs({backing_spec}, {{0}}, {CacheGroupType::FULL}, {"default"});
+    auto pool = std::make_shared<BlockPool>(BlockPoolConfigHelper::createConfig(config));
+    ASSERT_TRUE(pool->init());
+    ASSERT_EQ(pool->freeBlocksNum(), 255u);
+    auto                  spec = makeDsv4StateSpec("hca_state", 256);
+    SWAKVCacheGroup       group({}, spec, pool, 0, 0, nullptr, nullptr, makePolicy(true));
+    std::vector<BlockIds> streams(80);
+    for (auto& blocks : streams) {
+        ASSERT_TRUE(group.malloc(blocks, 4096, false, 4));
+    }
+    // Alternate one-token acceptance and full acceptance. This repeatedly moves
+    // the four-token speculative window across 256-token page boundaries.
+    for (int seq_len = 4097, step = 0; seq_len <= 4096 + 1500; seq_len += (++step % 2 == 0 ? 1 : 4)) {
+        for (auto& blocks : streams) {
+            ASSERT_TRUE(group.malloc(blocks, seq_len, false, 4)) << "seq_len=" << seq_len;
+            group.removeSkippedBlocks(blocks, false, 4);
+            const int committed_tail = (seq_len - 1) / 256;
+            const int reserved_tail  = (seq_len + 4 - 1) / 256;
+            ASSERT_FALSE(isNullBlockIdx(blocks.blocks()[committed_tail]));
+            ASSERT_FALSE(isNullBlockIdx(blocks.blocks()[reserved_tail]));
+            EXPECT_LE(validBlockCount(blocks.blocks()), 2u);
+        }
+        EXPECT_GE(pool->freeBlocksNum(), 95u);
+    }
+    for (auto& blocks : streams) {
+        group.free(blocks.blocks());
+    }
+    EXPECT_EQ(pool->freeBlocksNum(), 255u);
 }
 
 // ==================== free ====================

@@ -11,12 +11,12 @@ from safetensors.torch import save_file
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_loader import per_block_fp8_quant_weight as pbq
-from rtp_llm.model_loader.ffn_weight import MoeConfig
+from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.tensor_source import DatabaseTensorSource
 from rtp_llm.models.qwen3_next import qwen3_next_weight as qwen
 from rtp_llm.utils.database import CkptDatabase
-from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, stack_
 
 # Identity device stubs: parity vs legacy relies on no real post-processing here.
 _DEVICE = SimpleNamespace(
@@ -183,6 +183,71 @@ class PureTpPreshardTest(unittest.TestCase):
                     rank=1,
                     preshard=False,
                 )
+
+    def test_dsv4_fp4_routed_layouts_match_legacy_on_both_ranks(self):
+        from rtp_llm.platforms.ppu.models.dsv4.resources import routed_tp_preparation
+
+        specs = (
+            (W.v4_routed_w1_w, "w1.weight", torch.int8, (8, 8)),
+            (W.v4_routed_w1_s, "w1.scale", torch.float8_e8m0fnu, (8, 4)),
+            (W.v4_routed_w2_w, "w2.weight", torch.int8, (8, 8)),
+            (W.v4_routed_w2_s, "w2.scale", torch.float8_e8m0fnu, (8, 4)),
+            (W.v4_routed_w3_w, "w3.weight", torch.int8, (8, 8)),
+            (W.v4_routed_w3_s, "w3.scale", torch.float8_e8m0fnu, (8, 4)),
+        )
+        for name, suffix, dtype, shape in specs:
+            weight = MoeAtomicWeight(
+                name,
+                [
+                    CkptWeightInfo(
+                        f"layers.{{i}}.ffn.experts.{{expert_id}}.{suffix}",
+                        identity,
+                    )
+                ],
+                stack_,
+                config=MoeConfig(expert_num=2),
+                data_type=dtype,
+                enable_pure_tp_preshard=True,
+            )
+            tensors = {}
+            for expert in range(2):
+                values = torch.arange(prod(shape), dtype=torch.float32).reshape(shape)
+                if dtype == torch.float8_e8m0fnu:
+                    values = torch.ones_like(values).to(dtype)
+                else:
+                    values = values.to(dtype)
+                tensors[f"layers.0.ffn.experts.{expert}.{suffix}"] = values
+            full = torch.stack(list(tensors.values()))
+            # CUDA consumes full routed weights even at TP>1. Only the chosen
+            # PPU plan shards the intermediate dimension, including its scales.
+            for rank in (0, 1):
+                for preparation in (None, routed_tp_preparation()):
+                    with self.subTest(
+                        name=name, rank=rank, ppu=preparation is not None
+                    ):
+                        self._assert_parity(
+                            weight,
+                            tensors,
+                            rank=rank,
+                            preshard=preparation is not None,
+                            weight_preparation=preparation,
+                        )
+                        actual = weight._split(
+                            full, _config(rank, weight_preparation=preparation)
+                        )[name]
+                        axis = 2 if suffix.startswith("w2") else 1
+                        expected = (
+                            full
+                            if preparation is None
+                            else full.chunk(2, dim=axis)[rank]
+                        )
+                        self.assertEqual(actual.shape, expected.shape)
+                        self.assertTrue(
+                            torch.equal(
+                                actual.view(torch.uint8),
+                                expected.contiguous().view(torch.uint8),
+                            )
+                        )
 
 
 if __name__ == "__main__":

@@ -48,6 +48,10 @@ load("@rtp_deps//:git.bzl", "git_deps")
 
 git_deps()
 
+load("//3rdparty/ppu:repositories.bzl", "ppu_sdk_repositories")
+
+ppu_sdk_repositories()
+
 load("//3rdparty/xgrammar:repositories.bzl", "xgrammar_deps")
 
 xgrammar_deps()
@@ -86,6 +90,9 @@ pip_arm_torch_install_deps()
 
 load("@pip_ppu_torch//:requirements.bzl", pip_ppu_torch_install_deps = "install_deps")
 pip_ppu_torch_install_deps()
+
+load("@pip_ppu_sdk22_torch//:requirements.bzl", pip_ppu_sdk22_torch_install_deps = "install_deps")
+pip_ppu_sdk22_torch_install_deps()
 
 load("@pip_gpu_cuda12_torch//:requirements.bzl", pip_gpu_cuda12_torch_install_deps = "install_deps")
 pip_gpu_cuda12_torch_install_deps()

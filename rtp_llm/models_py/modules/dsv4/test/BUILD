@@ -1,4 +1,5 @@
-load(":defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test")
+load("@rules_python//python:defs.bzl", "py_test")
+load(":defs.bzl", "DSV4_CUDA13_ONLY", "dsv4_py_test", "dsv4_sm100_py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -138,4 +139,136 @@ test_suite(
         ":test_layer_profiler_ranges",
         ":test_hc_impl",
     ] + [name + "_x86" for name in _PAIRED_GPU_TESTS],
+)
+
+
+[
+    py_test(
+        name = name,
+        srcs = [name + ".py"],
+        deps = [
+            "//rtp_llm/models_py:modules",
+            "//rtp_llm:testlib",
+        ],
+        visibility = ["//visibility:public"],
+    )
+    for name in ["test_tp_norm", "test_tp_prefill_workspace_dims", "test_chunk_options"]
+]
+
+py_test(
+    name = "test_platform_provider",
+    srcs = ["test_platform_provider.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm/models_py:modules",
+    ],
+)
+
+alias(
+    name = "test_ppu_grouped_fp4_strategy_source",
+    actual = "//rtp_llm/platforms:test_ppu_grouped_fp4_strategy_source",
+)
+
+py_test(
+    name = "test_ppu_deep_gemm_layout_compat",
+    srcs = ["test_ppu_deep_gemm_layout_compat.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "test_deepep_graph_dispatch",
+    srcs = ["test_deepep_graph_dispatch.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "test_t24_dp_contract",
+    srcs = ["test_t24_dp_contract.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
+    name = "test_t23_cp_contract_round",
+    srcs = ["test_t23_cp_contract_round.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
+    name = "test_strategy_select",
+    srcs = ["test_strategy_select.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+
+    data = ["//rtp_llm/platforms:ppu_sources"],
+)
+
+py_test(
+    name = "test_chunked_moe",
+    srcs = ["test_chunked_moe.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
+    name = "test_v4_router_contract",
+    srcs = ["test_v4_router_contract.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
+    name = "test_v4_local_moe_contract",
+    srcs = ["test_v4_local_moe_contract.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
+    name = "test_v4_tp_reduce_contract",
+    srcs = ["test_v4_tp_reduce_contract.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    data = ["//rtp_llm/platforms:ppu_sources"],
+)
+
+py_test(
+    name = "test_hc_cuda_splitk",
+    srcs = ["test_hc_cuda_splitk.py"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    tags = ["manual", "SM100"],
+    exec_properties = {"gpu": "SM100", "gpu_count": "1"},
+    target_compatible_with = DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_prefill_communication",
+    srcs = ["test_prefill_communication.py"],
+    data = ["//rtp_llm/platforms:platform_sources", "//rtp_llm/platforms:ppu_sources", "//rtp_llm/server:backend_manager.py"],
 )

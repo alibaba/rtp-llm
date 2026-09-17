@@ -105,11 +105,13 @@ try:
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
-# frontend cannot load libpython3.10.so, so we need to load it manually
+# The frontend extension links against the active interpreter's shared library.
 import sysconfig
 from ctypes import cdll
 
-cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + "/libpython3.10.so")
+cdll.LoadLibrary(
+    os.path.join(sysconfig.get_config_var("LIBDIR"), sysconfig.get_config_var("LDLIBRARY"))
+)
 
 try:
     from libth_transformer_config import (

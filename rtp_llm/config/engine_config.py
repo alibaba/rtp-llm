@@ -1,12 +1,12 @@
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 import torch
-
 from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.module_dispatch_config import ModuleDispatchConfig
 from rtp_llm.config.py_config_modules import (
     MIN_WORKER_INFO_PORT_NUM,
     LoadConfig,
@@ -72,6 +72,11 @@ class EngineConfig:
     dash_sc_grpc_config: DashScGrpcConfig
     grammar_config: GrammarConfig
     load_config: LoadConfig
+    module_dispatch: ModuleDispatchConfig = field(default_factory=ModuleDispatchConfig)
+    # Worker-local construction state, created after device assignment. This is
+    # deliberately not serialized through PyEnvConfigs or sent to another rank.
+    module_build_context: Any = field(default=None, repr=False)
+    propose_module_build_context: Any = field(default=None, repr=False)
 
     def to_string(self) -> str:
         """Return a formatted string representation of EngineConfig for debugging.
@@ -141,6 +146,8 @@ class EngineConfig:
         lines.append(self.grammar_config.to_string())
         lines.append("\n[LoadConfig]")
         lines.append(self.load_config.to_string())
+        lines.append("\n[ModuleDispatchConfig]")
+        lines.append(self.module_dispatch.to_string())
 
         lines.append("\n" + "=" * 80)
         return "\n".join(lines)
@@ -242,6 +249,7 @@ class EngineConfig:
             dash_sc_grpc_config=dash_sc_grpc_config,
             grammar_config=grammar_config,
             load_config=load_config,
+            module_dispatch=py_env_configs.module_dispatch,
         )
 
         runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit
@@ -352,12 +360,22 @@ def derive_grammar_compile_threads(
 def finalize_scheduler_config(
     fifo_scheduler_config: Any,  # FIFOSchedulerConfig
     max_seq_len: int,
+    use_mla: bool,
+    use_hybrid_attention: bool,
+    role_type: Any,
+    use_batch_decode_scheduler: bool = False,
+    seq_size_per_block: int = 0,
 ) -> None:
     """Finalize fifo_scheduler_config with computed values.
 
     Args:
         fifo_scheduler_config: FIFOSchedulerConfig instance to finalize
         max_seq_len: Maximum sequence length from model config
+        use_mla: Whether the model uses MLA, which is incompatible with chunked prefill.
+        use_hybrid_attention: Whether hybrid attention is enabled, which is incompatible with chunked prefill.
+        role_type: Engine role; chunked prefill only applies to PREFILL and PDFUSION.
+        use_batch_decode_scheduler: Whether BatchDecodeScheduler is enabled, which is incompatible with chunked prefill.
+        seq_size_per_block: KV block size used to align the chunk budget; 0 skips normalization.
     """
 
     # Set max_batch_tokens_size if not set from py_runtime_config
@@ -368,3 +386,64 @@ def finalize_scheduler_config(
     logging.info(
         f"max_batch_tokens_size: {fifo_scheduler_config.max_batch_tokens_size}"
     )
+
+    # Chunked prefill normalization + engine-level hard gates.
+    chunk_size = fifo_scheduler_config.prefill_chunk_size
+    if chunk_size <= 0:
+        return  # chunked prefill disabled; nothing to validate.
+
+    if role_type not in (RoleType.PREFILL, RoleType.PDFUSION):
+        logging.info(
+            f"prefill_chunk_size only applies to PREFILL / PDFUSION roles; "
+            f"disabling for role_type={role_type}"
+        )
+        fifo_scheduler_config.prefill_chunk_size = 0
+        return
+
+    if use_batch_decode_scheduler:
+        raise ValueError(
+            "prefill_chunk_size > 0 is not supported with use_batch_decode_scheduler=True; "
+            "BatchDecodeScheduler forces streams onto the decode path. Disable chunked prefill "
+            "or use the normal FIFO/PDFusion scheduler."
+        )
+
+    if use_mla:
+        raise ValueError(
+            "prefill_chunk_size > 0 is not supported for MLA models "
+            "(attn_config.use_mla=True); chunked KV write-back for the MLA layout is not "
+            "verified. Disable chunked prefill or use a non-MLA model."
+        )
+    if use_hybrid_attention:
+        raise ValueError(
+            "prefill_chunk_size > 0 is not supported for hybrid / linear-attention models "
+            "(hybrid_attention_config.enable_hybrid_attention=True); cross-chunk linear-state "
+            "snapshot/restore is not implemented. Disable chunked prefill or use a plain "
+            "attention model."
+        )
+
+    max_stream_chunk_size = 2**31 - 1
+    if chunk_size > max_stream_chunk_size:
+        raise ValueError(
+            f"prefill_chunk_size ({chunk_size}) must not exceed "
+            f"INT_MAX ({max_stream_chunk_size})"
+        )
+
+    # Require at least one KV block, then floor-align so every chunk starts on a block boundary
+    # without exceeding the activation-memory budget. Log a warning on adjust.
+    if seq_size_per_block > 0:
+        if chunk_size < seq_size_per_block:
+            raise ValueError(
+                f"prefill_chunk_size ({chunk_size}) must be at least seq_size_per_block "
+                f"({seq_size_per_block})"
+            )
+
+        aligned = (chunk_size // seq_size_per_block) * seq_size_per_block
+        if aligned != chunk_size:
+            logging.warning(
+                f"prefill_chunk_size ({chunk_size}) is not a multiple of seq_size_per_block "
+                f"({seq_size_per_block}); adjusted to {aligned}"
+            )
+        chunk_size = aligned
+        fifo_scheduler_config.prefill_chunk_size = chunk_size
+
+    logging.info(f"chunked prefill enabled: prefill_chunk_size={chunk_size}")

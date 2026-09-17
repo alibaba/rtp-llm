@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import json
 import os
 import tempfile
@@ -25,6 +27,7 @@ from rtp_llm.models.dsv4_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
     SWA_KV_TAG,
+    Dsv4IndexerCacheMode,
     apply_dsv4_explicit_pool_blocks,
     build_dsv4_kv_cache_spec_descs,
 )
@@ -380,6 +383,61 @@ class Dsv4PostBuildModelConfigTest(TestCase):
         config.attn_config.tokens_per_block = tokens_per_block
         config.attn_config.kernel_tokens_per_block = tokens_per_block
         return config
+
+    def test_explicit_state_format_does_not_probe_or_register_a_device(self):
+        config = self._model_config()
+        with (
+            patch(
+                "rtp_llm.utils.backend_registry.run_backend_registrations",
+                side_effect=AssertionError("metadata must not register device code"),
+            ),
+            patch(
+                "torch.cuda.get_device_name",
+                side_effect=AssertionError("metadata must not probe a device"),
+            ),
+        ):
+            DeepSeekV4._post_build_model_config(
+                config, indexer_cache_mode=Dsv4IndexerCacheMode.FP8
+            )
+        entries = {
+            desc.entry_elems
+            for layer in config.kv_cache_spec_descs
+            for desc in layer
+            if desc.tag == INDEXER_KV_TAG
+        }
+        self.assertEqual(entries, {DSV4_FP8_INDEXER_ENTRY_BYTES})
+
+    def test_model_factory_passes_the_declared_format_in_module_mode(self):
+        from rtp_llm.config.module_dispatch_config import ModuleDispatchConfig
+        from rtp_llm.model_factory import ModelFactory
+
+        config = self._model_config()
+        with (
+            patch.object(ModelFactory, "get_model_cls", return_value=DeepSeekV4),
+            patch.object(DeepSeekV4, "_create_config", return_value=config),
+            patch("rtp_llm.model_factory.build_model_config"),
+            patch(
+                "rtp_llm.utils.backend_registry.run_backend_registrations",
+                side_effect=AssertionError(
+                    "module metadata must not use legacy registration"
+                ),
+            ),
+            patch(
+                "torch.cuda.get_device_name",
+                side_effect=AssertionError("module metadata must not probe a device"),
+            ),
+        ):
+            actual = ModelFactory.create_model_config(
+                model_args=SimpleNamespace(
+                    model_type="deepseek_v4", ckpt_path="unused"
+                ),
+                lora_config=SimpleNamespace(lora_info=""),
+                kv_cache_config=None,
+                profiling_debug_logging_config=None,
+                module_dispatch_config=ModuleDispatchConfig(mode="auto"),
+            )
+        self.assertIs(actual, config)
+        self.assertTrue(config.kv_cache_spec_descs)
 
     def test_post_build_enables_independent_pools(self):
         config = self._model_config()

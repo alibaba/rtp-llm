@@ -5,6 +5,26 @@ def clean_dep(dep):
 
 def http_deps():
     http_archive(
+        name = "torch_2.9_py310_ppu",
+        sha256 = "f58af1af2f7bfba035b66a14e1ae75fdc21d5c03ee7ac0b4c842a1088d06b0e0",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/torch-2.9.0%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
+    http_archive(
+        name = "torch_2.10_py312_ppu_sdk22",
+        sha256 = "f22ed4ce8245d83025691299ea00e709e0ba1fd3173b6f9e342233a37b00f6db",
+        urls = [
+            "file:///opt/ppu-sdk22-wheelhouse/torch-2.10.0-cp312-cp312-linux_x86_64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
+    http_archive(
         name = "rules_pkg",
         urls = [
             "https://mirror.bazel.build/github.com/bazelbuild/rules_pkg/releases/download/0.6.0/rules_pkg-0.6.0.tar.gz",

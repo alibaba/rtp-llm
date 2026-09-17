@@ -263,6 +263,25 @@ class DeepseekV4RendererTest(TestCase):
         self.assertEqual(self.renderer.tokenizer.encode_calls[-1], (expected, {}))
         self.assertEqual(self.renderer.tokenizer.decode(rendered.input_ids), expected)
 
+    def test_preserve_thinking_retains_history(self):
+        messages = [
+            {"role": "user", "content": "Remember the number."},
+            {"role": "assistant", "content": "Done.", "reasoning_content": "The number is 42."},
+            {"role": "user", "content": "What was the number?"},
+        ]
+        for preserve in (None, False, True):
+            with self.subTest(preserve=preserve):
+                request = ChatCompletionRequest(
+                    messages=messages, enable_thinking=True, preserve_thinking=preserve
+                )
+                rendered = self.renderer.render_chat(request)
+                expected = _rtp_expected_prompt(
+                    self.encoding, messages, thinking_mode="thinking",
+                    drop_thinking=preserve is not True,
+                )
+                self.assertEqual(rendered.rendered_prompt, expected)
+                self.assertEqual("The number is 42." in rendered.rendered_prompt, preserve is True)
+
     def test_existing_think_mode_env_path_is_unchanged(self):
         # The real renderer constructor derives both fields from THINK_MODE.
         self.renderer.think_mode = True

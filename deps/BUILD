@@ -59,6 +59,15 @@ compile_pip_requirements(
 )
 
 compile_pip_requirements(
+    name = "requirements_torch_ppu_sdk22",
+    src = "requirements_torch_ppu_sdk22.txt",
+    extra_args = PIP_EXTRA_ARGS,
+    extra_data = ["//:requirements_base.txt"],
+    requirements_txt = "requirements_lock_torch_ppu_sdk22.txt",
+    tags = ["manual"],
+)
+
+compile_pip_requirements(
     name = "requirements_torch_gpu_cuda12_9",
     src = "requirements_torch_gpu_cuda12_9.txt",
     extra_args = PIP_EXTRA_ARGS,

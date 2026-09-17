@@ -29,6 +29,9 @@ public:
         KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy, shared_cache, metrics_reporter),
         linear_step_(linear_step) {}
 
+    bool preparePrefillChunk(BlockIds& block_ids, int chunk_end,
+                             std::vector<size_t>* backfilled_positions) override;
+    void releaseBeforePrefillChunk(BlockIds& block_ids, int chunk_start, bool enable_reuse_cache) override;
     MatchResult matchSingleKey(CacheKeyType cache_key) const override;
     bool        malloc(BlockIds&            block_ids,
                        int                  seq_len,

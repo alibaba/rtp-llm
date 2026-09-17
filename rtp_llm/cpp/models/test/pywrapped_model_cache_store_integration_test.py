@@ -3,6 +3,8 @@ import os
 import sys
 import types
 import unittest
+from unittest.mock import patch
+
 from typing import Optional
 
 import torch
@@ -159,10 +161,10 @@ class SuccessfulGenerationPrefillCaptureModel(DirtyGenerationPrefillCaptureModel
         return PyModelOutputs(hidden_states)
 
 
-class LateInitializeFailureGenerationPrefillCaptureModel(
+class GraphInitializeFailureGenerationPrefillCaptureModel(
     SuccessfulGenerationPrefillCaptureModel
 ):
-    """Fail the post-capture initialization check after both graphs exist."""
+    """Reject failed graph initialization before either graph is captured."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -171,9 +173,7 @@ class LateInitializeFailureGenerationPrefillCaptureModel(
     def initialize(self, _resources) -> bool:
         self.initialize_calls += 1
         # PyWrappedModel initializes once before graph setup and once before
-        # capture. The second result is checked only after decode and prefill
-        # and generation-prefill runners have been constructed, exercising
-        # constructor unwind.
+        # capture. A false result must fail before either capture begins.
         return self.initialize_calls == 1
 
 
@@ -231,6 +231,35 @@ def _record_for_request(result: dict, request_id: int) -> dict:
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def test_graph_initialization_uses_public_boundary_before_capture(self):
+        from rtp_llm.models_py.pluggable import lifecycle
+
+        initialize = lifecycle.initialize_model
+        for fail_at in (1, 2):
+            for failure in (False, ValueError("graph resource validation failed")):
+                model = CacheStoreForwardModel()
+                calls = []
+
+                def checked(candidate, resources):
+                    self.assertIs(candidate, model)
+                    calls.append(resources)
+                    if len(calls) == fail_at:
+                        if isinstance(failure, Exception):
+                            raise failure
+                        return failure
+                    return initialize(candidate, resources)
+
+                with self.subTest(fail_at=fail_at, failure=failure), patch.object(
+                    lifecycle, "initialize_model", side_effect=checked
+                ), self.assertRaisesRegex(
+                    (ValueError, RuntimeError),
+                    "initialization failed|resource validation failed",
+                ):
+                    run_scenario(model, "multi_tag", enable_graph=True)
+                self.assertEqual(len(calls), fail_at)
+                self.assertEqual(model.forward_calls, 0)
+                self.assertEqual(model.micro_batch_calls, 0)
+
     def test_successful_generation_prefill_capture_does_not_reserve_request_blocks(
         self,
     ) -> None:
@@ -277,19 +306,19 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(result["available_during"], result["available_before"])
         self.assertEqual(result["available_after"], result["available_before"])
 
-    def test_late_constructor_failure_destroys_clean_graphs_without_cache_allocation(
+    def test_graph_initialize_failure_prevents_capture_without_cache_allocation(
         self,
     ) -> None:
-        model = LateInitializeFailureGenerationPrefillCaptureModel()
+        model = GraphInitializeFailureGenerationPrefillCaptureModel()
         result = run_generation_prefill_capture_scenario(
-            model, "Python model initialization failed"
+            model, "Python model graph initialization failed"
         )
 
         self.assertEqual(model.initialize_calls, 2)
-        self.assertEqual(model.prefill_forward_calls, 4)
+        self.assertEqual(model.prefill_forward_calls, 0)
         self.assertTrue(result["saw_capture_error"])
         self.assertIn(
-            "Python model initialization failed", result["capture_error_message"]
+            "Python model graph initialization failed", result["capture_error_message"]
         )
         self.assertFalse(result["graph_enabled"])
         self.assertEqual(result["available_during"], result["available_before"])

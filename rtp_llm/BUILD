@@ -4,6 +4,23 @@ exports_files([
     "ops/librtp_compute_ops/__init__.pyi",
 ])
 
+# Deferred model adapters and registry primitives are also available without
+# the model/kernel dependency closure. Runtime clients provide those dependencies.
+py_library(
+    name = "module_dispatch_support",
+    srcs = [
+        "__init__.py",
+        "model_factory_register.py",
+        "models/__init__.py",
+        "device/__init__.py",
+        "device/device_type.py",
+        "device/runtime.py",
+        "config/module_dispatch_config.py",
+        "utils/import_util.py",
+        "utils/backend_registry.py",
+    ] + glob(["models/dsv4/*.py"]),
+)
+
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
@@ -157,6 +174,7 @@ _JIT_CACHE_SRCS = [
 
 py_library(
     name = "utils",
+    data = ["//rtp_llm/platforms:platform_sources"],
     srcs = glob([
         "utils/**/*.py",
     ], exclude = _JIT_CACHE_SRCS + [
@@ -639,6 +657,11 @@ py_package(
     }),
 )
 
+grpcio_tools_req = select({
+    "@//:using_ppu_sdk22": ["grpcio-tools==1.62.0"],
+    "//conditions:default": ["grpcio-tools==1.57.0"],
+})
+
 whl_reqs = [
     "filelock>=3.20.0",
     "jinja2",
@@ -648,7 +671,6 @@ whl_reqs = [
     "transformers==5.2.0",
     "sentencepiece==0.2.0",
     "fastapi==0.115.6",
-    "grpcio-tools==1.57.0",
     "uvicorn==0.30.0",
     "setuptools==60.5.0",
     "dacite",
@@ -700,7 +722,7 @@ whl_reqs = [
     # OTel trace runtime; keep the pinned protobuf compatibility constraint.
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-exporter-otlp-proto-http==1.15.0",
-] + whl_deps() + platform_deps() + xft_dep
+] + grpcio_tools_req + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
     name = "rtp_llm_frontend_whl",

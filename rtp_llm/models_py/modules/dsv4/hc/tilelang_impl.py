@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from typing import NoReturn
 
 import torch
-
 from rtp_llm.models_py.modules.dsv4.hc.base import HCHeadBase, HCUnitBase
 from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
     tk_mhc_head,
@@ -51,8 +51,21 @@ class TileLangHCUnit(HCUnitBase):
         # non-contiguous input means an upstream layout change must be fixed
         # there instead of hiding an allocation in this hot HC path.
         tk_x = _require_contiguous(tk_x, name="mhc_pre residual")
+        if dbg_tag is not None:
+            from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+            # Capture the actual call's complete inputs before the in-place
+            # residual POST can overwrite them. Only the diagnostic recorder
+            # decides whether to retain tensors or just hashes/statistics.
+            for name, tensor in (
+                ("input", tk_x),
+                ("fn", self.fn),
+                ("scale", self.scale),
+                ("base", self.base),
+            ):
+                _rt.record_if_level(2, f"{dbg_tag}_{name}", tensor)
         with torch.inference_mode():
-            out = tk_mhc_pre(
+            out = getattr(self, "_pre_operator", tk_mhc_pre)(
                 tk_x,
                 self.fn,
                 self.scale,
@@ -66,6 +79,9 @@ class TileLangHCUnit(HCUnitBase):
         if out is None:
             _raise_unavailable("pre", x, self.hc_mult)
         y, post, comb = out
+        if dbg_tag is not None:
+            for name, tensor in (("y", y), ("post", post), ("comb", comb)):
+                _rt.record_if_level(2, f"{dbg_tag}_{name}", tensor)
         return (
             squeeze_hc_batch(y, wrapped, name="mhc_pre y"),
             squeeze_hc_batch(post, wrapped, name="mhc_pre post"),
@@ -101,7 +117,7 @@ class TileLangHCUnit(HCUnitBase):
             # (residual.numel() * 2 bytes, e.g. 7.5 GB at T=128K, hc=4,
             # dim=7168). Kernel-side safety: each block reads residual[pid_n]
             # into shared memory before writing out[pid_n] at the same slot.
-            out = tk_mhc_post(
+            out = getattr(self, "_post_operator", tk_mhc_post)(
                 tk_x,
                 tk_residual,
                 tk_post,
@@ -112,6 +128,91 @@ class TileLangHCUnit(HCUnitBase):
         if out is None:
             _raise_unavailable("post", residual, self.hc_mult)
         return squeeze_hc_batch(out, wrapped, name="mhc_post output")
+
+
+class HybridHCUnit(TileLangHCUnit):
+    """Selectable PRE with the validated FP32 PyTorch POST by default.
+
+    The PPU TileLang POST kernel currently fails JIT compilation because it
+    emits unsupported PDL.  PRE is independently parity/performance gated, so
+    hybrid mode keeps that speedup without routing serving through the broken
+    POST kernel.
+    """
+
+    def _linear_mixes(self, x_flat: torch.Tensor) -> torch.Tensor:
+        # Fallback PRE calls this method. Keep the exact FP32 reference
+        # projection used by FallbackHCUnit without constructing another
+        # module or caching an unnecessary BF16 weight copy.
+        from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import _tp_linear_mixes
+
+        return _tp_linear_mixes(self, x_flat, use_fp32=True)
+
+    def _pre_impl(self, x: torch.Tensor, dbg_tag=None):
+        # DeepGEMM and TileLang single-kernel PRE each have a graph replay
+        # determinism/parity gate. Keep every other/default backend on the
+        # validated FP32 reference path during capture.
+        pre_backend = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
+        allowed_pre_backends = {
+            "",
+            "fallback",
+            "tilelang",
+            "tilelang_single",
+            "deepgemm",
+            "deepgemm_deterministic",
+        }
+        if pre_backend not in allowed_pre_backends:
+            allowed = ", ".join(repr(value) for value in sorted(allowed_pre_backends))
+            raise ValueError(
+                "invalid DSV4_MHC_PRE_GEMM_BACKEND="
+                f"{pre_backend!r}; expected one of: {allowed}"
+            )
+        if pre_backend == "fallback":
+            from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import FallbackHCUnit
+
+            return FallbackHCUnit._pre_impl(self, x, dbg_tag=dbg_tag)
+
+        graph_safe_backends = {"tilelang_single", "deepgemm"}
+        capture_uses_fallback = pre_backend not in graph_safe_backends
+        if (
+            x.is_cuda
+            and torch.cuda.is_current_stream_capturing()
+            and capture_uses_fallback
+        ):
+            if pre_backend == "deepgemm_deterministic":
+                raise RuntimeError(
+                    "deepgemm_deterministic HC is qualified for eager Prefill only; "
+                    "CUDA Graph capture has not been validated"
+                )
+            from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import FallbackHCUnit
+
+            return FallbackHCUnit._pre_impl(self, x, dbg_tag=dbg_tag)
+        return super()._pre_impl(x, dbg_tag=dbg_tag)
+
+    def _post_impl(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> torch.Tensor:
+        # The PPU production path may opt into the separately gated TileLang
+        # POST kernel. Its explicit PDL launch hint must also be disabled on
+        # M890P (DSV4_MHC_POST_PDL=0); all other values preserve the validated
+        # FP32 reference implementation.
+        post_backend = os.environ.get("DSV4_MHC_POST_BACKEND", "").strip().lower()
+        allowed_post_backends = {"", "fallback", "tilelang", "tilelang_single"}
+        if post_backend not in allowed_post_backends:
+            allowed = ", ".join(repr(value) for value in sorted(allowed_post_backends))
+            raise ValueError(
+                f"invalid DSV4_MHC_POST_BACKEND={post_backend!r}; "
+                f"expected one of: {allowed}"
+            )
+        if post_backend == "tilelang":
+            return super()._post_impl(x, residual, post, comb)
+
+        from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import FallbackHCUnit
+
+        return FallbackHCUnit._post_impl(self, x, residual, post, comb)
 
 
 class TileLangHCHead(HCHeadBase):
