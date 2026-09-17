@@ -2,6 +2,8 @@
 #include <memory>
 #include <optional>
 
+#include "rtp_llm/cpp/engine_base/stream/FrontendSpTpotSamples.h"
+
 #define private public
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
@@ -177,8 +179,11 @@ TEST_F(QueryConverterTest, testTransOutput) {
     outputs.frontend_context_execute_time_with_cache_us = 81;
     outputs.frontend_generate_token_num                 = 17;
     outputs.frontend_generate_execute_time_us           = 201;
-    auto hidden_states_tensor                           = torch::empty({3, 2}, torch::kFloat32);
-    auto hidden_states_data                             = hidden_states_tensor.data_ptr<float>();
+    outputs.frontend_sp_tpot_samples                    = std::make_shared<FrontendSpTpotSamples>();
+    auto tpot_sample                                    = outputs.frontend_sp_tpot_samples->begin();
+    tpot_sample->complete(12345.5);
+    auto hidden_states_tensor = torch::empty({3, 2}, torch::kFloat32);
+    auto hidden_states_data   = hidden_states_tensor.data_ptr<float>();
     for (int i = 0; i < 6; ++i) {
         hidden_states_data[i] = i;
     }
@@ -213,6 +218,10 @@ TEST_F(QueryConverterTest, testTransOutput) {
     EXPECT_EQ(outputs_pb.frontend_generate_token_num().value(), 17);
     ASSERT_TRUE(outputs_pb.has_frontend_generate_execute_time_us());
     EXPECT_EQ(outputs_pb.frontend_generate_execute_time_us().value(), 201);
+    ASSERT_EQ(outputs_pb.frontend_sp_tpot_samples_size(), 1);
+    EXPECT_EQ(outputs_pb.frontend_sp_tpot_samples(0).sequence_id(), 1);
+    EXPECT_DOUBLE_EQ(outputs_pb.frontend_sp_tpot_samples(0).tpot_us(), 12345.5);
+    EXPECT_TRUE(outputs.frontend_sp_tpot_samples->take().empty());
     auto output_ids_pb = output_pb.output_ids();
     ASSERT_EQ(output_ids_pb.data_type(), TensorPB_DataType::TensorPB_DataType_INT32);
     ASSERT_EQ(output_ids_pb.shape_size(), 3);

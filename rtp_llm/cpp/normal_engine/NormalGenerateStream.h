@@ -39,15 +39,20 @@ public:
     ErrorResult<GenerateOutputs> nextOutput() override;
     void                         updateOutput(const StreamUpdateInfo& update_info) override;
 
+    std::shared_ptr<PendingFrontendSpTpotSample> beginFrontendSpTpotSample() {
+        return frontend_sp_tpot_samples_->begin();
+    }
+
 private:
-    void            fillFrontendMetricCounters(GenerateOutputs& generate_results);
-    GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);
-    GenerateOutputs prepareFrontendMetricOutput();
-    void            enqueueLatestFrontendMetricOutput(GenerateOutputs&& generate_results);
-    bool            hasPendingFrontendMetricOutput();
-    void            setPendingFrontendMetricTerminalError(bool pending);
-    GenerateOutputs takeLatestFrontendMetricOutput(GenerateOutputs&& marker);
-    void            enqueueGenerateOutput(GenerateOutputs&& generate_results);
+    std::shared_ptr<FrontendSpTpotSamples> frontend_sp_tpot_samples_ = std::make_shared<FrontendSpTpotSamples>();
+    void                                   fillFrontendMetricCounters(GenerateOutputs& generate_results);
+    GenerateOutputs                        prepareGenerateOutput(const StreamUpdateInfo& update_info);
+    GenerateOutputs                        prepareFrontendMetricOutput();
+    void                                   enqueueLatestFrontendMetricOutput(GenerateOutputs&& generate_results);
+    bool                                   hasPendingFrontendMetricOutput();
+    void                                   setPendingFrontendMetricTerminalError(bool pending);
+    GenerateOutputs                        takeLatestFrontendMetricOutput(GenerateOutputs&& marker);
+    void                                   enqueueGenerateOutput(GenerateOutputs&& generate_results);
 
     int64_t                                   request_id_{0};
     bool                                      finished_{false};

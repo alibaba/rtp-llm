@@ -411,6 +411,10 @@ def trans_output(
             if outputs_pb.HasField("frontend_generate_token_num")
             else None
         ),
+        frontend_sp_tpot_samples=[
+            (int(sample.sequence_id), float(sample.tpot_us))
+            for sample in outputs_pb.frontend_sp_tpot_samples
+        ],
         frontend_generate_execute_time_us=(
             int(outputs_pb.frontend_generate_execute_time_us.value)
             if outputs_pb.HasField("frontend_generate_execute_time_us")

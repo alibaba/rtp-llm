@@ -426,6 +426,13 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
         outputs->mutable_frontend_generate_execute_time_us()->set_value(
             responses->frontend_generate_execute_time_us.value());
     }
+    if (responses->frontend_sp_tpot_samples) {
+        for (const auto& sample : responses->frontend_sp_tpot_samples->take()) {
+            auto* value = outputs->add_frontend_sp_tpot_samples();
+            value->set_sequence_id(sample.first);
+            value->set_tpot_us(sample.second);
+        }
+    }
     const auto& source_outputs = responses->generate_outputs;
     if (source_outputs.empty()) {
         return;

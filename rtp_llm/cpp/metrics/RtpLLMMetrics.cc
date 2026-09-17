@@ -465,7 +465,7 @@ void RtpLLMSpeculativeEngineMetrics::report(const kmonitor::MetricsTags*        
         RTP_REPORT_MUTABLE_METRIC(sp_avg_accept_token_num_metric, avg_accept_num);
         RTP_REPORT_MUTABLE_METRIC(sp_avg_accept_rate_metric, avg_accept_num / (collector->spec_steps + 1));
         RTP_REPORT_MUTABLE_METRIC(sp_avg_fix_accept_rate_metric, (avg_accept_num - 1) / collector->spec_steps);
-        RTP_REPORT_MUTABLE_METRIC(sp_estimate_tpot_us_metric, (double)collector->step_latency_us / avg_accept_num);
+        RTP_REPORT_MUTABLE_METRIC(sp_estimate_tpot_us_metric, collector->estimateTpotUs());
     }
 }
 

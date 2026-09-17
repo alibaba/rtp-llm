@@ -89,6 +89,7 @@ def _make_frontend_metric_observer(
                 "context_execute_time_with_cache_us": output.frontend_context_execute_time_with_cache_us,
                 "generate_token_num": output.frontend_generate_token_num,
                 "generate_execute_time_us": output.frontend_generate_execute_time_us,
+                "frontend_sp_tpot_samples": output.frontend_sp_tpot_samples,
             }
         )
 

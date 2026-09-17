@@ -672,6 +672,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                     frontend_context_execute_time_with_cache_us=40,
                     frontend_generate_token_num=index,
                     frontend_generate_execute_time_us=execute_time_us,
+                    frontend_sp_tpot_samples=[(index, float(execute_time_us))],
                     generate_outputs=[
                         GenerateOutput(
                             output_ids=torch.tensor([[20 + index]], dtype=torch.int32),
@@ -703,6 +704,10 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             [2, 2], [item["_frontend_metric_attempt"] for item in observed]
         )
         self.assertEqual([3, 3], [item["context_token_num"] for item in observed])
+        self.assertEqual(
+            [[(1, 100.0)], [(2, 300.0)]],
+            [item["frontend_sp_tpot_samples"] for item in observed],
+        )
         self.assertEqual(
             [100, 300], [item["generate_execute_time_us"] for item in observed]
         )
