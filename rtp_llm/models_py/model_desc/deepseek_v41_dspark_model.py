@@ -378,7 +378,7 @@ class DeepSeekV41DSparkModel(GptModelBase):
         self._prefill_only = _prefill_role(parallelism_config)
         self.layout = CacheLayout(
             token_block_size=kv_cache_config.seq_size_per_block,
-            cp_size=8,
+            cp_size=parallelism_config.prefill_cp_config.prefill_cp_size,
             speculative_tokens=5,
             draft_enabled=True,
         )
