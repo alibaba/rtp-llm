@@ -21,6 +21,20 @@ public final class DeliverySettlementTestSupport {
             System::currentTimeMillis, () -> { });
     private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
 
+    public void enqueue(ScheduledRequest item) {
+        lock.lock();
+        try {
+            assertTrue(prefill.enqueueActiveUnderLock(item, Long.MAX_VALUE));
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public PrefillState.ReservationResult<PrefillState.BatchReservation> reserveBatch(
+            ScheduledRequest head, long batchId, int maxBatches) {
+        return prefill.reserveBatch(head, batchId, maxBatches, generation.tryAcquireHandoff());
+    }
+
     public void commit(long batchId, List<ScheduledRequest> items) {
         lock.lock();
         try {
@@ -54,7 +68,7 @@ public final class DeliverySettlementTestSupport {
         return result.schedulerFacts();
     }
 
-    public static void dispatchDecode(DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
+    public static void queueDecode(DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRunningTaskInfo(Map.of());
         response.setFinishedTaskInfo(Map.of());
@@ -64,6 +78,10 @@ public final class DeliverySettlementTestSupport {
         try (var pin = endpoint.tryPinGeneration()) {
             assertTrue(endpoint.markQueued(pin, reservation));
         }
+    }
+
+    public static void dispatchDecode(DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
+        queueDecode(endpoint, reservation);
         var permit = endpoint.acquireDispatchPermit(reservation, new DecodeEndpoint.AdmissionCapacity(0, 100L)).permit();
         assertNotNull(permit);
         assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,

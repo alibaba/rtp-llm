@@ -309,8 +309,8 @@ class RequestRegistryTest {
         assertNotNull(delivery);
         PreemptionRegistration preemption = lifecycle.tryClaim(703L, 1L, 19L, "victim").orElseThrow();
 
-        old.expireInactiveRequest(old.createdAtMs()
-                + config.getRequestLifecycle().getRequest().getTimeoutMs());
+        old.expireInactiveRequest(
+                RequestLifecycleTestSupport.<Long>inspect(old, "inactivityExpiresAtMsLocked"));
         registered.future().join();
         assertTrue(lifecycle.removeExactTerminalRecord(old, Long.MAX_VALUE));
         CompletableFuture<Response> replacement = lifecycle.register(context(703L));

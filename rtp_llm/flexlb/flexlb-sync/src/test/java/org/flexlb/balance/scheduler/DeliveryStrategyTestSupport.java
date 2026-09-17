@@ -491,26 +491,23 @@ public final class DeliveryStrategyTestSupport {
                         private boolean submitted;
 
                         @Override
-                        public void submitBatch(
-                                List<ScheduledRequest> exactItems,
-                                long batchId,
-                                long predictedMs,
-                                String decisionReason,
-                                BiConsumer<ScheduledRequest, DeliveryResult> exactObserver) {
+                        public void submit(BatchDeliveryStrategy.Delivery delivery) {
                             submitted = true;
-                            command = new SubmittedBatch(
-                                    exactItems,
-                                    batchId,
-                                    predictedMs,
-                                    decisionReason);
-                            observer = exactObserver;
-                            events.add("submit");
-                            for (CompletionEvent completion
-                                    : synchronousCompletions) {
-                                exactObserver.accept(
-                                        completion.item(),
-                                        completion.completion());
-                            }
+                            delivery.run((exactItems, batchId, predictedMs, decisionReason, exactObserver) -> {
+                                command = new SubmittedBatch(
+                                        exactItems,
+                                        batchId,
+                                        predictedMs,
+                                        decisionReason);
+                                observer = exactObserver;
+                                events.add("submit");
+                                for (CompletionEvent completion
+                                        : synchronousCompletions) {
+                                    exactObserver.accept(
+                                            completion.item(),
+                                            completion.completion());
+                                }
+                            });
                         }
 
                         @Override
