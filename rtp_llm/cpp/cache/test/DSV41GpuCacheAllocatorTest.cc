@@ -357,17 +357,23 @@ TEST_F(DSV41GpuCacheAllocatorTest, ValidKvBlocksDoNotRequireCompleteTailAndStale
     free(incomplete);
 
     // The checkpoint covers only the first block; the suffix beyond it is not published.
-    // Its fixed pages sit at the checkpoint's own index, not the last one.
+    // Its fixed pages sit at the checkpoint's own index, not the last one. The key base
+    // is re-xored so the bare part-one entry does not absorb this publication: the block
+    // cache merges same-key puts and only attaches metadata when every slot matches.
     auto stale = resource(2, DSV41ReplayMode::FULL, true, 0);
+    auto keys  = stale->cacheResource(0).cacheKeys();
+    for (auto& key : keys)
+        key ^= 0x2000;
+    stale->cacheResource(0).setCacheKeys(keys);
     fill(stale, 29);
     ready(stale, 1);
     allocator_->insertIntoCache(InsertInfo{stale, tokens(385), false});
-    matched = allocator_->sharedBlockCache()->match(identity().cacheKeySeed() ^ 100);
+    matched = allocator_->sharedBlockCache()->match(identity().cacheKeySeed() ^ 100 ^ 0x2000);
     ASSERT_TRUE(matched.found);
     EXPECT_TRUE(matched.recovery_metadata);
     EXPECT_GT(matched.group_blocks[4], 0);
     EXPECT_GT(matched.group_blocks[5], 0);
-    EXPECT_FALSE(allocator_->sharedBlockCache()->contains(identity().cacheKeySeed() ^ 101));
+    EXPECT_FALSE(allocator_->sharedBlockCache()->contains(identity().cacheKeySeed() ^ 101 ^ 0x2000));
     free(stale);
 }
 
