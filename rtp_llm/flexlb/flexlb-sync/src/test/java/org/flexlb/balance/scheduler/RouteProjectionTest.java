@@ -32,6 +32,49 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RouteProjectionTest {
 
     @Test
+    void probeCompletionMatchesEveryPriorityPositionAcrossConsumedGroups() {
+        // A tiny budget rejects the last appended item; zero disables prediction.
+        for (long budget : new long[]{0L, 25L}) {
+            for (int position = 0; position <= 12; position++) {
+                var active = new java.util.ArrayList<GroupPlanner.Item>();
+                long precedingMs = 0L;
+                for (int index = 0; index < 12; index++) {
+                    boolean expired = index % 4 == 1;
+                    active.add(item(index + 1L, 100 - 2 * index, index + 1L,
+                            10L, expired ? NOW_MS : Long.MAX_VALUE));
+                    if (index < position && !expired) {
+                        precedingMs += 10L;
+                    }
+                }
+                var limits = new GroupPlanner.Constraints(
+                        3, Long.MAX_VALUE, Long.MAX_VALUE, budget, 0L);
+                for (RouteProjection.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
+                    var result = project(queue(true, limits, active), noCommittedWork(),
+                            TOKEN_EVALUATOR, probe(99L, 101 - 2 * position, 7L, 0L), delivery);
+                    assertModeled(result, precedingMs + 7L);
+                }
+            }
+        }
+    }
+
+    @Test
+    void expiryOnBothSidesOfProbeDuringCollectionKeepsItsLogicalPosition() {
+        QueueSnapshot snapshot = queue(true, constraints(5, 30L), List.of(
+                item(1L, 100, 1L, 1L, NOW_MS + 5L),
+                item(2L, 100, 2L, 2L, NOW_MS + 5L),
+                item(3L, 100, 3L, 3L, NOW_MS + 5L),
+                item(4L, 100, 4L, 4L, NOW_MS + 5L),
+                item(5L, 100, 5L, 5L, NOW_MS + 5L),
+                item(6L, 90, 6L, 600L, NOW_MS + 10L),
+                item(7L, 80, 7L, 50L),
+                item(8L, 60, 8L, 700L, NOW_MS + 5L)));
+        for (RouteProjection.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
+            assertModeled(project(snapshot, noCommittedWork(), TOKEN_EVALUATOR,
+                    probe(99L, 70, 80L, 0L), delivery), 159L);
+        }
+    }
+
+    @Test
     void committedWorkOverlapsCollectionWindow() {
         WorkSnapshot committed = work(
                 List.of(new WorkSnapshot.RequestWork(
