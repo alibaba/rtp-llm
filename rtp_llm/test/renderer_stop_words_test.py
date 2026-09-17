@@ -21,6 +21,7 @@ from rtp_llm.openai.api_datatype import (
 )
 from rtp_llm.openai.renderers.chatglm45_renderer import ChatGlm45Renderer
 from rtp_llm.openai.renderers.custom_renderer import (
+    EMITS_REASONING_STREAM_BY_MODEL_TYPE,
     CustomChatRenderer,
     RendererParams,
     StreamStatus,
@@ -1301,6 +1302,51 @@ class EmitsReasoningStreamCapabilityTest(TestCase):
         from rtp_llm.openai.renderers.qwen35_renderer import Qwen35Renderer
 
         self.assertTrue(Qwen35Renderer.emits_reasoning_stream)
+
+    def test_model_type_override_wins_over_class_attribute(self):
+        """qwen_tool shares QwenReasoningToolRenderer with the qwen_3 reasoning
+        family, but it is the Qwen2/Qwen2.5 tool-calling variant: the class
+        attribute would classify the deployment as a reasoning family and skip
+        the clamp that protects a Qwen2 template from the begin="" envelope."""
+        from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
+            QwenReasoningToolRenderer,
+        )
+
+        self.assertTrue(
+            EMITS_REASONING_STREAM_BY_MODEL_TYPE.get(
+                "qwen_3", QwenReasoningToolRenderer.emits_reasoning_stream
+            )
+        )
+        self.assertFalse(
+            EMITS_REASONING_STREAM_BY_MODEL_TYPE.get(
+                "qwen_tool", QwenReasoningToolRenderer.emits_reasoning_stream
+            )
+        )
+
+    def test_instance_resolves_capability_from_model_type(self):
+        """The override must be applied per instance, so two deployments that
+        share a renderer class can disagree."""
+
+        class ToolRenderer(ReasoningToolBaseRenderer):
+            def _setup_chat_template(self):
+                self.chat_template = "test"
+
+        resolved = {}
+        for model_type in ("qwen_3", "qwen_tool"):
+            renderer = ToolRenderer(
+                tokenizer=Mock(),
+                renderer_params=RendererParams(
+                    model_type=model_type,
+                    max_seq_len=2048,
+                    eos_token_id=0,
+                    stop_word_ids_list=[],
+                ),
+                generate_env_config=GenerateEnvConfig(),
+            )
+            resolved[model_type] = renderer.emits_reasoning_stream
+
+        self.assertTrue(resolved["qwen_3"])
+        self.assertFalse(resolved["qwen_tool"])
 
 
 class ReasoningStatusWithLogprobsTest(IsolatedAsyncioTestCase):

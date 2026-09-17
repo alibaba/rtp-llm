@@ -811,6 +811,120 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.assertFalse(delta.reasoning_content)
         self.assertEqual(delta.content, "answer")
 
+    def _create_qwen_reasoning_renderer(self, model_type, think_mode=0):
+        tokenizer = BaseTokenizer(f"{self.test_data_path}/qwen3_30b/tokenizer/")
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = think_mode
+        renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            RendererParams(
+                model_type=model_type,
+                max_seq_len=MAX_SEQ_LEN,
+                eos_token_id=tokenizer.eos_token_id or 0,
+                stop_word_ids_list=[],
+            ),
+            generate_env_config=generate_env_config,
+            render_config=RenderConfig(),
+        )
+        return tokenizer, renderer
+
+    async def _render_plain_request(self, renderer, tokenizer, output_ids):
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")], stream=True
+        )
+        stream = renderer.render_response_stream(
+            fake_output_generator_mtp(
+                output_ids,
+                MAX_SEQ_LEN,
+                tokenizer.eos_token_id or 0,
+                10,
+                tokens_per_chunk=3,
+            ),
+            request,
+            GenerateConfig(is_streaming=True),
+        )
+        chunks = [
+            chunk
+            async for chunk in OpenaiEndpoint._complete_stream_response(stream, None)
+        ]
+        return merge_stream_responses(chunks).choices[0].delta
+
+    async def test_disabled_reasoning_renderer_strips_spontaneous_think_without_tools(
+        self,
+    ):
+        """critic shape: THINK_MODE=0, no tools, no anchor — the model still
+        emits a think block and it must not reach the visible reply."""
+        tokenizer, renderer = self._create_qwen_reasoning_renderer("qwen_3")
+        output_ids = tokenizer.encode(
+            "<think>好的</think>\n\n文本内容", add_special_tokens=False
+        )
+
+        delta = await self._render_plain_request(renderer, tokenizer, output_ids)
+
+        self.assertEqual(delta.content.strip(), "文本内容")
+        self.assertEqual(delta.reasoning_content.strip(), "好的")
+
+    async def test_disabled_reasoning_renderer_keeps_plain_answer_intact(self):
+        """The widened gate must not eat a reply that never opened a think block."""
+        tokenizer, renderer = self._create_qwen_reasoning_renderer("qwen_3")
+        output_ids = tokenizer.encode("文本内容", add_special_tokens=False)
+
+        delta = await self._render_plain_request(renderer, tokenizer, output_ids)
+
+        self.assertEqual(delta.content.strip(), "文本内容")
+        self.assertFalse(delta.reasoning_content)
+
+    async def test_stream_tail_partial_think_tag_is_not_dropped(self):
+        """A reply truncated right after `<` parks that character in the parser
+        until it can tell whether a tag completes; at end of stream it must be
+        released instead of vanishing from the reply."""
+        tokenizer, renderer = self._create_qwen_reasoning_renderer("qwen_3")
+        output_ids = tokenizer.encode("文本内容<", add_special_tokens=False)
+
+        delta = await self._render_plain_request(renderer, tokenizer, output_ids)
+
+        self.assertEqual(delta.content, "文本内容<")
+        self.assertFalse(delta.reasoning_content)
+
+    async def _render_clamped_forced_thinking(self, output_text):
+        """Non-reasoning renderer + request-forced thinking + no anchor: the
+        endpoint clamps the resolved mode back to DISABLED."""
+        tokenizer, renderer, endpoint = self._create_base_thinking_endpoint("disabled")
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            enable_thinking=True,
+            stream=True,
+        )
+        config = endpoint._extract_generation_config(
+            request, input_ids=[], renderer=renderer
+        )
+        output_ids = tokenizer.encode(output_text, add_special_tokens=False)
+        stream = renderer.render_response_stream(
+            fake_output_generator_mtp(
+                output_ids,
+                MAX_SEQ_LEN,
+                tokenizer.eos_token_id or 0,
+                10,
+                tokens_per_chunk=3,
+            ),
+            request,
+            config,
+        )
+        chunks = [
+            chunk
+            async for chunk in OpenaiEndpoint._complete_stream_response(stream, None)
+        ]
+        return config, merge_stream_responses(chunks).choices[0].delta
+
+    async def test_clamped_forced_thinking_keeps_the_answer_visible(self):
+        """The clamp must reach the response path: routing the reply into
+        reasoning_content would leave `content` empty for the clamped case."""
+        config, delta = await self._render_clamped_forced_thinking("answer")
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
+        self.assertEqual(delta.content, "answer")
+        self.assertFalse(delta.reasoning_content)
+
     async def test_adaptive_truncated_think_prefix_is_flushed_as_content(self):
         tokenizer, renderer = self._create_adaptive_qwen_renderer()
         start_ids = tokenizer.encode("<think>", add_special_tokens=False)
@@ -3391,7 +3505,7 @@ class EnabledWithoutAnchorWarningTest(TestCase):
                     self._make_request(user_template=f"template-{index}"),
                 )
 
-        cache = renderer._enabled_without_anchor_warned_keys
+        cache = renderer._think_warned_keys
         self.assertEqual(len(cache), 128)
         oldest_key = _enabled_without_anchor_warn_key(
             self._make_request(user_template="template-0"), "<think>"

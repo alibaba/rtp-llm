@@ -401,6 +401,26 @@ class OpenaiGenerateConfigTest(TestCase):
             {"anyOf": [{"type": "object"}, {"type": "array"}]},
         )
 
+    def _make_openai_endpoint(self, model_config: ModelConfig):
+        return OpenaiEndpoint(
+            model_config=model_config,
+            misc_config=PyMiscellaneousConfig(),
+            vit_config=VitConfig(),
+            tokenizer=self.tokenizer,
+            backend_rpc_server_visitor=None,
+        )
+
+    def _make_default_model_config(self) -> ModelConfig:
+        model_config = ModelConfig()
+        model_config.generate_env_config = GenerateEnvConfig()
+        model_config.render_config = RenderConfig()
+        model_config.special_tokens = SpecialTokens()
+        model_config.max_seq_len = 1024
+        model_config.template_type = None
+        model_config.model_name = ""
+        model_config.ckpt_path = ""
+        return model_config
+
     def _generate_config_with_stop_word(
         self,
         model_stop_word_str: Optional[List[str]] = None,
@@ -418,6 +438,7 @@ class OpenaiGenerateConfigTest(TestCase):
         thinking_mode: Optional[ThinkingMode] = None,
         env_think_mode: Optional[Union[str, int]] = None,
         prompt_has_think_anchor: bool = False,
+        begin_think_token_ids: Optional[List[int]] = None,
     ):
         special_tokens = SpecialTokens()
         if model_stop_word_str is not None:
@@ -443,13 +464,7 @@ class OpenaiGenerateConfigTest(TestCase):
         model_config.model_name = ""
         model_config.ckpt_path = ""
 
-        openai_endpoint = OpenaiEndpoint(
-            model_config=model_config,
-            misc_config=PyMiscellaneousConfig(),
-            vit_config=VitConfig(),
-            tokenizer=self.tokenizer,
-            backend_rpc_server_visitor=None,
-        )
+        openai_endpoint = self._make_openai_endpoint(model_config)
 
         request = ChatCompletionRequest(
             messages=[],
@@ -464,6 +479,10 @@ class OpenaiGenerateConfigTest(TestCase):
             if request.extra_configs is None:
                 request.extra_configs = GenerateConfig()
             request.extra_configs.thinking_mode = thinking_mode
+        if begin_think_token_ids is not None:
+            if request.extra_configs is None:
+                request.extra_configs = GenerateConfig()
+            request.extra_configs.begin_think_token_ids = list(begin_think_token_ids)
 
         if req_stop is not None:
             request.stop = req_stop
@@ -919,18 +938,71 @@ class OpenaiGenerateConfigTest(TestCase):
             1,
         )
 
-    def test_enabled_thinking_with_anchor_does_not_warn(self):
+    def test_enabled_thinking_with_anchor_is_not_clamped(self):
+        """An anchor proves the template opened thinking, so the clamp must not
+        fire even on a non-reasoning renderer. Guards the token-level fallback:
+        the Qwen form of the tag ends with a newline, which must count as the
+        anchor just as the text predicate does."""
         begin_ids = self.tokenizer.encode("<think>\n", add_special_tokens=False)
         with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
-            self._generate_config_with_stop_word(
+            config = self._generate_config_with_stop_word(
                 enable_thinking=True, input_ids=[1, 2, *begin_ids]
             )
 
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertTrue(config.in_think_mode)
         self.assertFalse(
             any(
                 "does not end with the think start tag" in str(call)
                 for call in mock_logging.warning.call_args_list
             )
+        )
+
+    def test_enabled_thinking_with_bare_anchor_is_not_clamped(self):
+        """DeepSeek-style templates append a bare `<think>` with no newline."""
+        begin_ids = self.tokenizer.encode("<think>", add_special_tokens=False)
+        config = self._generate_config_with_stop_word(
+            enable_thinking=True, input_ids=[1, 2, *begin_ids]
+        )
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertTrue(config.in_think_mode)
+
+    def test_begin_think_token_ids_keep_priority_in_anchor_check(self):
+        """A caller-supplied begin sequence must stay authoritative even when it
+        is not the tokenization of the configured tag, as the ADAPTIVE branch
+        already assumes."""
+        config = self._generate_config_with_stop_word(
+            enable_thinking=True,
+            input_ids=[1, 2, 3],
+            begin_think_token_ids=[1, 2, 3],
+        )
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertTrue(config.in_think_mode)
+
+    def test_clamp_warning_is_deduplicated_per_renderer(self):
+        """The clamp decision depends on nothing request-specific, so a client
+        that always sends enable_thinking=true must not log once per request.
+        Reuses one endpoint because the warn-once state lives on the renderer."""
+        endpoint = self._make_openai_endpoint(self._make_default_model_config())
+
+        config = None
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            for _ in range(5):
+                request = ChatCompletionRequest(messages=[], enable_thinking=True)
+                config = endpoint._extract_generation_config(request, input_ids=[1, 2])
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
+        self.assertEqual(
+            len(
+                [
+                    call
+                    for call in mock_logging.warning.call_args_list
+                    if "clamping to DISABLED" in str(call)
+                ]
+            ),
+            1,
         )
 
     def test_forced_thinking_on_reasoning_renderer_without_anchor_is_not_clamped(self):
@@ -961,7 +1033,9 @@ class OpenaiGenerateConfigTest(TestCase):
         reasoning_renderer = Mock(spec=CustomChatRenderer)
         reasoning_renderer.emits_reasoning_stream = True
         reasoning_renderer.default_thinking_mode = ThinkingMode.DISABLED
-        reasoning_renderer.resolve_thinking_mode = Mock(return_value=ThinkingMode.ENABLED)
+        reasoning_renderer.resolve_thinking_mode = Mock(
+            return_value=ThinkingMode.ENABLED
+        )
         reasoning_renderer.get_reasoning_format = Mock(
             return_value=ReasoningFormat(tag_begin="", tag_end="</think>\n\n")
         )

@@ -24,6 +24,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RendererParams,
     StreamResponseObject,
     StreamStatus,
+    ThinkStatus,
 )
 from rtp_llm.openai.renderers.sglang_helpers.format_convert_helper import (
     rtp_tools_to_sglang_tools,
@@ -146,6 +147,39 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                 for _ in range(n)
             ]
         return [StreamStatus(request) for _ in range(n)]
+
+    @override
+    async def _flush_buffer(
+        self,
+        buffer_list: List[StreamStatus],
+        stop_words_str: List[str],
+        is_streaming: bool,
+        think_status_list: List[ThinkStatus],
+    ):
+        """Release parser-held tail text before the final flush.
+
+        ``parse_streaming_increment`` parks text that is a strict prefix of a
+        think tag until it can decide whether the tag completes. If generation
+        stops right there (a reply ending in ``<``, or truncated by max_tokens or
+        a stop word) nothing else drains that buffer, so the tail would silently
+        disappear from the response. Hand the released text to the normal delta
+        path so it goes through stop-word truncation and logprobs like any other
+        chunk.
+        """
+        for status in buffer_list:
+            if not isinstance(status, ReasoningToolStreamStatus):
+                continue
+            parser = status.reasoning_parser
+            if parser is None:
+                continue
+            _, normal_text = parser.flush()
+            if normal_text:
+                status.delta_output_string = (
+                    status.delta_output_string or ""
+                ) + normal_text
+        return await super()._flush_buffer(
+            buffer_list, stop_words_str, is_streaming, think_status_list
+        )
 
     @override
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
