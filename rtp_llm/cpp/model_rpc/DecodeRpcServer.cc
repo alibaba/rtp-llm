@@ -852,13 +852,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
         return debug_infos;
     };
-    // Flat path: the peer list is the CP group. Under PP the predicate is
-    // re-evaluated per stage group in the dispatch below; the lambdas read the
-    // active value.
-    const bool is_page_level_rr = load_context.prefill_cp_size > 1
-                                  && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
-    bool active_page_level_rr = is_page_level_rr;
-    auto layerGroupIds        = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
+    auto layerGroupIds = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
         std::vector<int> layer_gids;
         if (use_hybrid) {
             const auto layer_group_ids = cfg.layerGroupIdsSnapshot();
@@ -898,104 +892,111 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
         return cpMapperForGroup(cfg, gid).layoutForGroup(cfg, gid).slice != CpBlockSliceMode::NONE;
     };
-    auto shouldLoadGroupFromPeer = [&](const CacheConfig& cfg, CacheGroupType group_type, size_t gid, int peer_idx) {
-        if (!active_page_level_rr) {
-            return true;
-        }
-        if (group_type == CacheGroupType::FULL) {
-            return true;
-        }
-        // Some specs are CP-sliced inside one logical block on prefill, while
-        // decode still owns the full block. Pull every peer slice and place it
-        // into the destination offset declared by the spec.
-        return groupUsesCpSlice(cfg, gid) || peer_idx == 0;
-    };
-    auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t block_pos, int peer_idx) {
-        if (!active_page_level_rr || group_type != CacheGroupType::FULL) {
+    auto shouldLoadGroupFromPeer =
+        [&](const CacheConfig& cfg, CacheGroupType group_type, size_t gid, int peer_idx, bool page_level_rr) {
+            if (!page_level_rr) {
+                return true;
+            }
+            if (group_type == CacheGroupType::FULL) {
+                return true;
+            }
+            // Some specs are CP-sliced inside one logical block on prefill, while
+            // decode still owns the full block. Pull every peer slice and place it
+            // into the destination offset declared by the spec.
+            return groupUsesCpSlice(cfg, gid) || peer_idx == 0;
+        };
+    auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t block_pos, int peer_idx, bool page_level_rr) {
+        if (!page_level_rr || group_type != CacheGroupType::FULL) {
             return true;
         }
         return (static_cast<int>(block_pos) % load_context.prefill_cp_size) == peer_idx;
     };
-    auto sliceCpDestinationForPeer = [&](std::vector<BlockInfo> parts,
-                                         const CacheConfig&     cfg,
-                                         size_t                 gid,
-                                         int                    peer_idx) {
-        if (!active_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
-            return parts;
-        }
-        return cpMapperForGroup(cfg, gid).sliceBlockForPeer(cfg, gid, std::move(parts), static_cast<size_t>(peer_idx));
-    };
-    auto isCompactFixedBlockTable = [&](const CacheConfig& cfg, size_t gid) {
-        if (!active_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
+    auto sliceCpDestinationForPeer =
+        [&](std::vector<BlockInfo> parts, const CacheConfig& cfg, size_t gid, int peer_idx, bool page_level_rr) {
+            if (!page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
+                return parts;
+            }
+            return cpMapperForGroup(cfg, gid).sliceBlockForPeer(
+                cfg, gid, std::move(parts), static_cast<size_t>(peer_idx));
+        };
+    auto isCompactFixedBlockTable = [&](const CacheConfig& cfg, size_t gid, bool page_level_rr) {
+        if (!page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
             return false;
         }
         const auto group_tokens = cfg.seqSizePerBlockForGroup(gid);
         return group_tokens > 0
                && group_tokens == cfg.seq_size_per_block * static_cast<size_t>(load_context.prefill_cp_size);
     };
-    auto blockPositionsForLoad =
-        [&](size_t block_num, const CacheConfig& cfg, bool cfg_use_hybrid, CacheGroupType group_type, size_t gid) {
-            const auto   policy = cfg.policyForGroup(gid);
-            const size_t tail_block_count =
-                policy.active_tail_blocks > 0 ? static_cast<size_t>(policy.active_tail_blocks) : 0;
-            const bool transfer_tail_blocks = tail_block_count > 0;
-            if (!active_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
-                return blockPositionsForCacheTransfer(block_num,
-                                                      load_context.reuse_block_size,
-                                                      cfg_use_hybrid,
-                                                      transfer_tail_blocks,
-                                                      tail_block_count,
-                                                      /*hybrid_full_from_begin=*/true);
-            }
-            if (isCompactFixedBlockTable(cfg, gid)) {
-                return blockPositionsForCacheTransfer(block_num,
-                                                      load_context.reuse_block_size,
-                                                      cfg_use_hybrid,
-                                                      transfer_tail_blocks,
-                                                      tail_block_count,
-                                                      /*hybrid_full_from_begin=*/true);
-            }
+    auto blockPositionsForLoad = [&](size_t             block_num,
+                                     const CacheConfig& cfg,
+                                     bool               cfg_use_hybrid,
+                                     CacheGroupType     group_type,
+                                     size_t             gid,
+                                     bool               page_level_rr) {
+        const auto   policy = cfg.policyForGroup(gid);
+        const size_t tail_block_count =
+            policy.active_tail_blocks > 0 ? static_cast<size_t>(policy.active_tail_blocks) : 0;
+        const bool transfer_tail_blocks = tail_block_count > 0;
+        if (!page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
+            return blockPositionsForCacheTransfer(block_num,
+                                                  load_context.reuse_block_size,
+                                                  cfg_use_hybrid,
+                                                  transfer_tail_blocks,
+                                                  tail_block_count,
+                                                  /*hybrid_full_from_begin=*/true);
+        }
+        if (isCompactFixedBlockTable(cfg, gid, page_level_rr)) {
+            return blockPositionsForCacheTransfer(block_num,
+                                                  load_context.reuse_block_size,
+                                                  cfg_use_hybrid,
+                                                  transfer_tail_blocks,
+                                                  tail_block_count,
+                                                  /*hybrid_full_from_begin=*/true);
+        }
 
-            std::vector<size_t> block_pos_list;
-            if (block_num == 0) {
-                return block_pos_list;
-            }
-            const size_t cp_size        = static_cast<size_t>(load_context.prefill_cp_size);
-            const size_t compact_blocks = (block_num + cp_size - 1) / cp_size;
-            const size_t reuse_blocks   = static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0));
-            const size_t tail_count     = std::max<size_t>(1, tail_block_count);
-            const size_t start = cfg_use_hybrid ? (compact_blocks > tail_count ? compact_blocks - tail_count : 0) :
-                                                  std::min(reuse_blocks, compact_blocks);
-            block_pos_list.reserve(compact_blocks - start);
-            for (size_t compact_pos = start; compact_pos < compact_blocks; ++compact_pos) {
-                block_pos_list.push_back(std::min((compact_pos + 1) * cp_size - 1, block_num - 1));
-            }
+        std::vector<size_t> block_pos_list;
+        if (block_num == 0) {
             return block_pos_list;
-        };
-    auto cacheKeyIndexForBlock =
-        [&](const CacheConfig& cfg, size_t gid, size_t block_pos, size_t cache_key_count, size_t& cache_key_index) {
-            if (cache_key_count == 0) {
-                return false;
-            }
-            cache_key_index = block_pos;
-            if (isCompactFixedBlockTable(cfg, gid)) {
-                cache_key_index = std::min((block_pos + 1) * static_cast<size_t>(load_context.prefill_cp_size) - 1,
-                                           cache_key_count - 1);
-            }
-            return cache_key_index < cache_key_count;
-        };
+        }
+        const size_t cp_size        = static_cast<size_t>(load_context.prefill_cp_size);
+        const size_t compact_blocks = (block_num + cp_size - 1) / cp_size;
+        const size_t reuse_blocks   = static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0));
+        const size_t tail_count     = std::max<size_t>(1, tail_block_count);
+        const size_t start          = cfg_use_hybrid ? (compact_blocks > tail_count ? compact_blocks - tail_count : 0) :
+                                                       std::min(reuse_blocks, compact_blocks);
+        block_pos_list.reserve(compact_blocks - start);
+        for (size_t compact_pos = start; compact_pos < compact_blocks; ++compact_pos) {
+            block_pos_list.push_back(std::min((compact_pos + 1) * cp_size - 1, block_num - 1));
+        }
+        return block_pos_list;
+    };
+    auto cacheKeyIndexForBlock = [&](const CacheConfig& cfg,
+                                     size_t             gid,
+                                     size_t             block_pos,
+                                     size_t             cache_key_count,
+                                     size_t&            cache_key_index,
+                                     bool               page_level_rr) {
+        if (cache_key_count == 0) {
+            return false;
+        }
+        cache_key_index = block_pos;
+        if (isCompactFixedBlockTable(cfg, gid, page_level_rr)) {
+            cache_key_index =
+                std::min((block_pos + 1) * static_cast<size_t>(load_context.prefill_cp_size) - 1, cache_key_count - 1);
+        }
+        return cache_key_index < cache_key_count;
+    };
     const size_t gb = static_cast<size_t>(global_begin);
     const size_t ge = static_cast<size_t>(global_end);
     // One (peer, global-layer-range) load; shared by the flat and per-stage paths.
-    auto loadFromPeer = [&](const std::string& peer_addr,
-                            size_t             gl_begin,
-                            size_t             gl_end,
-                            int                i,
-                            int                peer_cnt,
-                            int                src_partition_count,
-                            int                src_partition_id,
-                            bool               include_mtp) -> ErrorInfo {
+    auto loadFromPeer = [&](const std::string&    peer_addr,
+                            size_t                gl_begin,
+                            size_t                gl_end,
+                            const StagePeerSlice& slice,
+                            bool                  page_level_rr,
+                            bool                  include_mtp) -> ErrorInfo {
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
+        const int                                        peer_idx = static_cast<int>(slice.peer_index);
         RTP_LLM_LOG_DEBUG("load context request id is %d", load_context.request_id);
 
         for (size_t gl = gl_begin; gl < gl_end; ++gl) {
@@ -1023,13 +1024,14 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 size_t      model_id  = maga_init_params_.model_id;
 
                 CacheGroupType group_type = groupType(cache_config, use_hybrid, gid);
-                auto block_pos_list       = blockPositionsForLoad(block_num, cache_config, use_hybrid, group_type, gid);
+                auto           block_pos_list =
+                    blockPositionsForLoad(block_num, cache_config, use_hybrid, group_type, gid, page_level_rr);
 
-                if (!shouldLoadGroupFromPeer(cache_config, group_type, gid, i)) {
+                if (!shouldLoadGroupFromPeer(cache_config, group_type, gid, peer_idx, page_level_rr)) {
                     continue;
                 }
                 for (size_t block_pos : block_pos_list) {
-                    if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
+                    if (!shouldLoadBlockFromPeer(group_type, block_pos, peer_idx, page_level_rr)) {
                         continue;
                     }
                     auto block_id = block_ids[block_pos];
@@ -1037,8 +1039,12 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         continue;
                     }
                     size_t cache_key_index = 0;
-                    if (!cacheKeyIndexForBlock(
-                            cache_config, gid, block_pos, load_context.cache_keys.size(), cache_key_index)) {
+                    if (!cacheKeyIndexForBlock(cache_config,
+                                               gid,
+                                               block_pos,
+                                               load_context.cache_keys.size(),
+                                               cache_key_index,
+                                               page_level_rr)) {
                         continue;
                     }
                     auto cache_key = makeCacheKey(model_id,
@@ -1047,15 +1053,16 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                   tag);
 
                     const bool             use_kv_key_prefix  = use_mla || use_opaque_kv_store || use_hybrid;
-                    const bool             use_whole_kv_block = active_page_level_rr || use_kv_key_prefix;
+                    const bool             use_whole_kv_block = page_level_rr || use_kv_key_prefix;
                     std::vector<BlockInfo> parts;
                     if (use_whole_kv_block) {
                         parts = cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag);
                     } else {
-                        parts = cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag, peer_cnt, i);
+                        parts = cache_manager->convertIndexToBufferByTag(
+                            block_id, layer_id, tag, slice.local_piece_count, slice.local_piece_id);
                     }
 
-                    parts            = sliceCpDestinationForPeer(std::move(parts), cache_config, gid, i);
+                    parts = sliceCpDestinationForPeer(std::move(parts), cache_config, gid, peer_idx, page_level_rr);
                     auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                         RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null block addr for key=%s", key.c_str());
                         RTP_LLM_CHECK_WITH_INFO(block.size_bytes > 0, "zero block size for key=%s", key.c_str());
@@ -1065,7 +1072,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                           static_cast<long>(load_context.request_id),
                                           tag.c_str(),
                                           layer_id,
-                                          i,
+                                          peer_idx,
                                           peer_addr.c_str(),
                                           load_context.prefill_cp_size,
                                           block_pos,
@@ -1157,15 +1164,15 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             auto        block_num = block_ids.size();
                             size_t      model_id  = module_plan.cache_model_id;
 
-                            CacheGroupType group_type = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
-                            auto           block_pos_list =
-                                blockPositionsForLoad(block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, gid);
+                            CacheGroupType group_type     = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
+                            auto           block_pos_list = blockPositionsForLoad(
+                                block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, gid, page_level_rr);
 
-                            if (!shouldLoadGroupFromPeer(mtp_cache_cfg, group_type, gid, i)) {
+                            if (!shouldLoadGroupFromPeer(mtp_cache_cfg, group_type, gid, peer_idx, page_level_rr)) {
                                 continue;
                             }
                             for (size_t block_pos : block_pos_list) {
-                                if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
+                                if (!shouldLoadBlockFromPeer(group_type, block_pos, peer_idx, page_level_rr)) {
                                     continue;
                                 }
                                 auto block_id = block_ids[block_pos];
@@ -1177,7 +1184,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                            gid,
                                                            block_pos,
                                                            load_context.cache_keys.size(),
-                                                           cache_key_index)) {
+                                                           cache_key_index,
+                                                           page_level_rr)) {
                                     continue;
                                 }
                                 auto cache_key = makeCacheKey(
@@ -1185,17 +1193,21 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 const bool mtp_use_mla = mtp_cache_cfg.use_mla;
                                 const bool mtp_use_kv_key_prefix =
                                     mtp_use_mla || mtp_use_opaque_kv_store || mtp_use_hybrid;
-                                const bool mtp_use_whole_kv_block = active_page_level_rr || mtp_use_kv_key_prefix;
+                                const bool             mtp_use_whole_kv_block = page_level_rr || mtp_use_kv_key_prefix;
                                 std::vector<BlockInfo> parts;
                                 if (mtp_use_whole_kv_block) {
                                     parts =
                                         cache_manager->convertIndexToBufferByTag(block_id, stage_pool_layer_id, tag);
                                 } else {
-                                    parts = cache_manager->convertIndexToBufferByTag(
-                                        block_id, stage_pool_layer_id, tag, peer_cnt, i);
+                                    parts = cache_manager->convertIndexToBufferByTag(block_id,
+                                                                                     stage_pool_layer_id,
+                                                                                     tag,
+                                                                                     slice.local_piece_count,
+                                                                                     slice.local_piece_id);
                                 }
 
-                                parts            = sliceCpDestinationForPeer(std::move(parts), mtp_cache_cfg, gid, i);
+                                parts = sliceCpDestinationForPeer(
+                                    std::move(parts), mtp_cache_cfg, gid, peer_idx, page_level_rr);
                                 auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                                     RTP_LLM_CHECK_WITH_INFO(
                                         block.addr != nullptr, "null block addr for key=%s", key.c_str());
@@ -1210,7 +1222,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                       layer_id,
                                                       model_id,
                                                       mtp_model_id,
-                                                      i,
+                                                      peer_idx,
                                                       peer_addr.c_str(),
                                                       load_context.prefill_cp_size,
                                                       block_pos,
@@ -1269,8 +1281,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                autil::StringUtil::strToInt32WithDefault(ip_parts[2].c_str(), 0),
                                                load_context.timeout_ms,
                                                cancel_check_func,
-                                               src_partition_count,
-                                               src_partition_id);
+                                               slice.peer_piece_count,
+                                               slice.peer_piece_id);
         if (!layer_cache_load_context) {
             logReadFailures(load_context.request_id,
                             peer_addr,
@@ -1284,24 +1296,25 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     };
 
     if (load_context.remote_stage_peer_groups.empty()) {
+        // Flat path: the peer list is the CP group.
+        const bool flat_page_level_rr =
+            load_context.prefill_cp_size > 1
+            && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
         for (int i = 0; i < peer_cnt; ++i) {
-            auto error_info = loadFromPeer(load_context.peer_addrs[i],
-                                           gb,
-                                           ge,
-                                           i,
-                                           peer_cnt,
-                                           load_context.partition_count,
-                                           load_context.partition_id,
-                                           /*include_mtp=*/true);
+            const StagePeerSlice slice{
+                static_cast<size_t>(i), peer_cnt, i, load_context.partition_count, load_context.partition_id};
+            auto error_info =
+                loadFromPeer(load_context.peer_addrs[i], gb, ge, slice, flat_page_level_rr, /*include_mtp=*/true);
             if (!error_info.ok()) {
                 return error_info;
             }
         }
     } else {
-        // PP stage routing: pick the CP mode per stage group.
-        const int64_t tp_d           = std::max<int64_t>(1, pc.tp_size);
-        const int64_t lane           = static_cast<int64_t>(pc.tp_rank);
-        size_t        group_peer_cnt = 0;
+        // PP stage routing: plan the per-group loads and execute them.
+        const int64_t tp_d               = std::max<int64_t>(1, pc.tp_size);
+        const int64_t lane               = static_cast<int64_t>(pc.tp_rank);
+        const bool    prefill_cp_enabled = maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled();
+        size_t        group_peer_cnt     = 0;
         for (const auto& spg : load_context.remote_stage_peer_groups) {
             RTP_LLM_CHECK_WITH_INFO(
                 !spg.peer_addrs.empty(), "empty stage peer group [%u, %u)", spg.range.begin, spg.range.end());
@@ -1312,74 +1325,26 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                  "inconsistent stage peer group sizes: " + std::to_string(spg.peer_addrs.size())
                                      + " != " + std::to_string(group_peer_cnt));
             }
-            if (load_context.prefill_cp_size > 1
-                && static_cast<int>(spg.peer_addrs.size()) != load_context.prefill_cp_size) {
-                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
-                                 "CP-sharded prefill requires stage peer group size "
-                                     + std::to_string(spg.peer_addrs.size()) + " == prefill_cp_size "
-                                     + std::to_string(load_context.prefill_cp_size));
-            }
             const size_t g_begin = std::max(gb, static_cast<size_t>(spg.range.begin));
             const size_t g_end   = std::min(ge, static_cast<size_t>(spg.range.end()));
             if (g_begin >= g_end) {
                 continue;
             }
-            const bool group_page_level_rr = load_context.prefill_cp_size > 1
-                                             && static_cast<int>(spg.peer_addrs.size()) == load_context.prefill_cp_size;
-            active_page_level_rr = group_page_level_rr;
-            if (group_page_level_rr) {
-                // Mode A: CP sharded. Each prefill rank holds 1/cp of the data.
-                // No source partitioning needed; decode-side slicing handles reassembly.
-                // The whole-block load protocol is defined for MLA/opaque KV caches only.
-                if (!use_mla && !use_opaque_kv_store) {
-                    return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
-                                     "CP-sharded prefill is only supported for MLA or opaque KV caches");
-                }
-                for (size_t pi = 0; pi < spg.peer_addrs.size(); ++pi) {
-                    auto error_info = loadFromPeer(spg.peer_addrs[pi],
-                                                   g_begin,
-                                                   g_end,
-                                                   static_cast<int>(pi),
-                                                   static_cast<int>(spg.peer_addrs.size()),
-                                                   /*src_partition_count=*/1,  // No source partitioning
-                                                   /*src_partition_id=*/0,     // No source partitioning
-                                                   /*include_mtp=*/spg.is_last_stage);
-                    if (!error_info.ok()) {
-                        return error_info;
-                    }
-                }
-            } else if (maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
-                // Mode B: CP full replication. Each prefill rank holds the complete KV.
-                // Pick peer by lane % peer_cnt for load balancing across decode lanes.
-                const size_t peer_idx   = static_cast<size_t>(lane % static_cast<int64_t>(spg.peer_addrs.size()));
-                auto         error_info = loadFromPeer(spg.peer_addrs[peer_idx],
-                                               g_begin,
-                                               g_end,
-                                               /*i=*/0,         // Single peer, index starts at 0
-                                               /*peer_cnt=*/1,  // Single peer
-                                               static_cast<int>(tp_d),
-                                               static_cast<int>(lane),
-                                               /*include_mtp=*/spg.is_last_stage);
+            const auto plan = planStageGroupLoads({static_cast<int>(spg.peer_addrs.size()),
+                                                   load_context.prefill_cp_size,
+                                                   prefill_cp_enabled,
+                                                   static_cast<int>(tp_d),
+                                                   static_cast<int>(lane),
+                                                   use_mla,
+                                                   use_opaque_kv_store});
+            if (!plan.error.empty()) {
+                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, plan.error);
+            }
+            for (const auto& slice : plan.loads) {
+                auto error_info = loadFromPeer(
+                    spg.peer_addrs[slice.peer_index], g_begin, g_end, slice, plan.page_level_rr, spg.is_last_stage);
                 if (!error_info.ok()) {
                     return error_info;
-                }
-            } else {
-                const auto slices = planStagePeerSlices(static_cast<int>(spg.peer_addrs.size()),
-                                                        static_cast<int>(pc.tp_size),
-                                                        static_cast<int>(pc.tp_rank),
-                                                        /*replicated_kv=*/use_mla);
-                for (const auto& slice : slices) {
-                    auto error_info = loadFromPeer(spg.peer_addrs[slice.peer_index],
-                                                   g_begin,
-                                                   g_end,
-                                                   slice.dst_partition_id,
-                                                   slice.dst_partition_count,
-                                                   slice.src_partition_count,
-                                                   slice.src_partition_id,
-                                                   /*include_mtp=*/spg.is_last_stage);
-                    if (!error_info.ok()) {
-                        return error_info;
-                    }
                 }
             }
         }

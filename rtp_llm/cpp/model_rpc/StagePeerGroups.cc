@@ -75,6 +75,45 @@ std::vector<StagePeerSlice> planStagePeerSlices(int prefill_tp, int decode_tp, i
     return {{static_cast<size_t>(decode_tp_rank / group_num), 1, 0, group_num, decode_tp_rank % group_num}};
 }
 
+StageGroupLoadPlan planStageGroupLoads(const StageGroupLoadParams& params) {
+    StageGroupLoadPlan plan;
+    if (params.group_peer_count <= 0) {
+        plan.error = "empty stage peer group";
+        return plan;
+    }
+    const int peer_count = params.group_peer_count;
+    if (params.prefill_cp_size > 1 && peer_count != params.prefill_cp_size) {
+        plan.error = "CP-sharded prefill requires stage peer group size " + std::to_string(peer_count)
+                     + " == prefill_cp_size " + std::to_string(params.prefill_cp_size);
+        return plan;
+    }
+    if (params.prefill_cp_size > 1) {
+        // CP-sharded: every peer holds a page-level or in-page shard; the
+        // decode side reassembles whole blocks, so replicated KV is required.
+        if (!params.replicated_kv && !params.opaque_kv_store) {
+            plan.error = "CP-sharded prefill is only supported for MLA or opaque KV caches";
+            return plan;
+        }
+        plan.page_level_rr = true;
+        plan.loads.reserve(static_cast<size_t>(peer_count));
+        for (int pi = 0; pi < peer_count; ++pi) {
+            plan.loads.push_back({static_cast<size_t>(pi), 1, 0, 1, 0});
+        }
+        return plan;
+    }
+    if (params.prefill_cp_enabled) {
+        // CP full replication: every peer holds the complete KV; one peer per lane.
+        plan.loads.push_back({static_cast<size_t>(params.decode_tp_rank % peer_count),
+                              1,
+                              0,
+                              params.decode_tp_size,
+                              params.decode_tp_rank});
+        return plan;
+    }
+    plan.loads = planStagePeerSlices(peer_count, params.decode_tp_size, params.decode_tp_rank, params.replicated_kv);
+    return plan;
+}
+
 void validateStagePeerGroups(const std::vector<StagePeerGroup>& groups, int64_t total_layers) {
     RTP_LLM_CHECK_WITH_INFO(!groups.empty(), "stage peer groups must not be empty");
     uint32_t expected_begin = 0;

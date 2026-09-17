@@ -76,39 +76,39 @@ TEST(StagePeerGroups, PlanSlicesSymmetricTpCopiesWholeBlock) {
     const auto slices = planStagePeerSlices(2, 2, 1, false);
     ASSERT_EQ(slices.size(), 1u);
     EXPECT_EQ(slices[0].peer_index, 1u);
-    EXPECT_EQ(slices[0].dst_partition_count, 1);
-    EXPECT_EQ(slices[0].dst_partition_id, 0);
-    EXPECT_EQ(slices[0].src_partition_count, 1);
-    EXPECT_EQ(slices[0].src_partition_id, 0);
+    EXPECT_EQ(slices[0].local_piece_count, 1);
+    EXPECT_EQ(slices[0].local_piece_id, 0);
+    EXPECT_EQ(slices[0].peer_piece_count, 1);
+    EXPECT_EQ(slices[0].peer_piece_id, 0);
 }
 
 TEST(StagePeerGroups, PlanSlicesFinerPrefillTpAssemblesPeerSlices) {
     const auto slices = planStagePeerSlices(4, 2, 1, false);
     ASSERT_EQ(slices.size(), 2u);
     EXPECT_EQ(slices[0].peer_index, 2u);
-    EXPECT_EQ(slices[0].dst_partition_count, 2);
-    EXPECT_EQ(slices[0].dst_partition_id, 0);
-    EXPECT_EQ(slices[0].src_partition_count, 1);
+    EXPECT_EQ(slices[0].local_piece_count, 2);
+    EXPECT_EQ(slices[0].local_piece_id, 0);
+    EXPECT_EQ(slices[0].peer_piece_count, 1);
     EXPECT_EQ(slices[1].peer_index, 3u);
-    EXPECT_EQ(slices[1].dst_partition_id, 1);
+    EXPECT_EQ(slices[1].local_piece_id, 1);
 }
 
 TEST(StagePeerGroups, PlanSlicesFinerDecodeTpReadsSubSlice) {
     const auto slices = planStagePeerSlices(1, 2, 1, false);
     ASSERT_EQ(slices.size(), 1u);
     EXPECT_EQ(slices[0].peer_index, 0u);
-    EXPECT_EQ(slices[0].dst_partition_count, 1);
-    EXPECT_EQ(slices[0].src_partition_count, 2);
-    EXPECT_EQ(slices[0].src_partition_id, 1);
+    EXPECT_EQ(slices[0].local_piece_count, 1);
+    EXPECT_EQ(slices[0].peer_piece_count, 2);
+    EXPECT_EQ(slices[0].peer_piece_id, 1);
 }
 
 TEST(StagePeerGroups, PlanSlicesReplicatedKvUsesSingleWholePeer) {
     const auto slices = planStagePeerSlices(1, 2, 1, true);
     ASSERT_EQ(slices.size(), 1u);
     EXPECT_EQ(slices[0].peer_index, 0u);
-    EXPECT_EQ(slices[0].dst_partition_count, 1);
-    EXPECT_EQ(slices[0].src_partition_count, 1);
-    EXPECT_EQ(slices[0].src_partition_id, 0);
+    EXPECT_EQ(slices[0].local_piece_count, 1);
+    EXPECT_EQ(slices[0].peer_piece_count, 1);
+    EXPECT_EQ(slices[0].peer_piece_id, 0);
 }
 
 TEST(StagePeerGroups, PlanSlicesRejectsUnsupportedTpRatio) {
@@ -117,6 +117,133 @@ TEST(StagePeerGroups, PlanSlicesRejectsUnsupportedTpRatio) {
 
 TEST(StagePeerGroups, PlanSlicesRejectsOutOfRangeLane) {
     EXPECT_THROW(planStagePeerSlices(2, 2, 2, false), std::exception);
+}
+
+namespace {
+
+StageGroupLoadParams makeGroupParams(int  peer_count,
+                                     int  cp_size            = 1,
+                                     bool prefill_cp_enabled = false,
+                                     int  decode_tp_size     = 1,
+                                     int  decode_tp_rank     = 0,
+                                     bool replicated         = false,
+                                     bool opaque             = false) {
+    return {peer_count, cp_size, prefill_cp_enabled, decode_tp_size, decode_tp_rank, replicated, opaque};
+}
+
+}  // namespace
+
+// Mode A reads whole blocks: one read per group peer, no cutting on either side.
+TEST(StagePeerGroups, GroupLoadShardedMlaEnumeratesPeers) {
+    const auto plan = planStageGroupLoads(makeGroupParams(2, 2, true, 2, 1, /*replicated=*/true));
+    EXPECT_TRUE(plan.error.empty());
+    EXPECT_TRUE(plan.page_level_rr);
+    ASSERT_EQ(plan.loads.size(), 2u);
+    EXPECT_EQ(plan.loads[0].peer_index, 0u);
+    EXPECT_EQ(plan.loads[0].local_piece_count, 1);
+    EXPECT_EQ(plan.loads[0].local_piece_id, 0);
+    EXPECT_EQ(plan.loads[0].peer_piece_count, 1);
+    EXPECT_EQ(plan.loads[0].peer_piece_id, 0);
+    EXPECT_EQ(plan.loads[1].peer_index, 1u);
+    EXPECT_EQ(plan.loads[1].local_piece_id, 0);
+}
+
+TEST(StagePeerGroups, GroupLoadShardedOpaqueAllowed) {
+    const auto plan = planStageGroupLoads(makeGroupParams(2, 2, true, 2, 1, /*replicated=*/false, /*opaque=*/true));
+    EXPECT_TRUE(plan.error.empty());
+    EXPECT_TRUE(plan.page_level_rr);
+    ASSERT_EQ(plan.loads.size(), 2u);
+    EXPECT_EQ(plan.loads[0].peer_index, 0u);
+    EXPECT_EQ(plan.loads[1].peer_index, 1u);
+}
+
+TEST(StagePeerGroups, GroupLoadShardedRejectsPlainMha) {
+    const auto plan = planStageGroupLoads(makeGroupParams(2, 2, true, 2, 1, /*replicated=*/false, /*opaque=*/false));
+    EXPECT_TRUE(plan.loads.empty());
+    EXPECT_NE(plan.error.find("only supported for MLA or opaque"), std::string::npos);
+}
+
+TEST(StagePeerGroups, GroupLoadShardedRejectsPeerCountMismatch) {
+    const auto plan = planStageGroupLoads(makeGroupParams(4, 2, true, 2, 1, /*replicated=*/true));
+    EXPECT_TRUE(plan.loads.empty());
+    EXPECT_NE(plan.error.find("requires stage peer group size"), std::string::npos);
+}
+
+// Mode B mirrors the flat CP-full tuple: one peer per lane, tp_d source slicing.
+TEST(StagePeerGroups, GroupLoadFullReplicationPicksPeerByLane) {
+    const auto plan = planStageGroupLoads(makeGroupParams(2, 1, true, 4, 3));
+    EXPECT_TRUE(plan.error.empty());
+    EXPECT_FALSE(plan.page_level_rr);
+    ASSERT_EQ(plan.loads.size(), 1u);
+    EXPECT_EQ(plan.loads[0].peer_index, 1u);
+    EXPECT_EQ(plan.loads[0].local_piece_count, 1);
+    EXPECT_EQ(plan.loads[0].local_piece_id, 0);
+    EXPECT_EQ(plan.loads[0].peer_piece_count, 4);
+    EXPECT_EQ(plan.loads[0].peer_piece_id, 3);
+}
+
+TEST(StagePeerGroups, GroupLoadFullReplicationBalancesPeersAcrossLanes) {
+    const auto lane0 = planStageGroupLoads(makeGroupParams(2, 1, true, 4, 0));
+    const auto lane1 = planStageGroupLoads(makeGroupParams(2, 1, true, 4, 1));
+    ASSERT_EQ(lane0.loads.size(), 1u);
+    ASSERT_EQ(lane1.loads.size(), 1u);
+    EXPECT_EQ(lane0.loads[0].peer_index, 0u);
+    EXPECT_EQ(lane1.loads[0].peer_index, 1u);
+}
+
+// Replicated KV keeps the same lane slicing as MHA in full-replication mode.
+TEST(StagePeerGroups, GroupLoadFullReplicationKeepsReplicatedLaneSlicing) {
+    const auto plan = planStageGroupLoads(makeGroupParams(2, 1, true, 4, 3, /*replicated=*/true));
+    ASSERT_EQ(plan.loads.size(), 1u);
+    EXPECT_EQ(plan.loads[0].peer_index, 1u);
+    EXPECT_EQ(plan.loads[0].peer_piece_count, 4);
+    EXPECT_EQ(plan.loads[0].peer_piece_id, 3);
+}
+
+TEST(StagePeerGroups, GroupLoadSymmetricTpMatchesFlatTuple) {
+    const auto plan = planStageGroupLoads(makeGroupParams(2, 1, false, 2, 1));
+    EXPECT_TRUE(plan.error.empty());
+    EXPECT_FALSE(plan.page_level_rr);
+    ASSERT_EQ(plan.loads.size(), 1u);
+    EXPECT_EQ(plan.loads[0].peer_index, 1u);
+    EXPECT_EQ(plan.loads[0].local_piece_count, 1);
+    EXPECT_EQ(plan.loads[0].local_piece_id, 0);
+    EXPECT_EQ(plan.loads[0].peer_piece_count, 1);
+    EXPECT_EQ(plan.loads[0].peer_piece_id, 0);
+}
+
+TEST(StagePeerGroups, GroupLoadFinerPrefillTpAssemblesPeerSlices) {
+    const auto plan = planStageGroupLoads(makeGroupParams(4, 1, false, 2, 1));
+    ASSERT_EQ(plan.loads.size(), 2u);
+    EXPECT_EQ(plan.loads[0].peer_index, 2u);
+    EXPECT_EQ(plan.loads[0].local_piece_count, 2);
+    EXPECT_EQ(plan.loads[0].local_piece_id, 0);
+    EXPECT_EQ(plan.loads[0].peer_piece_count, 1);
+    EXPECT_EQ(plan.loads[1].peer_index, 3u);
+    EXPECT_EQ(plan.loads[1].local_piece_id, 1);
+}
+
+TEST(StagePeerGroups, GroupLoadFinerDecodeTpReadsSubSlice) {
+    const auto plan = planStageGroupLoads(makeGroupParams(1, 1, false, 2, 1));
+    ASSERT_EQ(plan.loads.size(), 1u);
+    EXPECT_EQ(plan.loads[0].peer_index, 0u);
+    EXPECT_EQ(plan.loads[0].local_piece_count, 1);
+    EXPECT_EQ(plan.loads[0].peer_piece_count, 2);
+    EXPECT_EQ(plan.loads[0].peer_piece_id, 1);
+}
+
+TEST(StagePeerGroups, GroupLoadReplicatedKvUsesSingleWholePeer) {
+    const auto plan = planStageGroupLoads(makeGroupParams(2, 1, false, 2, 1, /*replicated=*/true));
+    ASSERT_EQ(plan.loads.size(), 1u);
+    EXPECT_EQ(plan.loads[0].peer_index, 1u);
+    EXPECT_EQ(plan.loads[0].peer_piece_count, 1);
+    EXPECT_EQ(plan.loads[0].peer_piece_id, 0);
+}
+
+TEST(StagePeerGroups, GroupLoadEmptyPeerGroupRejected) {
+    const auto plan = planStageGroupLoads(makeGroupParams(0, 1, false, 2, 0));
+    EXPECT_TRUE(plan.loads.empty());
+    EXPECT_FALSE(plan.error.empty());
 }
 
 }  // namespace rtp_llm
