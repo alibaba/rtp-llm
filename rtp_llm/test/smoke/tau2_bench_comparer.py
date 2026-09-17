@@ -14,6 +14,7 @@ from typing import Any, List, Optional
 
 from rtp_llm.test.smoke.base_comparer import BaseComparer
 from rtp_llm.test.smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
+from rtp_llm.test.smoke.tau2_report import validate_task_coverage
 
 TAU2_TARBALL_URL = os.environ.get(
     "TAU2_TARBALL_URL",
@@ -86,6 +87,14 @@ class Tau2BenchComparer(BaseComparer):
                 QueryStatus.OTHERS,
                 f"no 'Dump report to: ...json' line in tau2-bench stdout, see {log_path}",
             )
+        try:
+            coverage = validate_task_coverage(report_path, task_ids_path)
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            raise SmokeException(
+                QueryStatus.COMPARE_FAILED,
+                f"tau2-bench execution coverage failed: {error}; see {log_path}",
+            ) from error
+        logging.info("[TAU2] complete task coverage: %s", coverage)
         score = self._load_overall_score(report_path)
         logging.info(
             f"[TAU2] parsed score={score} from {report_path}, threshold={threshold}"

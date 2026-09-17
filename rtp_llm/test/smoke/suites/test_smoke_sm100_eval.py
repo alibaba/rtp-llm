@@ -15,6 +15,9 @@ SMOKE_CASES = {
         "--use_deepep_moe 1 --use_deepep_low_latency 0 --tp_size 2 "
         "--world_size 2",
         "gpu_type": "SM100_ARM",
+        # Let tau2 return its normal tool error to the agent. Dropping an unknown
+        # call produces an empty message and aborts the task before scoring.
+        "envs": ["RTP_LLM_FORWARD_UNKNOWN_TOOLS=true"],
         "platform": "cuda",
         "markers": ["smoke", "cuda", "SM100_ARM", "eval"],
         "timeout": 6000,

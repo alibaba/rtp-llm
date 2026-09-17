@@ -268,7 +268,9 @@ def _install_task_filter(task_ids_map: dict) -> None:
             tasks = [t.model_dump(exclude_unset=True) for t in tasks]
             missing = allowed - {str(t.get("id")) for t in tasks}
             if missing:
-                print(f"[WARN] domain={domain_name} 下未找到 task_id: {sorted(missing)}")
+                raise ValueError(
+                    f"domain={domain_name}: required task IDs not loaded: {sorted(missing)}"
+                )
             dataset = DictDataLoader(
                 dict_list=tasks,
                 sample_fields=self.record_to_sample,
@@ -361,7 +363,8 @@ def main() -> None:
         repeats=args.repeats,
         limit=args.limit,
         work_dir=args.work_dir,
-        ignore_errors=True,       # 单个 task 挂了不拖垮整体
+        # Attempt every task; the comparer rejects incomplete scored reports.
+        ignore_errors=True,
         generation_config={
             "max_tokens":        DEFAULT_AGENT_MAX_TOKENS,
             "temperature":       args.temperature,
