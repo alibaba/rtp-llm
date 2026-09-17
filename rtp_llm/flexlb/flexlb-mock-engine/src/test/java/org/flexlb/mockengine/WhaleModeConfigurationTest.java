@@ -15,6 +15,28 @@ class WhaleModeConfigurationTest {
     @TempDir Path directory;
 
     @Test
+    void decodeSuccessQpsCountsOnlySuccessfulDecodeTerminals() {
+        var reports = new ArrayList<Double>();
+        var sink = (org.flexlb.metric.FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{org.flexlb.metric.FlexMonitor.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("report") && args.length == 3
+                            && args[0].equals("mock_decode_success_qps"))
+                        reports.add(((Number) args[2]).doubleValue());
+                    return null;
+                });
+        var monitor = new WhaleMockMonitor(sink);
+        long now = System.nanoTime();
+        var decode = java.util.Map.of("role", "ROLE_TYPE_DECODE", "engine", "decode-1");
+        var prefill = java.util.Map.of("role", "ROLE_TYPE_PREFILL", "engine", "prefill-1");
+        monitor.sample(java.util.Map.of("mock_completed_requests_total", 0), decode, now);
+        monitor.sample(java.util.Map.of("mock_completed_requests_total", 8), decode, now + 2_000_000_000L);
+        monitor.sample(java.util.Map.of("mock_completed_requests_total", 8), decode, now + 3_000_000_000L);
+        monitor.sample(java.util.Map.of("mock_completed_requests_total", 20), prefill, now + 3_000_000_000L);
+        assertEquals(List.of(0.0, 4.0, 0.0), reports);
+    }
+
+    @Test
     void contextBatchSizeDoesNotMixIdlePollSamples() {
         var values = new ArrayList<Double>();
         var sink = (org.flexlb.metric.FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(

@@ -88,6 +88,15 @@ final class WhaleMockMonitor implements AutoCloseable {
                 deltas.put(name, before == null ? 0L : Math.max(0, value.longValue() - before));
             }
         });
+        // No-Fetch mode has no client success response. This is the engine's
+        // successful Decode terminal rate, separate from frontend success QPS.
+        if ("ROLE_TYPE_DECODE".equals(labels.get("role"))
+                && metrics.containsKey("mock_completed_requests_total")) {
+            String name = "mock_decode_success_qps";
+            if (registered.add(name)) monitor.register(name, FlexMetricType.GAUGE);
+            monitor.report(name, tags,
+                    deltas.getOrDefault("mock_completed_requests_total", 0L) / seconds);
+        }
         metrics.forEach((name, value) -> {
             // Preserve execution-round samples. A periodic zero between two
             // short P batches must not dilute them. With no rounds this period,
