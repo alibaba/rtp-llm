@@ -14,6 +14,7 @@
 #include <chrono>
 #include <map>
 
+#include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerPrefill.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerDecode.h"
@@ -917,6 +918,74 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_FullQueueFailsBeforeBlockedSenderFini
     }
     EXPECT_EQ(released[0].wait_for(std::chrono::seconds(2)), std::future_status::ready);
     EXPECT_EQ(mock_sender_->getTransferCallCount(), 1);  // Queued tasks never reached the transport.
+}
+
+TEST_F(P2PConnectorWorkerTest, SharedSenderQueueIsolatesRejectedCancelledAndSuccessfulRequests) {
+    worker_config_.p2p_prefill_sender_thread_count = 1;
+    worker_config_.p2p_prefill_sender_queue_size = 1;
+    worker_config_.layer_all_num = 1;
+    worker_config_.topology = makeOneGroupPerLayerTopology(1);
+    prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(
+        worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+    ASSERT_TRUE(prefill_->init());
+    computed_buffers_ = prefill_->getComputedBuffersStore();
+    mock_sender_->setAsyncCallback(false);
+    mock_sender_->setCallbackDelayMs(0);
+    mock_sender_->setBlockSend(true);
+    const auto deadline = currentTimeMs() + 10000;
+    std::future<ErrorInfo> a, b, c;
+    auto cleanup = std::shared_ptr<void>(nullptr, [this, deadline](void*) {
+        mock_sender_->setBlockSend(false);
+        for (int id = 4100; id < 4103; ++id) {
+            prefill_->cancelRequest(id, "queue-" + std::to_string(id), deadline, deadline);
+        }
+    });
+    auto submit = [&](int id) {
+        return std::async(std::launch::async, [&, id] {
+            return prefill_->sendKVCache(id, "queue-" + std::to_string(id), deadline,
+                makeRoutePlan({{"127.0.0.1", 12345}}), deadline);
+        });
+    };
+    auto wait_for = [](auto predicate) {
+        const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!predicate() && std::chrono::steady_clock::now() < limit) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        return predicate();
+    };
+    for (int id = 4100; id < 4103; ++id) addComputedBuffer(id, 0, deadline);
+    a = submit(4100);
+    ASSERT_TRUE(mock_sender_->waitForTransferCallCount(1, std::chrono::seconds(2)));
+    b = submit(4101);
+    ASSERT_TRUE(wait_for([&] { return prefill_->async_sender_pool_->getItemCount() > 0; }));
+    // LockFreeThreadPool may admit an extra entry. Fill any remaining capacity
+    // explicitly rather than assuming its configured size is an exact bound.
+    bool full = false;
+    for (int i = 0; i < 8 && !full; ++i) {
+        full = prefill_->async_sender_pool_->pushTask([] {}, false, false)
+               == autil::ThreadPoolBase::ERROR_POOL_QUEUE_FULL;
+    }
+    ASSERT_TRUE(full);
+    c = submit(4102);
+    ASSERT_EQ(c.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    const auto rejected = c.get();
+    EXPECT_NE(rejected.ToString().find("sender queue full"), std::string::npos);
+    EXPECT_EQ(rejected.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+    EXPECT_TRUE(prefill_->cancelRequest(4101, "queue-4101", deadline, deadline));
+    ASSERT_EQ(b.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(b.get().code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED);
+    EXPECT_EQ(a.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 1);
+    mock_sender_->setBlockSend(false);
+    ASSERT_EQ(a.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_TRUE(a.get().ok());
+    ASSERT_TRUE(wait_for([&] { return prefill_->async_sender_pool_->getItemCount() == 0; }));
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 1); // B and C never reached send().
+    for (int id = 4100; id < 4103; ++id) EXPECT_EQ(computed_buffers_->getBuffer(id), nullptr);
+    addComputedBuffer(4103, 0, deadline);
+    EXPECT_TRUE(prefill_->sendKVCache(4103, "queue-4103", deadline,
+        makeRoutePlan({{"127.0.0.1", 12345}}), deadline).ok());
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 2);
 }
 
 TEST_F(P2PConnectorWorkerTest, SendLayer_UnavailablePoolCompletesRejectedTaskWithoutInlineSend) {

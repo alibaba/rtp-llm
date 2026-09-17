@@ -135,3 +135,26 @@ cc_test(
     tags = ["manual"],
     timeout = "moderate",
 )
+
+# Manual two-host TCP/GPU connector integration suite. Each host runs two
+# logical ranks; see docs/backend/p2p_multi_rank_transfer_tests.md for setup.
+cc_test(
+    name = "p2p_multi_rank_transfer_test",
+    srcs = ["P2PMultiRankTransferTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/cache/connector/p2p:connector",
+        "//rtp_llm/cpp/cache/connector/p2p/test:mock_generate_stream",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        "@havenask//aios/autil:net",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "H20"},
+    tags = ["manual"],
+    timeout = "long",
+)

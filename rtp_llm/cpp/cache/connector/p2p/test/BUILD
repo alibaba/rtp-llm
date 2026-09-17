@@ -22,6 +22,7 @@ cc_library(
 
 cc_library(
     name = "mock_generate_stream",
+    visibility = ["//rtp_llm/cpp/model_rpc/test:__pkg__"],
     hdrs = [
         "MockGenerateStream.h",
     ],
@@ -81,6 +82,7 @@ cc_test(
     name = "p2p_connector_scheduler_test",
     srcs = [
         "KVCacheManagerP2PReadTest.cc",
+        "P2PQueueSaturationTest.cc",
         "P2PConnectorSchedulerTest.cc",
         "main.cc",
     ],
