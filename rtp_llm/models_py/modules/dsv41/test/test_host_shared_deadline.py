@@ -41,9 +41,10 @@ class HostSharedDeadlineTest(TestCase):
     def setUp(self):
         self.assertNotEqual(os.getuid(), 0)
         self.shared_module, self.cuda_module = load_host_modules()
-        self.temporary = tempfile.TemporaryDirectory(
-            dir=os.environ.get("DSV41_TEST_SHARED_ROOT")
-        )
+        shared_root = os.environ.get("DSV41_TEST_SHARED_ROOT")
+        if shared_root:
+            os.makedirs(shared_root, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(dir=shared_root)
         self.root = Path(self.temporary.name)
         self.source = self.root / "source"
         self.slices = initialized_slices(self.source, self.shared_module)

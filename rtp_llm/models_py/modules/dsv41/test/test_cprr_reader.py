@@ -223,14 +223,14 @@ class CprrReaderGpuTest(unittest.TestCase):
     def test_invalid_ranks_pages_strides_and_context_capacity(self):
         layout = CacheLayout()
         received, ids, complete, _ = swa_fixture(layout)
-        for data, mapping in (
-            (received[:7], ids),
-            (received, ids[:7]),
-            (received[:, :, :-1], ids),
+        for data, mapping, message in (
+            (received[:7], ids, "rank-local stride"),
+            (received, ids[:7], "every CP rank"),
+            (received[:, :, :-1], ids, "rank-local stride"),
         ):
-            with self.assertRaisesRegex(ValueError, "eight"):
+            with self.assertRaisesRegex(ValueError, message):
                 restore_cprr_swa(layout, 21, data, mapping)
-        with self.assertRaisesRegex(ValueError, "CP8"):
+        with self.assertRaisesRegex(ValueError, "rank-local stride"):
             restore_cprr_swa(CacheLayout(cp_size=1), 21, received, ids)
         with self.assertRaisesRegex(ValueError, "alias"):
             restore_cprr_swa(

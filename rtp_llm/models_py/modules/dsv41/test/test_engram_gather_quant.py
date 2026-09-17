@@ -100,9 +100,10 @@ def fixture_slices(root):
 class EngramGatherQuantTest(unittest.TestCase):
     def setUp(self):
         self.assertNotEqual(os.getuid(), 0)
-        self.temporary = tempfile.TemporaryDirectory(
-            dir=os.environ.get("DSV41_TEST_SHARED_ROOT", "/dev/shm")
-        )
+        shared_root = os.environ.get("DSV41_TEST_SHARED_ROOT", "/dev/shm")
+        if shared_root:
+            os.makedirs(shared_root, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(dir=shared_root)
         root = Path(self.temporary.name)
         self.store = HostSharedWeightStore(root / "shared")
         self.shared = self.store.open_or_publish("a" * 40, fixture_slices(root))

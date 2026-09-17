@@ -65,7 +65,7 @@ class CPSelectedRowsTest(unittest.TestCase):
                 with self.subTest(entries=entries, entry_bytes=entry_bytes, rank=rank):
                     pool, table = self.fixture(entries, entry_bytes, rank)
                     actual = _selected_local_rows(
-                        pool, table, wanted, entries, entry_bytes, rank
+                        pool, table, wanted, entries, entry_bytes, rank, 8
                     )
                     torch.testing.assert_close(
                         actual.cpu(),
@@ -77,7 +77,7 @@ class CPSelectedRowsTest(unittest.TestCase):
                         "torch.cuda.get_device_capability", lambda *a, **k: (9, 0)
                     ):
                         legacy = _selected_local_rows(
-                            pool, table, wanted, entries, entry_bytes, rank
+                            pool, table, wanted, entries, entry_bytes, rank, 8
                         )
                     torch.testing.assert_close(actual, legacy, rtol=0, atol=0)
 
@@ -92,7 +92,7 @@ class CPSelectedRowsTest(unittest.TestCase):
             table[0, 0] = invalid
             with self.subTest(page=invalid):
                 actual = _selected_local_rows(
-                    pool, table, wanted, entries, entry_bytes, rank
+                    pool, table, wanted, entries, entry_bytes, rank, 8
                 )
                 # An owned row whose page is missing reads as zeros instead of
                 # raising; the valid owner row keeps its payload.
@@ -105,11 +105,11 @@ class CPSelectedRowsTest(unittest.TestCase):
                 )
                 with patch("torch.cuda.get_device_capability", lambda *a, **k: (9, 0)):
                     legacy = _selected_local_rows(
-                        pool, table, wanted, entries, entry_bytes, rank
+                        pool, table, wanted, entries, entry_bytes, rank, 8
                     )
                 torch.testing.assert_close(actual, legacy, rtol=0, atol=0)
         outside = torch.tensor([(table.shape[1] * 8 + rank) * entries], device="cuda")
-        actual = _selected_local_rows(pool, table, outside, entries, entry_bytes, rank)
+        actual = _selected_local_rows(pool, table, outside, entries, entry_bytes, rank, 8)
         torch.testing.assert_close(actual, torch.zeros_like(actual))
 
     @torch.inference_mode()
@@ -117,12 +117,12 @@ class CPSelectedRowsTest(unittest.TestCase):
         entries, entry_bytes, rank = 128, 68, 7
         pool, table = self.fixture(entries, entry_bytes, rank, limit=4096)
         wanted = torch.tensor([7 * entries + 3, -1], device="cuda", dtype=torch.int32)
-        first = _selected_local_rows(pool, table, wanted, entries, entry_bytes, rank)
+        first = _selected_local_rows(pool, table, wanted, entries, entry_bytes, rank, 8)
         torch.testing.assert_close(
             first.cpu(), self.expected(wanted, entries, entry_bytes, rank)
         )
         table[0, 0], table[0, 1] = table[0, 1].clone(), table[0, 0].clone()
-        second = _selected_local_rows(pool, table, wanted, entries, entry_bytes, rank)
+        second = _selected_local_rows(pool, table, wanted, entries, entry_bytes, rank, 8)
         changed = wanted.long().clone()
         changed[0] += 8 * entries
         torch.testing.assert_close(
@@ -131,7 +131,7 @@ class CPSelectedRowsTest(unittest.TestCase):
         wanted.fill_(-1)
         self.assertEqual(
             torch.count_nonzero(
-                _selected_local_rows(pool, table, wanted, entries, entry_bytes, rank)
+                _selected_local_rows(pool, table, wanted, entries, entry_bytes, rank, 8)
             ).item(),
             0,
         )

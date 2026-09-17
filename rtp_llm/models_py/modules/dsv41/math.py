@@ -4,105 +4,8 @@ Quantized GEMM wrappers must preserve these conversion boundaries. These
 functions do not replace real checkpoint or GPU acceptance measurements.
 """
 
-import importlib
-
 import torch
 import torch.nn.functional as F
-
-_HC_POINTWISE_KERNELS = {}
-_HC_PRENORM_READY = {}
-
-
-def _hc_prenorm_supported(hidden, weight):
-    return (
-        not torch.is_grad_enabled()
-        and not torch.is_autocast_enabled()
-        and hidden.is_cuda
-        and hidden.dtype == torch.bfloat16
-        and hidden.ndim >= 3
-        and hidden.shape[-2:] == (4, 5120)
-        and hidden.numel() > 0
-        and hidden.is_contiguous()
-        and weight.shape == (24, 20480)
-        and weight.dtype == torch.float32
-        and weight.device == hidden.device
-        and weight.is_contiguous()
-        and torch.version.cuda is not None
-        and torch.version.cuda.split(".")[0] == "13"
-        and torch.cuda.get_device_capability(hidden.device)[0] == 10
-    )
-
-
-def _hc_prenorm(hidden, weight, norm_eps):
-    from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import tf32_hc_prenorm_gemm
-    from rtp_llm.models_py.modules.dsv41._hc_prenorm_triton import (
-        hc_prenorm_reduce_kernel,
-    )
-
-    rows = hidden.numel() // 20480
-    key = (hidden.device.index, rows, norm_eps)
-    with torch.cuda.device(hidden.device):
-        splits = _HC_PRENORM_READY.get(key)
-        if splits is None:
-            if torch.cuda.is_current_stream_capturing():
-                raise RuntimeError("V4.1 HC prenorm must be warmed before capture")
-            sms = torch.cuda.get_device_properties(hidden.device).multi_processor_count
-            splits = max(1, min(sms // max((rows + 63) // 64, 1), 80))
-        products = hidden.new_empty((splits, rows, 24), dtype=torch.float32)
-        squares = hidden.new_empty((splits, rows), dtype=torch.float32)
-        mixes = hidden.new_empty((rows, 24), dtype=torch.float32)
-        # BF16 activations are exact TF32 inputs; FP32 weights use the existing
-        # upstream TF32 multiply with FP32 accumulation and square reduction.
-        tf32_hc_prenorm_gemm(hidden.view(rows, 20480), weight, products, squares, splits)
-        hc_prenorm_reduce_kernel[(rows,)](
-            products,
-            squares,
-            mixes,
-            ROWS=rows,
-            HIDDEN=20480,
-            SPLITS=splits,
-            NORM_EPS=norm_eps,
-            BLOCK_S=1 << (splits - 1).bit_length(),
-        )
-        _HC_PRENORM_READY[key] = splits
-    return mixes.view(*hidden.shape[:-2], 24)
-
-
-def _hc_pointwise_supported(hidden, *mixes):
-    return (
-        not torch.is_grad_enabled()
-        and hidden.is_cuda
-        and hidden.dtype == torch.bfloat16
-        and hidden.ndim >= 3
-        and hidden.shape[-2] == 4
-        and hidden.numel() > 0
-        and hidden.is_contiguous()
-        and all(
-            mix.dtype == torch.float32
-            and mix.device == hidden.device
-            and mix.is_contiguous()
-            for mix in mixes
-        )
-    )
-
-
-def _hc_pointwise_kernels(hidden):
-    key = (hidden.device.index, hidden.shape[-1])
-    kernels = _HC_POINTWISE_KERNELS.get(key)
-    if kernels is None:
-        if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError("V4.1 HC pointwise kernels must be warmed before capture")
-        from rtp_llm.models_py.modules.dsv4 import tilelang_kernels  # noqa: F401
-
-        prefix = "rtp_llm.models_py.3rdparty.tile_kernels.mhc."
-        pre = importlib.import_module(prefix + "pre_apply_mix_kernel")
-        post = importlib.import_module(prefix + "post_kernel")
-        kernels = (
-            pre._mhc_pre_apply_mix_fwd(4, hidden.shape[-1]),
-            post._mhc_post_fwd(4, hidden.shape[-1]),
-        )
-        _HC_POINTWISE_KERNELS[key] = kernels
-    return kernels
 
 
 def dequantize_block32(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
@@ -221,13 +124,6 @@ def identity_pre_mix(hidden: torch.Tensor) -> torch.Tensor:
 def hc_pre(hidden: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
     if pre_mix.shape != hidden.shape[:-1] or pre_mix.dtype != torch.float32:
         raise ValueError("pre_mix must be FP32 with one coefficient per HC stream")
-    if _hc_pointwise_supported(hidden, pre_mix):
-        dim = hidden.shape[-1]
-        out = hidden.new_empty((*hidden.shape[:-2], dim))
-        _hc_pointwise_kernels(hidden)[0](
-            hidden.view(-1, 4, dim), pre_mix.view(-1, 4), out.view(-1, dim)
-        )
-        return out
     return (hidden.float() * pre_mix.unsqueeze(-1)).sum(-2).to(hidden.dtype)
 
 
@@ -237,25 +133,6 @@ def hc_post(
     post: torch.Tensor,
     comb: torch.Tensor,
 ) -> torch.Tensor:
-    if (
-        _hc_pointwise_supported(residual, post, comb)
-        and output.dtype == residual.dtype
-        and output.device == residual.device
-        and output.is_contiguous()
-        and output.shape == residual.shape[:-2] + (residual.shape[-1],)
-        and post.shape == residual.shape[:-1]
-        and comb.shape == residual.shape[:-2] + (4, 4)
-    ):
-        dim = residual.shape[-1]
-        out = torch.empty_like(residual)
-        _hc_pointwise_kernels(residual)[1](
-            comb.view(-1, 4, 4),
-            residual.view(-1, 4, dim),
-            post.view(-1, 4),
-            output.view(-1, dim),
-            out.view(-1, 4, dim),
-        )
-        return out
     # comb's first HC axis is the source stream, its second the destination.
     mixed = (comb.float().unsqueeze(-1) * residual.float().unsqueeze(-2)).sum(-3)
     return (post.float().unsqueeze(-1) * output.float().unsqueeze(-2) + mixed).to(
@@ -273,13 +150,10 @@ def hc_mixes(
     hc_eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     hc = hidden.shape[-2]
-    if _hc_prenorm_supported(hidden, weight):
-        mixes = _hc_prenorm(hidden, weight, norm_eps)
-    else:
-        flat = hidden.flatten(-2).float()
-        mixes = F.linear(flat, weight.float()) * torch.rsqrt(
-            flat.square().mean(-1, keepdim=True) + norm_eps
-        )
+    flat = hidden.flatten(-2).float()
+    mixes = F.linear(flat, weight.float()) * torch.rsqrt(
+        flat.square().mean(-1, keepdim=True) + norm_eps
+    )
     pre = (mixes[..., :hc] * scale[0] + base[:hc]).sigmoid() + hc_eps
     post = (mixes[..., hc : 2 * hc] * scale[1] + base[hc : 2 * hc]).sigmoid() * 2
     comb = (mixes[..., 2 * hc :] * scale[2] + base[2 * hc :]).unflatten(-1, (hc, hc))
